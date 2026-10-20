@@ -34,7 +34,8 @@ Checkpoints contain PR numbers, retry counts, UTC window boundaries and a finite
 deadline; no PR bodies or credentials. A forced runner loss before artifact upload can
 repeat work from the last uploaded checkpoint. Missing state uses the workflow fallback.
 
-Requires authenticated gh, TAUCETI_REVIEW_RUNNER (for labels), and ZULIP_EMAIL/ZULIP_API_KEY.
+Requires authenticated gh and TAUCETI_REVIEW_RUNNER (for labels).
+ZULIP_EMAIL/ZULIP_API_KEY are needed unless --labels-only is selected.
 """
 
 from __future__ import annotations
