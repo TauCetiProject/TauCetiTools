@@ -55,6 +55,8 @@ test('target preflight rejects identity, nonempty state, missing restore and uns
   await f.archive.delete('control/queue-metrics.json');
   await assert.rejects(control.preflight(f.env,state),/migration_queue_dlq_unavailable/);
   await f.archive.put('control/queue-metrics.json',JSON.stringify({queue:{at:Date.now(),count:0,error:null},dlq:{at:Date.now(),count:0,error:null}}));
+  await f.archive.put(`parked/${f.id}/held/existing.json`,'{}');
+  await assert.rejects(control.preflight(f.env,state),/migration_held_input_pending/);await f.archive.delete(`parked/${f.id}/held/existing.json`);
   await control.preflight(f.env,state);
   const original={...f.env},changed=JSON.parse(f.env.MIGRATION_TARGET);changed.hostname='wrong-endpoint.neon.tech';
   f.env.MIGRATION_TARGET=JSON.stringify(changed);
@@ -107,6 +109,9 @@ test('ordinary supervisor restarts a fenced repository, preserves cursors, and r
     if(n===49)assert.fail('ordinary supervisor did not finish');
   }
   assert.equal(f.state.store.backend,'postgres');
+  await f.archive.put('control/'+custom.id+'/storage.json',JSON.stringify({state:'full',since:1}));
+  await f.request('/migration-supervise',{});
+  assert.equal((await f.archive.get('control/'+custom.id+'/storage.json').then(o=>o.json())).state,'superseded');
   assert.deepEqual(await (await f.request('/query',query)).json(),before);
   assert.deepEqual(await (await f.request('/query',{...query,cursor:cursor+':100'})).json(),page);
   const conditional=await f.state.fetch(new Request('https://internal/query',{method:'POST',headers:{'if-none-match':'"123"'},body:JSON.stringify(query)}));assert.equal(conditional.status,304);
@@ -130,6 +135,16 @@ test('ordinary supervisor restarts a fenced repository, preserves cursors, and r
   assert.equal(current.headers.get('X-TauCeti-Read-Fallback'),null);
   const steady=await fixture(f.db,f.archive,{...f.env,MIGRATION_ENVIRONMENT:undefined,MIGRATION_DATABASE_URL:undefined,MIGRATION_TARGET:undefined});
   assert.equal(steady.state.store.backend,'postgres');assert.equal((await (await steady.request('/changes',{})).json()).revision,Number(revision));
+  assert.equal(await ingress.storageState(steady.env,custom),null,'retired migration bindings never resurrect the SQLite full marker');
+  await ingress.noteRepositoryFull(steady.env,custom.id,'late-old-worker',Date.now());assert.equal(await ingress.storageState(steady.env,custom),null);
+  await steady.state.preparePostgresObservation(custom.id,{durable:true,backlog:{held:{count:0}}},Date.now());
+  assert.equal(steady.state.observation.generation,generation);
+  assert.ok(!steady.state.observation.reasons.includes('backend_generation_fenced'));
+  steady.env.REPOSITORIES.idFromName=()=>({toString:()=>steady.ctx.id.toString()});
+  steady.state.observation=undefined;assert.equal((await steady.state.preparedObservation()).generation,generation);
+  await steady.state.prepareStorage(false);
+  assert.equal((await f.archive.get('control/'+custom.id+'/retention-checkpoint.json').then(o=>o.json())).generation,generation);
+
   assert.equal(revision,committedRevision,'replaying a committed event cannot publish another change');
   await ingress.drain(f.env,custom);
   assert.equal((await f.admin.query(`SELECT value FROM ${f.schema}.meta WHERE key='revision'`)).rows[0].value,revision);
@@ -148,7 +163,10 @@ test('ordinary supervisor restarts a fenced repository, preserves cursors, and r
   const pinned=await ingress.park(f.env,custom,poison,'fixture_failure');
   const normalKey=ingress.pointerKey(custom.id,poison),heldKey=ingress.pointerKey(custom.id,poison,true);
   await f.archive.put(heldKey,JSON.stringify({...pinned,retry_at:Date.now()+86400000}));await f.archive.delete(normalKey);
-  await f.archive.put(ingress.recoveryKey(custom.id),JSON.stringify({held_last_pass:Date.now(),held:{count:1},next_retry:Date.now()+86400000}));
+  await ingress.maintainIngress(f.env,custom);
+  const visited=await f.archive.get(ingress.recoveryKey(custom.id)).then(o=>o.json());
+  assert.equal(typeof visited.held_last_pass,'object');assert.ok(visited.held_pass_completed_at>=(await migration.readMigration(f.archive,custom.id)).cutover.selected_at);
+
   assert.equal((await (await f.request('/migration-supervise',{})).json()).phase,'replaying');
   assert.equal(migration.blocksRepairs(await migration.readMigration(f.archive,custom.id)),false,'a deferred poison item cannot indefinitely stop bounded reconciliation');
   assert.ok(await f.archive.head(heldKey),'failed input remains durable and blocks final completion');
@@ -242,6 +260,7 @@ test('legacy column order imports fields by archived names and preserves raw che
 
 test('stored shadows reject real target differences and matching unavailable results',{skip:!enabled},async()=>{
  const f=await testFixture();try {
+  const custom={id:f.id,name:'org/repo',installation:'200'};await f.source.setMeta('repository',custom);f.env.ALLOWED_REPOSITORIES=JSON.stringify([custom]);
   f.db.prepare('INSERT INTO resources(kind,id,data,observed,revision,tombstone) VALUES(?,?,?,?,?,0)').run('pr','7',JSON.stringify({number:7,state:'OPEN',title:'source title'}),123456,123);
   f.db.prepare('INSERT INTO collections VALUES(?,?,?,?,?,?,?)').run('open_prs:{}','open_prs','{}',1,123456,123,'etag');
   f.db.prepare('INSERT INTO members VALUES(?,?)').run('open_prs:{}','7');
@@ -254,6 +273,12 @@ test('stored shadows reject real target differences and matching unavailable res
   f.db.prepare('UPDATE collections SET complete=0 WHERE key=?').run('open_prs:{}');
   await f.admin.query(`UPDATE ${f.schema}.collections SET complete=0 WHERE key=$1`,['open_prs:{}']);
   state.cutover.shadow=undefined;await assert.rejects(f.source.shadowMigration(state),/migration_shadow_unavailable/);
+  state.cutover.shadow=undefined;await migration.saveMigration(f.archive,state);
+  f.source.assertMigrationFence=()=>{};
+  f.source.shadowMigration=async function(){for(let n=0;n<901;n++)await this.env.ARCHIVE.head('budget-test');};
+  const exhausted=await f.source.superviseMigration(1);assert.equal(exhausted.status,503);
+  assert.equal((await migration.readMigration(f.archive,f.id)).failure,'migration_shadow_request_budget');
+
  }finally{await f.close();}
 });
 

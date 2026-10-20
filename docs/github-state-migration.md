@@ -59,7 +59,7 @@ the migration and application roles of the **same** enrolled Neon endpoint/datab
 `application_role`, and `migration_role`. URLs are never returned in receipts.
 The target checks exact expected tables/columns, generation/schema, database/role,
 application grants, live PostgreSQL 18/storage settings, restore evidence and empty
-data before freezing. Preflight authenticates the application credential separately
+data before freezing. Existing held input must be resolved before starting. Preflight authenticates the application credential separately
 and proves that role cannot update backend ownership. Application and migration
 roles/URLs must differ.
 
@@ -124,8 +124,9 @@ progress, renewable lease, failure code, target checks and write owner.
    body/pointer cleanup; duplicates cannot publish another semantic change.
 9. `complete`: record release evidence after parked/held pointers drain and fresh,
    post-selection queue and DLQ metrics both report zero backlog. The same deployed
-   durable parking/receipt handler owns both consumers. A held-lane pass after selection permits bounded reconciliation to resume even
-   if a poison input remains deferred; such inputs are logged and still block
+   durable parking/receipt handler owns both consumers. A completed held traversal
+   after selection permits bounded reconciliation to resume even
+   if a poison input remains deferred by its preserved retry deadline; such inputs are logged and still block
    the final completion receipt. Historical bucket recovery
    continues independently; its checkpoint/gaps remain explicit in the receipt.
 
@@ -145,6 +146,10 @@ SQLite is never released without proving that activation did not commit. A
 committed activation discovered after lease expiry always selects PostgreSQL.
 A source too full to commit its release remains fenced with stored reads/parked
 input, and ordinary supervision retries.
+
+Selection also publishes a superseded PostgreSQL storage marker so queue owners
+never treat the retained SQLite file as full after migration settings are retired.
+Monitoring and retention use the selected repository generation.
 
 The local `backend_owner` marker records PostgreSQL generation, target identity
 and selection time before any target event can apply. Cold starts honour it even
@@ -245,9 +250,25 @@ If the target is lost or unreachable after activation intent, retain its control
 record and every parked body/pointer. Do not edit the source fence or change the
 control phase back to exporting. Restore the original Neon branch/database from
 a verified point-in-time backup at the original endpoint, preserving roles,
-schema and generation. Verify its owner row and the latest applied-input watermark;
-restore/replay the retained input after that point through the delivery owner.
-Resume supervision only after the original enrolled identity is healthy. If a new
+schema and generation. Verify its owner row and the latest applied-input watermark. Keep service reads
+and writes fenced during restoration; an ordinary S2 `resume` is not a point-in-time
+reconstruction tool. A separate, verified forward-recovery procedure must:
+
+- Preserve/quarantine the R2 receipts committed after the restored SQL watermark;
+  normal delivery replay skips those receipts, so it cannot reconstruct lost SQL.
+- Recover the corresponding original raw bodies and pointers, verify their digests
+  and apply them through a recovery owner that commits fresh SQL delivery evidence
+  before reinstating authoritative receipts. Missing bodies remain an explicit gap.
+- Reconstruct any later non-webhook publications from retained recovery evidence;
+  a raw-webhook replay alone does not reconstruct every scheduler or metadata write.
+- Advance the revision above every value already published to clients, and explicitly
+  invalidate obsolete change-feed/cursor generations without reusing an old ETag.
+- Verify counts, hashes, input accounting and unchanged-client workflows on an
+  isolated restored copy before restoring production access.
+
+Resume supervision only after that procedure has been verified and the original
+enrolled identity is healthy. The included restore drill verifies SQL restoration
+of all fixture tables; it does not authorize post-write production reconstruction. If a new
 endpoint is required, stop and perform an independently verified forward recovery
 with a new identity and migrated write-owner metadata; ordinary S2 abandonment
 cannot authorize that identity change. The retained SQLite copy may be exposed

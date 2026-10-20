@@ -36,7 +36,7 @@ async function query(req:Request,env:Env,q:Query,request_id:string): Promise<Res
     return json({error:'storage_unavailable',reason:typeof detail.error==='string'?detail.error:'status_'+response.status,request_id},503);
   }
   const etag=response.headers.get('etag');
-  if (etag && matchesETag(req.headers.get('if-none-match'),etag) && !q.cursor) {
+  if (etag && matchesETag(req.headers.get('if-none-match'),etag) && !q.cursor && q.operation!=='progress') {
     const copy:any=await response.clone().json();
     if (copy.status==='ok') return new Response(null,{status:304,headers:{ETag:etag,'Cache-Control':'private, no-cache'}});
   }

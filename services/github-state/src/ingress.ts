@@ -25,7 +25,7 @@ export const storageKey = (repo: string) => `control/${repo}/storage.json`;
 // supersedes the report, and the conditional write rejects a concurrent probe.
 export async function noteRepositoryFull(env: Env, repo: string, source: string, started: number): Promise<void> {
   const object = await env.ARCHIVE.get(storageKey(repo)), marker: any = object ? await object.json() : null;
-  if (marker?.state === 'full' || marker?.state === 'writable' && Number(marker.verified_at) >= started) return;
+  if (marker?.backend==='postgres' && marker?.state==='superseded' || marker?.state === 'full' || marker?.state === 'writable' && Number(marker.verified_at) >= started) return;
   const cooldown = marker?.state === 'writable' && Date.now() - marker.verified_at < 3600000 ? {probe_attempts:marker.probe_attempts,last_probe_at:marker.last_probe_at,next_probe_at:marker.next_probe_at} : {};
   await env.ARCHIVE.put(storageKey(repo), JSON.stringify({ state: 'full', since: started, source, ...cooldown }), {onlyIf:object ? {etagMatches:object.etag} : {etagDoesNotMatch:'*'}});
 }
@@ -35,7 +35,8 @@ export async function storageState(env: Env, repo: Repository): Promise<any> {
   // This record describes the old SQLite file, not the selected remote store.
   if(env.REPOSITORY_BACKEND==='postgres')return null;
   if(['test','production'].includes(env.MIGRATION_ENVIRONMENT || '') && (await readMigration(env.ARCHIVE,repo.id))?.cutover?.target_active)return null;
-  return env.ARCHIVE.get(storageKey(repo.id)).then(o => o ? o.json() : null);
+  const marker:any=await env.ARCHIVE.get(storageKey(repo.id)).then(o=>o?o.json():null);
+  return marker?.backend==='postgres' && marker?.state==='superseded'?null:marker;
 }
 export async function ingressMode(env: Env, repo: Repository): Promise<{ mode: 'apply' | 'parked'; reason?: string; at?: number }> {
   const migration=['test','production'].includes(env.MIGRATION_ENVIRONMENT || '')?await readMigration(env.ARCHIVE,repo.id):null;
@@ -283,6 +284,7 @@ export async function maintainIngress(env: Env, repo: Repository): Promise<void>
         const pass = await drain(env, repo, { limit: 50, held: lane === 'held', cursor: state[lane + '_cursor'], deadline });
         state[lane + '_cursor'] = pass.cursor;
         state[lane + '_last_pass'] = pass;
+        if(!pass.cursor && !pass.stopped)state[lane + '_pass_completed_at']=Date.now();
         if(pass.stopped || !pass.cursor) break;
       }
     }

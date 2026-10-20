@@ -53,6 +53,9 @@ test('freeze fences all mutation routes and alarm dispatch, while stored reads/3
   const publicRead=await worker.fetch(new Request('https://public/v1/query?repository=org%2Frepo&operation=open_prs',{headers:{Authorization:'Bearer client','If-None-Match':validator}}),f.env,{});
   assert.equal(publicRead.status,304,'ordinary client can return the edge-weakened ETag');
  }
+ f.env.REPOSITORIES.get=()=>({fetch:async()=>Response.json({status:'ok',complete:true,revision:7,data:{}},{headers:{ETag:'"7"'}})});
+ const progress=await worker.fetch(new Request('https://public/v1/query?repository=org%2Frepo&operation=progress&args=%7B%22number%22%3A1%7D',{headers:{Authorization:'Bearer client','If-None-Match':'W/"7"'}}),f.env,{});
+ assert.equal(progress.status,200,'the edge preserves the progress conditional-read exemption');
  assert.equal(f.db.prepare('SELECT total_changes() n').get().n,sqlBefore,'no SQL mutation from reads or alarms');
  await assert.rejects(f.state.setMeta('forbidden',true),/migration_frozen/);
  assert.throws(()=>f.state.sql.exec("SELECT 1; UPDATE meta SET value='0' WHERE key='revision'"),/migration_frozen/);

@@ -50,6 +50,7 @@ ERROR_CODES = frozenset(
         "migration_retention_policy_invalid",
         "migration_constraint_incompatible",
         "migration_shadow_request_budget",
+        "migration_held_input_pending",
         "migration_cell_incompatible",
         "migration_rowid_sequence_exhausted",
         "invalid_target_identity",

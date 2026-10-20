@@ -96,6 +96,7 @@ export class RepositoryState extends DurableObject<Env> {
   private migrationFlight: Promise<unknown> = Promise.resolve();
   migrationHeld(): boolean { return this.migrationUnavailable || blocksWrites(this.migrationState); }
   private repairsHeld():boolean {return this.migrationUnavailable || blocksRepairs(this.migrationState);}
+  private backendGeneration():string {return this.selectedMigrationGeneration ?? this.env.REPOSITORY_GENERATION ?? 'sqlite-v1';}
   private logged=new Map<string,number>();
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx,env);
@@ -1311,7 +1312,7 @@ export class RepositoryState extends DurableObject<Env> {
     // retain the acknowledged policy while restoring the scan's old checkpoint.
     if(!this.retentionProgressLoaded)try {
       const checkpoint=await this.maintenanceArchive.get('control/'+repo+'/retention-checkpoint.json').then(o=>o?.json<any>());
-      if(checkpoint?.version===1 && (this.store.backend==='sqlite'?(!checkpoint.backend || checkpoint.backend==='sqlite'):checkpoint.backend==='postgres' && checkpoint.generation===this.env.REPOSITORY_GENERATION) && checkpoint.classes && typeof checkpoint.classes==='object') {
+      if(checkpoint?.version===1 && (this.store.backend==='sqlite'?(!checkpoint.backend || checkpoint.backend==='sqlite'):checkpoint.backend==='postgres' && checkpoint.generation===this.backendGeneration()) && checkpoint.classes && typeof checkpoint.classes==='object') {
         for(const name of Object.keys(RULES) as RetentionClass[]) {
           const row=checkpoint.classes[name];
           if(!this.retentionState[name] && row && ['after','upper','started','examined','eligible','deleted','bytes'].every(k=>Number.isSafeInteger(row[k]) && row[k]>=0) && row.after<=row.upper) {
@@ -1341,7 +1342,7 @@ export class RepositoryState extends DurableObject<Env> {
     if(this.storageLoaded){if(runExpiry)await this.expire();await this.archiveDeliveryReceipts().catch(error=>this.noteFailure('receipt_archive',error));}
     if(this.migrationHeld())return;
     try {
-      const text=JSON.stringify({version:1,backend:this.store.backend,generation:this.env.REPOSITORY_GENERATION || 'sqlite-v1',classes:this.retentionState});
+      const text=JSON.stringify({version:1,backend:this.store.backend,generation:this.backendGeneration(),classes:this.retentionState});
       if(!this.migrationHeld() && this.storageLoaded && this.retentionProgressLoaded && text!==this.checkpointText && Date.now()-this.checkpointAt>=30000) {
         if(this.store.backend==='sqlite')await this.ctx.storage.sync();
         await this.maintenanceArchive.put('control/'+repo+'/retention-checkpoint.json',text);
@@ -1430,7 +1431,7 @@ export class RepositoryState extends DurableObject<Env> {
     }catch(error) {this.noteFailure('monitoring',error);}
   }
   private async preparePostgresObservation(repo:string,ingress:any,now:number):Promise<void> {
-    const generation=this.env.REPOSITORY_GENERATION;
+    const generation=this.backendGeneration();
     if(!this.capacityHistory.length) {
       const old=await this.maintenanceArchive.get('control/'+repo+'/observation.json').then(o=>o?.json<any>()).catch(()=>null);
       if(old?.backend==='postgres' && old.generation===generation) {
@@ -1510,7 +1511,7 @@ export class RepositoryState extends DurableObject<Env> {
       let repo:string|undefined;try {repo=this.store.backend==='postgres'?this.monitoringRepository():(await this.meta('repository'))?.id;}catch {}
       if(repo) {
         const task=this.maintenanceArchive.get('control/'+repo+'/observation.json').then(o=>o?.json<any>()).then(value=>{
-          if(value && (this.store.backend!=='postgres' || value.backend==='postgres' && value.generation===this.env.REPOSITORY_GENERATION) && (!this.observation || value.at>this.observation.at))this.observation=value;
+          if(value && (this.store.backend!=='postgres' || value.backend==='postgres' && value.generation===this.backendGeneration()) && (!this.observation || value.at>this.observation.at))this.observation=value;
         }).catch(()=>{});
         if(this.ctx.waitUntil)this.ctx.waitUntil(task);
         // A cold status response stays fast even when the observation store is slow.
@@ -1900,16 +1901,22 @@ export class RepositoryState extends DurableObject<Env> {
   }
   private async selectMigrationBackend():Promise<void> {
     const state=this.migrationState;
-    if(!state?.cutover?.target_active || this.selectedMigrationGeneration===state.generation)return;
-    const identity=state.cutover.target_identity;
-    if(!identity || Object.entries(identity).some(([key,value])=>(targetConfig(this.env) as any)[key]!==value))throw new AdminError('migration_target_identity_mismatch');
-    const previous=this.localMeta('backend_owner');
-    if(previous?.generation!==state.generation || !['migration','postgres'].includes(previous.backend))throw new AdminError('migration_source_fence_lost');
-    const selected={...previous,backend:'postgres',selected_at:state.cutover.selected_at || Date.now(),target:state.target,target_identity:identity};
-    this.nativeSql.exec("UPDATE meta SET value=? WHERE key='backend_owner'",JSON.stringify(selected));
-    await this.ctx.storage.sync();
-    this.selectCommittedBackend(selected);
+    if(!state?.cutover?.target_active)return;
+    if(this.selectedMigrationGeneration!==state.generation) {
+      const identity=state.cutover.target_identity;
+      if(!identity || Object.entries(identity).some(([key,value])=>(targetConfig(this.env) as any)[key]!==value))throw new AdminError('migration_target_identity_mismatch');
+      const previous=this.localMeta('backend_owner');
+      if(previous?.generation!==state.generation || !['migration','postgres'].includes(previous.backend))throw new AdminError('migration_source_fence_lost');
+      const selected={...previous,backend:'postgres',selected_at:state.cutover.selected_at || Date.now(),target:state.target,target_identity:identity};
+      this.nativeSql.exec("UPDATE meta SET value=? WHERE key='backend_owner'",JSON.stringify(selected));
+      await this.ctx.storage.sync();this.selectCommittedBackend(selected);
+    }
+    // Queue owners must keep ignoring the obsolete file after migration-only
+    // bindings are retired. Publication is retried after a selection crash.
+    const key=storageKey(state.repository),marker:any=await this.env.ARCHIVE.get(key).then(o=>o?.json());
+    if(marker?.state!=='superseded' || marker?.backend!=='postgres' || marker?.generation!==state.generation)await this.env.ARCHIVE.put(key,JSON.stringify({state:'superseded',backend:'postgres',generation:state.generation,selected_at:state.cutover.selected_at}));
   }
+
   private assertMigrationFence(state:Migration):void {
     const row=this.nativeSql.exec<any>("SELECT value FROM meta WHERE key='backend_owner'").toArray()[0];
     const owner=row && JSON.parse(row.value);
@@ -2050,7 +2057,7 @@ export class RepositoryState extends DurableObject<Env> {
     // parking/receipt handler owns normal and dead-letter inputs. Historical
     // bucket scans remain visible, but are independent recovery work.
     if(['queue','dlq'].some(name=>queues[name].stale || queues[name].count!==0 || queues[name].at<state.cutover!.selected_at!))return;
-    if(!state.cutover!.replay_complete && (heldEmpty || recovery.held_last_pass>=state.cutover!.selected_at!)){state.cutover!.replay_complete=Date.now();await saveMigration(this.env.ARCHIVE,state);}
+    if(!state.cutover!.replay_complete && (heldEmpty || recovery.held_pass_completed_at>=state.cutover!.selected_at!)){state.cutover!.replay_complete=Date.now();await saveMigration(this.env.ARCHIVE,state);}
     if(!heldEmpty){log('migration_held_input_pending',{repository:state.repository,held:recovery.held?.count ?? null,next_retry:recovery.next_retry ?? null,reconciliation_resumed:Boolean(state.cutover!.replay_complete)});return;}
     await this.prepareDiagnostics();
     const evidence=await this.env.ARCHIVE.get(`control/${state.repository}/migration-acceptance.json`);
@@ -2110,8 +2117,8 @@ export class RepositoryState extends DurableObject<Env> {
         if(state.phase==='switching')break;
       } catch(error) {
         const reason=error instanceof AdminError?error.message:'migration_storage_failure';
-        const saved=await readMigration(bucket,repo);
-        if(saved && saved.generation===state.generation) {saved.failure=reason;if(saved.cutover)saved.cutover.last_failure=reason;if(reason==='migration_source_fence_lost' && !saved.cutover?.target_active)saved.phase='aborting';await saveMigration(bucket,saved);this.migrationState=saved;}
+        const saved=await readMigration(this.env.ARCHIVE,repo);
+        if(saved && saved.generation===state.generation) {saved.failure=reason;if(saved.cutover)saved.cutover.last_failure=reason;if(reason==='migration_source_fence_lost' && !saved.cutover?.target_active)saved.phase='aborting';await saveMigration(this.env.ARCHIVE,saved);this.migrationState=saved;}
         return json({error:reason,...publicReceipt(this.migrationState) as object},503);
       }
     }
@@ -2341,7 +2348,7 @@ export class RepositoryState extends DurableObject<Env> {
         return json(result,200,{ETag:'"'+result.revision+'"',...headers});
       }
       if (path==='/health' && this.store.backend==='postgres') {
-        const monitoring=await this.preparedObservation(),storage=monitoring.storage || {backend:'postgres',schema_version:null,expected_schema_version:1,expected_generation:this.env.REPOSITORY_GENERATION,connected:null,stale:true};
+        const monitoring=await this.preparedObservation(),storage=monitoring.storage || {backend:'postgres',schema_version:null,expected_schema_version:1,expected_generation:this.backendGeneration(),connected:null,stale:true};
         return json({...this.diagnostics,reconciliation_version:2,revision:this.revisionState.value ?? this.diagnostics.revision ?? null,repository:this.repositoryMemo ?? this.diagnostics.repository ?? null,storage,monitoring,request_id,deployment_id:this.env.CF_VERSION?.id,diagnostics_at:this.diagnosticsAt || null,diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
       }
       if (path==='/health') {

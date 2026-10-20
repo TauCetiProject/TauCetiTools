@@ -38,6 +38,7 @@ export async function preflight(env:Env,state:Migration):Promise<void> {
   if(!retention || Object.keys(R2_CLASSES).some(name=>!retention.pinned.includes(name) && !retention.disabled.includes(name)))throw new AdminError('migration_retention_not_pinned');
   const queues=await queueMetrics(env);
   if(['queue','dlq'].some(name=>queues[name].stale || !Number.isSafeInteger(queues[name].count) || queues[name].count<0))throw new AdminError('migration_queue_dlq_unavailable');
+  if((await env.ARCHIVE.list({prefix:`parked/${state.repository}/held/`,limit:1})).objects.length)throw new AdminError('migration_held_input_pending');
   await targetPreflight(env,state);
 }
 export async function controllerStep(env:Env,state:Migration,hooks:SourceHooks):Promise<void> {
