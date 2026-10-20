@@ -2,6 +2,7 @@
 // followed by LIMIT alone can scan an entire unindexed table on a quiet store.
 export const DAY = 86400000;
 export const RULES = {
+  expired_legacy_cursors: {table:'cursors',clock:'expires',age:0},
   expired_repair_metrics: { table: 'repair_metrics', clock: 'at', age: 7 * DAY },
   expired_changes: { table: 'changes', clock: 'at', age: 7 * DAY },
   expired_retired_objects: { table: 'retired_objects', clock: 'at', age: 30 * DAY },

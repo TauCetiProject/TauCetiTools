@@ -134,9 +134,11 @@ node scripts/prepare-postgres-statistics.mjs "$REPOSITORY_ID"
 
 The migration CLI does not change existing backend ownership. Capacity preparation
 samples database size once; protected health reads the saved value and timestamp,
-backend/schema identity, connection failures and latest applied input. Refresh
-capacity statistics explicitly on the operator's schedule, rather than computing
-full table sizes during status requests.
+backend/schema identity, connection failures and latest applied input. The existing cron refreshes capacity/connection gauges every minute after the
+additive monitoring migration is installed; physical table/index analysis runs at
+most hourly. Status serves prepared observations without database calls. See
+[retention and outage drills](../../docs/github-state-retention.md#postgresql-sampling-alarms-and-restore-drills)
+for privilege boundaries, quota-scope limitations, queue metrics and exact test commands.
 
 The Worker defaults to SQLite. Selecting PostgreSQL requires all three server
 bindings: `REPOSITORY_BACKEND=postgres`, `REPOSITORY_GENERATION`, and the secret

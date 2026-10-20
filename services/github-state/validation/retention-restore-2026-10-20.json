@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "started": "2026-10-20T08:01:09.518Z",
+  "project": "sparkling-sunset-73872362",
+  "test_branch": "br-fancy-unit-b5kzg3kp",
+  "production_data": false,
+  "production_fault_injection": false,
+  "github_calls": 0,
+  "verified": true,
+  "temporary_branch_deleted": true,
+  "restore_branch": "br-hidden-band-b5gkvapk",
+  "restore_point": "2026-10-20T08:01:14.211992Z",
+  "temporary_endpoint_restarted": true,
+  "restart_recovered": true,
+  "temporary_endpoint": "ep-morning-bread-b5ii02yi",
+  "tables": 23,
+  "manifest_sha256": "133fcb23ca3754a7e4edc164302ab446017930a7560bc5d733c0fa4b704cc286",
+  "exact_id_preserved": true,
+  "before_restored_after_source_mutation": true,
+  "finished": "2026-10-20T08:01:27.216Z"
+}

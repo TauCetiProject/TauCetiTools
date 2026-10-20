@@ -2,6 +2,7 @@ import { Env, EventPointer, Query, Repository, authorize, digest, json, reposito
 import { readMigration } from './migration';
 import { classify, log, requestId } from './storage';
 import { PARK_AFTER_ATTEMPTS, backlog, backoff, drain, maintainIngress, maintainRaw, release, ingressMode, noteRepositoryFull, park, reconcile, setIngressMode, storageState } from './ingress';
+import { prepareQueueMetrics } from './queue_monitoring';
 import { R2_CLASSES, policy, retirePrefix } from './retention';
 export { RepositoryState } from './repository';
 export { InstallationScheduler } from './installation';
@@ -232,6 +233,7 @@ export default {
     }));
   },
   async scheduled(_event:ScheduledController,env:Env,ctx:ExecutionContext):Promise<void> {
+    ctx.waitUntil(prepareQueueMetrics(env).catch(()=>log('queue_metrics_failed',{reason:'metrics_unavailable'})));
     const installations=new Set(repositories(env).map(repo=>repo.installation));
     for(const installation of installations)ctx.waitUntil((async()=>{await stub(env.INSTALLATIONS,installation).fetch('https://internal/maintenance',{method:'POST'});})().catch(error=>log('installation_maintenance_failed',{reason:classify(error)})));
     ctx.waitUntil(maintainRaw(env,(payload,event)=>targets(env,payload,event)).catch(error=>log('raw_reconciliation_failed',{reason:classify(error)})));

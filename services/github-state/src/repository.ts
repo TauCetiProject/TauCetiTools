@@ -8,9 +8,10 @@ import { Lane, LANES, laneAt, settings } from './reconciliation';
 import { SURVEY_CONTRACT, compactPR, issueFragment, reviewFragment, summarizeFragments, inScope, roadmapFocuses } from './survey';
 import { readPromotionReceipts } from './activity_landings';
 import { Migration, archiveKey, beginExport, expectedTables, exportStep, generation, encodeMigration, publicReceipt, readMigration, saveMigration, targetIdentity, verifyStep } from './migration';
+import { queueMetrics } from './queue_monitoring';
 import { backlog, backoff, receiptKey, controlKey, noteRepositoryFull, storageKey } from './ingress';
 import { Checkpoint, DEFAULT_POLICY, Policy, RetentionClass, R2_CLASSES, RULES, policy, sweep, sweepStore } from './retention';
-import { CapacitySample, RepairMetrics, RequestMetrics, SQLITE_ALLOWANCE, capacity, emitAlarm, timedBucket, within } from './monitoring';
+import { CapacitySample, RepairMetrics, RequestMetrics, SQLITE_ALLOWANCE, capacity, postgresCapacity, emitAlarm, timedBucket, within } from './monitoring';
 import { Failure, FULL_MESSAGE, AdminError, CLEANUP, PARKABLE, classify, deleteClass, faultySql, log, missingSchema, requestId, scan, summary, userTables as summaryTables } from './storage';
 
 class LeaseLost extends Error {}
@@ -69,6 +70,8 @@ export class RepositoryState extends DurableObject<Env> {
   private diagnostics:any={coverage:[],lanes:[],waits:[],repair_hour:[],requested_latency:[],queries:[],repair_operations:[]};
   private diagnosticsAt=0;
   private lastCapacity:any;
+  private postgresUnavailableSince?:number;
+  private inputFailure?:{since:number,at:number,reason:string};
   private capacityHistory:CapacitySample[]=[];
   private tableEstimates:any;
   private tableAttemptAt=0;
@@ -1206,6 +1209,7 @@ export class RepositoryState extends DurableObject<Env> {
     const names=Object.keys(RULES) as RetentionClass[];
     for(let i=0;i<names.length;i++) {
       const name=names[(i+this.storageTurn)%names.length];
+      if(name==='expired_legacy_cursors' && this.store.backend==='sqlite')continue;
       if(name==='expired_deliveries')continue; // Async receipt archival owns this class.
       if(this.retentionPolicy.disabled.includes(name) || this.retentionPolicy.pinned.includes(name))continue;
       if(budget.rows<=0 || budget.bytes<=0 || Date.now()>=budget.deadline)break;
@@ -1272,8 +1276,11 @@ export class RepositoryState extends DurableObject<Env> {
     const task=this.readRetentionState();this.retentionLoadFlight=task;
     try {await task;}finally {if(this.retentionLoadFlight===task)this.retentionLoadFlight=undefined;}
   }
+  private monitoringRepository():string|undefined {
+    try {return JSON.parse(this.env.ALLOWED_REPOSITORIES).find((r:any)=>this.env.REPOSITORIES.idFromName(r.id).toString()===this.ctx.id.toString())?.id;}catch {return undefined;}
+  }
   async readRetentionState():Promise<void> {
-    let repo:string|undefined;try {repo=(await this.meta('repository'))?.id;}catch {return;}if(!repo)return;
+    let repo:string|undefined;try {repo=this.store.backend==='postgres'?this.monitoringRepository():(await this.meta('repository'))?.id;}catch {return;}if(!repo)return;
     const observedGeneration=this.policyGeneration;
     if(!this.storageLoaded)try {
       const control=await this.maintenanceArchive.get('control/'+repo+'/retention-policy.json').then(o=>o?.json<any>());
@@ -1298,7 +1305,7 @@ export class RepositoryState extends DurableObject<Env> {
   }
 
   async prepareStorage(runExpiry=true): Promise<void> {
-    const repo=(await this.meta('repository'))?.id;if(!repo)return;
+    const repo=this.store.backend==='postgres'?this.monitoringRepository():(await this.meta('repository'))?.id;if(!repo)return;
     await this.loadRetentionState();
     if(this.migrationHeld())return;
     if(Date.now()-this.receiptsChecked>=60000) {
@@ -1312,11 +1319,11 @@ export class RepositoryState extends DurableObject<Env> {
       }catch {this.receiptsPinned=true;}
     }
     if(this.migrationHeld())return;
-    if(this.storageLoaded){if(runExpiry)await this.expire();await this.archiveDeliveryReceipts();}
+    if(this.storageLoaded){if(runExpiry)await this.expire();await this.archiveDeliveryReceipts().catch(error=>this.noteFailure('receipt_archive',error));}
     if(this.migrationHeld())return;
     try {
       const text=JSON.stringify({version:1,backend:this.store.backend,generation:this.env.REPOSITORY_GENERATION || 'sqlite-v1',classes:this.retentionState});
-      if(this.storageLoaded && this.retentionProgressLoaded && text!==this.checkpointText && Date.now()-this.checkpointAt>=30000) {
+      if(!this.migrationHeld() && this.storageLoaded && this.retentionProgressLoaded && text!==this.checkpointText && Date.now()-this.checkpointAt>=30000) {
         if(this.store.backend==='sqlite')await this.ctx.storage.sync();
         await this.maintenanceArchive.put('control/'+repo+'/retention-checkpoint.json',text);
         this.checkpointAt=Date.now();this.checkpointText=text;
@@ -1334,13 +1341,11 @@ export class RepositoryState extends DurableObject<Env> {
       if(await this.maintenanceArchive.get(key).then(o=>o?.text())!==nonce)throw new Error('durability_probe_mismatch');
       const configured=repository(this.env,repo);
       ingressHealth={at:now,durable:true,backlog:configured?await backlog({...this.env,ARCHIVE:this.maintenanceArchive},configured,true):null,
-        queue:{count:null,reason:'management_metrics_not_configured'},dlq:{count:null,reason:'management_metrics_not_configured'}};
+        ...await queueMetrics(this.env,now)};
     }catch(error) {ingressHealth={at:now,durable:false,error:classify(error)};}
     if(this.migrationHeld())return;
     if(this.store.backend==='postgres') {
-      const storage=await this.store.health();
-      this.observation={version:1,at:now,backend:'postgres',storage,capacity:storage.capacity,connections:{connected:storage.connected,failures:storage.connection_failures},ingress:ingressHealth,requests:this.requestMetrics.snapshot(now),repair_summary:this.repairMetrics.summary(now),retention:{policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,receipts_pinned:this.receiptsPinned,receipt_pin_backend:'r2'}};
-      await this.maintenanceArchive.put('control/'+repo+'/observation.json',JSON.stringify(this.observation));return;
+      await this.preparePostgresObservation(repo,ingressHealth,now);return;
     }
     try {
       const sample={at:now,bytes:this.sql.databaseSize,allowance:SQLITE_ALLOWANCE};
@@ -1405,13 +1410,79 @@ export class RepositoryState extends DurableObject<Env> {
       if(requests.requests || repairMinutes.length)await this.maintenanceArchive.put('telemetry/'+repo+'/'+Math.floor(now/60000)+'.json',JSON.stringify({at:now,requests:intervals.filter((r:any)=>r.at>=now-60000),repair_intervals:repairMinutes}),{customMetadata:{expires:String(now+7*86400000)}});
     }catch(error) {this.noteFailure('monitoring',error);}
   }
+  private async preparePostgresObservation(repo:string,ingress:any,now:number):Promise<void> {
+    const generation=this.env.REPOSITORY_GENERATION;
+    if(!this.capacityHistory.length) {
+      const old=await this.maintenanceArchive.get('control/'+repo+'/observation.json').then(o=>o?.json<any>()).catch(()=>null);
+      if(old?.backend==='postgres' && old.generation===generation) {
+        this.lastCapacity=old.capacity;
+        if(Array.isArray(old.capacity_history))this.capacityHistory=old.capacity_history.filter((r:any)=>Number.isSafeInteger(r.at) && Number.isSafeInteger(r.bytes) && r.at<=now && r.at>now-2*3600000).slice(-121);
+      }
+    }
+    let preparationError:string|undefined;
+    try {
+      // Record the expensive attempt before calling SQL: a cancelled SQL
+      // transaction must not repeat table/index analysis every minute.
+      const key='control/'+repo+'/postgres-table-attempt-'+generation+'.json';
+      let analyze=false;
+      try {
+        const prior=await this.maintenanceArchive.get(key).then(o=>o?.json<any>());
+        if(!prior || Number.isSafeInteger(prior.at) && prior.at<=now-3600000) {
+          await this.maintenanceArchive.put(key,JSON.stringify({at:now}));analyze=true;
+        }
+      }catch { /* Unknown attempt state skips expensive work, not minute gauges. */ }
+      await this.store.prepareMonitoring?.(analyze);
+    }catch(error) {preparationError=classify(error);this.noteFailure('postgres_monitoring_prepare',error);}
+    if(this.migrationHeld())return;
+    const storage=await this.store.health(),stats:any=storage.capacity;
+    if(storage.connected===false)this.postgresUnavailableSince ??= now;else this.postgresUnavailableSince=undefined;
+    this.capacityHistory=this.capacityHistory.filter(r=>r.at>=now-2*3600000 && r.at<now).slice(-120);
+    const baseline=this.capacityHistory.filter(r=>r.at<=now-3600000).at(-1);
+    const fresh=Number.isSafeInteger(stats?.prepared_at) && (!this.lastCapacity || stats.prepared_at>this.lastCapacity.at);
+    const measured=fresh?postgresCapacity(stats,baseline,now,this.lastCapacity):{...(this.lastCapacity || postgresCapacity(stats,baseline,now)),stale:!stats || now-stats.prepared_at>180000};
+    if(fresh){this.lastCapacity=measured;this.capacityHistory.push({at:measured.at,bytes:measured.bytes,allowance:measured.allowance});}
+    if(!storage.connected)measured.stale=true;
+    const reasons:string[]=[];
+    if(storage.generation && storage.generation!==generation || storage.backend && storage.backend!=='postgres')reasons.push('backend_generation_fenced');
+    if(this.inputFailure && now-this.inputFailure.since>=60000)reasons.push('input_application_unavailable');
+    if(measured.level && measured.level!=='ok')reasons.push('storage_capacity');
+    if(this.postgresUnavailableSince!==undefined && now-this.postgresUnavailableSince>=60000)reasons.push('input_application_unavailable');
+    if(!ingress.durable)reasons.push('parked_ingress_durability_unavailable');
+    const recovery=ingress.backlog;
+    if(recovery?.held?.count>0 || recovery?.parked?.oldest_received && now-recovery.parked.oldest_received>=86400000)reasons.push('input_application_backlog');
+    if(this.migrationHeld())return;
+    const connections=stats?.observation?.connections;
+    const usable=connections?connections.max-connections.reserved:0;
+    const pressure=usable>0?connections.used/usable:null;
+    if(pressure!==null && pressure>=.7)reasons.push('connection_saturation');
+    const critical=reasons.some(r=>!['storage_capacity','connection_saturation'].includes(r)) || measured.level==='critical' || pressure!==null && pressure>=.85;
+    const level=critical?'critical':reasons.length?'warning':'ok';
+    const requests=this.requestMetrics.snapshot(now),{intervals,...requestSummary}=requests;
+    const value={version:1,at:now,backend:'postgres',generation,level,reasons,storage,capacity:measured,capacity_history:this.capacityHistory,
+      preparation_error:preparationError,monitoring_stale:measured.stale,table_row_estimates:stats?.observation?.table_row_estimates ?? null,tables:{at:stats?.tables_prepared_at ?? null,attempt_at:stats?.tables_attempt_at ?? null,values:stats?.tables ?? null,stale:!stats?.tables_prepared_at || now-stats.tables_prepared_at>2*3600000},
+      connections:{...connections,ratio:pressure,connected:storage.connected,failures:storage.connection_failures,stale:!stats?.prepared_at || now-stats.prepared_at>180000},
+      compute:{...(stats?.observation?.compute || {cpu_utilization:null,reason:'use_neon_compute_metrics'}),stale:!stats?.prepared_at || now-stats.prepared_at>180000},
+      ingress,requests:requestSummary,repair_summary:this.repairMetrics.summary(now),
+      refresh_lag_ms:this.diagnostics.last_repair?now-this.diagnostics.last_repair:null,
+      latest_applied_input:this.diagnostics.latest_applied_input ?? null,
+      input_failure:this.inputFailure ?? null,
+      recovery:{prepared_at:recovery?.prepared_at ?? null,last_attempt:recovery?.last_attempt ?? null,next_retry:recovery?.next_retry ?? null,last_error:recovery?.last_error ?? null},
+      retention:{policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,receipts_pinned:this.receiptsPinned,receipt_pin_backend:'r2'}};
+    const alarm=level!=='ok'?emitAlarm(this.env,repo,value):{channel:'configured_workers_observability',emitted:false,notified:false};
+    this.observation={...value,alarm,persistence:{stored:true,at:now}};
+    try {await this.maintenanceArchive.put('control/'+repo+'/observation.json',JSON.stringify(this.observation));}
+    catch(error){this.observation.persistence={stored:false,at:now,error:classify(error)};this.noteFailure('observation_persistence',error);}
+    if(this.migrationHeld())return;
+    const repair=this.repairMetrics.snapshot(now).filter((r:any)=>r.at>=now-60000);
+    if(requests.requests || repair.length)await this.maintenanceArchive.put('telemetry/'+repo+'/'+Math.floor(now/60000)+'.json',JSON.stringify({at:now,requests:intervals.filter((r:any)=>r.at>=now-60000),repair_intervals:repair}),{customMetadata:{expires:String(now+7*86400000)}}).catch(error=>this.noteFailure('telemetry_persistence',error));
+  }
   async preparedObservation(): Promise<any> {
     if(!this.observation && Date.now()-this.observationReadAt>=60000) {
       this.observationReadAt=Date.now();
-      let repo:string|undefined;try {repo=(await this.meta('repository'))?.id;}catch {}
+      let repo:string|undefined;try {repo=this.store.backend==='postgres'?this.monitoringRepository():(await this.meta('repository'))?.id;}catch {}
       if(repo) {
         const task=this.maintenanceArchive.get('control/'+repo+'/observation.json').then(o=>o?.json<any>()).then(value=>{
-          if(value && (this.store.backend!=='postgres' || value.backend==='postgres') && (!this.observation || value.at>this.observation.at))this.observation=value;
+          if(value && (this.store.backend!=='postgres' || value.backend==='postgres' && value.generation===this.env.REPOSITORY_GENERATION) && (!this.observation || value.at>this.observation.at))this.observation=value;
         }).catch(()=>{});
         if(this.ctx.waitUntil)this.ctx.waitUntil(task);
         // A cold status response stays fast even when the observation store is slow.
@@ -1644,7 +1715,7 @@ export class RepositoryState extends DurableObject<Env> {
   }
   async storage(path:string,req:Request): Promise<Response> {
     if(this.store.backend==='postgres' && !['/storage/summary','/storage/ingress','/storage/deliveries','/storage/retention'].includes(path)) throw new AdminError('sqlite_recovery_only');
-    if(this.store.backend==='postgres' && path==='/storage/summary') return json({storage:await this.store.health(),monitoring:await this.preparedObservation(),retention:{policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,receipts_pinned:this.receiptsPinned,receipt_pin_backend:'r2'}});
+    if(this.store.backend==='postgres' && path==='/storage/summary') return json({storage:(await this.preparedObservation()).storage || {backend:'postgres',stale:true},monitoring:await this.preparedObservation(),retention:{policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,receipts_pinned:this.receiptsPinned,receipt_pin_backend:'r2'}});
     const input:any=req.method==='POST'?await req.json():{};
     const repo=(await this.meta('repository'))?.id ?? input.repository_id;
     if (typeof repo!=='string' || !/^[0-9]+$/.test(repo)) throw new AdminError('repository_unconfigured');
@@ -1934,6 +2005,7 @@ export class RepositoryState extends DurableObject<Env> {
           this.deliveryFlights.set(pointer.delivery,flight);
         }
         try {await flight;} finally {if(this.deliveryFlights.get(pointer.delivery)===flight)this.deliveryFlights.delete(pointer.delivery);}
+        this.inputFailure=undefined;
         return json({ok:true});
       }
       if(path==='/retained-object') {
@@ -1996,8 +2068,12 @@ export class RepositoryState extends DurableObject<Env> {
         requestCoverage=result.coverage || 'unknown';
         return json(result,200,{ETag:'"'+result.revision+'"',...(this.degraded?{'X-TauCeti-Storage':'degraded'}:{})});
       }
+      if (path==='/health' && this.store.backend==='postgres') {
+        const monitoring=await this.preparedObservation(),storage=monitoring.storage || {backend:'postgres',schema_version:null,expected_schema_version:1,expected_generation:this.env.REPOSITORY_GENERATION,connected:null,stale:true};
+        return json({...this.diagnostics,reconciliation_version:2,revision:this.revisionState.value ?? this.diagnostics.revision ?? null,repository:this.repositoryMemo ?? this.diagnostics.repository ?? null,storage,monitoring,request_id,diagnostics_at:this.diagnosticsAt || null,diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
+      }
       if (path==='/health') {
-        const storage=this.store.backend==='postgres'?await this.store.health():{...await this.storageState(),backend:'sqlite',schema_version:SCHEMA_VERSION};
+        const storage={...await this.storageState(),backend:'sqlite',schema_version:SCHEMA_VERSION};
         if(typeof this.schema==='object' || storage.connected===false)return json({storage,deployment_id:this.env.CF_VERSION?.id,monitoring:await this.preparedObservation(),request_id});
         return json({...this.diagnostics,reconciliation_version:2,settings:settings(this.env),...this.repairMetrics.summary(),queries:[...this.queryCounts.values()],query_metrics_scope:'repository_instance_since_restart',repair_metrics_scope:'repository_instance_since_restart',storage,storage_bytes:storage.database_size ?? (storage.capacity as any)?.database_bytes,
           repository:await this.meta('repository'),revision:await this.revision(),bootstrap_inventory:await this.meta('bootstrap_inventory'),latest_applied_input:await this.meta('latest_applied_input'),
@@ -2018,6 +2094,7 @@ export class RepositoryState extends DurableObject<Env> {
       if (path==='/activity-refresh' && req.method==='POST') {if(!this.degraded) await this.refreshActivityLandings();return json({ok:true,degraded:Boolean(this.degraded)});}
       if (path==='/tick') {
         // Cron reaches a full object even if its alarm cannot be rescheduled.
+        if(this.store.backend==='postgres')this.startStorageMaintenance();
         if(this.store.backend==='sqlite')await this.storageMarker();
         await this.expire();
         if(this.degraded && this.store.backend==='sqlite')await this.recoverHeadroom();
@@ -2036,6 +2113,7 @@ export class RepositoryState extends DurableObject<Env> {
       requestError=true;
       if (error instanceof AdminError) return json({error:error.message,request_id},400);
       const reason=this.noteFailure('request:'+path,error);
+      if(path==='/event')this.inputFailure={since:this.inputFailure?.since ?? Date.now(),at:Date.now(),reason};
       log('repository_request_failed',{request_id,path,reason});
       return json({error:reason,parkable:PARKABLE.has(reason),message:(error instanceof Error?error.message:'operation failed').slice(0,200),request_id},reason==='internal'?500:503);
     }finally {

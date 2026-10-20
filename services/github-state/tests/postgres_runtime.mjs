@@ -10,7 +10,7 @@ const bundle=await build({entryPoints:['src/repository.ts','src/repository_store
 }]});
 const imported=await Promise.all(bundle.outputFiles.map(file=>import('data:text/javascript;base64,'+Buffer.from(file.text+'\n//# sourceURL=postgres-repository-fixture.mjs').toString('base64'))));
 export const {RepositoryState}=imported.find(m=>m.RepositoryState);
-export const {PostgresStore,SQLiteStore,postgresSQL,Rows}=imported.find(m=>m.PostgresStore);
+export const {PostgresStore,SQLiteStore,postgresSQL,Rows,columns}=imported.find(m=>m.PostgresStore);
 export async function postgresFixture({configured=true}={}) {
  const credentials=testCredentials();
  const admin=new Client(credentials.migration.toString());await admin.connect();

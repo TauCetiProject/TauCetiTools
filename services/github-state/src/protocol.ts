@@ -1,7 +1,7 @@
 export interface Repository { id: string; name: string; installation: string; branch?: string; bors_receipts_url?: string }
 export interface Env {
   REPOSITORIES: DurableObjectNamespace; INSTALLATIONS: DurableObjectNamespace;
-  ARCHIVE: R2Bucket; EVENTS: Queue<EventPointer>;
+  ARCHIVE: R2Bucket; EVENTS: Queue<EventPointer>; EVENTS_DLQ?:Queue<EventPointer>;
   ALLOWED_REPOSITORIES: string; GITHUB_APP_ID: string; GITHUB_INSTALLATION_ID: string;
   GITHUB_PRIVATE_KEY: string; WEBHOOK_SECRET: string;
   CLIENT_TOKENS: string; ADMIN_TOKEN_HASH: string;

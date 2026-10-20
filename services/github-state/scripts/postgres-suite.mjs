@@ -1,0 +1,1 @@
+export const postgresFiles=['tests/postgres.test.mjs','tests/postgres_prevention.test.mjs','tests/monitoring.test.mjs','tests/transaction.test.mjs','tests/service.test.mjs','tests/survey.test.mjs','tests/snapshot.test.mjs','tests/scheduler.test.mjs','tests/activity.test.mjs'];

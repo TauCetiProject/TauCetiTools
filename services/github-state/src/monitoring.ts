@@ -20,6 +20,19 @@ export function capacity(current:CapacitySample,previous?:CapacitySample,now=Dat
     level,stale:now-current.at>180000,capacity_unknown:allowance===null};
 }
 
+// PostgreSQL storage grows automatically; only an operator-verified effective
+// project/account allowance is a capacity threshold. Never infer a 10 GiB cap.
+export function postgresCapacity(statistics:any,previous?:CapacitySample,now=Date.now(),prior?:any):any {
+  const valid=(n:any)=>Number.isSafeInteger(n) && n>=0;
+  if(!valid(statistics?.database_bytes) || !valid(statistics?.prepared_at))return {...prior,backend:'postgres',growable:true,allowance:null,allowance_kind:'operator_verified_effective_project_account_limit',usage_scope:'current_database_lower_bound',project_usage_bytes:null,stale:true,capacity_unknown:true};
+  const limit=valid(statistics.storage_limit_bytes) && statistics.storage_limit_bytes>0?statistics.storage_limit_bytes:null;
+  return {...capacity({at:statistics.prepared_at,bytes:statistics.database_bytes,allowance:limit},previous,now,prior),
+    backend:'postgres',growable:true,allowance_kind:'operator_verified_effective_project_account_limit',
+    reusable_bytes:null,reusable_space_reason:'dead_tuple_estimates_are_not_measured_free_space',
+    usage_scope:'current_database_lower_bound',allowance_scope:'effective_project_account',project_usage_bytes:null,
+    restore_verified_at:statistics.restore_verified_at ?? null};
+}
+
 // Fixed logarithmic buckets: memory and persisted cardinality do not grow with
 // traffic. Quantiles are bucket upper bounds, rather than false exact values.
 const BOUNDS = [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000];

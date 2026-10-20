@@ -1,13 +1,12 @@
 # GitHub state retention and outage drills
 
-This is the SQLite/R2 prevention release for [Worker
-#317](https://github.com/TauCetiProject/TauCetiWorker/issues/317). It keeps S0
-recovery available and adds no backend switch, migration, GitHub quota spender, or
-production fault injection. PostgreSQL implementation and Neon restore testing must
-follow the repository-store interface and isolated test infrastructure in [Worker
-#308](https://github.com/TauCetiProject/TauCetiWorker/issues/308). Production
-migration remains [Worker
-#316](https://github.com/TauCetiProject/TauCetiWorker/issues/316)'s release.
+This covers SQLite/R2 and PostgreSQL prevention for [Worker
+#317](https://github.com/TauCetiProject/TauCetiWorker/issues/317). The PostgreSQL
+implementation uses the store delivered in [TauCetiTools
+#5](https://github.com/TauCetiProject/TauCetiTools/pull/5), which completed Worker
+#308. Recovery/replay remains owned by the existing scheduled ingress controller
+(Worker #336). Production migration and backend selection remain Worker #316's
+release; these diagnostics do not select a backend or bootstrap GitHub.
 
 ## Ownership and storage policy
 
@@ -20,6 +19,7 @@ threshold for PostgreSQL.
 
 | Data | Default window / retirement condition |
 | --- | --- |
+| Imported PostgreSQL SQL cursors | Delete only after their stored ten-minute expiry, in bounded scans; SQLite no longer creates SQL cursors |
 | R2 cursors | Ten-minute validity plus the existing one-minute deletion margin |
 | Change journal | Seven days; clients beyond retained revisions receive reset |
 | Delivery receipts | Fourteen days **from application**; automatically pin the entire class while parked/held input is observed, or its inventory is unavailable |
@@ -77,7 +77,8 @@ automatic expiry waits for that policy; the explicit emergency SQL cleanup comma
 remain available without R2. Cached policy expiry remains independent of later R2
 monitoring failures. Other recovery attempts still run. New demand deletion starts
 in dry run; S0's receipt and other existing expiry classes remain active by default,
-subject to pins/explicit class overrides. No SQL schema migration is needed. Background retention and archival participate
+subject to pins/explicit class overrides. SQLite needs no new SQL schema. PostgreSQL monitoring requires the additive
+`002_monitoring.sql` function installed explicitly with migration credentials. Background retention and archival participate
 in the source-migration drain barrier and stop at its fence. Bucket expiry
 rechecks the migration hold before batch deletion; migration inventories include
 the staging-spill prefix.
@@ -140,9 +141,13 @@ Warning means >=70% of the allowance or projected exhaustion within seven days.
 Critical means >=85%, exhaustion within 24 hours, storage-full application failure
 lasting a minute, a held/day-old parked backlog, or a failed write/read probe of
 parked-ingress R2. The prepared backlog inspects at most two R2 pages per prefix:
-`truncated: true` means a lower bound, never an exact total. Queue/DLQ depth is
-explicitly unavailable until a management-metrics source is configured; the recovery
-CLI's full bounded inventory and operator queue metrics remain necessary. Compute is
+`truncated: true` means a lower bound, never an exact total. Queue/DLQ depth, bytes and oldest timestamp are sampled once per cron pass from
+`EVENTS.metrics()` and `EVENTS_DLQ.metrics()` and saved in `control/queue-metrics.json`.
+These are approximate unacknowledged-message observations, not reads/consumption
+of queue contents. Missing bindings or failed metrics preserve the last good
+observation with an error/stale flag; never replace unknown depth with zero.
+Both deployed environments bind their existing DLQ solely for metrics. Replay
+ownership remains unchanged. See [Cloudflare queue metrics](https://developers.cloudflare.com/queues/observability/metrics/). Compute is
 unavailable and connection saturation is not applicable to this SQLite runtime.
 
 Request p50/p95 are fixed bucket upper bounds using the Workers I/O clock;
@@ -201,7 +206,7 @@ every SQL/R2 expiry class while investigating, use:
 
 ```sh
 uv run python "$S" --environment test retention --mode dry_run \
-  --disable expired_repair_metrics \
+  --disable expired_legacy_cursors --disable expired_repair_metrics \
   --disable expired_changes --disable expired_retired_objects \
   --disable expired_deliveries --disable expired_demand \
   --disable r2_cursors --disable raw_webhooks --disable daily_archives \
@@ -248,13 +253,128 @@ R2 upload/delete/checkpoint/monitoring failures, quota exhaustion, no additional
 GitHub calls during stored-state recovery/monitoring, retained spill reads, fifty
 simulated retention days and 100,000 repair events.
 
-The PostgreSQL drill is **not run or claimed** by this release. After [Worker
-#308](https://github.com/TauCetiProject/TauCetiWorker/issues/308), use only its
-isolated test database/branch and dedicated Neon project: verify the effective
-allowance and seven-day restore history, capture the migration archive and
-checksums, exercise unavailable/slow/restarting connections, restore into a separate
-test branch, compare semantic state and parked replay receipts, and record p50/p95
-and connection/compute observations. Do not proceed to production fault testing
-without that test evidence. Actual Neon restore and migration archive format
-validation depend on S1/S2; a local SQLite archive restore is not evidence of a Neon
-restore.
+## PostgreSQL sampling, alarms and restore drills
+
+The existing minute cron starts background monitoring before attempting repository
+SQL. Even an unavailable database or a receipt-archive error cannot prevent the
+next monitoring/recovery attempt. `/health` and `/storage/summary` serve prepared
+PostgreSQL observations from memory/R2 and make **zero database or GitHub calls**.
+Cold health waits at most 100 ms for R2 and marks unknown schema/connectivity and
+stale projections explicitly. A committed in-memory revision remains available;
+a fresh coordinator without a prepared revision reports null rather than inventing
+one. Live repository reads keep their original complete/observed/unavailable
+semantics; an outage never becomes an empty complete collection. Warm DTOs retain
+their original timestamps; a cold unavailable database returns a precise parkable
+error/request ID. Reads do not recreate the database or query GitHub.
+
+Install the additive schema/function before deploying monitoring on a selected
+PostgreSQL test backend. From `services/github-state`, with isolated credentials
+already supplied privately (never enable shell tracing):
+
+```sh
+export MIGRATION_DATABASE_URL="$TEST_POSTGRES_MIGRATION_URL"
+export APPLICATION_ROLE=github_state_test_app
+node scripts/migrate-postgres.mjs "$REPOSITORY_ID" "$GENERATION"
+# Use the effective allowance verified for this dedicated project, not a plan guess.
+export STORAGE_LIMIT_BYTES=1099511627776
+node scripts/prepare-postgres-statistics.mjs "$REPOSITORY_ID"
+```
+
+Expected: matching repository/generation with `schema_version: 1`, then
+`prepared: true`. An existing ownership mismatch stops initialization. Deployment
+alone performs no DDL. `prepare_monitoring(expected_generation, analyze_tables)`
+is a fixed-schema, security-definer function with a fixed search path, time/lock
+limits and no dynamic SQL. The application can call it and read prepared statistics;
+it cannot set allowance/restore receipts, create schemas or change backend ownership.
+The function checks generation and serializes samplers with a try advisory lock.
+No runtime migration credential is added.
+
+Every minute, it saves current database bytes, connection usage/limit/reserves,
+role-limited active/waiting sessions and per-table live/dead row estimates from
+PostgreSQL statistics. CPU utilization is explicitly unavailable from these SQL
+views; use the dedicated project's existing Neon compute monitoring. Active-query
+and lock-wait observations are separate compute-pressure diagnostics, not a claim
+to measure CPU. [PostgreSQL statistics visibility](https://www.postgresql.org/docs/18/monitoring-stats.html)
+limits session detail for roles without `pg_read_all_stats`; the response labels
+that limitation. This release grants no global statistics role.
+
+Physical table/index/TOAST sizes and their growth are prepared at most hourly.
+R2 records the expensive attempt **before** SQL so a failed/cancelled transaction
+cannot cause minute-by-minute expensive retries; SQL also throttles persisted
+attempts. A missing attempt record permits a pass; unreadable/invalid attempt
+state skips physical analysis while minute gauges continue. Failed measurements
+retain prior values and timestamps. Dead tuples are estimates, not measured
+reusable bytes; neither deletion nor VACUUM guarantees a smaller physical file.
+
+PostgreSQL capacity is growable and uses only an operator-verified effective
+project/account allowance. Missing allowance is unknown, never SQLite's 10 GiB.
+`pg_database_size(current_database())` measures this database, **a lower bound on
+project usage**; sibling databases/branches, retained history and account quotas
+require Neon's project/account observations. `usage_scope` and `allowance_scope`
+expose that distinction, and `project_usage_bytes` stays null when not measured.
+Operators must continue watching actual project/account usage in Neon. The 70%/85%
+byte warnings and seven-day/24-hour confirmed forecasts apply to the measured
+lower bound; they cannot prove total account headroom. Connection usage emits a
+separate warning/critical at 70%/85% of nonreserved slots. Capacity, connection
+pressure, a persistent unapplied-input failure and loss of parked durability feed
+structured alarms in the configured Workers observability stream. Alarm delivery
+failure retains health and never claims human notification. Stale capacity or
+recovery observations stay stale even if the wrapper response is recent.
+
+Run the complete SQLite and real PostgreSQL drills separately:
+
+```sh
+# No PostgreSQL test environment variables for the SQLite run.
+npm run drill -- /tmp/sqlite-prevention.json
+# Isolated TEST_POSTGRES_URL and TEST_POSTGRES_MIGRATION_URL supplied privately.
+npm run drill -- --postgres /tmp/postgres-prevention.json
+```
+
+Expected: `exit_status: 0`, `failed: 0`, correct backend/environment and explicit
+skip counts. PostgreSQL mode refuses missing/non-test credentials and runs the
+shared service/scheduler/survey/snapshot/activity contracts plus prevention tests.
+Fixtures use disposable schemas/databases on the test branch. They cover slow SQL,
+self-terminated test connections, an unavailable dependency, coordinator restart,
+lost commit response, cached versus missing coverage, acknowledged parked input,
+existing held input, idempotent ordinary scheduled replay, bounded retention
+plateaus, archive/checkpoint/monitoring failure and recovery. No admin replay
+command, duplicate quota owner or direct GitHub fanout is used. The source hash
+includes SQL migrations. Generated JSON and complete TAP record passing and
+skipped tests separately; a skipped PostgreSQL test is never counted as passed.
+
+Validate a fresh Neon point-in-time restore with a private API-token file:
+
+```sh
+node scripts/restore-postgres-drill.mjs "$NEON_TOKEN_FILE" /tmp/neon-restore.json
+```
+
+Expected: `verified: true`, `temporary_branch_deleted: true`, exact large ID
+preserved and checksums for all 23 tables. The script checks the dedicated project's
+recorded **test** branch/endpoint, creates a random disposable repository schema,
+records its database timestamp and table hashes, changes the source sentinel, then
+creates a temporary point-in-time child of that test branch. It verifies the old
+sentinel and every table before deleting the child and source fixture. It then closes its own connection, restarts only that just-created temporary
+endpoint and reconnects to recheck every table. It never restarts shared test or
+production compute or selects a production endpoint. If an API mutation has an ambiguous
+failure, inspect existing `issue317-restore-*` branches before retrying; do not
+blindly repeat creates. If cleanup fails, retain the receipt's branch ID and stop
+until the temporary branch is removed. The actual isolated restore receipt lives
+in `services/github-state/validation/retention-restore-2026-10-20.json`.
+
+The separate migration-archive fixture verifies digests before committing a
+transactional restore, rejects corruption without publishing partial state, then
+retries successfully. It compares every repository table, tombstones/memberships,
+exact timestamps, retained cursor/spill references and landing evidence. This
+validates the stored-state archive contract; production S2 import/cutover acceptance
+remains owned by #316 and requires its actual migration receipt.
+
+For a PostgreSQL outage, restore the existing test dependency normally, leave
+parked/held inputs and receipt objects intact, and let minute cron run. Expected:
+`recovery.last_attempt` advances, `next_retry` is prepared, backlog decreases and
+`latest_applied_input` advances without an admin replay request. Stop if stored
+coverage disappears, acknowledged input lacks a receipt or durable pointer/body,
+an archive digest differs, generation is fenced unexpectedly, or retry/backlog
+progress stops. Never clear application receipts or switch backends as an outage
+workaround. Rollback retains archives/pins and uses #316's write-reconciliation
+contract rather than a routing flip. Production fault testing requires the isolated
+drill evidence first; this release performs no production deployment/fault.

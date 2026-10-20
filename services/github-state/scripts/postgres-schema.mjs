@@ -11,6 +11,7 @@ export async function initializeSchema(client,repository,generation,role) {
  const previous=(await client.query("SELECT c.relname,a.attname FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relkind='r' AND a.attnum>0 AND NOT a.attisdropped AND a.atttypid='text'::regtype AND a.attcollation<>'\"C\"'::regcollation",[schema])).rows;
  for(const column of previous)await client.query(`ALTER TABLE ${schema}.${quote(column.relname)} ALTER COLUMN ${quote(column.attname)} TYPE TEXT COLLATE "C"`);
  await client.query(sql);
+ await client.query((await readFile(new URL('../migrations/002_monitoring.sql',import.meta.url),'utf8')).replaceAll('__SCHEMA__',schema));
  await client.query(`ALTER TABLE ${schema}.resources ALTER COLUMN kind SET NOT NULL,ALTER COLUMN id SET NOT NULL; ALTER TABLE ${schema}.members ALTER COLUMN collection SET NOT NULL,ALTER COLUMN id SET NOT NULL`);
  await client.query(`INSERT INTO ${schema}.backend_control VALUES(1,'postgres',$1,1) ON CONFLICT DO NOTHING`,[generation]);
  const owner=(await client.query(`SELECT * FROM ${schema}.backend_control WHERE singleton=1`)).rows[0];
@@ -26,6 +27,7 @@ export async function initializeSchema(client,repository,generation,role) {
   // CHECK prevents changes; backend, generation and version remain read-only.
   await client.query(`GRANT UPDATE(singleton) ON ${schema}.backend_control TO ${role}`);
   await client.query(`GRANT EXECUTE ON FUNCTION ${schema}.assert_writer(TEXT) TO ${role}`);
+  await client.query(`GRANT EXECUTE ON FUNCTION ${schema}.prepare_monitoring(TEXT,BOOLEAN) TO ${role}`);
  }
  return schema;
 }

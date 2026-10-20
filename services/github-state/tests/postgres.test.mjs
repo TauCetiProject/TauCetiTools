@@ -42,6 +42,7 @@ pg('PostgreSQL preserves text IDs, exact timestamps, numeric ordering and change
   assert.equal(await state.revision(),8);
   const changes=await (await state.fetch(new Request('https://internal/changes?after=4'))).json();
   assert.equal(changes.reset,false);assert.deepEqual(changes.changes.map(r=>r.revision),[5,6,7,8]);
+  await state.storageMaintenance();
   const health=await (await state.fetch(new Request('https://internal/health'))).json();assert.equal(health.storage.backend,'postgres');assert.equal(health.storage.schema_version,1);
  }finally{await f.close();}
 });
