@@ -203,7 +203,7 @@ def main():
     for _ in range(args.steps if mutating and args.command == "resume" else 1):
         result = call(args.environment, body, **options)
         print(json.dumps(result, sort_keys=True), flush=True)
-        if result.get("phase") in {"complete", "abandoned"} or (result.get("phase") == "source_verified" and not result.get("cutover")):
+        if result.get("phase") in {"complete", "abandoned", "replaying"} or (result.get("phase") == "source_verified" and not result.get("cutover")):
             break
 
 

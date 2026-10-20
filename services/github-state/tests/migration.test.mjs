@@ -262,7 +262,7 @@ test('staging verification bounds idle windows and resumes a large partial job a
  const template=f.db.prepare('SELECT * FROM jobs').get(),fields=Object.keys(template);
  f.db.exec("UPDATE jobs SET rowid=-9223372036854775808");
  const insert=f.db.prepare('INSERT INTO jobs('+fields.join(',')+') VALUES('+fields.map(()=>'?').join(',')+')');
- f.db.exec('BEGIN');for(let n=0;n<6000;n++)insert.run(...fields.map(key=>key==='key'?'idle-'+n:key==='started'?null:template[key]));f.db.exec('COMMIT');
+ f.db.exec('BEGIN');for(let n=0;n<6000;n++)insert.run(...fields.map(key=>key==='key'?'idle-'+n:key==='started'?(n%2?template.started:null):key==='page'&&n%2?1:template[key]));f.db.exec('COMMIT');
  insert.run(...fields.map(key=>key==='key'?'last':key==='page'?152:template[key]));
  f.db.exec("UPDATE jobs SET rowid=9223372036854775807 WHERE key='last'");
  for(let page=1;page<150;page++)await f.archive.put('staging/100/last/12345/'+page,'{}');
@@ -272,11 +272,13 @@ test('staging verification bounds idle windows and resumes a large partial job a
  for(const table of Object.values(state.tables))table.verified=true;state.phase='verifying';
  await migration.verifyStep(f.archive,f.ctx.storage.sql,state);
  assert.equal(state.staging.after,'-9223372036854775808');assert.equal(state.staging.checked,2);
+ state.staging.page='101';await assert.rejects(migration.verifyStep(f.archive,f.ctx.storage.sql,state),/migration_source_mismatch/);state.staging.page='1';
  await migration.verifyStep(f.archive,f.ctx.storage.sql,state);
  assert.equal(state.staging.checked,2);assert.notEqual(state.staging.after,'9223372036854775807');
  await migration.verifyStep(f.archive,f.ctx.storage.sql,state);
  assert.equal(state.staging.page,'101');assert.equal(state.staging.checked,102);
  const cold=await migration.readMigration(f.archive,repo.id),beforeJob=cold.staging.after;
+ assert.equal(beforeJob,f.db.prepare("SELECT CAST(rowid AS TEXT) id FROM jobs WHERE key='idle-5999'").get().id);
  await migration.verifyStep(f.archive,f.ctx.storage.sql,cold);
  assert.equal(cold.staging.after,'9223372036854775807');assert.equal(cold.staging.checked,151);assert.notEqual(beforeJob,cold.staging.after);
  const key=[...f.archive.objects.keys()].find(key=>key.includes('/expired-staging/'));
@@ -284,6 +286,13 @@ test('staging verification bounds idle windows and resumes a large partial job a
  await migration.verifyStep(f.archive,f.ctx.storage.sql,cold);
  assert.equal(cold.staging.complete,true);assert.equal(cold.staging.expired_jobs,1);
  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM jobs').get().n,before);
+});
+
+test('page-one staging jobs still reject malformed execution checkpoints',async()=>{
+ const f=await fixture();await fill(f);f.db.exec('UPDATE jobs SET started=-1,page=1');
+ await f.command('freeze');const state=await migration.readMigration(f.archive,repo.id);
+ for(const table of Object.values(state.tables))table.verified=true;state.phase='verifying';
+ await assert.rejects(migration.verifyStep(f.archive,f.ctx.storage.sql,state),/migration_job_checkpoint_invalid/);
 });
 
 test('blob inventory checkpoints bounded thousand-object pages without missing continuation',async()=>{
@@ -301,6 +310,7 @@ test('blob inventory checkpoints bounded thousand-object pages without missing c
  assert.equal(cold.blobs.objects,1001);assert.equal(cold.blobs.pages,2);assert.equal(cold.blobs.prefix,1);
  const archived=[...f.archive.objects.entries()].filter(([key])=>key.includes('/blobs/')).flatMap(([,o])=>JSON.parse(o.text));
  assert.equal(new Set(archived.map(o=>o.key)).size,1001);
+ assert.equal(archived.length,1001);
 });
 
 test('production startup and ingress do not depend on test migration control reads',async()=>{

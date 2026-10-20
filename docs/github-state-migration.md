@@ -41,9 +41,11 @@ python3 services/github-state/scripts/migrate.py --environment production \
 
 Repeat the same command when its bounded step allowance ends. Monitor phase,
 checkpoint age and the recorded failure code; do not deploy another source
-version during a pre-switch generation. Once `replaying` is reached, stop the
-bulk command and use `status` while the normal bounded ingress owners drain
-the backlog. Cron publishes the completion receipt when its release gates pass.
+version during a pre-switch generation. The bulk command returns when `replaying`
+is reached; use `status` while the normal bounded ingress owners drain the backlog.
+Cron publishes the completion receipt when its release gates pass. An HTTP or
+transport failure also exits the command: inspect the reason and rerun the same
+generation for a transient failure.
 
 Before enabling `MIGRATION_ENVIRONMENT=test|production`, deploy the coordinator,
 queue consumers, installation quota owner and retention guards everywhere. Fence

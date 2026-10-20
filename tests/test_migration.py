@@ -68,6 +68,16 @@ class MigrationTests(unittest.TestCase):
                 migrate.main()
         self.assertEqual(call.call_count, 2)
 
+    def test_bulk_resume_returns_when_replay_owners_take_over(self):
+        responses = iter([{"phase": "importing"}, {"phase": "replaying", "cutover": {"target_active": True}}])
+        argv = ["migrate.py", "--environment", "test", "--generation", "c707ddba-076d-4a63-8696-96533031ce88", "--target", "neon-test", "--apply", "--steps", "10000", "resume"]
+        output = io.StringIO()
+        with patch.object(sys, "argv", argv), patch.object(migrate, "call", side_effect=lambda *_args: next(responses)) as call:
+            with contextlib.redirect_stdout(output):
+                migrate.main()
+        self.assertEqual(call.call_count, 2)
+        self.assertIn('"phase": "replaying"', output.getvalue())
+
     def test_bounded_batch_steps(self):
         args = ["--environment", "test", "--apply", "--generation",
                 "c707ddba-076d-4a63-8696-96533031ce88", "--target", "neon-test"]

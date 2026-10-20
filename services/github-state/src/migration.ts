@@ -231,8 +231,13 @@ export async function verifyStep(bucket: R2Bucket, sql: SqlStorage, state: Migra
 // Scan compact bounded windows; idle jobs have no implicit staging pages.
 async function stagingStep(bucket: R2Bucket, sql: SqlStorage, state: Migration): Promise<void> {
   const check=state.staging,columns=state.tables.jobs.columns;
-  const window=sql.exec<any>(`SELECT CAST(rowid AS TEXT) id,(started IS NOT NULL AND page IS NOT NULL) staged FROM jobs ${check.after===null?'':'WHERE rowid>CAST(? AS INTEGER)'} ORDER BY rowid LIMIT 5000`,...(check.after===null?[]:[check.after])).toArray();
-  const active=window.findIndex(row=>row.staged);
+  const window=sql.exec<any>(`SELECT CAST(rowid AS TEXT) id,CAST(started AS TEXT) started,CAST(page AS TEXT) page FROM jobs ${check.after===null?'':'WHERE rowid>CAST(? AS INTEGER)'} ORDER BY rowid LIMIT 5000`,...(check.after===null?[]:[check.after])).toArray();
+  const active=window.findIndex(row=>{
+    if(row.started===null || row.page===null)return false;
+    if(!/^[0-9]+$/.test(row.started) || !/^[1-9][0-9]*$/.test(row.page))throw new AdminError('migration_job_checkpoint_invalid');
+    return row.page!=='1';
+  });
+  if(check.page!=='1' && active!==0)throw new AdminError('migration_source_mismatch');
   if(active<0) {
     if(window.length)check.after=window.at(-1)!.id;else check.complete=true;
     await saveMigration(bucket,state);return;
