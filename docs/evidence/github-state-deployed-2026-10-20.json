@@ -2175,5 +2175,17 @@
       "complete": true,
       "finished_at": 1792506265.828324
     }
+  },
+  "release_integration": {
+    "upstream_base": "9f21120c3af3303c85f5bfcddb48f9f38dcfbfd2",
+    "upstream_pr": "https://github.com/TauCetiProject/TauCetiTools/pull/28",
+    "rebase_patch_series_unchanged": true,
+    "patches_compared": 8,
+    "service_tests_passed": 231,
+    "service_postgres_skipped": 53,
+    "python_package_tests_passed": 15,
+    "typecheck_and_build_passed": true,
+    "deployed_evidence_scope": "Phase bundles above were built before this unrelated opt-in diagnostics rebase. They are not represented as a deployment of the rebased PR head; final CI validates integration with the shared default branch.",
+    "temporary_credential_copies_removed_after_teardown": true
   }
 }
