@@ -342,8 +342,11 @@ recovery observations stay stale even if the wrapper response is recent.
 {"project":"PROJECT_ID","branch":"br-BRANCH_ID","endpoint":"ep-ENDPOINT_ID"}
 ```
 
-Use the actual lower-case provider IDs. Supply a project-scoped read-only management
-credential as the separate `NEON_MONITORING_API_KEY` Worker secret. Never reuse a SQL
+Use the actual lower-case provider IDs. Supply a project-scoped management
+credential as the separate `NEON_MONITORING_API_KEY` Worker secret. The collector
+issues only GETs; project scope itself does not make a management key read-only.
+Use an existing read-only credential broker if your observability integration
+provides one. Never reuse a SQL
 credential or copy an account-wide operator management key into the Worker. The
 minute cron samples the enrolled project's settings, at most 100 branches, and its
 enrolled endpoint, with two-second request deadlines. Collection and persistence

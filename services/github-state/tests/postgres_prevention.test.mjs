@@ -43,6 +43,25 @@ pg('prepared PostgreSQL health stays fast with a hung store and keeps diagnostic
  }finally {await f.close();}
 });
 
+pg('provider and compute alarms join prepared PostgreSQL health without blocking semantic writes',async()=>{
+ const f=await postgresFixture();try {
+  f.env.ARCHIVE=bucket();
+  const identity={project:'project-123',branch:'br-test',endpoint:'ep-test'},now=Date.now();
+  f.env.NEON_MONITORING=JSON.stringify(identity);
+  await f.env.ARCHIVE.put('control/neon-provider.json',JSON.stringify({...identity,at:now,capacity:{level:'warning'},compute:{state:'active'}}));
+  await f.env.ARCHIVE.put('control/neon-compute.json',JSON.stringify({...identity,at:now,cpu_utilization:.95}));
+  await f.state.storageMaintenance();
+  let v=await f.state.preparedObservation();assert.equal(v.level,'critical');assert.ok(v.reasons.includes('compute_saturation'));assert.ok(v.reasons.includes('branch_storage_capacity'));
+  await f.state.put('pr','7',{number:7,title:'input applies while metrics are critical'});
+  assert.ok((await f.store.exec("SELECT data FROM resources WHERE kind='pr' AND id='7'")).one().data.includes('input applies'));
+  f.env.NEON_MONITORING='{';f.state.observation.at=Date.now()-61000;
+  await f.state.storageMaintenance();v=await f.state.preparedObservation();
+  assert.equal(v.level,'warning');assert.equal(v.provider.stale,true);assert.equal(v.persistence.stored,true);
+  let sql=0;f.state.store=new Proxy(f.store,{get(target,key){if(['exec','health'].includes(key))return ()=>{sql++;throw Error('health must use saved data');};const v=target[key];return typeof v==='function'?v.bind(target):v;}});
+  const health=await (await send(f.state,'/health')).json();assert.equal(health.monitoring.level,'warning');assert.equal(sql,0);
+ }finally {await f.close();}
+});
+
 pg('PostgreSQL outage and coordinator restart park acknowledged input then scheduled held replay recovers without GitHub',async t=>{
  const f=await postgresFixture();let down=false,network=0;try {
   f.env.ARCHIVE=bucket();let state=f.state;
