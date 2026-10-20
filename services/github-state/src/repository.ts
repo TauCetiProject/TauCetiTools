@@ -1173,7 +1173,7 @@ export class RepositoryState extends DurableObject<Env> {
       let bound:{upper:number,started:number} | null=null,recovery:string | null=null;
       if (rule.recovery) {
         // Non-ephemeral rows are deleted only within a verified export.
-        const manifest=await readManifest(this.env.ARCHIVE,repo,input.recovery),exported=manifest.tables[rule.table];
+        const manifest=await readManifest(this.env.ARCHIVE,repo,input.recovery),exported=manifest.tables['class:'+input.class] ?? (rule.bound?manifest.tables[rule.table]:undefined);
         if (!exported?.verified || !Number.isSafeInteger(exported.started)) throw new AdminError('recovery_not_verified');
         bound={upper:exported.upper,started:exported.started};recovery=manifest.id;
       }

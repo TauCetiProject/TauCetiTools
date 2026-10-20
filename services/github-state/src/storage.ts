@@ -119,20 +119,29 @@ export async function createRecovery(bucket: R2Bucket, storage: DurableObjectSto
   await bucket.put(manifestKey(repo, manifest.id), JSON.stringify(manifest));
   return manifest;
 }
+// A class export archives only the rows one fixed-predicate cleanup class
+// deletes, instead of the whole table. Its state is keyed `class:<name>`.
+function exportScope(sql: SqlStorage, input: any): { name: string; key: string; filter: string } {
+  if (input.class === undefined) { const name = table(sql, input.table); return { name, key: name, filter: '' }; }
+  const rule = CLEANUP[input.class];
+  if (!rule?.recovery || rule.bound) throw new AdminError('class_export_unsupported');
+  return { name: rule.table, key: 'class:' + input.class, filter: ' AND (' + rule.where + ')' };
+}
 export async function exportPage(bucket: R2Bucket, sql: SqlStorage, repo: string, input: any): Promise<any> {
-  const manifest = await readManifest(bucket, repo, input.recovery), name = table(sql, input.table);
-  const state = manifest.tables[name] ||= { started: Date.now(), upper: sql.exec<any>('SELECT COALESCE(MAX(rowid),0) n FROM ' + quote(name)).one().n, after: 0, rows: 0, pages: [], complete: false, verified: false, verified_pages: 0 };
-  if (state.complete) return { table: name, ...state, pages: state.pages.length };
-  // The 1 MB logical byte bound limits each page; the row bound only caps tiny rows.
-  const cols = columns(sql, name), limit = bounded(input.limit, 1000, 50000);
+  const manifest = await readManifest(bucket, repo, input.recovery), { name, key: stateKey, filter } = exportScope(sql, input);
+  const state = manifest.tables[stateKey] ||= { started: Date.now(), upper: sql.exec<any>('SELECT COALESCE(MAX(rowid),0) n FROM ' + quote(name)).one().n, after: 0, rows: 0, pages: [], complete: false, verified: false, verified_pages: 0 };
+  if (state.complete) return { table: stateKey, ...state, pages: state.pages.length };
+  // The logical byte bound (1 MB by default, at most 8 MB) limits each page;
+  // the row bound caps how many candidate rows are measured per call.
+  const cols = columns(sql, name), limit = bounded(input.limit, 1000, 50000), pageBytes = bounded(input.page_bytes, 1000000, 8000000);
   const size = cols.map(c => 'COALESCE(length(CAST(' + quote(c) + ' AS BLOB)),0)').join('+');
-  const candidates = sql.exec<any>('SELECT rowid id,' + size + ' bytes FROM ' + quote(name) + ' WHERE rowid>? AND rowid<=? ORDER BY rowid LIMIT ?', state.after, state.upper, limit).toArray();
+  const candidates = sql.exec<any>('SELECT rowid id,' + size + ' bytes FROM ' + quote(name) + ' WHERE rowid>? AND rowid<=?' + filter + ' ORDER BY rowid LIMIT ?', state.after, state.upper, limit).toArray();
   if (!candidates.length) state.complete = true;
   else {
     let bytes = 0, last = state.after;
-    for (const row of candidates) { if (last !== state.after && bytes + row.bytes > 1000000) break; bytes += row.bytes; last = row.id; }
-    const rows = sql.exec('SELECT rowid AS __rowid,* FROM ' + quote(name) + ' WHERE rowid>? AND rowid<=? ORDER BY rowid', state.after, last).toArray();
-    const text = JSON.stringify(rows), sha256 = await digest(text), key = `recovery/${repo}/${manifest.id}/${name}/${state.after + 1}-${last}.json`;
+    for (const row of candidates) { if (last !== state.after && bytes + row.bytes > pageBytes) break; bytes += row.bytes; last = row.id; }
+    const rows = sql.exec('SELECT rowid AS __rowid,* FROM ' + quote(name) + ' WHERE rowid>? AND rowid<=?' + filter + ' ORDER BY rowid', state.after, last).toArray();
+    const text = JSON.stringify(rows), sha256 = await digest(text), key = `recovery/${repo}/${manifest.id}/${stateKey}/${state.after + 1}-${last}.json`;
     await bucket.put(key, text, { sha256, customMetadata: { kind: 'recovery', sha256 } });
     state.pages.push({ key, sha256, rows: rows.length, first: state.after + 1, last });
     state.rows += rows.length; state.after = last;
@@ -140,40 +149,51 @@ export async function exportPage(bucket: R2Bucket, sql: SqlStorage, repo: string
   }
   state.verified = false;
   await bucket.put(manifestKey(repo, manifest.id), JSON.stringify(manifest));
-  return { table: name, upper: state.upper, after: state.after, rows: state.rows, pages: state.pages.length, complete: state.complete };
+  return { table: stateKey, upper: state.upper, after: state.after, rows: state.rows, pages: state.pages.length, complete: state.complete };
 }
 // Re-read every exported page and check its digest before any deletion.
 export async function verifyExport(bucket: R2Bucket, repo: string, input: any): Promise<any> {
-  const manifest = await readManifest(bucket, repo, input.recovery), state = manifest.tables[input.table];
+  const stateKey = input.class === undefined ? input.table : 'class:' + input.class;
+  const manifest = await readManifest(bucket, repo, input.recovery), state = manifest.tables[stateKey];
   if (!state) throw new AdminError('table_not_exported');
   if (!state.complete) throw new AdminError('export_incomplete');
+  // At most 50 pages or 64 MB of downloads per call.
   const stop = Math.min(state.pages.length, state.verified_pages + 50);
-  for (; state.verified_pages < stop; state.verified_pages++) {
+  for (let read = 0; state.verified_pages < stop && read < 64000000; state.verified_pages++) {
     const page = state.pages[state.verified_pages], object = await bucket.get(page.key);
     if (!object) throw new AdminError('export_page_missing');
     const text = await object.text();
+    read += text.length;
     if (await digest(text) !== page.sha256 || JSON.parse(text).length !== page.rows) throw new AdminError('export_page_corrupt');
   }
   state.verified = state.verified_pages === state.pages.length;
   if (state.verified) state.verified_at = Date.now();
   await bucket.put(manifestKey(repo, manifest.id), JSON.stringify(manifest));
-  return { table: input.table, verified: state.verified, verified_pages: state.verified_pages, pages: state.pages.length, rows: state.rows, upper: state.upper, bookmark: manifest.bookmark };
+  return { table: stateKey, verified: state.verified, verified_pages: state.verified_pages, pages: state.pages.length, rows: state.rows, upper: state.upper, bookmark: manifest.bookmark };
 }
 
 // Only these classes may be deleted. Ephemeral classes follow the existing
 // retention policy; the others require a verified export covering the rows.
 // PR histories, resources, membership/coverage, tombstones, jobs, and
 // delivery receipts are never cleanup classes.
-export const CLEANUP: Record<string, { table: string; where: string; bound: (now: number, input: any) => number; recovery: boolean; max?: number }> = {
+// `bound` supplies the single placeholder in `where`; `clock` is the column
+// that must predate a verified export. Fixed-predicate classes have no bound.
+export const CLEANUP: Record<string, { table: string; where: string; bound?: (now: number, input: any) => number; clock?: string; recovery: boolean; max?: number }> = {
   // Legacy cursor rows hold up to 1.5 MB each; keep their batches small.
   expired_cursors: { table: 'cursors', where: 'expires<?', bound: now => now, recovery: false, max: 200 },
   expired_repair_metrics: { table: 'repair_metrics', where: 'at<?', bound: now => now - 7 * 86400000, recovery: false },
   expired_changes: { table: 'changes', where: 'at<?', bound: now => now - 7 * 86400000, recovery: false },
   expired_retired_objects: { table: 'retired_objects', where: 'at<?', bound: now => now - 30 * 86400000, recovery: false },
   // Expendable telemetry: archive first, then delete rows older than an hour.
-  repair_metrics: { table: 'repair_metrics', where: 'at<?', bound: (now, input) => Math.min(now - 3600000, Number.isSafeInteger(input.before) ? input.before : now - 86400000), recovery: true },
+  repair_metrics: { table: 'repair_metrics', where: 'at<?', bound: (now, input) => Math.min(now - 3600000, Number.isSafeInteger(input.before) ? input.before : now - 86400000), clock: 'at', recovery: true },
   // Demand older than its five-minute scheduling window is equivalent to absence.
-  stale_demand: { table: 'demand', where: 'at<?', bound: now => now - 86400000, recovery: true },
+  stale_demand: { table: 'demand', where: 'at<?', bound: now => now - 86400000, clock: 'at', recovery: true },
+  // GitHub Actions and check-run records are no longer mirrored (NOT_MIRRORED).
+  // Unary plus keeps these predicates on rowid range scans.
+  ci_resources: { table: 'resources', where: "+kind IN ('workflow_runs','workflow_jobs','checks')", clock: 'observed', recovery: true, max: 2000 },
+  ci_members: { table: 'members', where: "(+collection LIKE 'checks:%' OR +collection LIKE 'workflow_runs:%' OR +collection LIKE 'workflow_jobs:%')", recovery: true },
+  ci_collections: { table: 'collections', where: "+operation IN ('checks','workflow_runs','workflow_jobs')", recovery: true },
+  ci_meta: { table: 'meta', where: "(+key LIKE 'workflow%' OR +key LIKE 'important%')", recovery: true },
 };
 // A verified export covers rows with rowid <= upper that were last written
 // before it started. Rowids can be reused, so both bounds are required.
@@ -181,8 +201,12 @@ export function deleteClass(sql: SqlStorage, name: string, exported: { upper: nu
   const rule = CLEANUP[name], limit = bounded(input.limit, 100, rule.max ?? 5000);
   // Measuring reads every deleted payload; routine expiry skips that cost.
   const size = measure ? columns(sql, rule.table).map(c => 'COALESCE(length(CAST(' + quote(c) + ' AS BLOB)),0)').join('+') : '0';
-  const bound = exported === null ? rule.bound(now, input) : Math.min(rule.bound(now, input), exported.started);
-  const scope = rule.where + (exported === null ? '' : ' AND rowid<=?'), bindings = exported === null ? [bound] : [bound, exported.upper];
+  const predicates = [rule.where], bindings: number[] = rule.bound ? [rule.bound(now, input)] : [];
+  if (exported) {
+    predicates.push('rowid<=?'); bindings.push(exported.upper);
+    if (rule.clock) { predicates.push(quote(rule.clock) + '<?'); bindings.push(exported.started); }
+  }
+  const scope = predicates.join(' AND ');
   // Rowid order finds the oldest expired rows first and bounds every statement.
   const ids = sql.exec<any>('SELECT rowid id,' + size + ' bytes FROM ' + quote(rule.table) + ' WHERE ' + scope + ' ORDER BY rowid LIMIT ?', ...bindings, limit).toArray();
   for (let i = 0; i < ids.length; i += 50) {

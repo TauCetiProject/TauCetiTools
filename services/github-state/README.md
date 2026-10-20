@@ -55,6 +55,11 @@ of the repository database. CI webhooks are acknowledged without being stored,
 and `checks`, `workflow_runs` and `workflow_jobs` queries answer
 `status: "unavailable"` with reason `not_mirrored`, so a client uses its direct
 GitHub path rather than an empty result.
+Existing CI rows are removed with the `ci_resources`, `ci_members`,
+`ci_collections` and `ci_meta` cleanup classes. Each requires a verified class
+export (`/admin/storage/export` with `class`), which archives only the rows
+that class deletes; deletion covers exported rowids only, and resources only
+when they were last observed before the export began.
 Quiet closed PRs also stop periodic history and head polling once their
 baseline is complete. Webhook updates continue, and renewed client demand
 reactivates background reconciliation while returning the stored result.
