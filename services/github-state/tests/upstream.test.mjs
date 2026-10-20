@@ -389,3 +389,35 @@ test('batch validation isolates malformed aliases without empty substitution or 
   }
  }finally {await mf.dispose();}
 });
+
+
+test('label overflow restarts a pinned GraphQL traversal through the same quota owner',async()=>{
+ let network=0;
+ const labels=Array.from({length:101},(_,i)=>({name:'label-'+i}));
+ const mf=await runtime(async req=>{
+  network++;
+  if(new URL(req.url).pathname!=='/graphql')return response({number:7,state:'open',labels},'core');
+  const {query}=await req.json(),pr={number:7,state:'OPEN',headRefOid:'head',labels:{totalCount:101,nodes:labels.slice(0,100)}};
+  return response({data:{repository:query.includes('pullRequests(')?{pullRequests:{nodes:[pr],pageInfo:{hasNextPage:false,endCursor:null}}}:{pullRequest:pr}}});
+ });
+ try {
+  const ns=await mf.getDurableObjectNamespace('INSTALLATIONS'),stub=ns.get(ns.idFromName(repository.installation));
+  for(const operation of ['open_prs','pr']) {
+   const before=network,result=await (await send(stub,'/read',{repository,query:{operation,args:{number:7}},api:'graphql',page:2,cursor:'page-two'})).json();
+   assert.deepEqual(result,{restart:true,api:'core'});assert.equal(network-before,1,'restart does not fan out');
+  }
+  const result=await (await send(stub,'/read',{repository,query:{operation:'pr',args:{number:7}},api:'core',page:1})).json();
+  assert.equal(result.data.labels.length,101);
+ }finally {await mf.dispose();}
+});
+
+test('malformed thread overflow cannot publish a partial complete history',async()=>{
+ let network=0;
+ const mf=await runtime(async()=>{network++;return response({data:{node:{comments:{nodes:[{id:'node',fullDatabaseId:null,body:'unaddressable'}],pageInfo:{hasNextPage:false,endCursor:null}}}}});});
+ try {
+  const ns=await mf.getDurableObjectNamespace('INSTALLATIONS'),stub=ns.get(ns.idFromName(repository.installation));
+  const nested={rows:[{id:'thread',comments:{nodes:[{id:'old',fullDatabaseId:'1',body:'retained'}],pageInfo:{hasNextPage:true,endCursor:'next'}}}]};
+  const result=await (await send(stub,'/read',{repository,query:{operation:'review_threads',args:{number:7}},nested})).json();
+  assert.equal(result.unavailable,true);assert.equal(result.reason,'upstream_identity_unavailable');assert.equal(Object.hasOwn(result,'data'),false);assert.equal(network,1);
+ }finally {await mf.dispose();}
+});

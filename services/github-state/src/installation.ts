@@ -215,7 +215,10 @@ export class InstallationScheduler extends DurableObject<Env> {
       if (result.status >= 400 || result.body.errors?.length) return json({unavailable:true,status:result.status,retry_at:Date.now()+60000});
       let data;
       try {data=extract(recipe,result.body);}catch(error) {
-        if(error instanceof Error && error.message==='labels overflow')continue;
+        if(error instanceof Error && error.message==='labels overflow') {
+          if(input.api) {const alternative=this.alternate(input);if(alternative)return json(alternative);}
+          continue;
+        }
         return json(this.unavailableResponse(input,input.query.operation,recipe.api,error));
       }
       if (input.query.operation==='review_threads') {
