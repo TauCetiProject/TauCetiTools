@@ -45,13 +45,16 @@ SQLite; continuation reads individual pages rather than repeatedly decoding the
 entire inventory. Legacy SQL cursors stay readable until they expire.
 Concurrent queries at the same revision share a snapshot.
 
-PR and issue headers, commit statuses, check runs, workflow runs, and workflow
-jobs update from webhook payloads. A changed PR does not start a full repository
-survey. Full inventories reconcile hourly; overlapping deltas catch missed
-updates. Workflow reconciliation starts with a one-hour window and then reads
-the overlapping creation tail. It is a collection of observed recent runs,
-not an exhaustive historical Actions index. Completed workflow jobs stop
-polling and can update again through rerun webhooks.
+PR and issue headers and commit statuses update from webhook payloads. A
+changed PR does not start a full repository survey. Full inventories reconcile
+hourly; overlapping deltas catch missed updates.
+
+GitHub Actions runs and jobs and check runs are not mirrored. No client reads
+them, and keeping every run, job and check run for every commit was about 90%
+of the repository database. CI webhooks are acknowledged without being stored,
+and `checks`, `workflow_runs` and `workflow_jobs` queries answer
+`status: "unavailable"` with reason `not_mirrored`, so a client uses its direct
+GitHub path rather than an empty result.
 Quiet closed PRs also stop periodic history and head polling once their
 baseline is complete. Webhook updates continue, and renewed client demand
 reactivates background reconciliation while returning the stored result.
@@ -102,13 +105,6 @@ max 30000), and four positive `weights` (default `[8,4,2,1]`). Settings affect
 background reads only. Health includes lane eligibility, oldest requested age,
 repair arrivals/completions/cancellations, wait reasons, requested latency p95,
 and measured cost/latency by query shape and batch size.
-
-Workflow/job webhooks retain observed records without compulsory full-list
-backfills. Complete enumeration is requested on demand, or for important runs
-on `staging` and `trying`: every minute while active and once after completion.
-Completed undemanded repair jobs retire without deleting their records. Run
-attempts have separate current membership; old attempts remain retained and
-cannot pollute reruns. `workflow_runs` remains an observed recent-run inventory.
 
 ## Client behavior
 
@@ -190,13 +186,9 @@ poison outage handling for supported repositories. Invalid credentials still
 return 401. `/admin/bootstrap`, `/admin/storage[/...]` and `/admin/ingress[/...]` require the separate admin credential.
 Installation tokens and private keys never reach clients.
 
-`workflow_jobs` queries may explicitly request `allow_observed=true` (top-level
-JSON boolean for query batches). The response declares `coverage` as
-`webhook_observed` and `complete:false` when an exhaustive list is unavailable.
-Unknown runs remain unavailable. Other operations reject this option. Existing
-clients still require complete coverage; Python `read_workflow_jobs(...,
-allow_observed=True)` returns metadata with the rows rather than implying that
-the observed list is exhaustive.
+`allow_observed=true` remains accepted on `workflow_jobs` queries for protocol
+compatibility, and other operations still reject it; the answer is
+`not_mirrored`.
 
 The test environment enables `/admin/reference`: a protected, uncached
 catalog-only read through its installation quota owner. It requires the admin

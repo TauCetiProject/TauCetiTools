@@ -157,8 +157,8 @@ test('legacy SQL cursors and R2 cursors validate query, coverage and expiry',asy
  await archive.put('cursors/100/'+id+'/100.json',JSON.stringify({repository:'100',key:'workflow_jobs:{"id":"9"}',allow_observed:true,expires:now+60000,result:{...page,operation:'workflow_jobs'}}));
  await archive.put('cursors/100/'+id+'/200.json',JSON.stringify({repository:'100',key,allow_observed:false,expires:now-1,result:page}));
  await archive.put('cursors/100/'+id+'/300.json',JSON.stringify({repository:'999',key,allow_observed:false,expires:now+60000,result:page}));
- assert.equal((await queryFixture(state,{operation:'workflow_jobs',args:{id:'9'},cursor:id+':100'})).reason,'cursor_coverage_mismatch');
- assert.equal((await queryFixture(state,{operation:'workflow_jobs',args:{id:'9'},allow_observed:true,cursor:id+':100'})).status,'ok');
+ // CI operations are not mirrored: even a stored continuation is not served.
+ assert.equal((await queryFixture(state,{operation:'workflow_jobs',args:{id:'9'},allow_observed:true,cursor:id+':100'})).reason,'not_mirrored');
  assert.equal((await queryFixture(state,{operation:'open_prs',cursor:id+':200'})).reason,'cursor_expired');
  assert.equal((await queryFixture(state,{operation:'open_prs',cursor:id+':300'})).reason,'cursor_expired','another repository cannot use the cursor');
  assert.equal((await queryFixture(state,{operation:'open_prs',cursor:'../../etc:1'})).reason,'cursor_expired');
@@ -273,14 +273,14 @@ test('a recorded full state stops legacy migration even below the size threshold
  assert.equal(db.prepare("SELECT COUNT(*) n FROM meta WHERE key='schema_version'").get().n,0);
 });
 
-test('degraded workflow reads never run the legacy attempt rewrite',async()=>{
+test('degraded workflow reads never write: CI is not mirrored',async()=>{
  const {db,state}=repositoryFixture();
  db.prepare('INSERT INTO resources VALUES(?,?,?,?,?,?,?,?)').run('workflow_runs','77','',JSON.stringify({id:77,run_attempt:2}),'',1,1,0);
  state.setMeta('last_webhook',Date.now());
  state.degraded={since:1,reason:'storage_full',operation:'test'};
  const before=db.prepare('SELECT COUNT(*) n FROM changes').get().n;
  const result=await queryFixture(state,{operation:'workflow_jobs',args:{id:'77'}});
- assert.equal(result.status,'unavailable');assert.equal(result.reason,'storage_full');
+ assert.equal(result.status,'unavailable');assert.equal(result.reason,'not_mirrored');
  assert.equal(db.prepare("SELECT COUNT(*) n FROM meta WHERE key='workflow_attempt:77'").get().n,0);
  assert.equal(db.prepare('SELECT COUNT(*) n FROM changes').get().n,before);
 });

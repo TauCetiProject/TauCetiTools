@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { Env, EventPointer, Query, Result, json, queryKey, repository, stub, validateQuery, parseGitHub } from './protocol';
+import { Env, EventPointer, Query, Result, json, queryKey, repository, stub, validateQuery, parseGitHub, CI_EVENTS, NOT_MIRRORED } from './protocol';
 import { comment, issue, pr, status } from './normalize';
 import { batchLimit } from './catalog';
 import { Lane, LANES, laneAt, settings } from './reconciliation';
@@ -344,7 +344,7 @@ export class RepositoryState extends DurableObject<Env> {
   }
   id(operation:string,row:any): string { return String(row.number || row.id || row.node_id || row.ref || row.context || row.sha || row.headRefOid || 'value'); }
   async enqueue(q:Query,priority=20,due=Date.now(),dirty=false): Promise<void> {
-    if (q.operation==='progress') return;
+    if (q.operation==='progress' || NOT_MIRRORED.has(q.operation)) return;
     const key=queryKey(q);
     const prior=this.sql.exec<any>('SELECT * FROM jobs WHERE key=?',key).toArray()[0];
     const lane=this.lane(q,dirty || Boolean(prior?.dirty),priority),requested=lane==='requested'?(prior?.requested_at || Date.now()):prior?.requested_at || null;
@@ -422,6 +422,8 @@ export class RepositoryState extends DurableObject<Env> {
     await this.setAlarm(Date.now()+100);
   }
   async ingest(pointer:EventPointer): Promise<void> {
+    // Queued or parked CI events from before mirroring stopped need no receipt.
+    if (CI_EVENTS.has(pointer.event)) return;
     // Receipt retention counts from application, not original receipt: a
     // replay of a long-parked event must keep deduplicating its cleanup.
     if (this.sql.exec('SELECT id FROM deliveries WHERE id=?',pointer.delivery).toArray().length) return;
@@ -581,6 +583,7 @@ export class RepositoryState extends DurableObject<Env> {
   }
   async query(q:Query): Promise<Result> {
     validateQuery(q);
+    if (NOT_MIRRORED.has(q.operation)) return this.unavailable(q,'not_mirrored');
     if (!this.meta('repository')) {
       try {await this.configure(q.repository);}
       catch(error) {return this.unavailable(q,this.noteFailure('configure',error));}
@@ -996,7 +999,9 @@ export class RepositoryState extends DurableObject<Env> {
     }
   }
   retireUnneeded(job:any): boolean {
-    const q:Query=JSON.parse(job.query),demand=(this.sql.exec<any>('SELECT at FROM demand WHERE key=?',job.key).toArray()[0]?.at || 0)>Date.now()-300000;
+    const q:Query=JSON.parse(job.query);
+    if (NOT_MIRRORED.has(q.operation)) {this.sql.exec('DELETE FROM jobs WHERE key=?',job.key);this.optional('repair_metrics',()=>this.metric('cancellation',q,job.lane));return true;}
+    const demand=(this.sql.exec<any>('SELECT at FROM demand WHERE key=?',job.key).toArray()[0]?.at || 0)>Date.now()-300000;
     const unneeded=q.operation==='workflow_jobs' && !demand && !this.importantPending(String(q.args?.id));
     if (!unneeded && (job.dirty || !this.dormant(q) || !this.complete(q))) return false;
     this.sql.exec('DELETE FROM jobs WHERE key=?',job.key);
@@ -1395,6 +1400,7 @@ export class RepositoryState extends DurableObject<Env> {
       if (path==='/query') {
         const q=await req.json() as Query;
         validateQuery(q);
+        if (NOT_MIRRORED.has(q.operation)) return json(this.unavailable(q,'not_mirrored'));
         const changed=this.frozenSince();
         const planned=this.migrationState && this.migrationState.phase!=='abandoned';
         if (changed!==null && !planned) return json({...this.unavailable(q,'mirror_frozen'),frozen_since:changed},200,{'X-TauCeti-Storage':'degraded'});

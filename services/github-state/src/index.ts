@@ -1,4 +1,4 @@
-import { Env, EventPointer, Query, Repository, authorize, digest, json, repositories, repository, stub, validSignature, validateQuery, parseGitHub } from './protocol';
+import { Env, EventPointer, Query, Repository, authorize, digest, json, repositories, repository, stub, validSignature, validateQuery, parseGitHub, CI_EVENTS } from './protocol';
 import { readMigration } from './migration';
 import { classify, log, requestId } from './storage';
 import { PARK_AFTER_ATTEMPTS, backlog, backoff, drain, ingressMode, noteRepositoryFull, park, reconcile, setIngressMode, storageState } from './ingress';
@@ -47,7 +47,7 @@ export default {
       if (url.pathname==='/healthz' && req.method==='GET') return json({service:'tauceti-github-state',version:1});
       if (url.pathname==='/setup/register' && req.method==='GET') {
         const suffix=url.hostname.includes('github-state-test.')?'-test':'';
-        const manifest={name:'tauceti-github-state'+suffix,url:url.origin,hook_attributes:{url:url.origin+'/webhook/github',active:true},redirect_url:url.origin+'/registration-complete',public:false,description:'Exclusive read-only webhook mirror for TauCeti fleet queries.',default_permissions:{metadata:'read',contents:'read',pull_requests:'read',issues:'read',checks:'read',statuses:'read',actions:'read',merge_queues:'read'},default_events:['pull_request','pull_request_review','pull_request_review_comment','pull_request_review_thread','issues','issue_comment','label','milestone','push','create','delete','repository','status','check_run','check_suite','workflow_run','workflow_job','merge_group']};
+        const manifest={name:'tauceti-github-state'+suffix,url:url.origin,hook_attributes:{url:url.origin+'/webhook/github',active:true},redirect_url:url.origin+'/registration-complete',public:false,description:'Exclusive read-only webhook mirror for TauCeti fleet queries.',default_permissions:{metadata:'read',contents:'read',pull_requests:'read',issues:'read',checks:'read',statuses:'read',actions:'read',merge_queues:'read'},default_events:['pull_request','pull_request_review','pull_request_review_comment','pull_request_review_thread','issues','issue_comment','label','milestone','push','create','delete','repository','status','merge_group']};
         const escaped=JSON.stringify(manifest).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
         return new Response(`<!doctype html><meta name="referrer" content="no-referrer"><title>Register TauCeti GitHub state App</title><h1>Register the dedicated read-only GitHub App</h1><p>This creates ${manifest.name}, owned by TauCetiProject. Install it only on TauCeti. It cannot write to GitHub.</p><form method="post" action="https://github.com/organizations/TauCetiProject/settings/apps/new"><input type="hidden" name="manifest" value="${escaped}"><button>Register ${manifest.name}</button></form>`,{headers:{'Content-Type':'text/html; charset=utf-8','Referrer-Policy':'no-referrer','Cache-Control':'no-store'}});
       }
@@ -59,6 +59,8 @@ export default {
         if (!await validSignature(body,req.headers.get('x-hub-signature-256'),env.WEBHOOK_SECRET)) return json({error:'invalid_signature'},401);
         const delivery=req.headers.get('x-github-delivery'),event=req.headers.get('x-github-event');
         if (!delivery || !/^[a-zA-Z0-9-]{1,100}$/.test(delivery) || !event || !/^[a-z_]{1,100}$/.test(event)) return json({error:'invalid_delivery'},400);
+        // Existing installations still send CI events; acknowledge without storing.
+        if (CI_EVENTS.has(event)) return json({ignored:true,reason:'not_mirrored'},202);
         let payload:any; try { payload=parseGitHub(new TextDecoder().decode(body)); } catch { return json({error:'invalid_json'},400); }
         const target=targets(env,payload,event);
         if (!target.length) return json({ignored:true},202);

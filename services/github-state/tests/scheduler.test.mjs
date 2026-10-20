@@ -278,42 +278,6 @@ test('all four lanes get their configured share and leased work is excluded',()=
  } finally {db.close();}
 });
 
-test('completed undemanded workflows remain observed; strict demand repairs them and reruns isolate attempts',async()=>{
- const {state,db,objects}=fixture();
- const event=async(id,type,body)=>{const key='fixture/'+id;objects.set(key,JSON.stringify(body));await state.ingest({key,delivery:id,event:type,repository:'org/repo',received:Date.now()});};
- try {
-  await event('run','workflow_run',{workflow_run:{id:77,run_attempt:1,status:'completed',head_branch:'feature',updated_at:'2026-10-12T00:00:00Z'}});
-  await event('job','workflow_job',{workflow_job:{id:88,run_id:77,run_attempt:1,status:'completed',completed_at:'2026-10-12T00:00:00Z'}});
-  assert.equal(db.prepare("SELECT COUNT(*) n FROM jobs WHERE key LIKE 'workflow_jobs:%'").get().n,0);
-  const q={repository:'org/repo',operation:'workflow_jobs',args:{id:'77'}};
-  const observed=await state.query({...q,allow_observed:true});
-  assert.equal(observed.complete,false);assert.equal(observed.coverage,'webhook_observed');assert.equal(observed.data.length,1);
-  assert.equal(db.prepare("SELECT COUNT(*) n FROM demand WHERE key LIKE 'workflow_jobs:%'").get().n,0);
-  const strict=await state.query(q);assert.equal(strict.status,'unavailable');
-  assert.equal(db.prepare("SELECT lane FROM jobs WHERE key LIKE 'workflow_jobs:%'").get().lane,'requested');
-  await event('rerun','workflow_run',{workflow_run:{id:77,run_attempt:2,status:'in_progress',head_branch:'feature',updated_at:'2026-10-12T01:00:00Z'}});
-  await event('job2','workflow_job',{workflow_job:{id:99,run_id:77,run_attempt:2,status:'in_progress',started_at:'2026-10-12T01:00:00Z'}});
-  await event('old','workflow_job',{workflow_job:{id:88,run_id:77,run_attempt:1,status:'completed'}});
-  assert.deepEqual((await state.query({...q,allow_observed:true})).data.map(j=>j.id),[99]);
-  assert.equal(db.prepare("SELECT COUNT(*) n FROM resources WHERE kind='workflow_jobs'").get().n,2,'old rows remain retained');
- } finally {db.close();}
-});
-
-test('retirement keeps stored rows and important Bors builds still request a baseline',async()=>{
- const {state,db}=fixture();
- try {
-  const q={repository:'org/repo',operation:'workflow_jobs',args:{id:'77'}};
-  await state.put('workflow_runs','77',{id:77,status:'completed',head_branch:'feature'});
-  await state.put('workflow_jobs','88',{id:88,run_attempt:1},Date.now(),false,'77');
-  state.setMeta('workflow_finished:77',true);await state.enqueue(q,1,Date.now(),true);
-  assert.equal(state.retireUnneeded(state.nextJob()),true);
-  assert.equal(db.prepare("SELECT COUNT(*) n FROM resources WHERE kind='workflow_jobs'").get().n,1);
-  await state.put('workflow_runs','78',{id:78,status:'in_progress',head_branch:'staging'});
-  await state.enqueue({...q,args:{id:'78'}},1,Date.now(),true);
-  assert.equal(state.retireUnneeded(state.nextJob()),false);
- } finally {db.close();}
-});
-
 test('late R2 encoding cannot overwrite a webhook and replaced leases cannot publish coverage',async()=>{
  const {state,db,env}=fixture();
  try {
@@ -330,24 +294,6 @@ test('late R2 encoding cannot overwrite a webhook and replaced leases cannot pub
  } finally {db.close();}
 });
 
-test('future-due historical workflow retries retire without touching actual requested quota waits',async()=>{
- const {state,db}=fixture();
- try {
-  state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});state.setMeta('last_snapshot',Date.now());
-  const now=Date.now();
-  for(const id of ['77','78','79']) {
-   await state.put('workflow_runs',id,{id,status:'completed',head_branch:id==='79'?'staging':'feature'});
-   await state.enqueue({repository:'org/repo',operation:'workflow_jobs',args:{id}},20,now+3600000);
-  }
-  state.setMeta('important_final_pending:79',true);
-  db.prepare('INSERT INTO demand VALUES(?,?)').run('workflow_jobs:{"id":"78"}',now);
-  db.prepare("UPDATE jobs SET wait_reason='primary:core',attempt=1 WHERE key=?").run('workflow_jobs:{"id":"78"}');
-  await state.maintenance();
-  assert.deepEqual(db.prepare('SELECT key FROM jobs ORDER BY key').all().map(j=>j.key),['workflow_jobs:{"id":"78"}','workflow_jobs:{"id":"79"}']);
-  assert.equal(db.prepare('SELECT due FROM jobs WHERE key=?').get('workflow_jobs:{"id":"78"}').due,now+3600000);
- } finally {db.close();}
-});
-
 test('head-change webhooks refresh immutable file lists without resetting a quota cooldown',async()=>{
  const {state,db,objects}=fixture();
  try {
@@ -360,22 +306,6 @@ test('head-change webhooks refresh immutable file lists without resetting a quot
   await state.ingest({key:'head',delivery:'head',event:'pull_request',repository:'org/repo',received:Date.now()});
   const after=db.prepare('SELECT * FROM jobs WHERE key=?').get(key);
   assert.equal(after.dirty,1);assert.equal(after.lane,'active');assert.equal(after.due,before.due);assert.ok(after.generation>before.generation);
- } finally {db.close();}
-});
-
-test('legacy rerun baselines adopt the cached current attempt and cannot serve an earlier complete list',async()=>{
- const {state,db}=fixture();
- try {
-  state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
-  await state.put('workflow_runs','77',{id:77,run_attempt:2,status:'completed',head_branch:'feature'});
-  const q={repository:'org/repo',operation:'workflow_jobs',args:{id:'77'}},key='workflow_jobs:{"id":"77"}';
-  await state.put('workflow_jobs','88',{id:88,run_attempt:1});state.membership(key,'88',true);
-  await state.put('workflow_jobs','99',{id:99,run_attempt:2});state.membership(key,'99',true);
-  db.prepare('INSERT INTO collections VALUES(?,?,?,?,?,?,?)').run(key,q.operation,JSON.stringify(q.args),1,Date.now(),1,null);
-  assert.equal((await state.query(q)).status,'unavailable');assert.equal(state.runAttempt('77'),2);
-  const observed=await state.query({...q,allow_observed:true});assert.deepEqual(observed.data.map(j=>j.id),[99]);
-  assert.equal(state.workflowAttempt('77',1),false);
-  assert.equal(db.prepare("SELECT COUNT(*) n FROM resources WHERE kind='workflow_jobs'").get().n,2);
  } finally {db.close();}
 });
 

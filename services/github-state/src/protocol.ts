@@ -61,6 +61,12 @@ export async function validSignature(body: ArrayBuffer, signature: string | null
   const expected = 'sha256=' + Array.from(new Uint8Array(mac), b => b.toString(16).padStart(2, '0')).join('');
   return constantEqual(expected, signature!);
 }
+// GitHub Actions and check-run records are not mirrored: no client reads
+// them, and storing every run, job and check run for every commit filled the
+// repository database. Queries for them answer unavailable, so a client uses
+// its direct GitHub path instead of receiving an empty result.
+export const NOT_MIRRORED = new Set(['checks', 'workflow_runs', 'workflow_jobs']);
+export const CI_EVENTS = new Set(['check_run', 'check_suite', 'workflow_run', 'workflow_job']);
 export const OPERATIONS = new Set(['survey', 'open_prs', 'open_issues', 'recent_prs', 'recent_issues', 'pr', 'files', 'issue_comments', 'review_comments', 'review_threads', 'reviews', 'reactions', 'statuses', 'checks', 'workflow_runs', 'workflow_jobs', 'refs', 'repository', 'progress']);
 export function validateQuery(q: Query): void {
   if (!q || typeof q.repository !== 'string' || !OPERATIONS.has(q.operation) || (q.args && (typeof q.args !== 'object' || Array.isArray(q.args)))) throw new Error('invalid query');

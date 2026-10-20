@@ -63,17 +63,6 @@ test('query validation, repo scoping, admin token independent',async()=>{
   assert.equal((await request('/admin/bootstrap',{method:'POST',headers:{Authorization:'Bearer '+admin},body:JSON.stringify({repository:'org/repo'})})).status,200);
 });
 
-test('observed workflow coverage is explicit, isolated by query preference, and unknown runs stay unavailable',async()=>{
- const args=encodeURIComponent(JSON.stringify({id:'77'}));
- assert.equal((await request('/v1/query?repository=org/repo&operation=issue_comments&args=%7B%22number%22%3A7%7D&allow_observed=true',{headers})).status,400);
- const unknown=await (await request('/v1/query?repository=org/repo&operation=workflow_jobs&args='+args+'&allow_observed=true',{headers})).json();assert.equal(unknown.status,'unavailable');
- await ingest('workflow-run','workflow_run',{workflow_run:{id:77,run_attempt:1,status:'completed',head_branch:'feature'}});
- await ingest('workflow-job','workflow_job',{workflow_job:{id:88,run_id:77,run_attempt:1,status:'completed'}});
- const observed=await (await request('/v1/query?repository=org/repo&operation=workflow_jobs&args='+args+'&allow_observed=true',{headers})).json();
- assert.equal(observed.coverage,'webhook_observed');assert.equal(observed.complete,false);assert.equal(observed.data.length,1);
- const strict=await (await request('/v1/query?repository=org/repo&operation=workflow_jobs&args='+args,{headers})).json();assert.equal(strict.status,'unavailable');
-});
-
 test('reference reads require an explicitly enabled environment and admin authentication',async()=>{
  const body=JSON.stringify({query:{repository:'org/repo',operation:'files',args:{number:7}}});
  assert.equal((await request('/admin/reference',{method:'POST',headers:{Authorization:'Bearer '+admin},body})).status,401,'production default disables reference reads');
@@ -88,4 +77,20 @@ test('activity observations are authenticated, repository-scoped, bounded, and t
   assert.equal((await request('/v1/activity',{method:'POST',headers,body:JSON.stringify(input)})).status,400);
  const r=await request('/v1/activity',{method:'POST',headers,body});
  assert.equal(r.status,200);const data=await r.json();assert.equal(data.coverage,'observed');assert.deepEqual(data.missing,[999999]);
+});
+
+test('CI records are not mirrored: webhooks are acknowledged unstored and queries fall back',async()=>{
+ const text=JSON.stringify({repository:{id:10},installation:{id:20},action:'completed',workflow_run:{id:77,run_attempt:1,status:'completed'}});
+ const signed={'x-github-delivery':'ci-delivery','x-github-event':'workflow_run','x-hub-signature-256':'sha256='+createHmac('sha256',secret).update(text).digest('hex')};
+ const r=await request('/webhook/github',{method:'POST',headers:signed,body:text});
+ assert.equal(r.status,202);assert.deepEqual(await r.json(),{ignored:true,reason:'not_mirrored'});
+ assert.equal((await archive.list({prefix:'webhooks/'})).objects.some(o=>o.key.includes('ci-delivery')),false,'no raw body stored');
+ for(const [operation,args] of [['workflow_jobs',{id:'77'}],['workflow_runs',{}],['checks',{sha:'a'.repeat(40)}]]) {
+  const q=await (await request('/v1/query?repository=org/repo&operation='+operation+'&args='+encodeURIComponent(JSON.stringify(args)),{headers})).json();
+  assert.equal(q.status,'unavailable');assert.equal(q.reason,'not_mirrored');assert.equal(Object.hasOwn(q,'data'),false);
+ }
+ // A CI event queued before mirroring stopped is acknowledged without writes.
+ assert.equal((await ingest('queued-ci','check_run',{check_run:{id:5,head_sha:'a'.repeat(40)}})).status,200);
+ const changes=await (await request('/v1/changes?repository=org/repo',{headers})).json();
+ assert.equal(changes.changes.some(c=>c.kind==='checks'),false);
 });
