@@ -55,6 +55,7 @@ def substitutions(project: Project) -> list[tuple[str, str]]:
         ),
         ('"Tau Ceti"', json.dumps(project.raw.get("publication", {}).get("zulip_channel", ""))),
         ("'Tau Ceti'", repr(project.raw.get("publication", {}).get("zulip_channel", ""))),
+        ("TauCeti", root),
         ("origin/main", "origin/" + project.branch),
         ("branches: [main]", "branches: [" + project.branch + "]"),
         ("ref: main", "ref: " + project.branch),
@@ -70,7 +71,10 @@ def render(text: str, project: Project) -> str:
     import re
 
     pairs = dict(substitutions(project))
-    pattern = re.compile("|".join(re.escape(key) for key in sorted(pairs, key=len, reverse=True)))
+    pattern = re.compile("|".join(
+        r"\bTauCeti\b" if key == "TauCeti" else
+        re.escape(key) + r"(?![A-Za-z0-9_-])" if key == CANONICAL else re.escape(key)
+        for key in sorted(pairs, key=len, reverse=True)))
     return pattern.sub(lambda m: pairs[m.group()], text)
 
 

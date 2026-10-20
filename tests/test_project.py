@@ -24,6 +24,13 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(a.environment()["TAUCETI_GITHUB_STATE_URL"], "")
         self.assertEqual(a.environment()["TAUCETI_CACHE_SERVICE"], "")
 
+    def test_root_rendering_handles_shell_words_without_changing_shared_repositories(self):
+        from tauceti_tools.templates import render
+        project = parse(initial_configuration("kim-em/Arcturus", "human").encode())
+        source = "find TauCeti -name '*.lean'\nTauCetiProject/TauCetiTools\nTauCetiProject/TauCetiReview\n"
+        self.assertEqual(render(source, project),
+                         "find Arcturus -name '*.lean'\nTauCetiProject/TauCetiTools\nTauCetiProject/TauCetiReview\n")
+
     def test_configuration_snapshot_does_not_follow_file_edits(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"XDG_STATE_HOME": tmp}, clear=True):
             config = Path(tmp) / "project.toml"
