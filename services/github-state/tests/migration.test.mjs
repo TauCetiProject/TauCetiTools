@@ -422,6 +422,7 @@ test('workerd byte windows preserve UTF-8 boundaries, exact scalar values and ov
     const rows=sourceRows(sql,'byte_values',fields,after,100);if(!rows.length)break;
     pages.push(rows);after=rows.at(-1)[0];
    }
+   if(pages.length!==4)return Response.json({error:'unexpected_page_count',page_count:pages.length});
    if(pages[0][0][1][1]!=='😀'.repeat(64000) || pages[0][1][1][1]!=='x'.repeat(256000) || pages[1][0][1][1]!=='é' || pages[2][0][1][1]!=='x'.repeat(600000))throw Error('text changed');
    if(pages[3][1][1][0]!=='blob' || pages[3][1][1][1]!=='00FF80' || pages[3][2][1][0]!=='integer' || pages[3][2][1][1]!=='9223372036854775807')throw Error('scalar changed');
    const bytes=row=>{const [type,value]=row[1];return type==='null'?0:type==='blob'?value.length/2:new TextEncoder().encode(value).length;};
@@ -447,6 +448,12 @@ test('workerd SQLite REAL encoding matches the archive round-trip contract',asyn
    const sql=this.ctx.storage.sql;
    sql.exec('CREATE TABLE scalar_values(value)');
    for(const literal of ['0.1','5e-324','9e999','-9e999','-0.0','1.0','3.141592653589793','1.7976931348623157e308'])sql.exec('INSERT INTO scalar_values VALUES('+literal+')');
+   sql.exec('CREATE TABLE byte_edges(value)');
+   for(const value of ['',String.fromCharCode(97,0,98)])sql.exec('INSERT INTO byte_edges VALUES(?)',value);sql.exec("INSERT INTO byte_edges VALUES(X'')");
+   sql.exec('CREATE TABLE real_affinity(value REAL)');sql.exec('INSERT INTO real_affinity VALUES(1)');
+   for(const table of ['scalar_values','byte_edges','real_affinity']){
+    if(sql.exec('SELECT COUNT(*) mismatches FROM '+table+' WHERE octet_length(value) IS NOT length(CAST(value AS BLOB))').one().mismatches)throw Error('archive byte counts changed');
+   }
    const rows=sourceRows(sql,'scalar_values',schema(sql,'scalar_values'),null,100);
    const original=sql.exec('SELECT value FROM scalar_values ORDER BY rowid').toArray();
    for(let i=0;i<rows.length;i++){

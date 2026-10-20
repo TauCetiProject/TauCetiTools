@@ -105,6 +105,16 @@ SQL identity, schema, grants and capacity. Preserve test logs, baseline conditio
 restore/project/region/PG18/always-on compute evidence with the release artifacts.
 Never place credentials or payloads in a public receipt.
 
+The native byte-sizing component diagnostic can be reproduced from
+`services/github-state` after installing its development dependencies:
+
+```sh
+node scripts/benchmark-migration-bytes.mjs
+```
+
+It reports its runtime versions and checks byte-count equality. Its query timing
+is separate from full migration throughput and the deployed public-read latency gate.
+
 ## Durable phases and ownership
 
 Control and checkpoints live in R2 `control/<repo>/migration.json`, outside frozen
