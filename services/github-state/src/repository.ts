@@ -2091,8 +2091,8 @@ export class RepositoryState extends DurableObject<Env> {
     await terminalReceipt(this.env.ARCHIVE,state,'observation-receipt.json');
   }
   private async superviseMigration(steps=5):Promise<Response> {
-    // Native SQL cursors, typed cells, R2 bodies and driver buffers can retain
-    // memory until the invocation ends. Bound total pages as well as each page.
+    // Bound cumulative request work alongside the per-page limits. Long
+    // compatibility requests exhausted memory in the live source rehearsal.
     steps=Math.min(steps,5);
     const repo=JSON.parse(this.env.ALLOWED_REPOSITORIES || '[]').find((r:any)=>this.env.REPOSITORIES.idFromName(r.id).toString()===this.ctx.id.toString())?.id || this.localMeta('repository')?.id;
     if(!repo)return json({migration:null});

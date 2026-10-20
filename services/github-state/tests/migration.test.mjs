@@ -550,44 +550,78 @@ test('invalid supervised batch bounds fail before creating migration state',asyn
 });
 
 
-test('native SQL migration requests bound cumulative pages and resume after an isolate restart',async()=>{
+test('native SQL supervision bounds requests and resumes a committed checkpoint after a DO reset',async()=>{
  const source=`
  import {RepositoryState as Base} from './src/repository';
  import {expectedTables,saveMigration,readMigration,publicReceipt} from './src/migration';
  export class NativeSource extends Base {
+  constructor(ctx,env){
+   let last=0,crashRemaining=0,armRead=false,pendingRead,overlapped=false;
+   const archive=new Proxy(env.ARCHIVE,{get(target,key){const value=Reflect.get(target,key,target);
+    if(key!=='put')return typeof value==='function'?value.bind(target):value;
+    return async(...args)=>{const result=await target.put(...args);
+     if(args[0]==='control/100/migration.json'){
+      const rows=JSON.parse(args[1]).cutover?.compatibility?.changes?.rows || 0;
+      if(rows>last){last=rows;
+       if(crashRemaining>0 && --crashRemaining===0)ctx.abort('fixture crash after a durable page checkpoint');
+       if(armRead){armRead=false;let timer;try{await new Promise((resolve,reject)=>{pendingRead=resolve;timer=setTimeout(()=>reject(Error('concurrent read did not arrive')),5000);});}finally{clearTimeout(timer);pendingRead=undefined;}}
+      }
+     }
+     return result;
+    };
+   }});
+   super(ctx,{...env,ARCHIVE:archive});
+   this.fixtureId=crypto.randomUUID();this.armRead=()=>{armRead=true;};this.armCrash=()=>{crashRemaining=3;};
+   this.barrier=()=>({waiting:Boolean(pendingRead),overlapped});this.releaseRead=()=>{if(pendingRead){overlapped=true;pendingRead();}};
+  }
+  async setAlarm(){} // This fixture exercises stored reads and supervision only.
   async fetch(req){
    const path=new URL(req.url).pathname,sql=this.ctx.storage.sql;
    if(path==='/seed') {
     await this.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
     sql.exec("WITH RECURSIVE span(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM span WHERE n<250000) INSERT INTO changes(revision,at,kind,id,tombstone) SELECT n,1792490000000,'pr','xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'||n,0 FROM span");
+    const now=Date.now();await this.setMeta('revision',250000);
+    sql.exec('INSERT INTO resources VALUES(?,?,?,?,?,?,?,?)','pr','1','',JSON.stringify({number:1,state:'OPEN'}),'',now,250000,0);
+    sql.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?)','open_prs:{}','open_prs','{}',1,now,250000,'original-etag');
+    sql.exec('INSERT INTO members VALUES(?,?)','open_prs:{}','1');
     const state={version:1,generation:'${generation}',repository:'100',target:'neon-native-fixture',source:{object:this.ctx.id.toString(),deployment:'native-fixture',schema:5},phase:'preflighting',created:Date.now(),updated:Date.now(),tables:{},failure:null,
      staging:{after:null,page:'1',checked:0,complete:false,expired_jobs:0,expired_hash:'0'.repeat(64)},blobs:{prefix:0,pages:0,objects:0,hash:'0'.repeat(64),complete:false},
      cutover:{environment:'test',lease_until:Date.now()+900000,epoch:0,source_fenced:false,target_active:false,import:{},verify:{},acceptance:'',compatibility:Object.fromEntries(expectedTables(sql).map(name=>[name,{after:null,rows:0,complete:name!=='changes'}]))}};
     await saveMigration(this.env.ARCHIVE,state);this.migrationState=state;
     return Response.json({seeded:250000});
    }
-   if(path==='/restart'){this.ctx.abort('fixture crash between migration requests');}
-   if(path==='/step')return this.superviseMigration(100);
+   if(path==='/arm-read'){this.armRead();return Response.json({armed:true});}
+   if(path==='/arm-crash'){this.armCrash();return Response.json({armed:true});}
+   if(path==='/barrier')return Response.json(this.barrier());
+   if(path==='/instance')return Response.json({id:this.fixtureId});
+   if(path==='/state')return Response.json(publicReceipt(await readMigration(this.env.ARCHIVE,'100')));
    if(path==='/stats')return Response.json(sql.exec('SELECT COUNT(*) n,CAST(SUM(revision) AS TEXT) sum FROM changes').one());
-   return super.fetch(req);
+   const response=await super.fetch(req);if(path==='/query')this.releaseRead();return response;
   }
  }
  export default {fetch(req,env){return env.REPOSITORIES.get(env.REPOSITORIES.idFromName('100')).fetch(req);}};
  `;
  const built=await build({stdin:{contents:source,resolveDir:process.cwd(),loader:'ts'},bundle:true,format:'esm',write:false,external:['cloudflare:workers']});
  const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:built.outputFiles[0].text,compatibilityDate:'2026-10-11',durableObjects:{REPOSITORIES:{className:'NativeSource',useSQLite:true}},r2Buckets:['ARCHIVE'],bindings:{ALLOWED_REPOSITORIES:JSON.stringify([repo]),MIGRATION_ENVIRONMENT:'test',CF_VERSION:{id:'native-fixture'}},outboundService:()=>{throw Error('unexpected GitHub/bootstrap request');}}));
+ const get=path=>mf.dispatchFetch('https://fixture'+path),json=async path=>(await get(path)).json();
+ const query=()=>mf.dispatchFetch('https://fixture/query',{method:'POST',body:JSON.stringify({repository:repo.name,operation:'open_prs'})});
+ const step=()=>mf.dispatchFetch('https://fixture/migration',{method:'POST',body:JSON.stringify({repository:repo.name,environment:'test',generation,target:'neon-native-fixture',operation:'step',apply:true,batch_steps:100})});
+ const progress=async response=>{assert.equal(response.status,200);const r=await response.json();assert.equal(r.phase,'preflighting');assert.equal(r.failure,null);const c=r.cutover.compatibility.changes;assert.equal(c.after,String(c.rows));return c.rows;};
  try {
-  assert.equal((await mf.dispatchFetch('https://fixture/seed')).status,200);
-  let after=0;
-  for(let request=0;request<10;request++) {
-   const [response,storedRead]=await Promise.all([mf.dispatchFetch('https://fixture/step'),mf.dispatchFetch('https://fixture/stats')]);assert.equal(response.status,200);assert.equal(storedRead.status,200);assert.equal((await storedRead.json()).n,250000);
-   const receipt=await response.json(),check=receipt.cutover.compatibility.changes;
-   assert.equal(receipt.phase,'preflighting');assert.equal(receipt.failure,null);
-   assert.ok(check.rows>after && check.rows-after<=25000,'one invocation cannot accumulate an unbounded scan');
-   assert.equal(check.after,String(check.rows));after=check.rows;
-   if(request===0)await mf.dispatchFetch('https://fixture/restart').catch(()=>{});
+  assert.equal((await get('/seed')).status,200);const original=await (await query()).json();assert.equal(original.status,'ok');assert.equal(original.complete,true);
+  await get('/arm-read');const running=step();
+  let waiting=false;for(let n=0;n<100;n++){if((await json('/barrier')).waiting){waiting=true;break;}}
+  assert.equal(waiting,true,'migration is suspended at a durable checkpoint while the stored read runs');
+  const read=await query();assert.equal(read.status,200);const during=await read.json();assert.equal(during.status,'ok');assert.equal(during.complete,true);assert.deepEqual(during.data,original.data);assert.equal(during.observed_at,original.observed_at);
+  let after=await progress(await running);assert.ok(after>0 && after<=25000);assert.equal((await json('/barrier')).overlapped,true);
+  const beforeReset=(await json('/instance')).id;await get('/arm-crash');
+  let crashStatus;try{crashStatus=(await step()).status;}catch{crashStatus=500;}assert.notEqual(crashStatus,200);
+  assert.notEqual((await json('/instance')).id,beforeReset,'ctx.abort must construct a new Durable Object instance');
+  const saved=(await json('/state')).cutover.compatibility.changes.rows;assert.equal(saved,after+15000,'third page commits before the mid-invocation reset');after=saved;
+  for(let request=0;request<4;request++) {
+   const response=request%2?await step():await mf.dispatchFetch('https://fixture/migration-supervise',{method:'POST'});
+   const next=await progress(response);assert.ok(next>after && next-after<=25000);after=next;
   }
-  assert.equal(after,250000);
-  assert.deepEqual(await (await mf.dispatchFetch('https://fixture/stats')).json(),{n:250000,sum:'31250125000'});
+  assert.deepEqual(await json('/stats'),{n:250000,sum:'31250125000'});
  }finally{await mf.dispose();}
 });
