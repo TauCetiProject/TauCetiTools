@@ -68,6 +68,15 @@ class MigrationTests(unittest.TestCase):
                 migrate.main()
         self.assertEqual(call.call_count, 2)
 
+    def test_bounded_batch_steps(self):
+        args = ["--environment", "test", "--apply", "--generation",
+                "c707ddba-076d-4a63-8696-96533031ce88", "--target", "neon-test"]
+        self.assertEqual(run(*args, "resume")[0][1]["batch_steps"], 1)
+        self.assertEqual(run(*args, "--batch-steps", "100", "resume")[0][1]["batch_steps"], 100)
+        for value in ["0", "101", "-1"]:
+            with self.assertRaises(SystemExit):
+                run(*args, "--batch-steps", value, "resume")
+
     def test_finish_observation_requires_and_transmits_policy(self):
         args = ["--environment", "test", "--apply", "--generation",
                 "c707ddba-076d-4a63-8696-96533031ce88", "--target", "neon-test"]

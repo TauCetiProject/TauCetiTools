@@ -7,6 +7,8 @@ test('S2 imports exact archives into a standby, restarts every step and recovers
  const f=await testFixture();
  try {
   f.db.prepare('INSERT INTO demand(rowid,key,at) VALUES(9,?,1),(10,?,2),(99,?,3),(100,?,4)').run('numeric-nine','numeric-ten','numeric-ninety-nine','numeric-hundred');
+  const insert=f.db.prepare('INSERT INTO demand(rowid,key,at) VALUES(?,?,?)');
+  f.db.exec('BEGIN');for(let i=500;i<5500;i++)insert.run(i,'wide-'+i,i);f.db.exec('COMMIT');
   await control.preflight(f.env,f.state);await migration.saveMigration(f.archive,f.state);
   let importedCrash=false,validationCrash=false;
   for(let n=0;n<600;n++){
@@ -24,6 +26,8 @@ test('S2 imports exact archives into a standby, restarts every step and recovers
   assert.ok(importedCrash && validationCrash);
   let state=await migration.readMigration(f.archive,f.id);assert.equal(state.phase,'switching');
   const rows=(await f.admin.query(`SELECT rowid::text,at::text FROM ${f.schema}.demand t ORDER BY t.rowid`)).rows;
+  assert.equal(rows.length,5007);
+  assert.ok(state.tables.demand.pages<5,'large SQL batches stay below the parameter limit');
   assert.deepEqual(rows[0],{rowid:'-9223372036854775808',at:'9223372036854775807'});
   assert.deepEqual(rows.at(-1),{rowid:'9223372036854775807',at:'-9223372036854775808'});
   await target.activateTarget(f.env,state); // crash before writing R2 selection

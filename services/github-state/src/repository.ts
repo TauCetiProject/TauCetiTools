@@ -1960,6 +1960,8 @@ export class RepositoryState extends DurableObject<Env> {
     await this.ctx.storage.sync();
   }
   private async cutover(input:any,prior:Migration|null,repo:string):Promise<Response> {
+    const batchSteps=input.batch_steps ?? 1;
+    if(!Number.isSafeInteger(batchSteps) || batchSteps<1 || batchSteps>100)throw new AdminError('migration_step_limit_invalid');
     if(input.environment!==this.env.MIGRATION_ENVIRONMENT || !['test','production'].includes(input.environment))throw new AdminError('migration_environment_mismatch');
     const id=generation(input.generation),target=targetIdentity(input.target);
     if(input.apply!==true)throw new AdminError('migration_apply_required');
@@ -1988,7 +1990,7 @@ export class RepositoryState extends DurableObject<Env> {
       if(state.cutover!.target_active)throw new AdminError('migration_forward_recovery_required');
       state.phase='aborting';state.cutover!.abort_reason='operator_abandoned';await saveMigration(this.env.ARCHIVE,state);
     } else if(!['start','step','preflight'].includes(input.operation))throw new AdminError('migration_operation_invalid');
-    return this.superviseMigration(1);
+    return this.superviseMigration(batchSteps);
   }
   private async shadowMigration(state:Migration,onQuery:()=>void=()=>{}):Promise<void> {
     const record=await this.env.ARCHIVE.get(`control/${state.repository}/migration-acceptance.json`);

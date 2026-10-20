@@ -24,7 +24,7 @@ export interface Migration {
   source: { object: string; deployment: string; schema: number };
   phase: 'preflighting' | 'freezing' | 'exporting' | 'verifying' | 'source_verified' | 'importing' | 'target_verifying' | 'preparing' | 'switching' | 'replaying' | 'complete' | 'aborting' | 'abandoned';
   cutover?: {target_identity?:Record<string,string>; environment:'test'|'production'; lease_until:number; epoch:number; source_fenced:boolean; target_active:boolean;
-    compatibility?:Record<string,{after:string|null;complete:boolean}>; import:Record<string,TargetCheckpoint>; verify:Record<string,TargetCheckpoint>; acceptance:string;
+    compatibility?:Record<string,{after:string|null;complete:boolean;rows?:number}>; import:Record<string,TargetCheckpoint>; verify:Record<string,TargetCheckpoint>; acceptance:string;
     staging_after?:string; staging_rows?:number; staging_hash?:string; staging_complete?:boolean;
     observation_release?:{at:number;policy:unknown}; observation_finished_at?:number; abort_reason?:string; last_failure?:string; activation_intent?:boolean; target_quarantined?:{reason:string;at:number}; shadow?:{queries:number;hash:string;verified_at:number;complete:boolean;activity_checked?:boolean;cursor_checks?:number;expired_cursor_checks?:number;max_subrequests?:number;max_step_ms?:number}; replay_complete?:number; selected_at?:number; completed_at?:number; release?:Record<string,unknown>};
   created: number; updated: number; bookmark?: string; revision?: string;
@@ -125,6 +125,12 @@ export function sourceRows(sql: SqlStorage, name: string, columns: TableState['c
   }
   return sql.exec<any>(`SELECT CAST(rowid AS TEXT) id,${selects.join(',')} FROM ${quote(name)} WHERE ${lower?lower+' AND ':''}rowid<=CAST(? AS INTEGER) ORDER BY rowid`, ...bindings, last).toArray().map(row => [row.id, ...columns.map((_, i): Cell => [row['t' + i], row['v' + i]])]);
 }
+// Stay below PostgreSQL's 65,535 bind parameters, with bounded SQL/JSON memory.
+// Blob verification has its own smaller reference bound below.
+export function pageRowLimit(name:string):number {
+  if(!Object.hasOwn(columns,name))throw new AdminError('migration_table_manifest_mismatch');
+  return Math.min(5000,Math.floor(60000/(columns[name].length+1)));
+}
 export async function chain(hash: string, rows: Row[]): Promise<string> {
   for (const row of rows) hash = await digest(hash + '\n' + JSON.stringify(row));
   return hash;
@@ -153,20 +159,28 @@ export function compatibleRows(name:string,fields:TableState['columns'],rows:Row
 // This bounded scan runs while SQLite still accepts ordinary input. Export
 // rechecks every frozen page to cover changes made after a row was scanned.
 export function compatibilityStep(sql:SqlStorage,state:Migration):void {
-  const names=expectedTables(sql),progress=state.cutover!.compatibility ||= Object.fromEntries(names.map(n=>[n,{after:null,complete:false}]));
+  const names=expectedTables(sql),progress=state.cutover!.compatibility ||= Object.fromEntries(names.map(n=>[n,{after:null,complete:false,rows:0}]));
   const name=names.find(n=>!progress[n]?.complete);
   if(!name) {state.phase='freezing';return;}
-  const check=progress[name],fields=schema(sql,name),rows=sourceRows(sql,name,fields,check.after,250);
+  const check=progress[name],fields=schema(sql,name),rows=sourceRows(sql,name,fields,check.after,pageRowLimit(name));
   compatibleRows(name,fields,rows);
-  if(rows.length)check.after=rows.at(-1)![0];else check.complete=true;
+  if(rows.length){check.after=rows.at(-1)![0];check.rows=(check.rows || 0)+rows.length;}else check.complete=true;
 }
 export async function exportStep(bucket: R2Bucket, sql: SqlStorage, state: Migration, requestedLimit: unknown): Promise<void> {
   if (state.phase !== 'exporting') return;
   const name = Object.keys(state.tables).find(n => !state.tables[n].complete);
   if (!name) { state.phase = 'verifying'; await saveMigration(bucket, state); return; }
   const table = state.tables[name];
-  const limit = Number.isSafeInteger(requestedLimit) && Number(requestedLimit) > 0 ? Math.min(Number(requestedLimit), 250) : 100;
-  const rows = sourceRows(sql, name, table.columns, table.after, limit);
+  const limit = Number.isSafeInteger(requestedLimit) && Number(requestedLimit) > 0 ? Math.min(Number(requestedLimit), state.cutover?pageRowLimit(name):250) : 100;
+  let rows = sourceRows(sql, name, table.columns, table.after, limit);
+  // A wide SQL page must not turn into unbounded R2 HEAD requests. Truncate
+  // before the first row exceeding the cap; the rowid checkpoint resumes it.
+  const keys=new Set<string>();
+  for(let index=0;index<rows.length;index++) {
+    const refs=references([rows[index]]),added=refs.filter(key=>!keys.has(key));
+    if(keys.size+added.length>250){rows=rows.slice(0,index);break;}
+    for(const key of added)keys.add(key);
+  }
   if(state.cutover)compatibleRows(name,table.columns,rows);
   if (!rows.length) {
     if (table.rows !== table.count) throw new AdminError('migration_source_count_changed');
@@ -201,7 +215,7 @@ export async function verifyStep(bucket: R2Bucket, sql: SqlStorage, state: Migra
     const text = await object.text();
     if (await digest(text) !== object.customMetadata?.sha256) throw new AdminError('migration_page_corrupt');
     const page: { table: string; index: number; before: string | null; rows: Row[]; refs: string[]; hash: string } = JSON.parse(text);
-    if (page.table !== name || page.index !== check.pages || page.before !== check.after || !page.rows.length || page.rows.length > 250) throw new AdminError('migration_page_corrupt');
+    if (page.table !== name || page.index !== check.pages || page.before !== check.after || !page.rows.length || page.rows.length > (state.cutover?pageRowLimit(name):250) || !Array.isArray(page.refs) || page.refs.length>250) throw new AdminError('migration_page_corrupt');
     const source = sourceRows(sql, name, table.columns, check.after, page.rows.length);
     if (JSON.stringify(source) !== JSON.stringify(page.rows)) throw new AdminError('migration_source_mismatch');
     if (JSON.stringify(references(page.rows)) !== JSON.stringify(page.refs)) throw new AdminError('migration_reference_mismatch');

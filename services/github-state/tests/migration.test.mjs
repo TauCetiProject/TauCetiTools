@@ -507,3 +507,44 @@ test('an expired traversal deadline cannot claim a completed held pass',async t=
  assert.equal(recovery.held_last_pass.stopped,'deadline');assert.equal(recovery.held_pass_completed_at,undefined);
  assert.ok(await f.archive.head(held));
 });
+
+
+test('supervised pages use bounded wide batches with exact resumable rowids and checksums',async()=>{
+ const f=await fixture();
+ const insert=f.db.prepare('INSERT INTO demand(rowid,key,at) VALUES(?,?,?)');
+ f.db.exec('BEGIN');for(let i=0;i<7000;i++)insert.run(i+1,'demand-'+i,i);f.db.exec('COMMIT');
+ const scan={phase:'preflighting',cutover:{}};
+ for(let n=0;n<100 && scan.phase==='preflighting';n++)migration.compatibilityStep(f.ctx.storage.sql,scan);
+ assert.equal(scan.phase,'freezing');assert.equal(scan.cutover.compatibility.demand.rows,7000);
+ await f.command('freeze');
+ let state=await migration.readMigration(f.archive,repo.id);state.cutover={};await migration.saveMigration(f.archive,state);
+ while(state.phase==='exporting')await migration.exportStep(f.archive,f.ctx.storage.sql,state,5000);
+ const pages=[...f.archive.objects.entries()].filter(([key])=>key.includes('/demand/')).map(([,o])=>JSON.parse(o.text));
+ assert.deepEqual(pages.map(p=>p.rows.length),[5000,2000]);
+ assert.equal(pages[1].before,'5000');assert.equal(pages[1].rows[0][0],'5001');
+ while(state.phase==='verifying')await migration.verifyStep(f.archive,f.ctx.storage.sql,state);
+ assert.equal(state.phase,'source_verified');assert.equal(state.tables.demand.check.hash,state.tables.demand.hash);
+ for(const name of REQUIRED_TABLES)assert.ok(migration.pageRowLimit(name)*(state.tables[name].columns.length+1)<=60000);
+});
+
+test('wide supervised pages stop at 250 distinct R2 references without skipping rows',async()=>{
+ const f=await fixture(),insert=f.db.prepare('INSERT INTO resources VALUES(?,?,?,?,?,?,?,?)');
+ for(let i=0;i<501;i++) {const key='resources/100/spill-'+i;insert.run('pr',String(i),'',JSON.stringify({$r2:key}),'',1,1,0);await f.archive.put(key,'{}');}
+ await f.command('freeze');
+ let state=await migration.readMigration(f.archive,repo.id);state.cutover={};await migration.saveMigration(f.archive,state);
+ while(state.phase==='exporting')await migration.exportStep(f.archive,f.ctx.storage.sql,state,5000);
+ const pages=[...f.archive.objects.entries()].filter(([key])=>key.includes('/resources/')).map(([,o])=>JSON.parse(o.text));
+ assert.deepEqual(pages.map(p=>p.refs.length),[250,250,1]);
+ assert.equal(new Set(pages.flatMap(p=>p.rows.map(r=>r[0]))).size,501);
+ while(state.phase==='verifying')await migration.verifyStep(f.archive,f.ctx.storage.sql,state);
+ assert.equal(state.phase,'source_verified');assert.equal(state.tables.resources.check.rows,501);
+});
+
+
+test('invalid supervised batch bounds fail before creating migration state',async()=>{
+ const f=await fixture();
+ for(const batch_steps of [0,101,-1,1.5,'100']) {
+  assert.equal((await f.command('start',{batch_steps})).body.error,'migration_step_limit_invalid');
+  assert.equal(f.archive.objects.size,0);
+ }
+});

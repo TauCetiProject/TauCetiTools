@@ -52,6 +52,7 @@ ERROR_CODES = frozenset(
         "migration_shadow_request_budget",
         "migration_held_input_pending",
         "migration_cell_incompatible",
+        "migration_step_limit_invalid",
         "migration_rowid_sequence_exhausted",
         "invalid_target_identity",
         "migration_apply_required",
@@ -148,6 +149,7 @@ def main():
     parser.add_argument("--apply", action="store_true", help="perform the selected operation (requires deployed acceptance)")
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument("--retention-policy", type=Path, help="explicit post-observation retention policy JSON")
+    parser.add_argument("--batch-steps", type=int, default=1, help="supervised steps per request (1..100; also bounded by time and I/O)")
     parser.add_argument("--steps", type=int, default=1, help="bounded export/verification steps per invocation")
     parser.add_argument(
         "command", choices=["preflight", "status", "start", "freeze", "resume", "abandon", "finish-observation"], nargs="?", default="preflight"
@@ -170,8 +172,8 @@ def main():
         options["service_url"] = args.service_url.rstrip("/")
     if args.credentials_dir:
         options["credentials_dir"] = args.credentials_dir.expanduser()
-    if not 1 <= args.limit <= 250 or not 1 <= args.steps <= 10000:
-        parser.error("limit must be 1..250 and steps 1..10000")
+    if not 1 <= args.limit <= 250 or not 1 <= args.steps <= 10000 or not 1 <= args.batch_steps <= 100:
+        parser.error("limit must be 1..250, steps 1..10000 and batch-steps 1..100")
     mutating = args.command in {"start", "freeze", "resume", "abandon", "finish-observation"} and args.apply
     if mutating and (not args.generation or not args.target):
         parser.error("--apply requires --generation and --target")
@@ -189,6 +191,7 @@ def main():
             target=args.target,
             apply=True,
             limit=args.limit,
+            batch_steps=args.batch_steps,
         )
     if mutating and args.command == "finish-observation":
         if not args.retention_policy:

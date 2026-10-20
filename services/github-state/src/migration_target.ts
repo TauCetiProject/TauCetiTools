@@ -3,7 +3,7 @@ import { Client } from '@neondatabase/serverless';
 import { Env, digest } from './protocol';
 import { AdminError, REQUIRED_TABLES } from './storage';
 import { columns, integerColumn, schemaName } from './repository_store';
-import { Migration, Row, Cell, compatibleRows, archiveKey, chain } from './migration';
+import { Migration, Row, Cell, pageRowLimit, compatibleRows, archiveKey, chain } from './migration';
 
 export interface TargetIdentity { identity:string; hostname:string; database:string; application_role:string; migration_role:string }
 export function targetConfig(env:Env):TargetIdentity {
@@ -88,7 +88,7 @@ export async function archivePage(env:Env,state:Migration,name:string,index:numb
   if(!object)throw new AdminError('migration_page_missing');
   const text=await object.text();if(await digest(text)!==object.customMetadata?.sha256)throw new AdminError('migration_page_corrupt');
   const page:Page=JSON.parse(text);
-  if(page.version!==1 || page.table!==name || page.index!==index || !page.rows.length || page.rows.length>250)throw new AdminError('migration_page_corrupt');
+  if(page.version!==1 || page.table!==name || page.index!==index || !page.rows.length || page.rows.length>pageRowLimit(name) || !Array.isArray(page.refs) || page.refs.length>250)throw new AdminError('migration_page_corrupt');
   compatibleRows(name,state.tables[name].columns,page.rows);
   return page;
 }

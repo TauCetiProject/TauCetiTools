@@ -78,7 +78,7 @@ export async function controllerStep(env:Env,state:Migration,hooks:SourceHooks):
     await beginExport(env.ARCHIVE,hooks.storage,hooks.sql,state);
   } else if(!control.target_active && ['exporting','verifying','source_verified','importing','target_verifying','preparing','switching'].includes(state.phase)) {
     hooks.assertFence(state);
-    if(state.phase==='exporting')await exportStep(env.ARCHIVE,hooks.sql,state,250);
+    if(state.phase==='exporting')await exportStep(env.ARCHIVE,hooks.sql,state,5000);
     else if(state.phase==='verifying')await verifyStep(env.ARCHIVE,hooks.sql,state);
     else if(state.phase==='source_verified')state.phase='importing';
     else if(state.phase==='importing')await importStep(env,state);

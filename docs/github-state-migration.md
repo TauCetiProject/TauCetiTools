@@ -300,3 +300,13 @@ endpoint is required, stop and perform an independently verified forward recover
 with a new identity and migrated write-owner metadata; ordinary S2 abandonment
 cannot authorize that identity change. The retained SQLite copy may be exposed
 only as an explicitly timestamped emergency read fallback, never as a writer.
+
+
+For large repositories, `--batch-steps 100 --steps 10000 resume` reduces admin
+round trips. Each request still stops after 20 seconds or its bounded I/O budget;
+cron and the next identical invocation resume the last durable checkpoint.
+Supervised SQL pages contain at most 5,000 rows, 60,000 PostgreSQL parameters,
+512,000 logical value bytes (except a single larger row), and 250 distinct R2
+references. Wide tables reduce the row bound to preserve the parameter limit.
+The legacy source-only export retains its 250-row limit. Page sizes do not affect
+the canonical per-table hash or exact rowid checkpoints.
