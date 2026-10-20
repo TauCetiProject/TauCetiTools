@@ -590,7 +590,7 @@ test('native SQL supervision bounds requests and resumes a committed checkpoint 
     await saveMigration(this.env.ARCHIVE,state);this.migrationState=state;
     return Response.json({seeded:250000});
    }
-   if(path==='/arm-read'){this.armRead();return Response.json({armed:true});}
+   if(path==='/arm-read'){this.completedQueries.clear();this.armRead();return Response.json({armed:true,cache_entries:this.completedQueries.size});}
    if(path==='/arm-crash'){this.armCrash();return Response.json({armed:true});}
    if(path==='/barrier')return Response.json(this.barrier());
    if(path==='/instance')return Response.json({id:this.fixtureId});
@@ -605,23 +605,25 @@ test('native SQL supervision bounds requests and resumes a committed checkpoint 
  const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:built.outputFiles[0].text,compatibilityDate:'2026-10-11',durableObjects:{REPOSITORIES:{className:'NativeSource',useSQLite:true}},r2Buckets:['ARCHIVE'],bindings:{ALLOWED_REPOSITORIES:JSON.stringify([repo]),MIGRATION_ENVIRONMENT:'test',CF_VERSION:{id:'native-fixture'}},outboundService:()=>{throw Error('unexpected GitHub/bootstrap request');}}));
  const get=path=>mf.dispatchFetch('https://fixture'+path),json=async path=>(await get(path)).json();
  const query=()=>mf.dispatchFetch('https://fixture/query',{method:'POST',body:JSON.stringify({repository:repo.name,operation:'open_prs'})});
- const step=()=>mf.dispatchFetch('https://fixture/migration',{method:'POST',body:JSON.stringify({repository:repo.name,environment:'test',generation,target:'neon-native-fixture',operation:'step',apply:true,batch_steps:100})});
+ const step=(batch_steps=100)=>mf.dispatchFetch('https://fixture/migration',{method:'POST',body:JSON.stringify({repository:repo.name,environment:'test',generation,target:'neon-native-fixture',operation:'step',apply:true,batch_steps})});
  const progress=async response=>{assert.equal(response.status,200);const r=await response.json();assert.equal(r.phase,'preflighting');assert.equal(r.failure,null);const c=r.cutover.compatibility.changes;assert.equal(c.after,String(c.rows));return c.rows;};
  try {
-  assert.equal((await get('/seed')).status,200);const original=await (await query()).json();assert.equal(original.status,'ok');assert.equal(original.complete,true);
-  await get('/arm-read');const running=step();
-  let waiting=false;for(let n=0;n<100;n++){if((await json('/barrier')).waiting){waiting=true;break;}}
+  assert.equal((await get('/seed')).status,200);const original=await (await query()).json();assert.equal(original.status,'ok');assert.equal(original.complete,true);assert.ok(Number.isSafeInteger(original.observed_at) && original.observed_at>0);
+  const armed=await (await get('/arm-read')).json();assert.equal(armed.cache_entries,0,'overlapping query must miss the completed-result cache');const running=step();
+  let waiting=false;for(const deadline=Date.now()+4000;Date.now()<deadline;){if((await json('/barrier')).waiting){waiting=true;break;}await new Promise(resolve=>setTimeout(resolve,5));}
   assert.equal(waiting,true,'migration is suspended at a durable checkpoint while the stored read runs');
   const read=await query();assert.equal(read.status,200);const during=await read.json();assert.equal(during.status,'ok');assert.equal(during.complete,true);assert.deepEqual(during.data,original.data);assert.equal(during.observed_at,original.observed_at);
   let after=await progress(await running);assert.ok(after>0 && after<=25000);assert.equal((await json('/barrier')).overlapped,true);
   const beforeReset=(await json('/instance')).id;await get('/arm-crash');
   let crashStatus;try{crashStatus=(await step()).status;}catch{crashStatus=500;}assert.notEqual(crashStatus,200);
   assert.notEqual((await json('/instance')).id,beforeReset,'ctx.abort must construct a new Durable Object instance');
-  const saved=(await json('/state')).cutover.compatibility.changes.rows;assert.equal(saved,after+15000,'third page commits before the mid-invocation reset');after=saved;
-  for(let request=0;request<4;request++) {
-   const response=request%2?await step():await mf.dispatchFetch('https://fixture/migration-supervise',{method:'POST'});
-   const next=await progress(response);assert.ok(next>after && next-after<=25000);after=next;
+  const checkpoint=await json('/state');assert.equal(checkpoint.failure,null);assert.equal(checkpoint.cutover.last_failure,undefined);const saved=checkpoint.cutover.compatibility.changes.rows;assert.equal(saved,after+15000,'third page commits before the mid-invocation reset');after=saved;
+  for(let request=0;after<250000;request++) {
+   const single=250000-after<25000;
+   const response=single?await step(1):request%2?await step():await mf.dispatchFetch('https://fixture/migration-supervise',{method:'POST'});
+   const next=await progress(response);assert.equal(next,after+(single?5000:25000),'resume exactly after the last durable page');after=next;
   }
+  assert.equal(after,250000);await progress(await step(1));assert.equal((await json('/state')).cutover.compatibility.changes.complete,true,'empty final page marks the table complete');
   assert.deepEqual(await json('/stats'),{n:250000,sum:'31250125000'});
  }finally{await mf.dispose();}
 });
