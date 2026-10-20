@@ -235,6 +235,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--since", required=True, help="fallback window start, ISO-8601 UTC")
     ap.add_argument("--pr", type=int, action="append", default=[], help="a PR to reconcile regardless")
+    ap.add_argument("--labels-only", action="store_true", help="Update GitHub labels without contacting Zulip")
     ap.add_argument("--dry-run", action="store_true", help="list work; write nothing")
     ap.add_argument("--state-in", help="previous progress/retries JSON checkpoint")
     ap.add_argument("--state-out", help="where to checkpoint progress, including on failure")
@@ -282,14 +283,16 @@ def main(argv=None):
                 log(f"would reconcile #{number}")
             return 0
         save_progress(output, state)
-        email, api_key = (os.environ.get('ZULIP_EMAIL') or '').strip(), (os.environ.get('ZULIP_API_KEY') or '').strip()
-        if not (email and api_key):
-            return zulip.fail_config('ZULIP_EMAIL / ZULIP_API_KEY not set (no bot configured)')
-        z = zulip.Zulip(email, api_key, (os.environ.get('ZULIP_SITE') or 'https://leanprover.zulipchat.com').strip())
-        try:
-            bot_id = z.my_user_id()
-        except zulip.ConfigError as exc:
-            return zulip.fail_config(str(exc))
+        z, bot_id = None, None
+        if not args.labels_only:
+            email, api_key = (os.environ.get('ZULIP_EMAIL') or '').strip(), (os.environ.get('ZULIP_API_KEY') or '').strip()
+            if not (email and api_key):
+                return zulip.fail_config('ZULIP_EMAIL / ZULIP_API_KEY not set (no bot configured)')
+            z = zulip.Zulip(email, api_key, (os.environ.get('ZULIP_SITE') or 'https://leanprover.zulipchat.com').strip())
+            try:
+                bot_id = z.my_user_id()
+            except zulip.ConfigError as exc:
+                return zulip.fail_config(str(exc))
         stop, failures = [], []
 
         def one(number):
@@ -305,18 +308,19 @@ def main(argv=None):
             except Exception as exc:
                 failed = True
                 log(f"PR #{number}: label reconciliation failed: {exc}")
-            try:
-                ci = 'running' if running_prs(heads, running, number) else None
-                zulip.reconcile(z, str(number), number in opened, ci, bot_id=bot_id, create_if_open=True)
-            except zulip.ConfigError as exc:
-                stop.append(('config', str(exc)))
-                return
-            except core.RateLimited as exc:
-                stop.append(('quota', str(exc)))
-                return
-            except Exception as exc:
-                failed = True
-                log(f"PR #{number}: Zulip reconciliation failed: {exc}")
+            if z is not None:
+                try:
+                    ci = 'running' if running_prs(heads, running, number) else None
+                    zulip.reconcile(z, str(number), number in opened, ci, bot_id=bot_id, create_if_open=True)
+                except zulip.ConfigError as exc:
+                    stop.append(('config', str(exc)))
+                    return
+                except core.RateLimited as exc:
+                    stop.append(('quota', str(exc)))
+                    return
+                except Exception as exc:
+                    failed = True
+                    log(f"PR #{number}: Zulip reconciliation failed: {exc}")
             with lock:
                 key = str(number)
                 if failed:

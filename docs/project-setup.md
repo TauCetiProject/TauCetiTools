@@ -236,6 +236,9 @@ attests Lake configuration, prepares integration and runs candidate Lean offline
 existing sandbox. Shared drivers come from the workflow-pinned Tools version. Candidate
 scripts, workflow edits and cached audit binaries cannot replace those trusted drivers.
 
+The PR-status workflow maintains the labels workers use to select work. It is core
+automation even when Zulip is off; the same reconciler skips notifications in that mode.
+
 Project lint baselines and exceptions remain in project `scripts/`. The setup action overlays
 shared implementations but preserves the selected project's policy data.
 

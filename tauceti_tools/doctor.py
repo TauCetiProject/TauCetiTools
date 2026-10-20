@@ -197,6 +197,7 @@ def diagnose(project: Project, *, extras=False, github=None) -> list[Finding]:
             ".github/CODEOWNERS",
             ".github/workflows/pr-build.yml",
             ".github/workflows/auto-merge.yml",
+            ".github/workflows/pr-status.yml",
         ):
             value, error = gh.read(f"repos/{repo}/contents/{path}?ref={project.branch}")
             status = "unknown" if error else "ready"

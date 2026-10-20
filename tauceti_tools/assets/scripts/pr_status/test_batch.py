@@ -38,6 +38,14 @@ class ResumeTests(unittest.TestCase):
     def read(self):
         return json.loads(self.path.read_text())
 
+    def test_labels_only_needs_no_zulip_credentials_or_client(self):
+        with patch.dict(os.environ, {}, clear=True), \
+                patch.object(batch.zulip, 'Zulip', side_effect=AssertionError('Zulip is off')):
+            self.assertEqual(batch.main(self.args + ['--labels-only']), 0)
+        self.assertEqual([c.args[0] for c in self.labels.call_args_list], ['1', '2', '3'])
+        self.zulip.assert_not_called()
+        self.assertIsNone(self.read()['active'])
+
     def test_quota_failure_resumes_without_repeating_successful_prefix(self):
         def label(number):
             if number == '2':

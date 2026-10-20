@@ -102,7 +102,8 @@ unsafe def main (args : List String) : IO UInt32 := do
   initSearchPath (← findSysroot)
   -- The legacy `#lint` driver ran imported initializers too (`lean` always does).
   enableInitializersExecution
-  let env ← importModules (modules.map ({ module := · })) {} (trustLevel := 1024)
+  let lintImports := #[`Mathlib.Init, `Mathlib.Tactic.SetNotationForOrder] ++ modules
+  let env ← importModules (lintImports.map ({ module := · })) {} (trustLevel := 1024)
     (loadExts := true)
   let opts : Options := ({} : Options).setBool `trace.Batteries.Lint true
   let ctx : Core.Context := { fileName := tag, fileMap := default, options := opts }

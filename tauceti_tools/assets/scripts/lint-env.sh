@@ -304,6 +304,8 @@ lint_mods=$(wc -l < "$LINT_LIST")
 # closure at the `private` olean level, where docstrings and true declaration kinds
 # are visible (they are NOT in a module-style driver; see the header comment).
 {
+  echo 'import Mathlib.Init'
+  echo 'import Mathlib.Tactic.SetNotationForOrder'
   sed 's/^/import /' "$MODULE_IMPORT_LIST"
   cat <<EOF
 

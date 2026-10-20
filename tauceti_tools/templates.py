@@ -211,7 +211,6 @@ def write_project(project: Project, checkout: Path, role: str = "content") -> li
             "zulip-healthcheck.yml": "zulip",
             "toolchain-tags.yml": "security_audit",
             "nightly-verify.yml": "security_audit",
-            "pr-status.yml": "zulip",
         }
         if relative.name in optional and not project.feature(optional[relative.name]):
             continue
@@ -233,6 +232,9 @@ def write_project(project: Project, checkout: Path, role: str = "content") -> li
                 r"(?ms)^      - name: (?:Infrastructure policy unit tests|Lake archive reuse integration tests|Header audit equivalence tests)\n.*?(?=^      - |^  [a-z]|\Z)", "", text)
             text = text.replace("needs: [build, duplicate-audit-tests]", "needs: [build]")
             text = text.replace(" && needs['duplicate-audit-tests'].result == 'success'", "")
+        if relative.name == "pr-status.yml" and not project.feature("zulip"):
+            text = text.replace('args=(--since', 'args=(--labels-only --since')
+            text = text.replace("Reconcile labels and Zulip posts", "Reconcile PR status labels")
         if relative.name == "claims-access.yml" and project.repos.get("claims"):
             text = text.replace(
                 "owner: " + project.content.split("/")[0], "owner: " + project.repos["claims"].split("/")[0]
