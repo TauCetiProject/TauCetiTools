@@ -113,7 +113,8 @@ export function sourceRows(sql: SqlStorage, name: string, columns: TableState['c
   });
   // Read lengths first so neither many large rows nor maliciously large input
   // limits allocate an unbounded result. Include one large row for progress.
-  const sizes = columns.map(c => `COALESCE(length(CAST(${quote(c.name)} AS BLOB)),0)`).join('+');
+  // octet_length reads stored byte lengths without materializing large bodies.
+  const sizes = columns.map(c => `COALESCE(octet_length(${quote(c.name)}),0)`).join('+');
   const lower=after===null?'':'rowid>CAST(? AS INTEGER)';
   const bindings=after===null?[]:[after];
   const candidates = sql.exec<any>(`SELECT CAST(rowid AS TEXT) id,${sizes} bytes FROM ${quote(name)} ${lower?'WHERE '+lower:''} ORDER BY rowid LIMIT ?`, ...bindings, limit).toArray();

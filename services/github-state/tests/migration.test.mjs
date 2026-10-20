@@ -407,6 +407,37 @@ test('legacy initialization resumes automatically after control reads recover',a
 });
 
 
+test('workerd byte windows preserve UTF-8 boundaries, exact scalar values and oversized rows',async()=>{
+ const source=`
+ import {DurableObject} from 'cloudflare:workers';
+ import {sourceRows,schema} from './src/migration';
+ export class Bytes extends DurableObject {
+  async fetch(){
+   const sql=this.ctx.storage.sql;
+   sql.exec('CREATE TABLE byte_values(value)');
+   for(const value of ['😀'.repeat(64000),'x'.repeat(256000),null,'é','x'.repeat(600000),null])sql.exec('INSERT INTO byte_values VALUES(?)',value);
+   sql.exec("INSERT INTO byte_values VALUES(X'00FF80'),(9223372036854775807)");
+   const fields=schema(sql,'byte_values'),pages=[];let after=null;
+   for(let n=0;n<10;n++){
+    const rows=sourceRows(sql,'byte_values',fields,after,100);if(!rows.length)break;
+    pages.push(rows);after=rows.at(-1)[0];
+   }
+   if(pages[0][0][1][1]!=='😀'.repeat(64000) || pages[0][1][1][1]!=='x'.repeat(256000) || pages[1][0][1][1]!=='é' || pages[2][0][1][1]!=='x'.repeat(600000))throw Error('text changed');
+   if(pages[3][1][1][0]!=='blob' || pages[3][1][1][1]!=='00FF80' || pages[3][2][1][0]!=='integer' || pages[3][2][1][1]!=='9223372036854775807')throw Error('scalar changed');
+   const bytes=row=>{const [type,value]=row[1];return type==='null'?0:type==='blob'?value.length/2:new TextEncoder().encode(value).length;};
+   return Response.json({pages:pages.map(rows=>({ids:rows.map(row=>row[0]),bytes:rows.reduce((n,row)=>n+bytes(row),0)}))});
+  }
+ }
+ export default {fetch(req,env){return env.BYTES.get(env.BYTES.idFromName('values')).fetch(req);}};
+ `;
+ const built=await build({stdin:{contents:source,resolveDir:process.cwd(),loader:'ts'},bundle:true,format:'esm',write:false,external:['cloudflare:workers']});
+ const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:built.outputFiles[0].text,compatibilityDate:'2026-10-11',durableObjects:{BYTES:{className:'Bytes',useSQLite:true}},outboundService:()=>assert.fail('byte sizing made a network request')}));
+ try{
+  const response=await mf.dispatchFetch('https://fixture/bytes');assert.equal(response.status,200);
+  assert.deepEqual(await response.json(),{pages:[{ids:['1','2','3'],bytes:512000},{ids:['4'],bytes:2},{ids:['5'],bytes:600000},{ids:['6','7','8'],bytes:22}]});
+ }finally{await mf.dispose();}
+});
+
 test('workerd SQLite REAL encoding matches the archive round-trip contract',async()=>{
  const source=`
  import {DurableObject} from 'cloudflare:workers';
