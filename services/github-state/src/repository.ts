@@ -350,9 +350,31 @@ export class RepositoryState extends DurableObject<Env> {
     if(q.args?.number){const parent=String(q.args.number),found=(await cache.exec("SELECT id FROM resources WHERE kind='pr' AND id=?",parent)).toArray();cache.seed("SELECT id FROM resources WHERE kind='pr' AND id=?",[parent],found);}
     for(let offset=0;offset<ids.length;offset+=256) {
       const chunk=ids.slice(offset,offset+256);
-      const stored=(await cache.batch([{sql:'SELECT * FROM resources WHERE kind=? AND id IN ('+chunk.map(()=>'?').join(',')+')',bindings:[kind,...chunk]},
-        {sql:'SELECT collection,id FROM members WHERE collection IN ('+(['pr_delta','issue_delta'].includes(q.operation)?'?,?':'?')+') AND id IN ('+chunk.map(()=>'?').join(',')+')',bindings:[queryKey(q),...(['pr_delta','issue_delta'].includes(q.operation)?[queryKey({operation:q.operation==='pr_delta'?'open_prs':'open_issues'})]:[]),...chunk]}]));
-      for(const id of chunk){const found=stored[0].toArray().filter(r=>r.id===id);cache.seed('SELECT * FROM resources WHERE kind=? AND id=?',[kind,id],found);cache.seed('SELECT data,updated,observed FROM resources WHERE kind=? AND id=?',[kind,id],found);cache.seed('SELECT data,tombstone FROM resources WHERE kind=? AND id=?',[kind,id],found);for(const key of [queryKey(q),...(['pr_delta','issue_delta'].includes(q.operation)?[queryKey({operation:q.operation==='pr_delta'?'open_prs':'open_issues'})]:[])])cache.seed('SELECT id FROM members WHERE collection=? AND id=?',[key,id],stored[1].toArray().filter(r=>r.id===id && r.collection===key));}
+      // At most 2 MiB of old bodies per prefetch. Large old rows fall back to
+      // ordinary point reads; an omitted body must never be cached as absent.
+      const stored=(await cache.batch([{sql:'SELECT * FROM resources WHERE kind=? AND id IN ('+chunk.map(()=>'?').join(',')+') AND octet_length(data)<=8192',bindings:[kind,...chunk]},
+        {sql:'SELECT collection,id FROM members WHERE collection IN ('+(['pr_delta','issue_delta'].includes(q.operation)?'?,?':'?')+') AND id IN ('+chunk.map(()=>'?').join(',')+')',bindings:[queryKey(q),...(['pr_delta','issue_delta'].includes(q.operation)?[queryKey({operation:q.operation==='pr_delta'?'open_prs':'open_issues'})]:[]),...chunk]},
+        {sql:'SELECT id FROM resources WHERE kind=? AND id IN ('+chunk.map(()=>'?').join(',')+')',bindings:[kind,...chunk]}]));
+      const existing=new Set(stored[2].toArray().map(r=>r.id));
+      for(const id of chunk){const found=stored[0].toArray().filter(r=>r.id===id);
+        if(found.length || !existing.has(id)){cache.seed('SELECT * FROM resources WHERE kind=? AND id=?',[kind,id],found);cache.seed('SELECT data,updated,observed FROM resources WHERE kind=? AND id=?',[kind,id],found);cache.seed('SELECT data,tombstone FROM resources WHERE kind=? AND id=?',[kind,id],found);}
+        for(const key of [queryKey(q),...(['pr_delta','issue_delta'].includes(q.operation)?[queryKey({operation:q.operation==='pr_delta'?'open_prs':'open_issues'})]:[])])cache.seed('SELECT id FROM members WHERE collection=? AND id=?',[key,id],stored[1].toArray().filter(r=>r.id===id && r.collection===key));}
+    }
+  }
+  async *publicationRows(q:Query,rows:any[],source:RepositoryStore,prefetched:boolean):AsyncGenerator<any> {
+    if(source.backend!=='postgres' || prefetched){yield* rows;return;}
+    for(let offset=0;offset<rows.length;){
+      let end=offset,bytes=0;
+      while(end<rows.length && end<offset+128){
+        const size=JSON.stringify(rows[end]).length*2;
+        if(end>offset && bytes+size>2097152)break;
+        bytes+=size;end++;
+      }
+      this.store=source;
+      const chunk=rows.slice(offset,end);
+      await this.primePublication(q,chunk);
+      yield* chunk;
+      offset=end;
     }
   }
   async primeRelated(numbers:string[],heads:string[]):Promise<void> {
@@ -650,17 +672,17 @@ export class RepositoryState extends DurableObject<Env> {
     for(const item of input){const key=queryKey(item.q),prior=entries.get(key);entries.set(key,{...item,dirty:prior?.dirty || item.dirty});}
     const jobs=new Map<string,any>(),demands=new Map<string,any>(),collections=new Set<string>();
     const keys=[...entries.keys()],numbers=new Set<string>(),heads=new Map<string,string[]>(),comments=new Map<string,any>();
-    const select=async(table:string,column:string,values:string[],filter='')=>{
+    const select=async(table:string,column:string,values:string[],filter='',projection='*')=>{
       const rows:any[]=[];
       for(let offset=0;offset<values.length;offset+=readBatch) {
         const batch=values.slice(offset,offset+readBatch);
-        rows.push(...await this.scanRows('SELECT * FROM '+table+' WHERE '+column+' IN ('+batch.map(()=>'?').join(',')+')'+filter,...batch));
+        rows.push(...await this.scanRows('SELECT '+projection+' FROM '+table+' WHERE '+column+' IN ('+batch.map(()=>'?').join(',')+')'+filter,...batch));
       }
       return rows;
     };
     for(let offset=0;offset<keys.length;offset+=readBatch) {
       const chunk=keys.slice(offset,offset+readBatch),where=' WHERE key IN ('+chunk.map(()=>'?').join(',')+')';
-      const [js,ds,cs]=await this.store.batch(['jobs','demand','collections'].map(table=>({sql:'SELECT * FROM '+table+where,bindings:chunk})));
+      const [js,ds,cs]=await this.store.batch([['jobs','key,dirty,requested_at,due,wait_reason,attempt'],['demand','key,at'],['collections','key,complete']].map(([table,projection])=>({sql:'SELECT '+projection+' FROM '+table+where,bindings:chunk})));
       for(const row of js.toArray())jobs.set(row.key,row);
       for(const row of ds.toArray())demands.set(row.key,row);
       for(const row of cs.toArray())if(row.complete)collections.add(row.key);
@@ -669,9 +691,9 @@ export class RepositoryState extends DurableObject<Env> {
     const shas=[...new Set([...entries.values()].filter(e=>e.q.args?.sha).map(e=>String(e.q.args!.sha)))];
     for(const row of await select('head_prs','sha',shas)){const group=heads.get(row.sha)||[];group.push(row.number);heads.set(row.sha,group);numbers.add(row.number);}
     const ids=[...entries.values()].filter(e=>e.q.operation==='reactions').map(e=>String(e.q.args?.id));
-    if(ids.length)for(const row of await select('resources','id',ids," AND kind='review_comments'"))if(row.kind==='review_comments'){comments.set(row.id,row);if(row.parent)numbers.add(row.parent);}
+    if(ids.length)for(const row of await select('resources','id',ids," AND kind='review_comments'",'id,kind,parent,tombstone'))if(row.kind==='review_comments'){comments.set(row.id,row);if(row.parent)numbers.add(row.parent);}
     const states=new Map<string,any>();
-    for(const row of await select('resources','id',[...numbers]," AND kind IN ('pr','issue')"))if(['pr','issue'].includes(row.kind) && (!states.has(row.id)||row.kind==='pr'))states.set(row.id,JSON.parse(row.data));
+    for(const row of await select('resources','id',[...numbers]," AND kind IN ('pr','issue')","id,kind,json_extract(data,'$.state') state"))if(['pr','issue'].includes(row.kind) && (!states.has(row.id)||row.kind==='pr'))states.set(row.id,row);
     const now=Date.now();let scheduled=Infinity;
     const values:any[][]=[],metrics:any[][]=[];
     for(const [key,{q,priority,dirty=false}] of entries) {
@@ -1103,7 +1125,11 @@ export class RepositoryState extends DurableObject<Env> {
     try {await this.atomic(state=>{
       state.preparedEncodings=encodings;
       const archive=state.env.ARCHIVE;
-      state.env={...state.env,ARCHIVE:new Proxy(archive,{get(target,key){if(key==='get')return async(name:string,...args:any[])=>objects.has(name)?{text:async()=>objects.get(name)!,json:async()=>JSON.parse(objects.get(name)!)}:(target.get as any)(name,...args);const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;}})};
+      state.env={...state.env,ARCHIVE:new Proxy(archive,{get(target,key){if(key==='get')return async(name:string,...args:any[])=>{
+        if(!objects.has(name))return (target.get as any)(name,...args);
+        const consume=()=>{const text=objects.get(name)!;objects.delete(name);return text;};
+        return {text:async()=>consume(),json:async()=>JSON.parse(consume())};
+      };const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;}})};
       return RepositoryState.prototype.applyRefresh.call(state,job,q,repo,started,response,result,preparedNext,staged);
     });this.traceRepair('refresh_committed',job);}
     catch(error){if(!(error instanceof LeaseLost))throw error;}
@@ -1156,22 +1182,27 @@ export class RepositoryState extends DurableObject<Env> {
       if (next===job.cursor) throw new Error('repeated upstream cursor');
       await this.store.exec('UPDATE jobs SET cursor=?,page=page+1,api=?,due=?,etag=? WHERE key=?',next,result.api,Date.now(),result.etag || job.etag,job.key); return;
     }
-    const rows:any[]=[]; let scalar:any;
+    const rows:any[]=[]; let scalar:any,stagedChars=0;
     this.traceRepair('publication_decode_pages',job);
     for (let page=1;page<=job.page;page++) {
       const object=await this.env.ARCHIVE.get(`staging/${repo.id}/${encodeURIComponent(job.key)}/${started}/${page}`);
       if (!object) throw new Error('staging page missing');
-      const data:any=await object.json(); if (Array.isArray(data)) rows.push(...data); else scalar=data;
+      const text=await object.text();stagedChars+=text.length;
+      const data:any=JSON.parse(text); if (Array.isArray(data)) rows.push(...data); else scalar=data;
     }
     this.traceRepair('publication_rows',job,{rows:rows.length});
-    if(this.store.backend==='postgres')await this.primePublication(q,rows);
+    const publicationStore=this.store;
+    // UTF-16 length bounds retained string storage without allocating another
+    // encoded copy. Large publications replace the cache after each group.
+    const prefetched=rows.length<=2048 && stagedChars*2<=2097152;
+    if(this.store.backend==='postgres' && prefetched)await this.primePublication(q,rows);
     const kind=this.kind(q), memberIDs=new Set<string>(), acceptedIDs=new Set<string>();
     const changedNumbers=new Set<number>(), changedHeads=new Set<number>();
     if (scalar!==undefined || ['pr','repository','statuses'].includes(q.operation)) {
       await this.put(q.operation,job.key,scalar===undefined?rows:scalar,started);
       if (q.operation==='pr' && scalar?.number) await this.put('pr',String(scalar.number),scalar,started,false,String(scalar.number));
     } else {
-      for (const row of rows) {
+      for await (const row of this.publicationRows(q,rows,publicationStore,prefetched)) {
         if (q.operation.startsWith('recent_') && Date.parse(row.updatedAt)<Date.now()-30*86400000) continue;
         const id=q.operation==='files'?String(q.args?.number)+':'+String(row.filename):this.id(q.operation,row); memberIDs.add(id);
         if (kind==='pr') {
@@ -1181,6 +1212,8 @@ export class RepositoryState extends DurableObject<Env> {
           if ((!prior || prior.observed<=started) && (!before || before.headRefOid!==row.headRefOid)) changedHeads.add(row.number);
         }
         if (await this.put(kind,id,row,started,false,String(q.args?.number || q.args?.id || q.args?.sha || ''))) acceptedIDs.add(id);
+        const current=['open_prs','open_issues'].includes(q.operation)?(await this.store.exec<any>('SELECT data,tombstone FROM resources WHERE kind=? AND id=?',kind,id)).toArray()[0]:null;
+        if(!current || !current.tombstone && (await this.decode(current.data)).state==='OPEN')await this.membership(job.key,id,true);
       }
       // Keep newer webhook membership when the reconciliation began before that event.
       const prior=await this.scanRows('SELECT m.id,r.observed FROM members m LEFT JOIN resources r ON r.kind=? AND r.id=m.id WHERE m.collection=?',kind,job.key);
@@ -1190,11 +1223,6 @@ export class RepositoryState extends DurableObject<Env> {
       if(this.store instanceof ReadCacheStore)for(const row of prior)this.store.seed('SELECT id FROM members WHERE collection=? AND id=?',[job.key,row.id],[{id:row.id}]);
       const openInventory=['open_prs','open_issues'].includes(q.operation);
       for (const row of prior) if (!(openInventory && result.api==='core') && !memberIDs.has(row.id) && row.observed<=started) await this.membership(job.key,row.id,false);
-      for (const id of memberIDs) {
-        const current=openInventory?(await this.store.exec<any>('SELECT data,tombstone FROM resources WHERE kind=? AND id=?',kind,id)).toArray()[0]:null;
-        if(current && (current.tombstone || (await this.decode(current.data)).state!=='OPEN')) continue;
-        await this.membership(job.key,id,true);
-      }
     }
     if (job.lease_id && (await this.store.exec<any>('SELECT lease_id FROM jobs WHERE key=?',job.key)).toArray()[0]?.lease_id!==job.lease_id) throw new LeaseLost();
     if (!(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',job.key)).toArray().length) await this.nextRevision('collection',job.key);
@@ -1204,7 +1232,7 @@ export class RepositoryState extends DurableObject<Env> {
     const deltaRepairs:{q:Query,priority:number,dirty?:boolean}[]=[];
     if (['pr_delta','issue_delta'].includes(q.operation)) {
       const operation=q.operation==='pr_delta'?'open_prs':'open_issues', inventory=queryKey({operation});
-      for (const row of rows) {
+      for await (const row of this.publicationRows(q,rows,publicationStore,prefetched)) {
         const id=String(row.number);
         if (acceptedIDs.has(id)) await this.membership(inventory,id,row.state==='OPEN');
         if (changedNumbers.has(row.number)) {
@@ -1217,7 +1245,7 @@ export class RepositoryState extends DurableObject<Env> {
     }
     const repairs:{q:Query,priority:number,dirty?:boolean}[]=deltaRepairs;
     if (q.operation==='open_prs' || q.operation==='recent_prs') {
-      for (const row of rows) {
+      for await (const row of this.publicationRows(q,rows,publicationStore,prefetched || q.operation==='recent_prs')) {
         if (q.operation==='recent_prs' && Date.parse(row.updatedAt)<Date.now()-30*86400000) continue;
         for (const operation of ['issue_comments','review_threads','reviews','files']) repairs.push({q:{repository:repo.name,operation,args:{number:row.number}},priority:20});
         if (q.operation==='open_prs') {
@@ -1235,8 +1263,10 @@ export class RepositoryState extends DurableObject<Env> {
       // This complete thread reconciliation also supplies the flat REST-shaped history.
       const comments=rows.flatMap(t=>t.comments.nodes.map(comment));
       const flatKey=queryKey({operation:'review_comments',args:q.args}), ids=new Set<string>();
-      if(this.store.backend==='postgres')await this.primePublication({...q,operation:'review_comments'},comments);
-      for (const c of comments) {
+      const flatQuery={...q,operation:'review_comments'};
+      const flatPrefetched=prefetched && comments.length<=2048;
+      if(this.store.backend==='postgres' && flatPrefetched)await this.primePublication(flatQuery,comments);
+      for await (const c of this.publicationRows(flatQuery,comments,publicationStore,flatPrefetched)) {
         ids.add(String(c.id)); await this.put('review_comments',String(c.id),c,started,false,String(q.args?.number));
         repairs.push({q:{repository:repo.name,operation:'reactions',args:{id:String(c.id)}},priority:25});
       }

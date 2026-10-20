@@ -451,3 +451,49 @@ test('opt-in alarm traces identify publication stages without exposing input',as
   assert.equal(messages.some(line=>JSON.parse(line).stage==='refresh_committed'),false);
  }finally{console.log=original;await db.close();}
 });
+
+test('large staged repair fan-out rolls back, resumes, and reads scheduling metadata without payload copies',async()=>{
+ const {state,db,env}=await fixture();try {
+  await state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
+  let upstream=0;env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>{upstream++;throw Error('unexpected GitHub request');}})};
+  const q={repository:'org/repo',operation:'recent_prs'},key='recent_prs:{}',started=Date.now()-10000,count=2200;
+  const body='private-history-payload '.repeat(250);
+  const rows=Array.from({length:count},(_,i)=>({number:i+1,state:'CLOSED',updatedAt:new Date(started-1000).toISOString(),body,headRefOid:'a'.repeat(40)}));
+  await state.enqueue(q);await db.prepare('UPDATE jobs SET started=? WHERE key=?').run(started,key);
+  const child={repository:'org/repo',operation:'issue_comments',args:{number:1}},childKey='issue_comments:{"number":1}',cooldown=Date.now()+3600000;
+  await state.enqueue(child);await db.prepare("UPDATE jobs SET due=?,attempt=4,wait_reason='quota',generation=17 WHERE key=?").run(cooldown,childKey);
+  const job=await db.prepare('SELECT * FROM jobs WHERE key=?').get(key),before=await state.revision();
+  const enqueue=state.enqueueMany;let interrupt=true,checked=0;
+  state.enqueueMany=async function(input){
+   const store=this.store;
+   const check=sql=>{
+    if(/^SELECT .* FROM (resources|jobs|collections)\b/.test(sql)){
+     assert.equal(/\bSELECT \* FROM (resources|jobs|collections)\b/.test(sql),false,'fan-out must not copy resource bodies or nested job cursors');
+     if(/ FROM resources\b/.test(sql))assert.equal(/\bdata\b/.test(sql.replace(/json_extract\(data,'\$\.state'\)/g,'')),false);
+     checked++;
+    }
+   };
+   this.store=new Proxy(store,{get(target,name){
+    if(name==='exec')return (sql,...args)=>{check(sql);return target.exec(sql,...args);};
+    if(name==='batch')return statements=>{for(const statement of statements)check(statement.sql);return target.batch(statements);};
+    const value=Reflect.get(target,name,target);return typeof value==='function'?value.bind(target):value;
+   }});
+   try {await enqueue.call(this,input);if(interrupt)throw Error('fanout interrupted');}finally{this.store=store;}
+  };
+  await assert.rejects(state.refresh(job,{api:'core',data:rows}),/fanout interrupted/);
+  assert.equal(await state.revision(),before);assert.equal(await state.complete(q),false);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM resources').get()).n,0);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM members').get()).n,0);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM jobs').get()).n,2);
+  interrupt=false;await state.refresh(job,{api:'core',data:rows});
+  assert.equal(await state.complete(q),true);
+  assert.equal((await db.prepare("SELECT COUNT(*) n FROM resources WHERE kind='pr'").get()).n,count);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM members WHERE collection=?').get(key)).n,count);
+  const retained=await db.prepare('SELECT due,attempt,wait_reason,generation FROM jobs WHERE key=?').get(childKey);
+  assert.deepEqual({...retained},{due:cooldown,attempt:4,wait_reason:'quota',generation:17});
+  assert.equal((await db.prepare("SELECT COUNT(*) n FROM jobs WHERE key!=? AND key!=? AND lane!='archive'").get(key,childKey)).n,0);
+  const revision=await state.revision();await state.refresh(job,{api:'core',data:rows});
+  assert.equal(await state.revision(),revision,'repeated completion publishes no duplicate semantic changes');
+  assert.ok(checked>0);assert.equal(upstream,0);
+ }finally{await db.close();}
+});

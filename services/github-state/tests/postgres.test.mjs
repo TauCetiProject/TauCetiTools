@@ -315,3 +315,17 @@ pg('byte-cut history scans reduce subsequent SQL candidate work for large rows',
   const rows=await f.state.rows(q);assert.equal(rows.length,count);assert.equal(rows.at(-1).id,String(count));assert.ok(limits.length>=4);assert.equal(limits[0],4096);assert.ok(limits.slice(1).every(n=>n<600),'large rows must not repeatedly process the full candidate window: '+limits);
  }finally{await f.close();}
 });
+
+pg('publication prefetch preserves a large newer resource that is omitted from the body cache',async()=>{
+ const f=await postgresFixture();try{
+  const q={repository:repo.name,operation:'open_prs'},started=Date.now()-1000;
+  const current={number:7,state:'OPEN',updatedAt:'2026-10-20T00:00:00Z',body:'retained webhook body '.repeat(1000)};
+  await f.state.put('pr','7',current,Date.now(),false,'7');
+  await f.state.enqueue(q);const job=await f.state.claim(await f.state.nextJob());
+  await f.store.exec('UPDATE jobs SET started=? WHERE key=?',started,job.key);job.started=started;
+  await f.state.refresh(job,{api:'graphql',data:[{number:7,state:'CLOSED',updatedAt:current.updatedAt,body:'stale repair'}]});
+  const stored=(await f.store.exec("SELECT data FROM resources WHERE kind='pr' AND id='7'")).one();
+  assert.deepEqual(JSON.parse(stored.data),current);
+  assert.equal((await f.store.exec("SELECT COUNT(*) n FROM members WHERE collection='open_prs:{}' AND id='7'")).one().n,1);
+ }finally{await f.close();}
+});

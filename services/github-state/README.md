@@ -118,6 +118,15 @@ background reads only. Health includes lane eligibility, oldest requested age,
 repair arrivals/completions/cancellations, wait reasons, requested latency p95,
 and measured cost/latency by query shape and batch size.
 
+Repair publication releases buffered staging text as it decodes pages. Large
+PostgreSQL publications replace their prefetch cache after groups of at most
+128 rows and 2 MiB of serialized string storage (allowing one oversized row).
+Old-body prefetches transfer at most 2 MiB; larger existing resources use point
+reads and retain the same timestamp/tombstone guards. Follow-up job fan-out reads
+only IDs, states, membership and scheduling fields, so it does not reload PR
+bodies or nested job cursors for every dependent repair. Publication, membership
+and fan-out remain in the same transaction.
+
 For an isolate-reset investigation, temporarily set `RECONCILIATION_TRACE` to
 `"true"`. Background alarm and publication stage logs contain only the backend,
 operation, page number, and start timestamp. They exclude query arguments, keys,
