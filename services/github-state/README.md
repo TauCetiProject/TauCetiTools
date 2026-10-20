@@ -216,3 +216,7 @@ The example worker's process-manager rollout and shadow commands live in
 [TauCetiWorker/services/github-state/scripts](https://github.com/TauCetiProject/TauCetiWorker/tree/main/services/github-state/scripts).
 Downstream deployment and credential setup are documented in the
 [manual](../../docs/project-setup.md#github-state).
+
+The [migration source runbook](../../docs/github-state-migration.md) describes
+S2's test-only, fenced full-table export protocol and its production blockers.
+Source verification does not select PostgreSQL or constitute a release receipt.

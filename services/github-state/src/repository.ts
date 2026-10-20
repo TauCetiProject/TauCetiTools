@@ -5,6 +5,7 @@ import { batchLimit } from './catalog';
 import { Lane, LANES, laneAt, settings } from './reconciliation';
 import { SURVEY_CONTRACT, compactPR, issueFragment, reviewFragment, summarizeFragments, inScope, roadmapFocuses } from './survey';
 import { readPromotionReceipts } from './activity_landings';
+import { Migration, archiveKey, beginExport, expectedTables, exportStep, generation, encodeMigration, publicReceipt, readMigration, saveMigration, targetIdentity, verifyStep } from './migration';
 import { controlKey, noteRepositoryFull, storageKey } from './ingress';
 import { Failure, FULL_MESSAGE, AdminError, CLEANUP, PARKABLE, classify, createRecovery, deleteClass, exportPage, faultySql, log, missingSchema, requestId, readManifest, scan, summary, verifyExport } from './storage';
 
@@ -34,10 +35,29 @@ export class RepositoryState extends DurableObject<Env> {
   // by the admin endpoint, which waits for in-flight applications to finish.
   private ingress?:string;
   private applying=0;
+  private migrationState: Migration | null = null;
+  private migrationUnavailable=false;
+  private activeOperations=0;
+  private migrationFlight: Promise<unknown> = Promise.resolve();
+  migrationHeld(): boolean { return this.migrationUnavailable || Boolean(this.migrationState && this.migrationState.phase!=='abandoned'); }
   private logged=new Map<string,number>();
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx,env);
     this.sql=env.FAULT_INJECTION==='true'?faultySql(ctx.storage.sql,()=>this.faultFull):ctx.storage.sql;
+    const sourceSql=this.sql;
+    this.sql=new Proxy(sourceSql,{get:(target,property)=>{
+      if(property==='exec') return (query:string,...bindings:any[])=>{
+        if(this.migrationHeld() && (this.migrationUnavailable || this.migrationState?.phase!=='freezing')) {
+          // Frozen repository SQL uses single read statements only. Reject
+          // multi-statement strings even if their first statement is a read.
+          const readOnly=/^\s*(SELECT\b|PRAGMA\s+(table_info|index_list|index_info|page_size|page_count|freelist_count)\b)/i.test(query);
+          if(query.includes(';') || !readOnly) throw new AdminError('migration_frozen');
+        }
+        return target.exec(query,...bindings);
+      };
+      const value=Reflect.get(target,property,target);
+      return typeof value==='function'?value.bind(target):value;
+    }});
     if (this.sql.databaseSize>=FULL_DATABASE) this.degraded={since:Date.now(),reason:'storage_full',operation:'database_size'};
     // A current or fresh schema starts synchronously; migrating an existing
     // legacy schema waits until the durable storage state is known.
@@ -46,6 +66,12 @@ export class RepositoryState extends DurableObject<Env> {
       if (env.FAULT_INJECTION==='true') {
         this.faultFull=(await env.ARCHIVE.get(this.faultKey()).then(o=>o?.json<any>()))?.mode==='full';
         if (this.faultFull) this.degraded ||= {since:Date.now(),reason:'storage_full',operation:'fault_injection'};
+      }
+      let repo:string | undefined;
+      try {repo=this.meta('repository')?.id;} catch { /* Fresh test objects have no schema yet. */ }
+      if(repo && this.env.ARCHIVE && this.env.MIGRATION_ENVIRONMENT==='test') {
+        try {this.migrationState=await readMigration(this.env.ARCHIVE,repo);}
+        catch {this.migrationUnavailable=true;}
       }
       await this.storageMarker();
       if (env.FAULT_INJECTION==='true' || this.schema!=='current') this.startup();
@@ -73,6 +99,7 @@ export class RepositoryState extends DurableObject<Env> {
     let version:unknown;
     try {version=this.meta('schema_version');} catch {version=undefined;}
     if(version===SCHEMA_VERSION) {this.schema='current';return;}
+    if(this.migrationHeld()) {this.schema='legacy';return;}
     if(this.degraded || defer && this.sql.exec<any>("SELECT COUNT(*) n FROM sqlite_master WHERE type='table' AND name='meta'").one().n) {
       // Never attempt a migration that cannot commit; existing data stays readable.
       let missing:string[];
@@ -152,11 +179,11 @@ export class RepositoryState extends DurableObject<Env> {
   // Demand, metrics, refresh scheduling and derived caches never decide
   // whether stored data can be served. Degraded mode suppresses them.
   optional<T>(operation:string,write:()=>T): T | undefined {
-    if(this.degraded) return undefined;
+    if(this.degraded || this.migrationHeld()) return undefined;
     try {return write();} catch(error) {this.noteFailure(operation,error);return undefined;}
   }
   async optionalAsync(operation:string,write:()=>Promise<unknown>): Promise<void> {
-    if(this.degraded) return;
+    if(this.degraded || this.migrationHeld()) return;
     try {await write();} catch(error) {this.noteFailure(operation,error);}
   }
   async setAlarm(at:number): Promise<void> {
@@ -360,6 +387,7 @@ export class RepositoryState extends DurableObject<Env> {
     // Legacy mirrors did not scope membership by attempt. Revalidate once;
     // retain current webhook rows and all historical resource records. This
     // must commit before the legacy membership can be served.
+    if(this.migrationHeld()) throw new AdminError('migration_frozen');
     if(this.degraded) throw new Error('Exceeded the maximum database size; workflow attempt revalidation needs a write (degraded)');
     this.ctx.storage.transactionSync(()=>{
       this.setMeta('workflow_attempt:'+id,attempt);
@@ -1026,6 +1054,12 @@ export class RepositoryState extends DurableObject<Env> {
     }
   }
   async alarm(): Promise<void> {
+    if(this.migrationUnavailable) await this.retryMigrationControl();
+    if(this.migrationHeld()) return;
+    this.activeOperations++;
+    try {await this.runAlarm();} finally {this.activeOperations--;}
+  }
+  async runAlarm(): Promise<void> {
     const options=settings(this.env),began=Date.now();let dispatched=0,retired=0;
     try {
       this.expire();
@@ -1033,7 +1067,7 @@ export class RepositoryState extends DurableObject<Env> {
       // Every dispatch writes its lease before any GitHub request, so a full
       // store stops here without spending upstream quota.
       if(!this.degraded && typeof this.schema!=='object') try {
-        while(dispatched<options.dispatches && Date.now()-began<options.launch_ms && !this.degraded) {
+        while(dispatched<options.dispatches && Date.now()-began<options.launch_ms && !this.degraded && !this.migrationHeld()) {
           const wave:Promise<void>[]=[];
           while(wave.length<options.concurrency && dispatched<options.dispatches) {
             const next=this.nextJob();if (!next) break;
@@ -1045,13 +1079,13 @@ export class RepositoryState extends DurableObject<Env> {
           await Promise.allSettled(wave);
         }
       } catch(error) {this.noteFailure('repair_dispatch',error);}
-      try {await this.maintenance();} catch(error) {this.noteFailure('maintenance',error);}
+      try {if(!this.migrationHeld()) await this.maintenance();} catch(error) {this.noteFailure('maintenance',error);}
     } finally {
       try {
         const row=this.sql.exec<any>('SELECT MIN(MAX(due,lease_until)) AS due FROM jobs').one();
         // Degraded mode writes nothing, not even the next alarm; the cron tick
         // keeps expiring rows until a probe restores writes.
-        if (row.due && !this.degraded) await this.setAlarm(Math.max(Date.now()+100,row.due));
+        if (row.due && !this.degraded && !this.migrationHeld()) await this.setAlarm(Math.max(Date.now()+100,row.due));
       } catch(error) {this.noteFailure('alarm',error);}
     }
   }
@@ -1117,7 +1151,7 @@ export class RepositoryState extends DurableObject<Env> {
     return Date.now()-changed>FROZEN_AFTER?changed:null;
   }
   storageState(): any {
-    return {mode:this.degraded?'degraded':'writable',degraded:this.degraded ?? null,frozen_since:this.frozenSince(),schema:this.schema,database_size:this.sql.databaseSize,fault_injection:this.env.FAULT_INJECTION==='true'?{full:this.faultFull}:undefined};
+    return {mode:this.degraded?'degraded':'writable',mutation_fence:this.migrationUnavailable?'control_unavailable':this.migrationHeld()?'migration':null,degraded:this.degraded ?? null,frozen_since:this.frozenSince(),schema:this.schema,database_size:this.sql.databaseSize,fault_injection:this.env.FAULT_INJECTION==='true'?{full:this.faultFull}:undefined};
   }
   async storage(path:string,req:Request): Promise<Response> {
     const input:any=req.method==='POST'?await req.json():{};
@@ -1184,7 +1218,136 @@ export class RepositoryState extends DurableObject<Env> {
     }
     return json({error:'not_found'},404);
   }
+  async retryMigrationControl(): Promise<void> {
+    const result=this.migrationFlight.then(async()=>{
+      if(!this.migrationUnavailable) return;
+      try {
+        this.migrationState=await readMigration(this.env.ARCHIVE,this.meta('repository').id);
+        this.migrationUnavailable=false;
+      } catch { /* Keep stored reads and the write fence until the next tick. */ }
+    });
+    this.migrationFlight=result.catch(()=>{});
+    await result;
+  }
+  async migration(req:Request): Promise<Response> {
+    let state=this.migrationState;
+    try {
+      const input:any=await req.json();
+      const repo=this.meta('repository')?.id;
+      if(!repo) throw new AdminError('repository_unconfigured');
+      // A control-store outage must fence mutations without taking complete
+      // SQL reads down. An admin retry can reload the barrier after recovery.
+      if(this.migrationUnavailable) {
+        this.migrationState=await readMigration(this.env.ARCHIVE,repo);
+        this.migrationUnavailable=false;state=this.migrationState;
+      }
+      if(input.operation==='status') return json(publicReceipt(state));
+      if(!input.operation || input.operation==='preflight') {
+        const tables=expectedTables(this.sql);
+        return json({ ...publicReceipt(state) as object, repository:repo,
+          source:state?.source ?? {object:this.ctx.id.toString(),deployment:this.env.CF_VERSION?.id ?? null,schema:this.meta('schema_version')}, expected_tables:tables,
+          source_export_environment:this.env.MIGRATION_ENVIRONMENT ?? null,
+          blockers:['s1_backend_unavailable','production_prerequisite_acceptance_unavailable'],
+          production_cutover_supported:false });
+      }
+      const id=generation(input.generation),target=targetIdentity(input.target);
+      // S1 is not implemented. Never treat caller-supplied claims as deployed
+      // acceptance evidence or permit a production freeze with this protocol.
+      if(input.environment!=='test' || this.env.MIGRATION_ENVIRONMENT!=='test') throw new AdminError('migration_production_prerequisites_unavailable');
+      if(input.apply!==true) throw new AdminError('migration_apply_required');
+      const previousEtag=state?.checkpoint_etag;
+      if(state?.phase==='abandoned' && state.generation!==id && input.operation==='freeze') state=null;
+      if(state && (state.generation!==id || state.target!==target)) throw new AdminError('migration_identity_conflict');
+      if(!['freeze','step','abandon'].includes(input.operation)) throw new AdminError('migration_target_backend_unavailable');
+      if(!state) {
+        if(input.operation!=='freeze') throw new AdminError('migration_not_started');
+        if((await this.env.ARCHIVE.list({prefix:archiveKey(repo,id)+'/',limit:1})).objects.length) throw new AdminError('migration_generation_used');
+        expectedTables(this.sql);
+        if(this.meta('schema_version')!==SCHEMA_VERSION) throw new AdminError('migration_schema_incompatible');
+        if(!this.env.CF_VERSION?.id) throw new AdminError('migration_deployment_identity_required');
+        state={version:1,generation:id,repository:repo,target,checkpoint_etag:previousEtag,
+          source:{object:this.ctx.id.toString(),deployment:this.env.CF_VERSION.id,schema:SCHEMA_VERSION},
+          phase:'freezing',created:Date.now(),updated:Date.now(),tables:{},failure:null,
+          blobs:{prefix:0,pages:0,objects:0,hash:'0'.repeat(64),complete:false},
+          staging:{after:null,page:'1',checked:0,complete:false}};
+        // Install the in-memory barrier before yielding. Persist the barrier
+        // before waiting so a restart cannot accidentally unfreeze the source.
+        this.migrationState=state;
+        await saveMigration(this.env.ARCHIVE,state);
+      }
+      if(state.source.object!==this.ctx.id.toString() || state.source.deployment!==this.env.CF_VERSION?.id) throw new AdminError('migration_source_identity_changed');
+      // Always reload the durable checkpoint: an interrupted operation may
+      // have changed its local object without committing that checkpoint.
+      // If the very first barrier upload failed before commit, the in-memory
+      // intent is still fenced and may safely retry that same initial upload.
+      let checkpoint=await readMigration(this.env.ARCHIVE,repo);
+      if(!checkpoint && state.phase==='freezing' && !Object.keys(state.tables).length) {
+        await saveMigration(this.env.ARCHIVE,state);
+        checkpoint=await readMigration(this.env.ARCHIVE,repo);
+      }
+      if(!checkpoint) throw new AdminError('migration_checkpoint_unavailable');
+      state=checkpoint;
+      this.migrationState=state;
+      state.failure=null;
+      if(input.operation==='abandon') {
+        // There is no PostgreSQL write switch in this protocol. Preserve all
+        // archives; explicit abandonment only releases this source fence.
+        if(this.activeOperations) throw new AdminError('migration_drain_pending');
+        state={...state,phase:'abandoned',failure:null};
+        await this.env.ARCHIVE.put(archiveKey(repo,id)+'/abandoned.json',encodeMigration(state));
+        await saveMigration(this.env.ARCHIVE,state);
+        this.migrationState=state;
+        return json(publicReceipt(state));
+      }
+      if(state.phase==='abandoned') throw new AdminError('migration_generation_abandoned');
+      if(state.phase==='freezing') {
+        const claimKey=archiveKey(repo,id)+'/generation.json';
+        const claimed=await this.env.ARCHIVE.get(claimKey);
+        if(claimed) {
+          const owner:any=await claimed.json();
+          if(owner.generation!==id || owner.target!==target || owner.source.object!==state.source.object || owner.source.deployment!==state.source.deployment) throw new AdminError('migration_generation_used');
+        } else if(!await this.env.ARCHIVE.put(claimKey,JSON.stringify({generation:id,target,source:state.source}),{onlyIf:{etagDoesNotMatch:'*'}})) throw new AdminError('migration_generation_used');
+        for(const deadline=Date.now()+25000;this.activeOperations>0 && Date.now()<deadline;) await new Promise(resolve=>setTimeout(resolve,25));
+        if(this.activeOperations) throw new AdminError('migration_drain_pending');
+        await beginExport(this.env.ARCHIVE,this.ctx.storage,this.sql,state);
+      } else if(input.operation==='step') {
+        if(state.phase==='exporting') await exportStep(this.env.ARCHIVE,this.sql,state,input.limit);
+        else if(state.phase==='verifying') await verifyStep(this.env.ARCHIVE,this.sql,state);
+        else if(state.phase==='source_verified') await this.env.ARCHIVE.put(archiveKey(repo,id)+'/receipt.json',encodeMigration(state));
+      }
+      state.failure=null;
+      await saveMigration(this.env.ARCHIVE,state);
+      return json(publicReceipt(state));
+    } catch(error) {
+      const reason=error instanceof AdminError?error.message:'migration_storage_failure';
+      // Error details can contain driver credentials or payloads. Persist only
+      // controlled reason codes and keep the last committed checkpoint.
+      const repo=this.meta('repository')?.id;
+      if(repo && this.migrationHeld()) {
+        const saved=await readMigration(this.env.ARCHIVE,repo).catch(()=>null);
+        if(saved) {saved.failure=reason;this.migrationState=saved;await saveMigration(this.env.ARCHIVE,saved).catch(()=>{});}
+      }
+      return json({error:reason},reason==='migration_storage_failure' || reason==='migration_checkpoint_conflict'?503:400);
+    }
+  }
   async fetch(req:Request): Promise<Response> {
+    const path=new URL(req.url).pathname;
+    if(path==='/tick' && this.migrationUnavailable) await this.retryMigrationControl();
+    if(path==='/migration') {
+      const result=this.migrationFlight.then(()=>this.migration(req));
+      this.migrationFlight=result.catch(()=>{});
+      return result;
+    }
+    if(this.migrationHeld()) {
+      if(path==='/event') return json({error:'migration_frozen',parkable:true},503);
+      if(!['/query','/activity','/health','/changes','/retained-object','/storage/summary','/storage/scan','/storage/deliveries'].includes(path)) return json({error:'migration_frozen',parkable:true},503);
+      if(path==='/retained-object') return json({retained:true});
+    }
+    const tracked=!this.migrationHeld();
+    if(tracked) this.activeOperations++;
+    try {return await this.repositoryFetch(req);} finally {if(tracked) this.activeOperations--;}
+  }
+  async repositoryFetch(req:Request): Promise<Response> {
     const url=new URL(req.url),path=url.pathname,request_id=requestId(req);
     try {
       if (path.startsWith('/storage/')) return await this.storage(path,req);
@@ -1230,7 +1393,8 @@ export class RepositoryState extends DurableObject<Env> {
         const q=await req.json() as Query;
         validateQuery(q);
         const changed=this.frozenSince();
-        if (changed!==null) return json({...this.unavailable(q,'mirror_frozen'),frozen_since:changed},200,{'X-TauCeti-Storage':'degraded'});
+        const planned=this.migrationState && this.migrationState.phase!=='abandoned';
+        if (changed!==null && !planned) return json({...this.unavailable(q,'mirror_frozen'),frozen_since:changed},200,{'X-TauCeti-Storage':'degraded'});
         if(q.operation==='workflow_jobs') {
           try {this.runAttempt(String(q.args?.id));}
           catch(error) {return json(this.unavailable(q,this.noteFailure('workflow_attempt',error)));}
