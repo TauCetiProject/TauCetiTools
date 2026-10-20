@@ -22,7 +22,6 @@ export class InstallationScheduler extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS quota_types(category TEXT PRIMARY KEY,first_seen INTEGER,last_seen INTEGER,count INTEGER,evidence TEXT);`);
     this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS reservations(id TEXT PRIMARY KEY,resource TEXT,cost INTEGER,expires INTEGER);');
     this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS redelivery_retries(id TEXT PRIMARY KEY,due INTEGER,attempt INTEGER);');
-    this.ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS accounting_at ON accounting(at)');
     const columns=new Set(this.ctx.storage.sql.exec<any>('PRAGMA table_info(accounting)').toArray().map(c=>c.name));
     for(const [name,type] of Object.entries({shape:'TEXT',batch_size:'INTEGER DEFAULT 1',predicted:'INTEGER'})) if(!columns.has(name)) this.ctx.storage.sql.exec('ALTER TABLE accounting ADD COLUMN '+name+' '+type);
   }

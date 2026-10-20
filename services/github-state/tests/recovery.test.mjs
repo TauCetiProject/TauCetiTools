@@ -573,3 +573,32 @@ test('malformed retention progress restarts safely without dropping persisted pi
  assert.equal(scalar(db,'SELECT COUNT(*) FROM cursors'),1);
  assert.equal((await state.preparedObservation()).retention.policy_loaded,true);
 });
+
+
+test('a single bounded sweep per interval keeps up with sustained append volume',()=>{
+ const {state,db}=repositoryFixture(),day=86400000,start=Date.now()-60*day;
+ let checkpoint;
+ for(let interval=0;interval<50;interval++) {
+  const now=start+interval*day;
+  for(let i=0;i<200;i++)db.prepare('INSERT INTO changes VALUES(?,?,?,?,?)').run(interval*200+i+1,now,'pr',String(i),0);
+  const b=budget(6000);
+  checkpoint=retention.sweep(state.sql,'expired_changes',checkpoint,b,true,now);
+  assert.ok(6000-b.rows<=1000);
+  if(interval>20)assert.ok(scalar(db,'SELECT COUNT(*) FROM changes')<=2400,'expiry reaches a plateau without unbounded catch-up loops');
+ }
+});
+
+
+test('a concurrent resource update wins over slow CI archival',async()=>{
+ const {state,db,archive}=repositoryFixture(),old=Date.now()-8*86400000;
+ const before={id:'7',run_attempt:1,steps:['x'.repeat(8000)]},after={id:'7',run_attempt:2,steps:['new attempt']};
+ db.prepare('INSERT INTO resources VALUES(?,?,?,?,?,?,?,?)').run('workflow_jobs','7','9',JSON.stringify(before),'',old,5,0);
+ const put=archive.put.bind(archive);
+ archive.put=async(key,...args)=>{
+  await put(key,...args);
+  if(key.includes('/ci/'))db.prepare('UPDATE resources SET data=?,revision=6,observed=? WHERE id=?').run(JSON.stringify(after),Date.now(),'7');
+ };
+ await state.archiveCI();
+ const row=db.prepare('SELECT data,revision FROM resources').get();
+ assert.deepEqual(JSON.parse(row.data),after);assert.equal(row.revision,6);
+});

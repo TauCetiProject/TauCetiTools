@@ -49,9 +49,9 @@ GitHub requests to status, cleanup, archival, or recovery.
 ## Bounded work and independent recovery
 
 SQL expiry runs before alarm dispatch/hydration and on every cron tick before
-alarm scheduling. One pass examines at most 600 rows, accounts for at most
+alarm scheduling. One pass examines at most 6,000 rows, accounts for at most
 4 MiB of logical row bytes, and stops launching work after a 50 ms cooperative
-budget. Each class examines at most 100 rows (50 for legacy cursors). Rowid
+budget. Each class examines at most 1,000 rows (50 for legacy cursors). Rowid
 keysets bound rows examined as well as deleted; unindexed expiry predicates do
 not silently scan an entire table. Classes rotate to prevent starvation.
 

@@ -963,7 +963,7 @@ export class RepositoryState extends DurableObject<Env> {
   // before repair, hydration or snapshots, any of which can fail first.
   expire(): Record<string,number> {
     const out:Record<string,number>={},now=Date.now();
-    const budget={rows:600,bytes:4*1024**2,deadline:now+50};
+    const budget={rows:6000,bytes:4*1024**2,deadline:now+50};
     const names=Object.keys(RULES) as RetentionClass[];
     for(let i=0;i<names.length;i++) {
       const name=names[(i+this.storageTurn)%names.length];
@@ -1102,7 +1102,7 @@ export class RepositoryState extends DurableObject<Env> {
           if(!stored || await digest(await stored.text())!==hash)throw new Error('archive_verification_failed');
           // Preserve the inline field used by legacy attempt membership guards.
           const pointer=JSON.stringify({$r2:key,...(row.kind==='workflow_jobs'?{run_attempt:data.run_attempt || 1}:{})});
-          this.sql.exec('UPDATE resources SET data=? WHERE rowid=? AND data=?',pointer,row.rid,before);
+          this.sql.exec('UPDATE resources SET data=? WHERE rowid=? AND kind=? AND id=? AND data=?',pointer,row.rid,row.kind,row.id,before);
           archived++;
         }
       }
@@ -1349,7 +1349,7 @@ export class RepositoryState extends DurableObject<Env> {
         this.retentionPolicy=next;
       }
       await this.storageMaintenance();
-      return json({policy:this.retentionPolicy,classes:this.retentionState,budget:{rows:600,bytes:4*1024**2,time_ms:50},observation:await this.preparedObservation()});
+      return json({policy:this.retentionPolicy,classes:this.retentionState,budget:{rows:6000,bytes:4*1024**2,time_ms:50},observation:await this.preparedObservation()});
     }
     if (path==='/storage/scan') return json(scan(this.sql,input));
     if (path==='/storage/recovery') return json(await createRecovery(this.env.ARCHIVE,this.ctx.storage,this.sql,repo,this.revision()));

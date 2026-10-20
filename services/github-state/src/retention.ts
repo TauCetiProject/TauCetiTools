@@ -30,7 +30,7 @@ export function sweep(sql: SqlStorage, name: RetentionClass, previous: Checkpoin
   delete state.error;
   const cols = sql.exec<any>('PRAGMA table_info(' + rule.table + ')').toArray().map(c => c.name);
   const size = cols.map(c => 'COALESCE(length(CAST("' + c + '" AS BLOB)),0)').join('+');
-  const rows = sql.exec<any>('SELECT rowid id,' + rule.clock + ' at,' + size + ' bytes FROM ' + rule.table + ' WHERE rowid>? AND rowid<=? ORDER BY rowid LIMIT ?', state.after, state.upper, Math.min(name === 'expired_cursors' ? 50 : 100, budget.rows)).toArray();
+  const rows = sql.exec<any>('SELECT rowid id,' + rule.clock + ' at,' + size + ' bytes FROM ' + rule.table + ' WHERE rowid>? AND rowid<=? ORDER BY rowid LIMIT ?', state.after, state.upper, Math.min(name === 'expired_cursors' ? 50 : 1000, budget.rows)).toArray();
   for (const row of rows) {
     if (Date.now() >= budget.deadline || budget.rows <= 0 || row.bytes > budget.bytes) break;
     budget.rows--; budget.bytes -= row.bytes;
