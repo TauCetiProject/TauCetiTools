@@ -316,8 +316,10 @@ state skips physical analysis while minute gauges continue. Failed measurements
 retain prior values and timestamps. Dead tuples are estimates, not measured
 reusable bytes; neither deletion nor VACUUM guarantees a smaller physical file.
 
-PostgreSQL capacity is growable and uses only an operator-verified effective
-project/account allowance. Missing allowance is unknown, never SQLite's 10 GiB.
+PostgreSQL capacity is growable and uses only an operator-verified database/branch
+allowance. Neon's `settings.quota.logical_size_bytes` is a per-branch quota,
+not an account or project-wide storage allowance. Missing allowance is unknown,
+never SQLite's 10 GiB.
 `pg_database_size(current_database())` measures this database, **a lower bound on
 project usage**; sibling databases/branches, retained history and account quotas
 require Neon's project/account observations. `usage_scope` and `allowance_scope`
@@ -331,6 +333,66 @@ pressure, a recent persistent parkable input failure and loss of parked durabili
 structured alarms in the configured Workers observability stream. Alarm delivery
 failure retains health and never claims human notification. Stale capacity or
 recovery observations stay stale even if the wrapper response is recent.
+
+### Provider observations and CPU integration
+
+`NEON_MONITORING` explicitly enrolls one project/branch/endpoint per environment:
+
+```json
+{"project":"PROJECT_ID","branch":"br-BRANCH_ID","endpoint":"ep-ENDPOINT_ID"}
+```
+
+Use the actual lower-case provider IDs. Supply a project-scoped read-only management
+credential as the separate `NEON_MONITORING_API_KEY` Worker secret. Never reuse a SQL
+credential or copy an account-wide operator management key into the Worker. The
+minute cron samples the enrolled project's settings, at most 100 branches, and its
+enrolled endpoint, with two-second request deadlines. Collection and persistence
+failures do not enter repository or queue transactions. Failed samples retain their
+original timestamps and last good values. Health reads only prepared observations.
+
+The selected branch's logical size includes **all databases in that branch**.
+`provider.capacity` applies the 70%/85% and confirmed exhaustion thresholds to its
+real branch quota. `provider.branches` exposes other branch sizes separately.
+The sample clock records retrieval time: `logical_size` is a provider estimate,
+whose internal measurement time/refresh lag is unavailable and explicitly labelled.
+`project_logical_branch_sum_bytes` is available only for a complete inventory, and
+counts copy-on-write shared data repeatedly; it is not physical/billed usage. A
+100-branch response is conservatively incomplete. Physical usage and account
+limits remain explicitly null unless supplied by a verified provider integration;
+this adapter does not infer either from a plan name or the branch sum.
+
+Validate the read-only collector before supplying any Worker secret:
+
+```sh
+cd services/github-state
+node scripts/observe-provider.mjs /private/test-neon-identity.json \
+  /private/operator-neon-key /private/provider-readiness.json
+```
+
+Expected: a saved receipt, `stale:false`, the exact enrolled identity, branch bytes
+and scope, and zero GitHub/SQL calls. This command changes no infrastructure and
+keeps the management key in the operator process. It deliberately leaves CPU null.
+
+CPU must come from the **existing configured observability integration**, using
+Neon's [native compute metric export](https://neon.com/docs/guides/opentelemetry).
+It is not the cumulative `compute_time_seconds` billing counter, configured CU
+ceiling, SQL active-query count, or queue depth. Its adapter submits a normalized
+one-minute utilization ratio, in `[0,1]`, with the enrolled `project`, `branch`,
+`endpoint` and the original Unix-millisecond sample `at`, to
+`POST /admin/monitoring/compute` with existing admin authentication. The endpoint
+rejects wrong identities, samples older than three minutes, future clocks and
+duplicate/out-of-order samples. ETag preconditions reject concurrent stale writes.
+It stores only the latest bounded observation in R2. Do not send raw telemetry or
+credentials in the body. The integration owner configures this transform in its
+existing pipeline; no new messaging destination or observability account is created.
+
+Fresh CPU >=80% warns and >=90% is critical, separately from storage and connection
+pressure. Missing/stale provider or CPU data warns once monitoring is enrolled;
+missing enrollment is reported as unconfigured. Existing Workers structured alarms
+carry these reasons. `notified:false` remains true even when a log is emitted.
+Before claiming deployment completion, record the real CPU source, original sample
+time, enrolled identity, minute updates and configured destination's delivery
+evidence. A fixture or successful log write does not satisfy that release check.
 
 Run the complete SQLite and real PostgreSQL drills separately:
 

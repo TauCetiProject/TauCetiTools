@@ -3,6 +3,7 @@ import { blocksRepairs, holdsRetention, readMigration } from './migration';
 import { classify, log, requestId } from './storage';
 import { PARK_AFTER_ATTEMPTS, backlog, backoff, drain, maintainIngress, maintainRaw, release, ingressMode, noteRepositoryFull, park, reconcile, setIngressMode, storageState } from './ingress';
 import { prepareQueueMetrics } from './queue_monitoring';
+import { boundedText, prepareProvider, saveCompute } from './provider_monitoring';
 import { R2_CLASSES, policy, retirePrefix } from './retention';
 export { RepositoryState } from './repository';
 export { InstallationScheduler } from './installation';
@@ -116,6 +117,16 @@ export default {
         const input:any=await req.json(),repo=repository(env,input.repository);
         if (!repo) return json({error:'repository_not_allowed'},400);
         return stub(env.REPOSITORIES,repo.id).fetch('https://internal/configure',{method:'POST',body:JSON.stringify({repository:repo.name})});
+      }
+      if(url.pathname==='/admin/monitoring/compute' && req.method==='POST') {
+        if(!await authorize(req,env,undefined,true))return json({error:'unauthorized'},401);
+        let text:string;
+        try {text=await boundedText(req.body,4096);}catch {return json({error:'payload_too_large'},413);}
+        try {await saveCompute(env,JSON.parse(text));return json({stored:true});}
+        catch(error) {
+          if(error instanceof SyntaxError || error instanceof Error && ['invalid_compute_observation','stale_compute_observation','invalid_neon_monitoring_identity'].includes(error.message))return json({error:'compute_observation_rejected',request_id},400);
+          return json({error:'compute_observation_unavailable',request_id},503);
+        }
       }
       if (url.pathname==='/admin/migration' && req.method==='POST') {
         if (!await authorize(req,env,undefined,true)) return json({error:'unauthorized'},401);
@@ -234,6 +245,7 @@ export default {
   },
   async scheduled(_event:ScheduledController,env:Env,ctx:ExecutionContext):Promise<void> {
     ctx.waitUntil(prepareQueueMetrics(env).catch(()=>log('queue_metrics_failed',{reason:'metrics_unavailable'})));
+    ctx.waitUntil(prepareProvider(env).catch(()=>log('provider_metrics_failed',{reason:'metrics_unavailable'})));
     const installations=new Set(repositories(env).map(repo=>repo.installation));
     for(const installation of installations)ctx.waitUntil((async()=>{await stub(env.INSTALLATIONS,installation).fetch('https://internal/maintenance',{method:'POST'});})().catch(error=>log('installation_maintenance_failed',{reason:classify(error)})));
     ctx.waitUntil(maintainRaw(env,(payload,event)=>targets(env,payload,event)).catch(error=>log('raw_reconciliation_failed',{reason:classify(error)})));

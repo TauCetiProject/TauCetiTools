@@ -10,6 +10,7 @@ export interface Env {
   REPOSITORY_DATABASE_URL?:string; REPOSITORY_GENERATION?:string;
   MIGRATION_ENVIRONMENT?: string;
   MIGRATION_DATABASE_URL?:string; MIGRATION_TARGET?:string;
+  NEON_MONITORING?:string; NEON_MONITORING_API_KEY?:string;
   CF_VERSION?: {id:string};
   BORS_ACTIVITY?: Fetcher;
 }

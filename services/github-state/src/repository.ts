@@ -8,6 +8,7 @@ import { Lane, LANES, laneAt, settings } from './reconciliation';
 import { SURVEY_CONTRACT, compactPR, issueFragment, reviewFragment, summarizeFragments, inScope, roadmapFocuses } from './survey';
 import { readPromotionReceipts } from './activity_landings';
 import { queueMetrics } from './queue_monitoring';
+import { providerObservation, providerAlarms } from './provider_monitoring';
 import { targetConfig, targetOwner } from './migration_target';
 import { controllerStep, preflight as cutoverPreflight, FREEZE_LEASE_MS } from './migration_control';
 import { Migration, terminalReceipt, compatibilityStep, blocksRepairs, blocksWrites, archiveKey, beginExport, expectedTables, exportStep, generation, encodeMigration, publicReceipt, readMigration, saveMigration, targetIdentity, verifyStep } from './migration';
@@ -1483,14 +1484,16 @@ export class RepositoryState extends DurableObject<Env> {
     const usable=connections?connections.max-connections.reserved:0;
     const pressure=usable>0?connections.used/usable:null;
     if(pressure!==null && pressure>=.7)reasons.push('connection_saturation');
-    const uniqueReasons=[...new Set(reasons)];
-    const critical=uniqueReasons.some(r=>!['storage_capacity','connection_saturation','monitoring_unavailable'].includes(r)) || measured.level==='critical' || pressure!==null && pressure>=.85;
-    const level=critical?'critical':reasons.length?'warning':'ok';
+    const provider=await providerObservation(this.env,now),providerAlarm=providerAlarms(provider);
+    const critical=reasons.some(r=>!['storage_capacity','connection_saturation','monitoring_unavailable'].includes(r)) || measured.level==='critical' || pressure!==null && pressure>=.85 || providerAlarm.level==='critical';
+    const uniqueReasons=[...new Set([...reasons,...providerAlarm.reasons])];
+    const level=critical?'critical':uniqueReasons.length?'warning':'ok';
     const requests=this.requestMetrics.snapshot(now),{intervals,...requestSummary}=requests;
     const value={version:1,at:now,backend:'postgres',generation,level,reasons:uniqueReasons,storage:{...storage,observed_at:now,stale:measured.stale},database_unavailable_since:this.postgresUnavailableSince,monitoring_failure_since:this.monitoringFailureSince,capacity:measured,capacity_history:this.capacityHistory,
       preparation_error:preparationError,monitoring_stale:measured.stale,table_row_estimates:stats?.observation?.table_row_estimates ?? null,tables:{at:stats?.tables_prepared_at ?? null,attempt_at:stats?.tables_attempt_at ?? null,values:stats?.tables ?? null,stale:!stats?.tables_prepared_at || now-stats.tables_prepared_at>2*3600000},
       connections:{...connections,ratio:pressure,connected:storage.connected,failures:storage.connection_failures,stale:!stats?.prepared_at || now-stats.prepared_at>180000},
-      compute:{...(stats?.observation?.compute || {cpu_utilization:null,reason:'use_neon_compute_metrics'}),stale:!stats?.prepared_at || now-stats.prepared_at>180000},
+      provider,
+      compute:provider.configured?provider.compute:{...(stats?.observation?.compute || {cpu_utilization:null,reason:'use_neon_compute_metrics'}),stale:!stats?.prepared_at || now-stats.prepared_at>180000},
       ingress,requests:requestSummary,repair_summary:this.repairMetrics.summary(now),
       refresh_lag_ms:this.diagnostics.last_repair?now-this.diagnostics.last_repair:null,
       latest_applied_input:this.diagnostics.latest_applied_input ?? null,
