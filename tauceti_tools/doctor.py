@@ -339,7 +339,8 @@ def diagnose(project: Project, *, extras=False, github=None) -> list[Finding]:
 
         metadata = []
         errors = []
-        for endpoint in ("secrets", "organization-secrets"):
+        secret_endpoints = ("secrets", "organization-secrets") if repo_info["content"]["owner"]["type"] == "Organization" else ("secrets",)
+        for endpoint in secret_endpoints:
             value, error = gh.read(f"repos/{repo}/actions/{endpoint}")
             metadata.extend(_items(value, "secrets"))
             if error:

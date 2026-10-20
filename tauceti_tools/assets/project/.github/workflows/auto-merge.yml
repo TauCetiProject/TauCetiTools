@@ -79,10 +79,10 @@ jobs:
     # Pinned to a TauCetiReview commit; bump deliberately. The reusable workflow receives the App
     # secrets, so a floating @main would be a supply-chain risk.
     # Re-pin together with the other two callers and .github/actions/checkout-merge-policy
-    # (scripts/test_workflow_pins.py checks they agree). The called workflow checks out its own
-    # commit, so no review_ref is passed.
+    # (scripts/test_workflow_pins.py checks they agree). Pass the same pin to the runner checkout.
     uses: TauCetiProject/TauCetiReview/.github/workflows/merge-only.yml@dff64733b34e4e4e69d768242f198dd79411d9a8
     with:
+      review_ref: __REVIEW_REF__
       tools_repository: __TOOLS_REPO__
       tools_ref: __TOOLS_REF__
       pr: ${{ needs.resolve.outputs.pr }}

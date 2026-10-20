@@ -361,7 +361,8 @@ date before merging** unchecked (`required_status_checks.strict = false`). Do no
 merge queue. Trusted automation applies the same current-head scoreboard and path policy,
 then squash-merges through GitHub's API with the exact reviewed head SHA. Advancing the base
 branch does not invalidate a review of the same diff or require a branch update. GitHub still
-rejects merge conflicts and enforces the branch's required checks. The hourly sweep retries
+rejects merge conflicts. Keep the direct-merge App out of the ruleset bypass list so
+GitHub also enforces the required checks. The hourly sweep retries
 eligible PRs after missed events. This mode works for public personal-account repositories.
 
 GitHub merge queue availability depends on repository visibility and account type. The standard

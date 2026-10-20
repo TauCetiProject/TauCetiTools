@@ -247,7 +247,7 @@ def write_project(project: Project, checkout: Path, role: str = "content") -> li
                 text,
             )
         if relative.name in ("auto-merge.yml", "merge-sweep.yml") and review.get("ref"):
-            text = text.replace("    with:\n", "    with:\n      review_ref: " + review["ref"] + "\n")
+            text = text.replace("__REVIEW_REF__", review["ref"])
         if relative.as_posix() == ".github/actions/checkout-merge-policy/action.yml" and review.get("ref"):
             text = re.sub(r"(?m)^(        ref: )[0-9a-f]{40}$", lambda m, ref=review["ref"]: m[1] + ref, text)
         target.write_text(text)
