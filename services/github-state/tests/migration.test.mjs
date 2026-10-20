@@ -548,3 +548,46 @@ test('invalid supervised batch bounds fail before creating migration state',asyn
   assert.equal(f.archive.objects.size,0);
  }
 });
+
+
+test('native SQL migration requests bound cumulative pages and resume after an isolate restart',async()=>{
+ const source=`
+ import {RepositoryState as Base} from './src/repository';
+ import {expectedTables,saveMigration,readMigration,publicReceipt} from './src/migration';
+ export class NativeSource extends Base {
+  async fetch(req){
+   const path=new URL(req.url).pathname,sql=this.ctx.storage.sql;
+   if(path==='/seed') {
+    await this.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
+    sql.exec("WITH RECURSIVE span(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM span WHERE n<250000) INSERT INTO changes(revision,at,kind,id,tombstone) SELECT n,1792490000000,'pr','xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'||n,0 FROM span");
+    const state={version:1,generation:'${generation}',repository:'100',target:'neon-native-fixture',source:{object:this.ctx.id.toString(),deployment:'native-fixture',schema:5},phase:'preflighting',created:Date.now(),updated:Date.now(),tables:{},failure:null,
+     staging:{after:null,page:'1',checked:0,complete:false,expired_jobs:0,expired_hash:'0'.repeat(64)},blobs:{prefix:0,pages:0,objects:0,hash:'0'.repeat(64),complete:false},
+     cutover:{environment:'test',lease_until:Date.now()+900000,epoch:0,source_fenced:false,target_active:false,import:{},verify:{},acceptance:'',compatibility:Object.fromEntries(expectedTables(sql).map(name=>[name,{after:null,rows:0,complete:name!=='changes'}]))}};
+    await saveMigration(this.env.ARCHIVE,state);this.migrationState=state;
+    return Response.json({seeded:250000});
+   }
+   if(path==='/restart'){this.ctx.abort('fixture crash between migration requests');}
+   if(path==='/step')return this.superviseMigration(100);
+   if(path==='/stats')return Response.json(sql.exec('SELECT COUNT(*) n,CAST(SUM(revision) AS TEXT) sum FROM changes').one());
+   return super.fetch(req);
+  }
+ }
+ export default {fetch(req,env){return env.REPOSITORIES.get(env.REPOSITORIES.idFromName('100')).fetch(req);}};
+ `;
+ const built=await build({stdin:{contents:source,resolveDir:process.cwd(),loader:'ts'},bundle:true,format:'esm',write:false,external:['cloudflare:workers']});
+ const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:built.outputFiles[0].text,compatibilityDate:'2026-10-11',durableObjects:{REPOSITORIES:{className:'NativeSource',useSQLite:true}},r2Buckets:['ARCHIVE'],bindings:{ALLOWED_REPOSITORIES:JSON.stringify([repo]),MIGRATION_ENVIRONMENT:'test',CF_VERSION:{id:'native-fixture'}},outboundService:()=>{throw Error('unexpected GitHub/bootstrap request');}}));
+ try {
+  assert.equal((await mf.dispatchFetch('https://fixture/seed')).status,200);
+  let after=0;
+  for(let request=0;request<10;request++) {
+   const [response,storedRead]=await Promise.all([mf.dispatchFetch('https://fixture/step'),mf.dispatchFetch('https://fixture/stats')]);assert.equal(response.status,200);assert.equal(storedRead.status,200);assert.equal((await storedRead.json()).n,250000);
+   const receipt=await response.json(),check=receipt.cutover.compatibility.changes;
+   assert.equal(receipt.phase,'preflighting');assert.equal(receipt.failure,null);
+   assert.ok(check.rows>after && check.rows-after<=25000,'one invocation cannot accumulate an unbounded scan');
+   assert.equal(check.after,String(check.rows));after=check.rows;
+   if(request===0)await mf.dispatchFetch('https://fixture/restart').catch(()=>{});
+  }
+  assert.equal(after,250000);
+  assert.deepEqual(await (await mf.dispatchFetch('https://fixture/stats')).json(),{n:250000,sum:'31250125000'});
+ }finally{await mf.dispose();}
+});

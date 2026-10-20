@@ -303,8 +303,11 @@ cannot authorize that identity change. The retained SQLite copy may be exposed
 only as an explicitly timestamped emergency read fallback, never as a writer.
 
 For large repositories, `--batch-steps 100 --steps 10000 resume` reduces admin
-round trips. Each request still stops after 20 seconds or its bounded I/O budget;
-cron and the next identical invocation resume the last durable checkpoint.
+round trips. Each request processes at most five steps and also stops after
+20 seconds or its bounded I/O budget. Cron and the next identical invocation
+resume the last durable checkpoint. The five-step ceiling limits cumulative
+native SQL, R2 and PostgreSQL allocations per invocation, even when more steps
+are requested.
 Supervised SQL pages contain at most 5,000 rows, 60,000 PostgreSQL parameters,
 512,000 logical value bytes (except a single larger row), and 250 distinct R2
 references. Wide tables reduce the row bound to preserve the parameter limit.

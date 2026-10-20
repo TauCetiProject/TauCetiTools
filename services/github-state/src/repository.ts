@@ -2090,7 +2090,10 @@ export class RepositoryState extends DurableObject<Env> {
     state.cutover!.observation_finished_at=release.at;state.failure=null;await saveMigration(this.env.ARCHIVE,state);
     await terminalReceipt(this.env.ARCHIVE,state,'observation-receipt.json');
   }
-  private async superviseMigration(steps=100):Promise<Response> {
+  private async superviseMigration(steps=5):Promise<Response> {
+    // Native SQL cursors, typed cells, R2 bodies and driver buffers can retain
+    // memory until the invocation ends. Bound total pages as well as each page.
+    steps=Math.min(steps,5);
     const repo=JSON.parse(this.env.ALLOWED_REPOSITORIES || '[]').find((r:any)=>this.env.REPOSITORIES.idFromName(r.id).toString()===this.ctx.id.toString())?.id || this.localMeta('repository')?.id;
     if(!repo)return json({migration:null});
     let io=0;

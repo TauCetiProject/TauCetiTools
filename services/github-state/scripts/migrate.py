@@ -149,7 +149,7 @@ def main():
     parser.add_argument("--apply", action="store_true", help="perform the selected operation (requires deployed acceptance)")
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument("--retention-policy", type=Path, help="explicit post-observation retention policy JSON")
-    parser.add_argument("--batch-steps", type=int, default=1, help="supervised steps per request (1..100; also bounded by time and I/O)")
+    parser.add_argument("--batch-steps", type=int, default=1, help="requested supervised steps per request (1..100; server caps each request at five steps, time and I/O)")
     parser.add_argument("--steps", type=int, default=1, help="bounded export/verification steps per invocation")
     parser.add_argument(
         "command", choices=["preflight", "status", "start", "freeze", "resume", "abandon", "finish-observation"], nargs="?", default="preflight"
