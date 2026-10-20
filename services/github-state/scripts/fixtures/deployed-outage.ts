@@ -52,7 +52,7 @@ function wrap(env:any,ctx?:any):any {
  // the wrapped archive, including in a fresh isolate with no previous request.
  let initialized=!ctx;
  let initial:Promise<void>|undefined;
- const archive=new Proxy(native,{get(target,key){const member=Reflect.get(target,key,target);return typeof member!=='function'?member:async(...args:any[])=>{if(!initialized)await (initial ||= native.get('control/fixture-faults.json').then((o:any)=>o?.json()).then((value:any)=>{faults=value || {};initialized=true;}));if(faults.r2)throw Error('fixture R2 unavailable');return member.apply(target,args);};}});
+ const archive=new Proxy(native,{get(target,key){const member=Reflect.get(target,key,target);return typeof member!=='function'?member:async(...args:any[])=>{if(!initialized)try{await (initial ||= native.get('control/fixture-faults.json').then((o:any)=>o?.json()).then((value:any)=>{faults=value || {};initialized=true;}));}catch(error){initial=undefined;throw error;}if(faults.r2)throw Error('fixture R2 unavailable');return member.apply(target,args);};}});
  return {...env,DRILL_NATIVE_ARCHIVE:native,ARCHIVE:archive};
 }
 async function prepare(env:any,ctx?:any):Promise<any> {

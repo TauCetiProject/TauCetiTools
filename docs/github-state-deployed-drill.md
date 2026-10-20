@@ -40,7 +40,10 @@ config so Wrangler uploads these exact module bytes. Associate each resulting
 version ID (including a secret-only version) with that manifest. Store the manifest
 plus `uploaded_deployments:[{"version":"<ACTUAL_VERSION_ID>","kind":"deploy"}]`
 in private `build-deployment-manifest.json`. Both runners verify the local module
-hash and require the actual `/fixture/state` version to be enrolled. The provider
+hash and require the actual `/fixture/state` version to be enrolled. This is an
+operator-enrolled version with a locally verified bundle hash, not independent
+Cloudflare attestation of uploaded module bytes. Record the implementation commit
+next to the PR head and preserve the explicit phase/deployment associations. The provider
 helper separately labels its local operator source identity.
 
 Copy [the configuration template](../services/github-state/scripts/fixtures/deployed-outage.example.json)
@@ -161,8 +164,9 @@ restore preserves the child for investigation and clears the source fault flag;
 only a verified restore child is deleted automatically.
 
 The restart receipt records operation states/timestamps around each cached read
-and webhook request and reports whether in-progress operations overlapped those
-requests. If the provider finishes too quickly to observe overlap, retain that
+and webhook request and reports overlap separately for the cached read and webhook. A request
+counts as overlapping only when the same operation is unfinished immediately
+before and after it. If the provider finishes too quickly to observe overlap, retain that
 limitation explicitly; postmaster timestamps alone do not prove request overlap.
 The separate unavailable case verifies actual failed SQL requests.
 
