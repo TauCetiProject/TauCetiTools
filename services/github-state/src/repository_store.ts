@@ -19,7 +19,7 @@ export interface RepositoryStore {
   batch(statements:Statement[]):Promise<Rows<any>[]>;
   transaction<T>(apply:(store:RepositoryStore)=>Promise<T>):Promise<T>;
   health():Promise<Record<string,unknown>>;
-  prepareMonitoring?(analyzeTables:boolean):Promise<void>;
+  prepareMonitoring?(analyzeTables:boolean,attemptToken?:number):Promise<any>;
 }
 export class SerialLane {
   private tail:Promise<unknown>=Promise.resolve();
@@ -214,8 +214,14 @@ export class PostgresStore implements RepositoryStore {
       }catch{}finally{if(timer)clearTimeout(timer);}}
     }
   }
-  async prepareMonitoring(analyzeTables:boolean):Promise<void> {
-    await this.run(()=>this.http.query(`SELECT "${this.schema}".prepare_monitoring($1,$2)`,[this.generation,analyzeTables],{fetchOptions:{signal:AbortSignal.timeout(6000)}}));
+  async prepareMonitoring(analyzeTables:boolean,attemptToken=Date.now()):Promise<any> {
+    return this.run(async()=>{
+      const result=await this.http.transaction([
+        this.http.query("SELECT set_config('statement_timeout','5s',true)"),
+        this.http.query(`SELECT "${this.schema}".prepare_monitoring($1,$2,$3) AS result`,[this.generation,analyzeTables,attemptToken])
+      ],{fetchOptions:{signal:AbortSignal.timeout(6000)}});
+      return result[1][0].result;
+    });
   }
   async health():Promise<Record<string,unknown>> {
     let metadata:Record<string,unknown>;

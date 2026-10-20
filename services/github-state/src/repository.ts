@@ -71,6 +71,7 @@ export class RepositoryState extends DurableObject<Env> {
   private diagnosticsAt=0;
   private lastCapacity:any;
   private postgresUnavailableSince?:number;
+  private monitoringFailureSince?:number;
   private inputFailure?:{since:number,at:number,reason:string};
   private capacityHistory:CapacitySample[]=[];
   private tableEstimates:any;
@@ -1416,6 +1417,8 @@ export class RepositoryState extends DurableObject<Env> {
       const old=await this.maintenanceArchive.get('control/'+repo+'/observation.json').then(o=>o?.json<any>()).catch(()=>null);
       if(old?.backend==='postgres' && old.generation===generation) {
         this.lastCapacity=old.capacity;
+        this.postgresUnavailableSince=old.database_unavailable_since;
+        this.monitoringFailureSince=old.monitoring_failure_since;
         if(Array.isArray(old.capacity_history))this.capacityHistory=old.capacity_history.filter((r:any)=>Number.isSafeInteger(r.at) && Number.isSafeInteger(r.bytes) && r.at<=now && r.at>now-2*3600000).slice(-121);
       }
     }
@@ -1424,26 +1427,31 @@ export class RepositoryState extends DurableObject<Env> {
       // Record the expensive attempt before calling SQL: a cancelled SQL
       // transaction must not repeat table/index analysis every minute.
       const key='control/'+repo+'/postgres-table-attempt-'+generation+'.json';
-      let analyze=false;
+      let analyze=false,token=Date.now();
       try {
         const prior=await this.maintenanceArchive.get(key).then(o=>o?.json<any>());
-        if(!prior || Number.isSafeInteger(prior.at) && prior.at<=now-3600000) {
-          await this.maintenanceArchive.put(key,JSON.stringify({at:now}));analyze=true;
+        if(!prior || Number.isSafeInteger(prior.at) && (prior.at<=token-3600000 || prior.not_started===true && prior.retry_at<=token)) {
+          token=Date.now();await this.maintenanceArchive.put(key,JSON.stringify({at:token}));analyze=true;
         }
       }catch { /* Unknown attempt state skips expensive work, not minute gauges. */ }
-      await this.store.prepareMonitoring?.(analyze);
+      const prepared=await this.store.prepareMonitoring?.(analyze,token);
+      if(analyze && prepared?.analysis_attempted===false)await this.maintenanceArchive.put(key,JSON.stringify({at:token,not_started:true,retry_at:Math.max(Date.now()+60000,prepared.table_retry_at || 0)}));
     }catch(error) {preparationError=classify(error);this.noteFailure('postgres_monitoring_prepare',error);}
     if(this.migrationHeld())return;
     const storage=await this.store.health(),stats:any=storage.capacity;
     if(storage.connected===false)this.postgresUnavailableSince ??= now;else this.postgresUnavailableSince=undefined;
     this.capacityHistory=this.capacityHistory.filter(r=>r.at>=now-2*3600000 && r.at<now).slice(-120);
     const baseline=this.capacityHistory.filter(r=>r.at<=now-3600000).at(-1);
-    const fresh=Number.isSafeInteger(stats?.prepared_at) && (!this.lastCapacity || stats.prepared_at>this.lastCapacity.at);
-    const measured=fresh?postgresCapacity(stats,baseline,now,this.lastCapacity):{...(this.lastCapacity || postgresCapacity(stats,baseline,now)),stale:!stats || now-stats.prepared_at>180000};
+    const sampleValid=Number.isSafeInteger(stats?.prepared_at) && stats.prepared_at<=Date.now()+60000;
+    const fresh=sampleValid && (!this.lastCapacity || stats.prepared_at>this.lastCapacity.at);
+    const measured=fresh?postgresCapacity(stats,baseline,now,this.lastCapacity):{...(this.lastCapacity || postgresCapacity(stats,baseline,now)),stale:!sampleValid || now-stats.prepared_at>180000};
     if(fresh){this.lastCapacity=measured;this.capacityHistory.push({at:measured.at,bytes:measured.bytes,allowance:measured.allowance});}
     if(!storage.connected)measured.stale=true;
+    if(preparationError)this.monitoringFailureSince ??= now;else this.monitoringFailureSince=undefined;
     const reasons:string[]=[];
-    if(storage.generation && storage.generation!==generation || storage.backend && storage.backend!=='postgres')reasons.push('backend_generation_fenced');
+    if(preparationError==='backend_fenced' || storage.connected && (storage.generation!==generation || storage.backend!=='postgres' || storage.schema_version!==1))reasons.push('backend_generation_fenced');
+    if(measured.stale || this.monitoringFailureSince!==undefined && now-this.monitoringFailureSince>=180000)reasons.push('monitoring_unavailable');
+    if(this.inputFailure && now-this.inputFailure.at>180000)this.inputFailure=undefined;
     if(this.inputFailure && now-this.inputFailure.since>=60000)reasons.push('input_application_unavailable');
     if(measured.level && measured.level!=='ok')reasons.push('storage_capacity');
     if(this.postgresUnavailableSince!==undefined && now-this.postgresUnavailableSince>=60000)reasons.push('input_application_unavailable');
@@ -1455,10 +1463,12 @@ export class RepositoryState extends DurableObject<Env> {
     const usable=connections?connections.max-connections.reserved:0;
     const pressure=usable>0?connections.used/usable:null;
     if(pressure!==null && pressure>=.7)reasons.push('connection_saturation');
-    const critical=reasons.some(r=>!['storage_capacity','connection_saturation'].includes(r)) || measured.level==='critical' || pressure!==null && pressure>=.85;
+    if(ingress.dlq?.count>0)reasons.push('input_dead_lettered');
+    const uniqueReasons=[...new Set(reasons)];
+    const critical=uniqueReasons.some(r=>!['storage_capacity','connection_saturation','monitoring_unavailable'].includes(r)) || measured.level==='critical' || pressure!==null && pressure>=.85;
     const level=critical?'critical':reasons.length?'warning':'ok';
     const requests=this.requestMetrics.snapshot(now),{intervals,...requestSummary}=requests;
-    const value={version:1,at:now,backend:'postgres',generation,level,reasons,storage,capacity:measured,capacity_history:this.capacityHistory,
+    const value={version:1,at:now,backend:'postgres',generation,level,reasons:uniqueReasons,storage:{...storage,observed_at:now,stale:measured.stale},database_unavailable_since:this.postgresUnavailableSince,monitoring_failure_since:this.monitoringFailureSince,capacity:measured,capacity_history:this.capacityHistory,
       preparation_error:preparationError,monitoring_stale:measured.stale,table_row_estimates:stats?.observation?.table_row_estimates ?? null,tables:{at:stats?.tables_prepared_at ?? null,attempt_at:stats?.tables_attempt_at ?? null,values:stats?.tables ?? null,stale:!stats?.tables_prepared_at || now-stats.tables_prepared_at>2*3600000},
       connections:{...connections,ratio:pressure,connected:storage.connected,failures:storage.connection_failures,stale:!stats?.prepared_at || now-stats.prepared_at>180000},
       compute:{...(stats?.observation?.compute || {cpu_utilization:null,reason:'use_neon_compute_metrics'}),stale:!stats?.prepared_at || now-stats.prepared_at>180000},
@@ -1490,7 +1500,8 @@ export class RepositoryState extends DurableObject<Env> {
       }
     }
     const {capacity_history,...publicObservation}=this.observation || {};
-    return {...publicObservation,stale:!this.observation || Date.now()-this.observation.at>180000,age_ms:this.observation?Date.now()-this.observation.at:null};
+    const stale=!this.observation || Date.now()-this.observation.at>180000 || Boolean(this.observation.monitoring_stale);
+    return {...publicObservation,...(publicObservation.storage?{storage:{...publicObservation.storage,observed_at:this.observation.at,stale}}:{}),stale,age_ms:this.observation?Date.now()-this.observation.at:null};
   }
   async maintenance(): Promise<void> {
     if(!this.degraded) {
@@ -1715,7 +1726,7 @@ export class RepositoryState extends DurableObject<Env> {
   }
   async storage(path:string,req:Request): Promise<Response> {
     if(this.store.backend==='postgres' && !['/storage/summary','/storage/ingress','/storage/deliveries','/storage/retention'].includes(path)) throw new AdminError('sqlite_recovery_only');
-    if(this.store.backend==='postgres' && path==='/storage/summary') return json({storage:(await this.preparedObservation()).storage || {backend:'postgres',stale:true},monitoring:await this.preparedObservation(),retention:{policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,receipts_pinned:this.receiptsPinned,receipt_pin_backend:'r2'}});
+    if(this.store.backend==='postgres' && path==='/storage/summary') {const monitoring=await this.preparedObservation();return json({storage:monitoring.storage || {backend:'postgres',stale:true},monitoring,retention:{policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,receipts_pinned:this.receiptsPinned,receipt_pin_backend:'r2'}});}
     const input:any=req.method==='POST'?await req.json():{};
     const repo=(await this.meta('repository'))?.id ?? input.repository_id;
     if (typeof repo!=='string' || !/^[0-9]+$/.test(repo)) throw new AdminError('repository_unconfigured');
@@ -2070,7 +2081,7 @@ export class RepositoryState extends DurableObject<Env> {
       }
       if (path==='/health' && this.store.backend==='postgres') {
         const monitoring=await this.preparedObservation(),storage=monitoring.storage || {backend:'postgres',schema_version:null,expected_schema_version:1,expected_generation:this.env.REPOSITORY_GENERATION,connected:null,stale:true};
-        return json({...this.diagnostics,reconciliation_version:2,revision:this.revisionState.value ?? this.diagnostics.revision ?? null,repository:this.repositoryMemo ?? this.diagnostics.repository ?? null,storage,monitoring,request_id,diagnostics_at:this.diagnosticsAt || null,diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
+        return json({...this.diagnostics,reconciliation_version:2,revision:this.revisionState.value ?? this.diagnostics.revision ?? null,repository:this.repositoryMemo ?? this.diagnostics.repository ?? null,storage,monitoring,request_id,deployment_id:this.env.CF_VERSION?.id,diagnostics_at:this.diagnosticsAt || null,diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
       }
       if (path==='/health') {
         const storage={...await this.storageState(),backend:'sqlite',schema_version:SCHEMA_VERSION};
@@ -2113,7 +2124,7 @@ export class RepositoryState extends DurableObject<Env> {
       requestError=true;
       if (error instanceof AdminError) return json({error:error.message,request_id},400);
       const reason=this.noteFailure('request:'+path,error);
-      if(path==='/event')this.inputFailure={since:this.inputFailure?.since ?? Date.now(),at:Date.now(),reason};
+      if(path==='/event' && PARKABLE.has(reason))this.inputFailure={since:this.inputFailure?.since ?? Date.now(),at:Date.now(),reason};
       log('repository_request_failed',{request_id,path,reason});
       return json({error:reason,parkable:PARKABLE.has(reason),message:(error instanceof Error?error.message:'operation failed').slice(0,200),request_id},reason==='internal'?500:503);
     }finally {

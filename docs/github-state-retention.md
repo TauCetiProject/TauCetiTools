@@ -214,7 +214,7 @@ uv run python "$S" --environment test retention --mode dry_run \
   --disable staging_spills --disable legacy_staging_spills
 ```
 
-Expected: all twelve SQL/R2 expiry classes disabled.
+Expected: all thirteen SQL/R2 expiry classes disabled.
 This does not stop installation accounting's independent seven-day telemetry
 expiry. Retain migration and parked input regardless of overrides. Inspect health's stale flags and failed class checkpoints;
 repeated checkpoint failure is not proof of cleanup progress.
@@ -277,16 +277,20 @@ export APPLICATION_ROLE=github_state_test_app
 node scripts/migrate-postgres.mjs "$REPOSITORY_ID" "$GENERATION"
 # Use the effective allowance verified for this dedicated project, not a plan guess.
 export STORAGE_LIMIT_BYTES=1099511627776
-node scripts/prepare-postgres-statistics.mjs "$REPOSITORY_ID"
+node scripts/prepare-postgres-statistics.mjs "$REPOSITORY_ID" "$GENERATION"
 ```
 
 Expected: matching repository/generation with `schema_version: 1`, then
 `prepared: true`. An existing ownership mismatch stops initialization. Deployment
-alone performs no DDL. `prepare_monitoring(expected_generation, analyze_tables)`
-is a fixed-schema, security-definer function with a fixed search path, time/lock
-limits and no dynamic SQL. The application can call it and read prepared statistics;
+alone performs no DDL. `prepare_monitoring(expected_generation, analyze_tables, attempt_token)`
+is a fixed-schema, security-definer function with an explicit `pg_catalog, pg_temp` search path and qualified catalog views. The
+HTTP transaction sets a server statement timeout before invoking the function,
+which also has a lock timeout and no dynamic SQL. The application can call it and read prepared statistics;
 it cannot set allowance/restore receipts, create schemas or change backend ownership.
 The function checks generation and serializes samplers with a try advisory lock.
+Its returned outcome distinguishes a real analysis attempt from a busy/recent
+sample; a known unstarted attempt is retried on a later minute. The SQL and R2
+hourly gates use the same attempt token.
 No runtime migration credential is added.
 
 Every minute, it saves current database bytes, connection usage/limit/reserves,
@@ -295,8 +299,9 @@ PostgreSQL statistics. CPU utilization is explicitly unavailable from these SQL
 views; use the dedicated project's existing Neon compute monitoring. Active-query
 and lock-wait observations are separate compute-pressure diagnostics, not a claim
 to measure CPU. [PostgreSQL statistics visibility](https://www.postgresql.org/docs/18/monitoring-stats.html)
-limits session detail for roles without `pg_read_all_stats`; the response labels
-that limitation. This release grants no global statistics role.
+limits session detail for roles without `pg_read_all_stats`. The response reports
+the actual definer's visibility; this release grants no global statistics role.
+Connection counts include only client backends, excluding background processes.
 
 Physical table/index/TOAST sizes and their growth are prepared at most hourly.
 R2 records the expensive attempt **before** SQL so a failed/cancelled transaction
@@ -315,8 +320,9 @@ expose that distinction, and `project_usage_bytes` stays null when not measured.
 Operators must continue watching actual project/account usage in Neon. The 70%/85%
 byte warnings and seven-day/24-hour confirmed forecasts apply to the measured
 lower bound; they cannot prove total account headroom. Connection usage emits a
-separate warning/critical at 70%/85% of nonreserved slots. Capacity, connection
-pressure, a persistent unapplied-input failure and loss of parked durability feed
+separate warning/critical at 70%/85% of nonreserved slots. Missing/mismatched generation or schema is critical; stale monitoring or a
+persistent sampler failure warns explicitly. Capacity, connection
+pressure, a recent persistent parkable input failure and loss of parked durability feed
 structured alarms in the configured Workers observability stream. Alarm delivery
 failure retains health and never claims human notification. Stale capacity or
 recovery observations stay stale even if the wrapper response is recent.
@@ -354,7 +360,9 @@ recorded **test** branch/endpoint, creates a random disposable repository schema
 records its database timestamp and table hashes, changes the source sentinel, then
 creates a temporary point-in-time child of that test branch. It verifies the old
 sentinel and every table before deleting the child and source fixture. It then closes its own connection, restarts only that just-created temporary
-endpoint and reconnects to recheck every table. It never restarts shared test or
+endpoint, waits for every returned restart operation to finish and requires
+`pg_postmaster_start_time()` to advance before rechecking every table. The receipt
+records the script hash, implementation revision and source dirty flag. It never restarts shared test or
 production compute or selects a production endpoint. If an API mutation has an ambiguous
 failure, inspect existing `issue317-restore-*` branches before retrying; do not
 blindly repeat creates. If cleanup fails, retain the receipt's branch ID and stop

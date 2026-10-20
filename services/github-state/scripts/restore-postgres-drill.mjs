@@ -1,6 +1,8 @@
 // Isolated test branch only. Does not restart/select/migrate the production service.
 import {readFile,writeFile} from 'node:fs/promises';
 import {randomBytes,createHash} from 'node:crypto';
+import {sourceFingerprint} from './source-fingerprint.mjs';
+import {fileURLToPath} from 'node:url';
 import {Client} from '@neondatabase/serverless';
 import {testCredentials} from '../tests/postgres_credentials.mjs';
 import {initializeSchema} from './postgres-schema.mjs';
@@ -14,7 +16,7 @@ const api=async(path,method='GET',body)=>{
  if(!r.ok){const value=await r.json().catch(()=>({}));throw Error('neon_api_'+r.status+'_'+String(value.code || value.message || 'unknown').replace(/[^a-zA-Z0-9_ -]/g,'').slice(0,100));}return r.status===204?{}:r.json();
 };
 const checksum=rows=>createHash('sha256').update(JSON.stringify(rows)).digest('hex');
-const receipt={version:1,started:new Date().toISOString(),project,test_branch:parent,production_data:false,production_fault_injection:false,github_calls:0,verified:false,temporary_branch_deleted:false};
+const receipt={version:2,...sourceFingerprint(fileURLToPath(new URL('..',import.meta.url))),script_sha256:createHash('sha256').update(await readFile(fileURLToPath(import.meta.url))).digest('hex'),started:new Date().toISOString(),project,test_branch:parent,production_data:false,production_fault_injection:false,github_calls:0,verified:false,temporary_branch_deleted:false};
 let source,restored,branch,schema;
 try {
  if(credentials.migration.hostname!==provision.test_compute.id+'.'+provision.project.region_id.replace('aws-','')+'.aws.neon.tech' && !credentials.migration.hostname.startsWith(provision.test_compute.id+'.'))throw Error('test_endpoint_identity_mismatch');
@@ -52,9 +54,26 @@ try {
  // our own session. Never restart the shared test or production endpoint.
  const endpoint=created.endpoints[0];
  if(endpoint.branch_id!==branch || [provision.test_compute.id,provision.production_compute.id].includes(endpoint.id))throw Error('restart_endpoint_identity_mismatch');
+ const startedBefore=(await restored.query('SELECT pg_postmaster_start_time()::text started')).rows[0].started;
  await restored.end();restored=undefined;
- await api(`/projects/${project}/endpoints/${endpoint.id}/restart`,'POST');
+ const restarting=await api(`/projects/${project}/endpoints/${endpoint.id}/restart`,'POST');
+ const operations=restarting.operations || [];if(!operations.length)throw Error('restart_operation_missing');
+ receipt.restart_operations=operations.map(op=>op.id);
+ for(const operation of operations) {
+  let finished=false;
+  for(let attempt=0;attempt<60;attempt++) {
+   const value=await api(`/projects/${project}/operations/${operation.id}`),status=value.operation?.status;
+   if(status==='finished'){finished=true;break;}
+   if(['failed','cancelled','skipped'].includes(status))throw Error('restart_operation_failed');
+   await new Promise(r=>setTimeout(r,2000));
+  }
+  if(!finished)throw Error('restart_operation_timeout');
+ }
  restored=await reconnect();
+ const startedAfter=(await restored.query('SELECT pg_postmaster_start_time()::text started')).rows[0].started;
+ if(Date.parse(startedAfter)<=Date.parse(startedBefore))throw Error('restart_not_observed');
+ receipt.postmaster_started_before=startedBefore;receipt.postmaster_started_after=startedAfter;
+ receipt.restart_operations_finished=true;
  for(const table of tables)if(checksum((await restored.query(`SELECT * FROM ${schema}.${table} ORDER BY 1`)).rows)!==manifests[table])throw Error('restart_checksum_mismatch');
  receipt.temporary_endpoint_restarted=true;receipt.restart_recovered=true;receipt.temporary_endpoint=endpoint.id;
  receipt.verified=true;receipt.tables=tables.length;receipt.manifest_sha256=checksum(manifests);receipt.exact_id_preserved=true;receipt.before_restored_after_source_mutation=true;

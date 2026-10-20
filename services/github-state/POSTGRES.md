@@ -129,7 +129,7 @@ the intended database and repository, using a separate application role:
 # MIGRATION_DATABASE_URL and APPLICATION_ROLE are already supplied securely.
 node scripts/migrate-postgres.mjs "$REPOSITORY_ID" "$GENERATION"
 # STORAGE_LIMIT_BYTES must come from verified effective account/project limits.
-node scripts/prepare-postgres-statistics.mjs "$REPOSITORY_ID"
+node scripts/prepare-postgres-statistics.mjs "$REPOSITORY_ID" "$GENERATION"
 ```
 
 The migration CLI does not change existing backend ownership. Capacity preparation

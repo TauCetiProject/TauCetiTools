@@ -7,20 +7,13 @@ import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import {postgresFiles} from './postgres-suite.mjs';
 import {testCredentials} from '../tests/postgres_credentials.mjs';
+import {sourceFingerprint} from './source-fingerprint.mjs';
 const cwd=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 const postgres=process.argv[2]==='--postgres';
 if(postgres)testCredentials();else if(process.env.TEST_POSTGRES_URL || process.env.TEST_POSTGRES_MIGRATION_URL)throw Error('Use --postgres when test credentials are supplied');
 const destination=resolve(process.argv[postgres?3:2] || '/tmp/github-state-outage-drill-'+Date.now()+'.json');
 const started=new Date().toISOString();
-const hash=createHash('sha256');
-for(const folder of ['src','tests','scripts','migrations'])for(const file of readdirSync(resolve(cwd,folder),{recursive:true}).sort()) {
- if(!/\.(ts|mjs|py|sql)$/.test(file))continue;
- hash.update(folder+'/'+file+'\0');hash.update(readFileSync(resolve(cwd,folder,file)));
-}
-for(const file of ['package.json','package-lock.json','wrangler.jsonc','tsconfig.json']) {hash.update(file+'\0');hash.update(readFileSync(resolve(cwd,file)));}
-const workspace_sha256=hash.digest('hex');
-const revision=spawnSync('git',['rev-parse','HEAD'],{cwd,encoding:'utf8'}).stdout.trim();
-const source_dirty=Boolean(spawnSync('git',['status','--porcelain','--','src','tests','scripts','migrations','package.json','package-lock.json','wrangler.jsonc','tsconfig.json'],{cwd,encoding:'utf8'}).stdout.trim());
+const identity=sourceFingerprint(cwd);
 for(const command of ['typecheck','build']) {
  const check=spawnSync('npm',['run',command],{cwd,encoding:'utf8'});
  if(check.status!==0){process.stderr.write(check.stdout+check.stderr);process.exit(check.status || 1);}
@@ -31,7 +24,7 @@ const transcript=(result.stdout || '')+(result.stderr || '');
 const passed=[...result.stdout.matchAll(/^ok \d+(?: -)? (.+)$/gm)].map(m=>m[1]).filter(name=>!/# SKIP/.test(name));
 const skipped=[...result.stdout.matchAll(/^ok \d+(?: -)? (.+) # SKIP.*$/gm)].map(m=>m[1]);
 const failed=[...result.stdout.matchAll(/^not ok \d+(?: -)? (.+)$/gm)].map(m=>m[1]);
-const evidence={version:2,started,finished:new Date().toISOString(),implementation_revision:revision,workspace_sha256,source_dirty,
+const evidence={version:2,started,finished:new Date().toISOString(),...identity,
   environment:postgres?'isolated_neon_test_branch':'local_sqlite_fault_fixtures',typecheck_exit_status:0,build_exit_status:0,exit_status:result.status,
   passed:passed.length,failed:failed.length,skipped:skipped.length,test_files:files,scenarios:passed,failed_tests:failed,
   transcript_sha256:createHash('sha256').update(transcript).digest('hex'),

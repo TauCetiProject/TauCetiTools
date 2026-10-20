@@ -78,7 +78,7 @@ pg('PostgreSQL outage and coordinator restart park acknowledged input then sched
   const held=await ingress.park(f.env,repo,heldPointer,'previous-service-failure');
   await f.env.ARCHIVE.put(ingress.pointerKey(repo.id,heldPointer,true),JSON.stringify({...held,replay_failures:5}));
   await f.env.ARCHIVE.delete(ingress.pointerKey(repo.id,heldPointer));
-  await state.storageMaintenance();state.postgresUnavailableSince=Date.now()-61000;state.observation.at=Date.now()-61000;
+  await state.storageMaintenance();t.mock.timers.tick(70000);
   await state.storageMaintenance();assert.equal((await state.preparedObservation()).level,'critical');
   down=false;t.mock.timers.tick(700000);
   await ingress.maintainIngress(f.env,repo);
@@ -130,6 +130,7 @@ pg('verified migration archive restores every repository table, exact IDs and re
      if(digest(text)!==page.sha256)throw Error('archive_digest_mismatch');
      for(const row of JSON.parse(text)){const fields=Object.keys(row);await target.admin.query(`INSERT INTO ${target.schema}.${page.table} (${fields.join(',')}) OVERRIDING SYSTEM VALUE VALUES (${fields.map((_,i)=>'$'+(i+1)).join(',')})`,Object.values(row));}
     }
+    for(const table of Object.keys(columns))await target.admin.query(`SELECT setval(pg_get_serial_sequence($1,'rowid'),GREATEST(COALESCE((SELECT MAX(rowid) FROM ${target.schema}.${table}),0),1),EXISTS(SELECT 1 FROM ${target.schema}.${table}))`,[target.schema+'.'+table]);
     await target.admin.query('COMMIT');
    }catch(error){await target.admin.query('ROLLBACK');throw error;}
   }
@@ -139,6 +140,8 @@ pg('verified migration archive restores every repository table, exact IDs and re
   const restored=(await target.store.exec('SELECT data FROM resources WHERE id=?',huge)).one();assert.equal((await target.state.decode(restored.data)).body,'retained archive contents');
   assert.equal((await target.store.exec('SELECT at FROM activity_landings')).one().at,1792000000123456);
   assert.ok((await target.store.exec('SELECT payload FROM cursors')).one().payload.includes(blob));
+  await target.state.put('pr','8',{number:8,body:'post-restore progress',state:'OPEN'},Date.now());
+  assert.ok((await target.store.exec("SELECT data FROM resources WHERE kind='pr' AND id='8'")).one().data.includes('post-restore progress'));
  }finally {await source.close();await target.close();}
 });
 
@@ -178,7 +181,7 @@ pg('a lost commit response replays idempotently and imported legacy cursors expi
 pg('PostgreSQL storage and connection alarms retain prepared health when alarm delivery fails',async()=>{
  const f=await postgresFixture();const output=console.log;try {
   f.env.ARCHIVE=bucket();let now=Date.now(),stats={prepared_at:now,database_bytes:700,storage_limit_bytes:1000,observation:{connections:{used:7,max:10,reserved:0}},tables_prepared_at:now,tables:{}};
-  f.state.store=new Proxy(f.store,{get(target,key){if(key==='prepareMonitoring')return async()=>{};if(key==='health')return async()=>({backend:'postgres',generation:'test-v1',connected:true,capacity:stats});const value=target[key];return typeof value==='function'?value.bind(target):value;}});
+  f.state.store=new Proxy(f.store,{get(target,key){if(key==='prepareMonitoring')return async()=>{};if(key==='health')return async()=>({backend:'postgres',generation:'test-v1',schema_version:1,connected:true,capacity:stats});const value=target[key];return typeof value==='function'?value.bind(target):value;}});
   console.log=()=>{throw Error('observability unavailable');};
   await f.state.storageMaintenance();let value=await f.state.preparedObservation();
   assert.equal(value.level,'warning');assert.equal(value.alarm.emitted,false);assert.equal(value.alarm.notified,false);assert.equal(value.capacity.growable,true);
@@ -187,4 +190,62 @@ pg('PostgreSQL storage and connection alarms retain prepared health when alarm d
   f.state.observation.at=now-61000;stats={...stats,prepared_at:now+2,database_bytes:1,storage_limit_bytes:null,observation:{connections:{used:1,max:10,reserved:0}}};
   await f.state.storageMaintenance();value=await f.state.preparedObservation();assert.equal(value.capacity.capacity_unknown,true);assert.equal(value.level,'ok');
  }finally {console.log=output;await f.close();}
+});
+
+pg('missing control and missing monitoring function alarm precisely without blocking prepared health',async()=>{
+ const f=await postgresFixture();try {
+  f.env.ARCHIVE=bucket();
+  await f.admin.query(`DELETE FROM ${f.schema}.backend_control`);
+  await f.state.storageMaintenance();let value=await f.state.preparedObservation();
+  assert.equal(value.level,'critical');assert.ok(value.reasons.includes('backend_generation_fenced'));assert.equal(value.storage.stale,true);
+  await f.admin.query(`INSERT INTO ${f.schema}.backend_control VALUES(1,'postgres','test-v1',1)`);
+  await f.admin.query(`UPDATE ${f.schema}.backend_control SET schema_version=2`);f.state.observation.at=Date.now()-61000;
+  await f.state.storageMaintenance();assert.ok((await f.state.preparedObservation()).reasons.includes('backend_generation_fenced'));
+  await f.admin.query(`UPDATE ${f.schema}.backend_control SET schema_version=1`);
+  await f.admin.query(`DROP FUNCTION ${f.schema}.prepare_monitoring(TEXT,BOOLEAN,BIGINT)`);
+  f.state.observation.at=Date.now()-61000;
+  await f.state.storageMaintenance();value=await f.state.preparedObservation();
+  assert.equal(value.level,'warning');assert.ok(value.reasons.includes('monitoring_unavailable'));assert.equal(value.stale,true);
+  f.state.store=new Proxy(f.store,{get(target,key){if(['exec','batch','health'].includes(key))return ()=>{throw Error('unexpected status SQL');};const v=target[key];return typeof v==='function'?v.bind(target):v;}});
+  const health=await (await send(f.state,'/health')).json();assert.equal(health.storage.stale,true);assert.ok(health.storage.observed_at);
+ }finally {await f.close();}
+});
+
+pg('SQL sampling uses one hourly token across clocks, retries known busy work, and ignores temporary catalog shadows',async()=>{
+ const f=await postgresFixture();try {
+  const firstToken=Date.now();const first=await f.store.prepareMonitoring(true,firstToken);assert.equal(first.analyzed,true);
+  await f.admin.query(`UPDATE ${f.schema}.capacity_statistics SET tables_attempt_at=$1`,[firstToken-3600000]);
+  // A recently prepared minute sample must not suppress an hourly analysis.
+  const next=await f.store.prepareMonitoring(true,firstToken);assert.equal(next.analyzed,true);
+  const third=await f.store.prepareMonitoring(true,firstToken+1);assert.equal(third.analysis_attempted,false);
+  await f.admin.query('BEGIN');await f.admin.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))",[f.schema+':monitoring']);
+  const busy=await f.store.prepareMonitoring(true);assert.equal(busy.reason,'busy');assert.equal(busy.analysis_attempted,false);await f.admin.query('ROLLBACK');
+  await f.store.transaction(async tx=>{
+   await tx.exec('CREATE TEMP TABLE pg_class(oid oid,relname name,relnamespace oid,relkind char,reltuples real)');
+   await tx.exec("INSERT INTO pg_class(oid,relname,relnamespace,relkind,reltuples) VALUES(0,'forged',0,'r',999999)");
+   await tx.exec('CREATE TEMP TABLE pg_stat_activity(backend_type text,state text,wait_event_type text,datname name)');
+   await tx.exec("INSERT INTO pg_stat_activity(backend_type,state,wait_event_type,datname) VALUES('client backend','active',NULL,current_database())");
+   await tx.exec(`SELECT "${f.schema}".prepare_monitoring(?,true,?)`,'test-v1',Date.now());
+  });
+  const actual=(await f.store.health()).capacity;assert.equal(Object.hasOwn(actual.tables,'forged'),false);assert.ok(actual.observation.connections.used>=1);
+ }finally {await f.admin.query('ROLLBACK').catch(()=>{});await f.close();}
+});
+
+pg('monitoring has a server timeout, a failed expensive pass is not retried blindly, and later attempts recover',async()=>{
+ const f=await postgresFixture();try {
+  await f.admin.query(`CREATE FUNCTION ${f.schema}.slow_monitor() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(8); RETURN NEW; END $$; CREATE TRIGGER slow_monitor BEFORE UPDATE ON ${f.schema}.capacity_statistics FOR EACH ROW EXECUTE FUNCTION ${f.schema}.slow_monitor()`);
+  const started=performance.now();await assert.rejects(f.store.prepareMonitoring(true),/57014/);assert.ok(performance.now()-started<7000);
+  await f.admin.query(`DROP TRIGGER slow_monitor ON ${f.schema}.capacity_statistics`);
+  assert.equal((await f.store.prepareMonitoring(true)).sampled,true);
+  f.env.ARCHIVE=bucket();const attempts=[];
+  f.state.store=new Proxy(f.store,{get(target,key){if(key==='prepareMonitoring')return async analyze=>{attempts.push(analyze);throw Error('Repository database unavailable');};const v=target[key];return typeof v==='function'?v.bind(target):v;}});
+  await f.state.storageMaintenance();f.state.observation.at=Date.now()-61000;
+  await f.state.storageMaintenance();assert.deepEqual(attempts,[true,false]);
+  f.env.ARCHIVE=bucket();f.state.observation=undefined;const known=[];
+  f.state.store=new Proxy(f.store,{get(target,key){if(key==='prepareMonitoring')return async analyze=>{known.push(analyze);return {analysis_attempted:false,reason:'busy'};};const v=target[key];return typeof v==='function'?v.bind(target):v;}});
+  await f.state.storageMaintenance();
+  const key='control/100/postgres-table-attempt-test-v1.json',pending=await f.env.ARCHIVE.get(key).then(o=>o.json());
+  assert.equal(pending.not_started,true);await f.env.ARCHIVE.put(key,JSON.stringify({...pending,retry_at:Date.now()-1}));
+  f.state.observation.at=Date.now()-61000;await f.state.storageMaintenance();assert.deepEqual(known,[true,true]);
+ }finally {await f.close();}
 });

@@ -27,7 +27,7 @@ export async function initializeSchema(client,repository,generation,role) {
   // CHECK prevents changes; backend, generation and version remain read-only.
   await client.query(`GRANT UPDATE(singleton) ON ${schema}.backend_control TO ${role}`);
   await client.query(`GRANT EXECUTE ON FUNCTION ${schema}.assert_writer(TEXT) TO ${role}`);
-  await client.query(`GRANT EXECUTE ON FUNCTION ${schema}.prepare_monitoring(TEXT,BOOLEAN) TO ${role}`);
+  await client.query(`GRANT EXECUTE ON FUNCTION ${schema}.prepare_monitoring(TEXT,BOOLEAN,BIGINT) TO ${role}`);
  }
  return schema;
 }
