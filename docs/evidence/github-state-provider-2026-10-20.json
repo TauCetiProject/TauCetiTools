@@ -1,0 +1,359 @@
+{
+  "version": 1,
+  "implementation": {
+    "implementation_revision": "24bc140d00837c82e88723168cf35b4d40680527",
+    "workspace_sha256": "806b768085b13f3baecd6bbc17265bfb1d272a05be09d3870913cbcfd0f3d5a3",
+    "source_dirty": false
+  },
+  "local_validation": {
+    "service": {
+      "passed": 216,
+      "skipped": 52,
+      "failed": 0
+    },
+    "neon_prevention_and_monitoring": {
+      "passed": 16,
+      "failed": 0
+    },
+    "python": {
+      "passed": 12,
+      "failed": 0
+    },
+    "prior_full_neon": {
+      "implementation_revision": "b4e811510b6089bc542d7720543912b6d159014d",
+      "passed": 102,
+      "skipped": 1,
+      "failed": 0
+    }
+  },
+  "provider_read_only_validation": {
+    "verified_at": "2026-10-20T11:52:05.440Z",
+    "read_only": true,
+    "neon_requests": 4,
+    "github_requests": 0,
+    "other_requests": 0,
+    "observation": {
+      "version": 1,
+      "project": "sparkling-sunset-73872362",
+      "branch": "br-icy-feather-b54h8dxh",
+      "endpoint": "ep-shy-cherry-b5nnow2x",
+      "cpu_required": false,
+      "at": 1792497125127,
+      "last_attempt": 1792497125127,
+      "error": null,
+      "capacity": {
+        "at": 1792497125127,
+        "bytes": 106307584,
+        "allowance": 1099511627776,
+        "backend": "postgres",
+        "allowance_kind": "neon_branch_logical_size_quota",
+        "growable": true,
+        "reusable_bytes": null,
+        "growth_bytes_per_second": null,
+        "projected_exhaustion_at": null,
+        "baseline_at": null,
+        "forecast_level": "ok",
+        "forecast_breaches": 0,
+        "forecast_confirmed": false,
+        "level": "ok",
+        "stale": false,
+        "capacity_unknown": false,
+        "usage_scope": "selected_branch_all_databases",
+        "allowance_scope": "branch",
+        "measurement": "provider_logical_size_estimate",
+        "retrieved_at": 1792497125127,
+        "provider_sample_at": null,
+        "provider_refresh_lag_unknown": true
+      },
+      "branch_limits": {
+        "configured_quota_bytes": 1099511627776,
+        "provider_limit_bytes": 17592186044416,
+        "effective_bytes": 1099511627776,
+        "error": null
+      },
+      "branches": [
+        {
+          "id": "br-wispy-unit-b5i6xalz",
+          "logical_bytes": 33021952
+        },
+        {
+          "id": "br-icy-feather-b54h8dxh",
+          "logical_bytes": 106307584
+        },
+        {
+          "id": "br-fancy-unit-b5kzg3kp",
+          "logical_bytes": 195993600
+        }
+      ],
+      "branch_inventory_complete": true,
+      "branch_inventory_at": 1792497125127,
+      "branch_inventory_stale": false,
+      "project_logical_branch_sum_bytes": 335323136,
+      "project_sum_includes_shared_copies": true,
+      "project_physical_bytes": null,
+      "account_storage_allowance_bytes": null,
+      "account_usage_bytes": null,
+      "compute": {
+        "state": "active",
+        "min_cu": 0.5,
+        "max_cu": 2,
+        "at": null,
+        "cpu_utilization": null,
+        "stale": true,
+        "reason": "compute_observation_unavailable"
+      },
+      "source": "neon_management_api",
+      "configured": true,
+      "stale": false
+    }
+  },
+  "deployed_observations": {
+    "test": {
+      "source_revision_unverified": true,
+      "first": {
+        "at": null,
+        "observed_at": 1792495535.4082575,
+        "environment": "test",
+        "deployment_id": "2da73e57-4cfe-4c92-8c9c-c000ca95a9f4",
+        "backend": "sqlite",
+        "monitoring_stale": false,
+        "level": "ok",
+        "ingress_durable": true,
+        "queue": {
+          "count": null,
+          "stale": true
+        },
+        "dlq": {
+          "count": null,
+          "stale": true
+        },
+        "replay": {
+          "mode": "apply",
+          "parked": {
+            "count": 492,
+            "truncated": true,
+            "oldest_received": 1792436118162
+          },
+          "held": {
+            "count": 0,
+            "truncated": false,
+            "oldest_received": null
+          },
+          "last_attempt": 1792495475992,
+          "next_retry": 1792495505992,
+          "last_pass": {
+            "replayed": 10,
+            "failed": 0,
+            "remaining": true,
+            "stopped": "deadline"
+          }
+        }
+      },
+      "second": {
+        "at": 1792495974.0792258,
+        "observed_at": null,
+        "environment": null,
+        "deployment_id": "2da73e57-4cfe-4c92-8c9c-c000ca95a9f4",
+        "backend": "sqlite",
+        "monitoring_stale": false,
+        "level": "ok",
+        "ingress_durable": true,
+        "queue": {
+          "at": 1792495895133,
+          "count": 3,
+          "bytes": 621,
+          "oldest_received": 1792495887020,
+          "approximate": true,
+          "error": null,
+          "stale": false
+        },
+        "dlq": {
+          "at": 1792495895133,
+          "count": 0,
+          "bytes": 0,
+          "oldest_received": null,
+          "approximate": true,
+          "error": null,
+          "stale": false
+        },
+        "replay": {
+          "mode": "apply",
+          "parked": {
+            "count": 492,
+            "truncated": true,
+            "oldest_received": 1792436118162
+          },
+          "held": {
+            "count": 0,
+            "truncated": false,
+            "oldest_received": null
+          },
+          "last_attempt": 1792495895214,
+          "next_retry": 1792495865255,
+          "last_pass": {
+            "replayed": 30,
+            "failed": 0,
+            "remaining": true,
+            "stopped": "deadline"
+          }
+        }
+      },
+      "earlier_queue_metrics_from_authenticated_session_health": {
+        "deployment_id": "2da73e57-4cfe-4c92-8c9c-c000ca95a9f4",
+        "prepared_at": 1792495175423,
+        "queue_count": 1,
+        "dlq_count": 2573
+      }
+    },
+    "production": {
+      "at": null,
+      "observed_at": 1792496084.932006,
+      "environment": "production",
+      "deployment_id": "84ab5ea1-0760-4683-a21f-d7df09f12879",
+      "backend": null,
+      "monitoring_stale": false,
+      "level": "ok",
+      "ingress_durable": true,
+      "queue": {
+        "count": null,
+        "reason": "management_metrics_not_configured"
+      },
+      "dlq": {
+        "count": null,
+        "reason": "management_metrics_not_configured"
+      },
+      "replay": {
+        "mode": "apply",
+        "parked": {
+          "count": 492,
+          "truncated": true,
+          "oldest_received": 1792463265024
+        },
+        "held": {
+          "count": 0,
+          "truncated": false,
+          "oldest_received": null
+        },
+        "last_attempt": 1792496034525,
+        "next_retry": 1792496064525,
+        "last_pass": {
+          "replayed": 20,
+          "failed": 0,
+          "remaining": true,
+          "stopped": null
+        }
+      },
+      "source_revision_unverified": true,
+      "capacity": {
+        "at": 1792496067260,
+        "bytes": 2046803968,
+        "allowance": 10737418240,
+        "backend": "sqlite",
+        "allowance_kind": "durable_object_hard_limit",
+        "growable": false,
+        "reusable_bytes": null,
+        "growth_bytes_per_second": 1681.1384252732573,
+        "projected_exhaustion_at": 1797665548928.7017,
+        "baseline_at": 1792492441831,
+        "forecast_level": "ok",
+        "forecast_breaches": 0,
+        "forecast_confirmed": false,
+        "level": "ok",
+        "stale": false,
+        "capacity_unknown": false
+      },
+      "reported_storage_backend_missing": true
+    }
+  },
+  "test_retention_read_only": {
+    "policy": {
+      "disabled": [],
+      "mode": "dry_run",
+      "pinned": [
+        "r2_cursors",
+        "raw_webhooks",
+        "daily_archives",
+        "staging_pages",
+        "telemetry_intervals",
+        "staging_spills",
+        "legacy_staging_spills"
+      ]
+    },
+    "receipts_pinned": true,
+    "budget": {
+      "bytes": 4194304,
+      "cooperative_io_budget_ms": 50,
+      "cpu_bound": "rows_and_bytes",
+      "receipt_archive_io_budget_ms": 2000,
+      "receipt_archive_rows": 100,
+      "rows": 6000
+    },
+    "classes": {
+      "expired_changes": {
+        "after": 4476346,
+        "bytes": 27029436,
+        "deleted": 527440,
+        "eligible": 527440,
+        "examined": 3789000,
+        "oldest_expired": 1791848577931,
+        "started": 1792476214866,
+        "upper": 6124370
+      },
+      "expired_deliveries": {
+        "after": 349000,
+        "bytes": 0,
+        "deleted": 0,
+        "eligible": 0,
+        "examined": 349000,
+        "started": 1792476218301,
+        "upper": 2998645
+      },
+      "expired_demand": {
+        "after": 2003,
+        "bytes": 4089,
+        "completed": 1792496621179,
+        "deleted": 0,
+        "eligible": 82,
+        "examined": 208,
+        "oldest_expired": 1792378574847,
+        "started": 1792496621179,
+        "upper": 2003
+      },
+      "expired_repair_metrics": {
+        "after": 337926,
+        "bytes": 138507,
+        "completed": 1792496069195,
+        "deleted": 3670,
+        "eligible": 3670,
+        "examined": 3670,
+        "oldest_expired": 1791891269793,
+        "started": 1792496137817,
+        "upper": 11410091
+      },
+      "expired_retired_objects": {
+        "after": 0,
+        "bytes": 0,
+        "completed": 1792496621179,
+        "deleted": 0,
+        "eligible": 0,
+        "examined": 0,
+        "started": 1792496621179,
+        "upper": 0
+      }
+    }
+  },
+  "release_status": {
+    "provider_followup_deployed": false,
+    "production_deployment_or_cutover_performed_by_this_task": false,
+    "production_faults_injected": false,
+    "actual_cpu_source_and_delivery_verified": false,
+    "production_rollout_owner_confirmation_pending": true,
+    "migration_archives_and_resource_spills_retained": true
+  },
+  "limits": [
+    "Prepared test observations show ordinary replay progress and a drained DLQ; they do not prove every acknowledged production event has been reconciled.",
+    "Production reports SQLite capacity but omits the explicit storage backend field; S1 deployed acceptance is unverified.",
+    "Account-wide usage and physical billed storage remain unavailable; branch logical sums include shared copies.",
+    "Production cutover and archive/retention release remain S2 operator actions. No deployment or fault injection was performed."
+  ]
+}
