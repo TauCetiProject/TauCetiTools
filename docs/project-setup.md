@@ -116,6 +116,14 @@ gh api "repos/leanprover-community/mathlib4/contents/lean-toolchain?ref=$mathlib
 elan toolchain install "$(cat lean-toolchain)"
 mkdir -p ExampleCeti
 printf 'module\n' > ExampleCeti.lean
+cat > ExampleCeti/Basic.lean <<'LEAN'
+/-
+Copyright (c) 2026 Example Maintainer. All rights reserved.
+Released under Apache 2.0 license as described in the file LICENSE.
+Authors: Example Maintainer
+-/
+module
+LEAN
 ```
 
 Write `lakefile.toml` as follows, then run `lake update`, `lake exe cache get`, and `lake build`:
