@@ -25,7 +25,7 @@ test('isolated database cleanup reports persistent failure after a bounded retry
 });
 
 test('isolated database cleanup refuses names outside its generated fixture namespace',async()=>{
- for(const name of ['github_state','github_state_test','contract_other','contract_0123456789abcdef01234567;DROP DATABASE github_state']){
+ for(const name of ['github_state','github_state_test','contract_other','contract_0123456789abcdef01234567\n','contract_0123456789ABCDEF01234567','contract_0123456789abcdef01234567;DROP DATABASE github_state']){
   await assert.rejects(dropWorkerDatabase({query(){assert.fail('unexpected database operation');}},name),/Invalid isolated worker database/);
  }
 });

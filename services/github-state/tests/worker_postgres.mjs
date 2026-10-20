@@ -58,7 +58,9 @@ export async function workerDatabase(repositories) {
     const socket=new WebSocket(url),pair=new WebSocketPair();sockets.add(socket);socket.once('close',()=>sockets.delete(socket));
     await coupleWebSocket(socket,pair[1]);return new WorkerResponse(null,{status:101,webSocket:pair[0]});
    }
-   return fetch(req.url,{method:req.method,headers:Object.fromEntries(req.headers),body:['GET','HEAD'].includes(req.method)?undefined:await req.arrayBuffer()});
+   const body=['GET','HEAD'].includes(req.method)?undefined:await req.arrayBuffer();
+   if(closing)throw Error('Worker database fixture is closing');
+   return fetch(req.url,{method:req.method,headers:Object.fromEntries(req.headers),body});
   }
  };
 }
