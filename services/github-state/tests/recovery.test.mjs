@@ -141,9 +141,9 @@ test('a persistently failing parked event is held aside without blocking newer e
 function repositoryFixture(env={},size=0,db=new DatabaseSync(':memory:'),archive=bucket()){
  let alarm=null,ready;
  const ctx={blockConcurrencyWhile:fn=>(ready=fn()),id:{toString:()=>'fixture'},storage:{sql:{exec(sql,...bindings){let rows=[],written=0;if(!bindings.length && sql.includes(';'))db.exec(sql);else{const st=db.prepare(sql);if(st.columns().length)rows=st.all(...bindings);else written=Number(st.run(...bindings).changes);}return {rowsWritten:written,toArray:()=>rows,one:()=>rows[0]};},get databaseSize(){return size;}},
-  transactionSync(fn){db.exec('SAVEPOINT tx');try{const v=fn();db.exec('RELEASE tx');return v;}catch(e){db.exec('ROLLBACK TO tx');db.exec('RELEASE tx');throw e;}},sync:async()=>{},getAlarm:async()=>alarm,setAlarm:async v=>{alarm=v;}}};
+  async transaction(fn){db.exec('SAVEPOINT async_tx');try{const result=await fn();db.exec('RELEASE async_tx');return result;}catch(error){db.exec('ROLLBACK TO async_tx');db.exec('RELEASE async_tx');throw error;}},transactionSync(fn){db.exec('SAVEPOINT tx');try{const v=fn();db.exec('RELEASE tx');return v;}catch(e){db.exec('ROLLBACK TO tx');db.exec('RELEASE tx');throw e;}},sync:async()=>{},getAlarm:async()=>alarm,setAlarm:async v=>{alarm=v;}}};
  const state=new RepositoryState(ctx,{ALLOWED_REPOSITORIES:JSON.stringify([repo]),ARCHIVE:archive,...env});
- if(!size) state.setMeta('repository',repo);
+ if(!size) state.localSetMeta('repository',repo);
  state.fixtureReady=ready;
  return {db,state,archive,ready};
 }
@@ -258,7 +258,7 @@ test('a recorded full state stops legacy migration even below the size threshold
 test('degraded workflow reads never write: CI is not mirrored',async()=>{
  const {db,state}=repositoryFixture();
  db.prepare('INSERT INTO resources VALUES(?,?,?,?,?,?,?,?)').run('workflow_runs','77','',JSON.stringify({id:77,run_attempt:2}),'',1,1,0);
- state.setMeta('last_webhook',Date.now());
+ (await state.setMeta('last_webhook',Date.now()));
  state.degraded={since:1,reason:'storage_full',operation:'test'};
  const before=db.prepare('SELECT COUNT(*) n FROM changes').get().n;
  const result=await queryFixture(state,{operation:'workflow_jobs',args:{id:'77'}});
@@ -296,13 +296,30 @@ test('a batch parks its messages concurrently',async()=>{
  for(let i=0;i<20;i++) assert.ok(durable(h,'c'+i));
 });
 
+
+test('explicit ownership fence blocks adapter writes and raw SQL from old deployments',async()=>{
+ const {db,state}=repositoryFixture({MIGRATION_ENVIRONMENT:'test'});try {
+  const post=(path,body)=>state.fetch(new Request('https://internal/storage/'+path,{method:'POST',body:JSON.stringify(body)}));
+  assert.equal((await post('ownership',{backend:'postgres',generation:'migration-2',expected_generation:'sqlite-v1'})).status,400,'park and drain first');
+  db.prepare('INSERT INTO jobs(key,query,due) VALUES(?,?,?)').run('old','{}',0);
+  await post('ingress',{mode:'parked'});
+  const response=await post('ownership',{backend:'postgres',generation:'migration-2',expected_generation:'sqlite-v1'});
+  assert.equal(response.status,200,JSON.stringify(await response.json()));
+  await assert.rejects(state.put('pr','7',{number:7}),/generation fenced/);
+  assert.throws(()=>db.prepare('INSERT INTO demand VALUES(?,?)').run('old-deployment',Date.now()),/generation fenced/);
+  assert.throws(()=>db.prepare('UPDATE jobs SET dirty=1').run(),/generation fenced/);
+  assert.equal((await post('probe',{})).status,400);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM resources').get().n,0);
+ }finally{db.close();}
+});
+
 test('a degraded mirror that stopped changing is reported unavailable, not served stale',async()=>{
  const {state}=repositoryFixture();
  const q={operation:'open_prs'};
- state.setMeta('last_webhook',Date.now()-60000);
+ (await state.setMeta('last_webhook',Date.now()-60000));
  state.degraded={since:Date.now(),reason:'storage_full',operation:'test'};
  assert.notEqual((await queryFixture(state,q)).reason,'mirror_frozen','recently changed data is still served');
- state.setMeta('last_webhook',Date.now()-11*60000);
+ (await state.setMeta('last_webhook',Date.now()-11*60000));
  const frozen=await queryFixture(state,q);
  assert.equal(frozen.status,'unavailable');assert.equal(frozen.reason,'mirror_frozen');assert.ok(frozen.frozen_since>0);
  assert.equal(Object.hasOwn(frozen,'data'),false);
@@ -318,14 +335,14 @@ test('CI cleanup classes delete only CI rows, without an archive',async()=>{
  db.prepare('INSERT INTO members VALUES(?,?)').run('open_prs:{}','7');
  db.prepare('INSERT INTO collections VALUES(?,?,?,?,?,?,?)').run('checks:{"sha":"a"}','checks','{}',1,now,1,null);
  db.prepare('INSERT INTO collections VALUES(?,?,?,?,?,?,?)').run('open_prs:{}','open_prs','{}',1,now,1,null);
- state.setMeta('workflow_attempt:9',1);state.setMeta('important_active:9',true);
+ await state.setMeta('workflow_attempt:9',1);await state.setMeta('important_active:9',true);
  const call=(path,body)=>state.fetch(new Request('https://internal'+path,{method:'POST',body:JSON.stringify({repository_id:'100',...body})})).then(r=>r.json());
  for(const name of ['ci_resources','ci_members','ci_collections','ci_meta']) assert.equal((await call('/storage/cleanup',{class:name,limit:100})).class,name);
  assert.deepEqual(db.prepare('SELECT kind,id FROM resources').all().map(r=>r.kind+':'+r.id),['pr:7']);
  assert.deepEqual(db.prepare('SELECT collection FROM members').all().map(r=>r.collection),['open_prs:{}']);
  assert.deepEqual(db.prepare('SELECT key FROM collections').all().map(r=>r.key),['open_prs:{}']);
  assert.equal(db.prepare("SELECT COUNT(*) n FROM meta WHERE key LIKE 'workflow%' OR key LIKE 'important%'").get().n,0);
- assert.ok(state.meta('repository'),'other meta survives');
+ assert.ok(await state.meta('repository'),'other meta survives');
 });
 
 const retention=await load('src/retention.ts');
@@ -333,7 +350,7 @@ const monitoring=await load('src/monitoring.ts');
 const budget=(rows=100,bytes=4*1024**2)=>({rows,bytes,deadline:Date.now()+10000});
 const scalar=(db,q)=>Object.values(db.prepare(q).get())[0];
 
-test('sustained retention volume plateaus across windows with bounded rows, bytes and time',()=>{
+test('sustained retention volume plateaus across windows with bounded rows, bytes and time',async()=>{
  const {db,state}=repositoryFixture(),day=86400000,checkpoints={};
  const start=Date.now()-60*day;
  for(let d=0;d<50;d++) {
@@ -367,7 +384,7 @@ test('sustained retention volume plateaus across windows with bounded rows, byte
  assert.equal(scalar(db,'SELECT COUNT(*) FROM deliveries'),before,'expired time budget performs no deletion');
 });
 
-test('duplicate/stale retention checkpoints, dry runs and rowid reuse are safe',()=>{
+test('duplicate/stale retention checkpoints, dry runs and rowid reuse are safe',async()=>{
  const {db,state}=repositoryFixture(),now=Date.now();
  for(let i=0;i<20;i++)db.prepare('INSERT INTO retired_objects VALUES(?,?)').run('c'+i,now-31*86400000);
  const dry=retention.sweep(state.sql,'expired_retired_objects',undefined,budget(5),false,now);
@@ -427,7 +444,7 @@ test('repair telemetry never writes authoritative SQL and its dimensions stay bo
  assert.equal(summary.error_rate,.1);assert.equal(summary.unavailable_rate,.2);
 });
 
-test('capacity thresholds handle growth, shrinkage, unknown allowance and stale samples',()=>{
+test('capacity thresholds handle growth, shrinkage, unknown allowance and stale samples',async()=>{
  const C=monitoring.capacity,at=1000000000,allowance=1000000;
  assert.equal(C({at,bytes:700000,allowance}).level,'warning');
  assert.equal(C({at,bytes:850000,allowance}).level,'critical');
@@ -449,7 +466,7 @@ test('prepared health does no aggregate SQL or GitHub calls and survives monitor
  archive.failures.push((op,key)=>op==='put' && key.endsWith('observation.json'));
  await state.storageMaintenance();
  assert.equal((await state.preparedObservation()).stale,false,'in-memory diagnostics remain available');
- state.prepareDiagnostics();assert.ok(state.diagnosticsAt>0);
+ await state.prepareDiagnostics();assert.ok(state.diagnosticsAt>0);
  const original=state.sql;state.sql=new Proxy(original,{get(target,key){if(key==='exec')return (q,...b)=>{assert.ok(!/COUNT\(|GROUP BY|SUM\(|AVG\(/i.test(q),'health must only read prepared observations');return target.exec(q,...b);};return Reflect.get(target,key,target);}});
  const response=await state.fetch(new Request('https://internal/health'));
  assert.equal(response.status,200);assert.equal((await response.json()).monitoring.stale,false);
@@ -497,7 +514,7 @@ test('malformed retention progress restarts safely without dropping persisted pi
 });
 
 
-test('a single bounded sweep per interval keeps up with sustained append volume',()=>{
+test('a single bounded sweep per interval keeps up with sustained append volume',async()=>{
  const {state,db}=repositoryFixture(),day=86400000,start=Date.now()-60*day;
  let checkpoint;
  for(let interval=0;interval<50;interval++) {
@@ -589,10 +606,24 @@ test('expired staged spills retire, then traversal restarts without an empty-res
  const job={key:'review_threads:{"number":7}',query:JSON.stringify({operation:'review_threads',args:{number:7}}),page:1,attempt:0,lease_id:'l',nested:encoded};
  db.prepare('INSERT INTO jobs(key,query,due,lease_id,nested) VALUES(?,?,?,?,?)').run(job.key,job.query,0,job.lease_id,encoded);
  await assert.rejects(state.refresh(job),/staging page missing/);
- state.retryJob(job,new Error('staging page missing'));
+ await state.retryJob(job,new Error('staging page missing'));
  const row=db.prepare('SELECT nested,wait_reason FROM jobs WHERE key=?').get(job.key);assert.equal(row.nested,null);assert.equal(row.wait_reason,'staging_expired');
 });
 
+test('archived collection reads bound parallel R2 fetches and preserve membership order',async()=>{
+ const {db,state,archive}=repositoryFixture();await state.fixtureReady;
+ const key='workflow_jobs:{"id":"9"}';await state.setMeta('workflow_attempt:9',1);
+ db.prepare('INSERT INTO collections VALUES(?,?,?,?,?,?,?)').run(key,'workflow_jobs','{"id":"9"}',1,Date.now(),1,null);
+ for(let i=1;i<=20;i++) {
+  const blob='resources/100/job-'+i;await archive.put(blob,JSON.stringify({id:i,run_attempt:1}));
+  db.prepare('INSERT INTO resources VALUES(?,?,?,?,?,?,?,?)').run('workflow_jobs',String(i),'9',JSON.stringify({$r2:blob,run_attempt:1}),'',1,1,0);
+  db.prepare('INSERT INTO members VALUES(?,?)').run(key,String(i));
+ }
+ let active=0,peak=0;const get=archive.get.bind(archive);
+ archive.get=async key=>{active++;peak=Math.max(peak,active);await new Promise(r=>setTimeout(r,1));try{return await get(key);}finally{active--;}};
+ const rows=await state.rows({operation:'workflow_jobs',args:{id:'9'}});
+ assert.equal(peak,8);assert.deepEqual(rows.map(r=>r.id),Array.from({length:20},(_,i)=>i+1));
+});
 
 test('installation accounting prepares retained hourly projections with a bounded scan and expires from its oldest prefix',async()=>{
  const {InstallationScheduler}=await load('src/installation.ts'),{state,db}=repositoryFixture();
@@ -657,12 +688,12 @@ test('a delayed cold policy load cannot overwrite an acknowledged operator pin',
 test('a completed retention epoch waits for the next minute instead of rescanning on every alarm',async()=>{
  const {state,db}=repositoryFixture();await state.fixtureReady;
  db.prepare('INSERT INTO changes VALUES(?,?,?,?,?)').run(1,Date.now(),'pr','1',0);
- state.expire();const first={...state.retentionState.expired_changes};
- for(let i=0;i<20;i++)state.expire();
+ await state.expire();const first={...state.retentionState.expired_changes};
+ for(let i=0;i<20;i++)await state.expire();
  assert.deepEqual(state.retentionState.expired_changes,first);
 });
 
-test('incremental accounting projections roll the hourly window without regrouping on health reads',()=>{
+test('incremental accounting projections roll the hourly window without regrouping on health reads',async()=>{
  const metrics=new monitoring.AccountingMetrics(),all=[];
  for(let minute=0;minute<120;minute++)for(let i=0;i<10;i++) {
   const row={api:i%2?'core':'graphql',operation:'pr',shape:'shape-'+i%3,batch_size:1,points:i%3===0?null:1,latency:i,bytes:100,predicted:1,at:minute*60000};
@@ -686,7 +717,7 @@ test('a future completion timestamp cannot indefinitely suppress expiry',async()
  await archive.put('control/100/retention-policy.json',JSON.stringify({mode:'enforce',pinned:[],disabled:[]}));
  await archive.put('control/100/retention-checkpoint.json',JSON.stringify({version:1,classes:{expired_changes:row}}));
  db.prepare('INSERT INTO changes VALUES(?,?,?,?,?)').run(1,now-8*86400000,'pr','1',0);
- await state.loadRetentionState();state.expire();
+ await state.loadRetentionState();await state.expire();
  assert.equal(scalar(db,'SELECT COUNT(*) FROM changes'),0);
 });
 
@@ -845,7 +876,7 @@ test('a committed receipt survives repeated cleanup failures and SQL receipt exp
  advance(15*86400000);await f.state.storageMaintenance();
  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,0);
  await f.archive.delete('body');
- const revision=f.state.revision();assert.equal((await f.state.fetch(request())).status,200);assert.equal(f.state.revision(),revision);
+ const revision=(await f.state.revision());assert.equal((await f.state.fetch(request())).status,200);assert.equal((await f.state.revision()),revision);
 }));
 
 test('queue success releases pinned input immediately and R2 cleanup errors remain cron-owned',async()=>{
@@ -1030,3 +1061,17 @@ test('a transient tick marker-read failure clears on the next read without publi
  assert.equal((await event.json()).error,'storage_control_unavailable');
  advance(61000);await tick(f.state);assert.equal(f.state.degraded,undefined);assert.equal(writes,0);assert.equal(probes,0);assert.deepEqual(JSON.parse(f.archive.objects.get(key).bytes),writable);
 }));
+
+
+test('PostgreSQL queue and replay ignore an obsolete SQLite full marker',async()=>{
+ const h=harness();h.env.REPOSITORY_BACKEND='postgres';
+ await h.archive.put('control/100/storage.json',JSON.stringify({state:'full',since:1}));
+ assert.equal((await deliver(h.env,'postgres-after-sqlite-full')).acked,true);
+ assert.equal(h.state.applied.has('postgres-after-sqlite-full'),true);
+ h.state.full=true;await deliver(h.env,'postgres-replay-after-sqlite-full');h.state.full=false;
+ const {maintainIngress,storageState}=await load('src/ingress.ts');
+ assert.equal(await storageState(h.env,repo),null);
+ await maintainIngress(h.env,repo);
+ assert.equal(h.state.applied.has('postgres-replay-after-sqlite-full'),true);
+ assert.equal(JSON.parse(h.archive.objects.get('control/100/storage.json').bytes).state,'full','SQLite recovery evidence remains intact');
+});

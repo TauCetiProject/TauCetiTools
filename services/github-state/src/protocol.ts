@@ -6,6 +6,8 @@ export interface Env {
   GITHUB_PRIVATE_KEY: string; WEBHOOK_SECRET: string;
   CLIENT_TOKENS: string; ADMIN_TOKEN_HASH: string;
   RECONCILIATION_SETTINGS?: string; REFERENCE_READS?: string; FAULT_INJECTION?: string;
+  REPOSITORY_BACKEND?: 'sqlite' | 'postgres';
+  REPOSITORY_DATABASE_URL?:string; REPOSITORY_GENERATION?:string;
   MIGRATION_ENVIRONMENT?: string;
   CF_VERSION?: {id:string};
   BORS_ACTIVITY?: Fetcher;
@@ -72,6 +74,7 @@ export function validateQuery(q: Query): void {
   if (!q || typeof q.repository !== 'string' || !OPERATIONS.has(q.operation) || (q.args && (typeof q.args !== 'object' || Array.isArray(q.args)))) throw new Error('invalid query');
   if (q.allow_observed!==undefined && (typeof q.allow_observed!=='boolean' || q.operation!=='workflow_jobs')) throw new Error('invalid observed coverage preference');
   for (const [key, value] of Object.entries(q.args || {})) {
+    if(typeof value==='number' && !Number.isSafeInteger(value))throw new Error('unsafe numeric argument; send decimal IDs as strings');
     if(q.operation==='survey') {
       if(!['roadmap','skip','numbers','stages'].includes(key) || typeof value!=='string' || value.length>4096) throw new Error('invalid survey scope');
       if(key==='numbers' && !/^(?:[1-9][0-9]*(?:,[1-9][0-9]*)*)?$/.test(value)) throw new Error('invalid survey targets');
@@ -87,3 +90,13 @@ export function queryKey(q: Pick<Query, 'operation' | 'args'>): string {
   return q.operation + ':' + JSON.stringify(Object.fromEntries(Object.entries(q.args || {}).sort(([a], [b]) => a.localeCompare(b))));
 }
 export function stub(ns: DurableObjectNamespace, id: string): DurableObjectStub { return ns.get(ns.idFromName(id)); }
+
+// SQL checkpoints point to immutable uploads. Missing entries retain the
+// deterministic pre-migration staging-page address for in-flight old jobs.
+export const stagingStateKey=(key:string)=>'staging_pages:'+key;
+export function stagedPageKey(checkpoint:any,legacy:string,started:number|string,page:number|string):string {
+  if(checkpoint?.version!==1 || String(checkpoint.started)!==String(started))return legacy;
+  const entry=checkpoint.pages?.[String(page)];if(!entry)return legacy;
+  if(typeof entry.key!=='string' || !entry.key.startsWith(legacy+'-'))throw Error('staging page missing');
+  return entry.key;
+}

@@ -18,7 +18,7 @@ test('Python fallback and TypeScript projection agree on 240 changing histories 
 
 test('compact survey is authenticated, roadmap scoped and does not issue GitHub requests',async()=>{
  let network=0;
- const mf=await runtime(async()=>{network++;return response([],'core');});
+ const mf=await runtime(async()=>{network++;return response([],'core');},{},{repositoryAlarms:false});
  try {
   const ns=await mf.getDurableObjectNamespace('REPOSITORIES'),stub=ns.get(ns.idFromName('100'));
   // Seed repository identity without scheduling the unrelated bootstrap.

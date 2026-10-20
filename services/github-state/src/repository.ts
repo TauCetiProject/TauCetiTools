@@ -1,5 +1,7 @@
+import { RepositoryStore, SQLiteStore, PostgresStore, ReadCacheStore, BufferedStore, SerialLane, columns } from './repository_store';
+import { repositoryHealth } from './repository_health';
 import { DurableObject } from 'cloudflare:workers';
-import { Env, EventPointer, Query, Result, digest, json, queryKey, repository, stub, validateQuery, parseGitHub, CI_EVENTS, NOT_MIRRORED } from './protocol';
+import { Env, EventPointer, Query, Result, digest, json, queryKey, repository, stub, validateQuery, parseGitHub, CI_EVENTS, NOT_MIRRORED, stagingStateKey, stagedPageKey } from './protocol';
 import { comment, issue, pr, status } from './normalize';
 import { batchLimit } from './catalog';
 import { Lane, LANES, laneAt, settings } from './reconciliation';
@@ -7,10 +9,11 @@ import { SURVEY_CONTRACT, compactPR, issueFragment, reviewFragment, summarizeFra
 import { readPromotionReceipts } from './activity_landings';
 import { Migration, archiveKey, beginExport, expectedTables, exportStep, generation, encodeMigration, publicReceipt, readMigration, saveMigration, targetIdentity, verifyStep } from './migration';
 import { backlog, backoff, receiptKey, controlKey, noteRepositoryFull, storageKey } from './ingress';
-import { Checkpoint, DEFAULT_POLICY, Policy, RetentionClass, R2_CLASSES, RULES, policy, sweep } from './retention';
+import { Checkpoint, DEFAULT_POLICY, Policy, RetentionClass, R2_CLASSES, RULES, policy, sweep, sweepStore } from './retention';
 import { CapacitySample, RepairMetrics, RequestMetrics, SQLITE_ALLOWANCE, capacity, emitAlarm, timedBucket, within } from './monitoring';
 import { Failure, FULL_MESSAGE, AdminError, CLEANUP, PARKABLE, classify, deleteClass, faultySql, log, missingSchema, requestId, scan, summary, userTables as summaryTables } from './storage';
 
+class LeaseLost extends Error {}
 const SCHEMA_VERSION=5;
 // 10 GiB limit less a margin. With no recorded storage state, a database this
 // large is treated as full: no startup write may risk a failed commit, which
@@ -21,16 +24,33 @@ const FULL_DATABASE=10*1024**3-16*1024**2;
 // clients use their direct GitHub fallback instead of acting on frozen state.
 const FROZEN_AFTER=10*60000;
 const CURSOR_UPLOADS=4;
+const decimalArgument=(value:string):number|string=>Number.isSafeInteger(Number(value))?Number(value):value;
+const activityFingerprint=(p:any,revision:number|undefined)=>JSON.stringify([p.headRefOid,p.baseRefOid,p.changedFiles,p.additions,p.deletions,revision]);
 const cursorKey=(repo:string,id:string,offset:number)=>`cursors/${repo}/${id}/${offset}.json`;
 
 export class RepositoryState extends DurableObject<Env> {
   private inflightQueries=new Map<string,Promise<Result>>();
   private completedQueries=new Map<string,{result:Result,expires:number}>();
+  private alarmFlight?:Promise<void>;
+  private revisionState:{value?:number}={};
+  private readRevision?:number;
+  private owner:RepositoryState=this;
+  private mutationState={active:0,blocked:false};
+  private pendingChanges?:{revision:number,at:number,kind:string,id:string,tombstone:number}[];
+  private repositoryMemo?:any;
+  private readScope=false;
+  private preparedEncodings?:Map<string,string>;
+  private optionalWork={active:0};
+  private demandMemo=new Map<string,number>();
   sql:SqlStorage;
+  store:RepositoryStore;
+  localMeta(key:string):any {const row=this.sql.exec<any>('SELECT value FROM meta WHERE key=?',key).toArray()[0];return row?JSON.parse(row.value):undefined;}
+  localSetMeta(key:string,value:unknown):void {this.sql.exec('INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',key,JSON.stringify(value));}
   // R2 owns durable full state; this is its local read-only guard.
   degraded?:{since:number,reason:Failure,operation:string};
   schema:'current'|'migration_pending'|{error:Failure,missing:string[],cause:Failure}='current';
   private faultFull=false;
+  private retentionLane=new SerialLane();
   private retentionPolicy: Policy = DEFAULT_POLICY;
   private retentionState: Partial<Record<RetentionClass, Checkpoint>> = {};
   private storageFlight?: Promise<void>;
@@ -85,6 +105,14 @@ export class RepositoryState extends DurableObject<Env> {
       const value=Reflect.get(target,property,target);
       return typeof value==='function'?value.bind(target):value;
     }});
+    this.store=new SQLiteStore(ctx.storage,this.sql,false,env.REPOSITORY_GENERATION || 'sqlite-v1',ctx);
+    if(env.REPOSITORY_BACKEND==='postgres') {
+      const repo=JSON.parse(env.ALLOWED_REPOSITORIES || '[]').find((r:any)=>env.REPOSITORIES.idFromName(r.id).toString()===ctx.id.toString());
+      if(!repo || !env.REPOSITORY_DATABASE_URL || !env.REPOSITORY_GENERATION) throw new Error('PostgreSQL backend configuration missing');
+      this.store=new PostgresStore(env.REPOSITORY_DATABASE_URL,repo.id,env.REPOSITORY_GENERATION);
+      return; // No schema creation, migration, bootstrap or GitHub reads.
+    }
+    if(env.REPOSITORY_BACKEND && env.REPOSITORY_BACKEND!=='sqlite') throw new Error('Unknown repository backend');
     if (this.sql.databaseSize>=FULL_DATABASE) this.degraded={since:Date.now(),reason:'storage_full',operation:'database_size'};
     // A current or fresh schema starts synchronously; migrating an existing
     // legacy schema waits until the durable storage state is known.
@@ -95,7 +123,7 @@ export class RepositoryState extends DurableObject<Env> {
         if (this.faultFull) this.degraded ||= {since:Date.now(),reason:'storage_full',operation:'fault_injection'};
       }
       let repo:string | undefined;
-      try {repo=this.meta('repository')?.id;} catch { /* Fresh test objects have no schema yet. */ }
+      try {repo=this.localMeta('repository')?.id;} catch { /* Fresh test objects have no schema yet. */ }
       if(repo && this.env.ARCHIVE && this.env.MIGRATION_ENVIRONMENT==='test') {
         try {this.migrationState=await readMigration(this.env.ARCHIVE,repo);}
         catch {this.migrationUnavailable=true;}
@@ -108,8 +136,9 @@ export class RepositoryState extends DurableObject<Env> {
   // A recorded full state degrades the object; a probe-verified writable state
   // overrides the size rule after cleanup, since freed pages do not shrink the file.
   async storageMarker(): Promise<void> {
+    if(this.store.backend==='postgres')return;
     let marker:any,repo:string|undefined;
-    try {repo=this.meta('repository')?.id;} catch {return;} // Fresh objects have no schema yet.
+    try {repo=(await this.meta('repository'))?.id;} catch {return;} // Fresh objects have no schema yet.
     try {
       marker=repo?await this.env.ARCHIVE.get(storageKey(repo)).then(o=>o?.json<any>()):undefined;
     } catch {this.storageMarkerUnavailable=true;this.degraded ||= {since:Date.now(),reason:'storage_error',operation:'storage_marker_unavailable'};return;}
@@ -120,7 +149,7 @@ export class RepositoryState extends DurableObject<Env> {
     if(unknown && !this.degraded && this.schema!=='current')this.startup();
   }
   markFull(operation:string): void {
-    const repo=(()=>{try {return this.meta('repository')?.id;} catch {return undefined;}})();
+    const repo=(()=>{try {return this.localMeta('repository')?.id;} catch {return undefined;}})();
     if (repo) noteRepositoryFull(this.env,repo,operation,this.degraded?.since ?? Date.now()).catch(()=>{});
   }
   faultKey(): string { return 'faults/'+this.ctx.id.toString()+'.json'; }
@@ -128,7 +157,9 @@ export class RepositoryState extends DurableObject<Env> {
   // transaction; if it cannot commit, compatible stored data stays readable.
   startup(defer=false): void {
     let version:unknown;
-    try {version=this.meta('schema_version');} catch {version=undefined;}
+    try {version=this.localMeta('schema_version');} catch {version=undefined;}
+    let owner:any;try{owner=this.localMeta('backend_owner');}catch{if(version!==undefined)throw new Error('Invalid backend ownership metadata');}
+    if(owner && (owner.backend!=='sqlite' || owner.generation!==(this.env.REPOSITORY_GENERATION || 'sqlite-v1'))) {this.schema={error:'backend_fenced',missing:[],cause:'backend_fenced'};return;}
     if(version===SCHEMA_VERSION) {this.schema='current';return;}
     if(this.migrationHeld()) {this.schema='migration_pending';return;}
     if(this.degraded || defer && this.sql.exec<any>("SELECT COUNT(*) n FROM sqlite_master WHERE type='table' AND name='meta'").one().n) {
@@ -174,11 +205,12 @@ export class RepositoryState extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS query_metrics(operation TEXT,coverage TEXT,requests INTEGER,last_at INTEGER,PRIMARY KEY(operation,coverage));`);
     // Continuation pages live in R2; the SQL cursor table is gone.
     this.sql.exec('DROP TABLE IF EXISTS cursors');
-    this.setMeta('schema_version',SCHEMA_VERSION);
+    this.localSetMeta('schema_version',SCHEMA_VERSION);
   }
   noteFailure(operation:string,error:unknown): Failure {
     const reason=classify(error);
-    if(reason==='storage_full' && !this.degraded) {this.degraded={since:Date.now(),reason,operation};this.markFull(operation);}
+    const owner=this.owner || this;
+    if(reason==='storage_full' && !owner.degraded) {owner.degraded={since:Date.now(),reason,operation};owner.markFull(operation);}
     // At most one structured line per operation and minute; no payloads.
     const now=Date.now();
     if((this.logged.get(operation) || 0)<now-60000) {
@@ -189,9 +221,9 @@ export class RepositoryState extends DurableObject<Env> {
   }
   // Demand, metrics, refresh scheduling and derived caches never decide
   // whether stored data can be served. Degraded mode suppresses them.
-  optional<T>(operation:string,write:()=>T): T | undefined {
+  async optional<T>(operation:string,write:()=>T|Promise<T>): Promise<T | undefined> {
     if(this.degraded || this.migrationHeld()) return undefined;
-    try {return write();} catch(error) {this.noteFailure(operation,error);return undefined;}
+    try {return await write();} catch(error) {this.noteFailure(operation,error);return undefined;}
   }
   async optionalAsync(operation:string,write:()=>Promise<unknown>): Promise<void> {
     if(this.degraded || this.migrationHeld()) return;
@@ -199,19 +231,149 @@ export class RepositoryState extends DurableObject<Env> {
   }
   async setAlarm(at:number): Promise<void> {
     if(this.faultFull) throw new Error(FULL_MESSAGE);
-    await this.ctx.storage.setAlarm(at);
+    try{await this.ctx.storage.setAlarm(at);}catch(error){
+      if(this.store.backend!=='postgres')throw error;
+      log('repository_alarm_unavailable',{reason:classify(error),backend:'postgres'});
+    }
   }
-  meta(key: string): any { const row = this.sql.exec<any>('SELECT value FROM meta WHERE key=?',key).toArray()[0]; return row ? JSON.parse(row.value) : undefined; }
-  setMeta(key:string,value:unknown): void { this.sql.exec('INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',key,JSON.stringify(value)); }
-  revision(): number { return this.meta('revision') || 0; }
-  nextRevision(kind:string,id:string,tombstone=false): number {
-    const revision = this.revision()+1; this.setMeta('revision',revision);
-    this.sql.exec('INSERT INTO changes VALUES(?,?,?,?,?)',revision,Date.now(),kind,id,Number(tombstone)); return revision;
+  async atomic<T>(apply:(state:RepositoryState)=>Promise<T>):Promise<T> {
+    if(this.store.transactional)return apply(this);
+    if(this.migrationHeld())throw new AdminError('migration_frozen');
+    if(this.mutationState.blocked)throw new Error('Repository backend generation fenced');
+    this.mutationState.active++;
+    let scoped:RepositoryState | undefined;
+    try {
+      const result=await this.store.transaction(async store=>{
+        scoped=Object.create(this) as RepositoryState;
+        const buffered=store.backend==='postgres'?new BufferedStore(store):undefined;
+        scoped!.store=buffered || store;scoped!.revisionState={};scoped!.readScope=false;scoped!.readRevision=undefined;scoped!.repositoryMemo=undefined;scoped!.pendingChanges=store.backend==='postgres'?[]:undefined;
+        const result=await apply(scoped!);await scoped!.flushChanges();await buffered?.flush();return result;
+      });
+      if(scoped?.revisionState.value!==undefined)this.revisionState.value=Math.max(this.revisionState.value ?? 0,scoped.revisionState.value);
+      if(scoped?.repositoryMemo!==undefined)this.repositoryMemo=scoped.repositoryMemo;
+      return result;
+    }catch(error){this.revisionState.value=undefined;throw error;}finally{this.mutationState.active--;}
   }
-  async encode(data: unknown, expires?:number): Promise<string> {
+  backgroundDemand(q:Query):void {
+    const key=queryKey(q),now=Date.now();
+    if(this.optionalWork.active>=2 || (this.demandMemo.get(key) || 0)>now-60000)return;
+    this.demandMemo.set(key,now);
+    while(this.demandMemo.size>2000)this.demandMemo.delete(this.demandMemo.keys().next().value!);
+    this.backgroundWrite('demand',()=>this.noteDemand(q));
+  }
+  backgroundWrite(operation:string,write:()=>Promise<unknown>):void {
+    if(this.optionalWork.active>=2)return;
+    this.optionalWork.active++;
+    const work=this.optionalAsync(operation,write).finally(()=>{this.optionalWork.active--;});
+    if(this.ctx.waitUntil)this.ctx.waitUntil(work);
+  }
+  async noteReadDemand(q:Query,known?:boolean):Promise<void> {
+    if(this.store.backend==='postgres' && (known ?? await this.complete(q))){this.backgroundDemand(q);return;}
+    await this.optionalAsync('demand',()=>this.noteDemand(q));
+  }
+  async optionalRead(operation:string,write:()=>Promise<unknown>):Promise<void> {
+    if(this.store.backend==='postgres' && this.readScope){this.backgroundWrite(operation,write);return;}
+    await this.optionalAsync(operation,write);
+  }
+  async scanRows(sql:string,...bindings:(string|number|null)[]):Promise<any[]> {
+    const cached=this.store instanceof ReadCacheStore?this.store.peek(sql,bindings):undefined;if(cached!==undefined)return cached;
+    const remote=this.store.backend==='postgres',limit=remote?4096:256;
+    // Bound transferred bytes as well as row count, without multiplying remote
+    // round trips for small rows. One oversized row is allowed for progress.
+    const bounded=(query:string,order:string)=>remote?'SELECT * FROM (SELECT stored_page.*,SUM(octet_length(to_jsonb(stored_page)::text)) OVER (ORDER BY '+order+' ROWS UNBOUNDED PRECEDING) AS __bytes,ROW_NUMBER() OVER (ORDER BY '+order+') AS __position,COUNT(*) OVER () AS __candidate_count FROM ('+query+') AS stored_page) AS bounded_page WHERE __bytes<=2097152 OR __position=1 ORDER BY '+order:query;
+    const finished=(page:any[])=>!page.length || (remote?page.length===page[0].__candidate_count && page[0].__candidate_count<limit:page.length<limit);
+    const rows:any[]=[],ordered=sql.match(/ ORDER BY CAST\((r|f)\.id AS INTEGER\),\1\.id$/);
+    if(ordered){
+      const alias=ordered[1],inner=sql.slice(0,ordered.index).replace(/^SELECT /,`SELECT CAST(CAST(${alias}.id AS INTEGER) AS TEXT) AS __sort,${alias}.id AS __id,`);let after:{sort:string,id:string}|undefined;
+      for(;;){
+        const order='CAST(__sort AS NUMERIC),__id',query='SELECT * FROM ('+inner+') AS source_page'+(after?' WHERE (CAST(__sort AS NUMERIC),__id)>(CAST(? AS NUMERIC),?)':'')+' ORDER BY '+order+' LIMIT '+limit;
+        const page=(await this.store.exec<any>(bounded(query,order),...bindings,...(after?[after.sort,after.id]:[]))).toArray();rows.push(...page);if(finished(page))return rows;after={sort:String(page.at(-1).__sort),id:page.at(-1).__id};
+      }
+    }
+    if(/\bORDER BY\b/.test(sql))throw Error('Unsupported repository scan ordering');
+    const identity=/\bFROM members m\b/.test(sql)?'m.rowid':/\bJOIN resources r\b/.test(sql)?'r.rowid':'rowid',where=sql.indexOf(' WHERE ');let after=0;
+    const selected=(where<0?sql:sql.slice(0,where)).replace(/^SELECT /,`SELECT ${identity} AS __after,`),predicate=where<0?'': '('+sql.slice(where+7)+') AND ';
+    for(;;){const query=selected+' WHERE '+predicate+identity+'>? ORDER BY '+identity+' LIMIT '+limit,page=(await this.store.exec<any>(bounded(query,'__after'),...bindings,after)).toArray();rows.push(...page);if(finished(page))return rows;after=page.at(-1).__after;}
+  }
+  async primePublication(q:Query,rows:any[]):Promise<void> {
+    const cache=new ReadCacheStore(this.store);this.store=cache;
+    const kind=this.kind(q),ids=rows.flatMap(row=>{const id=q.operation==='files'?String(q.args?.number)+':'+String(row.filename):this.id(q.operation,row);return kind==='pr'?[id,queryKey({operation:'pr',args:{number:row.number}})]:[id];});
+    if(q.args?.number){const parent=String(q.args.number),found=(await cache.exec("SELECT id FROM resources WHERE kind='pr' AND id=?",parent)).toArray();cache.seed("SELECT id FROM resources WHERE kind='pr' AND id=?",[parent],found);}
+    for(let offset=0;offset<ids.length;offset+=256) {
+      const chunk=ids.slice(offset,offset+256);
+      const stored=(await cache.batch([{sql:'SELECT * FROM resources WHERE kind=? AND id IN ('+chunk.map(()=>'?').join(',')+')',bindings:[kind,...chunk]},
+        {sql:'SELECT collection,id FROM members WHERE collection IN ('+(['pr_delta','issue_delta'].includes(q.operation)?'?,?':'?')+') AND id IN ('+chunk.map(()=>'?').join(',')+')',bindings:[queryKey(q),...(['pr_delta','issue_delta'].includes(q.operation)?[queryKey({operation:q.operation==='pr_delta'?'open_prs':'open_issues'})]:[]),...chunk]}]));
+      for(const id of chunk){const found=stored[0].toArray().filter(r=>r.id===id);cache.seed('SELECT * FROM resources WHERE kind=? AND id=?',[kind,id],found);cache.seed('SELECT data,updated,observed FROM resources WHERE kind=? AND id=?',[kind,id],found);cache.seed('SELECT data,tombstone FROM resources WHERE kind=? AND id=?',[kind,id],found);for(const key of [queryKey(q),...(['pr_delta','issue_delta'].includes(q.operation)?[queryKey({operation:q.operation==='pr_delta'?'open_prs':'open_issues'})]:[])])cache.seed('SELECT id FROM members WHERE collection=? AND id=?',[key,id],stored[1].toArray().filter(r=>r.id===id && r.collection===key));}
+    }
+  }
+  async primeRelated(numbers:string[],heads:string[]):Promise<void> {
+    if(!(this.store instanceof ReadCacheStore))return;
+    const cache=this.store;
+    // At most 256 parents per batch. Bodies remain in their normal resources;
+    // survey reads load compact projections and status contexts only.
+    for(let offset=0;offset<Math.max(numbers.length,heads.length);offset+=256) {
+      const ns=numbers.slice(offset,offset+256),hs=[...new Set(heads.slice(offset,offset+256))];
+      const keys=[...ns.flatMap(number=>['issue_comments','review_comments'].map(operation=>queryKey({operation,args:{number:decimalArgument(number)}}))),...hs.map(sha=>queryKey({operation:'statuses',args:{sha}}))];
+      const tasks:{sql:string,bindings:(string|number)[]}[]=[];
+      if(ns.length)for(const table of ['survey_hydrated','survey_state','survey_dirty'])tasks.push({sql:'SELECT * FROM '+table+' WHERE number IN ('+ns.map(()=>'?').join(',')+')',bindings:ns});
+      if(keys.length)tasks.push({sql:'SELECT * FROM collections WHERE key IN ('+keys.map(()=>'?').join(',')+')',bindings:keys});
+      const statusKeys=hs.map(sha=>queryKey({operation:'statuses',args:{sha}}));
+      if(hs.length) {
+        tasks.push({sql:"SELECT * FROM resources WHERE kind='statuses' AND id IN ("+statusKeys.map(()=>'?').join(',')+')',bindings:statusKeys});
+        tasks.push({sql:"SELECT * FROM resources WHERE kind='status_context' AND parent IN ("+hs.map(()=>'?').join(',')+') AND tombstone=0',bindings:hs});
+      }
+      const results=await cache.batch(tasks.map(t=>({...t,sql:t.sql+' LIMIT 50001'})));
+      if(results.some(r=>r.toArray().length>50000))throw new Error('Related repository read exceeds batch bound');
+      let at=0;
+      if(ns.length)for(const [table,sql] of [['survey_hydrated','SELECT contract FROM survey_hydrated WHERE number=?'],['survey_state','SELECT data FROM survey_state WHERE number=?'],['survey_dirty','SELECT number FROM survey_dirty WHERE number=?']]) {
+        const rows=results[at++].toArray();for(const number of ns)cache.seed(sql,[number],rows.filter(r=>r.number===number));
+      }
+      if(keys.length){const rows=results[at++].toArray();for(const key of keys){const found=rows.filter(r=>r.key===key && r.complete===1);cache.seed('SELECT key FROM collections WHERE key=? AND complete=1',[key],found);cache.seed('SELECT * FROM collections WHERE key=? AND complete=1',[key],found);}}
+      if(hs.length) {
+        const rows=results[at++].toArray(),contexts=results[at++].toArray();
+        for(const sha of hs){const key=queryKey({operation:'statuses',args:{sha}});cache.seed('SELECT data FROM resources WHERE kind=? AND id=? AND tombstone=0',['statuses',key],rows.filter(r=>r.id===key && !r.tombstone));cache.seed('SELECT data FROM resources WHERE kind=? AND parent=? AND tombstone=0',['status_context',sha],contexts.filter(r=>r.parent===sha));}
+      }
+    }
+  }
+  async meta(key:string):Promise<any> {
+    if(key==='repository' && this.repositoryMemo!==undefined)return this.repositoryMemo;
+    const row=(await this.store.exec<any>('SELECT value FROM meta WHERE key=?',key)).toArray()[0],value=row?JSON.parse(row.value):undefined;
+    if(key==='repository')this.repositoryMemo=value;return value;
+  }
+  async setMeta(key:string,value:unknown): Promise<void> { await this.store.exec('INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',key,JSON.stringify(value));if(key==='revision')this.revisionState.value=Number(value);if(key==='repository')this.repositoryMemo=value; }
+  async revision():Promise<number> {
+    if(this.readRevision!==undefined)return this.readRevision;
+    if(this.revisionState.value!==undefined)return this.revisionState.value;
+    const value=(await this.meta('revision')) || 0;
+    return this.revisionState.value=Math.max(this.revisionState.value ?? 0,value);
+  }
+  async flushChanges():Promise<void> {
+    if(!this.pendingChanges?.length)return;
+    const changes=this.pendingChanges;
+    for(let offset=0;offset<changes.length;offset+=200) {
+      const batch=changes.slice(offset,offset+200),writes=[{sql:'INSERT INTO changes VALUES '+batch.map(()=>'(?,?,?,?,?)').join(','),bindings:batch.flatMap(row=>[row.revision,row.at,row.kind,row.id,row.tombstone])}];
+      if(offset+200>=changes.length)writes.push({sql:'INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',bindings:['revision',JSON.stringify(this.revisionState.value)]});
+      await this.store.batch(writes);
+    }
+    this.pendingChanges=[];
+  }
+  async nextRevision(kind:string,id:string,tombstone=false): Promise<number> {
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.nextRevision.call(state,kind,id,tombstone));
+    const revision=(await this.revision())+1;
+    if(!Number.isSafeInteger(revision))throw new Error('Repository revision exceeds safe range');
+    if(this.pendingChanges){this.pendingChanges.push({revision,at:Date.now(),kind,id,tombstone:Number(tombstone)});this.revisionState.value=revision;return revision;}
+    await this.store.batch([
+      {sql:'INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',bindings:['revision',JSON.stringify(revision)]},
+      {sql:'INSERT INTO changes VALUES(?,?,?,?,?)',bindings:[revision,Date.now(),kind,id,Number(tombstone)]}
+    ]);
+    this.revisionState.value=revision;return revision;
+  }
+  async encode(data: unknown, expires?:number,repositoryId?:string): Promise<string> {
     const text = JSON.stringify(data);
+    const memoKey=(expires?'staging:':'resource:')+text;
+    if(this.preparedEncodings?.has(memoKey))return this.preparedEncodings.get(memoKey)!;
     if (new TextEncoder().encode(text).length < 1500000) return text;
-    const key = `${expires?'staging-spills':'resources'}/${this.meta('repository').id}/${crypto.randomUUID()}`;
+    const key = `${expires?'staging-spills':'resources'}/${repositoryId || (await this.meta('repository')).id}/${crypto.randomUUID()}`;
     // Active resources must remain readable for their entire SQL row lifetime.
     // Raw deliveries, staging pages, and snapshots have separate expiry rules.
     await this.env.ARCHIVE.put(key,text,{customMetadata:{kind:expires?'cursor':'resource',...(expires?{expires:String(expires)}:{})}});
@@ -219,15 +381,22 @@ export class RepositoryState extends DurableObject<Env> {
   }
   async decode(text: string): Promise<any> {
     const data = JSON.parse(text);
-    if (data?.$r2) { const object = await this.env.ARCHIVE.get(data.$r2); if (!object) throw new Error('resource unavailable'); return object.json(); }
+    if (data?.$r2) { const object = await (this.store.transactional && this.store.backend==='postgres'?this.maintenanceArchive:this.env.ARCHIVE).get(data.$r2); if (!object) throw new Error('resource unavailable'); return object.json(); }
+    if(data && typeof data==='object' && !Array.isArray(data))delete data.__tauceti_received_at;
     return data;
   }
   async *decodeRows(rows:{data:string}[]):AsyncGenerator<any> {
     // Archived collection reads preserve order with a bounded R2 fanout.
     for(let i=0;i<rows.length;i+=8)for(const data of await Promise.all(rows.slice(i,i+8).map(r=>this.decode(r.data))))yield data;
   }
-  async put(kind:string,id:string,data:any,started=Date.now(),deleted=false,parent='',fromEvent=false): Promise<boolean> {
-    let old = this.sql.exec<any>('SELECT * FROM resources WHERE kind=? AND id=?',kind,id).toArray()[0];
+  async put(kind:string,id:string,data:any,started=Date.now(),deleted=false,parent='',fromEvent=false,prepared?:string): Promise<boolean> {
+    if(!this.store.transactional) {
+      const encoded=await this.encode(data);
+      return this.atomic(state=>RepositoryState.prototype.put.call(state,kind,id,data,started,deleted,parent,fromEvent,encoded));
+    }
+    let old = (await this.store.exec<any>('SELECT * FROM resources WHERE kind=? AND id=?',kind,id)).toArray()[0];
+    const oldStored=old?JSON.parse(old.data):null,received=oldStored?.__tauceti_received_at || 0;
+    if(fromEvent && received>started)return false;
     const updated = data?.updatedAt || data?.updated_at || data?.created_at || data?.startedAt || '';
     // A response begun before a webhook cannot overwrite that event, even if HTTP finishes later.
     if (!fromEvent && old?.observed > started) return false;
@@ -239,195 +408,299 @@ export class RepositoryState extends DurableObject<Env> {
         data={...prior,...Object.fromEntries(Object.entries(data).filter(([,v])=>v!==undefined))};
       else if(data.mergeable===undefined) data={...data,mergeable:'UNKNOWN'};
     }
-    const encoded = await this.encode(data);
+    const plain = prepared && kind!=='pr'?prepared:await this.encode(data);
+    const stored=JSON.parse(plain),inputReceived=fromEvent?started:received;
+    if(inputReceived && stored && typeof stored==='object' && !Array.isArray(stored))stored.__tauceti_received_at=inputReceived;
+    const encoded=JSON.stringify(stored);
+    if(oldStored && typeof oldStored==='object')delete oldStored.__tauceti_received_at;
     // R2 encoding yields: repeat the guard against events received during that await.
-    old=this.sql.exec<any>('SELECT * FROM resources WHERE kind=? AND id=?',kind,id).toArray()[0];
+    if(!this.store.transactional)old=(await this.store.exec<any>('SELECT * FROM resources WHERE kind=? AND id=?',kind,id)).toArray()[0];
     if (!fromEvent && old?.observed>started || old?.updated && updated && old.updated>updated || old?.updated && updated===old.updated && old.tombstone && !deleted) return false;
-    if (kind==='pr' && /^[1-9][0-9]*$/.test(id) && data?.headRefOid) this.sql.exec('INSERT OR IGNORE INTO head_prs VALUES(?,?)',data.headRefOid,id);
-    if (old?.data===encoded && Boolean(old.tombstone)===deleted) {
-      this.sql.exec('UPDATE resources SET observed=? WHERE kind=? AND id=?',Date.now(),kind,id);
+    if (kind==='pr' && /^[1-9][0-9]*$/.test(id) && data?.headRefOid) await this.store.exec('INSERT OR IGNORE INTO head_prs VALUES(?,?)',data.headRefOid,id);
+    if (old && JSON.stringify(oldStored)===plain && Boolean(old.tombstone)===deleted) {
+      if(encoded===old.data)await this.store.exec('UPDATE resources SET observed=? WHERE kind=? AND id=?',Date.now(),kind,id);
+      else await this.store.exec('UPDATE resources SET data=?,observed=? WHERE kind=? AND id=?',encoded,Date.now(),kind,id);
+      if(this.store instanceof ReadCacheStore)this.store.seed('SELECT data,tombstone FROM resources WHERE kind=? AND id=?',[kind,id],[{data:encoded,tombstone:Number(deleted)}]);
       return true;
     }
-    const rev = this.nextRevision(kind,id,deleted);
-    this.sql.exec('INSERT INTO resources VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET parent=excluded.parent,data=excluded.data,updated=excluded.updated,observed=excluded.observed,revision=excluded.revision,tombstone=excluded.tombstone',kind,id,parent,encoded,updated,Date.now(),rev,Number(deleted));
-    if(kind==='pr' && /^[1-9][0-9]*$/.test(id)) this.sql.exec('INSERT INTO survey_inventory VALUES(?,?) ON CONFLICT(number) DO UPDATE SET data=excluded.data',id,JSON.stringify(compactPR(data)));
+    const rev = (await this.nextRevision(kind,id,deleted));
+    const resourceWrite=this.store.backend==='postgres'
+      ?old?{sql:'UPDATE resources SET parent=?,data=?,updated=?,observed=?,revision=?,tombstone=? WHERE kind=? AND id=?',bindings:[parent,encoded,updated,Date.now(),rev,Number(deleted),kind,id]}
+        :{sql:'INSERT INTO resources VALUES(?,?,?,?,?,?,?,?)',bindings:[kind,id,parent,encoded,updated,Date.now(),rev,Number(deleted)]}
+      :{sql:'INSERT INTO resources VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET parent=excluded.parent,data=excluded.data,updated=excluded.updated,observed=excluded.observed,revision=excluded.revision,tombstone=excluded.tombstone',bindings:[kind,id,parent,encoded,updated,Date.now(),rev,Number(deleted)]};
+    const writes:{sql:string,bindings:(string|number)[]}[]=[resourceWrite];
+    if(kind==='pr' && /^[1-9][0-9]*$/.test(id))writes.push({sql:'INSERT INTO survey_inventory VALUES(?,?) ON CONFLICT(number) DO UPDATE SET data=excluded.data',bindings:[id,JSON.stringify(compactPR(data))]});
+    await this.store.batch(writes);
+    if(this.store instanceof ReadCacheStore)this.store.seed('SELECT data,tombstone FROM resources WHERE kind=? AND id=?',[kind,id],[{data:encoded,tombstone:Number(deleted)}]);
     if(['issue_comments','review_comments'].includes(kind)) {
-      try {this.projectSurvey(kind,id,parent,data,deleted);this.dirtySurvey(parent);}
-      catch {this.invalidateSurvey(parent);}
+      await this.projectSurvey(kind,id,parent,data,deleted);await this.dirtySurvey(parent);
     }
     return true;
   }
-  membership(key:string,id:string,included:boolean): void {
-    const exists=this.sql.exec('SELECT id FROM members WHERE collection=? AND id=?',key,id).toArray().length>0;
+  async membership(key:string,id:string,included:boolean): Promise<void> {
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.membership.call(state,key,id,included));
+    const exists=(await this.store.exec('SELECT id FROM members WHERE collection=? AND id=?',key,id)).toArray().length>0;
     if (exists===included) return;
-    if (included) this.sql.exec('INSERT INTO members VALUES(?,?)',key,id);
-    else this.sql.exec('DELETE FROM members WHERE collection=? AND id=?',key,id);
-    this.nextRevision('collection',key);
+    if (included) await this.store.exec('INSERT INTO members VALUES(?,?)',key,id);
+    else await this.store.exec('DELETE FROM members WHERE collection=? AND id=?',key,id);
+    await this.nextRevision('collection',key);
     if(key.startsWith('issue_comments:') || key.startsWith('review_comments:')) {
       const args=JSON.parse(key.slice(key.indexOf(':')+1));
-      if(args.number) this.dirtySurvey(String(args.number));
+      if(args.number) await this.dirtySurvey(String(args.number));
     }
   }
-  projectSurvey(kind:string,id:string,parent:string,data:any,deleted=false): void {
-    if(!parent || !this.sql.exec("SELECT id FROM resources WHERE kind='pr' AND id=?",parent).toArray().length) return;
+  async projectSurvey(kind:string,id:string,parent:string,data:any,deleted=false): Promise<void> {
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.projectSurvey.call(state,kind,id,parent,data,deleted));
+    if(!parent || !(await this.store.exec("SELECT id FROM resources WHERE kind='pr' AND id=?",parent)).toArray().length) return;
     const fragment=kind==='issue_comments'?issueFragment(data):reviewFragment(data);
     const useful=kind==='issue_comments'?fragment.meta!==null || fragment.marker || fragment.rebase_heads.length || fragment.blocked.length:fragment.root || fragment.parent && fragment.reply;
-    if(deleted || !useful) this.sql.exec('DELETE FROM survey_fragments WHERE kind=? AND id=?',kind,id);
-    else this.sql.exec('INSERT INTO survey_fragments VALUES(?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET parent=excluded.parent,data=excluded.data',kind,id,parent,JSON.stringify(fragment));
+    if(deleted || !useful) await this.store.exec('DELETE FROM survey_fragments WHERE kind=? AND id=?',kind,id);
+    else await this.store.exec('INSERT INTO survey_fragments VALUES(?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET parent=excluded.parent,data=excluded.data',kind,id,parent,JSON.stringify(fragment));
   }
-  projectedSurvey(number:string): string {
-    const read=(kind:string)=>this.sql.exec<any>('SELECT f.data FROM survey_fragments f JOIN members m ON m.id=f.id AND m.collection=? WHERE f.kind=? AND f.parent=? ORDER BY CAST(f.id AS INTEGER),f.id',queryKey({operation:kind,args:{number:Number(number)}}),kind,number).toArray().map(row=>JSON.parse(row.data));
-    return JSON.stringify(summarizeFragments(read('issue_comments'),read('review_comments')));
+  async projectedSurvey(number:string): Promise<string> {
+    const read=async (kind:string)=>(await this.scanRows('SELECT f.data FROM survey_fragments f JOIN members m ON m.id=f.id AND m.collection=? WHERE f.kind=? AND f.parent=? ORDER BY CAST(f.id AS INTEGER),f.id',queryKey({operation:kind,args:{number:decimalArgument(number)}}),kind,number)).map(row=>JSON.parse(row.data));
+    return JSON.stringify(summarizeFragments(await read('issue_comments'),await read('review_comments')));
   }
-  rebuildSurvey(number:string,data=this.projectedSurvey(number)): void {
-    this.sql.exec('INSERT INTO survey_state VALUES(?,?,?) ON CONFLICT(number) DO UPDATE SET data=excluded.data,revision=excluded.revision',number,data,this.revision());
-    this.sql.exec('DELETE FROM survey_dirty WHERE number=?',number);
+  async rebuildSurvey(number:string,data?:string): Promise<void> {
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.rebuildSurvey.call(state,number,data));
+    await this.store.batch([
+      {sql:'INSERT INTO survey_state VALUES(?,?,?) ON CONFLICT(number) DO UPDATE SET data=excluded.data,revision=excluded.revision',bindings:[number,data ?? await this.projectedSurvey(number),await this.revision()]},
+      {sql:'DELETE FROM survey_dirty WHERE number=?',bindings:[number]}
+    ]);
   }
-  dirtySurvey(number:string): void {
-    if(number && this.sql.exec("SELECT id FROM resources WHERE kind='pr' AND id=?",number).toArray().length)
-      this.sql.exec('INSERT OR IGNORE INTO survey_dirty VALUES(?)',number);
+  async dirtySurvey(number:string): Promise<void> {
+    if(this.store instanceof ReadCacheStore && this.store.dirtyParents.has(number))return;
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.dirtySurvey.call(state,number));
+    if(number && (await this.store.exec("SELECT id FROM resources WHERE kind='pr' AND id=?",number)).toArray().length){
+      await this.store.exec('INSERT OR IGNORE INTO survey_dirty VALUES(?)',number);
+      if(this.store instanceof ReadCacheStore)this.store.dirtyParents.add(number);
+    }
   }
-  invalidateSurvey(number:string): void {
-    this.sql.exec('DELETE FROM survey_hydrated WHERE number=?',number);
-    this.sql.exec('INSERT INTO survey_hydration_failures VALUES(?,?) ON CONFLICT(number) DO UPDATE SET retry_at=excluded.retry_at',number,Date.now()+300000);
-    this.nextRevision('survey_failure',number);
+  async invalidateSurvey(number:string): Promise<void> {
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.invalidateSurvey.call(state,number));
+    await this.store.exec('DELETE FROM survey_hydrated WHERE number=?',number);
+    await this.store.exec('INSERT INTO survey_hydration_failures VALUES(?,?) ON CONFLICT(number) DO UPDATE SET retry_at=excluded.retry_at',number,Date.now()+300000);
+    await this.nextRevision('survey_failure',number);
   }
   async hydrateSurvey(number:string): Promise<void> {
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.hydrateSurvey.call(state,number));
+    if(this.store.backend==='postgres')return this.hydratePostgresSurvey(number);
     // Existing deployments already have complete histories. Project those
     // locally once, in bounded batches, without any new GitHub requests.
-    const prRow=this.sql.exec<any>("SELECT data,revision FROM resources WHERE kind='pr' AND id=?",number).toArray()[0];
+    const prRow=(await this.store.exec<any>("SELECT data,revision FROM resources WHERE kind='pr' AND id=?",number)).toArray()[0];
     if(prRow) {
       const data=await this.decode(prRow.data);
-      if(this.sql.exec<any>("SELECT revision FROM resources WHERE kind='pr' AND id=?",number).toArray()[0]?.revision===prRow.revision)
-        this.sql.exec('INSERT INTO survey_inventory VALUES(?,?) ON CONFLICT(number) DO UPDATE SET data=excluded.data',number,JSON.stringify(compactPR(data)));
+      if((await this.store.exec<any>("SELECT revision FROM resources WHERE kind='pr' AND id=?",number)).toArray()[0]?.revision===prRow.revision)
+        await this.store.exec('INSERT INTO survey_inventory VALUES(?,?) ON CONFLICT(number) DO UPDATE SET data=excluded.data',number,JSON.stringify(compactPR(data)));
     }
-    const rows=this.sql.exec<any>("SELECT kind,id,parent,data,revision FROM resources WHERE kind IN ('issue_comments','review_comments') AND parent=? AND tombstone=0",number).toArray();
+    const rows=(await this.store.exec<any>("SELECT kind,id,parent,data,revision FROM resources WHERE kind IN ('issue_comments','review_comments') AND parent=? AND tombstone=0",number)).toArray();
     for(const row of rows) {
       const data=await this.decode(row.data);
-      const current=this.sql.exec<any>('SELECT revision,tombstone FROM resources WHERE kind=? AND id=?',row.kind,row.id).toArray()[0];
-      if(current?.revision===row.revision && !current.tombstone) this.projectSurvey(row.kind,row.id,number,data);
+      const current=(await this.store.exec<any>('SELECT revision,tombstone FROM resources WHERE kind=? AND id=?',row.kind,row.id)).toArray()[0];
+      if(current?.revision===row.revision && !current.tombstone) await this.projectSurvey(row.kind,row.id,number,data);
     }
-    this.rebuildSurvey(number);
-    this.nextRevision('survey',number);
-    this.sql.exec('INSERT INTO survey_hydrated VALUES(?,?) ON CONFLICT(number) DO UPDATE SET contract=excluded.contract',number,SURVEY_CONTRACT);
-    this.sql.exec('DELETE FROM survey_hydration_failures WHERE number=?',number);
+    await this.rebuildSurvey(number);
+    await this.nextRevision('survey',number);
+    await this.store.exec('INSERT INTO survey_hydrated VALUES(?,?) ON CONFLICT(number) DO UPDATE SET contract=excluded.contract',number,SURVEY_CONTRACT);
+    await this.store.exec('DELETE FROM survey_hydration_failures WHERE number=?',number);
+  }
+  async hydratePostgresSurvey(number:string):Promise<void> {
+    const prRow=(await this.store.exec<any>("SELECT data FROM resources WHERE kind='pr' AND id=?",number)).toArray()[0];
+    if(prRow)await this.store.exec('INSERT INTO survey_inventory VALUES(?,?) ON CONFLICT(number) DO UPDATE SET data=excluded.data',number,JSON.stringify(compactPR(await this.decode(prRow.data))));
+    const rows=await this.scanRows("SELECT kind,id,data FROM resources WHERE kind IN ('issue_comments','review_comments') AND parent=? AND tombstone=0",number);
+    await this.store.exec('DELETE FROM survey_fragments WHERE parent=?',number);
+    const fragments:(string|number)[][]=[];
+    const flush=async()=>{if(!fragments.length)return;const batch=fragments.splice(0);await this.store.exec('INSERT INTO survey_fragments VALUES '+batch.map(()=>'(?,?,?,?)').join(',')+' ON CONFLICT(kind,id) DO UPDATE SET parent=excluded.parent,data=excluded.data',...batch.flat());};
+    if(prRow)for(let offset=0;offset<rows.length;offset+=8) {
+      const decoded=await Promise.all(rows.slice(offset,offset+8).map(async row=>({row,data:await this.decode(row.data)})));
+      for(const {row,data} of decoded) {
+        const fragment=row.kind==='issue_comments'?issueFragment(data):reviewFragment(data);
+        const useful=row.kind==='issue_comments'?fragment.meta!==null || fragment.marker || fragment.rebase_heads.length || fragment.blocked.length:fragment.root || fragment.parent && fragment.reply;
+        if(useful)fragments.push([row.kind,row.id,number,JSON.stringify(fragment)]);
+      }
+      if(fragments.length>=200)await flush();
+    }
+    await flush();await this.rebuildSurvey(number);await this.nextRevision('survey',number);
+    await this.store.batch([
+      {sql:'INSERT INTO survey_hydrated VALUES(?,?) ON CONFLICT(number) DO UPDATE SET contract=excluded.contract',bindings:[number,SURVEY_CONTRACT]},
+      {sql:'DELETE FROM survey_hydration_failures WHERE number=?',bindings:[number]}
+    ]);
   }
   async surveyRows(q:Query): Promise<{rows:any[],author_counts:Record<string,number>} | null> {
     const inventory={repository:q.repository,operation:'open_prs'};
-    await this.optionalAsync('demand',()=>this.noteDemand(inventory));
-    if(!this.complete(inventory)) {await this.optionalAsync('enqueue',()=>this.enqueue(inventory,5));return null;}
+    const inventoryComplete=await this.complete(inventory);
+    await this.noteReadDemand(inventory,inventoryComplete);
+    if(!inventoryComplete) {await this.optionalAsync('enqueue',async ()=>(await this.enqueue(inventory,5)));return null;}
     // Scan compact local metadata, then add statuses only for the selected
     // roadmap. Descriptions and unrelated comment histories stay in storage.
-    const rows=this.sql.exec<any>("SELECT COALESCE(s.data,r.data) data FROM members m JOIN resources r ON r.kind='pr' AND r.id=m.id LEFT JOIN survey_inventory s ON s.number=r.id WHERE m.collection=? AND r.tombstone=0 ORDER BY CAST(r.id AS INTEGER),r.id",queryKey(inventory)).toArray();
+    const rows=await this.scanRows("SELECT COALESCE(s.data,r.data) data FROM members m JOIN resources r ON r.kind='pr' AND r.id=m.id LEFT JOIN survey_inventory s ON s.number=r.id WHERE m.collection=? AND r.tombstone=0 ORDER BY CAST(r.id AS INTEGER),r.id",queryKey(inventory));
     const scope=String(q.args?.roadmap || 'any'),skip=String(q.args?.skip || '').split(',').filter(Boolean),out=[];
     const author_counts:Record<string,number>={},stages=new Set(String(q.args?.stages ?? 'review,fix,rebase').split(','));
-    for(const storedRow of rows) {
-      const row=compactPR(await this.decode(storedRow.data));
+    const decoded=[];for(const storedRow of rows)decoded.push(compactPR(await this.decode(storedRow.data)));
+    const selected=decoded.filter(row=>q.args?.numbers?String(q.args.numbers).split(',').includes(String(row.number)):inScope(row,scope,skip));
+    await this.primeRelated(selected.map(r=>String(r.number)),selected.map(r=>r.headRefOid).filter(Boolean));
+    for(const row of decoded) {
       if(row.state && row.state!=='OPEN') continue;
       const areas=roadmapFocuses((row.labels || []).map((label:any)=>label.name),row.target_focuses,row.headRefName);
       if(!row.isDraft && (areas===null || areas.some(area=>!skip.includes(area)))) {
         const author=row.author?.login || '';author_counts[author]=(author_counts[author] || 0)+1;
       }
       if(q.args?.numbers ? !String(q.args.numbers).split(',').includes(String(row.number)) : !inScope(row,scope,skip)) continue;
-      const number=String(row.number);let hydrated=this.sql.exec<any>('SELECT contract FROM survey_hydrated WHERE number=?',number).toArray()[0]?.contract===SURVEY_CONTRACT;
-      let projected=this.sql.exec<any>('SELECT data FROM survey_state WHERE number=?',number).toArray()[0]?.data;
-      if(hydrated && this.sql.exec('SELECT number FROM survey_dirty WHERE number=?',number).toArray().length) {
+      const number=String(row.number);let hydrated=(await this.store.exec<any>('SELECT contract FROM survey_hydrated WHERE number=?',number)).toArray()[0]?.contract===SURVEY_CONTRACT;
+      let projected=(await this.store.exec<any>('SELECT data FROM survey_state WHERE number=?',number)).toArray()[0]?.data;
+      if(hydrated && (await this.store.exec('SELECT number FROM survey_dirty WHERE number=?',number)).toArray().length) {
         // The projection is derived: serve it from fragments even when the
         // cache cannot be written, and persist it only when storage allows.
-        try {projected=this.projectedSurvey(number);}catch {hydrated=false;this.optional('survey_invalidate',()=>this.invalidateSurvey(number));}
-        if(hydrated) {const data=projected;this.optional('survey_projection',()=>this.rebuildSurvey(number,data));}
+        try {projected=(await this.projectedSurvey(number));}catch {hydrated=false;await this.optionalRead('survey_invalidate',async ()=>(await this.invalidateSurvey(number)));}
+        if(hydrated) {const data=projected;await this.optionalRead('survey_projection',async ()=>(await this.rebuildSurvey(number,data)));}
       }
       const review={...(hydrated && projected?JSON.parse(projected):summarizeFragments([],[])),issue_complete:false,review_complete:false};
       const statuses=await this.rows({repository:q.repository,operation:'statuses',args:{sha:row.headRefOid}});
       const green=Array.isArray(statuses) && statuses.some(c=>c.context==='build' && c.state==='SUCCESS') && !statuses.some(c=>c.context==='build' && c.state!=='SUCCESS');
       for(const [operation,field] of [['issue_comments','issue_complete'],['review_comments','review_complete']]) {
         const child={repository:q.repository,operation,args:{number:row.number}};
-        review[field]=hydrated && this.complete(child);
+        review[field]=hydrated && (await this.complete(child));
         // Demand is deduplicated in the installation scheduler; serving a
         // snapshot never performs synchronous upstream validation.
         const needs=operation==='issue_comments'?(green && (stages.has('review') || stages.has('fix'))) || stages.has('rebase') && (row.labels || []).some((l:any)=>l.name==='needs-rebase'):green && (stages.has('review') || stages.has('fix'));
-        if(!row.isDraft && needs && !this.complete(child)) {await this.optionalAsync('demand',()=>this.noteDemand(child));await this.optionalAsync('enqueue',()=>this.enqueue(child,5));}
+        if(!row.isDraft && needs && !(await this.complete(child))) {await this.noteReadDemand(child);await this.optionalAsync('enqueue',async ()=>(await this.enqueue(child,5)));}
       }
       out.push({contract:SURVEY_CONTRACT,pr:{...compactPR(row),statusCheckRollup:Array.isArray(statuses)?statuses:[]},review});
     }
     return {rows:out,author_counts};
   }
-  surveyHealth(): any {
-    const counts=this.sql.exec<any>("SELECT COUNT(*) open_prs,SUM(h.contract=?) hydrated,SUM(s.number IS NOT NULL) materialized FROM members m JOIN resources r ON r.kind='pr' AND r.id=m.id LEFT JOIN survey_hydrated h ON h.number=r.id LEFT JOIN survey_state s ON s.number=r.id WHERE m.collection=? AND r.tombstone=0",SURVEY_CONTRACT,queryKey({operation:'open_prs'})).one();
-    const failures=this.sql.exec<any>('SELECT COUNT(*) n FROM survey_hydration_failures').one().n;
+  async surveyHealth(): Promise<any> {
+    const counts=(await this.store.exec<any>("SELECT COUNT(*) open_prs,SUM(h.contract=?) hydrated,SUM(s.number IS NOT NULL) materialized FROM members m JOIN resources r ON r.kind='pr' AND r.id=m.id LEFT JOIN survey_hydrated h ON h.number=r.id LEFT JOIN survey_state s ON s.number=r.id WHERE m.collection=? AND r.tombstone=0",SURVEY_CONTRACT,queryKey({operation:'open_prs'}))).one();
+    const failures=(await this.store.exec<any>('SELECT COUNT(*) n FROM survey_hydration_failures')).one().n;
     return {contract:SURVEY_CONTRACT,...counts,failures};
   }
   id(operation:string,row:any): string { return String(row.number || row.id || row.node_id || row.ref || row.context || row.sha || row.headRefOid || 'value'); }
   async enqueue(q:Query,priority=20,due=Date.now(),dirty=false): Promise<void> {
     if (q.operation==='progress' || NOT_MIRRORED.has(q.operation)) return;
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.enqueue.call(state,q,priority,due,dirty));
     const key=queryKey(q);
-    const prior=this.sql.exec<any>('SELECT * FROM jobs WHERE key=?',key).toArray()[0];
-    const lane=this.lane(q,dirty || Boolean(prior?.dirty),priority),requested=lane==='requested'?(prior?.requested_at || Date.now()):prior?.requested_at || null;
-    this.sql.exec('INSERT INTO jobs(key,query,priority,due,dirty,generation,lane,requested_at,created_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET priority=excluded.priority,lane=excluded.lane,requested_at=excluded.requested_at,dirty=MAX(dirty,excluded.dirty),generation=generation+excluded.generation' + (dirty ? ",due=CASE WHEN wait_reason IS NOT NULL OR attempt>0 THEN due ELSE MIN(due,excluded.due) END" : ''),key,JSON.stringify({...q,allow_observed:undefined}),priority,due,Number(dirty),Number(dirty),lane,requested,Date.now());
-    if (!prior) this.metric('arrival',q,lane);
+    const prior=(await this.store.exec<any>('SELECT * FROM jobs WHERE key=?',key)).toArray()[0];
+    const lane=(await this.lane(q,dirty || Boolean(prior?.dirty),priority)),requested=lane==='requested'?(prior?.requested_at || Date.now()):prior?.requested_at || null;
+    await this.store.exec('INSERT INTO jobs(key,query,priority,due,dirty,generation,lane,requested_at,created_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET priority=excluded.priority,lane=excluded.lane,requested_at=excluded.requested_at,dirty=MAX(dirty,excluded.dirty),generation=generation+excluded.generation' + (dirty ? ",due=CASE WHEN wait_reason IS NOT NULL OR attempt>0 THEN due ELSE MIN(due,excluded.due) END" : ''),key,JSON.stringify({...q,allow_observed:undefined}),priority,due,Number(dirty),Number(dirty),lane,requested,Date.now());
+    if (!prior) await this.metric('arrival',q,lane);
     const alarm=await this.ctx.storage.getAlarm();
-    const scheduled=this.sql.exec<any>('SELECT due FROM jobs WHERE key=?',key).one().due;
+    const scheduled=(await this.store.exec<any>('SELECT due FROM jobs WHERE key=?',key)).one().due;
     if (!alarm || alarm>scheduled) await this.setAlarm(Math.max(Date.now()+100,scheduled));
   }
-  complete(q:Pick<Query,'operation'|'args'>): boolean { return this.sql.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q)).toArray().length>0; }
-  metric(event:string,q:Query,lane:Lane,value=1): void {
-    // Telemetry cannot turn a successfully applied page/job into a retry.
-    try {this.repairMetrics.record(event,lane,q.operation,value);}catch(error) {try {this.noteFailure('repair_metrics',error);}catch {}}
+  async enqueueMany(input:{q:Query,priority:number,dirty?:boolean}[]):Promise<void> {
+    input=input.filter(({q})=>q.operation!=='progress' && !NOT_MIRRORED.has(q.operation));
+    if(!input.length)return;
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.enqueueMany.call(state,input));
+    const readBatch=this.store.backend==='sqlite'?80:256,writeBatch=this.store.backend==='sqlite'?10:200,metricBatch=this.store.backend==='sqlite'?20:200;
+    const entries=new Map<string,{q:Query,priority:number,dirty?:boolean}>();
+    for(const item of input){const key=queryKey(item.q),prior=entries.get(key);entries.set(key,{...item,dirty:prior?.dirty || item.dirty});}
+    const jobs=new Map<string,any>(),demands=new Map<string,any>(),collections=new Set<string>();
+    const keys=[...entries.keys()],numbers=new Set<string>(),heads=new Map<string,string[]>(),comments=new Map<string,any>();
+    const select=async(table:string,column:string,values:string[],filter='')=>{
+      const rows:any[]=[];
+      for(let offset=0;offset<values.length;offset+=readBatch) {
+        const batch=values.slice(offset,offset+readBatch);
+        rows.push(...await this.scanRows('SELECT * FROM '+table+' WHERE '+column+' IN ('+batch.map(()=>'?').join(',')+')'+filter,...batch));
+      }
+      return rows;
+    };
+    for(let offset=0;offset<keys.length;offset+=readBatch) {
+      const chunk=keys.slice(offset,offset+readBatch),where=' WHERE key IN ('+chunk.map(()=>'?').join(',')+')';
+      const [js,ds,cs]=await this.store.batch(['jobs','demand','collections'].map(table=>({sql:'SELECT * FROM '+table+where,bindings:chunk})));
+      for(const row of js.toArray())jobs.set(row.key,row);
+      for(const row of ds.toArray())demands.set(row.key,row);
+      for(const row of cs.toArray())if(row.complete)collections.add(row.key);
+    }
+    for(const {q} of entries.values())if(q.args?.number)numbers.add(String(q.args.number));
+    const shas=[...new Set([...entries.values()].filter(e=>e.q.args?.sha).map(e=>String(e.q.args!.sha)))];
+    for(const row of await select('head_prs','sha',shas)){const group=heads.get(row.sha)||[];group.push(row.number);heads.set(row.sha,group);numbers.add(row.number);}
+    const ids=[...entries.values()].filter(e=>e.q.operation==='reactions').map(e=>String(e.q.args?.id));
+    if(ids.length)for(const row of await select('resources','id',ids," AND kind='review_comments'"))if(row.kind==='review_comments'){comments.set(row.id,row);if(row.parent)numbers.add(row.parent);}
+    const states=new Map<string,any>();
+    for(const row of await select('resources','id',[...numbers]," AND kind IN ('pr','issue')"))if(['pr','issue'].includes(row.kind) && (!states.has(row.id)||row.kind==='pr'))states.set(row.id,JSON.parse(row.data));
+    const now=Date.now();let scheduled=Infinity;
+    const values:any[][]=[],metrics:any[][]=[];
+    for(const [key,{q,priority,dirty=false}] of entries) {
+      const prior=jobs.get(key),demanded=(demands.get(key)?.at || 0)>now-300000;
+      const comment=q.operation==='reactions'?comments.get(String(q.args?.id)):null;
+      const ns=q.args?.number?[String(q.args.number)]:q.args?.sha?heads.get(String(q.args.sha)) || []:comment?.parent?[comment.parent]:[];
+      const dormant=!demanded && (comment?.tombstone || ns.length>0 && ns.every(n=>states.get(n)?.state && states.get(n).state!=='OPEN'));
+      const lane=demanded && !collections.has(key)?'requested':dirty || prior?.dirty || priority<=5 || q.operation.endsWith('_delta')?'active':q.operation.startsWith('recent_') || dormant?'archive':'verification';
+      values.push([key,JSON.stringify({...q,allow_observed:undefined}),priority,now,Number(dirty),Number(dirty),lane,lane==='requested'?(prior?.requested_at || now):prior?.requested_at || null,now]);
+      if(!prior)metrics.push([now,'arrival',lane,q.operation,1]);
+      scheduled=Math.min(scheduled,!prior?now:dirty && !prior.wait_reason && !prior.attempt?Math.min(prior.due,now):prior.due);
+    }
+    // Independent rows share a parameterized VALUES statement. This is the
+    // inventory/history fan-out path; remote latency is bounded per batch.
+    for(let offset=0;offset<values.length;offset+=writeBatch) {
+      const batch=values.slice(offset,offset+writeBatch);
+      await this.store.exec('INSERT INTO jobs(key,query,priority,due,dirty,generation,lane,requested_at,created_at) VALUES '+batch.map(()=>'(?,?,?,?,?,?,?,?,?)').join(',')+' ON CONFLICT(key) DO UPDATE SET priority=excluded.priority,lane=excluded.lane,requested_at=excluded.requested_at,dirty=MAX(dirty,excluded.dirty),generation=generation+excluded.generation,due=CASE WHEN excluded.generation>0 AND wait_reason IS NULL AND attempt=0 THEN MIN(due,excluded.due) ELSE due END',...batch.flat());
+    }
+    for(const [at,event,lane,operation,value] of metrics)this.repairMetrics.record(event,lane,operation,value,at);
+    const alarm=await this.ctx.storage.getAlarm();
+    if(!alarm || alarm>scheduled)await this.setAlarm(Math.max(now+100,scheduled));
   }
-  lane(q:Query,dirty=false,priority=20): Lane {
-    const demanded=(this.sql.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q)).toArray()[0]?.at || 0)>Date.now()-300000;
-    if (demanded && !this.complete(q)) return 'requested';
+  async complete(q:Pick<Query,'operation'|'args'>): Promise<boolean> { return (await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length>0; }
+  async metric(event:string,q:Query,lane:Lane,value=1): Promise<void> {try{this.repairMetrics.record(event,lane,q.operation,value);}catch(error){try{this.noteFailure('repair_metrics',error);}catch{}}}
+  async lane(q:Query,dirty=false,priority=20): Promise<Lane> {
+    const demanded=((await this.store.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q))).toArray()[0]?.at || 0)>Date.now()-300000;
+    if (demanded && !(await this.complete(q))) return 'requested';
     if (dirty || priority<=5 || q.operation.endsWith('_delta')) return 'active';
-    return q.operation.startsWith('recent_') || this.dormant(q)?'archive':'verification';
+    return q.operation.startsWith('recent_') || (await this.dormant(q))?'archive':'verification';
   }
   async configure(name:string): Promise<void> {
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.configure.call(state,name));
     const repo=repository(this.env,name); if (!repo) throw new Error('repository not allowed');
-    this.setMeta('repository',repo);
+    await this.setMeta('repository',repo);
     for (const operation of ['repository','refs','open_prs','open_issues','recent_prs','recent_issues','pr_delta','issue_delta']) await this.enqueue({repository:repo.name,operation},operation==='open_prs' || operation.endsWith('_delta')?0:10);
     await this.setAlarm(Date.now()+100);
   }
-  async ingest(pointer:EventPointer): Promise<void> {
-    const configured = repository(this.env,pointer.repository);
-    if(!configured) throw new Error('repository not allowed');
-    if (await this.env.ARCHIVE.head(receiptKey(configured.id,pointer.delivery))) return;
-    // Receipt retention counts from application, not original receipt: a
-    // replay of a long-parked event must keep deduplicating its cleanup.
-    if (this.sql.exec('SELECT id FROM deliveries WHERE id=?',pointer.delivery).toArray().length) return;
-    if (this.degraded) {
-      if(this.degraded.reason!=='storage_full')throw new Error('repository storage control unavailable');
-      throw new Error('Exceeded the maximum database size; SQLITE_FULL recorded at '+new Date(this.degraded.since).toISOString());
+  async ingest(pointer:EventPointer,preparedBody?:any): Promise<void> {
+    const configured=repository(this.env,pointer.repository);if(!configured)throw Error('repository not allowed');
+    if(!this.store.transactional){
+      if(await this.env.ARCHIVE.head(receiptKey(configured.id,pointer.delivery)))return;
+      if((await this.store.exec('SELECT id FROM deliveries WHERE id=?',pointer.delivery)).toArray().length)return;
+      let body:any,encodings=new Map<string,string>();
+      if(!CI_EVENTS.has(pointer.event)){
+        const object=await this.env.ARCHIVE.get(pointer.key);if(!object)throw Error('event body unavailable');body=parseGitHub(await object.text());
+        if(body.comment){const value=comment(body.comment),text=JSON.stringify(value);if(new TextEncoder().encode(text).length>=1500000)encodings.set('resource:'+text,await this.encode(value,undefined,configured.id));}
+      }
+      return this.atomic(async state=>{state.preparedEncodings=encodings;await RepositoryState.prototype.ingest.call(state,pointer,body);});
     }
-    if (CI_EVENTS.has(pointer.event)) {this.sql.exec('INSERT OR IGNORE INTO deliveries VALUES(?,?,?)',pointer.delivery,'ignored:'+pointer.event,Date.now());return;}
-    const object=await this.env.ARCHIVE.get(pointer.key); if (!object) throw new Error('event body unavailable');
-    const body:any=parseGitHub(await object.text()); const repo=repository(this.env,pointer.repository); if (!repo) throw new Error('repository not allowed');
-    this.setMeta('repository',repo);
+    // Receipt archival publishes R2 before deleting SQL. Recheck under writer
+    // ownership so an archival race cannot reapply a committed old delivery.
+    if(await this.maintenanceArchive.head(receiptKey(configured.id,pointer.delivery)))return;
+    if((await this.store.exec('SELECT id FROM deliveries WHERE id=?',pointer.delivery)).toArray().length)return;
+    if(this.degraded){if(this.degraded.reason!=='storage_full')throw Error('repository storage control unavailable');throw Error('Exceeded the maximum database size; SQLITE_FULL recorded at '+new Date(this.degraded.since).toISOString());}
+    if(CI_EVENTS.has(pointer.event)){await this.store.exec('INSERT OR IGNORE INTO deliveries VALUES(?,?,?)',pointer.delivery,'ignored:'+pointer.event,Date.now());return;}
+    const body:any=preparedBody,repo=configured;await this.setMeta('repository',repo);
     const event=pointer.event, deleted=body.action==='deleted';
     // All updates are idempotent; receipt is committed only after their durable rows and jobs.
     if (event==='pull_request' && body.pull_request) {
       const row=pr(body.pull_request), number=String(row.number);
-      const before=this.sql.exec<any>('SELECT data FROM resources WHERE kind=? AND id=?','pr',number).toArray()[0];
+      const before=(await this.store.exec<any>('SELECT data FROM resources WHERE kind=? AND id=?','pr',number)).toArray()[0];
       const prior=before?await this.decode(before.data):null;
       const accepted=await this.put('pr',number,row,pointer.received,false,number,true);
       // A webhook describes one PR, not a complete inventory. Never create fake coverage.
       const key=queryKey({operation:'open_prs'});
-      if (accepted) this.membership(key,number,body.pull_request.state==='open');
+      if (accepted) await this.membership(key,number,body.pull_request.state==='open');
       const detail={repository:repo.name,operation:'pr',args:{number:row.number}};
-      const detailKnown=this.sql.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(detail)).toArray().length>0;
+      const detailKnown=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(detail))).toArray().length>0;
       await this.enqueue(detail,0,Date.now(),!detailKnown || row.mergeable==='UNKNOWN');
-      const inventoryKnown=this.sql.exec('SELECT key FROM collections WHERE key=? AND complete=1',key).toArray().length>0;
+      const inventoryKnown=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',key)).toArray().length>0;
       await this.enqueue({repository:repo.name,operation:'open_prs'},1,Date.now(),!inventoryKnown);
       if(accepted && row.headRefOid && prior?.headRefOid!==row.headRefOid) await this.enqueue({repository:repo.name,operation:'files',args:{number:row.number}},1,Date.now(),true);
       if (accepted && row.headRefOid) for (const operation of ['statuses']) {
         const q={repository:repo.name,operation,args:{sha:row.headRefOid}};
-        const known=this.sql.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q)).toArray().length>0;
+        const known=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length>0;
         await this.enqueue(q,1,Date.now(),!known || prior?.headRefOid!==row.headRefOid);
       }
     }
     if (event==='issues' && body.issue) {
       const row=issue(body.issue); const accepted=await this.put('issue',String(row.number),row,pointer.received,deleted,String(row.number),true);
-      if (accepted) this.membership(queryKey({operation:'open_issues'}),String(row.number),!deleted && row.state==='OPEN');
+      if (accepted) await this.membership(queryKey({operation:'open_issues'}),String(row.number),!deleted && row.state==='OPEN');
       const q={repository:repo.name,operation:'open_issues'};
-      const known=this.sql.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q)).toArray().length>0;
+      const known=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length>0;
       await this.enqueue(q,1,Date.now(),!known);
     }
     if (['issue_comment','pull_request_review_comment'].includes(event) && body.comment) {
@@ -435,8 +708,8 @@ export class RepositoryState extends DurableObject<Env> {
       const number=body.issue?.number || body.pull_request?.number;
       const row=comment(body.comment); const accepted=await this.put(operation,String(row.id),row,pointer.received,deleted,String(number),true);
       const key=queryKey({operation,args:{number}});
-      if (accepted) this.membership(key,String(row.id),!deleted);
-      const known=this.sql.exec('SELECT key FROM collections WHERE key=? AND complete=1',key).toArray().length>0;
+      if (accepted) await this.membership(key,String(row.id),!deleted);
+      const known=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',key)).toArray().length>0;
       await this.enqueue({repository:repo.name,operation,args:{number}},0,Date.now(),!known);
       if (operation==='review_comments') await this.enqueue({repository:repo.name,operation:'review_threads',args:{number}},2,Date.now(),true);
     }
@@ -447,49 +720,61 @@ export class RepositoryState extends DurableObject<Env> {
     if (event==='status' && body.sha && body.context) {
       await this.put('status_context',body.sha+':'+body.context,status(body),pointer.received,false,body.sha,true);
       const q={repository:repo.name,operation:'statuses',args:{sha:body.sha}};
-      const known=this.sql.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q)).toArray().length>0;
+      const known=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length>0;
       await this.enqueue(q,0,Date.now(),!known);
     }
     if (['push','create','delete','repository','label','milestone','merge_group'].includes(event)) {
       if (event==='push' && String(body.ref).startsWith('refs/heads/')) {
         const row={ref:body.ref,object:{sha:body.after,type:'commit',url:'https://api.github.com/repos/'+repo.name+'/git/commits/'+body.after},updated_at:new Date(pointer.received).toISOString()};
         const removed=Boolean(body.deleted) || /^0+$/.test(body.after || '');
-        if (await this.put('refs',body.ref,row,pointer.received,removed,'',true)) this.membership(queryKey({operation:'refs'}),body.ref,!removed);
+        if (await this.put('refs',body.ref,row,pointer.received,removed,'',true)) await this.membership(queryKey({operation:'refs'}),body.ref,!removed);
       }
       // Header and CI webhooks already update the indexed records. A single
       // changed PR must not trigger a repository-wide survey at fleet scale.
       for (const operation of ['open_prs','open_issues','refs','repository']) {
         const q={repository:repo.name,operation};
-        const known=this.sql.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q)).toArray().length>0;
+        const known=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length>0;
         await this.enqueue(q,2,Date.now(),!known || operation==='repository' && event==='repository' || operation==='refs' && ['create','delete'].includes(event));
       }
     }
-    this.sql.exec('INSERT OR IGNORE INTO deliveries VALUES(?,?,?)',pointer.delivery,event,Date.now());
-    this.setMeta('last_webhook',Math.max(pointer.received,this.meta('last_webhook') || 0));
-    this.setMeta('webhook_apply_ms',Math.max(0,Date.now()-pointer.received));
+    await this.commitReceipt(pointer);
   }
+  async commitReceipt(pointer:EventPointer):Promise<void> {
+    const now=Date.now();
+    await this.store.batch([
+      {sql:'INSERT OR IGNORE INTO deliveries VALUES(?,?,?)',bindings:[pointer.delivery,pointer.event,now]},
+      {sql:'INSERT INTO meta VALUES(?,?),(?,?),(?,?),(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',bindings:[
+        'latest_applied_input',JSON.stringify({delivery:pointer.delivery,event:pointer.event,received:pointer.received,applied_at:now}),
+        'last_webhook',JSON.stringify(Math.max(pointer.received,(await this.meta('last_webhook')) || 0)),
+        'webhook_apply_ms',JSON.stringify(Math.max(0,now-pointer.received)),
+        'latest_input_applied_at',JSON.stringify(now)
+      ]}
+    ]);
+  }
+
   kind(q:Query): string { return ['open_prs','recent_prs','pr','pr_delta'].includes(q.operation)?'pr':['open_issues','recent_issues','issue_delta'].includes(q.operation)?'issue':q.operation; }
   async rows(q:Query): Promise<any[] | any | null> {
-    const key=queryKey(q), collection=this.sql.exec<any>('SELECT * FROM collections WHERE key=? AND complete=1',key).toArray()[0];
+    const key=queryKey(q), collection=(await this.store.exec<any>('SELECT * FROM collections WHERE key=? AND complete=1',key)).toArray()[0];
     if (!collection) return null;
     if (q.operation==='pr') {
-      const row=this.sql.exec<any>('SELECT data FROM resources WHERE kind=? AND id=? AND tombstone=0','pr',String(q.args?.number)).toArray()[0];
-      if (row) return this.decode(row.data);
+      const row=(await this.store.exec<any>('SELECT data FROM resources WHERE kind=? AND id=? AND tombstone=0','pr',String(q.args?.number))).toArray()[0];
+      if (row) return (await this.decode(row.data));
     }
     if (['pr','repository','statuses'].includes(q.operation)) {
-      const row=this.sql.exec<any>('SELECT data FROM resources WHERE kind=? AND id=? AND tombstone=0',q.operation,key).toArray()[0];
+      const row=(await this.store.exec<any>('SELECT data FROM resources WHERE kind=? AND id=? AND tombstone=0',q.operation,key)).toArray()[0];
       if (!row) return null;
       const data=await this.decode(row.data);
       if (q.operation!=='statuses' || !Array.isArray(data)) return data;
       const contexts=new Map(data.map(n=>{const value=status(n);return [value.context,value];}));
-      for (const row of this.sql.exec<any>('SELECT data FROM resources WHERE kind=? AND parent=? AND tombstone=0','status_context',String(q.args?.sha)).toArray()) {
+      for (const row of await this.scanRows('SELECT data FROM resources WHERE kind=? AND parent=? AND tombstone=0','status_context',String(q.args?.sha))) {
         const value=status(await this.decode(row.data)),prior=contexts.get(value.context);
         if (!prior || Date.parse(value.startedAt)>=Date.parse(prior.startedAt)) contexts.set(value.context,value);
       }
       return [...contexts.values()];
     }
-    const members=this.sql.exec<any>('SELECT r.data FROM members m JOIN resources r ON r.kind=? AND r.id=m.id WHERE m.collection=? AND r.tombstone=0 ORDER BY CAST(r.id AS INTEGER),r.id',this.kind(q),key).toArray();
+    const members=await this.scanRows('SELECT r.data FROM members m JOIN resources r ON r.kind=? AND r.id=m.id WHERE m.collection=? AND r.tombstone=0 ORDER BY CAST(r.id AS INTEGER),r.id',this.kind(q),key);
     const rows=[];
+    if(q.operation==='open_prs')await this.primeRelated([],members.map(r=>JSON.parse(r.data).headRefOid).filter(Boolean));
     for await(const data of this.decodeRows(members)) {
       if (q.operation==='open_prs' || q.operation==='open_issues') {
         if (data.state && data.state!=='OPEN') continue;
@@ -502,19 +787,35 @@ export class RepositoryState extends DurableObject<Env> {
     }
     return rows;
   }
-  unavailable(q:Query,reason:string): Result {
-    return {version:1,repository:q.repository,operation:q.operation,status:'unavailable',revision:this.revision(),complete:false,reason};
+  async unavailable(q:Query,reason:string): Promise<Result> {
+    return {version:1,repository:q.repository,operation:q.operation,status:'unavailable',revision:(await this.revision()),complete:false,reason};
+  }
+  async stableQuery(q:Query):Promise<Result> {
+    if(q.cursor)return this.query(q);
+    for(let attempt=0;attempt<3;attempt++) {
+      const result=await this.query(q);
+      const row=(await this.store.exec<any>("SELECT value FROM meta WHERE key='revision'")).toArray()[0];
+      const revision=row?JSON.parse(row.value):0;
+      this.revisionState.value=Math.max(this.revisionState.value ?? 0,revision);
+      if(result.revision===revision)return result;
+    }
+    return this.unavailable(q,'concurrent_input');
   }
   async query(q:Query): Promise<Result> {
+    if(!this.readScope) {
+      const scoped=Object.create(this) as RepositoryState;if(this.store.backend==='postgres')scoped.store=new ReadCacheStore(this.store);scoped.readScope=true;scoped.readRevision=await this.revision();
+      return scoped.query(q);
+    }
     validateQuery(q);
     if (NOT_MIRRORED.has(q.operation)) return this.unavailable(q,'not_mirrored');
-    if (!this.meta('repository')) {
+    if (!(await this.meta('repository'))) {
+      if(this.store.backend==='postgres')return this.unavailable(q,'repository_unconfigured');
       try {await this.configure(q.repository);}
-      catch(error) {return this.unavailable(q,this.noteFailure('configure',error));}
+      catch(error) {return (await this.unavailable(q,this.noteFailure('configure',error)));}
     }
     const key=queryKey(q);
-    if (!q.allow_observed && q.operation!=='survey') await this.optionalAsync('demand',()=>this.noteDemand(q));
     if (q.cursor) return this.continuation(q,key);
+    if (!q.allow_observed && !['survey','progress'].includes(q.operation))await this.noteReadDemand(q);
     let rows:any;
     let author_counts:Record<string,number> | undefined;
     if(q.operation==='survey') {
@@ -522,26 +823,26 @@ export class RepositoryState extends DurableObject<Env> {
     } else if (q.operation==='progress') {
       const detail={...q,operation:'pr'};
       const p=await this.rows(detail);
-      await this.optionalAsync('demand',()=>this.noteDemand(detail));
-      if(!this.complete(detail)) await this.optionalAsync('enqueue',()=>this.enqueue(detail,5));
+      await this.noteReadDemand(detail,p!==null);
+      if(!(await this.complete(detail))) await this.optionalAsync('enqueue',async ()=>(await this.enqueue(detail,5)));
       const cs=await this.rows({...q,operation:'issue_comments'}), rcs=await this.rows({...q,operation:'review_comments'});
       for (const operation of ['issue_comments','review_comments']) {
         const child={...q,operation};
-        await this.optionalAsync('demand',()=>this.noteDemand(child));
-        if (!this.complete(child)) await this.optionalAsync('enqueue',()=>this.enqueue(child,5));
+        await this.noteReadDemand(child);
+        if (!(await this.complete(child))) await this.optionalAsync('enqueue',async ()=>(await this.enqueue(child,5)));
       }
-      rows=p && cs && rcs ? {head:p.headRefOid,state:p.state,ncomments:cs.length+rcs.length,revision:this.revision()}:null;
+      rows=p && cs && rcs ? {head:p.headRefOid,state:p.state,ncomments:cs.length+rcs.length,revision:(await this.revision())}:null;
     } else {
-      if (!q.allow_observed && !this.complete(q)) await this.optionalAsync('enqueue',()=>this.enqueue(q,5));
+      if (!q.allow_observed && !(await this.complete(q))) await this.optionalAsync('enqueue',async ()=>(await this.enqueue(q,5)));
       rows=await this.rows(q);
     }
-    const complete=rows!==null && (q.operation==='survey' || q.operation==='progress' || this.complete(q));
-    const {observed,verified}=this.freshness(q);
-    const result:Result={version:1,repository:q.repository,operation:q.operation,status:rows===null?'unavailable':'ok',revision:this.revision(),observed_at:observed || verified,verified_at:verified,complete,coverage:complete?'complete':q.allow_observed?'webhook_observed':undefined};
+    const complete=rows!==null && (q.operation==='survey' || q.operation==='progress' || (await this.complete(q)));
+    const {observed,verified}=(await this.freshness(q));
+    const result:Result={version:1,repository:q.repository,operation:q.operation,status:rows===null?'unavailable':'ok',revision:(await this.revision()),observed_at:observed || verified,verified_at:verified,complete,coverage:complete?'complete':q.allow_observed?'webhook_observed':undefined};
     if(q.operation==='survey') {result.contract=SURVEY_CONTRACT;result.author_counts=author_counts;}
     if (rows===null) return {...result,reason:'coverage_unavailable'};
     if (Array.isArray(rows) && rows.length>100) {
-      const id=crypto.randomUUID(),expires=Date.now()+600000,repo=this.meta('repository').id;
+      const id=crypto.randomUUID(),expires=Date.now()+600000,repo=(await this.meta('repository')).id;
       // Continuation pages go directly to private R2, never into SQLite. Each
       // page is separate, so continuation never decodes the whole inventory,
       // and every page retains the initial snapshot revision.
@@ -565,30 +866,45 @@ export class RepositoryState extends DurableObject<Env> {
   }
   // Derived results report the stored times of the collections they read:
   // the newest observation and the oldest complete verification.
-  freshness(q:Query): {observed?:number,verified?:number} {
+  async freshness(q:Query): Promise<{observed?:number,verified?:number}> {
     const args=q.args,number=q.args?.number;
     const sources=q.operation==='survey'?[{key:queryKey({operation:'open_prs'}),kind:'pr'}]
       :q.operation==='progress'?[{key:queryKey({operation:'pr',args}),kind:'pr',id:String(number)},{key:queryKey({operation:'issue_comments',args}),kind:'issue_comments'},{key:queryKey({operation:'review_comments',args}),kind:'review_comments'}]
       :[{key:queryKey(q),kind:this.kind(q)}];
     let observed:number | undefined,verified:number | undefined;
     for (const source of sources as {key:string,kind:string,id?:string}[]) {
-      const at=source.id?this.sql.exec<any>('SELECT observed at FROM resources WHERE kind=? AND id=?',source.kind,source.id).toArray()[0]?.at
-        :this.sql.exec<any>('SELECT MAX(r.observed) at FROM members m JOIN resources r ON r.kind=? AND r.id=m.id WHERE m.collection=?',source.kind,source.key).one().at;
-      const checked=this.sql.exec<any>('SELECT verified FROM collections WHERE key=?',source.key).toArray()[0]?.verified;
+      const at=source.id?(await this.store.exec<any>('SELECT observed at FROM resources WHERE kind=? AND id=?',source.kind,source.id)).toArray()[0]?.at
+        :(await this.store.exec<any>('SELECT MAX(r.observed) at FROM members m JOIN resources r ON r.kind=? AND r.id=m.id WHERE m.collection=?',source.kind,source.key)).one().at;
+      const checked=(await this.store.exec<any>('SELECT verified FROM collections WHERE key=?',source.key)).toArray()[0]?.verified;
       if (at) observed=Math.max(observed ?? 0,at);
       if (checked) verified=verified===undefined?checked:Math.min(verified,checked);
     }
     return {observed,verified};
   }
   async continuation(q:Query,key:string): Promise<Result> {
-    const now=Date.now(),repo=this.meta('repository')?.id;
-    const match=q.cursor!.match(/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):([1-9][0-9]{0,8})$/);
-    const object=match && repo?await this.env.ARCHIVE.get(cursorKey(repo,match[1],Number(match[2]))):null;
-    const payload:any=object?await object.json():null;
-    if (!payload || payload.repository!==repo || !(payload.expires>now) || payload.result?.data===undefined) return this.unavailable(q,'cursor_expired');
-    if (payload.key!==key) return this.unavailable(q,'cursor_query_mismatch');
-    if (Boolean(payload.allow_observed)!==Boolean(q.allow_observed)) return this.unavailable(q,'cursor_coverage_mismatch');
-    return payload.result;
+    const cursor=q.cursor!,now=Date.now();
+    const repo=(await this.meta('repository'))?.id;
+    const match=cursor.match(/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):([1-9][0-9]{0,8})$/);
+    const object=match?await this.env.ARCHIVE.get(cursorKey(repo,match[1],Number(match[2]))):null;
+    let payload:any;
+    if(object) {
+      payload=await object.json();
+      if(payload.repository!==repo || !(payload.expires>now))return this.unavailable(q,'cursor_expired');
+    }else {
+      if(this.store.backend!=='postgres')return this.unavailable(q,'cursor_expired');
+      // SQL fallback retains pre-recovery cursors, including UUID-shaped IDs.
+      const row=(await this.store.exec<any>('SELECT payload FROM cursors WHERE (id=? OR id=?) AND expires>? ORDER BY CASE WHEN id=? THEN 0 ELSE 1 END LIMIT 1',cursor,cursor.split(':')[0],now,cursor)).toArray()[0];
+      if(!row)return this.unavailable(q,'cursor_expired');
+      payload=await this.decode(row.payload);
+    }
+    if (payload.key!==key) return (await this.unavailable(q,'cursor_query_mismatch'));
+    if (Boolean(payload.allow_observed)!==Boolean(q.allow_observed)) return (await this.unavailable(q,'cursor_coverage_mismatch'));
+    if (payload.result?.data!==undefined) return payload.result;
+    // Existing ten-minute cursors survive a rolling deployment. Only an offset
+    // inside the stored snapshot can continue it; never fabricate an empty page.
+    const legacy=cursor.match(/^([^:]+):([1-9][0-9]{0,8})$/),offset=Number(legacy?.[2]),id=legacy?.[1] || '';
+    if (!legacy || !Array.isArray(payload.rows) || offset>=payload.rows.length) return (await this.unavailable(q,'cursor_invalid'));
+    return this.page(payload.result,payload.rows,id,offset);
   }
   page(result:Result,rows:any[],id:string,offset:number): Result {
     // Keep the number of client round trips bounded as inventories grow.
@@ -601,88 +917,103 @@ export class RepositoryState extends DurableObject<Env> {
     }
     return {...result,data:rows.slice(offset,end),...(end<rows.length?{cursor:id+':'+end}:{})};
   }
-  interval(q:Query): number {
+  async interval(q:Query): Promise<number> {
     if (q.operation==='pr_delta' || q.operation==='issue_delta') return 60000;
     if (q.operation==='open_prs' || q.operation==='open_issues') return 3600000;
     if (q.operation==='files') return 365*86400000; // head-change webhook dirties this immutable-by-head read
     if (q.operation==='reactions') {
-      const active=this.sql.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q)).toArray()[0];
+      const active=(await this.store.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q))).toArray()[0];
       return active?.at>Date.now()-300000?300000:86400000;
     }
     if (q.operation==='reviews') return 6*3600000;
-    const demand=this.sql.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q)).toArray()[0];
+    const demand=(await this.store.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q))).toArray()[0];
     if (q.operation==='statuses') return demand?.at>Date.now()-300000?300000:3600000;
     if (['issue_comments','review_comments','review_threads','reviews','reactions'].includes(q.operation)) return demand?.at>Date.now()-300000?300000:3600000;
     return 3600000;
   }
-  priority(q:Query): number {
+  async priority(q:Query): Promise<number> {
     if (q.operation.endsWith('_delta')) return 0;
-    const demand=this.sql.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q)).toArray()[0];
+    const demand=(await this.store.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q))).toArray()[0];
     if (demand?.at>Date.now()-300000) return 5;
     if (['open_prs','open_issues','repository','refs'].includes(q.operation)) return 10;
     return 20;
   }
   async noteDemand(q:Query): Promise<void> {
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.noteDemand.call(state,q));
     if (q.allow_observed || q.operation==='survey') return;
     const key=queryKey(q),now=Date.now();
-    const prior=this.sql.exec<any>('SELECT at FROM demand WHERE key=?',key).toArray()[0];
-    this.sql.exec('INSERT INTO demand VALUES(?,?) ON CONFLICT(key) DO UPDATE SET at=excluded.at',key,now);
-    const complete=this.sql.exec('SELECT key FROM collections WHERE key=? AND complete=1',key).toArray().length>0;
+    const prior=(await this.store.exec<any>('SELECT at FROM demand WHERE key=?',key)).toArray()[0];
+    await this.store.exec('INSERT INTO demand VALUES(?,?) ON CONFLICT(key) DO UPDATE SET at=excluded.at',key,now);
+    const complete=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',key)).toArray().length>0;
     if (!complete && q.operation!=='progress') {
-      this.sql.exec("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?),due=CASE WHEN wait_reason IS NULL AND attempt=0 THEN MIN(due,?) ELSE due END WHERE key=?",now,now,key);
+      await this.store.exec("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?),due=CASE WHEN wait_reason IS NULL AND attempt=0 THEN MIN(due,?) ELSE due END WHERE key=?",now,now,key);
     }
     if (prior?.at>now-300000) return;
-    if (complete && q.operation!=='progress' && !this.sql.exec('SELECT key FROM jobs WHERE key=?',key).toArray().length) await this.enqueue(q,20,now+this.interval(q));
+    if (complete && q.operation!=='progress' && !(await this.store.exec('SELECT key FROM jobs WHERE key=?',key)).toArray().length) await this.enqueue(q,20,now+(await this.interval(q)));
     // Becoming active advances a quiet audit to its hot interval. A client
     // still receives existing data immediately; actual quota waits stay intact.
-    this.sql.exec("UPDATE jobs SET due=MIN(due,?),priority=5,lane=CASE WHEN ? THEN 'verification' ELSE 'requested' END WHERE key=? AND attempt=0 AND started IS NULL AND wait_reason IS NULL",complete?now+this.interval(q):now,Number(complete),key);
-    const due=this.sql.exec<any>('SELECT due FROM jobs WHERE key=?',key).toArray()[0]?.due;
+    await this.store.exec("UPDATE jobs SET due=MIN(due,?),priority=5,lane=CASE WHEN ? THEN 'verification' ELSE 'requested' END WHERE key=? AND attempt=0 AND started IS NULL AND wait_reason IS NULL",complete?now+(await this.interval(q)):now,Number(complete),key);
+    const due=(await this.store.exec<any>('SELECT due FROM jobs WHERE key=?',key)).toArray()[0]?.due;
     const alarm=await this.ctx.storage.getAlarm();
     if (due && (!alarm || alarm>due)) await this.setAlarm(Math.max(now+100,due));
   }
-  nextJob(): any {
-    const now=Date.now(),turn=this.meta('repair_turn') || 0;
-    this.setMeta('repair_turn',turn+1);
+  async nextJob(): Promise<any> {
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.nextJob.call(state));
+    const now=Date.now(),turn=(await this.meta('repair_turn')) || 0;
+    await this.setMeta('repair_turn',turn+1);
     const preferred=laneAt(turn,settings(this.env).weights);
-    return this.sql.exec<any>('SELECT * FROM jobs WHERE due<=? AND lease_until<=? ORDER BY CASE WHEN lane=? THEN 0 WHEN lane=\'requested\' THEN 1 WHEN lane=\'active\' THEN 2 WHEN lane=\'verification\' THEN 3 ELSE 4 END,due,key LIMIT 1',now,now,preferred).toArray()[0];
+    return (await this.store.exec<any>('SELECT * FROM jobs WHERE due<=? AND lease_until<=? ORDER BY CASE WHEN lane=? THEN 0 WHEN lane=\'requested\' THEN 1 WHEN lane=\'active\' THEN 2 WHEN lane=\'verification\' THEN 3 ELSE 4 END,due,key LIMIT 1',now,now,preferred)).toArray()[0];
   }
-  dormant(q:Query): boolean {
-    const demand=this.sql.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q)).toArray()[0];
+  async dormant(q:Query): Promise<boolean> {
+    const demand=(await this.store.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q))).toArray()[0];
     if (demand?.at>Date.now()-300000) return false;
     let numbers:string[]=[];
     if (q.args?.number) numbers=[String(q.args.number)];
     else if (q.operation==='reactions') {
-      const row=this.sql.exec<any>('SELECT parent,tombstone FROM resources WHERE kind=? AND id=?','review_comments',String(q.args?.id)).toArray()[0];
+      const row=(await this.store.exec<any>('SELECT parent,tombstone FROM resources WHERE kind=? AND id=?','review_comments',String(q.args?.id))).toArray()[0];
       if (row?.tombstone) return true;
       if (row?.parent) numbers=[row.parent];
-    } else if (q.operation==='statuses') numbers=this.sql.exec<any>('SELECT number FROM head_prs WHERE sha=?',String(q.args?.sha)).toArray().map(r=>r.number);
+    } else if (q.operation==='statuses') {
+      const counts=(await this.store.exec<any>("SELECT COUNT(*) total,SUM(CASE WHEN json_extract(r.data,'$.state') IN ('CLOSED','MERGED') THEN 1 ELSE 0 END) closed FROM head_prs h LEFT JOIN resources r ON r.kind='pr' AND r.id=h.number WHERE h.sha=?",String(q.args?.sha))).one();
+      return counts.total>0 && counts.closed===counts.total;
+    }
     if (!numbers.length) return false;
-    return numbers.every(number=>{
-      const row=this.sql.exec<any>("SELECT data FROM resources WHERE kind IN ('pr','issue') AND id=? ORDER BY kind DESC LIMIT 1",number).toArray()[0];
+    return (await Promise.all(numbers.map(async number=>{
+      const row=(await this.store.exec<any>("SELECT data FROM resources WHERE kind IN ('pr','issue') AND id=? ORDER BY kind DESC LIMIT 1",number)).toArray()[0];
       const data=row?JSON.parse(row.data):null;
-      return data?.state && data.state!=='OPEN';
-    });
+      return Boolean(data?.state && data.state!=='OPEN');
+    }))).every(Boolean);
   }
-  finishJob(job:any,q:Query,etag?:string): void {
-    const current=this.sql.exec<any>('SELECT generation,priority,requested_at,lane FROM jobs WHERE key=?',job.key).toArray()[0];
+  async finishJob(job:any,q:Query,etag?:string): Promise<void> {
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.finishJob.call(state,job,q,etag));
+    const current=(await this.store.exec<any>('SELECT generation,priority,requested_at,lane FROM jobs WHERE key=?',job.key)).toArray()[0];
     const again=current?.generation>(job.start_generation || 0);
     // A newer webhook can arrive while pages are being fetched. Completing the
     // old collection must not erase that event's pending repair.
-    this.metric('completion',q,current?.lane || job.lane || 'verification');
+    await this.metric('completion',q,current?.lane || job.lane || 'verification');
     const requested=job.requested_at || current?.requested_at;
     if (requested) {
-      this.metric('requested_latency_ms',q,'requested',Date.now()-requested);
-      if(job.page===1 && !job.nested) this.metric('requested_single_latency_ms',q,'requested',Date.now()-requested);
+      await this.metric('requested_latency_ms',q,'requested',Date.now()-requested);
+      if(job.page===1 && !job.nested) await this.metric('requested_single_latency_ms',q,'requested',Date.now()-requested);
     }
-    this.sql.exec('UPDATE jobs SET due=?,priority=?,lane=?,dirty=?,started=NULL,cursor=NULL,page=1,api=NULL,etag=?,attempt=0,wait_reason=NULL,nested=NULL,requested_at=NULL WHERE key=?',again?Date.now():Date.now()+this.interval(q),again?current.priority:this.priority(q),this.lane(q,again),Number(again),etag || null,job.key);
-    if (!again && this.dormant(q)) this.sql.exec('DELETE FROM jobs WHERE key=?',job.key);
+    await this.store.exec('UPDATE jobs SET due=?,priority=?,lane=?,dirty=?,started=NULL,cursor=NULL,page=1,api=NULL,etag=?,attempt=0,wait_reason=NULL,nested=NULL,requested_at=? WHERE key=?',again?Date.now():Date.now()+(await this.interval(q)),again?current.priority:(await this.priority(q)),(await this.lane(q,again)),Number(again),etag || null,again?current?.requested_at || null:null,job.key);
+    if (!again && (await this.dormant(q))) await this.store.exec('DELETE FROM jobs WHERE key=?',job.key);
+  }
+  async nextRefreshCursor(q:Query,result:any,started:number):Promise<string|undefined>{
+    let next=result.cursor;
+    if(['pr_delta','issue_delta'].includes(q.operation) && Array.isArray(result.data)){
+      const watermark=(await this.meta(q.operation+'_watermark')) || started;
+      if(result.data.some((r:any)=>Date.parse(r.updatedAt)<watermark-300000))next=undefined;
+    }
+    if(q.operation.startsWith('recent_') && Array.isArray(result.data) && result.data.some((r:any)=>Date.parse(r.updatedAt)<Date.now()-30*86400000))next=undefined;
+    return next;
   }
   async refresh(job:any,supplied?:any): Promise<void> {
-    const repo=this.meta('repository'), q:Query=JSON.parse(job.query);
+    const repo=(await this.meta('repository')), q:Query=JSON.parse(job.query);
     const started=job.started || Date.now();
     if (!job.started) {
       job.start_generation=job.generation || 0;
-      this.sql.exec('UPDATE jobs SET started=?,start_generation=? WHERE key=?',started,job.start_generation,job.key);
+      await this.store.exec('UPDATE jobs SET started=?,start_generation=? WHERE key=?',started,job.start_generation,job.key);
     }
     const upstream=q;
     let nested:any;
@@ -692,15 +1023,42 @@ export class RepositoryState extends DurableObject<Env> {
     }
     const response=supplied?null:await stub(this.env.INSTALLATIONS,repo.installation).fetch('https://internal/read',{method:'POST',headers:{'x-request-id':crypto.randomUUID()},body:JSON.stringify({repository:repo,query:upstream,cursor:job.cursor,page:job.page,api:job.api,nested,etag:job.page===1 && !job.nested && q.operation!=='workflow_runs'?job.etag:undefined})});
     const result:any=supplied || await response!.json();
-    if (job.lease_id && this.sql.exec<any>('SELECT lease_id FROM jobs WHERE key=?',job.key).toArray()[0]?.lease_id!==job.lease_id) return;
+    const objects=new Map<string,string>(),encodings=new Map<string,string>();
+    const prefix=`staging/${repo.id}/${encodeURIComponent(job.key)}/${started}/`;
+    const publish=(!response || response.ok) && !result.continuation && !result.restart && !result.deferred && !result.unavailable && !result.error && !result.unchanged && result.data!==undefined;
+    const preparedNext=publish?await this.nextRefreshCursor(q,result,started):undefined;
+    const checkpoint=publish?await this.meta(stagingStateKey(job.key)):undefined;
+    // Checkpointed pages are immutable. Load them before taking the publication
+    // lock; the lease is checked again inside the transaction before use.
+    if(publish && !preparedNext){
+      const pages=Array.from({length:Math.max(0,(job.page || 1)-1)},(_,i)=>i+1);
+      for(let offset=0;offset<pages.length;offset+=8)await Promise.all(pages.slice(offset,offset+8).map(async page=>{const object=await this.env.ARCHIVE.get(stagedPageKey(checkpoint,prefix+page,started,page));if(!object)throw Error('staging page missing');objects.set(prefix+page,await object.text());}));
+    }
+    let staged:{key:string,expires:number}|undefined;
+    if(publish){const text=JSON.stringify(result.data);staged={key:prefix+job.page+'-'+crypto.randomUUID(),expires:Date.now()+86400000};await this.env.ARCHIVE.put(staged.key,text,{customMetadata:{expires:String(staged.expires)}});objects.set(prefix+job.page,text);}
+    for(const text of objects.values()){
+      const data=JSON.parse(text),values=Array.isArray(data)?data:[data];
+      for(const value of values){const body=JSON.stringify(value);if(new TextEncoder().encode(body).length>=1500000)encodings.set('resource:'+body,await this.encode(value));}
+    }
+    if(result.continuation){const text=JSON.stringify(result.continuation);if(new TextEncoder().encode(text).length>=1500000)encodings.set('staging:'+text,await this.encode(result.continuation,Date.now()+86400000));}
+    try {return await this.atomic(state=>{
+      state.preparedEncodings=encodings;
+      const archive=state.env.ARCHIVE;
+      state.env={...state.env,ARCHIVE:new Proxy(archive,{get(target,key){if(key==='get')return async(name:string,...args:any[])=>objects.has(name)?{text:async()=>objects.get(name)!,json:async()=>JSON.parse(objects.get(name)!)}:(target.get as any)(name,...args);const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;}})};
+      return RepositoryState.prototype.applyRefresh.call(state,job,q,repo,started,response,result,preparedNext,staged);
+    });}
+    catch(error){if(!(error instanceof LeaseLost))throw error;}
+  }
+  async applyRefresh(job:any,q:Query,repo:any,started:number,response:Response|null,result:any,preparedNext:string|undefined,staged:{key:string,expires:number}|undefined):Promise<void> {
+    if (job.lease_id && (await this.store.exec<any>('SELECT lease_id FROM jobs WHERE key=?',job.key)).toArray()[0]?.lease_id!==job.lease_id) throw new LeaseLost();
     if (result.continuation) {
       const nested=await this.encode(result.continuation,Date.now()+86400000);
-      if (job.lease_id && this.sql.exec<any>('SELECT lease_id FROM jobs WHERE key=?',job.key).toArray()[0]?.lease_id!==job.lease_id) return;
-      this.sql.exec('UPDATE jobs SET nested=?,api=?,due=?,wait_reason=NULL WHERE key=?',nested,result.api,Date.now(),job.key);
-      this.metric('page',q,job.lane || 'verification');return;
+      if (job.lease_id && (await this.store.exec<any>('SELECT lease_id FROM jobs WHERE key=?',job.key)).toArray()[0]?.lease_id!==job.lease_id) throw new LeaseLost();
+      await this.store.exec('UPDATE jobs SET nested=?,api=?,due=?,wait_reason=NULL WHERE key=?',nested,result.api,Date.now(),job.key);
+      await this.metric('page',q,job.lane || 'verification');return;
     }
     if (result.restart) {
-      this.sql.exec('UPDATE jobs SET started=NULL,cursor=NULL,page=1,api=?,etag=NULL,due=? WHERE key=?',result.api,Date.now(),job.key);
+      await this.store.exec('UPDATE jobs SET started=NULL,cursor=NULL,page=1,api=?,etag=NULL,due=? WHERE key=?',result.api,Date.now(),job.key);
       return;
     }
     if (response && !response.ok || result.deferred || result.unavailable) {
@@ -709,33 +1067,35 @@ export class RepositoryState extends DurableObject<Env> {
         // The existing thread reconciler supplies the same flat history. Preserve
         // the REST cooldown while promoting that dependency in the other pool.
         const source={...q,operation:'review_threads'};
-        const existing=this.sql.exec<any>('SELECT started,dirty FROM jobs WHERE key=?',queryKey(source)).toArray()[0];
+        const existing=(await this.store.exec<any>('SELECT started,dirty FROM jobs WHERE key=?',queryKey(source))).toArray()[0];
         await this.noteDemand(source);await this.enqueue(source,1,Date.now(),!existing || !existing.started && !existing.dirty);
-        if(!this.complete(q)) this.sql.exec("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?) WHERE key=?",job.requested_at || Date.now(),queryKey(source));
+        if(!(await this.complete(q))) await this.store.exec("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?) WHERE key=?",job.requested_at || Date.now(),queryKey(source));
       }
-      this.sql.exec('UPDATE jobs SET due=?,attempt=attempt+?,wait_reason=? WHERE key=?',result.retry_at || Date.now()+Math.min(3600000,60000*2**Math.min(6,job.attempt)),capacity?0:1,result.category || result.reason || 'upstream',job.key);
-      this.metric(capacity?'capacity_wait':'retry',q,job.lane || 'verification');
-      if(!capacity) this.setMeta('last_upstream_failure',{at:Date.now(),operation:q.operation,category:result.category || result.reason || 'upstream',request_id:result.request_id}); return;
+      await this.store.exec('UPDATE jobs SET due=?,attempt=attempt+?,wait_reason=? WHERE key=?',result.retry_at || Date.now()+Math.min(3600000,60000*2**Math.min(6,job.attempt)),capacity?0:1,result.category || result.reason || 'upstream',job.key);
+      await this.metric(capacity?'capacity_wait':'retry',q,job.lane || 'verification');
+      if(!capacity) await this.setMeta('last_upstream_failure',{at:Date.now(),operation:q.operation,category:result.category || result.reason || 'upstream',request_id:result.request_id}); return;
     }
     if (result.unchanged) {
-      this.sql.exec('UPDATE collections SET verified=? WHERE key=?',Date.now(),job.key);
-      this.finishJob(job,q,job.etag); return;
+      await this.store.exec('DELETE FROM meta WHERE key=?',stagingStateKey(job.key));
+      await this.store.exec('UPDATE collections SET verified=? WHERE key=?',Date.now(),job.key);
+      await this.finishJob(job,q,job.etag); return;
     }
     if (result.api!==job.api && job.page>1 && job.api) {
       // REST pages and GraphQL cursors cannot be mixed; restart this staged collection.
-      this.sql.exec('UPDATE jobs SET started=NULL,cursor=NULL,page=1,api=NULL WHERE key=?',job.key); return;
+      await this.store.exec('UPDATE jobs SET started=NULL,cursor=NULL,page=1,api=NULL WHERE key=?',job.key); return;
     }
-    const key=`staging/${repo.id}/${encodeURIComponent(job.key)}/${started}/${job.page}`;
-    await this.env.ARCHIVE.put(key,JSON.stringify(result.data),{customMetadata:{expires:String(Date.now()+86400000)}});
-    if (job.lease_id && this.sql.exec<any>('SELECT lease_id FROM jobs WHERE key=?',job.key).toArray()[0]?.lease_id!==job.lease_id) return;
-    this.sql.exec('UPDATE jobs SET nested=NULL,wait_reason=NULL WHERE key=?',job.key);
-    this.metric('page',q,job.lane || 'verification');
-    let next=result.cursor;
-    if (['pr_delta','issue_delta'].includes(q.operation) && Array.isArray(result.data) && result.data.some((r:any)=>Date.parse(r.updatedAt)<(this.meta(q.operation+'_watermark') || started)-300000)) next=undefined;
-    if (q.operation.startsWith('recent_') && Array.isArray(result.data) && result.data.some((r:any)=>Date.parse(r.updatedAt)<Date.now()-30*86400000)) next=undefined;
+    if(!staged)throw Error('malformed service response');
+    const previous=await this.meta(stagingStateKey(job.key));
+    const pages=previous?.version===1 && previous.started===started?{...previous.pages}:{};
+    pages[String(job.page)]={key:staged.key,expires:staged.expires};
+    await this.setMeta(stagingStateKey(job.key),{version:1,started,pages});
+    if (job.lease_id && (await this.store.exec<any>('SELECT lease_id FROM jobs WHERE key=?',job.key)).toArray()[0]?.lease_id!==job.lease_id) throw new LeaseLost();
+    await this.store.exec('UPDATE jobs SET nested=NULL,wait_reason=NULL WHERE key=?',job.key);
+    await this.metric('page',q,job.lane || 'verification');
+    const next=preparedNext;
     if (next) {
       if (next===job.cursor) throw new Error('repeated upstream cursor');
-      this.sql.exec('UPDATE jobs SET cursor=?,page=page+1,api=?,due=?,etag=? WHERE key=?',next,result.api,Date.now(),result.etag || job.etag,job.key); return;
+      await this.store.exec('UPDATE jobs SET cursor=?,page=page+1,api=?,due=?,etag=? WHERE key=?',next,result.api,Date.now(),result.etag || job.etag,job.key); return;
     }
     const rows:any[]=[]; let scalar:any;
     for (let page=1;page<=job.page;page++) {
@@ -743,6 +1103,7 @@ export class RepositoryState extends DurableObject<Env> {
       if (!object) throw new Error('staging page missing');
       const data:any=await object.json(); if (Array.isArray(data)) rows.push(...data); else scalar=data;
     }
+    if(this.store.backend==='postgres')await this.primePublication(q,rows);
     const kind=this.kind(q), memberIDs=new Set<string>(), acceptedIDs=new Set<string>();
     const changedNumbers=new Set<number>(), changedHeads=new Set<number>();
     if (scalar!==undefined || ['pr','repository','statuses'].includes(q.operation)) {
@@ -753,7 +1114,7 @@ export class RepositoryState extends DurableObject<Env> {
         if (q.operation.startsWith('recent_') && Date.parse(row.updatedAt)<Date.now()-30*86400000) continue;
         const id=q.operation==='files'?String(q.args?.number)+':'+String(row.filename):this.id(q.operation,row); memberIDs.add(id);
         if (kind==='pr') {
-          const prior=this.sql.exec<any>('SELECT data,updated,observed FROM resources WHERE kind=? AND id=?','pr',id).toArray()[0];
+          const prior=(await this.store.exec<any>('SELECT data,updated,observed FROM resources WHERE kind=? AND id=?','pr',id)).toArray()[0];
           const before=prior?await this.decode(prior.data):null;
           if ((!prior || prior.observed<=started) && (!before || before.updatedAt!==row.updatedAt)) changedNumbers.add(row.number);
           if ((!prior || prior.observed<=started) && (!before || before.headRefOid!==row.headRefOid)) changedHeads.add(row.number);
@@ -761,76 +1122,84 @@ export class RepositoryState extends DurableObject<Env> {
         if (await this.put(kind,id,row,started,false,String(q.args?.number || q.args?.id || q.args?.sha || ''))) acceptedIDs.add(id);
       }
       // Keep newer webhook membership when the reconciliation began before that event.
-      const prior=this.sql.exec<any>('SELECT m.id,r.observed FROM members m LEFT JOIN resources r ON r.kind=? AND r.id=m.id WHERE m.collection=?',kind,job.key).toArray();
+      const prior=await this.scanRows('SELECT m.id,r.observed FROM members m LEFT JOIN resources r ON r.kind=? AND r.id=m.id WHERE m.collection=?',kind,job.key);
       // A REST offset can shift when another PR closes between pages. Absence
       // from that traversal cannot delete a previously observed open resource;
       // webhooks and delta surveys supply actual state changes instead.
+      if(this.store instanceof ReadCacheStore)for(const row of prior)this.store.seed('SELECT id FROM members WHERE collection=? AND id=?',[job.key,row.id],[{id:row.id}]);
       const openInventory=['open_prs','open_issues'].includes(q.operation);
-      for (const row of prior) if (!(openInventory && result.api==='core') && !memberIDs.has(row.id) && row.observed<=started && this.sql.exec<any>('SELECT observed FROM resources WHERE kind=? AND id=?',kind,row.id).toArray()[0]?.observed<=started) this.membership(job.key,row.id,false);
+      for (const row of prior) if (!(openInventory && result.api==='core') && !memberIDs.has(row.id) && row.observed<=started) await this.membership(job.key,row.id,false);
       for (const id of memberIDs) {
-        const current=openInventory?this.sql.exec<any>('SELECT data,tombstone FROM resources WHERE kind=? AND id=?',kind,id).toArray()[0]:null;
+        const current=openInventory?(await this.store.exec<any>('SELECT data,tombstone FROM resources WHERE kind=? AND id=?',kind,id)).toArray()[0]:null;
         if(current && (current.tombstone || (await this.decode(current.data)).state!=='OPEN')) continue;
-        this.membership(job.key,id,true);
+        await this.membership(job.key,id,true);
       }
     }
-    if (job.lease_id && this.sql.exec<any>('SELECT lease_id FROM jobs WHERE key=?',job.key).toArray()[0]?.lease_id!==job.lease_id) return;
-    if (!this.sql.exec('SELECT key FROM collections WHERE key=? AND complete=1',job.key).toArray().length) this.nextRevision('collection',job.key);
-    this.sql.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET complete=1,verified=excluded.verified,revision=excluded.revision,etag=excluded.etag',job.key,q.operation,JSON.stringify(q.args || {}),1,Date.now(),this.revision(),job.page===1?result.etag || null:null);
-    this.finishJob(job,q,job.page===1?result.etag || null:null);
+    if (job.lease_id && (await this.store.exec<any>('SELECT lease_id FROM jobs WHERE key=?',job.key)).toArray()[0]?.lease_id!==job.lease_id) throw new LeaseLost();
+    if (!(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',job.key)).toArray().length) await this.nextRevision('collection',job.key);
+    await this.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET complete=1,verified=excluded.verified,revision=excluded.revision,etag=excluded.etag',job.key,q.operation,JSON.stringify(q.args || {}),1,Date.now(),(await this.revision()),job.page===1?result.etag || null:null);
+    await this.store.exec('DELETE FROM meta WHERE key=?',stagingStateKey(job.key));
+    await this.finishJob(job,q,job.page===1?result.etag || null:null);
+    const deltaRepairs:{q:Query,priority:number,dirty?:boolean}[]=[];
     if (['pr_delta','issue_delta'].includes(q.operation)) {
       const operation=q.operation==='pr_delta'?'open_prs':'open_issues', inventory=queryKey({operation});
       for (const row of rows) {
         const id=String(row.number);
-        if (acceptedIDs.has(id)) this.membership(inventory,id,row.state==='OPEN');
+        if (acceptedIDs.has(id)) await this.membership(inventory,id,row.state==='OPEN');
         if (changedNumbers.has(row.number)) {
-          await this.enqueue({repository:repo.name,operation:'issue_comments',args:{number:row.number}},2,Date.now(),true);
-          if (operation==='open_prs') for (const op of ['review_threads','pr']) await this.enqueue({repository:repo.name,operation:op,args:{number:row.number}},3,Date.now(),true);
-          if (changedHeads.has(row.number)) await this.enqueue({repository:repo.name,operation:'files',args:{number:row.number}},3,Date.now(),true);
+          deltaRepairs.push({q:{repository:repo.name,operation:'issue_comments',args:{number:row.number}},priority:2,dirty:true});
+          if (operation==='open_prs') for (const op of ['review_threads','pr']) deltaRepairs.push({q:{repository:repo.name,operation:op,args:{number:row.number}},priority:3,dirty:true});
+          if (changedHeads.has(row.number)) deltaRepairs.push({q:{repository:repo.name,operation:'files',args:{number:row.number}},priority:3,dirty:true});
         }
       }
-      this.setMeta(q.operation+'_watermark',started);
+      await this.setMeta(q.operation+'_watermark',started);
     }
+    const repairs:{q:Query,priority:number,dirty?:boolean}[]=deltaRepairs;
     if (q.operation==='open_prs' || q.operation==='recent_prs') {
       for (const row of rows) {
         if (q.operation==='recent_prs' && Date.parse(row.updatedAt)<Date.now()-30*86400000) continue;
-        for (const operation of ['issue_comments','review_threads','reviews','files']) await this.enqueue({repository:repo.name,operation,args:{number:row.number}},20);
+        for (const operation of ['issue_comments','review_threads','reviews','files']) repairs.push({q:{repository:repo.name,operation,args:{number:row.number}},priority:20});
         if (q.operation==='open_prs') {
           const itemKey=queryKey({operation:'pr',args:{number:row.number}});
           await this.put('pr',itemKey,row,started);
-          this.sql.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET complete=1,verified=excluded.verified,revision=excluded.revision',itemKey,'pr',JSON.stringify({number:row.number}),1,Date.now(),this.revision(),null);
+          await this.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET complete=1,verified=excluded.verified,revision=excluded.revision',itemKey,'pr',JSON.stringify({number:row.number}),1,Date.now(),(await this.revision()),null);
         }
-        if (q.operation==='open_prs' && row.headRefOid) for (const operation of ['statuses']) await this.enqueue({repository:repo.name,operation,args:{sha:row.headRefOid}},2);
+        if (q.operation==='open_prs' && row.headRefOid) for (const operation of ['statuses']) repairs.push({q:{repository:repo.name,operation,args:{sha:row.headRefOid}},priority:2});
       }
-      if(q.operation==='open_prs') this.setMeta('bootstrap_inventory',Date.now());
+      if(q.operation==='open_prs') await this.setMeta('bootstrap_inventory',Date.now());
     }
-    if (q.operation==='open_issues') for (const row of rows) await this.enqueue({repository:repo.name,operation:'issue_comments',args:{number:row.number}},20);
-    if (q.operation==='review_comments') for (const row of rows) await this.enqueue({repository:repo.name,operation:'reactions',args:{id:String(row.id)}},25);
+    if (q.operation==='open_issues') for (const row of rows) repairs.push({q:{repository:repo.name,operation:'issue_comments',args:{number:row.number}},priority:20});
+    if (q.operation==='review_comments') for (const row of rows) repairs.push({q:{repository:repo.name,operation:'reactions',args:{id:String(row.id)}},priority:25});
     if (q.operation==='review_threads') {
       // This complete thread reconciliation also supplies the flat REST-shaped history.
       const comments=rows.flatMap(t=>t.comments.nodes.map(comment));
       const flatKey=queryKey({operation:'review_comments',args:q.args}), ids=new Set<string>();
+      if(this.store.backend==='postgres')await this.primePublication({...q,operation:'review_comments'},comments);
       for (const c of comments) {
         ids.add(String(c.id)); await this.put('review_comments',String(c.id),c,started,false,String(q.args?.number));
-        await this.enqueue({repository:repo.name,operation:'reactions',args:{id:String(c.id)}},25);
+        repairs.push({q:{repository:repo.name,operation:'reactions',args:{id:String(c.id)}},priority:25});
       }
-      const prior=this.sql.exec<any>('SELECT m.id,r.observed FROM members m LEFT JOIN resources r ON r.kind=? AND r.id=m.id WHERE m.collection=?','review_comments',flatKey).toArray();
-      for (const row of prior) if (!ids.has(row.id) && row.observed<=started) this.membership(flatKey,row.id,false);
-      for (const id of ids) this.membership(flatKey,id,true);
-      if (!this.sql.exec('SELECT key FROM collections WHERE key=? AND complete=1',flatKey).toArray().length) this.nextRevision('collection',flatKey);
-      this.sql.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET complete=1,verified=excluded.verified,revision=excluded.revision',flatKey,'review_comments',JSON.stringify(q.args),1,Date.now(),this.revision(),null);
-      const dependent=this.sql.exec<any>('SELECT * FROM jobs WHERE key=? AND wait_reason LIKE ?',flatKey,'primary%').toArray()[0];
+      const prior=await this.scanRows('SELECT m.id,r.observed FROM members m LEFT JOIN resources r ON r.kind=? AND r.id=m.id WHERE m.collection=?','review_comments',flatKey);
+      if(this.store instanceof ReadCacheStore)for(const row of prior)this.store.seed('SELECT id FROM members WHERE collection=? AND id=?',[flatKey,row.id],[{id:row.id}]);
+      for (const row of prior) if (!ids.has(row.id) && row.observed<=started) await this.membership(flatKey,row.id,false);
+      for (const id of ids) await this.membership(flatKey,id,true);
+      if (!(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',flatKey)).toArray().length) await this.nextRevision('collection',flatKey);
+      await this.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET complete=1,verified=excluded.verified,revision=excluded.revision',flatKey,'review_comments',JSON.stringify(q.args),1,Date.now(),(await this.revision()),null);
+      const dependent=(await this.store.exec<any>('SELECT * FROM jobs WHERE key=? AND wait_reason LIKE ?',flatKey,'primary%')).toArray()[0];
       if(dependent) {
-        this.finishJob({...dependent,start_generation:dependent.generation},{...q,operation:'review_comments'});
-        this.sql.exec('UPDATE jobs SET lease_id=NULL,lease_until=0 WHERE key=?',flatKey);
+        await this.finishJob({...dependent,start_generation:dependent.generation},{...q,operation:'review_comments'});
+        await this.store.exec('UPDATE jobs SET lease_id=NULL,lease_until=0 WHERE key=?',flatKey);
       }
     }
-    this.setMeta('last_repair',Date.now());
+    await this.enqueueMany(repairs);
+    await this.setMeta('last_repair',Date.now());
   }
   // Expiry only deletes, which still succeeds at the storage limit. It runs
   // before repair, hydration or snapshots, any of which can fail first.
-  expire(): Record<string,number> {
+  async expire(): Promise<Record<string,number>> {return this.owner.retentionLane.run(()=>this.expireTurn());}
+  private async expireTurn(): Promise<Record<string,number>> {
     const out:Record<string,number>={},now=Date.now();
-    const budget={rows:6000,bytes:4*1024**2,deadline:now+50};
+    const budget={rows:6000,bytes:4*1024**2,deadline:now+(this.store.backend==='postgres'?5000:50)};
     if(!this.storageLoaded || this.migrationHeld())return out; // Unknown pins and source fences fail closed.
     const names=Object.keys(RULES) as RetentionClass[];
     for(let i=0;i<names.length;i++) {
@@ -843,8 +1212,8 @@ export class RepositoryState extends DurableObject<Env> {
       // Preserve S0's emergency expiry; new classes start as a dry run.
       const enforce=this.retentionPolicy.mode==='enforce' || name!=='expired_demand';
       try {
-        const next=sweep(this.sql,name,prior,budget,enforce,now);
-        this.retentionState[name]=next;out[name]=next.deleted-(next.started===prior?.started?prior.deleted:0);
+        const next=this.store.backend==='postgres'?await sweepStore(this.store,name,prior,budget,enforce,now):sweep(this.sql,name,prior,budget,enforce,now);
+        this.retentionState[name]=next;out[name]=next.deleted-(next.started===prior?.started?(prior?.deleted || 0):0);
       } catch(error) {
         this.noteFailure('expire:'+name,error);
         this.retentionState[name]={...(prior || {after:0,upper:0,started:now,examined:0,eligible:0,deleted:0,bytes:0}),error:classify(error)};
@@ -855,54 +1224,35 @@ export class RepositoryState extends DurableObject<Env> {
   }
   // Same retention class/pins and bounded rowid checkpoint as ordinary
   // expiry, but SQL receipt deletion must follow durable R2 archival.
-  async archiveDeliveryReceipts():Promise<void> {
-    const name='expired_deliveries',now=Date.now(),repo=this.meta('repository')?.id;
-    if(!repo || !this.storageLoaded || this.migrationHeld() || this.retentionPolicy.disabled.includes(name) || this.retentionPolicy.pinned.includes(name))return;
-    const previous=this.retentionState[name];
-    if(previous?.completed && previous.after>=previous.upper && now-previous.completed<60000)return;
-    const state:Checkpoint=previous && previous.after<previous.upper ? {...previous} : {after:0,upper:this.sql.exec<any>('SELECT COALESCE(MAX(rowid),0) n FROM deliveries').one().n,started:now,examined:0,eligible:0,deleted:0,bytes:0};
-    delete state.error;
-    try {
-      const rows=this.sql.exec<any>('SELECT rowid rid,id,event,received,length(CAST(id AS BLOB))+length(CAST(event AS BLOB))+8 bytes FROM deliveries WHERE rowid>? AND rowid<=? ORDER BY rowid LIMIT 100',state.after,state.upper).toArray();
-      let bytes=0;
-      // SQL work stays row/byte bounded. R2 I/O has a separate two-second
-      // dispatch budget and groups of ten, rather than consuming a 50ms SQL turn.
-      for(let offset=0;offset<rows.length && Date.now()-now<2000;offset+=10) {
-        const group=[];
-        for(const row of rows.slice(offset,offset+10)) {
-          if(bytes+row.bytes>4*1024**2)break;
-          bytes+=row.bytes;group.push(row);
+  async archiveDeliveryReceipts():Promise<void> {return this.owner.retentionLane.run(()=>this.archiveDeliveryReceiptTurn());}
+  private async archiveDeliveryReceiptTurn():Promise<void> {
+    const name='expired_deliveries',now=Date.now(),repo=(await this.meta('repository'))?.id;
+    if(!repo || !this.storageLoaded || this.migrationHeld() || this.mutationState.blocked || this.retentionPolicy.disabled.includes(name) || this.retentionPolicy.pinned.includes(name))return;
+    const previous=this.retentionState[name];if(previous?.completed && previous.after>=previous.upper && now-previous.completed<60000)return;
+    const state:Checkpoint=previous && previous.after<previous.upper?{...previous}:{after:0,upper:(await this.store.exec<any>('SELECT COALESCE(MAX(rowid),0) n FROM deliveries')).one().n,started:now,examined:0,eligible:0,deleted:0,bytes:0};delete state.error;
+    try{
+      const size=this.store.backend==='postgres'?"octet_length(id)+octet_length(event)+8":"length(CAST(id AS BLOB))+length(CAST(event AS BLOB))+8";
+      const rows=(await this.store.exec<any>('SELECT rowid rid,id,event,received,'+size+' bytes FROM deliveries WHERE rowid>? AND rowid<=? ORDER BY rowid LIMIT 100',state.after,state.upper)).toArray();let bytes=0;
+      for(let offset=0;offset<rows.length && Date.now()-now<2000;offset+=10){
+        const group:any[]=[];for(const row of rows.slice(offset,offset+10)){if(bytes+row.bytes>4*1024**2)break;bytes+=row.bytes;group.push(row);}if(!group.length)break;
+        const results=await Promise.allSettled(group.map(async row=>{if(row.received>=now-14*86400000)return false;await this.maintenanceArchive.put(receiptKey(repo,row.id),JSON.stringify({delivery:row.id,committed_at:row.received,disposition:String(row.event).startsWith('ignored:')?'not_mirrored':'applied'}),{onlyIf:{etagDoesNotMatch:'*'}});return true;}));
+        if(this.migrationHeld() || this.mutationState.blocked || this.retentionPolicy.disabled.includes(name) || this.retentionPolicy.pinned.includes(name))break;
+        const expired=group.filter((row,i)=>results[i].status==='fulfilled' && (results[i] as PromiseFulfilledResult<boolean>).value);
+        const removed=expired.length?(await this.store.exec<any>('DELETE FROM deliveries WHERE (rowid,id) IN ('+expired.map(()=>'(?,?)').join(',')+') AND received<? RETURNING rowid',...expired.flatMap(row=>[row.rid,row.id]),now-14*86400000)).toArray():[];
+        state.deleted+=removed.length;
+        for(let i=0;i<group.length;i++){
+          const row=group[i],result=results[i];if(result.status==='rejected'){state.error=classify(result.reason);this.noteFailure('receipt_archive',result.reason);}
+          if(row.received<now-14*86400000){state.eligible++;state.bytes+=row.bytes;state.oldest_expired=Math.min(state.oldest_expired ?? row.received,row.received);}state.after=row.rid;state.examined++;
         }
-        if(!group.length)break;
-        const results=await Promise.allSettled(group.map(async row=>{
-          if(row.received>=now-14*86400000)return 0;
-          await this.maintenanceArchive.put(receiptKey(repo,row.id),JSON.stringify({delivery:row.id,committed_at:row.received,disposition:row.event.startsWith('ignored:')?'not_mirrored':'applied'}),{onlyIf:{etagDoesNotMatch:'*'}});
-          if(this.migrationHeld() || this.retentionPolicy.disabled.includes(name) || this.retentionPolicy.pinned.includes(name))return null;
-          return this.sql.exec('DELETE FROM deliveries WHERE rowid=? AND id=? AND received<?',row.rid,row.id,now-14*86400000).rowsWritten;
-        }));
-        let paused=false;
-        for(let i=0;i<group.length;i++) {
-          const row=group[i],result=results[i];
-          if(result.status==='fulfilled' && result.value===null) {paused=true;break;}
-          if(result.status==='rejected') {state.error=classify(result.reason);this.noteFailure('receipt_archive',result.reason);}
-          if(row.received<now-14*86400000) {
-            state.eligible++;state.bytes+=row.bytes;state.oldest_expired=Math.min(state.oldest_expired ?? row.received,row.received);
-            if(result.status==='fulfilled')state.deleted+=result.value || 0;
-          }
-          // Failed uploads retain SQL rows and are revisited on the next cycle;
-          // one R2 failure must not strand the rest of this bounded page.
-          state.after=row.rid;state.examined++;
-        }
-        if(paused || this.migrationHeld())break;
       }
       if(!rows.length || state.after>=state.upper)state.completed=now;
-    } catch(error) {state.error=classify(error);this.noteFailure('receipt_archive',error);}
+    }catch(error){state.error=classify(error);this.noteFailure('receipt_archive',error);}
     this.retentionState[name]=state;
   }
   // Cron calls this independently of hydration, dispatch and archive creation.
   // Checkpoints and observations live outside the potentially full SQLite DB.
   async storageMaintenance(runExpiry=true): Promise<void> {
-    if(this.migrationHeld())return;
+    if(this.migrationHeld() || this.mutationState.blocked)return;
     if(this.storageFlight)return this.storageFlight;
     this.activeOperations++;
     const flight=this.prepareStorage(runExpiry);this.storageFlight=flight;
@@ -910,7 +1260,7 @@ export class RepositoryState extends DurableObject<Env> {
   }
   get maintenanceArchive():R2Bucket {return timedBucket(this.env.ARCHIVE);}
   startStorageMaintenance():void {
-    if(this.migrationHeld())return;
+    if(this.migrationHeld() || this.mutationState.blocked)return;
     const task=this.storageMaintenance(false).catch(error=>this.noteFailure('storage_maintenance',error));
     if(this.ctx.waitUntil)this.ctx.waitUntil(task);
   }
@@ -921,7 +1271,7 @@ export class RepositoryState extends DurableObject<Env> {
     try {await task;}finally {if(this.retentionLoadFlight===task)this.retentionLoadFlight=undefined;}
   }
   async readRetentionState():Promise<void> {
-    let repo:string|undefined;try {repo=this.meta('repository')?.id;}catch {return;}if(!repo)return;
+    let repo:string|undefined;try {repo=(await this.meta('repository'))?.id;}catch {return;}if(!repo)return;
     const observedGeneration=this.policyGeneration;
     if(!this.storageLoaded)try {
       const control=await this.maintenanceArchive.get('control/'+repo+'/retention-policy.json').then(o=>o?.json<any>());
@@ -933,7 +1283,7 @@ export class RepositoryState extends DurableObject<Env> {
     // retain the acknowledged policy while restoring the scan's old checkpoint.
     if(!this.retentionProgressLoaded)try {
       const checkpoint=await this.maintenanceArchive.get('control/'+repo+'/retention-checkpoint.json').then(o=>o?.json<any>());
-      if(checkpoint?.version===1 && checkpoint.classes && typeof checkpoint.classes==='object') {
+      if(checkpoint?.version===1 && (this.store.backend==='sqlite'?(!checkpoint.backend || checkpoint.backend==='sqlite'):checkpoint.backend==='postgres' && checkpoint.generation===this.env.REPOSITORY_GENERATION) && checkpoint.classes && typeof checkpoint.classes==='object') {
         for(const name of Object.keys(RULES) as RetentionClass[]) {
           const row=checkpoint.classes[name];
           if(!this.retentionState[name] && row && ['after','upper','started','examined','eligible','deleted','bytes'].every(k=>Number.isSafeInteger(row[k]) && row[k]>=0) && row.after<=row.upper) {
@@ -946,7 +1296,7 @@ export class RepositoryState extends DurableObject<Env> {
   }
 
   async prepareStorage(runExpiry=true): Promise<void> {
-    const repo=this.meta('repository')?.id;if(!repo)return;
+    const repo=(await this.meta('repository'))?.id;if(!repo)return;
     await this.loadRetentionState();
     if(this.migrationHeld())return;
     if(Date.now()-this.receiptsChecked>=60000) {
@@ -960,18 +1310,18 @@ export class RepositoryState extends DurableObject<Env> {
       }catch {this.receiptsPinned=true;}
     }
     if(this.migrationHeld())return;
-    if(this.storageLoaded) {if(runExpiry)this.expire();await this.archiveDeliveryReceipts();}
+    if(this.storageLoaded){if(runExpiry)await this.expire();await this.archiveDeliveryReceipts();}
     if(this.migrationHeld())return;
     try {
-      const text=JSON.stringify({version:1,classes:this.retentionState});
+      const text=JSON.stringify({version:1,backend:this.store.backend,generation:this.env.REPOSITORY_GENERATION || 'sqlite-v1',classes:this.retentionState});
       if(this.storageLoaded && this.retentionProgressLoaded && text!==this.checkpointText && Date.now()-this.checkpointAt>=30000) {
-        await this.ctx.storage.sync();
+        if(this.store.backend==='sqlite')await this.ctx.storage.sync();
         await this.maintenanceArchive.put('control/'+repo+'/retention-checkpoint.json',text);
         this.checkpointAt=Date.now();this.checkpointText=text;
       }
     }catch(error) {this.noteFailure('retention_checkpoint',error);}
     if(this.migrationHeld())return;
-    this.prepareDiagnostics();
+    await this.prepareDiagnostics();
     const now=Date.now();
     if(this.observation && now-this.observation.at<60000)return;
     let ingressHealth:any;
@@ -985,6 +1335,11 @@ export class RepositoryState extends DurableObject<Env> {
         queue:{count:null,reason:'management_metrics_not_configured'},dlq:{count:null,reason:'management_metrics_not_configured'}};
     }catch(error) {ingressHealth={at:now,durable:false,error:classify(error)};}
     if(this.migrationHeld())return;
+    if(this.store.backend==='postgres') {
+      const storage=await this.store.health();
+      this.observation={version:1,at:now,backend:'postgres',storage,capacity:storage.capacity,connections:{connected:storage.connected,failures:storage.connection_failures},ingress:ingressHealth,requests:this.requestMetrics.snapshot(now),repair_summary:this.repairMetrics.summary(now),retention:{policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,receipts_pinned:this.receiptsPinned,receipt_pin_backend:'r2'}};
+      await this.maintenanceArchive.put('control/'+repo+'/observation.json',JSON.stringify(this.observation));return;
+    }
     try {
       const sample={at:now,bytes:this.sql.databaseSize,allowance:SQLITE_ALLOWANCE};
       if(!this.capacityHistory.length) {
@@ -1036,7 +1391,7 @@ export class RepositoryState extends DurableObject<Env> {
       const level=reasons.some(r=>r!=='storage_capacity')?'critical':measured.level;
       const requests=this.requestMetrics.snapshot(now),repairMinutes=this.repairMetrics.snapshot(now).filter((r:any)=>r.at>=now-60000);
       const {intervals,...requestSummary}=requests;
-      const value={version:1,at:now,level,reasons,capacity:measured,capacity_history:this.capacityHistory,tables:this.tableEstimates,table_attempt_at:this.tableAttemptAt,ingress:ingressHealth,refresh_lag_ms:this.meta('last_repair')?now-this.meta('last_repair'):null,requests:requestSummary,repair_summary:this.repairMetrics.summary(now),
+      const value={version:1,at:now,level,reasons,capacity:measured,capacity_history:this.capacityHistory,tables:this.tableEstimates,table_attempt_at:this.tableAttemptAt,ingress:ingressHealth,refresh_lag_ms:(await this.meta('last_repair'))?now-(await this.meta('last_repair')):null,requests:requestSummary,repair_summary:this.repairMetrics.summary(now),
         retention:{policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,receipts_pinned:this.receiptsPinned,receipt_pin_backend:'r2',r2:r2Retention},
         compute:{status:'unavailable',reason:'not_exposed_by_sqlite_runtime'},connections:{status:'not_applicable'}};
       const alarm=level!=='ok'?emitAlarm(this.env,repo,value):{channel:'configured_workers_observability',emitted:false,notified:false};
@@ -1051,10 +1406,10 @@ export class RepositoryState extends DurableObject<Env> {
   async preparedObservation(): Promise<any> {
     if(!this.observation && Date.now()-this.observationReadAt>=60000) {
       this.observationReadAt=Date.now();
-      let repo:string|undefined;try {repo=this.meta('repository')?.id;}catch {}
+      let repo:string|undefined;try {repo=(await this.meta('repository'))?.id;}catch {}
       if(repo) {
         const task=this.maintenanceArchive.get('control/'+repo+'/observation.json').then(o=>o?.json<any>()).then(value=>{
-          if(value && (!this.observation || value.at>this.observation.at))this.observation=value;
+          if(value && (this.store.backend!=='postgres' || value.backend==='postgres') && (!this.observation || value.at>this.observation.at))this.observation=value;
         }).catch(()=>{});
         if(this.ctx.waitUntil)this.ctx.waitUntil(task);
         // A cold status response stays fast even when the observation store is slow.
@@ -1067,50 +1422,54 @@ export class RepositoryState extends DurableObject<Env> {
   async maintenance(): Promise<void> {
     if(!this.degraded) {
       try {
-        const pending=this.sql.exec<any>('SELECT m.id FROM members m LEFT JOIN survey_hydrated h ON h.number=m.id LEFT JOIN survey_hydration_failures f ON f.number=m.id WHERE m.collection=? AND (h.contract IS NULL OR h.contract!=?) AND (f.retry_at IS NULL OR f.retry_at<=?) LIMIT 20',queryKey({operation:'open_prs'}),SURVEY_CONTRACT,Date.now()).toArray();
+        const pending=(await this.store.exec<any>('SELECT m.id FROM members m LEFT JOIN survey_hydrated h ON h.number=m.id LEFT JOIN survey_hydration_failures f ON f.number=m.id WHERE m.collection=? AND (h.contract IS NULL OR h.contract!=?) AND (f.retry_at IS NULL OR f.retry_at<=?) LIMIT 20',queryKey({operation:'open_prs'}),SURVEY_CONTRACT,Date.now())).toArray();
         for(const row of pending) {
-          try {await this.hydrateSurvey(row.id);}catch {this.invalidateSurvey(row.id);}
+          try {await this.hydrateSurvey(row.id);}catch {await this.invalidateSurvey(row.id);}
         }
-        for(const row of this.sql.exec<any>('SELECT number FROM survey_dirty LIMIT 20').toArray()) {
-          try {this.rebuildSurvey(row.number);}catch {this.invalidateSurvey(row.number);this.sql.exec('DELETE FROM survey_dirty WHERE number=?',row.number);}
+        for(const row of (await this.store.exec<any>('SELECT number FROM survey_dirty LIMIT 20')).toArray()) {
+          try {await this.rebuildSurvey(row.number);}catch {await this.invalidateSurvey(row.number);await this.store.exec('DELETE FROM survey_dirty WHERE number=?',row.number);}
         }
       } catch(error) {this.noteFailure('survey_hydration',error);}
     }
   }
-  retireUnneeded(job:any): boolean {
+  async retireUnneeded(job:any): Promise<boolean> {
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.retireUnneeded.call(state,job));
     const q:Query=JSON.parse(job.query);
-    if (NOT_MIRRORED.has(q.operation)) {this.sql.exec('DELETE FROM jobs WHERE key=?',job.key);this.optional('repair_metrics',()=>this.metric('cancellation',q,job.lane));return true;}
-    if (job.dirty || !this.dormant(q) || !this.complete(q)) return false;
-    this.sql.exec('DELETE FROM jobs WHERE key=?',job.key);
-    this.metric('cancellation',q,job.lane);return true;
+    if (!NOT_MIRRORED.has(q.operation) && (job.dirty || !(await this.dormant(q)) || !(await this.complete(q)))) return false;
+    const removed=(await this.store.exec('DELETE FROM jobs WHERE key=? AND COALESCE(generation,0)=? AND lease_until<=? AND COALESCE(started,0)=? AND dirty=? RETURNING key',job.key,job.generation || 0,Date.now(),job.started || 0,job.dirty || 0)).toArray();
+    if(!removed.length)return false;
+    await this.store.exec('DELETE FROM meta WHERE key=?',stagingStateKey(job.key));
+    await this.metric('cancellation',q,job.lane);return true;
   }
-  claim(job:any): any {
+  async claim(job:any): Promise<any> {
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.claim.call(state,job));
     const now=Date.now(),lease=crypto.randomUUID(),started=job.started || now,generation=job.started?job.start_generation:job.generation;
-    this.sql.exec('UPDATE jobs SET lease_id=?,lease_until=?,started=?,start_generation=? WHERE key=? AND lease_until<=?',lease,now+settings(this.env).lease_ms,started,generation,job.key,now);
-    return this.sql.exec<any>('SELECT * FROM jobs WHERE key=? AND lease_id=?',job.key,lease).toArray()[0];
+    await this.store.exec('UPDATE jobs SET lease_id=?,lease_until=?,started=?,start_generation=? WHERE key=? AND lease_until<=? AND COALESCE(generation,0)=? AND COALESCE(started,0)=?',lease,now+settings(this.env).lease_ms,started,generation,job.key,now,job.generation || 0,job.started || 0);
+    return (await this.store.exec<any>('SELECT * FROM jobs WHERE key=? AND lease_id=?',job.key,lease)).toArray()[0];
   }
-  retryJob(job:any,error:unknown): void {
+  async retryJob(job:any,error:unknown): Promise<void> {
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.retryJob.call(state,job,error));
     const expired=error instanceof Error && /staging page missing/.test(error.message);
     const category=expired?'staging_expired':'transport_or_parser';
     const delay=Math.min(3600000,60000*2**Math.min(job.attempt || 0,6));
-    this.sql.exec('UPDATE jobs SET due=?,attempt=attempt+1,wait_reason=?'+(expired?',started=NULL,cursor=NULL,page=1,api=NULL,etag=NULL,nested=NULL':'')+' WHERE key=? AND lease_id=?',Date.now()+delay,category,job.key,job.lease_id);
-    this.metric('retry',JSON.parse(job.query),job.lane);
-    this.setMeta('last_upstream_failure',{at:Date.now(),operation:JSON.parse(job.query).operation,category});
+    await this.store.exec('UPDATE jobs SET due=?,attempt=attempt+1,wait_reason=?'+(expired?',started=NULL,cursor=NULL,page=1,api=NULL,etag=NULL,nested=NULL':'')+' WHERE key=? AND lease_id=?',Date.now()+delay,category,job.key,job.lease_id);
+    await this.metric('retry',JSON.parse(job.query),job.lane);
+    await this.setMeta('last_upstream_failure',{at:Date.now(),operation:JSON.parse(job.query).operation,category});
   }
   async dispatch(first:any): Promise<void> {
-    const q:Query=JSON.parse(first.query),operation=q.operation,repo=this.meta('repository');
+    const q:Query=JSON.parse(first.query),operation=q.operation,repo=(await this.meta('repository'));
     let jobs=[first];
     try {
       if (['issue_comments','review_threads','statuses','reactions'].includes(operation) && first.page===1 && !first.api && !first.nested) {
-        const candidates=this.sql.exec<any>('SELECT * FROM jobs WHERE due<=? AND lease_until<=? AND lane=? AND page=1 AND api IS NULL AND nested IS NULL AND key LIKE ? ORDER BY due,key LIMIT ?',Date.now(),Date.now(),first.lane,operation+':%',Math.max(0,batchLimit(operation)-1)).toArray();
+        const candidates=(await this.store.exec<any>('SELECT * FROM jobs WHERE due<=? AND lease_until<=? AND lane=? AND page=1 AND api IS NULL AND nested IS NULL AND key LIKE ? ORDER BY due,key LIMIT ?',Date.now(),Date.now(),first.lane,operation+':%',Math.max(0,batchLimit(operation)-1))).toArray();
         for (const item of candidates) {
-          if (this.retireUnneeded(item)) continue;
-          const claimed=this.claim(item);if (claimed) jobs.push(claimed);
+          if ((await this.retireUnneeded(item))) continue;
+          const claimed=(await this.claim(item));if (claimed) jobs.push(claimed);
         }
         if (operation==='reactions') {
           const supported=[];
           for (const item of jobs) {
-            const query=JSON.parse(item.query),row=this.sql.exec<any>('SELECT data FROM resources WHERE kind=? AND id=? AND tombstone=0','review_comments',String(query.args.id)).toArray()[0];
+            const query=JSON.parse(item.query),row=(await this.store.exec<any>('SELECT data FROM resources WHERE kind=? AND id=? AND tombstone=0','review_comments',String(query.args.id))).toArray()[0];
             const data=row?await this.decode(row.data):null;
             if (data?.node_id) supported.push({...item,node_id:data.node_id});
           }
@@ -1122,20 +1481,25 @@ export class RepositoryState extends DurableObject<Env> {
         if (result.results) {
           for(let i=0;i<jobs.length;i++) {
             try {await this.refresh(jobs[i],result.results[i] || {unavailable:true});}
-            catch(error) {this.retryJob(jobs[i],error);}
+            catch(error) {await this.retryJob(jobs[i],error);}
           }
         } else if (result.deferred && operation!=='review_threads' && result.category!=='capacity' && !String(result.category).startsWith('secondary')) {
           // Retry REST-capable operations in their other pool on the next quantum.
-          for(const item of jobs) this.sql.exec('UPDATE jobs SET api=?,due=? WHERE key=? AND lease_id=?','core',Date.now(),item.key,item.lease_id);
+          for(const item of jobs) await this.store.exec('UPDATE jobs SET api=?,due=? WHERE key=? AND lease_id=?','core',Date.now(),item.key,item.lease_id);
         } else for(const item of jobs) await this.refresh(item,result.deferred || result.unavailable?result:{unavailable:true,reason:'malformed_service_response'});
       } else await this.refresh(first);
     } catch(error) {
-      for(const item of jobs) this.retryJob(item,error);
+      for(const item of jobs) await this.retryJob(item,error);
     } finally {
-      for(const item of jobs) this.sql.exec('UPDATE jobs SET lease_id=NULL,lease_until=0 WHERE key=? AND lease_id=?',item.key,item.lease_id);
+      for(const item of jobs) await this.store.exec('UPDATE jobs SET lease_id=NULL,lease_until=0 WHERE key=? AND lease_id=?',item.key,item.lease_id);
     }
   }
   async alarm(): Promise<void> {
+    if(this.owner.alarmFlight)return this.owner.alarmFlight;
+    const flight=this.runSingleAlarm();this.owner.alarmFlight=flight;
+    try{await flight;}finally{if(this.owner.alarmFlight===flight)this.owner.alarmFlight=undefined;}
+  }
+  async runSingleAlarm(): Promise<void> {
     if(this.migrationUnavailable) await this.retryMigrationControl();
     if(this.migrationHeld()) return;
     this.activeOperations++;
@@ -1144,7 +1508,7 @@ export class RepositoryState extends DurableObject<Env> {
   async runAlarm(): Promise<void> {
     const options=settings(this.env),began=Date.now();let dispatched=0,retired=0;
     try {
-      this.expire();
+      await this.expire();
       if(this.schema!=='current' && !this.degraded) this.startup();
       // Every dispatch writes its lease before any GitHub request, so a full
       // store stops here without spending upstream quota.
@@ -1152,9 +1516,10 @@ export class RepositoryState extends DurableObject<Env> {
         while(dispatched<options.dispatches && Date.now()-began<options.launch_ms && !this.degraded && !this.migrationHeld()) {
           const wave:Promise<void>[]=[];
           while(wave.length<options.concurrency && dispatched<options.dispatches) {
-            const next=this.nextJob();if (!next) break;
-            if (this.retireUnneeded(next)) {if (++retired>=200) break;continue;}
-            const job=this.claim(next);if (!job) continue;
+            const selected=await this.atomic(async state=>{const next=await state.nextJob();if(!next)return undefined;if(await state.retireUnneeded(next))return {retired:true,job:undefined};return {retired:false,job:await state.claim(next)};});
+            if(!selected)break;
+            if(selected.retired){if(++retired>=200)break;continue;}
+            const job=selected.job;if(!job)continue;
             dispatched++;wave.push(this.dispatch(job));
           }
           if (!wave.length) break;
@@ -1164,7 +1529,7 @@ export class RepositoryState extends DurableObject<Env> {
       try {if(!this.migrationHeld()) await this.maintenance();} catch(error) {this.noteFailure('maintenance',error);}
     } finally {
       try {
-        const row=this.sql.exec<any>('SELECT MIN(MAX(due,lease_until)) AS due FROM jobs').one();
+        const row=(await this.store.exec<any>('SELECT MIN(MAX(due,lease_until)) AS due FROM jobs')).one();
         // Degraded mode writes nothing, not even the next alarm; the cron tick
         // keeps expiring rows until a probe restores writes.
         if (row.due && !this.degraded && !this.migrationHeld()) await this.setAlarm(Math.max(Date.now()+100,row.due));
@@ -1173,36 +1538,70 @@ export class RepositoryState extends DurableObject<Env> {
     }
   }
   async refreshActivityLandings(): Promise<void> {
-    const configured=this.meta('repository');
-    const receiptURL=configured?.bors_receipts_url;
-    if(!receiptURL && !(configured?.name==='TauCetiProject/TauCeti' && this.env.BORS_ACTIVITY)) return;
-    if(receiptURL && (!receiptURL.startsWith('https://') || new URL(receiptURL).username || new URL(receiptURL).password)) throw new Error('Bors receipts require an approved HTTPS URL');
-    const now=Date.now();
-    if(this.meta('activity_landings_transport')==='service-binding-v2' && now-(this.meta('activity_landings_checked') || 0)<300000) return;
-    // Reserve the interval before yielding so overlapping cron requests cannot
-    // multiply reads. This path never calls configure, demand or the scheduler.
-    this.setMeta('activity_landings_checked',now);
-    this.setMeta('activity_landings_transport','service-binding-v2');
-    try {
-      const receipts=await readPromotionReceipts((url,options)=>this.env.BORS_ACTIVITY ? this.env.BORS_ACTIVITY.fetch(url,options) : fetch(url,options),receiptURL,configured.name,configured.branch || 'main');
-      for(const r of receipts) this.sql.exec('INSERT INTO activity_landings VALUES(?,?,?,?) ON CONFLICT(number,head) DO UPDATE SET at=excluded.at,source=excluded.source WHERE excluded.at<activity_landings.at',r.number,r.head,r.at,r.source);
-      this.setMeta('activity_landings_success',now);
-      this.setMeta('activity_landings_error',null);
-    } catch(error) {this.setMeta('activity_landings_error','Stored Bors promotion receipts unavailable: '+(error instanceof Error?error.name+': '+error.message.slice(0,160):'unknown error'));}
+    const configured=await this.meta('repository'),receiptURL=configured?.bors_receipts_url;
+    if(!receiptURL && !(configured?.name==='TauCetiProject/TauCeti' && this.env.BORS_ACTIVITY))return;
+    if(receiptURL && (!receiptURL.startsWith('https://') || new URL(receiptURL).username || new URL(receiptURL).password))throw Error('Bors receipts require an approved HTTPS URL');
+    const now=Date.now(),token=crypto.randomUUID();
+    const reserved=await this.atomic(async state=>{
+      if((await state.meta('activity_landings_transport'))==='service-binding-v2' && now-((await state.meta('activity_landings_checked')) || 0)<300000)return false;
+      await state.setMeta('activity_landings_checked',now);await state.setMeta('activity_landings_transport','service-binding-v2');await state.setMeta('activity_landings_token',token);return true;
+    });
+    if(!reserved)return;
+    let receipts:Awaited<ReturnType<typeof readPromotionReceipts>>=[],failure:string|null=null;
+    try{receipts=await readPromotionReceipts((url,options)=>this.env.BORS_ACTIVITY?this.env.BORS_ACTIVITY.fetch(url,options):fetch(url,options),receiptURL,configured.name,configured.branch || 'main');}
+    catch(error){failure='Stored Bors promotion receipts unavailable: '+(error instanceof Error?error.name+': '+error.message.slice(0,160):'unknown error');}
+    await this.atomic(async state=>{
+      if(await state.meta('activity_landings_token')!==token)return;
+      if(!failure){
+        for(const r of receipts)await state.store.exec('INSERT INTO activity_landings VALUES(?,?,?,?) ON CONFLICT(number,head) DO UPDATE SET at=excluded.at,source=excluded.source WHERE excluded.at<activity_landings.at',r.number,r.head,r.at,r.source);
+        await state.setMeta('activity_landings_success',now);
+      }
+      await state.setMeta('activity_landings_error',failure);
+    });
+  }
+  async primeActivity(numbers:number[]):Promise<RepositoryState> {
+    if(this.store.backend!=='postgres')return this;
+    const state=Object.create(this) as RepositoryState,cache=new ReadCacheStore(this.store);state.store=cache;state.readScope=true;
+    for(let offset=0;offset<numbers.length;offset+=128) {
+      const ns=numbers.slice(offset,offset+128),ids=ns.map(String),keys=ns.map(number=>queryKey({operation:'files',args:{number}}));
+      const [resources,collections,loc]=await cache.batch([
+        {sql:"SELECT id,data,observed FROM resources WHERE kind='pr' AND tombstone=0 AND id IN ("+ids.map(()=>'?').join(',')+')',bindings:ids},
+        {sql:'SELECT key,complete,revision FROM collections WHERE key IN ('+keys.map(()=>'?').join(',')+')',bindings:keys},
+        {sql:'SELECT number,fingerprint,data FROM activity_loc_cache WHERE number IN ('+ids.map(()=>'?').join(',')+')',bindings:ids}
+      ]);
+      const decoded=new Map<string,any>();
+      for(const row of resources.toArray())decoded.set(row.id,await this.decode(row.data));
+      const heads=ns.flatMap(number=>decoded.has(String(number))?[String(number),decoded.get(String(number)).headRefOid || '']:[]);
+      const landings=heads.length?(await cache.exec('SELECT number,head,at,source FROM activity_landings WHERE (number,head) IN ('+Array.from({length:heads.length/2},()=>'(?,?)').join(',')+')',...heads)).toArray():[];
+      for(const number of ns) {
+        const id=String(number),found=resources.toArray().filter(r=>r.id===id),key=queryKey({operation:'files',args:{number}}),collection=collections.toArray().filter(r=>r.key===key),p=decoded.get(id);
+        cache.seed("SELECT data,observed FROM resources WHERE kind='pr' AND id=? AND tombstone=0",[id],found);
+        cache.seed('SELECT complete,revision FROM collections WHERE key=?',[key],collection);
+        if(p){
+          cache.seed('SELECT at,source FROM activity_landings WHERE number=? AND head=?',[number,p.headRefOid || ''],landings.filter(r=>r.number===id && r.head===p.headRefOid));
+          const fingerprint=activityFingerprint(p,collection[0]?.revision);
+          cache.seed('SELECT data FROM activity_loc_cache WHERE number=? AND fingerprint=?',[number,fingerprint],loc.toArray().filter(r=>r.number===id && r.fingerprint===fingerprint));
+        }
+      }
+      // Reuse already decoded PR metadata, including occasional R2-backed rows.
+      const decode=state.decode.bind(state),byText=new Map(resources.toArray().map(r=>[r.data,decoded.get(r.id)]));
+      state.decode=async text=>byText.has(text)?byText.get(text):decode(text);
+    }
+    return state;
   }
   async activityLOC(number:number,p:any,budget?:{remaining:number}): Promise<any> {
     const key=queryKey({operation:'files',args:{number}});
-    const complete=this.sql.exec<any>('SELECT complete,revision FROM collections WHERE key=?',key).toArray()[0];
+    const complete=(await this.store.exec<any>('SELECT complete,revision FROM collections WHERE key=?',key)).toArray()[0];
     if(!complete?.complete || !p.headRefOid || !Number.isSafeInteger(p.changedFiles)) return null;
-    const fingerprint=JSON.stringify([p.headRefOid,p.baseRefOid,p.changedFiles,p.additions,p.deletions,complete.revision]);
-    const cached=this.sql.exec<any>('SELECT data FROM activity_loc_cache WHERE number=? AND fingerprint=?',number,fingerprint).toArray()[0];
+    const fingerprint=activityFingerprint(p,complete.revision);
+    const cached=(await this.store.exec<any>('SELECT data FROM activity_loc_cache WHERE number=? AND fingerprint=?',number,fingerprint)).toArray()[0];
     if(cached) return JSON.parse(cached.data);
     if(budget && budget.remaining--<=0) return null;
-    const remember=(result:any)=>{
-      this.optional('activity_loc_cache',()=>this.sql.exec('INSERT OR REPLACE INTO activity_loc_cache VALUES (?,?,?)',number,fingerprint,JSON.stringify(result)));
+    const remember=async (result:any)=>{
+      await this.optionalRead('activity_loc_cache',async ()=>(await this.store.exec('INSERT OR REPLACE INTO activity_loc_cache VALUES (?,?,?)',number,fingerprint,JSON.stringify(result))));
       return result;
     };
-    const stored=this.sql.exec<any>("SELECT r.data FROM members m JOIN resources r ON r.kind='files' AND r.id=m.id WHERE m.collection=? AND r.tombstone=0",key).toArray();
+    const stored=await this.scanRows("SELECT r.data FROM members m JOIN resources r ON r.kind='files' AND r.id=m.id WHERE m.collection=? AND r.tombstone=0",key);
     if(stored.length!==p.changedFiles) return remember(null);
     let added=0,deleted=0,totalAdded=0,totalDeleted=0;
     for(const row of stored) {
@@ -1228,32 +1627,40 @@ export class RepositoryState extends DurableObject<Env> {
     return remember({added,deleted,head_sha:p.headRefOid});
   }
   // The last time the mirror changed: an applied webhook or a stored repair.
-  frozenSince(): number | null {
+  async frozenSince(): Promise<number | null> {
     if (!this.degraded) return null;
-    let changed:number;try {changed=Math.max(this.meta('last_webhook') || 0,this.meta('last_repair') || 0);}catch {return null;}
+    let changed:number;try{changed=Math.max((await this.meta('last_webhook')) || 0,(await this.meta('last_repair')) || 0);}catch{return null;}
     return Date.now()-changed>FROZEN_AFTER?changed:null;
   }
-  prepareDiagnostics(): void {
+  async prepareDiagnostics(): Promise<void> {
     if(Date.now()-this.diagnosticsAt<60000)return;
-    try {this.diagnostics={storage:this.storageState(),storage_bytes:this.sql.databaseSize,survey:this.surveyHealth(),reconciliation_version:2,deployment_id:this.env.CF_VERSION?.id,settings:settings(this.env),repository:this.meta('repository'),revision:this.revision(),bootstrap_inventory:this.meta('bootstrap_inventory'),last_webhook:this.meta('last_webhook'),webhook_apply_ms:this.meta('webhook_apply_ms'),last_repair:this.meta('last_repair'),last_upstream_failure:this.meta('last_upstream_failure'),coverage:this.sql.exec('SELECT operation,COUNT(*) resources,SUM(complete) complete,MIN(verified) oldest_verified FROM collections GROUP BY operation').toArray(),jobs:this.sql.exec('SELECT COUNT(*) total,SUM(due<=?) due,MIN(started) oldest_started FROM jobs',Date.now()).one(),lanes:this.sql.exec('SELECT lane,COUNT(*) jobs,SUM(due<=? AND lease_until<=?) eligible,SUM(lease_until>?) inflight,MIN(CASE WHEN due<=? AND lease_until<=? THEN due END) oldest_eligible,MIN(requested_at) oldest_requested FROM jobs GROUP BY lane',...Array(5).fill(Date.now())).toArray(),waits:this.sql.exec('SELECT lane,wait_reason,COUNT(*) jobs FROM jobs WHERE wait_reason IS NOT NULL GROUP BY lane,wait_reason').toArray(),...this.repairMetrics.summary(),queries:[...this.queryCounts.values()],repair_operations:this.sql.exec("SELECT json_extract(query,'$.operation') operation,COUNT(*) jobs,SUM(due<=?) due,MIN(due) next_due,MAX(attempt) attempts FROM jobs GROUP BY operation",Date.now()).toArray()};this.diagnosticsAt=Date.now();}
-    catch(error) {this.noteFailure('health_prepare',error);}
+    try {this.diagnostics={reconciliation_version:2,...await repositoryHealth(this.store),...this.repairMetrics.summary(),queries:[...this.queryCounts.values()]};this.diagnosticsAt=Date.now();}
+    catch(error){this.noteFailure('health_prepare',error);}
   }
-  storageState(): any {
-    return {mode:this.degraded?'degraded':'writable',mutation_fence:this.migrationUnavailable?'control_unavailable':this.migrationHeld()?'migration':null,degraded:this.degraded ?? null,frozen_since:this.frozenSince(),schema:this.schema,database_size:this.sql.databaseSize,fault_injection:this.env.FAULT_INJECTION==='true'?{full:this.faultFull}:undefined};
+  async storageState(): Promise<any> {
+    return {mode:this.degraded?'degraded':'writable',mutation_fence:this.migrationUnavailable?'control_unavailable':this.migrationHeld()?'migration':null,degraded:this.degraded ?? null,frozen_since:(await this.frozenSince()),schema:this.schema,database_size:this.sql.databaseSize,fault_injection:this.env.FAULT_INJECTION==='true'?{full:this.faultFull}:undefined};
   }
   async storage(path:string,req:Request): Promise<Response> {
+    if(this.store.backend==='postgres' && !['/storage/summary','/storage/ingress','/storage/deliveries','/storage/retention'].includes(path)) throw new AdminError('sqlite_recovery_only');
+    if(this.store.backend==='postgres' && path==='/storage/summary') return json({storage:await this.store.health(),monitoring:await this.preparedObservation(),retention:{policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,receipts_pinned:this.receiptsPinned,receipt_pin_backend:'r2'}});
     const input:any=req.method==='POST'?await req.json():{};
-    const repo=this.meta('repository')?.id ?? input.repository_id;
+    const repo=(await this.meta('repository'))?.id ?? input.repository_id;
     if (typeof repo!=='string' || !/^[0-9]+$/.test(repo)) throw new AdminError('repository_unconfigured');
-    if (path==='/storage/summary') return json({repository:repo,storage:this.storageState(),retention:{policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,receipts_pinned:this.receiptsPinned,receipt_pin_backend:'r2'},...summary(this.sql)});
+    if(this.store.backend==='sqlite' && ['/storage/cleanup','/storage/probe'].includes(path)) {
+      const owner=this.localMeta('backend_owner');
+      if(owner && (owner.backend!=='sqlite' || owner.generation!==(this.env.REPOSITORY_GENERATION || 'sqlite-v1')))throw new AdminError('backend_fenced');
+    }
+    if (path==='/storage/summary') return json({repository:repo,storage:await this.storageState(),retention:{policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,receipts_pinned:this.receiptsPinned,receipt_pin_backend:'r2'},...summary(this.sql)});
     if (path==='/storage/retention') {
       if(input.policy!==undefined) {
         let next:Policy;try {next=policy(input.policy);}catch {throw new AdminError('invalid_retention_policy');}
         const update=this.policyUpdateFlight.then(async()=>{
           if(this.storageFlight)await this.storageFlight.catch(()=>{});
           if(this.retentionLoadFlight)await this.retentionLoadFlight;
-          await this.env.ARCHIVE.put('control/'+repo+'/retention-policy.json',JSON.stringify(next));
-          this.policyGeneration++;this.retentionPolicy=next;this.storageLoaded=true;
+          await this.owner.retentionLane.run(async()=>{
+            await this.env.ARCHIVE.put('control/'+repo+'/retention-policy.json',JSON.stringify(next));
+            this.policyGeneration++;this.retentionPolicy=next;this.storageLoaded=true;
+          });
         });
         this.policyUpdateFlight=update.catch(()=>{});
         await update;
@@ -1268,6 +1675,32 @@ export class RepositoryState extends DurableObject<Env> {
       return json({class:input.class,table:rule.table,...result,database_size_before:before,database_size_after:this.sql.databaseSize,
         note:'Deleted rows become reusable free pages; the physical database size need not shrink. Prove headroom with /admin/storage/probe.'});
     }
+    if(path==='/storage/ownership') {
+      if(this.env.MIGRATION_ENVIRONMENT!=='test')throw new AdminError('migration_production_prerequisites_unavailable');
+      if(this.ingress!=='parked')throw new AdminError('ingress_must_be_drained');
+      if(!['sqlite','postgres'].includes(input.backend) || !/^[A-Za-z0-9_-]{1,80}$/.test(input.generation || ''))throw new AdminError('invalid_backend_owner');
+      const prior=this.localMeta('backend_owner') || {backend:'sqlite',generation:'sqlite-v1'};
+      if(input.expected_generation!==prior.generation)throw new AdminError('backend_generation_mismatch');
+      this.mutationState.blocked=true;
+      try {
+      if(this.storageFlight)await this.storageFlight;
+      await this.policyUpdateFlight;
+      for(const deadline=Date.now()+25000;this.mutationState.active>0 && Date.now()<deadline;)await new Promise(resolve=>setTimeout(resolve,50));
+      if(this.mutationState.active || this.applying)throw new AdminError('repository_mutations_not_drained');
+      this.ctx.storage.transactionSync(()=>{
+        // Persistent SQLite triggers fence even deployments predating the
+        // asynchronous adapter. Install only during the explicit S2 operation.
+        const existing=new Set(this.sql.exec<any>("SELECT name FROM sqlite_master WHERE type='table'").toArray().map(row=>row.name));
+        for(const table of Object.keys(columns).filter(table=>existing.has(table)))for(const operation of ['INSERT','UPDATE','DELETE']) {
+          const record=operation==='DELETE'?'OLD':'NEW',exclude=table==='meta'?` AND ${record}.key!='backend_owner'`:'';
+          this.sql.exec(`CREATE TRIGGER IF NOT EXISTS backend_fence_${table}_${operation.toLowerCase()} BEFORE ${operation} ON ${table} WHEN COALESCE((SELECT json_extract(value,'$.backend') FROM meta WHERE key='backend_owner'),'sqlite')!='sqlite'${exclude} BEGIN SELECT RAISE(ABORT,'Repository backend generation fenced'); END`);
+        }
+        this.localSetMeta('backend_owner',{backend:input.backend,generation:input.generation});
+      });
+      await this.ctx.storage.sync();this.revisionState.value=undefined;
+      return json({backend:input.backend,generation:input.generation});
+      }finally{this.mutationState.blocked=false;}
+    }
     if (path==='/storage/probe') {
       const bytes=Number.isSafeInteger(input.bytes) && input.bytes>0?Math.min(input.bytes,64*1048576):65536,before=this.sql.databaseSize;
       // Commit a real row, then delete it: proves usable headroom of that size.
@@ -1280,7 +1713,7 @@ export class RepositoryState extends DurableObject<Env> {
         await this.ctx.storage.sync();
       } catch(error) {
         try {this.sql.exec("DELETE FROM meta WHERE key LIKE 'storage_probe:%'");} catch {}
-        return json({writable:false,bytes,reason:this.noteFailure('probe',error),database_size:this.sql.databaseSize,storage:this.storageState()});
+        return json({writable:false,bytes,reason:this.noteFailure('probe',error),database_size:this.sql.databaseSize,storage:(await this.storageState())});
       }
       this.sql.exec("DELETE FROM meta WHERE key LIKE 'storage_probe:%'");
       await this.ctx.storage.sync();
@@ -1288,36 +1721,39 @@ export class RepositoryState extends DurableObject<Env> {
       if (input.automatic && !marker) return json({writable:false,reason:'storage_marker_conflict'});
       this.degraded=undefined;
       if (this.schema!=='current') this.startup();
-      await this.optionalAsync('alarm',()=>this.setAlarm(Date.now()+100));
-      return json({writable:true,bytes,database_size_before:before,database_size_after:this.sql.databaseSize,storage:this.storageState()});
+      await this.optionalAsync('alarm',async ()=>(await this.setAlarm(Date.now()+100)));
+      return json({writable:true,bytes,database_size_before:before,database_size_after:this.sql.databaseSize,storage:(await this.storageState())});
     }
     if (path==='/storage/fault') {
       if (this.env.FAULT_INJECTION!=='true') throw new AdminError('fault_injection_disabled');
       if (!['full','none'].includes(input.mode)) throw new AdminError('invalid_fault');
       await this.env.ARCHIVE.put(this.faultKey(),JSON.stringify({mode:input.mode,at:Date.now()}));
       this.faultFull=input.mode==='full';
-      return json({storage:this.storageState()});
+      return json({storage:(await this.storageState())});
     }
     if (path==='/storage/ingress') {
       if (!['apply','parked'].includes(input.mode)) throw new AdminError('invalid_ingress_mode');
       this.ingress=input.mode;
+      if(input.mode==='apply')this.mutationState.blocked=false;
       for (const deadline=Date.now()+25000;input.mode==='parked' && this.applying>0 && Date.now()<deadline;) await new Promise(resolve=>setTimeout(resolve,50));
       return json({mode:this.ingress,in_flight:this.applying,drained:this.applying===0});
     }
     if (path==='/storage/deliveries') {
       // Read-only receipt check for queue and DLQ reconciliation.
       if (!Array.isArray(input.ids) || input.ids.length>100 || input.ids.some((id:any)=>typeof id!=='string')) throw new AdminError('invalid_ids');
-      return json({known:input.ids.filter((id:string)=>this.sql.exec('SELECT 1 FROM deliveries WHERE id=?',id).toArray().length)});
+      const rows=await this.store.batch(input.ids.map((id:string)=>({sql:'SELECT id FROM deliveries WHERE id=?',bindings:[id]})));
+      return json({known:rows.flatMap(row=>row.toArray().map(r=>r.id))});
     }
     return json({error:'not_found'},404);
   }
   // Persist cooldown BEFORE allocating so commit-time resets cannot cause
   // constructor retries or repeated writes on every cron/request.
   async recoverHeadroom(): Promise<void> {
+    if(this.store.backend!=='sqlite')return;
     if (this.probeFlight) return this.probeFlight;
     const run = async () => {
       if (this.storageMarkerUnavailable || this.migrationHeld() || this.ingress === 'parked') return;
-      const repo = this.meta('repository')?.id;
+      const repo = (await this.meta('repository'))?.id;
       if (!repo) return;
       const control = await this.env.ARCHIVE.get(controlKey(repo));
       if (control && (await control.json<any>()).mode === 'parked') return;
@@ -1340,7 +1776,7 @@ export class RepositoryState extends DurableObject<Env> {
     const result=this.migrationFlight.then(async()=>{
       if(!this.migrationUnavailable) return;
       try {
-        this.migrationState=await readMigration(this.env.ARCHIVE,this.meta('repository').id);
+        this.migrationState=await readMigration(this.env.ARCHIVE,(await this.meta('repository')).id);
         this.migrationUnavailable=false;
         if(this.schema!=='current' && !this.migrationHeld() && !this.degraded) this.startup();
       } catch { /* Keep stored reads and the write fence until the next tick. */ }
@@ -1349,10 +1785,11 @@ export class RepositoryState extends DurableObject<Env> {
     await result;
   }
   async migration(req:Request): Promise<Response> {
+    if(this.store.backend!=='sqlite')return json({error:'sqlite_source_migration_only'},400);
     let state=this.migrationState;
     try {
       const input:any=await req.json();
-      const repo=this.meta('repository')?.id;
+      const repo=(await this.meta('repository'))?.id;
       if(!repo) throw new AdminError('repository_unconfigured');
       // A control-store outage must fence mutations without taking complete
       // SQL reads down. An admin retry can reload the barrier after recovery.
@@ -1364,14 +1801,14 @@ export class RepositoryState extends DurableObject<Env> {
       if(!input.operation || input.operation==='preflight') {
         const tables=expectedTables(this.sql);
         return json({ ...publicReceipt(state) as object, repository:repo,
-          source:state?.source ?? {object:this.ctx.id.toString(),deployment:this.env.CF_VERSION?.id ?? null,schema:this.meta('schema_version')}, expected_tables:tables,
+          source:state?.source ?? {object:this.ctx.id.toString(),deployment:this.env.CF_VERSION?.id ?? null,schema:(await this.meta('schema_version'))}, expected_tables:tables,
           source_export_environment:this.env.MIGRATION_ENVIRONMENT ?? null,
-          blockers:['s1_backend_unavailable','production_prerequisite_acceptance_unavailable'],
+          backend_supported:['sqlite','postgres'],blockers:['target_import_unavailable','production_prerequisite_acceptance_unavailable'],
           production_cutover_supported:false });
       }
       const id=generation(input.generation),target=targetIdentity(input.target);
-      // S1 is not implemented. Never treat caller-supplied claims as deployed
-      // acceptance evidence or permit a production freeze with this protocol.
+      // Source export does not authorize target import or production selection.
+      // Caller-supplied claims cannot stand in for deployed acceptance evidence.
       if(input.environment!=='test' || this.env.MIGRATION_ENVIRONMENT!=='test') throw new AdminError('migration_production_prerequisites_unavailable');
       if(input.apply!==true) throw new AdminError('migration_apply_required');
       const previousEtag=state?.checkpoint_etag;
@@ -1382,7 +1819,7 @@ export class RepositoryState extends DurableObject<Env> {
         if(input.operation!=='freeze') throw new AdminError('migration_not_started');
         if((await this.env.ARCHIVE.list({prefix:archiveKey(repo,id)+'/',limit:1})).objects.length) throw new AdminError('migration_generation_used');
         expectedTables(this.sql);
-        if(this.meta('schema_version')!==SCHEMA_VERSION) throw new AdminError('migration_schema_incompatible');
+        if((await this.meta('schema_version'))!==SCHEMA_VERSION) throw new AdminError('migration_schema_incompatible');
         if(!this.env.CF_VERSION?.id) throw new AdminError('migration_deployment_identity_required');
         state={version:1,generation:id,repository:repo,target,checkpoint_etag:previousEtag,
           source:{object:this.ctx.id.toString(),deployment:this.env.CF_VERSION.id,schema:SCHEMA_VERSION},
@@ -1413,7 +1850,7 @@ export class RepositoryState extends DurableObject<Env> {
       if(input.operation==='abandon') {
         // There is no PostgreSQL write switch in this protocol. Preserve all
         // archives; explicit abandonment only releases this source fence.
-        if(this.activeOperations) throw new AdminError('migration_drain_pending');
+        if(this.activeOperations || this.mutationState.active || this.optionalWork.active) throw new AdminError('migration_drain_pending');
         state={...state,phase:'abandoned',failure:null};
         await this.env.ARCHIVE.put(archiveKey(repo,id)+'/abandoned.json',encodeMigration(state));
         await saveMigration(this.env.ARCHIVE,state);
@@ -1428,8 +1865,8 @@ export class RepositoryState extends DurableObject<Env> {
           const owner:any=await claimed.json();
           if(owner.generation!==id || owner.target!==target || owner.source.object!==state.source.object || owner.source.deployment!==state.source.deployment) throw new AdminError('migration_generation_used');
         } else if(!await this.env.ARCHIVE.put(claimKey,JSON.stringify({generation:id,target,source:state.source}),{onlyIf:{etagDoesNotMatch:'*'}})) throw new AdminError('migration_generation_used');
-        for(const deadline=Date.now()+25000;this.activeOperations>0 && Date.now()<deadline;) await new Promise(resolve=>setTimeout(resolve,25));
-        if(this.activeOperations) throw new AdminError('migration_drain_pending');
+        for(const deadline=Date.now()+25000;(this.activeOperations>0 || this.mutationState.active>0 || this.optionalWork.active>0) && Date.now()<deadline;) await new Promise(resolve=>setTimeout(resolve,25));
+        if(this.activeOperations || this.mutationState.active || this.optionalWork.active) throw new AdminError('migration_drain_pending');
         await beginExport(this.env.ARCHIVE,this.ctx.storage,this.sql,state);
       } else if(input.operation==='step') {
         if(state.phase==='exporting') await exportStep(this.env.ARCHIVE,this.sql,state,input.limit);
@@ -1443,7 +1880,7 @@ export class RepositoryState extends DurableObject<Env> {
       const reason=error instanceof AdminError?error.message:'migration_storage_failure';
       // Error details can contain driver credentials or payloads. Persist only
       // controlled reason codes and keep the last committed checkpoint.
-      const repo=this.meta('repository')?.id;
+      const repo=(await this.meta('repository'))?.id;
       if(repo && this.migrationHeld()) {
         const saved=await readMigration(this.env.ARCHIVE,repo).catch(()=>null);
         if(saved) {saved.failure=reason;this.migrationState=saved;await saveMigration(this.env.ARCHIVE,saved).catch(()=>{});}
@@ -1488,7 +1925,7 @@ export class RepositoryState extends DurableObject<Env> {
           flight=(async()=>{
             try {
               await this.ingest(pointer);
-              await this.ctx.storage.sync();
+              if(this.store.backend==='sqlite')await this.ctx.storage.sync();
               await this.env.ARCHIVE.put(receiptKey(repo.id,pointer.delivery),JSON.stringify({delivery:pointer.delivery,committed_at:Date.now(),disposition:CI_EVENTS.has(pointer.event)?'not_mirrored':'applied'}));
             } finally {this.applying--;}
           })();
@@ -1504,49 +1941,51 @@ export class RepositoryState extends DurableObject<Env> {
       }
       if (path==='/activity') {
         const input:any=await req.json();
-        const prs=[],missing=[],locBudget={remaining:32};
+        const prs=[],missing=[],locBudget={remaining:32},state=await this.primeActivity(input.numbers);
         // Deliberately no configure, demand, collection verification, or repair.
         for (const number of input.numbers) {
-          const row=this.sql.exec<any>("SELECT data,observed FROM resources WHERE kind='pr' AND id=? AND tombstone=0",String(number)).toArray()[0];
+          const row=(await state.store.exec<any>("SELECT data,observed FROM resources WHERE kind='pr' AND id=? AND tombstone=0",String(number))).toArray()[0];
           if(!row){missing.push(number);continue;}
-          const p=await this.decode(row.data);
-          const landing=this.sql.exec<any>('SELECT at,source FROM activity_landings WHERE number=? AND head=?',number,p.headRefOid || '').toArray()[0];
+          const p=await state.decode(row.data);
+          const landing=(await state.store.exec<any>('SELECT at,source FROM activity_landings WHERE number=? AND head=?',number,p.headRefOid || '')).toArray()[0];
           prs.push({number,state:p.state,created_at:p.createdAt || null,landed_at:p.mergedAt || (landing?new Date(landing.at/1000).toISOString():null),
             head_sha:p.headRefOid || null,observed_at:row.observed,
-            landing_source:p.mergedAt?'github-merged':landing?.source || null,lean_loc:await this.activityLOC(number,p,locBudget)});
+            landing_source:p.mergedAt?'github-merged':landing?.source || null,lean_loc:await state.activityLOC(number,p,locBudget)});
         }
-        return json({version:1,repository:input.repository,revision:this.revision(),as_of:Date.now(),coverage:'observed',prs,missing,
-          landing_observations:{checked_at:this.meta('activity_landings_checked'),last_success_at:this.meta('activity_landings_success'),error:this.meta('activity_landings_error')}});
+        return json({version:1,repository:input.repository,revision:(await this.revision()),as_of:Date.now(),coverage:'observed',prs,missing,
+          landing_observations:{checked_at:(await this.meta('activity_landings_checked')),last_success_at:(await this.meta('activity_landings_success')),error:(await this.meta('activity_landings_error'))}});
       }
       if (path==='/query') {
-        const q=await req.json() as Query;
+        const q=parseGitHub(await req.text()) as Query;
         validateQuery(q);
         requestOperation=q.operation;
-        if (NOT_MIRRORED.has(q.operation)) {requestUnavailable=true;return json(this.unavailable(q,'not_mirrored'));}
-        const changed=this.frozenSince();
+        if (NOT_MIRRORED.has(q.operation)){requestUnavailable=true;return json(await this.unavailable(q,'not_mirrored'));}
+        await this.meta('repository');
+        if(q.cursor)this.backgroundDemand(q);
+        const changed=await this.frozenSince();
         const planned=this.migrationState && this.migrationState.phase!=='abandoned';
-        if (changed!==null && !planned) {requestUnavailable=true;return json({...this.unavailable(q,'mirror_frozen'),frozen_since:changed},200,{'X-TauCeti-Storage':'degraded'});}
-        const etag='"'+this.revision()+'"',headers:Record<string,string>=this.degraded?{'X-TauCeti-Storage':'degraded'}:{};
-        if (!q.cursor && req.headers.get('if-none-match')===etag && q.operation!=='progress' && this.sql.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q)).toArray().length) {
-          await this.optionalAsync('demand',()=>this.noteDemand(q));
+        if(changed!==null && !planned){requestUnavailable=true;return json({...await this.unavailable(q,'mirror_frozen'),frozen_since:changed},200,{'X-TauCeti-Storage':'degraded'});}
+        const etag='"'+(await this.revision())+'"',headers:Record<string,string>=this.degraded?{'X-TauCeti-Storage':'degraded'}:{};
+        if (!q.cursor && req.headers.get('if-none-match')===etag && q.operation!=='progress' && (await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length) {
+          this.backgroundDemand(q);
           return new Response(null,{status:304,headers:{ETag:etag,...headers}});
         }
         const key=queryKey(q)+'|observed:'+Boolean(q.allow_observed)+'|'+(q.cursor || '');
         const cached=this.completedQueries.get(key);
-        if (!q.cursor && cached?.result.revision===this.revision() && cached.expires>Date.now()) {
+        if (!q.cursor && cached?.result.revision===(await this.revision()) && cached.expires>Date.now()) {
           requestCoverage=cached.result.coverage || 'unknown';
-          await this.optionalAsync('demand',()=>this.noteDemand(q));
+          this.backgroundDemand(q);
           return json(cached.result,200,{ETag:'"'+cached.result.revision+'"',...headers});
         }
         let pending=this.inflightQueries.get(key);
         if (!pending) {
-          pending=this.query(q);
+          pending=q.cursor?this.continuation(q,queryKey(q)):this.stableQuery(q);
           this.inflightQueries.set(key,pending);
         }
         let result:Result;
         try { result=await pending; }
         finally { if (this.inflightQueries.get(key)===pending) this.inflightQueries.delete(key); }
-        if (!q.cursor && result.status==='ok') {
+        if (!q.cursor && result.status==='ok' && result.revision===await this.revision()) {
           this.completedQueries.delete(key);
           this.completedQueries.set(key,{result,expires:Date.now()+540000});
           while (this.completedQueries.size>16) this.completedQueries.delete(this.completedQueries.keys().next().value!);
@@ -1556,26 +1995,40 @@ export class RepositoryState extends DurableObject<Env> {
         return json(result,200,{ETag:'"'+result.revision+'"',...(this.degraded?{'X-TauCeti-Storage':'degraded'}:{})});
       }
       if (path==='/health') {
-        if (typeof this.schema==='object') return json({storage:this.storageState(),deployment_id:this.env.CF_VERSION?.id,monitoring:await this.preparedObservation(),request_id});
-        return json({...this.diagnostics,reconciliation_version:2,settings:settings(this.env),...this.repairMetrics.summary(),queries:[...this.queryCounts.values()],query_metrics_scope:'repository_instance_since_restart',repair_metrics_scope:'repository_instance_since_restart',storage:this.storageState(),storage_bytes:this.sql.databaseSize,
-          repository:this.meta('repository'),revision:this.revision(),bootstrap_inventory:this.meta('bootstrap_inventory'),
-          deployment_id:this.env.CF_VERSION?.id,monitoring:await this.preparedObservation(),diagnostics_at:this.diagnosticsAt || null,
-          diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
+        const storage=this.store.backend==='postgres'?await this.store.health():{...await this.storageState(),backend:'sqlite',schema_version:SCHEMA_VERSION};
+        if(typeof this.schema==='object' || storage.connected===false)return json({storage,deployment_id:this.env.CF_VERSION?.id,monitoring:await this.preparedObservation(),request_id});
+        return json({...this.diagnostics,reconciliation_version:2,settings:settings(this.env),...this.repairMetrics.summary(),queries:[...this.queryCounts.values()],query_metrics_scope:'repository_instance_since_restart',repair_metrics_scope:'repository_instance_since_restart',storage,storage_bytes:storage.database_size ?? (storage.capacity as any)?.database_bytes,
+          repository:await this.meta('repository'),revision:await this.revision(),bootstrap_inventory:await this.meta('bootstrap_inventory'),latest_applied_input:await this.meta('latest_applied_input'),
+          deployment_id:this.env.CF_VERSION?.id,monitoring:await this.preparedObservation(),diagnostics_at:this.diagnosticsAt || null,diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
       }
-      if (path==='/changes') { const after=Number(new URL(req.url).searchParams.get('after') || 0); const first=this.sql.exec<any>('SELECT MIN(revision) AS revision FROM changes').one(); return json({revision:this.revision(),reset:after>0 && first.revision && after<first.revision-1,changes:this.sql.exec('SELECT * FROM changes WHERE revision>? ORDER BY revision LIMIT 1000',after).toArray()}); }
+      if(path==='/changes') {
+        const after=Number(url.searchParams.get('after') || 0);
+        if(!Number.isSafeInteger(after) || after<0)return json({error:'invalid_revision'},400);
+        const [meta,first,changes]=await this.store.batch([
+          {sql:"SELECT value FROM meta WHERE key='revision'"},
+          {sql:'SELECT MIN(revision) AS revision FROM changes'},
+          {sql:'SELECT revision,at,kind,id,tombstone FROM changes WHERE revision>? ORDER BY revision LIMIT 1000',bindings:[after]}
+        ]);
+        const revision=JSON.parse(meta.toArray()[0]?.value || '0'),oldest=first.one().revision;
+        this.revisionState.value=Math.max(this.revisionState.value ?? 0,revision);
+        return json({revision,reset:after>0 && oldest && after<oldest-1,changes:changes.toArray()});
+      }
       if (path==='/activity-refresh' && req.method==='POST') {if(!this.degraded) await this.refreshActivityLandings();return json({ok:true,degraded:Boolean(this.degraded)});}
       if (path==='/tick') {
-        // A full marker may arrive after this instance starts, or its startup
-        // read may fail. Every ordinary tick reloads durable recovery ownership.
-        await this.storageMarker();
-        this.expire();
-        if(this.degraded) await this.recoverHeadroom();
-        if (!this.meta('repository')) await this.configure((await req.json() as any).repository);
-        await this.optionalAsync('alarm',()=>this.setAlarm(Date.now()+100));
+        // Cron reaches a full object even if its alarm cannot be rescheduled.
+        if(this.store.backend==='sqlite')await this.storageMarker();
+        await this.expire();
+        if(this.degraded && this.store.backend==='sqlite')await this.recoverHeadroom();
+        if (!(await this.meta('repository'))) {
+          if(this.store.backend==='postgres')return json({ok:false,reason:'repository_unconfigured'},409);
+          await this.configure((await req.json() as any).repository);
+        }
+        await this.optionalAsync('alarm',async ()=>(await this.setAlarm(Date.now()+100)));
         this.startStorageMaintenance();
+        if(this.store.backend==='postgres')this.ctx.waitUntil(this.alarm());
         return json({ok:true,degraded:Boolean(this.degraded)});
       }
-      if (path==='/repair') { this.sql.exec('UPDATE jobs SET due=CASE WHEN wait_reason IS NULL AND attempt=0 THEN ? ELSE due END,dirty=1,generation=generation+1',Date.now()); await this.setAlarm(Date.now()+100); return json({ok:true}); }
+      if (path==='/repair') { await this.store.exec('UPDATE jobs SET due=CASE WHEN wait_reason IS NULL AND attempt=0 THEN ? ELSE due END,dirty=1,generation=generation+1',Date.now()); await this.setAlarm(Date.now()+100); return json({ok:true}); }
       return json({error:'not_found'},404);
     } catch(error) {
       requestError=true;

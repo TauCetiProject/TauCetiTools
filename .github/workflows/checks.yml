@@ -21,3 +21,19 @@ jobs:
           node-version: '24'
       - run: npm ci && npm test
         working-directory: services/github-state
+
+  github-state-postgres:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Isolated test-branch credentials only; no Neon API key or production URL.
+      TEST_POSTGRES_URL: ${{ secrets.STATE_TEST_POSTGRES_URL }}
+      TEST_POSTGRES_MIGRATION_URL: ${{ secrets.STATE_TEST_POSTGRES_MIGRATION_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci && npm run test:postgres
+        working-directory: services/github-state

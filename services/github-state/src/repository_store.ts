@@ -1,0 +1,330 @@
+import { Client, neon, types } from '@neondatabase/serverless';
+
+export type Bind = string | number | null;
+export interface Statement { sql:string; bindings?:Bind[] }
+export class Rows<T=Record<string,unknown>> {
+  constructor(private rows:T[]) {}
+  toArray():T[] {return this.rows;}
+  one():T {if(this.rows.length!==1) throw new Error('Expected one repository row');return this.rows[0];}
+}
+// Identifiers, cursors and JSON stay text. Numeric columns contain counters and
+// Unix milliseconds/microseconds, and must never silently lose precision.
+const integer=(value:string)=>{const n=Number(value);if(!Number.isSafeInteger(n))throw new Error('Repository integer exceeds safe range');return n;};
+types.setTypeParser(20,integer);
+types.setTypeParser(1700,value=>{const n=Number(value);if(!Number.isFinite(n) || Number.isInteger(n)&&!Number.isSafeInteger(n))throw new Error('Repository numeric exceeds safe range');return n;});
+export interface RepositoryStore {
+  readonly backend:'sqlite'|'postgres';
+  readonly transactional?:boolean;
+  exec<T=any>(sql:string,...bindings:Bind[]):Promise<Rows<T>>;
+  batch(statements:Statement[]):Promise<Rows<any>[]>;
+  transaction<T>(apply:(store:RepositoryStore)=>Promise<T>):Promise<T>;
+  health():Promise<Record<string,unknown>>;
+}
+export class SerialLane {
+  private tail:Promise<unknown>=Promise.resolve();
+  run<T>(work:()=>Promise<T>):Promise<T> {
+    const pending=this.tail.then(work,work);this.tail=pending.catch(()=>{});return pending;
+  }
+}
+export class SQLiteStore implements RepositoryStore {
+  readonly backend='sqlite';
+  constructor(private storage:DurableObjectStorage,private sql:SqlStorage,readonly transactional=false,private generation='sqlite-v1',private context?:DurableObjectState,private lane=new SerialLane()) {}
+  async exec<T=any>(query:string,...bindings:Bind[]):Promise<Rows<T>> {
+    if(!this.transactional)return this.lane.run(()=>new SQLiteStore(this.storage,this.sql,true,this.generation,this.context,this.lane).exec<T>(query,...bindings));
+    if(!/^\s*SELECT\b/i.test(query))this.fence();
+    return new Rows(this.sql.exec<any>(query,...bindings).toArray());
+  }
+  private fence():void {
+    const row=this.sql.exec<any>("SELECT value FROM meta WHERE key='backend_owner'").toArray()[0];
+    if(row) {const owner=JSON.parse(row.value);if(owner.backend!=='sqlite' || owner.generation!==this.generation)throw new StoreFenced();}
+  }
+  private batchSync(statements:Statement[]):Rows<any>[] {if(statements.some(s=>!/^\s*SELECT\b/i.test(s.sql)))this.fence();return statements.map(s=>new Rows(this.sql.exec(s.sql,...(s.bindings || [])).toArray()));}
+  async batch(statements:Statement[]):Promise<Rows<any>[]> {
+    if(this.transactional)return this.batchSync(statements);
+    return this.lane.run(async()=>statements.some(s=>!/^\s*SELECT\b/i.test(s.sql))?this.storage.transactionSync(()=>this.batchSync(statements)):this.batchSync(statements));
+  }
+  transaction<T>(apply:(store:RepositoryStore)=>Promise<T>):Promise<T> {
+    if(this.transactional) return apply(this);
+    return this.lane.run(async()=>{
+      let result:T,error:unknown,failed=false;
+      const execute=async()=>{try{result=await this.storage.transaction(()=>{this.fence();return apply(new SQLiteStore(this.storage,this.sql,true,this.generation,this.context,this.lane));});}catch(cause){failed=true;error=cause;}};
+      // Input gating also protects native SQLite recovery/status operations
+      // from observing an open async savepoint. Catch inside the gate: an
+      // expected transaction rollback must not reset the Durable Object.
+      if(this.context)await this.context.blockConcurrencyWhile(execute);else await execute();
+      if(failed)throw error;return result!;
+    });
+  }
+  async health():Promise<Record<string,unknown>> {return {backend:this.backend,schema_version:5,database_size:this.sql.databaseSize};}
+}
+// The column list also documents positional inserts retained by the SQLite
+// adapter. PostgreSQL adds an archive sequence without changing these inserts.
+export const columns:Record<string,string[]>={
+  meta:['key','value'],resources:['kind','id','parent','data','updated','observed','revision','tombstone'],
+  activity_loc_cache:['number','fingerprint','data'],activity_landings:['number','head','at','source'],
+  collections:['key','operation','args','complete','verified','revision','etag'],members:['collection','id'],
+  deliveries:['id','event','received'],changes:['revision','at','kind','id','tombstone'],
+  jobs:['key','query','priority','due','started','cursor','page','api','etag','attempt','dirty','generation','start_generation','lane','lease_id','lease_until','requested_at','created_at','wait_reason','nested'],
+  demand:['key','at'],cursors:['id','expires','payload'],retired_objects:['key','at'],head_prs:['sha','number'],
+  survey_fragments:['kind','id','parent','data'],survey_state:['number','data','revision'],survey_inventory:['number','data'],
+  survey_hydrated:['number','contract'],survey_dirty:['number'],survey_hydration_failures:['number','retry_at'],
+  repair_metrics:['at','event','lane','operation','value'],query_metrics:['operation','coverage','requests','last_at']
+};
+export function schemaName(repository:string):string {
+  if(!/^[0-9]{1,50}$/.test(repository)) throw new Error('Invalid repository identity');
+  return 'github_state_'+repository;
+}
+// Explicit translations of the service's SQLite dialect. No user-provided SQL
+// or identifiers enter this boundary. Values always use driver parameters.
+export function postgresSQL(input:string,schema:string):string {
+  let sql=input;
+  sql=sql.replace(/INSERT OR REPLACE INTO activity_loc_cache VALUES\s*\(([^)]+)\)/gi,'INSERT INTO activity_loc_cache VALUES($1) ON CONFLICT(number) DO UPDATE SET fingerprint=excluded.fingerprint,data=excluded.data');
+  if(/INSERT OR IGNORE/i.test(sql)) sql=sql.replace(/INSERT OR IGNORE/i,'INSERT')+' ON CONFLICT DO NOTHING';
+  sql=sql.replace(/\bINSERT INTO (\w+)(\s+)(VALUES|SELECT)/gi,(_,table,space,op)=>{
+    if(!columns[table])throw new Error('Unknown repository table');
+    return `INSERT INTO ${table}(${columns[table].join(',')}) ${op}`;
+  });
+  sql=sql.replace(/json_extract\((\w+(?:\.\w+)?),'\$\.([\w.]+)'\)/g,(_,value,path)=>`(${value}::jsonb #>> '{${path.replaceAll('.',',')}}')`);
+  sql=sql.replace(/COALESCE\((\([^)]*::jsonb[^)]*\)),1\)/g,'COALESCE(($1)::bigint,1)');
+  // SQLite casts nonnumeric IDs to zero and clamps oversized integers. Decimal
+  // ordering avoids both PostgreSQL cast errors and bigint overflow.
+  sql=sql.replace(/CAST\((\w+\.id) AS INTEGER\)/g,(_,field)=>`CASE WHEN ${field} ~ '^[0-9]+$' THEN ${field}::numeric ELSE 0 END`);
+  sql=sql.replace(/\b(MAX|MIN)\((dirty|due|generation|1),/g,(_,fn,value)=>`${fn==='MAX'?'GREATEST':'LEAST'}(${value},`);
+  sql=sql.replace(/MIN\(MAX\(due,lease_until\)\)/g,'MIN(GREATEST(due,lease_until))');
+  // SQLite allows unqualified target columns in conflict updates; PostgreSQL
+  // requires the target name when an excluded column has the same name.
+  sql=sql.replace(/(DO UPDATE SET[\s\S]*)/i,part=>part.replace(/(?<![.\w])(dirty|generation|due|wait_reason|attempt|requests)(?![\w])/g,(name,_column,offset)=>{
+    const before=part.slice(0,offset).trimEnd(),after=part.slice(offset+name.length);
+    if(/^\s*=/.test(after) && (before.endsWith(',') || /\bSET$/.test(before)))return name;
+    const table=sql.match(/INSERT INTO (\w+)/i)?.[1];return table?`${table}.${name}`:name;
+  }));
+  // SQL boolean values need an explicit integer cast for SQLite-style SUMs.
+  sql=sql.replace(/SUM\((h\.contract=\?|s\.number IS NOT NULL|due<=\?(?: AND lease_until<=\?)?|lease_until>\?)\)/g,'SUM(($1)::int)');
+  sql=sql.replace(/\bFROM \(SELECT operation,value,/,'FROM (SELECT operation,value,').replace(/\) WHERE rank>=/,') AS ranked WHERE rank>=');
+  // PostgreSQL sorts nulls last by default; match SQLite for due/ordering keys.
+  // Production integer timestamps are non-null; archive rowids are explicit.
+  for(const table of Object.keys(columns).concat(['backend_control','capacity_statistics'])) {
+    sql=sql.replace(new RegExp('\\b(FROM|JOIN|INTO|UPDATE) '+table+'\\b','g'),`$1 "${schema}".${table}`);
+  }
+  let parameter=0;
+  // Question marks in quoted literals are not parameters.
+  sql=sql.replace(/'(?:''|[^'])*'|\?/g,part=>part==='?'?'$'+(++parameter):part);
+  return sql;
+}
+export class StoreUnavailable extends Error {constructor(code?:string){super('Repository database unavailable'+(code && /^[0-9A-Z]{5}$/.test(code)?' ('+code+')':''));}}
+export class StoreFenced extends Error {constructor(){super('Repository backend generation fenced');}}
+interface ConnectionState {closed:boolean;ending:boolean;error?:StoreUnavailable}
+export class PostgresStore implements RepositoryStore {
+  readonly backend='postgres';
+  readonly schema:string;
+
+  private http;
+  private writer=new SerialLane();
+  constructor(private url:string,repository:string,private generation:string,private client?:Client,private diagnostics:{connections:number,queries:number,lastConnection?:number}={connections:0,queries:0},private connectionState?:ConnectionState) {
+    this.schema=schemaName(repository);
+    try{this.http=neon(url);}catch{throw new StoreUnavailable();}
+  }
+  get transactional():boolean {return Boolean(this.client);}
+  private async run<T>(action:()=>Promise<T>,connection=this.connectionState):Promise<T> {
+    if(connection?.error)throw connection.error;
+    try{return await action();}catch(error){
+      if(connection?.error)throw connection.error;
+      if(error instanceof StoreFenced || error instanceof StoreUnavailable)throw error;
+      const code=(error as any)?.code;
+      if(code!=='P0308'){this.diagnostics.queries++;if(!/^[0-9A-Z]{5}$/.test(code || '') || /^(08|28)/.test(code) || ['57P01','57P02','57P03'].includes(code)){this.diagnostics.connections++;this.diagnostics.lastConnection=Date.now();}}
+      // Driver errors can contain connection strings or parameter data.
+      if((error as any)?.code==='P0308')throw new StoreFenced();
+      throw new StoreUnavailable((error as any)?.code);
+    }
+  }
+  async exec<T=any>(sql:string,...bindings:Bind[]):Promise<Rows<T>> {
+    const query=postgresSQL(sql,this.schema);
+    // Standalone writes are still fenced and atomic. The callback path uses a
+    // request-scoped interactive connection, closed before the request returns.
+    if(!this.client && !/^\s*SELECT\b/i.test(sql))return (await this.batch([{sql,bindings}]))[0] as Rows<T>;
+    return this.run(async()=>new Rows<T>(this.client?(await this.client.query(query,bindings)).rows:await this.http.query(query,bindings,{fetchOptions:{signal:AbortSignal.timeout(15000)}}) as T[]));
+  }
+  async batch(statements:Statement[]):Promise<Rows<any>[]> {
+    if(!this.client && statements.some(s=>!/^\s*SELECT\b/i.test(s.sql)))return this.writer.run(()=>this.executeBatch(statements));
+    return this.executeBatch(statements);
+  }
+  private async executeBatch(statements:Statement[]):Promise<Rows<any>[]> {
+    if(!statements.length)return [];
+    if(this.client) {
+      if(statements.every(s=>/^\s*SELECT\b/i.test(s.sql))) {
+        const bindings:Bind[]=[],queries=statements.map((s,i)=>{
+          const offset=bindings.length,query=postgresSQL(s.sql,this.schema).replace(/'(?:''|[^'])*'|\$(\d+)/g,(part,n)=>n?'$'+(Number(n)+offset):part);
+          bindings.push(...(s.bindings || []));return `(SELECT COALESCE(jsonb_agg(to_jsonb(q${i})),'[]'::jsonb) FROM (${query}) AS q${i})`;
+        });
+        const rows=await this.run(async()=> (await this.client!.query('SELECT jsonb_build_array('+queries.join(',')+') AS batches',bindings)).rows[0].batches as any[][]);
+        const check=(value:any):void=>{if(typeof value==='number' && (!Number.isFinite(value) || Number.isInteger(value)&&!Number.isSafeInteger(value)))throw new StoreUnavailable('22003');if(value && typeof value==='object')for(const child of Object.values(value))check(child);};
+        check(rows);return rows.map(row=>new Rows(row));
+      }
+      const tables=statements.map(s=>s.sql.match(/^\s*(?:INSERT(?: OR IGNORE)? INTO|UPDATE|DELETE FROM) (\w+)/i)?.[1]);
+      if(tables.every(Boolean) && new Set(tables).size===tables.length && statements.every(s=>!/\b(RETURNING|SELECT)\b/i.test(s.sql))) {
+        const bindings:Bind[]=[],parts=statements.map((s,i)=>{
+          const offset=bindings.length;
+          const query=postgresSQL(s.sql,this.schema).replace(/'(?:''|[^'])*'|\$(\d+)/g,(part,n)=>n?'$'+(Number(n)+offset):part);
+          bindings.push(...(s.bindings || []));return `s${i} AS (${query} RETURNING 1)`;
+        });
+        await this.run(()=>this.client!.query('WITH '+parts.join(',')+' SELECT 1',bindings));
+        return statements.map(()=>new Rows([]));
+      }
+      return Promise.all(statements.map(s=>this.exec(s.sql,...(s.bindings || []))));
+    }
+    const write=statements.some(s=>!/^\s*SELECT\b/i.test(s.sql));
+    return this.run(async()=>{
+      const queries=statements.map(s=>this.http.query(postgresSQL(s.sql,this.schema),s.bindings || []));
+      if(write)queries.unshift(this.http.query(`SELECT \"${this.schema}\".assert_writer($1)`,[this.generation]));
+      const results=await this.http.transaction(queries,{readOnly:!write,isolationLevel:'RepeatableRead',fetchOptions:{signal:AbortSignal.timeout(15000)}});
+      return results.slice(write?1:0).map(rows=>new Rows(rows));
+    });
+  }
+  async transaction<T>(apply:(store:RepositoryStore)=>Promise<T>):Promise<T> {
+    if(this.client)return apply(this);
+    return this.writer.run(()=>this.transact(apply));
+  }
+  private async transact<T>(apply:(store:RepositoryStore)=>Promise<T>):Promise<T> {
+    let client:Client;try{client=new Client({connectionString:this.url,connectionTimeoutMillis:10000,query_timeout:15000});}catch{throw new StoreUnavailable();}
+    const connection:ConnectionState={closed:false,ending:false};let disconnected!:(error:StoreUnavailable)=>void;
+    const lost=new Promise<never>((_,reject)=>{disconnected=reject;});void lost.catch(()=>{});
+    const fail=(code?:string)=>{if(connection.ending || connection.error)return;connection.error=new StoreUnavailable(code || '08006');this.diagnostics.connections++;this.diagnostics.queries++;this.diagnostics.lastConnection=Date.now();disconnected(connection.error);};
+    client.on('error',error=>fail((error as any)?.code));client.on('end',()=>{connection.closed=true;fail();});
+    try {
+      await this.run(async()=>{
+        await client.connect();await client.query("BEGIN; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='15s'");
+        const control=await client.query(`SELECT generation,backend,schema_version FROM "${this.schema}".backend_control WHERE singleton=1 FOR UPDATE`);
+        const row=control.rows[0];
+        if(!row || row.backend!=='postgres' || row.generation!==this.generation || row.schema_version!==1)throw new StoreFenced();
+      },connection);
+      const scoped=new PostgresStore(this.url,this.schema.slice('github_state_'.length),this.generation,client,this.diagnostics,connection);
+      // Application exceptions must retain their meaning (for example an
+      // expired staging page); only driver operations are sanitized.
+      const result=await Promise.race([apply(scoped),lost]);
+      const committed=await this.run(()=>client.query('COMMIT'),connection);
+      if(committed.command!=='COMMIT')throw new StoreUnavailable('25P02');return result;
+    }catch(error){
+      if(!connection.closed && !connection.error)try{await client.query('ROLLBACK');}catch{}
+      throw error;
+    }finally{connection.ending=true;if(!connection.closed)try{await client.end();}catch{}}
+  }
+  async health():Promise<Record<string,unknown>> {
+    let metadata:Record<string,unknown>;
+    try {
+      const [control,capacity]=await this.batch([
+        {sql:'SELECT backend,generation,schema_version FROM backend_control WHERE singleton=1'},
+        {sql:'SELECT prepared_at,database_bytes,storage_limit_bytes,restore_verified_at FROM capacity_statistics WHERE singleton=1'}
+      ]);
+      metadata={...control.toArray()[0],connected:true,capacity:capacity.toArray()[0] ?? null};
+    }catch {metadata={connected:false,capacity:null};}
+    return {backend:this.backend,expected_generation:this.generation,...metadata,connection_failures:this.diagnostics.connections,query_failures:this.diagnostics.queries,last_connection_failure:this.diagnostics.lastConnection ?? null};
+  }
+}
+
+// A query-scoped snapshot of related read rows. Set-oriented prefetches seed
+// the exact existing lookups, so network latency never scales per PR/comment.
+export class ReadCacheStore implements RepositoryStore {
+  readonly backend;
+  readonly dirtyParents=new Set<string>();
+  private cache=new Map<string,{rows:any[],sql:string,bindings:Bind[],tables:string[]}>();
+  private index=new Map<string,Map<string,Set<string>>>();
+  constructor(private source:RepositoryStore){this.backend=source.backend;}
+  get transactional():boolean|undefined{return this.source.transactional;}
+  private key(sql:string,bindings:Bind[]):string{return JSON.stringify([sql,bindings]);}
+  peek(sql:string,bindings:Bind[]):any[]|undefined{return this.cache.get(this.key(sql,bindings))?.rows;}
+  private remove(key:string):void {
+    const entry=this.cache.get(key);if(!entry)return;
+    this.cache.delete(key);
+    const identity=JSON.stringify(entry.bindings.at(-1) ?? null);
+    for(const table of entry.tables){const bucket=this.index.get(table)?.get(identity);bucket?.delete(key);if(!bucket?.size)this.index.get(table)?.delete(identity);}
+  }
+  seed(sql:string,bindings:Bind[],rows:any[]):void {
+    const key=this.key(sql,bindings);this.remove(key);
+    const tables=[...sql.matchAll(/\b(?:FROM|JOIN) (\w+)/g)].map(match=>match[1]);
+    this.cache.set(key,{sql,bindings,rows,tables});
+    const identity=JSON.stringify(bindings.at(-1) ?? null);
+    for(const table of tables){let tableIndex=this.index.get(table);if(!tableIndex){tableIndex=new Map();this.index.set(table,tableIndex);}let bucket=tableIndex.get(identity);if(!bucket){bucket=new Set();tableIndex.set(identity,bucket);}bucket.add(key);}
+  }
+  async exec<T=any>(sql:string,...bindings:Bind[]):Promise<Rows<T>> {
+    const entry=this.cache.get(this.key(sql,bindings));
+    if(entry)return new Rows<T>(entry.rows);
+    this.invalidate(sql,bindings);return this.source.exec<T>(sql,...bindings);
+  }
+  private invalidate(sql:string,bindings:Bind[]):void {
+    const table=sql.match(/^\s*(?:INSERT(?: OR IGNORE)? INTO|UPDATE|DELETE FROM) (\w+)/i)?.[1];
+    if(!table)return;
+    if(/^DELETE/.test(sql) && (!bindings.length || /WHERE (collection|parent)=\?$/.test(sql)))for(const [key,entry] of this.cache)if(entry.tables.includes(table) && (!bindings.length || entry.bindings.includes(bindings[0])))this.remove(key);
+    const tableIndex=this.index.get(table),candidates=new Set<string>();
+    for(const value of bindings)for(const key of tableIndex?.get(JSON.stringify(value)) || [])candidates.add(key);
+    // Seeded point lookups use their final binding as the identity. Matching
+    // only those buckets keeps publication linear in the number of resources.
+    for(const key of candidates){const entry=this.cache.get(key);if(!entry)continue;
+      const kind=/INSERT INTO resources/i.test(sql)?bindings[0]:/^UPDATE resources SET (parent|data|observed)=/.test(sql)?bindings.at(-2):undefined;
+      if(table==='resources' && entry.sql.includes("kind='pr'") && kind!==undefined && kind!=='pr')continue;
+      if(entry.bindings.every(value=>bindings.includes(value)))this.remove(key);
+    }
+    if(table==='survey_dirty' && /^DELETE/.test(sql)){if(!bindings.length)this.dirtyParents.clear();else for(const value of bindings)this.dirtyParents.delete(String(value));}
+  }
+  batch(statements:Statement[]):Promise<Rows<any>[]> {for(const s of statements)this.invalidate(s.sql,s.bindings || []);return this.source.batch(statements);}
+  transaction<T>(apply:(store:RepositoryStore)=>Promise<T>):Promise<T>{return this.source.transaction(apply);}
+  health():Promise<Record<string,unknown>> {return this.source.health();}
+}
+
+// Publication writes are invisible until commit. Buffer independent row writes,
+// coalesce them into set operations, and flush before any uncached read. Repeated
+// identities and non-point updates force a flush to retain SQL statement order.
+export class BufferedStore implements RepositoryStore {
+  readonly backend='postgres';readonly transactional=true;
+  private pending:Statement[]=[];private identities=new Set<string>();
+  constructor(private source:RepositoryStore){}
+  private identity(s:Statement):string|undefined {
+    const insert=s.sql.match(/^INSERT(?: OR IGNORE)? INTO (\w+)(?:\(([^)]+)\))? VALUES\s*\(([^)]+)\)/);
+    if(insert){
+      const table=insert[1],fields=insert[2]?.split(',') || columns[table],keys=({resources:['kind','id'],members:['collection','id'],head_prs:['sha','number'],survey_fragments:['kind','id'],activity_landings:['number','head'],query_metrics:['operation','coverage']} as Record<string,string[]>)[table] || (table==='repair_metrics'?[]:[fields[0]]);
+      if(!/^\?(?:,\?)*$/.test(insert[3]) || insert[3].split(',').length!==(s.bindings || []).length)return undefined;
+      return keys.length?JSON.stringify([table,...keys.map(key=>s.bindings?.[fields.indexOf(key)])]):'metric:'+this.pending.length;
+    }
+    const pointDelete=s.sql.match(/^DELETE FROM (\w+) WHERE (kind=\? AND id=\?|collection=\? AND id=\?|number=\?)$/);
+    if(pointDelete)return JSON.stringify([pointDelete[1],...(s.bindings || [])]);
+    if(s.sql==='UPDATE resources SET observed=? WHERE kind=? AND id=?' || s.sql==='UPDATE resources SET data=?,observed=? WHERE kind=? AND id=?' || s.sql==='UPDATE resources SET parent=?,data=?,updated=?,observed=?,revision=?,tombstone=? WHERE kind=? AND id=?')return JSON.stringify(['resources',...s.bindings!.slice(-2)]);
+    return undefined;
+  }
+  async exec<T=any>(sql:string,...bindings:Bind[]):Promise<Rows<T>> {
+    const statement={sql,bindings},identity=this.identity(statement);
+    if(!identity || /\bRETURNING\b/.test(sql)){await this.flush();return this.source.exec<T>(sql,...bindings);}
+    if(this.identities.has(identity) || this.pending.length>=200)await this.flush();
+    this.identities.add(identity);this.pending.push(statement);return new Rows<T>([]);
+  }
+  async batch(statements:Statement[]):Promise<Rows<any>[]> {
+    if(statements.some(s=>!this.identity(s) || /\bRETURNING\b/.test(s.sql))){await this.flush();return this.source.batch(statements);}
+    const results:Rows<any>[]=[];for(const s of statements)results.push(await this.exec(s.sql,...(s.bindings || [])));return results;
+  }
+  async flush():Promise<void> {
+    if(!this.pending.length)return;
+    const pending=this.pending;this.pending=[];this.identities.clear();
+    const groups=new Map<string,Statement[]>();
+    for(const s of pending){const group=groups.get(s.sql) || [];group.push(s);groups.set(s.sql,group);}
+    const writes:Statement[]=[];
+    for(const [sql,group] of groups){
+      if(group.length===1){writes.push(group[0]);continue;}
+      const insert=sql.match(/^(INSERT(?: OR IGNORE)? INTO \w+(?:\([^)]+\))? VALUES\s*)(\([^)]+\))([\s\S]*)$/);
+      if(insert){writes.push({sql:insert[1]+group.map(()=>insert[2]).join(',')+insert[3],bindings:group.flatMap(s=>s.bindings || [])});continue;}
+      const deletion=sql.match(/^(DELETE FROM \w+ WHERE )(.+)$/);
+      if(deletion){writes.push({sql:deletion[1]+group.map(()=>'('+deletion[2]+')').join(' OR '),bindings:group.flatMap(s=>s.bindings || [])});continue;}
+      if(sql==='UPDATE resources SET observed=? WHERE kind=? AND id=?'){
+        writes.push({sql:'UPDATE resources AS r SET observed=v.observed FROM (VALUES '+group.map(()=>'(CAST(? AS BIGINT),CAST(? AS TEXT),CAST(? AS TEXT))').join(',')+') AS v(observed,kind,id) WHERE r.kind=v.kind AND r.id=v.id',bindings:group.flatMap(s=>s.bindings || [])});continue;
+      }
+      if(sql==='UPDATE resources SET data=?,observed=? WHERE kind=? AND id=?'){
+        writes.push({sql:'UPDATE resources AS r SET data=v.data,observed=v.observed FROM (VALUES '+group.map(()=>'(CAST(? AS TEXT),CAST(? AS BIGINT),CAST(? AS TEXT),CAST(? AS TEXT))').join(',')+') AS v(data,observed,kind,id) WHERE r.kind=v.kind AND r.id=v.id',bindings:group.flatMap(s=>s.bindings || [])});continue;
+      }
+      if(sql.startsWith('UPDATE resources SET parent=')){
+        const fields=['parent','data','updated','observed','revision','tombstone','kind','id'];
+        writes.push({sql:'UPDATE resources AS r SET '+fields.slice(0,6).map(field=>field+'=v.'+field).join(',')+' FROM (VALUES '+group.map(()=>'(CAST(? AS TEXT),CAST(? AS TEXT),CAST(? AS TEXT),CAST(? AS BIGINT),CAST(? AS BIGINT),CAST(? AS BIGINT),CAST(? AS TEXT),CAST(? AS TEXT))').join(',')+') AS v('+fields.join(',')+') WHERE r.kind=v.kind AND r.id=v.id',bindings:group.flatMap(s=>s.bindings || [])});continue;
+      }
+      writes.push(...group);
+    }
+    await this.source.batch(writes);
+  }
+  transaction<T>(apply:(store:RepositoryStore)=>Promise<T>):Promise<T>{return apply(this);}
+  async health():Promise<Record<string,unknown>>{await this.flush();return this.source.health();}
+}

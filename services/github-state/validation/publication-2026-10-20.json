@@ -1,0 +1,9 @@
+{
+  "publication_rows": 1200,
+  "sql_statements": 234,
+  "duration_ms": 3584.811679999999,
+  "backend": "postgres",
+  "github_calls": 0,
+  "measurement": "real Neon transaction; synthetic 1,200-PR publication; SQL statements counted at repository-store driver boundary",
+  "observed_at": "2026-10-20"
+}

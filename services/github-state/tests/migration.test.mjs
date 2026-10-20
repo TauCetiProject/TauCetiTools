@@ -35,18 +35,18 @@ function bucket(){
 }
 async function fixture(db=new DatabaseSync(':memory:'),archive=bucket(),overrides={}){
  let alarm=null;const ready=[];
- const ctx={id:{toString:()=>'source-object'},blockConcurrencyWhile(fn){ready.push(fn());},storage:{sql:{databaseSize:1024,exec(sql,...bindings){let rows=[];if(!bindings.length && sql.includes(';'))db.exec(sql);else{const st=db.prepare(sql);if(st.columns().length)rows=st.all(...bindings);else st.run(...bindings);}return {toArray:()=>rows,one:()=>rows[0]};}},transactionSync(fn){db.exec('SAVEPOINT tx');try{const v=fn();db.exec('RELEASE tx');return v;}catch(e){db.exec('ROLLBACK TO tx');db.exec('RELEASE tx');throw e;}},sync:async()=>{},getCurrentBookmark:async()=>'authoritative-bookmark',setAlarm:async v=>{alarm=v;},getAlarm:async()=>alarm}};
+ const ctx={id:{toString:()=>'source-object'},blockConcurrencyWhile(fn){const pending=fn();ready.push(pending);return pending;},storage:{sql:{databaseSize:1024,exec(sql,...bindings){let rows=[];if(!bindings.length && sql.includes(';'))db.exec(sql);else{const st=db.prepare(sql);if(st.columns().length)rows=st.all(...bindings);else st.run(...bindings);}return {toArray:()=>rows,one:()=>rows[0]};}},async transaction(fn){db.exec('SAVEPOINT async_tx');try{const result=await fn();db.exec('RELEASE async_tx');return result;}catch(error){db.exec('ROLLBACK TO async_tx');db.exec('RELEASE async_tx');throw error;}},transactionSync(fn){db.exec('SAVEPOINT tx');try{const v=fn();db.exec('RELEASE tx');return v;}catch(e){db.exec('ROLLBACK TO tx');db.exec('RELEASE tx');throw e;}},sync:async()=>{},getCurrentBookmark:async()=>'authoritative-bookmark',setAlarm:async v=>{alarm=v;},getAlarm:async()=>alarm}};
  const env={ARCHIVE:archive,ALLOWED_REPOSITORIES:JSON.stringify([repo]),CF_VERSION:{id:'test-deployment'},MIGRATION_ENVIRONMENT:'test',...overrides};
  const state=new RepositoryState(ctx,env);await Promise.all(ready);
- if(!state.meta('repository'))state.setMeta('repository',repo);
+ if(!(await state.meta('repository')))(await state.setMeta('repository',repo));
  env.REPOSITORIES={idFromName:x=>x,get:()=>({fetch:(url,options)=>state.fetch(new Request(url,options))})};
  const request=(path,body)=>state.fetch(new Request('https://internal'+path,{method:'POST',body:JSON.stringify(body)}));
  const command=async(operation,extra={})=>{const response=await request('/migration',{repository:repo.name,environment:'test',operation,generation,target,apply:true,...extra});return {status:response.status,body:await response.json()};};
  return {db,archive,state,env,ctx,request,command};
 }
-function fill(f){
+async function fill(f){
  const now=Date.now();
- f.state.setMeta('revision',123);
+ (await f.state.setMeta('revision',123));
  for(const table of REQUIRED_TABLES){
   if(table==='meta')continue;
   const columns=f.db.prepare('PRAGMA table_info('+table+')').all();
@@ -101,7 +101,7 @@ test('freeze fences all mutation routes and alarm dispatch, while stored reads/3
  f.db.prepare('INSERT INTO resources VALUES(?,?,?,?,?,?,?,?)').run('pr','1','',JSON.stringify({number:1,state:'OPEN'}),'',123456,7,0);
  f.db.prepare('INSERT INTO collections VALUES(?,?,?,?,?,?,?)').run('open_prs:{}','open_prs','{}',1,123456,7,'etag');
  f.db.prepare('INSERT INTO members VALUES(?,?)').run('open_prs:{}','1');
- f.state.setMeta('revision',7);
+ (await f.state.setMeta('revision',7));
  const page={version:1,repository:repo.name,operation:'open_prs',status:'ok',revision:7,complete:true,data:[{number:1}]};
  const cursorId='0b6c2f0e-1f7a-4b4c-9a1e-5b8d3c2a1f00';
  await f.archive.put('cursors/100/'+cursorId+'/100.json',JSON.stringify({repository:'100',key:'open_prs:{}',allow_observed:false,expires:Date.now()+60000,result:page}));
@@ -115,7 +115,7 @@ test('freeze fences all mutation routes and alarm dispatch, while stored reads/3
  assert.deepEqual(await (await f.request('/query',{...query,cursor:cursorId+':100'})).json(),page);
  const conditional=await f.state.fetch(new Request('https://internal/query',{method:'POST',headers:{'if-none-match':'"7"'},body:JSON.stringify(query)}));assert.equal(conditional.status,304);
  assert.equal(f.db.prepare('SELECT total_changes() n').get().n,sqlBefore,'no SQL mutation from reads or alarms');
- assert.throws(()=>f.state.setMeta('forbidden',true),/migration_frozen/);
+ await assert.rejects(f.state.setMeta('forbidden',true),/migration_frozen/);
  assert.throws(()=>f.state.sql.exec("SELECT 1; UPDATE meta SET value='0' WHERE key='revision'"),/migration_frozen/);
 });
 
@@ -123,10 +123,10 @@ test('in-flight event finishes before bookmark; new input parks even beyond retr
  const f=await fixture();
  let finishEvent,entered;
  const waiting=new Promise(r=>entered=r),gate=new Promise(r=>finishEvent=r);
- f.state.ingest=async()=>{entered();await gate;f.state.setMeta('revision',987);};
+ f.state.ingest=async()=>{entered();await gate;(await f.state.setMeta('revision',987));};
  const inflight=f.request('/event',{repository:repo.name});await waiting;
  let bookmarkRevision;
- f.ctx.storage.getCurrentBookmark=async()=>{bookmarkRevision=f.state.revision();return 'after-event';};
+ f.ctx.storage.getCurrentBookmark=async()=>{bookmarkRevision=(await f.state.revision());return 'after-event';};
  const freezing=f.command('freeze');
  // Wait until durable barrier exists, without depending on a fixed timer.
  while(!f.archive.objects.has('control/100/migration.json'))await new Promise(r=>setImmediate(r));
@@ -204,7 +204,7 @@ test('verification rejects missing R2 references and changed/corrupt source page
  assert.equal((await f.command('abandon')).body.phase,'abandoned');
  assert.ok(f.archive.objects.has(key),'abandon never removes archives');
  assert.equal((await f.command('freeze')).body.error,'migration_generation_abandoned');
- f.state.setMeta('unfrozen',true);
+ (await f.state.setMeta('unfrozen',true));
 });
 
 
@@ -215,7 +215,7 @@ test('public migration endpoint requires admin auth and never exposes stored row
  assert.equal((await call('client')).status,401);
  const response=await call('admin');assert.equal(response.status,200);
  const data=await response.json();assert.equal(data.production_cutover_supported,false);assert.equal(data.source_export_environment,'test');
- assert.ok(data.blockers.includes('s1_backend_unavailable'));
+ assert.ok(data.blockers.includes('target_import_unavailable'));
  assert.equal(Object.hasOwn(data,'rows'),false);
 });
 
@@ -265,9 +265,9 @@ test('a cold migration-control outage fences writes but keeps complete stored SQ
  assert.equal(query.status,'ok');assert.equal(query.observed_at,123456);
  assert.equal((await f.request('/repair',{})).status,503);
  assert.equal((await (await f.request('/health',{})).json()).storage.mutation_fence,'control_unavailable');
- assert.throws(()=>f.state.setMeta('blocked',true),/migration_frozen/);
+ await assert.rejects(f.state.setMeta('blocked',true),/migration_frozen/);
  assert.equal((await f.request('/tick',{})).status,200,'cron automatically retries the recovered control store');
- f.state.setMeta('recovered',true);
+ (await f.state.setMeta('recovered',true));
 });
 
 
@@ -322,7 +322,7 @@ test('production startup and ingress do not depend on test migration control rea
  f.archive.get=async key=>{if(key==='control/100/migration.json')assert.fail('production touched the test migration control');return get(key);};
  f=await fixture(f.db,f.archive,{MIGRATION_ENVIRONMENT:undefined});
  assert.equal((await f.request('/tick',{})).status,200);
- assert.equal(f.state.storageState().mutation_fence,null);
+ assert.equal((await f.state.storageState()).mutation_fence,null);
  const {ingressMode}=await load('src/ingress.ts');
  assert.equal((await ingressMode(f.env,repo)).mode,'apply');
 });
@@ -405,7 +405,7 @@ test('legacy initialization resumes automatically after control reads recover',a
  f=await fixture(f.db,f.archive);
  assert.equal(f.state.schema,'migration_pending');
  assert.equal((await f.request('/tick',{})).status,200);
- assert.equal(f.state.schema,'current');assert.equal(f.state.meta('schema_version'),5);
+ assert.equal(f.state.schema,'current');assert.equal((await f.state.meta('schema_version')),5);
 });
 
 
@@ -458,4 +458,14 @@ test('source migration inventories and verifies the expiring staging-spill prefi
  assert.equal((await f.command('freeze')).status,200);
  const result=await finish(f);assert.equal(result.blobs.objects,1);
  assert.ok([...f.archive.objects.entries()].some(([name,object])=>name.includes('/blobs/') && object.text.includes(key)));
+});
+
+test('source export verifies immutable staging references as well as legacy page addresses',async()=>{
+ const f=await fixture();
+ const q={repository:repo.name,operation:'files',args:{number:7}};await f.state.enqueue(q);const job=await f.state.claim(await f.state.nextJob());
+ await f.state.refresh(job,{api:'core',data:[{filename:'first'}],cursor:'second'});
+ const checkpoint=await f.state.meta('staging_pages:'+job.key);assert.equal(checkpoint.version,1);
+ assert.ok(f.archive.objects.has(checkpoint.pages['1'].key));assert.equal(f.archive.objects.has(`staging/${repo.id}/${encodeURIComponent(job.key)}/${job.started}/1`),false);
+ const frozen=await f.command('freeze');assert.equal(frozen.status,200);const receipt=await finish(f);
+ assert.equal(receipt.staging.expired_jobs,0);assert.equal(receipt.staging.checked,1);assert.equal(receipt.phase,'source_verified');
 });

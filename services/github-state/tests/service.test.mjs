@@ -1,17 +1,13 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { createHmac, createHash } from 'node:crypto';
-import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
+import {runtime} from './runtime.mjs';
 let mf, namespace, archive;
 const token='test-client-token', admin='test-admin-token', secret='test-webhook-secret';
 const sha=x=>createHash('sha256').update(x).digest('hex');
 const repo={id:'10',name:'org/repo',installation:'20'};
 before(async()=>{
-  mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:readFileSync('dist/index.js','utf8'),compatibilityDate:'2026-10-11',
-    durableObjects:{REPOSITORIES:{className:'RepositoryState',useSQLite:true},INSTALLATIONS:{className:'InstallationScheduler',useSQLite:true}},
-    r2Buckets:['ARCHIVE'],queueProducers:{EVENTS:'events'},
-    bindings:{ALLOWED_REPOSITORIES:JSON.stringify([repo]),GITHUB_APP_ID:'',GITHUB_INSTALLATION_ID:'20',GITHUB_PRIVATE_KEY:'',WEBHOOK_SECRET:secret,CLIENT_TOKENS:JSON.stringify([{hash:sha(token),repositories:['org/repo']}]),ADMIN_TOKEN_HASH:sha(admin)}}));
+  mf=await runtime(async()=>Response.json([]),{ALLOWED_REPOSITORIES:JSON.stringify([repo]),MIGRATION_ENVIRONMENT:'test',GITHUB_APP_ID:'',GITHUB_INSTALLATION_ID:'20',GITHUB_PRIVATE_KEY:'',WEBHOOK_SECRET:secret,CLIENT_TOKENS:JSON.stringify([{hash:sha(token),repositories:['org/repo']}]),ADMIN_TOKEN_HASH:sha(admin)});
   namespace=await mf.getDurableObjectNamespace('REPOSITORIES'); archive=await mf.getR2Bucket('ARCHIVE');
 });
 after(async()=>{await mf?.dispose();});
@@ -97,4 +93,26 @@ test('CI records are not mirrored: webhooks are acknowledged unstored and querie
  assert.equal((await ingest('queued-ci','check_run',{check_run:{id:5,head_sha:'a'.repeat(40)}})).status,200);
  const changes=await (await request('/v1/changes?repository=org/repo',{headers})).json();
  assert.equal(changes.changes.some(c=>c.kind==='checks'),false);
+});
+
+test('GET and batch queries retain unquoted IDs beyond the JavaScript safe range',async()=>{
+ const doStub=namespace.get(namespace.idFromName(repo.id)),number='90071992547409931234';
+ const key='fixture/exact-pr';await archive.put(key,'{"pull_request":{"number":'+number+',"state":"open","title":"exact ID","head":{"sha":"'+'b'.repeat(40)+'"},"user":{"login":"peer"}}}');
+ assert.equal((await doStub.fetch('https://internal/event',{method:'POST',body:JSON.stringify({key,delivery:'exact-pr',event:'pull_request',repository:repo.name,received:Date.now()})})).status,200);
+ const response=await request('/v1/query?repository=org/repo&operation=pr&args='+encodeURIComponent('{"number":'+number+'}'),{headers});
+ assert.equal((await response.json()).reason,'coverage_unavailable');
+ const changes=await (await request('/v1/changes?repository=org/repo',{headers})).json();
+ assert.ok(changes.changes.some(row=>row.kind==='pr' && row.id===number));
+ const exact='{"repository":"org/repo","operation":"pr","args":{"number":'+number+'}}';
+ const batch=await request('/v1/query_batch',{method:'POST',headers,body:'{"queries":['+exact+',{"repository":"org/private","operation":"open_prs"},'+exact+']}'});
+ const result=await batch.json();assert.equal(result.results.length,3);
+ assert.equal(result.results[0].result.reason,'coverage_unavailable');assert.equal(result.results[1].result.reason,'repository_unavailable');assert.equal(result.results[2].result.reason,'coverage_unavailable');
+});
+
+test('explicit SQLite ownership fencing works in the Worker SQL runtime',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
+ const post=(path,body)=>request('/admin/'+path,{method:'POST',headers:{Authorization:'Bearer '+admin},body:JSON.stringify({repository:repo.name,...body})});
+ assert.equal((await post('ingress',{mode:'parked'})).status,200);
+ const fence=await post('storage/ownership',{backend:'postgres',generation:'migration-2',expected_generation:'sqlite-v1'});
+ assert.equal(fence.status,200,JSON.stringify(await fence.json()));
+ const response=await post('storage/probe',{});assert.equal(response.status,400);assert.equal((await response.json()).error,'backend_fenced');
 });

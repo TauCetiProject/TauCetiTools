@@ -8,12 +8,18 @@
     "test": "npm run typecheck && npm run build && node --test tests/*.test.mjs",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "drill": "node scripts/outage-drill.mjs"
+    "drill": "node scripts/outage-drill.mjs",
+    "test:postgres": "npm run typecheck && npm run build && node scripts/test-postgres.mjs",
+    "benchmark:postgres": "node scripts/benchmark-postgres.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "latest",
     "miniflare": "latest",
     "typescript": "^5.9.3",
-    "wrangler": "4.149.0"
+    "wrangler": "4.149.0",
+    "ws": "^8.22.0"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.2.0"
   }
 }

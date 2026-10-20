@@ -32,6 +32,8 @@ export async function noteRepositoryFull(env: Env, repo: string, source: string,
 export function backoff(attempts: number): number { return Math.min(600, 5 * 2 ** Math.max(0, Math.min(attempts - 1, 8))); }
 
 export async function storageState(env: Env, repo: Repository): Promise<any> {
+  // This record describes the old SQLite file, not the selected remote store.
+  if(env.REPOSITORY_BACKEND==='postgres')return null;
   return env.ARCHIVE.get(storageKey(repo.id)).then(o => o ? o.json() : null);
 }
 export async function ingressMode(env: Env, repo: Repository): Promise<{ mode: 'apply' | 'parked'; reason?: string; at?: number }> {

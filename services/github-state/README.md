@@ -19,13 +19,19 @@ flowchart LR
   GH[GitHub webhooks] --> W[Cloudflare Worker]
   W --> R[R2 raw deliveries]
   W --> Q[Cloudflare Queue and dead letter queue]
-  Q --> D[SQLite repository Durable Object]
+  Q --> D[Repository Durable Object]
+  D --> SQL[Selected SQLite or PostgreSQL store]
   C[TauCeti clients] --> W
   W --> D
   D --> I[Installation Durable Object]
   I --> A[GitHub REST and GraphQL]
   D --> R
 ```
+
+The optional [Neon PostgreSQL backend](POSTGRES.md) retains the public API and
+installation quota owner. Production remains on SQLite until the separate #316
+cutover. Its provisioning, test isolation, restore evidence, performance gate
+and explicit generation fence are documented in that guide.
 
 ## Data and recovery
 
@@ -35,7 +41,7 @@ only after recording the event and repair jobs. Delivery IDs make replays
 idempotent; timestamps and tombstones protect newer records from older events
 and API responses. Large identifiers retain their decimal digits.
 
-SQLite stores indexed resources, collection membership and coverage, repair
+The selected repository store holds indexed resources, collection membership and coverage, repair
 jobs with pagination state, a seven-day change journal, and stable query
 snapshots. Initial inventories and histories publish complete coverage after
 all pages finish. A failed page preserves the previous complete collection.

@@ -1,7 +1,7 @@
 // S2 source protocol. This is deliberately separate from observational recovery
 // exports: only a drained, fenced repository may produce a migration archive.
 import { AdminError, REQUIRED_TABLES } from './storage';
-import { digest } from './protocol';
+import { digest, stagingStateKey, stagedPageKey } from './protocol';
 
 export const migrationKey = (repo: string) => `control/${repo}/migration.json`;
 export const archiveKey = (repo: string, generation: string) => `migrations/${repo}/${generation}`;
@@ -183,8 +183,11 @@ async function stagingStep(bucket: R2Bucket, sql: SqlStorage, state: Migration):
     if(!/^[0-9]+$/.test(started) || !/^[1-9][0-9]*$/.test(next)) throw new AdminError('migration_job_checkpoint_invalid');
     let page=BigInt(check.page);
     for(let n=0;page<BigInt(next) && n<100;n++,page++) {
-      const key=`staging/${state.repository}/${encodeURIComponent(value('key')!)}/${started}/${page}`;
-      if(!await bucket.head(key)) {
+      const legacy=`staging/${state.repository}/${encodeURIComponent(value('key')!)}/${started}/${page}`;
+      const checkpoint=sql.exec<any>('SELECT value FROM meta WHERE key=?',stagingStateKey(value('key')!)).toArray()[0];
+      let key:string | undefined;
+      try {key=stagedPageKey(checkpoint?JSON.parse(checkpoint.value):undefined,legacy,started,String(page));}catch {}
+      if(!key || !await bucket.head(key)) {
         // S0 already resets pagination when a partial staging page expires.
         // Preserve the exact SQL export and cooldown/generation, but record
         // that this execution checkpoint cannot resume from its old page.

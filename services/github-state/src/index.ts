@@ -12,7 +12,7 @@ function targets(env:Env,payload:any,event:string): Repository[] {
   const target=payload?.repository ? configured.filter(r=>r.id===String(payload.repository.id)) : ['installation','installation_repositories','ping'].includes(event)?configured:[];
   return target.filter(repo=>!payload?.installation?.id || String(payload.installation.id)===repo.installation);
 }
-const STORAGE_OPERATIONS=new Set(['scan','cleanup','probe','fault','retention']);
+const STORAGE_OPERATIONS=new Set(['ownership','scan','cleanup','probe','fault','retention']);
 async function query(req:Request,env:Env,q:Query,request_id:string): Promise<Response> {
   try { validateQuery(q); } catch { return json({error:'invalid_query'},400); }
   const repo=repository(env,q.repository);
@@ -90,15 +90,16 @@ export default {
         return stub(env.REPOSITORIES,repo.id).fetch('https://internal/activity',{method:'POST',body:JSON.stringify({repository:repo.name,numbers:[...new Set(input.numbers)]})});
       }
       if (url.pathname==='/v1/query' && req.method==='GET') {
-        let args; try { args=JSON.parse(url.searchParams.get('args') || '{}'); } catch { return json({error:'invalid_args'},400); }
+        let args; try { args=parseGitHub(url.searchParams.get('args') || '{}'); } catch { return json({error:'invalid_args'},400); }
         if (url.searchParams.has('allow_observed') && !['true','false'].includes(url.searchParams.get('allow_observed')!)) return json({error:'invalid_query'},400);
         return await query(req,env,{repository:url.searchParams.get('repository') || '',operation:url.searchParams.get('operation') || '',args,cursor:url.searchParams.get('cursor') || undefined,allow_observed:url.searchParams.has('allow_observed')?url.searchParams.get('allow_observed')==='true':undefined},request_id);
       }
       if (url.pathname==='/v1/query_batch' && req.method==='POST') {
-        const input:any=await req.json();
+        const input:any=parseGitHub(await req.text());
         if (!Array.isArray(input.queries) || input.queries.length>50) return json({error:'invalid_batch'},400);
-        const results=[];
-        for (const q of input.queries) { const response=await query(req,env,q,request_id); results.push({status:response.status,result:response.status===304?null:await response.json()}); }
+        const results:any[]=new Array(input.queries.length);let next=0;
+        const read=async()=>{for(let index=next++;index<input.queries.length;index=next++) {const response=await query(req,env,input.queries[index],request_id);results[index]={status:response.status,result:response.status===304?null:await response.json()};}};
+        await Promise.all(Array.from({length:Math.min(4,input.queries.length)},read));
         return json({version:1,results});
       }
       if (['/v1/health','/v1/changes'].includes(url.pathname) && req.method==='GET') {

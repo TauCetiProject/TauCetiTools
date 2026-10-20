@@ -1,0 +1,76 @@
+{
+  "verified_date": "2026-10-20",
+  "project": {
+    "id": "sparkling-sunset-73872362",
+    "name": "tauceti-github-state",
+    "org_id": "org-summer-darkness-64936821",
+    "pg_version": 18,
+    "region_id": "aws-us-east-2",
+    "history_retention_seconds": 604800,
+    "branch_logical_size_limit_bytes": 17592186044416
+  },
+  "production_compute": {
+    "id": "ep-autumn-bird-b5a2du6h",
+    "branch_id": "br-wispy-unit-b5i6xalz",
+    "autoscaling_limit_min_cu": 0.5,
+    "autoscaling_limit_max_cu": 2,
+    "suspend_timeout_seconds": -1
+  },
+  "test_compute": {
+    "id": "ep-odd-cherry-b5yvahvs",
+    "branch_id": "br-fancy-unit-b5kzg3kp",
+    "autoscaling_limit_min_cu": 0.5,
+    "autoscaling_limit_max_cu": 2,
+    "suspend_timeout_seconds": -1
+  },
+  "storage": {
+    "project_logical_size_quota_bytes": 1099511627776,
+    "postgres_neon_max_cluster_size": "1TB",
+    "effective_allowance_bytes": 1099511627776,
+    "grows_with_usage": true
+  },
+  "isolation": {
+    "verified_at": "2026-10-20T04:16:49.656Z",
+    "checks": [
+      {
+        "credential": "test-application-url",
+        "production_connection_rejected": true
+      },
+      {
+        "credential": "test-migration-url",
+        "production_connection_rejected": true
+      }
+    ]
+  },
+  "restore": {
+    "project": "sparkling-sunset-73872362",
+    "test_branch": "br-fancy-unit-b5kzg3kp",
+    "restore_branch": "br-autumn-poetry-b56z76ty",
+    "restore_point": "2026-10-20T04:06:59.687229Z",
+    "verified_at": "2026-10-20T04:07:03.786Z",
+    "result": "before value recovered after original changed to after",
+    "production_data": false,
+    "temporary_restore_branch_deleted": true
+  },
+  "production_routing": "SQLite; no production Worker deployment or cutover performed",
+  "bors_changed": false,
+  "production_roles": {
+    "verified_at": "2026-10-20T05:18:04.200Z",
+    "roles": [
+      {
+        "rolname": "github_state_app",
+        "rolsuper": false,
+        "rolcreatedb": false,
+        "rolcreaterole": false,
+        "rolcanlogin": true
+      },
+      {
+        "rolname": "github_state_migration",
+        "rolsuper": false,
+        "rolcreatedb": true,
+        "rolcreaterole": true,
+        "rolcanlogin": true
+      }
+    ]
+  }
+}

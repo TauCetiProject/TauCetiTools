@@ -2,16 +2,18 @@ import { digest } from './protocol';
 
 // Cloudflare SQLite keeps serving reads and deletes at its size limit while
 // inserts and updates fail. Classify that precisely instead of hiding it.
-export type Failure = 'storage_full' | 'storage_error' | 'schema_unavailable' | 'transport' | 'internal';
+export type Failure = 'backend_fenced' | 'database_unavailable' | 'storage_full' | 'storage_error' | 'schema_unavailable' | 'transport' | 'internal';
 export function classify(error: unknown): Failure {
   const text = error instanceof Error ? error.message : String(error);
+  if (/Repository backend generation fenced/.test(text))return 'backend_fenced';
+  if (/Repository database unavailable/.test(text))return 'database_unavailable';
   if (/SQLITE_FULL|maximum database size|database or disk is full/i.test(text)) return 'storage_full';
   if (/no such (table|column)|schema/i.test(text)) return 'schema_unavailable';
   if (/SQLITE_|Durable Object storage|storage operation/i.test(text)) return 'storage_error';
   if (/network|fetch|connection|timed? ?out|Durable Object (is overloaded|reset)/i.test(text)) return 'transport';
   return 'internal';
 }
-export const PARKABLE = new Set<Failure>(['storage_full', 'schema_unavailable']);
+export const PARKABLE = new Set<Failure>(['storage_full', 'schema_unavailable','database_unavailable','backend_fenced']);
 export const FULL_MESSAGE = 'Exceeded the maximum database size. SQLITE_FULL (fault injection)';
 
 // Request identifiers are echoed in errors and logs; never echo arbitrary input.

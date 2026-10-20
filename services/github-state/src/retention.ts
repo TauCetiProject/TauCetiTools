@@ -83,3 +83,27 @@ export async function retirePrefix(bucket: R2Bucket, name: keyof typeof R2_CLASS
   await bucket.put(checkpointKey, JSON.stringify(state));
   return state;
 }
+
+// The same policy/checkpoint contract on remote SQL. Pages bound examined rows
+// as well as deleted rows. PostgreSQL sizes use prepared column lists rather
+// than SQLite PRAGMAs; deletion remains conditional after the read snapshot.
+export async function sweepStore(store:import('./repository_store').RepositoryStore,name:RetentionClass,previous:Checkpoint|undefined,budget:Budget,enforce:boolean,now=Date.now()):Promise<Checkpoint> {
+  const {columns}=await import('./repository_store'),rule=RULES[name];
+  let state:Checkpoint=previous?{...previous}:{after:0,upper:0,started:now,examined:0,eligible:0,deleted:0,bytes:0};
+  if(!previous || state.after>=state.upper)state={after:0,upper:(await store.exec<any>('SELECT COALESCE(MAX(rowid),0) n FROM '+rule.table)).one().n,started:now,completed:previous?.completed,examined:0,eligible:0,deleted:0,bytes:0};
+  delete state.error;
+  const size=columns[rule.table].map(c=>'COALESCE(octet_length(CAST('+c+' AS TEXT)),0)').join('+'),limit=Math.min(1000,budget.rows),indexed=name==='expired_repair_metrics';
+  const rows=(await store.exec<any>('SELECT rowid id,'+rule.clock+' at,'+size+' bytes FROM '+rule.table+(indexed?' WHERE at<? ORDER BY at LIMIT ?':' WHERE rowid>? AND rowid<=? ORDER BY rowid LIMIT ?'),...(indexed?[now-rule.age,limit]:[state.after,state.upper,limit]))).toArray();
+  const eligible:number[]=[];
+  for(const row of rows){
+    if(Date.now()>=budget.deadline || budget.rows<=0)break;
+    if(row.bytes>4*1024**2){state.error='row_exceeds_byte_budget';state.after=row.id;budget.rows--;continue;}
+    if(row.bytes>budget.bytes)break;
+    budget.rows--;budget.bytes-=row.bytes;
+    if(row.at<now-rule.age){eligible.push(row.id);state.eligible++;state.bytes+=row.bytes;state.oldest_expired=Math.min(state.oldest_expired ?? row.at,row.at);}
+    state.examined++;state.after=row.id;
+  }
+  if(enforce)for(let offset=0;offset<eligible.length;offset+=200){const ids=eligible.slice(offset,offset+200);state.deleted+=(await store.exec('DELETE FROM '+rule.table+' WHERE rowid IN ('+ids.map(()=>'?').join(',')+') AND '+rule.clock+'<? RETURNING rowid',...ids,now-rule.age)).toArray().length;}
+  if(!rows.length || !indexed && state.after>=state.upper){state.after=state.upper;state.completed=now;}
+  return state;
+}
