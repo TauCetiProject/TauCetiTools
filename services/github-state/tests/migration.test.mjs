@@ -452,3 +452,30 @@ test('table discovery only excludes literal engine prefixes',async()=>{
   f.db.exec('DROP TABLE '+name);
  }
 });
+
+test('freeze drains an in-flight archival job and prevents its SQL publication',async()=>{
+ const f=await fixture(),body=JSON.stringify({id:7,run_attempt:1,steps:['x'.repeat(8000)]});
+ f.db.prepare('INSERT INTO resources VALUES(?,?,?,?,?,?,?,?)').run('workflow_jobs','7','9',body,'',Date.now()-8*86400000,1,0);
+ f.state.storageLoaded=true;f.state.retentionPolicy={mode:'enforce',disabled:[],pinned:[],archive_ci:true};f.state.receiptsChecked=Date.now();
+ let release,entered;const gate=new Promise(r=>release=r),waiting=new Promise(r=>entered=r),put=f.archive.put.bind(f.archive);
+ f.archive.put=async(key,...args)=>{if(key.includes('/ci/')) {entered();await gate;}return put(key,...args);};
+ f.state.startStorageMaintenance();await waiting;
+ const freezing=f.command('freeze');
+ while(!f.archive.objects.has('control/100/migration.json'))await new Promise(r=>setImmediate(r));
+ assert.ok(f.state.activeOperations>0,'background work participates in source draining');
+ release();assert.equal((await freezing).status,200);
+ assert.equal(f.db.prepare('SELECT data FROM resources').get().data,body,'archival cannot publish beneath a freeze');
+ assert.equal(f.state.activeOperations,0);
+ const before=f.db.prepare('SELECT total_changes() n').get().n;
+ await f.state.storageMaintenance();f.state.expire();f.state.startStorageMaintenance();
+ assert.equal(f.db.prepare('SELECT total_changes() n').get().n,before);
+});
+
+test('source migration inventories and verifies the expiring staging-spill prefix',async()=>{
+ const f=await fixture(),key='staging-spills/100/nested';
+ await f.archive.put(key,'{"rows":[]}',{customMetadata:{kind:'cursor',expires:'1'}});
+ f.db.prepare('INSERT INTO jobs(key,query,due,nested) VALUES(?,?,?,?)').run('review_threads:{"number":7}',JSON.stringify({operation:'review_threads',args:{number:7}}),0,JSON.stringify({$r2:key}));
+ assert.equal((await f.command('freeze')).status,200);
+ const result=await finish(f);assert.equal(result.blobs.objects,1);
+ assert.ok([...f.archive.objects.entries()].some(([name,object])=>name.includes('/blobs/') && object.text.includes(key)));
+});

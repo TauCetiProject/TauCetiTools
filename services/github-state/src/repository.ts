@@ -978,7 +978,7 @@ export class RepositoryState extends DurableObject<Env> {
   expire(): Record<string,number> {
     const out:Record<string,number>={},now=Date.now();
     const budget={rows:6000,bytes:4*1024**2,deadline:now+50};
-    if(!this.storageLoaded)return out; // Unknown durable pins fail closed.
+    if(!this.storageLoaded || this.migrationHeld())return out; // Unknown pins and source fences fail closed.
     const names=Object.keys(RULES) as RetentionClass[];
     for(let i=0;i<names.length;i++) {
       const name=names[(i+this.storageTurn)%names.length];
@@ -1002,12 +1002,15 @@ export class RepositoryState extends DurableObject<Env> {
   // Cron calls this independently of hydration, dispatch and archive creation.
   // Checkpoints and observations live outside the potentially full SQLite DB.
   async storageMaintenance(runExpiry=true): Promise<void> {
+    if(this.migrationHeld())return;
     if(this.storageFlight)return this.storageFlight;
+    this.activeOperations++;
     const flight=this.prepareStorage(runExpiry);this.storageFlight=flight;
-    try {await flight;}finally {if(this.storageFlight===flight)this.storageFlight=undefined;}
+    try {await flight;}finally {this.activeOperations--;if(this.storageFlight===flight)this.storageFlight=undefined;}
   }
   get maintenanceArchive():R2Bucket {return timedBucket(this.env.ARCHIVE);}
   startStorageMaintenance():void {
+    if(this.migrationHeld())return;
     const task=this.storageMaintenance(false).catch(error=>this.noteFailure('storage_maintenance',error));
     if(this.ctx.waitUntil)this.ctx.waitUntil(task);
   }
@@ -1039,6 +1042,7 @@ export class RepositoryState extends DurableObject<Env> {
   async prepareStorage(runExpiry=true): Promise<void> {
     const repo=this.meta('repository')?.id;if(!repo)return;
     await this.loadRetentionState();
+    if(this.migrationHeld())return;
     if(Date.now()-this.receiptsChecked>=60000) {
       try {
         const [parked,held]=await Promise.all([
@@ -1049,10 +1053,12 @@ export class RepositoryState extends DurableObject<Env> {
         this.receiptsChecked=Date.now();
       }catch {this.receiptsPinned=true;}
     }
+    if(this.migrationHeld())return;
     if(runExpiry && this.storageLoaded)this.expire();
     if(this.storageLoaded && this.retentionPolicy.archive_ci && !this.degraded) {
       try {await this.archiveCI(this.retentionPolicy.mode==='enforce');}catch(error) {this.noteFailure('archive_ci',error);}
     }
+    if(this.migrationHeld())return;
     try {
       const text=JSON.stringify({version:1,classes:this.retentionState,ci_after:this.ciAfter});
       if(this.storageLoaded && text!==this.checkpointText && Date.now()-this.checkpointAt>=30000) {
@@ -1135,6 +1141,7 @@ export class RepositoryState extends DurableObject<Env> {
     }catch(error) {this.noteFailure('monitoring',error);}
   }
   async archiveCI(enforce=true): Promise<void> {
+    if(this.migrationHeld())return;
     const began=Date.now(),cutoff=began-7*86400000;
     const candidates=this.sql.exec<any>('SELECT rowid rid,kind,id,observed,length(CAST(data AS BLOB)) bytes FROM resources WHERE rowid>? ORDER BY rowid LIMIT 100',this.ciAfter).toArray();
     let bytes=0,archived=0,eligible=0;
@@ -1156,6 +1163,7 @@ export class RepositoryState extends DurableObject<Env> {
           const stored=await this.maintenanceArchive.get(key);
           if(!stored || await digest(await stored.text())!==hash)throw new Error('archive_verification_failed');
           // Preserve the inline field used by legacy attempt membership guards.
+          if(this.migrationHeld())return;
           const pointer=JSON.stringify({$r2:key,...(row.kind==='workflow_jobs'?{run_attempt:data.run_attempt || 1}:{})});
           const written=this.sql.exec('UPDATE resources SET data=? WHERE rowid=? AND kind=? AND id=? AND data=?',pointer,row.rid,row.kind,row.id,before).rowsWritten;
           if(written)archived++;
@@ -1169,7 +1177,7 @@ export class RepositoryState extends DurableObject<Env> {
   async preparedObservation(): Promise<any> {
     if(!this.observation && Date.now()-this.observationReadAt>=60000) {
       this.observationReadAt=Date.now();
-      const repo=this.meta('repository')?.id;
+      let repo:string|undefined;try {repo=this.meta('repository')?.id;}catch {}
       if(repo) {
         const task=this.maintenanceArchive.get('control/'+repo+'/observation.json').then(o=>o?.json<any>()).then(value=>{
           if(value && (!this.observation || value.at>this.observation.at))this.observation=value;
@@ -1388,7 +1396,7 @@ export class RepositoryState extends DurableObject<Env> {
   // The last time the mirror changed: an applied webhook or a stored repair.
   frozenSince(): number | null {
     if (!this.degraded) return null;
-    const changed=Math.max(this.meta('last_webhook') || 0,this.meta('last_repair') || 0);
+    let changed:number;try {changed=Math.max(this.meta('last_webhook') || 0,this.meta('last_repair') || 0);}catch {return null;}
     return Date.now()-changed>FROZEN_AFTER?changed:null;
   }
   prepareDiagnostics(): void {

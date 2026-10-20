@@ -207,7 +207,7 @@ async function stagingStep(bucket: R2Bucket, sql: SqlStorage, state: Migration):
 // Inventory cursor and staging blobs as well as resources. Staging is addressed
 // implicitly by (job key, started, page), not only by explicit $r2 references.
 async function blobStep(bucket: R2Bucket, state: Migration): Promise<void> {
-  const prefixes = ['resources/', 'cursors/', 'staging/'].map(p => p + state.repository + '/'), check = state.blobs;
+  const prefixes = ['resources/', 'cursors/', 'staging/', 'staging-spills/'].map(p => p + state.repository + '/'), check = state.blobs;
   if (check.prefix === prefixes.length) {
     check.complete = true; state.phase = 'source_verified';
     await saveMigration(bucket, state);

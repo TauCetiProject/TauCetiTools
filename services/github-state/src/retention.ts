@@ -58,10 +58,10 @@ export function sweep(sql: SqlStorage, name: RetentionClass, previous: Checkpoin
 
 // Explicit protection wins even if a mistakenly copied expiry is present.
 export function protectedObject(key: string, metadata?: Record<string, string>): boolean {
-  return metadata?.pinned === 'true' || /^(parked|recovery|migration|control)\//.test(key) || key.startsWith('resources/') && metadata?.kind!=='cursor';
+  return metadata?.pinned === 'true' || /^(parked|recovery|migrations?|control)\//.test(key) || key.startsWith('resources/') && metadata?.kind!=='cursor';
 }
 
-export async function retirePrefix(bucket: R2Bucket, name: keyof typeof R2_CLASSES, now = Date.now()): Promise<any> {
+export async function retirePrefix(bucket: R2Bucket, name: keyof typeof R2_CLASSES, now = Date.now(), canDelete:()=>Promise<boolean> = async()=>true): Promise<any> {
   const prefix = R2_CLASSES[name], checkpointKey = 'control/retention/' + name + '.json';
   const prior = await bucket.get(checkpointKey).then(o => o?.json<any>());
   const page = await bucket.list({ prefix, cursor: prior?.cursor || undefined, limit: name === 'r2_cursors' ? 500 : 100, include: ['customMetadata'] });
@@ -77,10 +77,11 @@ export async function retirePrefix(bucket: R2Bucket, name: keyof typeof R2_CLASS
     examined++;
   }
   // One R2 batch operation retains the previous cursor-expiry throughput.
-  if(keys.length)await bucket.delete(keys);
+  let deleted=0;
+  if(keys.length) {if(await canDelete()) {await bucket.delete(keys);deleted=keys.length;}else paused=true;}
   // If budget ran out, repeat the page. Advancing would skip unprocessed keys.
   // Deleting a row/object twice after a checkpoint failure is harmless.
-  const state = { at: Date.now(), cursor: paused ? prior?.cursor || null : page.truncated ? page.cursor : null, examined, deleted:keys.length, bytes, paused, oversized, completed: !paused && !page.truncated ? now : prior?.completed || null };
+  const state = { at: Date.now(), cursor: paused ? prior?.cursor || null : page.truncated ? page.cursor : null, examined, deleted, bytes, paused, oversized, completed: !paused && !page.truncated ? now : prior?.completed || null };
   await bucket.put(checkpointKey, JSON.stringify(state));
   return state;
 }

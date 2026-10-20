@@ -78,7 +78,10 @@ automatic expiry waits for that policy; the explicit emergency SQL cleanup comma
 remain available without R2. Cached policy expiry remains independent of later R2
 monitoring failures. Other recovery attempts still run. New demand deletion starts
 in dry run; S0's receipt and other existing expiry classes remain active by default,
-subject to pins/explicit class overrides. No SQL schema migration is needed.
+subject to pins/explicit class overrides. No SQL schema migration is needed. Background retention and archival participate
+in the source-migration drain barrier and stop at its fence. Bucket expiry
+rechecks the migration hold before batch deletion; migration inventories include
+the staging-spill prefix.
 
 CI archival is separately opt-in, with a maximum 100 resource candidates, 4 MiB and
 50 ms between operations. The R2 bytes are uploaded with a digest and read back for

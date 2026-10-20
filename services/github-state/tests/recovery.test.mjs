@@ -482,7 +482,7 @@ test('prepared health does no aggregate SQL or GitHub calls and survives monitor
  await state.storageMaintenance();
  assert.equal((await state.preparedObservation()).stale,false,'in-memory diagnostics remain available');
  state.prepareDiagnostics();assert.ok(state.diagnosticsAt>0);
- const original=state.sql.exec;state.sql.exec=(q,...b)=>{assert.ok(!/COUNT\(|GROUP BY|SUM\(|AVG\(/i.test(q),'health must only read prepared observations');return original(q,...b);};
+ const original=state.sql;state.sql=new Proxy(original,{get(target,key){if(key==='exec')return (q,...b)=>{assert.ok(!/COUNT\(|GROUP BY|SUM\(|AVG\(/i.test(q),'health must only read prepared observations');return target.exec(q,...b);};return Reflect.get(target,key,target);}});
  const response=await state.fetch(new Request('https://internal/health'));
  assert.equal(response.status,200);assert.equal((await response.json()).monitoring.stale,false);
  state.observation.at=Date.now()-180001;
@@ -670,12 +670,12 @@ test('checkpoints are coalesced and prepared diagnostics advance from tick maint
 
 test('hourly size estimates never count a whole table and checkpoint their attempt first',async()=>{
  const {state,archive}=repositoryFixture();await state.fixtureReady;
- const original=state.sql.exec;let sawSample=false;
- state.sql.exec=(q,...b)=>{
+ const original=state.sql;let sawSample=false;
+ state.sql=new Proxy(original,{get(target,key){if(key!=='exec')return Reflect.get(target,key,target);return (q,...b)=>{
   if(/FROM \"resources\"/.test(q) && /SUM\(/.test(q)) {assert.ok(archive.objects.has('control/100/table-estimate-attempt.json'));sawSample=true;}
   assert.ok(!/^SELECT COUNT\(\*\) n FROM \"/.test(q),'whole-table row counts are forbidden');
-  return original(q,...b);
- };
+  return target.exec(q,...b);
+ };}});
  await state.storageMaintenance();assert.equal(sawSample,true);
 });
 
@@ -736,4 +736,13 @@ test('accounting instrumentation failure cannot fail an upstream semantic respon
   const result=await owner.http('/repos/org/repo','test-token','GET',undefined,'repository','core');
   assert.equal(result.status,200);assert.equal(result.body.id,'exact-result');assert.ok(owner.accountingFailure);
  }finally {globalThis.fetch=original;}
+});
+
+
+test('health retains schema diagnostics when repository metadata is missing',async()=>{
+ const {state,db}=repositoryFixture();await state.fixtureReady;
+ state.degraded={since:1,reason:'storage_full',operation:'fixture'};
+ db.exec('DROP TABLE meta');state.schema={error:'schema_unavailable',missing:['meta'],cause:'storage_full'};
+ const response=await state.fetch(new Request('https://internal/health'));
+ assert.equal(response.status,200);const result=await response.json();assert.deepEqual(result.storage.schema.missing,['meta']);assert.equal(result.monitoring.stale,true);
 });

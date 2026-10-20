@@ -151,3 +151,7 @@ serve an explicitly timestamped emergency last-known-data fallback; it is stale
 and must never become writable by flipping a routing flag. Keep it and migration
 archives read-only through observation. Retirement and reverse migration require
 separate deliberate procedures.
+
+Retention background work participates in the source drain barrier. The R2
+blob inventory also includes `staging-spills/<repo>/` for expiring nested
+continuations, and bucket expiry rechecks the migration hold before deletion.

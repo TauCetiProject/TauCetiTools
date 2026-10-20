@@ -225,7 +225,7 @@ export default {
   },
   async scheduled(_event:ScheduledController,env:Env,ctx:ExecutionContext):Promise<void> {
     const installations=new Set(repositories(env).map(repo=>repo.installation));
-    for(const installation of installations)ctx.waitUntil(stub(env.INSTALLATIONS,installation).fetch('https://internal/maintenance',{method:'POST'}).catch(error=>log('installation_maintenance_failed',{reason:classify(error)})));
+    for(const installation of installations)ctx.waitUntil((async()=>{await stub(env.INSTALLATIONS,installation).fetch('https://internal/maintenance',{method:'POST'});})().catch(error=>log('installation_maintenance_failed',{reason:classify(error)})));
     for (const repo of repositories(env)) {
       if(repo.bors_receipts_url || (repo.name==='TauCetiProject/TauCeti' && env.BORS_ACTIVITY)) ctx.waitUntil(stub(env.REPOSITORIES,repo.id).fetch('https://internal/activity-refresh',{method:'POST'}));
       ctx.waitUntil((async()=>{
@@ -271,7 +271,7 @@ export default {
       }
       await Promise.allSettled(Object.keys(R2_CLASSES).map(async name=>{
         if(held.has(name))return;
-        try {await retirePrefix(env.ARCHIVE,name as keyof typeof R2_CLASSES);}
+        try {await retirePrefix(env.ARCHIVE,name as keyof typeof R2_CLASSES,Date.now(),async()=>!await retentionHeld());}
         catch(error) {log('archive_retention_failed',{class:name,reason:classify(error)});}
       }));
     })().catch(error=>log('archive_retention_policy_failed',{reason:classify(error)})));
