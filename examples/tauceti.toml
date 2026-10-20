@@ -47,7 +47,7 @@ update = true
 overlap = true
 upstream_destination = true
 
-# Everything below is optional. Run doctor --extras to continue beyond core.
+# Everything below is optional. Use doctor --no-extras to report only core setup.
 [features]
 archives = false
 ci_archive = false
