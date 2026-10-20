@@ -12,8 +12,9 @@ release; these diagnostics do not select a backend or bootstrap GitHub.
 
 The shared-state service operator owns capacity alarms, retention overrides, archive
 receipts and replay. The existing installation scheduler exclusively owns GitHub
-quotas. The PostgreSQL backend operator owns the dedicated Neon project's effective
-account/project allowance, compute, connections and restore history after S1.
+quotas. The PostgreSQL backend operator owns the dedicated Neon branch's effective
+storage limit and separately verified project/account quotas, compute, connections
+and restore history after S1.
 Automatically growing storage is not a hard allowance; do not reuse SQLite's 10 GiB
 threshold for PostgreSQL.
 
@@ -345,17 +346,28 @@ recovery observations stay stale even if the wrapper response is recent.
 Use the actual lower-case provider IDs. Supply a project-scoped management
 credential as the separate `NEON_MONITORING_API_KEY` Worker secret. The collector
 issues only GETs; project scope itself does not make a management key read-only.
-Use an existing read-only credential broker if your observability integration
-provides one. Never reuse a SQL
+The operator owns creation/rotation of this separate credential. Never reuse a SQL
 credential or copy an account-wide operator management key into the Worker. The
-minute cron samples the enrolled project's settings, at most 100 branches, and its
-enrolled endpoint, with two-second request deadlines. Collection and persistence
+minute cron issues four bounded GETs for the enrolled project's settings, its
+selected branch, at most 100 inventory branches, and its enrolled endpoint, with
+two-second request deadlines. A missing or malformed inventory sibling does not
+prevent observing the selected branch. Collection and persistence
 failures do not enter repository or queue transactions. Failed samples retain their
 original timestamps and last good values. Health reads only prepared observations.
+Selected PostgreSQL observations also verify the enrolled endpoint against the
+application database hostname, accepting its pooled form. A mismatched or missing
+database identity reports monitoring unavailable rather than headroom for another
+branch.
 
 The selected branch's logical size includes **all databases in that branch**.
 `provider.capacity` applies the 70%/85% and confirmed exhaustion thresholds to its
-real branch quota. `provider.branches` exposes other branch sizes separately.
+effective branch limit: the minimum positive configured branch quota and the
+provider's explicit `branch_logical_size_limit_bytes`. A missing limit remains
+unknown without producing a capacity-threshold alarm. `provider.branches` exposes
+other branch sizes separately. Equal cached estimates preserve confirmation
+counts without counting as another growing sample; shrinking values reset them.
+The last known storage alarm remains active, explicitly stale, through collection
+failure until a fresh observation proves recovery.
 The sample clock records retrieval time: `logical_size` is a provider estimate,
 whose internal measurement time/refresh lag is unavailable and explicitly labelled.
 `project_logical_branch_sum_bytes` is available only for a complete inventory, and
@@ -382,17 +394,28 @@ It is not the cumulative `compute_time_seconds` billing counter, configured CU
 ceiling, SQL active-query count, or queue depth. Its adapter submits a normalized
 one-minute utilization ratio, in `[0,1]`, with the enrolled `project`, `branch`,
 `endpoint` and the original Unix-millisecond sample `at`, to
-`POST /admin/monitoring/compute` with existing admin authentication. The endpoint
-rejects wrong identities, samples older than three minutes, future clocks and
-duplicate/out-of-order samples. ETag preconditions reject concurrent stale writes.
+`POST /admin/monitoring/compute` with a separate ingest-only bearer token. Configure
+its SHA-256 hex digest in `MONITORING_INGEST_TOKEN_HASH`; keep the raw token only
+in the existing metrics pipeline. It grants no migration, repository admin or
+query authority. Reusing the admin token is rejected. The endpoint rejects wrong
+identities, samples older than three minutes, clocks more than one minute ahead,
+and duplicate/out-of-order samples. ETag preconditions reject concurrent writes
+with HTTP 409: retry that same sample; a now-obsolete sample returns HTTP 400.
+Storage/configuration failures return HTTP 503 and can be retried.
 It stores only the latest bounded observation in R2. Do not send raw telemetry or
 credentials in the body. The integration owner configures this transform in its
 existing pipeline; no new messaging destination or observability account is created.
+SQL active-query and lock-wait diagnostics remain visible alongside CPU observations.
+Before backend selection, SQLite health also exposes the enrolled standby provider
+observation; its pressure does not page as the current SQLite store's pressure.
+During a migration hold, the standalone minute collector continues and its R2
+record can be inspected with existing authenticated operator tooling.
 
 Fresh CPU >=80% warns and >=90% is critical, separately from storage and connection
 pressure. Missing/stale provider or CPU data warns once monitoring is enrolled;
 missing enrollment is reported as unconfigured. Existing Workers structured alarms
-carry these reasons. `notified:false` remains true even when a log is emitted.
+carry these reasons and measured provider/compute/connection values. The record
+still says `notified:false` when a log is emitted.
 Before claiming deployment completion, record the real CPU source, original sample
 time, enrolled identity, minute updates and configured destination's delivery
 evidence. A fixture or successful log write does not satisfy that release check.

@@ -11,6 +11,7 @@ export interface Env {
   MIGRATION_ENVIRONMENT?: string;
   MIGRATION_DATABASE_URL?:string; MIGRATION_TARGET?:string;
   NEON_MONITORING?:string; NEON_MONITORING_API_KEY?:string;
+  MONITORING_INGEST_TOKEN_HASH?:string;
   CF_VERSION?: {id:string};
   BORS_ACTIVITY?: Fetcher;
 }

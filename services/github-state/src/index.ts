@@ -3,7 +3,7 @@ import { blocksRepairs, holdsRetention, readMigration } from './migration';
 import { classify, log, requestId } from './storage';
 import { PARK_AFTER_ATTEMPTS, backlog, backoff, drain, maintainIngress, maintainRaw, release, ingressMode, noteRepositoryFull, park, reconcile, setIngressMode, storageState } from './ingress';
 import { prepareQueueMetrics } from './queue_monitoring';
-import { boundedText, prepareProvider, saveCompute } from './provider_monitoring';
+import { authorizeCompute, boundedText, prepareProvider, saveCompute } from './provider_monitoring';
 import { R2_CLASSES, policy, retirePrefix } from './retention';
 export { RepositoryState } from './repository';
 export { InstallationScheduler } from './installation';
@@ -119,12 +119,13 @@ export default {
         return stub(env.REPOSITORIES,repo.id).fetch('https://internal/configure',{method:'POST',body:JSON.stringify({repository:repo.name})});
       }
       if(url.pathname==='/admin/monitoring/compute' && req.method==='POST') {
-        if(!await authorize(req,env,undefined,true))return json({error:'unauthorized'},401);
+        if(!await authorizeCompute(req,env))return json({error:'unauthorized'},401);
         let text:string;
-        try {text=await boundedText(req.body,4096);}catch {return json({error:'payload_too_large'},413);}
+        try {text=await boundedText(req.body,4096);}catch(error) {return json({error:'compute_observation_body_unavailable'},error instanceof Error && error.message==='monitoring_payload_too_large'?413:503);}
         try {await saveCompute(env,JSON.parse(text));return json({stored:true});}
         catch(error) {
-          if(error instanceof SyntaxError || error instanceof Error && ['invalid_compute_observation','stale_compute_observation','invalid_neon_monitoring_identity'].includes(error.message))return json({error:'compute_observation_rejected',request_id},400);
+          if(error instanceof Error && error.message==='compute_observation_conflict')return json({error:'compute_observation_conflict',request_id},409);
+          if(error instanceof SyntaxError || error instanceof Error && ['invalid_compute_observation','stale_compute_observation'].includes(error.message))return json({error:'compute_observation_rejected',request_id},400);
           return json({error:'compute_observation_unavailable',request_id},503);
         }
       }

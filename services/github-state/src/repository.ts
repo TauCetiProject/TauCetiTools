@@ -8,7 +8,7 @@ import { Lane, LANES, laneAt, settings } from './reconciliation';
 import { SURVEY_CONTRACT, compactPR, issueFragment, reviewFragment, summarizeFragments, inScope, roadmapFocuses } from './survey';
 import { readPromotionReceipts } from './activity_landings';
 import { queueMetrics } from './queue_monitoring';
-import { providerObservation, providerAlarms } from './provider_monitoring';
+import { ageProvider, providerObservation, providerAlarms } from './provider_monitoring';
 import { targetConfig, targetOwner } from './migration_target';
 import { controllerStep, preflight as cutoverPreflight, FREEZE_LEASE_MS } from './migration_control';
 import { Migration, terminalReceipt, compatibilityStep, blocksRepairs, blocksWrites, archiveKey, beginExport, expectedTables, exportStep, generation, encodeMigration, publicReceipt, readMigration, saveMigration, targetIdentity, verifyStep } from './migration';
@@ -1419,7 +1419,7 @@ export class RepositoryState extends DurableObject<Env> {
       const level=reasons.some(r=>r!=='storage_capacity')?'critical':measured.level;
       const requests=this.requestMetrics.snapshot(now),repairMinutes=this.repairMetrics.snapshot(now).filter((r:any)=>r.at>=now-60000);
       const {intervals,...requestSummary}=requests;
-      const value={version:1,at:now,level,reasons,capacity:measured,capacity_history:this.capacityHistory,tables:this.tableEstimates,table_attempt_at:this.tableAttemptAt,ingress:ingressHealth,refresh_lag_ms:(await this.meta('last_repair'))?now-(await this.meta('last_repair')):null,requests:requestSummary,repair_summary:this.repairMetrics.summary(now),
+      const value={version:1,at:now,level,reasons,capacity:measured,capacity_history:this.capacityHistory,tables:this.tableEstimates,table_attempt_at:this.tableAttemptAt,ingress:ingressHealth,refresh_lag_ms:(await this.meta('last_repair'))?now-(await this.meta('last_repair')):null,requests:requestSummary,repair_summary:this.repairMetrics.summary(now),provider:await providerObservation(this.env,now),
         retention:{policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,receipts_pinned:this.receiptsPinned,receipt_pin_backend:'r2',r2:r2Retention},
         compute:{status:'unavailable',reason:'not_exposed_by_sqlite_runtime'},connections:{status:'not_applicable'}};
       const alarm=level!=='ok'?emitAlarm(this.env,repo,value):{channel:'configured_workers_observability',emitted:false,notified:false};
@@ -1484,7 +1484,7 @@ export class RepositoryState extends DurableObject<Env> {
     const usable=connections?connections.max-connections.reserved:0;
     const pressure=usable>0?connections.used/usable:null;
     if(pressure!==null && pressure>=.7)reasons.push('connection_saturation');
-    const provider=await providerObservation(this.env,now),providerAlarm=providerAlarms(provider);
+    const provider=await providerObservation(this.env,now,true),providerAlarm=providerAlarms(provider);
     const critical=reasons.some(r=>!['storage_capacity','connection_saturation','monitoring_unavailable'].includes(r)) || measured.level==='critical' || pressure!==null && pressure>=.85 || providerAlarm.level==='critical';
     const uniqueReasons=[...new Set([...reasons,...providerAlarm.reasons])];
     const level=critical?'critical':uniqueReasons.length?'warning':'ok';
@@ -1493,7 +1493,7 @@ export class RepositoryState extends DurableObject<Env> {
       preparation_error:preparationError,monitoring_stale:measured.stale,table_row_estimates:stats?.observation?.table_row_estimates ?? null,tables:{at:stats?.tables_prepared_at ?? null,attempt_at:stats?.tables_attempt_at ?? null,values:stats?.tables ?? null,stale:!stats?.tables_prepared_at || now-stats.tables_prepared_at>2*3600000},
       connections:{...connections,ratio:pressure,connected:storage.connected,failures:storage.connection_failures,stale:!stats?.prepared_at || now-stats.prepared_at>180000},
       provider,
-      compute:provider.configured?provider.compute:{...(stats?.observation?.compute || {cpu_utilization:null,reason:'use_neon_compute_metrics'}),stale:!stats?.prepared_at || now-stats.prepared_at>180000},
+      compute:provider.configured?{...stats?.observation?.compute,...provider.compute,sql_at:stats?.prepared_at ?? null,sql_stale:!stats?.prepared_at || now-stats.prepared_at>180000}:{...(stats?.observation?.compute || {cpu_utilization:null,reason:'use_neon_compute_metrics'}),stale:!stats?.prepared_at || now-stats.prepared_at>180000},
       ingress,requests:requestSummary,repair_summary:this.repairMetrics.summary(now),
       refresh_lag_ms:this.diagnostics.last_repair?now-this.diagnostics.last_repair:null,
       latest_applied_input:this.diagnostics.latest_applied_input ?? null,
@@ -1522,6 +1522,10 @@ export class RepositoryState extends DurableObject<Env> {
       }
     }
     const {capacity_history,...publicObservation}=this.observation || {};
+    if(publicObservation.provider) {
+      publicObservation.provider=ageProvider(publicObservation.provider);
+      if(this.store.backend==='postgres' && publicObservation.provider.configured)publicObservation.compute={...publicObservation.compute,...publicObservation.provider.compute};
+    }
     const stale=!this.observation || Date.now()-this.observation.at>180000 || Boolean(this.observation.monitoring_stale);
     return {...publicObservation,...(publicObservation.storage?{storage:{...publicObservation.storage,observed_at:this.observation.at,stale}}:{}),stale,age_ms:this.observation?Date.now()-this.observation.at:null};
   }

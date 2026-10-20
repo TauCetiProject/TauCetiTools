@@ -98,6 +98,7 @@ export class RepairMetrics {
 export function emitAlarm(env: Env, repository: string, observation: any): { channel: string; emitted: boolean; notified: false; error?: string } {
   try {
     log('github_state_capacity_alarm', { repository, level: observation.level, at: observation.at, capacity: observation.capacity,
+      provider:observation.provider,compute:observation.compute,connections:observation.connections,
       reasons: observation.reasons, operator_action: 'Follow docs/github-state-retention.md', deployment_id: env.CF_VERSION?.id });
     return { channel: 'configured_workers_observability', emitted: true, notified: false };
   } catch { return { channel: 'configured_workers_observability', emitted: false, notified: false, error: 'observability_emit_failed' }; }

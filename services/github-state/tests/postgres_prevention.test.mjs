@@ -46,7 +46,7 @@ pg('prepared PostgreSQL health stays fast with a hung store and keeps diagnostic
 pg('provider and compute alarms join prepared PostgreSQL health without blocking semantic writes',async()=>{
  const f=await postgresFixture();try {
   f.env.ARCHIVE=bucket();
-  const identity={project:'project-123',branch:'br-test',endpoint:'ep-test'},now=Date.now();
+  const identity={project:'project-123',branch:'br-test',endpoint:new URL(f.env.REPOSITORY_DATABASE_URL).hostname.split('.')[0].replace(/-pooler$/,'')},now=Date.now();
   f.env.NEON_MONITORING=JSON.stringify(identity);
   await f.env.ARCHIVE.put('control/neon-provider.json',JSON.stringify({...identity,at:now,capacity:{level:'warning'},compute:{state:'active'}}));
   await f.env.ARCHIVE.put('control/neon-compute.json',JSON.stringify({...identity,at:now,cpu_utilization:.95}));
