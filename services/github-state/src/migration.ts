@@ -1,6 +1,6 @@
 // S2 source protocol. This is deliberately separate from observational recovery
 // exports: only a drained, fenced repository may produce a migration archive.
-import { AdminError, REQUIRED_TABLES, userTables } from './storage';
+import { AdminError, REQUIRED_TABLES } from './storage';
 import { digest } from './protocol';
 
 export const migrationKey = (repo: string) => `control/${repo}/migration.json`;
@@ -44,7 +44,11 @@ export async function readMigration(bucket: R2Bucket, repo: string): Promise<Mig
   return state;
 }
 export function expectedTables(sql: SqlStorage): string[] {
-  const actual = userTables(sql), expected = [...REQUIRED_TABLES].sort();
+  // Use literal prefixes: SQL LIKE's underscore wildcard can accidentally
+  // hide application tables such as scf_extra or sqliteXstate.
+  const actual = sql.exec<any>("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").toArray()
+    .map(row=>row.name as string).filter(name=>!name.startsWith('sqlite_') && !name.startsWith('_cf_'));
+  const expected = [...REQUIRED_TABLES].sort();
   if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new AdminError('migration_table_manifest_mismatch');
   return actual;
 }

@@ -441,3 +441,14 @@ test('workerd SQLite REAL encoding matches the archive round-trip contract',asyn
   assert.deepEqual(rows[4][1],['real','0.0']);assert.deepEqual(rows[5][1],['real','1.0']);
  }finally{await mf.dispose();}
 });
+
+
+test('table discovery only excludes literal engine prefixes',async()=>{
+ const f=await fixture();
+ for(const name of ['scf_extra','sqliteXstate']){
+  f.db.exec('CREATE TABLE '+name+'(id TEXT)');
+  assert.equal((await f.command('freeze')).body.error,'migration_table_manifest_mismatch');
+  assert.equal(f.archive.objects.size,0);
+  f.db.exec('DROP TABLE '+name);
+ }
+});
