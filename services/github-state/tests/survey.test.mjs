@@ -21,7 +21,12 @@ test('compact survey is authenticated, roadmap scoped and does not issue GitHub 
  const mf=await runtime(async()=>{network++;return response([],'core');});
  try {
   const ns=await mf.getDurableObjectNamespace('REPOSITORIES'),stub=ns.get(ns.idFromName('100'));
-  await send(stub,'/configure',{repository:repository.name});
+  // Seed repository identity without scheduling the unrelated bootstrap.
+  // Configure deliberately starts background GitHub work, which can overlap
+  // this assertion on a busy runner even though the survey itself is local.
+  const key='webhooks/survey-fixture.json';
+  await (await mf.getR2Bucket('ARCHIVE')).put(key,'{}');
+  await send(stub,'/event',{key,delivery:'survey-fixture',event:'ping',repository:repository.name,received:Date.now()});
   const before=network;
   const r=await mf.dispatchFetch('https://test/v1/query?repository=org/repo&operation=survey&args='+encodeURIComponent(JSON.stringify({roadmap:'PDE',skip:'',numbers:''})),{headers:{Authorization:'Bearer client'}});
   assert.equal(r.status,200);const payload=await r.json();

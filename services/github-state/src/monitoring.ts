@@ -50,6 +50,25 @@ export class RepairMetrics {
     this.intervals.set(key, row);
   }
   snapshot(now = Date.now()): any[] { return [...this.intervals.values()].filter(r => r.at >= now - 3600000); }
+  summary(now = Date.now()): any {
+    const groups=new Map<string,any>(),latency=new Map<string,{samples:number,buckets:number[]}>();
+    for(const row of this.snapshot(now)) {
+      const key=JSON.stringify([row.event,row.lane,row.operation]);
+      const g=groups.get(key) || {event:row.event,lane:row.lane,operation:row.operation,n:0,value:0,maximum:0};
+      g.n+=row.n;g.value+=row.value;g.maximum=Math.max(g.maximum,row.maximum);groups.set(key,g);
+      if(row.event==='requested_single_latency_ms') {
+        const l=latency.get(row.operation) || {samples:0,buckets:Array(BOUNDS.length+1).fill(0)};
+        l.samples+=row.n;l.buckets=l.buckets.map((v,i)=>v+row.latency[i]);latency.set(row.operation,l);
+      }
+    }
+    const requested_latency=[...latency].map(([operation,l])=>{
+      let seen=0,p95_ms:number|null=null;
+      for(let i=0;i<l.buckets.length;i++) {seen+=l.buckets[i];if(seen>=Math.ceil(l.samples*.95)) {p95_ms=BOUNDS[i] ?? null;break;}}
+      return {operation,samples:l.samples,p95_ms,method:'bucket_upper_bound',scope:'repository_instance_since_restart'};
+    });
+    return {repair_hour:[...groups.values()],requested_latency};
+  }
+
 }
 
 // Uses the already configured Workers observability stream. This is an alarm

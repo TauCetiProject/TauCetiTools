@@ -1,14 +1,14 @@
 {
   "version": 1,
-  "started": "2026-10-20T04:01:55.168Z",
-  "finished": "2026-10-20T04:02:00.952Z",
-  "revision": "ae86606605b62071a08ee74b8a9f62e6ede25311",
-  "workspace_sha256": "a2dd643bee167a929b4081514ed25e4dabb9497ceead614189620edfd5a6cb03",
+  "started": "2026-10-20T04:07:54.929Z",
+  "finished": "2026-10-20T04:08:00.545Z",
+  "revision": "75dbdd115c99bad6c70c7f1456da4da1fdfa03b9",
+  "workspace_sha256": "87b09da9263bb5a052b9e2e0dcf2a42457d731732e954198d181d63c9d79a8b4",
   "environment": "local_fault_fixtures",
   "exit_status": 0,
-  "passed": 59,
+  "passed": 60,
   "failed": 0,
-  "transcript_sha256": "910b9098087af6c0fd5f2d4b088b87e3b0c0a5a0137231755e7f251efcd95aa3",
+  "transcript_sha256": "2a34e1a6f778969095ba6ec52ac90ac483986e5768011630ac1e90844c327e99",
   "scenarios": [
     "full SQLite and cold restart",
     "durable parked ingress and idempotent recovery",
@@ -24,8 +24,8 @@
   },
   "production_fault_injection": false,
   "full_service_suite": {
-    "passed": 99,
+    "passed": 100,
     "failed": 0
   },
-  "transcript_location": "Operator host: /tmp/issue317-tools-drill.json.tap"
+  "transcript_location": "Operator host: /tmp/issue317-tools-drill-v2.json.tap"
 }

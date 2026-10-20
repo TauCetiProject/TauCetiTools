@@ -21,7 +21,7 @@ reuse SQLite's 10 GiB threshold for PostgreSQL.
 | R2 cursors | Ten-minute validity plus the existing one-minute deletion margin |
 | Change journal | Seven days; clients beyond retained revisions receive reset |
 | Delivery receipts | Fourteen days **from application**; automatically pin the entire class while parked/held input is observed, or its inventory is unavailable |
-| Legacy raw repair telemetry | Seven days; new repairs use bounded minute counters and latency buckets instead of SQL samples |
+| Legacy raw repair telemetry | Seven days; new repairs and query counts use bounded counters and latency buckets instead of SQL samples |
 | Installation accounting | Seven days; independent bounded maintenance also runs while repository ingestion/auditing is paused |
 | Aggregated diagnostic intervals | Seven days in R2; no payloads, credentials or event bodies |
 | Raw webhooks | Fourteen days; a parked body is a separate digest-verified, non-expiring copy |

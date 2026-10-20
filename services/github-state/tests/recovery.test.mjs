@@ -441,6 +441,8 @@ test('repair telemetry never writes authoritative SQL and its dimensions stay bo
  for(let i=0;i<100000;i++)state.metric('page',{operation:'pr',repository:'org/repo'},'active');
  state.metric('requested_single_latency_ms',{operation:'pr',repository:'org/repo'},'requested',25);
  assert.equal(scalar(db,'SELECT COUNT(*) FROM repair_metrics'),0);
+ assert.equal(state.repairMetrics.summary().repair_hour.find(r=>r.event==='page').value,100000);
+ assert.equal(state.repairMetrics.summary().requested_latency[0].p95_ms,25);
  await state.storageMaintenance();
  const observation=await state.preparedObservation();
  const pages=observation.repair_intervals.filter(r=>r.event==='page');
@@ -559,4 +561,15 @@ test('R2 prefix expiry preserves pinned inputs and retries after deletion/checkp
  archive.failures.push((op,key)=>op==='delete' && key==='staging/expired');
  await assert.rejects(retention.retirePrefix(archive,'staging_pages',now));
  assert.equal((await retention.retirePrefix(archive,'staging_pages',now)).deleted,1,'failed class does not disable future attempts');
+});
+
+
+test('malformed retention progress restarts safely without dropping persisted pins',async()=>{
+ const {state,archive,db}=repositoryFixture();
+ await archive.put('control/100/retention-policy.json',JSON.stringify({mode:'enforce',disabled:[],pinned:['expired_cursors']}));
+ await archive.put('control/100/retention-checkpoint.json',JSON.stringify({version:1,classes:{expired_cursors:{after:'bad'}},ci_after:-10}));
+ db.prepare('INSERT INTO cursors VALUES(?,?,?)').run('pinned',Date.now()-1,'{}');
+ await state.storageMaintenance();
+ assert.equal(scalar(db,'SELECT COUNT(*) FROM cursors'),1);
+ assert.equal((await state.preparedObservation()).retention.policy_loaded,true);
 });
