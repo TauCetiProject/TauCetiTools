@@ -220,13 +220,13 @@ def write_project(project: Project, checkout: Path, role: str = "content") -> li
         target = checkout / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         text = render(source.read_text(), project)
-        if relative.as_posix() == ".github/workflows/ci.yml" and not project.legacy:
+        if relative.as_posix() in (".github/workflows/ci.yml", ".github/workflows/lint-full.yml") and not project.legacy:
             # Downstreams build and audit their library. The shared harness's own
             # regression fixtures belong to its source repository, not each clone.
             import re
             text = re.sub(r"(?ms)^  readiness-tests:.*?(?=^  build:)", "", text)
             text = re.sub(
-                r"(?ms)^      - name: [^\n]*[Tt]ests[^\n]*\n.*?(?=^      - |^  [a-z]|\Z)", "", text)
+                r"(?ms)^      - name: (?:Infrastructure policy unit tests|Lake archive reuse integration tests|Header audit equivalence tests)\n.*?(?=^      - |^  [a-z]|\Z)", "", text)
             text = text.replace("needs: [build, duplicate-audit-tests]", "needs: [build]")
             text = text.replace(" && needs['duplicate-audit-tests'].result == 'success'", "")
         if relative.name == "claims-access.yml" and project.repos.get("claims"):
