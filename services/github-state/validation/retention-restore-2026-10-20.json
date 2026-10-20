@@ -1,6 +1,10 @@
 {
-  "version": 1,
-  "started": "2026-10-20T08:01:09.518Z",
+  "version": 2,
+  "implementation_revision": "98fd5f62be72710034fe1f22ec1371d7a6e7c5d1",
+  "workspace_sha256": "aaae0f4184dc918aad205351ed21595a48e74d56727da17f282bbd0820dc1809",
+  "source_dirty": false,
+  "script_sha256": "aee00b54f4989c8cd02b293c79f7d58dabeea837a4e7b24b9f1ee3cdea4c1273",
+  "started": "2026-10-20T08:29:17.512Z",
   "project": "sparkling-sunset-73872362",
   "test_branch": "br-fancy-unit-b5kzg3kp",
   "production_data": false,
@@ -8,14 +12,57 @@
   "github_calls": 0,
   "verified": true,
   "temporary_branch_deleted": true,
-  "restore_branch": "br-hidden-band-b5gkvapk",
-  "restore_point": "2026-10-20T08:01:14.211992Z",
+  "restore_branch": "br-super-forest-b55uaafj",
+  "restore_point": "2026-10-20T08:29:21.970699Z",
+  "restart_operations": [
+    "df1dc6ac-3d06-4a61-8f38-bdc954bea78b",
+    "b49e9b74-2a34-453f-a63e-7e03aa1361ad",
+    "045e4765-a954-4108-9f58-f65e2f2e02c6",
+    "116efc7e-e430-423c-bbdb-0f67231bc7c1",
+    "477c903d-95a4-4ce2-a464-8fc1703fb120",
+    "fa84cc48-b3ce-4d48-aee7-ab4b100317f5"
+  ],
+  "restart_operation_states": [
+    {
+      "id": "df1dc6ac-3d06-4a61-8f38-bdc954bea78b",
+      "status": "finished",
+      "action": "start_compute"
+    },
+    {
+      "id": "b49e9b74-2a34-453f-a63e-7e03aa1361ad",
+      "status": "finished",
+      "action": "prewarm_replica"
+    },
+    {
+      "id": "045e4765-a954-4108-9f58-f65e2f2e02c6",
+      "status": "finished",
+      "action": "suspend_compute"
+    },
+    {
+      "id": "116efc7e-e430-423c-bbdb-0f67231bc7c1",
+      "status": "finished",
+      "action": "promote_replica"
+    },
+    {
+      "id": "477c903d-95a4-4ce2-a464-8fc1703fb120",
+      "status": "skipped",
+      "action": "start_compute"
+    },
+    {
+      "id": "fa84cc48-b3ce-4d48-aee7-ab4b100317f5",
+      "status": "finished",
+      "action": "suspend_compute"
+    }
+  ],
+  "postmaster_started_before": "2026-10-20 08:29:30.40312+00",
+  "postmaster_started_after": "2026-10-20 08:29:34.85283+00",
+  "restart_operations_finished": true,
   "temporary_endpoint_restarted": true,
   "restart_recovered": true,
-  "temporary_endpoint": "ep-morning-bread-b5ii02yi",
+  "temporary_endpoint": "ep-restless-butterfly-b5yxzkk2",
   "tables": 23,
-  "manifest_sha256": "133fcb23ca3754a7e4edc164302ab446017930a7560bc5d733c0fa4b704cc286",
+  "manifest_sha256": "24608fbc461881ab3cde658ab238bbef389e8c84d89282f62cf9d175dc749e0e",
   "exact_id_preserved": true,
   "before_restored_after_source_mutation": true,
-  "finished": "2026-10-20T08:01:27.216Z"
+  "finished": "2026-10-20T08:29:38.227Z"
 }

@@ -2,244 +2,244 @@ TAP version 13
 # Subtest: reporting missing/never-configured resources creates no demand, jobs, alarms or upstream calls
 ok 1 - reporting missing/never-configured resources creates no demand, jobs, alarms or upstream calls
   ---
-  duration_ms: 1895.185033
+  duration_ms: 1571.301225
   type: 'test'
   ...
 # Subtest: stale cached closed/merged PRs remain readable without reactivating polling
 ok 2 - stale cached closed/merged PRs remain readable without reactivating polling
   ---
-  duration_ms: 1249.830847
+  duration_ms: 1170.440077
   type: 'test'
   ...
 # {"event":"repository_storage_failure","operation":"request:/activity","reason":"internal","degraded":false,"message":"resource unavailable"}
-# {"event":"repository_request_failed","request_id":"582c68f7-7aeb-4dfb-afc6-0ed1aac7bf72","path":"/activity","reason":"internal"}
+# {"event":"repository_request_failed","request_id":"faaa0ec7-9b35-446d-90ca-7eb092d06677","path":"/activity","reason":"internal"}
 # Subtest: unavailable stored resource fails without falling back to upstream repair
 ok 3 - unavailable stored resource fails without falling back to upstream repair
   ---
-  duration_ms: 1058.248204
+  duration_ms: 911.781194
   type: 'test'
   ...
 # Subtest: LOC uses complete cached files at the exact PR head without scheduling work
 ok 4 - LOC uses complete cached files at the exact PR head without scheduling work
   ---
-  duration_ms: 1949.857556
+  duration_ms: 2044.740137
   type: 'test'
   ...
 # Subtest: background Bors receipt import is shared and rate limited; activity reads never fetch
 ok 5 - background Bors receipt import is shared and rate limited; activity reads never fetch
   ---
-  duration_ms: 2881.475087
+  duration_ms: 2685.372488
   type: 'test'
   ...
 # Subtest: PostgreSQL capacity separates growable bytes, unknown quotas, forecasts and staleness
 ok 6 - PostgreSQL capacity separates growable bytes, unknown quotas, forecasts and staleness
   ---
-  duration_ms: 1.13352
+  duration_ms: 0.684987
   type: 'test'
   ...
 # Subtest: scheduled queue metrics retain last good values as stale after failed delivery without consuming messages
 ok 7 - scheduled queue metrics retain last good values as stale after failed delivery without consuming messages
   ---
-  duration_ms: 4.429375
+  duration_ms: 1.632124
   type: 'test'
   ...
 # Subtest: PostgreSQL configuration errors never echo connection credentials
 ok 8 - PostgreSQL configuration errors never echo connection credentials
   ---
-  duration_ms: 7.885977
+  duration_ms: 2.303121
   type: 'test'
   ...
 # Subtest: PostgreSQL dialect preserves literal question marks, parameter indexes and exact numeric ordering
 ok 9 - PostgreSQL dialect preserves literal question marks, parameter indexes and exact numeric ordering
   ---
-  duration_ms: 0.940083
+  duration_ms: 0.393795
   type: 'test'
   ...
 # Subtest: PostgreSQL preserves text IDs, exact timestamps, numeric ordering and change revisions
 ok 10 - PostgreSQL preserves text IDs, exact timestamps, numeric ordering and change revisions
   ---
-  duration_ms: 5278.521018
+  duration_ms: 4723.400629
   type: 'test'
   ...
 # Subtest: interrupted event rolls back resources, memberships, repairs, revisions and receipt; replay is idempotent
 ok 11 - interrupted event rolls back resources, memberships, repairs, revisions and receipt; replay is idempotent
   ---
-  duration_ms: 2667.324625
+  duration_ms: 2576.218371
   type: 'test'
   ...
 # Subtest: reordered events and tombstones retain the newest input even for identical source timestamps
 ok 12 - reordered events and tombstones retain the newest input even for identical source timestamps
   ---
-  duration_ms: 3576.413586
+  duration_ms: 3127.427392
   type: 'test'
   ...
 # Subtest: webhook commits during a slow upstream read; old response preserves the event and its repair generation
 ok 13 - webhook commits during a slow upstream read; old response preserves the event and its repair generation
   ---
-  duration_ms: 3382.856428
+  duration_ms: 3073.403708
   type: 'test'
   ...
 # Subtest: collection publication failure cannot expose a partial complete history and can be replayed
 ok 14 - collection publication failure cannot expose a partial complete history and can be replayed
   ---
-  duration_ms: 3553.120185
+  duration_ms: 3404.403381
   type: 'test'
   ...
 # Subtest: HTTP outage returns sanitized health, reconnects with the same store, and never returns invented coverage
 ok 15 - HTTP outage returns sanitized health, reconnects with the same store, and never returns invented coverage
   ---
-  duration_ms: 1823.30421
+  duration_ms: 1799.548676
   type: 'test'
   ...
 # Subtest: application role cannot migrate, change ownership/capacity or access production; stale generations cannot write
 ok 16 - application role cannot migrate, change ownership/capacity or access production; stale generations cannot write
   ---
-  duration_ms: 1463.200755
+  duration_ms: 1302.226165
   type: 'test'
   ...
 # Subtest: empty provisioned PostgreSQL does not bootstrap on deployment, tick or query
 ok 17 - empty provisioned PostgreSQL does not bootstrap on deployment, tick or query
   ---
-  duration_ms: 1500.880492
+  duration_ms: 1405.514144
   type: 'test'
   ...
 # Subtest: failed resource blob upload commits no reference or receipt and the event remains replayable
 ok 18 - failed resource blob upload commits no reference or receipt and the event remains replayable
   ---
-  duration_ms: 1846.207476
+  duration_ms: 1781.131855
   type: 'test'
   ...
 # Subtest: legacy SQL cursors, complete versus observed coverage, timestamps and conditional reads keep the wire contract
 ok 19 - legacy SQL cursors, complete versus observed coverage, timestamps and conditional reads keep the wire contract
   ---
-  duration_ms: 2687.831727
+  duration_ms: 2556.394723
   type: 'test'
   ...
 # Subtest: stored survey hydration batches large histories without GitHub calls
 ok 20 - stored survey hydration batches large histories without GitHub calls
   ---
-  duration_ms: 2388.772268
+  duration_ms: 2207.319982
   type: 'test'
   ...
 # Subtest: long file paths retain exact identity, update and membership uniqueness beyond B-tree tuple limits
 ok 21 - long file paths retain exact identity, update and membership uniqueness beyond B-tree tuple limits
   ---
-  duration_ms: 2352.206262
+  duration_ms: 2128.677291
   type: 'test'
   ...
 # Subtest: writers wait locally beyond the database lock timeout, without losing another event
 ok 22 - writers wait locally beyond the database lock timeout, without losing another event
   ---
-  duration_ms: 6852.506266
+  duration_ms: 6627.322973
   type: 'test'
   ...
-# {"publication_rows":1200,"sql_statements":234,"duration_ms":5308.180586000002}
+# {"publication_rows":1200,"sql_statements":234,"duration_ms":4640.073775000004}
 # Subtest: large publication writes are set based and do not open a transaction per row
 ok 23 - large publication writes are set based and do not open a transaction per row
   ---
-  duration_ms: 12462.635914
+  duration_ms: 10006.269507
   type: 'test'
   ...
 # Subtest: the first large event can prepare its blob before repository metadata exists
 ok 24 - the first large event can prepare its blob before repository metadata exists
   ---
-  duration_ms: 2027.666413
+  duration_ms: 1802.323151
   type: 'test'
   ...
 # Subtest: PostgreSQL retention honors operator pins and parked-input receipt protection
 ok 25 - PostgreSQL retention honors operator pins and parked-input receipt protection
   ---
-  duration_ms: 1822.596439
+  duration_ms: 1502.094339
   type: 'test'
   ...
 # Subtest: an aborted PostgreSQL transaction cannot report a successful commit after a swallowed SQL error
 ok 26 - an aborted PostgreSQL transaction cannot report a successful commit after a swallowed SQL error
   ---
-  duration_ms: 1414.278031
+  duration_ms: 1139.102325
   type: 'test'
   ...
 # Subtest: explicit schema initialization upgrades pre-release key constraints and collation
 ok 27 - explicit schema initialization upgrades pre-release key constraints and collation
   ---
-  duration_ms: 1591.280165
+  duration_ms: 1234.993233
   type: 'test'
   ...
 # Subtest: dependent batch statements retain input order within a transaction
 ok 28 - dependent batch statements retain input order within a transaction
   ---
-  duration_ms: 1329.393309
+  duration_ms: 1135.819104
   type: 'test'
   ...
 # Subtest: late staging uploads from an old lease cannot replace a newer checkpoint
 ok 29 - late staging uploads from an old lease cannot replace a newer checkpoint
   ---
-  duration_ms: 3928.061614
+  duration_ms: 3727.09128
   type: 'test'
   ...
 # Subtest: history reads batch small rows while respecting the transferred-payload byte bound
 ok 30 - history reads batch small rows while respecting the transferred-payload byte bound
   ---
-  duration_ms: 2993.965876
+  duration_ms: 2218.555026
   type: 'test'
   ...
 # Subtest: a disconnected interactive transaction rolls back and reconnects on the next operation
 ok 31 - a disconnected interactive transaction rolls back and reconnects on the next operation
   ---
-  duration_ms: 1515.066536
+  duration_ms: 1437.423605
   type: 'test'
   ...
 # Subtest: a retention pin is acknowledged only after an in-flight sweep completes
 ok 32 - a retention pin is acknowledged only after an in-flight sweep completes
   ---
-  duration_ms: 1393.866059
+  duration_ms: 994.776727
   type: 'test'
   ...
 # Subtest: a missing close handshake cannot hold the PostgreSQL writer lane
 ok 33 - a missing close handshake cannot hold the PostgreSQL writer lane
   ---
-  duration_ms: 3233.566513
+  duration_ms: 3008.987651
   type: 'test'
   ...
 # Subtest: PostgreSQL mutation and scheduling never write the obsolete SQLite alarm file
 ok 34 - PostgreSQL mutation and scheduling never write the obsolete SQLite alarm file
   ---
-  duration_ms: 1696.997827
+  duration_ms: 1474.620651
   type: 'test'
   ...
 # Subtest: byte-cut history scans reduce subsequent SQL candidate work for large rows
 ok 35 - byte-cut history scans reduce subsequent SQL candidate work for large rows
   ---
-  duration_ms: 2613.934105
+  duration_ms: 2079.470878
   type: 'test'
   ...
 # Subtest: minute PostgreSQL observations measure without quota-write grants and hourly sizes stay throttled
 ok 36 - minute PostgreSQL observations measure without quota-write grants and hourly sizes stay throttled
   ---
-  duration_ms: 1796.952641
+  duration_ms: 1731.835582
   type: 'test'
   ...
 # {"event":"repository_storage_failure","operation":"observation_persistence","reason":"internal","degraded":false,"message":"R2 put failed"}
 # Subtest: prepared PostgreSQL health stays fast with a hung store and keeps diagnostics after persistence failure
 ok 37 - prepared PostgreSQL health stays fast with a hung store and keeps diagnostics after persistence failure
   ---
-  duration_ms: 1919.194982
+  duration_ms: 1699.022282
   type: 'test'
   ...
 # {"event":"repository_storage_failure","operation":"request:/query","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable (08006)"}
 # {"event":"repository_request_failed","request_id":"cold-outage","path":"/query","reason":"database_unavailable"}
 # {"event":"repository_storage_failure","operation":"request:/event","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable (08006)"}
-# {"event":"repository_request_failed","request_id":"cd35fbfd-8be5-44ea-996c-448d5978d72b","path":"/event","reason":"database_unavailable"}
+# {"event":"repository_request_failed","request_id":"c642b70b-bef4-4fe1-891a-62e39bb96b7c","path":"/event","reason":"database_unavailable"}
 # {"event":"event_parked","delivery":"recover","repository":"org/repo","reason":"database_unavailable"}
 # {"event":"repository_storage_failure","operation":"request:/event","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable (08006)"}
-# {"event":"repository_request_failed","request_id":"6976906e-ec3d-493b-b0de-10a8e50e8d28","path":"/event","reason":"database_unavailable"}
+# {"event":"repository_request_failed","request_id":"562f5b10-f7be-44ff-a537-1235bed45c18","path":"/event","reason":"database_unavailable"}
 # {"event":"repository_storage_failure","operation":"request:/event","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable (08006)"}
-# {"event":"repository_request_failed","request_id":"a48aea3b-3ce7-4983-9b63-45bd99fe069f","path":"/event","reason":"database_unavailable"}
+# {"event":"repository_request_failed","request_id":"71a6d96c-0837-479b-b491-66cb628c48a6","path":"/event","reason":"database_unavailable"}
 # {"event":"repository_storage_failure","operation":"request:/event","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable (08006)"}
-# {"event":"repository_request_failed","request_id":"992d27a1-fd37-4620-b111-71d6d1098f1a","path":"/event","reason":"database_unavailable"}
+# {"event":"repository_request_failed","request_id":"9002466a-0080-4c87-8469-e8699bba712c","path":"/event","reason":"database_unavailable"}
 # {"event":"repository_storage_failure","operation":"request:/event","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable (08006)"}
-# {"event":"repository_request_failed","request_id":"830acf3f-cf78-4d21-9685-b0cb5956e74a","path":"/event","reason":"database_unavailable"}
+# {"event":"repository_request_failed","request_id":"7ebd896b-3893-485e-b404-0281bc5868f3","path":"/event","reason":"database_unavailable"}
 # {"event":"repository_storage_failure","operation":"request:/event","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable (08006)"}
-# {"event":"repository_request_failed","request_id":"1fc6ab28-31bb-4ed4-8dd8-1ad4a3900582","path":"/event","reason":"database_unavailable"}
+# {"event":"repository_request_failed","request_id":"3d30b84f-6e0f-4d9f-b33f-39a648613b6f","path":"/event","reason":"database_unavailable"}
 # {"event":"repository_storage_failure","operation":"expire:expired_legacy_cursors","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable (08006)"}
 # {"event":"repository_storage_failure","operation":"expire:expired_repair_metrics","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable (08006)"}
 # {"event":"repository_storage_failure","operation":"expire:expired_changes","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable (08006)"}
@@ -248,30 +248,38 @@ ok 37 - prepared PostgreSQL health stays fast with a hung store and keeps diagno
 # {"event":"repository_storage_failure","operation":"receipt_archive","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable (08006)"}
 # {"event":"repository_storage_failure","operation":"health_prepare","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable (08006)"}
 # {"event":"repository_storage_failure","operation":"postgres_monitoring_prepare","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable (08006)"}
-# {"event":"github_state_capacity_alarm","repository":"100","level":"critical","at":1792486848084,"capacity":{"backend":"postgres","growable":true,"allowance":null,"allowance_kind":"operator_verified_effective_project_account_limit","usage_scope":"current_database_lower_bound","project_usage_bytes":null,"stale":true,"capacity_unknown":true},"reasons":["input_application_unavailable"],"operator_action":"Follow docs/github-state-retention.md"}
-# {"event":"github_state_capacity_alarm","repository":"100","level":"critical","at":1792486848084,"capacity":{"backend":"postgres","growable":true,"allowance":null,"allowance_kind":"operator_verified_effective_project_account_limit","usage_scope":"current_database_lower_bound","project_usage_bytes":null,"stale":true,"capacity_unknown":true},"reasons":["input_application_unavailable","input_application_unavailable"],"operator_action":"Follow docs/github-state-retention.md"}
+# {"event":"github_state_capacity_alarm","repository":"100","level":"warning","at":1792488472970,"capacity":{"backend":"postgres","growable":true,"allowance":null,"allowance_kind":"operator_verified_effective_project_account_limit","usage_scope":"current_database_lower_bound","project_usage_bytes":null,"stale":true,"capacity_unknown":true},"reasons":["monitoring_unavailable"],"operator_action":"Follow docs/github-state-retention.md"}
+# {"event":"repository_storage_failure","operation":"expire:expired_repair_metrics","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable (08006)"}
+# {"event":"repository_storage_failure","operation":"expire:expired_changes","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable (08006)"}
+# {"event":"repository_storage_failure","operation":"expire:expired_retired_objects","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable (08006)"}
+# {"event":"repository_storage_failure","operation":"expire:expired_demand","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable (08006)"}
+# {"event":"repository_storage_failure","operation":"expire:expired_legacy_cursors","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable (08006)"}
+# {"event":"repository_storage_failure","operation":"receipt_archive","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable (08006)"}
+# {"event":"repository_storage_failure","operation":"health_prepare","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable (08006)"}
+# {"event":"repository_storage_failure","operation":"postgres_monitoring_prepare","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable (08006)"}
+# {"event":"github_state_capacity_alarm","repository":"100","level":"critical","at":1792488542970,"capacity":{"backend":"postgres","growable":true,"allowance":null,"allowance_kind":"operator_verified_effective_project_account_limit","usage_scope":"current_database_lower_bound","project_usage_bytes":null,"stale":true,"capacity_unknown":true},"reasons":["monitoring_unavailable","input_application_unavailable"],"operator_action":"Follow docs/github-state-retention.md"}
 # Subtest: PostgreSQL outage and coordinator restart park acknowledged input then scheduled held replay recovers without GitHub
 ok 38 - PostgreSQL outage and coordinator restart park acknowledged input then scheduled held replay recovers without GitHub
   ---
-  duration_ms: 4333.032066
+  duration_ms: 3793.301537
   type: 'test'
   ...
 # Subtest: PostgreSQL expiry bounds each pass and plateaus across retention windows without deleting referenced resources
 ok 39 - PostgreSQL expiry bounds each pass and plateaus across retention windows without deleting referenced resources
   ---
-  duration_ms: 3364.086751
+  duration_ms: 3834.922283
   type: 'test'
   ...
 # Subtest: verified migration archive restores every repository table, exact IDs and referenced spills; corrupt restore retries safely
 ok 40 - verified migration archive restores every repository table, exact IDs and referenced spills; corrupt restore retries safely
   ---
-  duration_ms: 4060.119164
+  duration_ms: 4697.328498
   type: 'test'
   ...
 # Subtest: slow PostgreSQL transactions and terminated connections recover through the same store without partial writes
 ok 41 - slow PostgreSQL transactions and terminated connections recover through the same store without partial writes
   ---
-  duration_ms: 1715.617614
+  duration_ms: 1421.751671
   type: 'test'
   ...
 # {"event":"repository_storage_failure","operation":"request:/event","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable (08006)"}
@@ -279,275 +287,315 @@ ok 41 - slow PostgreSQL transactions and terminated connections recover through 
 # Subtest: a lost commit response replays idempotently and imported legacy cursors expire with a bounded checkpoint
 ok 42 - a lost commit response replays idempotently and imported legacy cursors expire with a bounded checkpoint
   ---
-  duration_ms: 1879.832094
+  duration_ms: 1867.842704
   type: 'test'
   ...
 # Subtest: PostgreSQL storage and connection alarms retain prepared health when alarm delivery fails
 ok 43 - PostgreSQL storage and connection alarms retain prepared health when alarm delivery fails
   ---
-  duration_ms: 1503.287581
+  duration_ms: 1233.450994
+  type: 'test'
+  ...
+# {"event":"repository_storage_failure","operation":"postgres_monitoring_prepare","reason":"backend_fenced","degraded":false,"message":"Repository backend generation fenced"}
+# {"event":"github_state_capacity_alarm","repository":"100","level":"critical","at":1792484989301,"capacity":{"backend":"postgres","growable":true,"allowance":null,"allowance_kind":"operator_verified_effective_project_account_limit","usage_scope":"current_database_lower_bound","project_usage_bytes":null,"stale":true,"capacity_unknown":true},"reasons":["backend_generation_fenced","monitoring_unavailable"],"operator_action":"Follow docs/github-state-retention.md"}
+# {"event":"github_state_capacity_alarm","repository":"100","level":"critical","at":1792484989414,"capacity":{"backend":"postgres","growable":true,"allowance":null,"allowance_kind":"operator_verified_effective_project_account_limit","usage_scope":"current_database_lower_bound","project_usage_bytes":null,"stale":true,"capacity_unknown":true},"reasons":["backend_generation_fenced","monitoring_unavailable"],"operator_action":"Follow docs/github-state-retention.md"}
+# {"event":"github_state_capacity_alarm","repository":"100","level":"warning","at":1792484989534,"capacity":{"backend":"postgres","growable":true,"allowance":null,"allowance_kind":"operator_verified_effective_project_account_limit","usage_scope":"current_database_lower_bound","project_usage_bytes":null,"stale":true,"capacity_unknown":true},"reasons":["monitoring_unavailable"],"operator_action":"Follow docs/github-state-retention.md"}
+# Subtest: missing control and missing monitoring function alarm precisely without blocking prepared health
+ok 44 - missing control and missing monitoring function alarm precisely without blocking prepared health
+  ---
+  duration_ms: 1526.71029
+  type: 'test'
+  ...
+# Subtest: SQL sampling uses one hourly token across clocks, retries known busy work, and ignores temporary catalog shadows
+ok 45 - SQL sampling uses one hourly token across clocks, retries known busy work, and ignores temporary catalog shadows
+  ---
+  duration_ms: 1782.591318
+  type: 'test'
+  ...
+# {"event":"repository_storage_failure","operation":"postgres_monitoring_prepare","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable"}
+# Subtest: monitoring has a server timeout, a failed expensive pass is not retried blindly, and later attempts recover
+ok 46 - monitoring has a server timeout, a failed expensive pass is not retried blindly, and later attempts recover
+  ---
+  duration_ms: 6764.644442
+  type: 'test'
+  ...
+# Subtest: restricted connection observations include open application sessions
+ok 47 - restricted connection observations include open application sessions
+  ---
+  duration_ms: 1613.329948
+  type: 'test'
+  ...
+# {"event":"repository_storage_failure","operation":"request:/event","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable"}
+# {"event":"repository_request_failed","request_id":"prevention-drill","path":"/event","reason":"database_unavailable"}
+# {"event":"repository_storage_failure","operation":"request:/event","reason":"database_unavailable","degraded":false,"message":"Repository database unavailable"}
+# {"event":"repository_request_failed","request_id":"prevention-drill","path":"/event","reason":"database_unavailable"}
+# {"event":"github_state_capacity_alarm","repository":"100","level":"critical","at":1792485070622,"capacity":{"at":1792485070622,"bytes":1,"allowance":null,"backend":"postgres","allowance_kind":"operator_verified_effective_project_account_limit","growable":true,"reusable_bytes":null,"growth_bytes_per_second":null,"projected_exhaustion_at":null,"baseline_at":null,"forecast_level":"ok","forecast_breaches":0,"forecast_confirmed":false,"level":"ok","stale":false,"capacity_unknown":true,"reusable_space_reason":"dead_tuple_estimates_are_not_measured_free_space","usage_scope":"current_database_lower_bound","allowance_scope":"effective_project_account","project_usage_bytes":null,"restore_verified_at":null},"reasons":["input_application_unavailable"],"operator_action":"Follow docs/github-state-retention.md"}
+# Subtest: a single transient parkable event failure does not become a persistent critical alarm
+ok 48 - a single transient parkable event failure does not become a persistent critical alarm
+  ---
+  duration_ms: 1859.048655
   type: 'test'
   ...
 # Subtest: compact roadmap snapshot updates on comment edit/delete without reading full histories
-ok 44 - compact roadmap snapshot updates on comment edit/delete without reading full histories
+ok 49 - compact roadmap snapshot updates on comment edit/delete without reading full histories
   ---
-  duration_ms: 7874.573879
+  duration_ms: 6737.781503
   type: 'test'
   ...
 # Subtest: large inventory filters before statuses and serves compact facts in one page
-ok 45 - large inventory filters before statuses and serves compact facts in one page
+ok 50 - large inventory filters before statuses and serves compact facts in one page
   ---
-  duration_ms: 31070.182513
+  duration_ms: 28654.426372
   type: 'test'
   ...
 # Subtest: migration is outside requests and one missing resource cannot block other PRs or maintenance
-ok 46 - migration is outside requests and one missing resource cannot block other PRs or maintenance
+ok 51 - migration is outside requests and one missing resource cannot block other PRs or maintenance
   ---
-  duration_ms: 5253.267834
+  duration_ms: 4650.489558
   type: 'test'
   ...
 # Subtest: comment bursts coalesce projection rebuilds and malformed reply IDs do not block ingestion
-ok 47 - comment bursts coalesce projection rebuilds and malformed reply IDs do not block ingestion
+ok 52 - comment bursts coalesce projection rebuilds and malformed reply IDs do not block ingestion
   ---
-  duration_ms: 20172.41786
+  duration_ms: 18699.115807
   type: 'test'
   ...
 # Subtest: partial PR payloads retain mergeability only for the same head and base
-ok 48 - partial PR payloads retain mergeability only for the same head and base
+ok 53 - partial PR payloads retain mergeability only for the same head and base
   ---
-  duration_ms: 1905.399313
+  duration_ms: 1680.227463
   type: 'test'
   ...
 # Subtest: REST offset inventory gaps retain previously observed open PRs
-ok 49 - REST offset inventory gaps retain previously observed open PRs
+ok 54 - REST offset inventory gaps retain previously observed open PRs
   ---
-  duration_ms: 4496.369801
+  duration_ms: 3774.667608
   type: 'test'
   ...
 # Subtest: a newer close cannot be re-added by an older inventory response
-ok 50 - a newer close cannot be re-added by an older inventory response
+ok 55 - a newer close cannot be re-added by an older inventory response
   ---
-  duration_ms: 3189.299373
+  duration_ms: 2957.75228
   type: 'test'
   ...
 # Subtest: expired staging restarts from page one instead of retrying a missing page forever
-ok 51 - expired staging restarts from page one instead of retrying a missing page forever
+ok 56 - expired staging restarts from page one instead of retrying a missing page forever
   ---
-  duration_ms: 2357.707216
+  duration_ms: 2095.953885
   type: 'test'
   ...
 # Subtest: one bad batched history does not turn a completed sibling into a retry
-ok 52 - one bad batched history does not turn a completed sibling into a retry
+ok 57 - one bad batched history does not turn a completed sibling into a retry
   ---
-  duration_ms: 4122.059159
+  duration_ms: 3666.050952
   type: 'test'
   ...
 # Subtest: persistent parser errors keep their pagination and back off without rapid full scans
-ok 53 - persistent parser errors keep their pagination and back off without rapid full scans
+ok 58 - persistent parser errors keep their pagination and back off without rapid full scans
   ---
-  duration_ms: 3013.358735
+  duration_ms: 2774.594852
   type: 'test'
   ...
 # Subtest: active R2 references are retained
-ok 54 - active R2 references are retained
+ok 59 - active R2 references are retained
   ---
-  duration_ms: 1020.930758
+  duration_ms: 803.347693
   type: 'test'
   ...
 # Subtest: large old repair backlog cannot starve fresh deltas and still makes progress
-ok 55 - large old repair backlog cannot starve fresh deltas and still makes progress
+ok 60 - large old repair backlog cannot starve fresh deltas and still makes progress
   ---
-  duration_ms: 11971.00687
+  duration_ms: 11164.598131
   type: 'test'
   ...
 # Subtest: demand advances quiet reconciliation without revoking actual quota deferrals
-ok 56 - demand advances quiet reconciliation without revoking actual quota deferrals
+ok 61 - demand advances quiet reconciliation without revoking actual quota deferrals
   ---
-  duration_ms: 1919.89839
+  duration_ms: 1755.764679
   type: 'test'
   ...
 # Subtest: closed PR history and CI polling retire, then client demand reactivates them
-ok 57 - closed PR history and CI polling retire, then client demand reactivates them
+ok 62 - closed PR history and CI polling retire, then client demand reactivates them
   ---
-  duration_ms: 2651.123772
+  duration_ms: 2339.242742
   type: 'test'
   ...
 # Subtest: a webhook arriving during a staged read keeps its repair pending
-ok 58 - a webhook arriving during a staged read keeps its repair pending
+ok 63 - a webhook arriving during a staged read keeps its repair pending
   ---
-  duration_ms: 2731.009314
+  duration_ms: 2516.888209
   type: 'test'
   ...
 # Subtest: all four lanes get their configured share and leased work is excluded
-ok 59 - all four lanes get their configured share and leased work is excluded
+ok 64 - all four lanes get their configured share and leased work is excluded
   ---
-  duration_ms: 6985.223643
+  duration_ms: 6222.545996
   type: 'test'
   ...
 # Subtest: late R2 encoding cannot overwrite a webhook and replaced leases cannot publish coverage
-ok 60 - late R2 encoding cannot overwrite a webhook and replaced leases cannot publish coverage
+ok 65 - late R2 encoding cannot overwrite a webhook and replaced leases cannot publish coverage
   ---
-  duration_ms: 2777.050668
+  duration_ms: 2585.725216
   type: 'test'
   ...
 # Subtest: head-change webhooks refresh immutable file lists without resetting a quota cooldown
-ok 61 - head-change webhooks refresh immutable file lists without resetting a quota cooldown
+ok 66 - head-change webhooks refresh immutable file lists without resetting a quota cooldown
   ---
-  duration_ms: 2898.067586
+  duration_ms: 2548.022484
   type: 'test'
   ...
 # Subtest: REST exhaustion repairs a flat review history through its existing GraphQL thread dependency
-ok 62 - REST exhaustion repairs a flat review history through its existing GraphQL thread dependency
+ok 67 - REST exhaustion repairs a flat review history through its existing GraphQL thread dependency
   ---
-  duration_ms: 4995.257416
+  duration_ms: 4399.041175
   type: 'test'
   ...
 # Subtest: a webhook during a stored read cannot cache old rows under the newer revision
-ok 63 - a webhook during a stored read cannot cache old rows under the newer revision
+ok 68 - a webhook during a stored read cannot cache old rows under the newer revision
   ---
-  duration_ms: 2962.223547
+  duration_ms: 2880.822008
   type: 'test'
   ...
 # Subtest: a stale selection cannot claim or retire a newer repair generation
-ok 64 - a stale selection cannot claim or retire a newer repair generation
+ok 69 - a stale selection cannot claim or retire a newer repair generation
   ---
-  duration_ms: 3410.867519
+  duration_ms: 3170.549515
   type: 'test'
   ...
 # Subtest: delta surveys keep fetching until the stored watermark and publish both pages
-ok 65 - delta surveys keep fetching until the stored watermark and publish both pages
+ok 70 - delta surveys keep fetching until the stored watermark and publish both pages
   ---
-  duration_ms: 3421.813064
+  duration_ms: 3209.269342
   type: 'test'
   ...
 # Subtest: webhook freshness evidence stays on its resource without permanent per-input metadata
-ok 66 - webhook freshness evidence stays on its resource without permanent per-input metadata
+ok 71 - webhook freshness evidence stays on its resource without permanent per-input metadata
   ---
-  duration_ms: 1472.005137
+  duration_ms: 1474.952653
   type: 'test'
   ...
 # Subtest: malformed upstream state retains coverage and backs off with a traceable request ID
-ok 67 - malformed upstream state retains coverage and backs off with a traceable request ID
+ok 72 - malformed upstream state retains coverage and backs off with a traceable request ID
   ---
-  duration_ms: 2067.932608
+  duration_ms: 1935.215421
   type: 'test'
   ...
 # Subtest: whole-batch malformed responses retain the upstream trace and scheduler backoff
-ok 68 - whole-batch malformed responses retain the upstream trace and scheduler backoff
+ok 73 - whole-batch malformed responses retain the upstream trace and scheduler backoff
   ---
-  duration_ms: 3623.395915
+  duration_ms: 3203.403285
   type: 'test'
   ...
 # Subtest: public health does not expose internal quota or secrets
-ok 69 - public health does not expose internal quota or secrets
+ok 74 - public health does not expose internal quota or secrets
   ---
-  duration_ms: 1995.212477
+  duration_ms: 1059.919346
   type: 'test'
   ...
 # Subtest: webhook rejects bad signatures and conflicting duplicate bodies
-ok 70 - webhook rejects bad signatures and conflicting duplicate bodies
+ok 75 - webhook rejects bad signatures and conflicting duplicate bodies
   ---
-  duration_ms: 169.467857
+  duration_ms: 43.719382
   type: 'test'
   ...
 # Subtest: webhooks do not invent complete inventory; duplicate and old delivery are idempotent
-ok 71 - webhooks do not invent complete inventory; duplicate and old delivery are idempotent
+ok 76 - webhooks do not invent complete inventory; duplicate and old delivery are idempotent
   ---
-  duration_ms: 3103.574759
+  duration_ms: 2624.981589
   type: 'test'
   ...
 # Subtest: resource tombstones advance journal without marking missing histories empty
-ok 72 - resource tombstones advance journal without marking missing histories empty
+ok 77 - resource tombstones advance journal without marking missing histories empty
   ---
-  duration_ms: 2939.882353
+  duration_ms: 2348.579685
   type: 'test'
   ...
 # Subtest: query validation, repo scoping, admin token independent
-ok 73 - query validation, repo scoping, admin token independent
+ok 78 - query validation, repo scoping, admin token independent
   ---
-  duration_ms: 1145.908761
+  duration_ms: 1166.630567
   type: 'test'
   ...
 # Subtest: reference reads require an explicitly enabled environment and admin authentication
-ok 74 - reference reads require an explicitly enabled environment and admin authentication
+ok 79 - reference reads require an explicitly enabled environment and admin authentication
   ---
-  duration_ms: 10.129013
+  duration_ms: 1.849577
   type: 'test'
   ...
 # Subtest: activity observations are authenticated, repository-scoped, bounded, and tolerate missing coverage
-ok 75 - activity observations are authenticated, repository-scoped, bounded, and tolerate missing coverage
+ok 80 - activity observations are authenticated, repository-scoped, bounded, and tolerate missing coverage
   ---
-  duration_ms: 162.697372
+  duration_ms: 115.838588
   type: 'test'
   ...
 # Subtest: CI records are not mirrored: webhooks are acknowledged unstored and queries fall back
-ok 76 - CI records are not mirrored: webhooks are acknowledged unstored and queries fall back
+ok 81 - CI records are not mirrored: webhooks are acknowledged unstored and queries fall back
   ---
-  duration_ms: 468.192192
+  duration_ms: 281.263368
   type: 'test'
   ...
 # Subtest: GET and batch queries retain unquoted IDs beyond the JavaScript safe range
-ok 77 - GET and batch queries retain unquoted IDs beyond the JavaScript safe range
+ok 82 - GET and batch queries retain unquoted IDs beyond the JavaScript safe range
   ---
-  duration_ms: 3215.220988
+  duration_ms: 2600.467577
   type: 'test'
   ...
 # Subtest: explicit SQLite ownership fencing works in the Worker SQL runtime
-ok 78 - explicit SQLite ownership fencing works in the Worker SQL runtime # SKIP
+ok 83 - explicit SQLite ownership fencing works in the Worker SQL runtime # SKIP
   ---
-  duration_ms: 2.00346
+  duration_ms: 0.131075
   type: 'test'
   ...
-# {"event":"upstream_response_unavailable","request_id":"9782f906-3241-484c-9d23-f7b0b70528ca","operation":"repository","api":"core","reason":"malformed_upstream_response"}
-# {"fixture":"large_inventory","prs":1200,"initial_inventory_requests":12,"concurrent_clients":10,"pages":3,"query_and_continuation_ms":3042}
+# {"event":"upstream_response_unavailable","request_id":"8f3d374e-6d5b-4c28-b1fe-5d21d03a25f0","operation":"repository","api":"core","reason":"malformed_upstream_response"}
+# {"fixture":"large_inventory","prs":1200,"initial_inventory_requests":12,"concurrent_clients":10,"pages":3,"query_and_continuation_ms":2118}
 # Subtest: large inventory snapshots paginate coherently and coalesce concurrent reads
-ok 79 - large inventory snapshots paginate coherently and coalesce concurrent reads
+ok 84 - large inventory snapshots paginate coherently and coalesce concurrent reads
   ---
-  duration_ms: 86117.790774
+  duration_ms: 79859.645588
   type: 'test'
   ...
 # Subtest: Python fallback and TypeScript projection agree on 240 changing histories and scopes
-ok 80 - Python fallback and TypeScript projection agree on 240 changing histories and scopes
+ok 85 - Python fallback and TypeScript projection agree on 240 changing histories and scopes
   ---
-  duration_ms: 329.288459
+  duration_ms: 74.427048
   type: 'test'
   ...
 # Subtest: compact survey is authenticated, roadmap scoped and does not issue GitHub requests
-ok 81 - compact survey is authenticated, roadmap scoped and does not issue GitHub requests
+ok 86 - compact survey is authenticated, roadmap scoped and does not issue GitHub requests
   ---
-  duration_ms: 4047.236366
+  duration_ms: 2772.263688
   type: 'test'
   ...
 # Subtest: head-bound blockers retain their authenticated actor and do not trust quoted markers
-ok 82 - head-bound blockers retain their authenticated actor and do not trust quoted markers
+ok 87 - head-bound blockers retain their authenticated actor and do not trust quoted markers
   ---
-  duration_ms: 0.800406
+  duration_ms: 0.425511
   type: 'test'
   ...
 # Subtest: an interrupted publication cannot acknowledge or expose an overlapping SQLite/PG event
-ok 83 - an interrupted publication cannot acknowledge or expose an overlapping SQLite/PG event
+ok 88 - an interrupted publication cannot acknowledge or expose an overlapping SQLite/PG event
   ---
-  duration_ms: 3826.747979
+  duration_ms: 2686.743277
   type: 'test'
   ...
 # Subtest: slow Bors receipt reads do not hold the repository transaction or input gate
-ok 84 - slow Bors receipt reads do not hold the repository transaction or input gate
+ok 89 - slow Bors receipt reads do not hold the repository transaction or input gate
   ---
-  duration_ms: 4978.382038
+  duration_ms: 3650.57214
   type: 'test'
   ...
 # Subtest: a standalone store batch rolls back earlier statements when a later statement fails
-ok 85 - a standalone store batch rolls back earlier statements when a later statement fails
+ok 90 - a standalone store batch rolls back earlier statements when a later statement fails
   ---
-  duration_ms: 2066.823388
+  duration_ms: 1323.301829
   type: 'test'
   ...
-1..85
-# tests 85
+1..90
+# tests 90
 # suites 0
-# pass 84
+# pass 89
 # fail 0
 # cancelled 0
 # skipped 1
 # todo 0
-# duration_ms 186721.712021
+# duration_ms 170615.199179

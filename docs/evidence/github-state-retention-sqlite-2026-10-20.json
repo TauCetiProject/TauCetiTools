@@ -1,9 +1,9 @@
 {
   "version": 2,
-  "started": "2026-10-20T08:02:01.487Z",
-  "finished": "2026-10-20T08:02:45.839Z",
-  "implementation_revision": "c83fc32cc2b486746d831cb91000982f17c232e2",
-  "workspace_sha256": "b552691f4cd98b293f727d00d0b2cbb55749217408c175c77c3e2337c8f5ad78",
+  "started": "2026-10-20T08:29:17.549Z",
+  "finished": "2026-10-20T08:29:31.963Z",
+  "implementation_revision": "98fd5f62be72710034fe1f22ec1371d7a6e7c5d1",
+  "workspace_sha256": "aaae0f4184dc918aad205351ed21595a48e74d56727da17f282bbd0820dc1809",
   "source_dirty": false,
   "environment": "local_sqlite_fault_fixtures",
   "typecheck_exit_status": 0,
@@ -11,7 +11,7 @@
   "exit_status": 0,
   "passed": 191,
   "failed": 0,
-  "skipped": 34,
+  "skipped": 39,
   "test_files": [
     "tests/activity.test.mjs",
     "tests/activity_landings.test.mjs",
@@ -222,7 +222,7 @@
     "malformed label connections stay unavailable and overflow waits for the REST quota reset"
   ],
   "failed_tests": [],
-  "transcript_sha256": "753fc6a5b38be43e1ebace5831daad98d2659f398c4cee1857ba2425728838e7",
+  "transcript_sha256": "3051664e3bbb4e6d3f9e4e4d1ac7f6896f530fb2a8d05857d2aa78517190ab3b",
   "postgresql": {
     "run": false,
     "prerequisite": "TauCetiTools PR #5 / Worker issue #308",
