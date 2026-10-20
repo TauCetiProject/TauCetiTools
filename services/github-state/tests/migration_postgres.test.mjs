@@ -109,6 +109,26 @@ test('ordinary supervisor restarts a fenced repository, preserves cursors, and r
   assert.deepEqual(await fallback.json(),before);
   assert.equal(fallback.headers.get('X-TauCeti-Read-Fallback'),'last-known-source');
   assert.ok(Number(fallback.headers.get('X-TauCeti-Source-Frozen-At'))>0);
+  // Real source fence/triggers from the controller survive fresh constructors,
+  // including the fault-injection startup ordering used by the deployed drill.
+  for(const fault of [false,true])for(const unavailable of [false,true]) {
+    if(unavailable)f.archive.fail((op,key)=>op==='get' && key===`control/${custom.id}/migration.json`);
+    const reset=await fixture(f.db,f.archive,{...f.env,FAULT_INJECTION:fault?'true':undefined});
+    const response=await reset.request('/query',query);assert.equal(response.status,200);
+    assert.deepEqual(await response.json(),before);
+    await assert.rejects(reset.state.setMeta('forbidden',true),/migration_frozen|backend generation fenced/);
+    assert.throws(()=>f.db.prepare("INSERT INTO demand VALUES('trigger-check',1)").run(),/backend generation fenced/);
+  }
+  const checkpoint=await f.archive.get(`control/${custom.id}/migration.json`).then(o=>o.text());
+  const activated=JSON.parse(checkpoint);activated.cutover.target_active=true;
+  await f.archive.put(`control/${custom.id}/migration.json`,JSON.stringify(activated));
+  try {
+    const configured=JSON.parse(f.env.MIGRATION_TARGET);
+    const reset=await fixture(f.db,f.archive,{...f.env,MIGRATION_TARGET:JSON.stringify({...configured,identity:'mismatched-target'})});
+    const rejected=await reset.request('/query',query);assert.equal(rejected.status,503);
+    assert.equal((await rejected.json()).error,'backend_fenced','known target activation never falls back after configuration failure');
+  }finally{await f.archive.put(`control/${custom.id}/migration.json`,checkpoint);}
+
   await assert.rejects(outage.state.setMeta('forbidden',true),/migration_frozen|backend generation fenced/);
   assert.throws(()=>f.db.prepare("INSERT INTO demand VALUES('old-worker',1)").run(),/generation fenced/);
   const key='webhooks/freeze/event.json',body=JSON.stringify({issue:{number:7},comment:{id:'during-freeze',body:'retained comment',created_at:'2026-10-19T00:00:00Z'}});

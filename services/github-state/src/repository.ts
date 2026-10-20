@@ -157,9 +157,9 @@ export class RepositoryState extends DurableObject<Env> {
       try {repo=this.localMeta('repository')?.id;} catch { /* Fresh test objects have no schema yet. */ }
       if(repo && this.env.ARCHIVE && ['test','production'].includes(this.env.MIGRATION_ENVIRONMENT || '')) {
         try {this.migrationState=await readMigration(this.env.ARCHIVE,repo);await this.selectMigrationBackend();
-          if(this.migrationState?.cutover && this.store.backend==='sqlite')this.schema='current';}
+          if(this.store.backend==='sqlite')this.startup();}
         catch {this.migrationUnavailable=true;
-          if(this.localMeta('schema_version')===SCHEMA_VERSION)this.schema='current';}
+          if(this.store.backend==='sqlite')this.startup();}
       }
       await this.storageMarker();
       if (env.FAULT_INJECTION==='true' || this.schema!=='current') this.startup();
@@ -188,6 +188,15 @@ export class RepositoryState extends DurableObject<Env> {
   faultKey(): string { return 'faults/'+this.ctx.id.toString()+'.json'; }
   // Existing current schemas start without any write. Migration is one
   // transaction; if it cannot commit, compatible stored data stays readable.
+  private frozenSourceReadable(owner:any,version:unknown):boolean {
+    if(version!==SCHEMA_VERSION || this.store.backend!=='sqlite' || owner?.backend!=='migration' || owner.protocol!=='s2-selection-v1')return false;
+    const state=this.migrationState;
+    // A known activation prohibits source fallback even if selecting its
+    // configuration fails. Unknown control can expose only the locally fenced
+    // source: accepting target input requires a durable local postgres selection.
+    if(state?.cutover?.target_active || state && state.generation!==owner.generation)return false;
+    return this.migrationUnavailable || Boolean(this.migrationHeld() && state?.cutover?.source_fenced);
+  }
   startup(defer=false): void {
     let version:unknown;
     try {version=this.localMeta('schema_version');} catch {version=undefined;}
@@ -195,9 +204,7 @@ export class RepositoryState extends DurableObject<Env> {
     if(owner && (owner.backend!=='sqlite' || owner.generation!==(this.env.REPOSITORY_GENERATION || 'sqlite-v1'))) {
       // A known frozen source remains readable after a constructor or storage
       // marker retry. The adapters and migration gate still fence every write.
-      const frozenSource=this.migrationHeld() && owner.backend==='migration' && version===SCHEMA_VERSION &&
-        this.migrationState?.generation===owner.generation && this.migrationState?.cutover?.source_fenced &&
-        !this.migrationState?.cutover?.target_active && this.store.backend==='sqlite';
+      const frozenSource=this.frozenSourceReadable(owner,version);
       this.schema=frozenSource?'current':{error:'backend_fenced',missing:[],cause:'backend_fenced'};return;
     }
     if(version===SCHEMA_VERSION) {this.schema='current';return;}
@@ -423,7 +430,7 @@ export class RepositoryState extends DurableObject<Env> {
     // Immutable resource contents reuse one object across identical refreshes.
     // Conditional creation also preserves any existing operator/migration pin.
     // Staging uploads retain distinct keys because their expiry can differ.
-    await this.env.ARCHIVE.put(key,bytes,{customMetadata:{kind:expires?'cursor':'resource',...(expires?{expires:String(expires)}:{})},...(hash?{sha256:hash,onlyIf:{etagDoesNotMatch:'*'}}:{})});
+    if(!hash || !await this.env.ARCHIVE.head(key))await this.env.ARCHIVE.put(key,bytes,{customMetadata:{kind:expires?'cursor':'resource',...(expires?{expires:String(expires)}:{})},...(hash?{sha256:hash,onlyIf:{etagDoesNotMatch:'*'}}:{})});
     return JSON.stringify({$r2:key});
   }
   async decode(text: string): Promise<any> {
@@ -1929,7 +1936,7 @@ export class RepositoryState extends DurableObject<Env> {
         this.migrationState=await readMigration(this.env.ARCHIVE,(await this.meta('repository')).id);
         this.migrationUnavailable=false;await this.selectMigrationBackend();
         if(this.schema!=='current' && !this.migrationHeld() && !this.degraded) this.startup();
-      } catch {this.migrationUnavailable=true; /* Retry without enabling source writes. */ }
+      } catch {this.migrationUnavailable=true;if(this.store.backend==='sqlite')this.startup(); /* Retry without enabling source writes. */ }
     });
     this.migrationFlight=result.catch(()=>{});
     await result;

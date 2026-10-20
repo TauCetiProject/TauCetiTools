@@ -46,9 +46,13 @@ in operator capacity planning; this release does not claim to complete
 reference-graph garbage collection.
 
 New authoritative resource spills use `resources/<repository>/sha256-<digest>`.
-Identical large payloads reuse one immutable object and pointer, so repeated
-refreshes do not create extra objects or semantic revisions. Conditional creation
-preserves existing pins. Upload failure prevents publication of the new pointer
+Identical large payloads within a repository can share one immutable object across
+multiple rows. A future deletion index must count all row, cursor and snapshot
+references. A legacy UUID pointer incurs one new object/revision on its first
+refresh after rollout; its old object remains retained. Subsequent identical
+large payloads reuse one immutable object and pointer, so repeated
+refreshes do not create extra objects or semantic revisions. A cheap HEAD avoids re-uploading existing contents; conditional creation
+handles racing first writers and preserves existing pins. Upload failure prevents publication of the new pointer
 and a subsequent attempt can retry normally. Legacy pointers remain readable;
 changed contents create a separate object without retiring the old one. Expiring
 staging uploads keep unique keys because they have independent lifetimes. A
@@ -58,7 +62,10 @@ onto it accidentally.
 A current SQLite source frozen by a verified migration remains readable when
 startup is retried after its ownership fence is written. This requires matching
 migration generation and the recorded source fence. It never authorizes writes,
-and an activated PostgreSQL target cannot fall back to that source. Cold reads
+and a known activated PostgreSQL target cannot fall back to that source, even if
+its configuration fails validation. If R2 control is unavailable before any durable
+local target selection, compatible source reads are explicitly labeled
+`last-known-source`; every write remains fenced. Cold reads
 during a target outage still return an explicit storage error; only warm,
 unexpired results from the selected owner are available from memory.
 

@@ -1062,6 +1062,7 @@ test('PostgreSQL queue and replay ignore an obsolete SQLite full marker',async()
 
 test('identical large resource refreshes reuse immutable spills and do not manufacture revisions',async()=>{
  const {state,db,archive}=repositoryFixture();await state.fixtureReady;
+ let uploads=0;const originalPut=archive.put.bind(archive);archive.put=async(key,...args)=>{if(key.startsWith('resources/'))uploads++;return originalPut(key,...args);};
  const data={id:'9223372036854775807',body:'x'.repeat(1600000),created_at:'2026-10-20T00:00:00Z'};
  await state.put('issue_comments',data.id,data,Date.now(),false,'7');
  const original=db.prepare('SELECT data FROM resources WHERE id=?').get(data.id).data,key=JSON.parse(original).$r2,revision=await state.revision();
@@ -1071,6 +1072,7 @@ test('identical large resource refreshes reuse immutable spills and do not manuf
  assert.equal(await state.revision(),revision);
  assert.equal([...archive.objects.keys()].filter(k=>k.startsWith('resources/')).length,1);
  assert.equal(archive.objects.get(key).customMetadata.pinned,'true','conditional creation must preserve an existing pin');
+ assert.equal(uploads,1,'identical contents must not repeatedly upload the full payload');
  archive.failures.push((op,k)=>op==='put' && k.startsWith('resources/'));
  await assert.rejects(state.put('issue_comments',data.id,{...data,changed:true},Date.now(),false,'7'));
  assert.equal(await state.revision(),revision,'a failed upload cannot publish a new pointer');
@@ -1102,13 +1104,13 @@ test('a known frozen source survives startup retries without relaxing ownership 
   await state.put('pr','7',{number:7,title:'retained header'});
   await state.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?)','pr:{"number":7}','pr','{"number":7}',1,Date.now(),await state.revision(),null);
   const generation='frozen-source';
-  state.localSetMeta('backend_owner',{backend:'migration',generation});
+  state.localSetMeta('backend_owner',{protocol:'s2-selection-v1',backend:'migration',generation});
   state.migrationState={phase:'switching',generation,cutover:{source_fenced:true,target_active:false}};
   state.startup();assert.equal(state.schema,'current');
   const result=await queryFixture(state,{operation:'pr',args:{number:7}});
   assert.equal(result.status,'ok');assert.equal(result.data.title,'retained header');
-  await assert.rejects(state.store.exec("INSERT INTO demand VALUES('illegal',1)"));
-  await assert.rejects(state.put('pr','8',{number:8}));
+  await assert.rejects(state.store.exec("INSERT INTO demand VALUES('illegal',1)"),/migration_frozen|generation fenced/);
+  await assert.rejects(state.put('pr','8',{number:8}),/migration_frozen|generation fenced/);
   state.migrationState={...state.migrationState,generation:'wrong-generation'};
   state.startup();assert.equal(state.schema.error,'backend_fenced');
   state.migrationState={phase:'complete',generation,cutover:{source_fenced:true,target_active:true}};
