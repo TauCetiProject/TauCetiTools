@@ -128,6 +128,9 @@ variable restarts the object. Traces include aggregate row, repair and staged-ch
 counts. `publication_applied` precedes commit; only `refresh_committed` confirms
 the transaction completed. Background storage work can continue after
 `alarm_complete`; its completion is recorded separately as `storage_prepared`.
+An opaque random `trace` correlates stages of the same job object within a
+dispatch, including concurrent jobs with identical operation/page metadata.
+`publication_encode_pages` records the staged size before the encoding scan.
 
 ## Client behavior
 

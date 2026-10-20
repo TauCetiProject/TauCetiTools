@@ -94,14 +94,17 @@ export class RepositoryState extends DurableObject<Env> {
   private selectedMigrationGeneration?:string;
   private migrationUnavailable=false;
   private activeOperations=0;
+  private repairTraces=new WeakMap<object,string>();
   private migrationFlight: Promise<unknown> = Promise.resolve();
   migrationHeld(): boolean { return this.migrationUnavailable || blocksWrites(this.migrationState); }
   private repairsHeld():boolean {return this.migrationUnavailable || blocksRepairs(this.migrationState);}
   private traceRepair(stage:string,job?:any,counts?:{rows?:number,repairs?:number,staged_chars?:number}):void {
     if(this.env.RECONCILIATION_TRACE!=='true')return;
+    let trace:string|undefined;
+    if(job){trace=this.repairTraces.get(job);if(!trace){trace=crypto.randomUUID();this.repairTraces.set(job,trace);}}
     // Whitelist metadata: never log queries, keys, cursor values, response
     // bodies, exceptions or credentials when investigating an isolate reset.
-    log('repository_repair_trace',{stage,backend:this.store.backend,...(job?{operation:JSON.parse(job.query).operation,page:job.page,started:job.started ?? null}:{}),...counts});
+    log('repository_repair_trace',{stage,backend:this.store.backend,...(job?{trace,operation:JSON.parse(job.query).operation,page:job.page,started:job.started ?? null}:{}),...counts});
   }
   private backendGeneration():string {return this.selectedMigrationGeneration ?? this.env.REPOSITORY_GENERATION ?? 'sqlite-v1';}
   private logged=new Map<string,number>();
@@ -1070,12 +1073,14 @@ export class RepositoryState extends DurableObject<Env> {
     }
     let staged:{key:string,expires:number}|undefined;
     if(publish){const text=JSON.stringify(result.data);staged={key:prefix+job.page+'-'+crypto.randomUUID(),expires:Date.now()+86400000};await this.env.ARCHIVE.put(staged.key,text,{customMetadata:{expires:String(staged.expires)}});objects.set(prefix+job.page,text);}
+    const sizes=this.env.RECONCILIATION_TRACE==='true'?{staged_chars:[...objects.values()].reduce((n,text)=>n+text.length,0)}:undefined;
+    this.traceRepair('publication_encode_pages',job,sizes);
     for(const text of objects.values()){
       const data=JSON.parse(text),values=Array.isArray(data)?data:[data];
       for(const value of values){const body=JSON.stringify(value);if(new TextEncoder().encode(body).length>=1500000)encodings.set('resource:'+body,await this.encode(value));}
     }
     if(result.continuation){const text=JSON.stringify(result.continuation);if(new TextEncoder().encode(text).length>=1500000)encodings.set('staging:'+text,await this.encode(result.continuation,Date.now()+86400000));}
-    this.traceRepair('refresh_transaction',job,{staged_chars:this.env.RECONCILIATION_TRACE==='true'?[...objects.values()].reduce((n,text)=>n+text.length,0):0});
+    this.traceRepair('refresh_transaction',job,sizes);
     try {await this.atomic(state=>{
       state.preparedEncodings=encodings;
       const archive=state.env.ARCHIVE;

@@ -424,11 +424,12 @@ test('opt-in alarm traces identify publication stages without exposing input',as
   await state.runAlarm();
   state.prepareStorage=async()=>{};await state.storageMaintenance(false);
   const trace=messages.map(message=>JSON.parse(message));
-  for(const stage of ['refresh_response','publication_load_pages','refresh_transaction','publication_decode_pages','publication_rows','publication_repairs','publication_applied','refresh_committed','dispatch','dispatch_complete','expire','select_jobs','maintenance','storage_maintenance','storage_prepare','storage_prepared','alarm_complete'])
+  for(const stage of ['refresh_response','publication_load_pages','publication_encode_pages','refresh_transaction','publication_decode_pages','publication_rows','publication_repairs','publication_applied','refresh_committed','dispatch','dispatch_complete','expire','select_jobs','maintenance','storage_maintenance','storage_prepare','storage_prepared','alarm_complete'])
    assert.ok(trace.some(entry=>entry.stage===stage),stage);
   for(const entry of trace){
    assert.equal(entry.event,'repository_repair_trace');
-   assert.ok(Object.keys(entry).every(key=>['event','stage','backend','operation','page','started','rows','repairs','staged_chars'].includes(key)));
+   assert.ok(Object.keys(entry).every(key=>['event','stage','backend','trace','operation','page','started','rows','repairs','staged_chars'].includes(key)));
+   if(entry.operation)assert.match(entry.trace,/^[a-f0-9-]{36}$/);
    if(entry.page!==undefined)assert.equal(typeof entry.page,'number');
    if(entry.started!==undefined && entry.started!==null)assert.equal(typeof entry.started,'number');
    for(const count of ['rows','repairs','staged_chars'])if(entry[count]!==undefined)assert.equal(typeof entry[count],'number');
@@ -437,6 +438,12 @@ test('opt-in alarm traces identify publication stages without exposing input',as
   assert.equal(messages.join('').includes('number'),false);
   assert.equal(trace.find(entry=>entry.stage==='publication_rows').rows,1);
   assert.ok(trace.find(entry=>entry.stage==='refresh_transaction').staged_chars>0);
+  const dispatchTrace=trace.find(entry=>entry.stage==='dispatch').trace;
+  assert.ok(trace.some(entry=>entry.stage==='refresh_committed' && entry.trace===dispatchTrace));
+  assert.ok(trace.some(entry=>entry.stage==='dispatch_complete' && entry.trace===dispatchTrace));
+  const stages=trace.filter(entry=>entry.trace===dispatchTrace).map(entry=>entry.stage);
+  assert.ok(stages.indexOf('publication_encode_pages')<stages.indexOf('refresh_transaction'));
+  assert.ok(stages.indexOf('publication_applied')<stages.indexOf('refresh_committed'));
   const atomic=state.atomic.bind(state);messages.length=0;
   state.atomic=apply=>atomic(async scoped=>{await apply(scoped);throw Error('commit interrupted');});
   await assert.rejects(state.refresh(job,result),/commit interrupted/);
