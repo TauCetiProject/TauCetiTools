@@ -16,7 +16,7 @@ test('provider branch quota includes all databases, labels project sum, preserve
  try {
   await m.prepareProvider(env);let v=await m.providerObservation(env);assert.equal(calls,4);assert.equal(v.capacity.level,'critical');assert.equal(v.capacity.allowance_scope,'branch');assert.equal(v.project_logical_branch_sum_bytes,950);assert.equal(v.account_storage_allowance_bytes,null);assert.equal(v.compute.cpu_utilization,null);
   await m.prepareProvider(env);assert.equal(calls,4);
-  age();fail=true;await m.prepareProvider(env);v=await m.providerObservation(env);assert.equal(v.capacity.bytes,850);assert.equal(v.stale,true);assert.equal(m.providerAlarms(v).level,'critical');assert.equal(v.capacity.stale,true);
+  age();fail=true;await m.prepareProvider(env);v=await m.providerObservation(env);assert.equal(v.capacity.bytes,850);assert.equal(v.stale,false);assert.equal(m.providerAlarms(v).level,'critical');assert.equal(v.capacity.stale,false);assert.equal((await m.providerObservation(env,Date.now()+200000)).stale,true);
   age();fail=false;bytes=600;await m.prepareProvider(env);v=await m.providerObservation(env);assert.equal(v.stale,false);assert.equal(v.capacity.level,'ok');assert.equal(JSON.stringify(v).includes('private-test-token'),false);
   const before=calls;await m.providerObservation(env);assert.equal(calls,before,'prepared reads never call provider/GitHub/SQL');
  }finally{globalThis.fetch=original;}
@@ -104,6 +104,34 @@ test('repeated cached estimates preserve but do not increment forecast confirmat
  prior=m.providerCapacity({at:now+180000,bytes:201,allowance:1000},baseline,now+180000,prior);assert.equal(prior.forecast_breaches,2);
  prior=m.providerCapacity({at:now+240000,bytes:202,allowance:1000},baseline,now+240000,prior);assert.equal(prior.forecast_confirmed,true);
  prior=m.providerCapacity({at:now+300000,bytes:199,allowance:1000},baseline,now+300000,prior);assert.equal(prior.forecast_breaches,0);
+ const changedLevel=m.providerCapacity({at:now,bytes:200,allowance:1000},baseline,now,{bytes:200,allowance:1000,forecast_level:'warning',forecast_breaches:2});assert.equal(changedLevel.forecast_breaches,0);
+});
+
+test('storage monitoring can be enrolled before CPU routing; required CPU absence then warns',async()=>{
+ const env=setup(),now=Date.now();
+ await env.ARCHIVE.put('control/neon-provider.json',JSON.stringify({...identity,at:now,capacity:{level:'ok'}}));
+ let v=await m.providerObservation(env,now);assert.equal(m.providerAlarms(v).level,'ok');assert.equal(v.compute.stale,true);
+ env.NEON_MONITORING=JSON.stringify({...identity,cpu_required:true});
+ v=await m.providerObservation(env,now);assert.ok(m.providerAlarms(v).reasons.includes('compute_monitoring_unavailable'));
+ await m.saveCompute(env,{...identity,at:now,cpu_utilization:.5},now);v=await m.providerObservation(env,now);assert.equal(m.providerAlarms(v).level,'ok');
+});
+
+test('Workers collector uses bounded manual redirects and never follows upstream to GitHub',async()=>{
+ const {Miniflare,convertV4MiniflareOptions}=await import('miniflare'),{build}=await import('esbuild');
+ const script=(await build({stdin:{contents:"import {prepareProvider,providerObservation} from './src/provider_monitoring';export default {async fetch(req,env){await prepareProvider(env);return Response.json(await providerObservation(env));}}",resolveDir:process.cwd(),loader:'ts'},bundle:true,format:'esm',platform:'browser',write:false})).outputFiles[0].text;
+ let redirect=false,badLimit=false,calls=0;
+ const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script,compatibilityDate:'2026-10-11',r2Buckets:['ARCHIVE'],bindings:{NEON_MONITORING:JSON.stringify(identity),NEON_MONITORING_API_KEY:'private-test-token'},outboundService:async req=>{
+  calls++;const url=new URL(req.url);assert.equal(url.hostname,'console.neon.tech');assert.equal(req.method,'GET');
+  if(redirect)return new Response(null,{status:302,headers:{Location:'https://api.github.com/must-not-be-called'}});
+  return Response.json(url.pathname.endsWith('/branches/br-test')?{branch:{id:'br-test',logical_size:100}}:url.pathname.endsWith('/branches')?{branches:[{id:'br-test',logical_size:100}]}:url.pathname.endsWith('/endpoints/ep-test')?{endpoint:{id:'ep-test',branch_id:'br-test'}}:{project:{id:'project-123',branch_logical_size_limit_bytes:badLimit?-1:1000}});
+ }}));
+ try {
+  let v=await (await mf.dispatchFetch('https://test/sample')).json();assert.equal(v.stale,false);assert.equal(calls,4);assert.equal(v.branch_inventory_complete,true);
+  const archive=await mf.getR2Bucket('ARCHIVE');
+  const next=async()=>{const prior=await (await archive.get('control/neon-provider.json')).json();prior.last_attempt-=60000;await archive.put('control/neon-provider.json',JSON.stringify(prior));};
+  await next();redirect=true;v=await (await mf.dispatchFetch('https://test/sample')).json();assert.equal(v.error,'provider_http_unavailable');assert.equal(calls,8);assert.equal(v.capacity.bytes,100);assert.equal(v.stale,false,'one failed collection retains a recent usable sample');
+  await next();redirect=false;badLimit=true;v=await (await mf.dispatchFetch('https://test/sample')).json();assert.equal(v.capacity.bytes,100);assert.equal(v.capacity.capacity_unknown,true);assert.equal(v.branch_limits.error,'provider_quota_unavailable');
+ }finally {await mf.dispose();}
 });
 
 test('real Workers R2 conditional creation and replacement fence concurrent compute updates',async()=>{

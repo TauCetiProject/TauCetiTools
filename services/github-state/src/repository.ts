@@ -1484,7 +1484,7 @@ export class RepositoryState extends DurableObject<Env> {
     const usable=connections?connections.max-connections.reserved:0;
     const pressure=usable>0?connections.used/usable:null;
     if(pressure!==null && pressure>=.7)reasons.push('connection_saturation');
-    const provider=await providerObservation(this.env,now,true),providerAlarm=providerAlarms(provider);
+    const provider=await providerObservation(this.env,Date.now(),true),providerAlarm=providerAlarms(provider);
     const critical=reasons.some(r=>!['storage_capacity','connection_saturation','monitoring_unavailable'].includes(r)) || measured.level==='critical' || pressure!==null && pressure>=.85 || providerAlarm.level==='critical';
     const uniqueReasons=[...new Set([...reasons,...providerAlarm.reasons])];
     const level=critical?'critical':uniqueReasons.length?'warning':'ok';
@@ -1526,6 +1526,7 @@ export class RepositoryState extends DurableObject<Env> {
       publicObservation.provider=ageProvider(publicObservation.provider);
       if(this.store.backend==='postgres' && publicObservation.provider.configured)publicObservation.compute={...publicObservation.compute,...publicObservation.provider.compute};
     }
+    if(publicObservation.compute && 'sql_at' in publicObservation.compute)publicObservation.compute={...publicObservation.compute,sql_stale:!Number.isSafeInteger(publicObservation.compute.sql_at) || Date.now()-publicObservation.compute.sql_at>180000};
     const stale=!this.observation || Date.now()-this.observation.at>180000 || Boolean(this.observation.monitoring_stale);
     return {...publicObservation,...(publicObservation.storage?{storage:{...publicObservation.storage,observed_at:this.observation.at,stale}}:{}),stale,age_ms:this.observation?Date.now()-this.observation.at:null};
   }

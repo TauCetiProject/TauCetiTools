@@ -340,7 +340,7 @@ recovery observations stay stale even if the wrapper response is recent.
 `NEON_MONITORING` explicitly enrolls one project/branch/endpoint per environment:
 
 ```json
-{"project":"PROJECT_ID","branch":"br-BRANCH_ID","endpoint":"ep-ENDPOINT_ID"}
+{"project":"PROJECT_ID","branch":"br-BRANCH_ID","endpoint":"ep-ENDPOINT_ID","cpu_required":false}
 ```
 
 Use the actual lower-case provider IDs. Supply a project-scoped management
@@ -354,6 +354,8 @@ two-second request deadlines. A missing or malformed inventory sibling does not
 prevent observing the selected branch. Collection and persistence
 failures do not enter repository or queue transactions. Failed samples retain their
 original timestamps and last good values. Health reads only prepared observations.
+One failed request records a closed diagnostic error without invalidating a usable
+sample younger than three minutes. Persistent failure ages that sample into stale.
 Selected PostgreSQL observations also verify the enrolled endpoint against the
 application database hostname, accepting its pooled form. A mismatched or missing
 database identity reports monitoring unavailable rather than headroom for another
@@ -405,6 +407,11 @@ Storage/configuration failures return HTTP 503 and can be retried.
 It stores only the latest bounded observation in R2. Do not send raw telemetry or
 credentials in the body. The integration owner configures this transform in its
 existing pipeline; no new messaging destination or observability account is created.
+Enable storage sampling first with `cpu_required:false`. After verifying real CPU
+samples and delivery, set `cpu_required:true` to enable missing/stale CPU alarms.
+Optional CPU absence remains explicitly unavailable without paging. Fresh CPU
+pressure still alarms in either mode. Install secrets and deploy before issuing
+migration acceptance receipts; do not change deployment identity during a freeze.
 SQL active-query and lock-wait diagnostics remain visible alongside CPU observations.
 Before backend selection, SQLite health also exposes the enrolled standby provider
 observation; its pressure does not page as the current SQLite store's pressure.
@@ -412,7 +419,7 @@ During a migration hold, the standalone minute collector continues and its R2
 record can be inspected with existing authenticated operator tooling.
 
 Fresh CPU >=80% warns and >=90% is critical, separately from storage and connection
-pressure. Missing/stale provider or CPU data warns once monitoring is enrolled;
+pressure. Stale provider data and stale **required** CPU data warn;
 missing enrollment is reported as unconfigured. Existing Workers structured alarms
 carry these reasons and measured provider/compute/connection values. The record
 still says `notified:false` when a log is emitted.
