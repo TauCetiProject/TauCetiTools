@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -180,6 +181,12 @@ def write_project(project: Project, checkout: Path, role: str = "content") -> li
     if role != "content":
         return write_auxiliary(project, checkout, role)
     written = []
+    if project.feature("docs") and not project.legacy:
+        ignore = checkout / ".gitignore"
+        text = ignore.read_text() if ignore.exists() else ""
+        if "/docbuild/" not in text.splitlines():
+            ignore.write_text(text.rstrip("\n") + "\n/docbuild/\n")
+            written.append(".gitignore")
     owners = project.raw.get("project", {}).get("codeowners", [])
     codeowners = checkout / ".github/CODEOWNERS"
     if owners and not codeowners.exists():
@@ -207,12 +214,17 @@ def write_project(project: Project, checkout: Path, role: str = "content") -> li
             "claims-access.yml": "claims",
             "api-docs.yml": "docs",
             "pages.yml": "docs",
+            "prepare_docs.py": "docs",
             "stuck-alerts.yml": "zulip",
             "zulip-healthcheck.yml": "zulip",
             "toolchain-tags.yml": "security_audit",
             "nightly-verify.yml": "security_audit",
         }
         if relative.name in optional and not project.feature(optional[relative.name]):
+            continue
+        if relative.name == "pages.yml" and not project.legacy:
+            continue  # The downstream API workflow also deploys its Pages artifact.
+        if relative.name == "prepare_docs.py" and project.legacy:
             continue
         if relative.name == "update.yml" and not project.legacy:
             continue
@@ -222,7 +234,10 @@ def write_project(project: Project, checkout: Path, role: str = "content") -> li
             continue
         target = checkout / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        text = render(source.read_text(), project)
+        if relative.name == "api-docs.yml" and not project.legacy:
+            text = render((ASSETS / "downstream/api-docs.yml").read_text(), project)
+        else:
+            text = render(source.read_text(), project)
         if relative.as_posix() in (".github/workflows/ci.yml", ".github/workflows/lint-full.yml") and not project.legacy:
             # Downstreams build and audit their library. The shared harness's own
             # regression fixtures belong to its source repository, not each clone.
@@ -322,13 +337,15 @@ def configuration_pr(project: Project, *, apply=False, role="content"):
     directory = Path(tempfile.mkdtemp(prefix="tauceti-setup-"))
     subprocess.run(["gh", "repo", "clone", repository, str(directory), "--", "--depth", "1"], check=True)
     base_branch = subprocess.check_output(["git", "-C", str(directory), "branch", "--show-current"], text=True).strip()
-    existing = subprocess.check_output(
-        ["gh", "pr", "list", "--repo", repository, "--head", "setup/tauceti-tools", "--json", "url"], text=True
-    )
-    if json.loads(existing):
-        print("An existing setup PR is open: " + json.loads(existing)[0]["url"])
+    existing = subprocess.check_output([
+        "gh", "api", "--paginate", f"repos/{repository}/pulls?state=open&per_page=100", "--jq",
+        f'.[] | select(.head.repo.full_name == {json.dumps(repository)} and (.head.ref | startswith("setup/tauceti-tools"))) | .html_url',
+    ], text=True).splitlines()
+    if existing:
+        print("An existing setup PR is open: " + existing[0])
         return
-    branch = "setup/tauceti-tools"
+    # A previous setup branch can survive a squash merge. Never overwrite it.
+    branch = "setup/tauceti-tools-" + secrets.token_hex(4)
     subprocess.run(["git", "-C", str(directory), "switch", "-c", branch], check=True)
     write_project(project, directory, role)
     from .project import read_source

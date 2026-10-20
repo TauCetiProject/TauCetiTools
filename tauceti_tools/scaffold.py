@@ -49,6 +49,9 @@ completed_dir = "Completed"
 # [tools.progress]
 # repo = "TauCetiProject/TauCetiProgress"
 # ref = "FULL_COMMIT_SHA"
+# [tools.docgen]
+# repo = "leanprover/doc-gen4"
+# ref = "FULL_COMMIT_SHA_COMPATIBLE_WITH_YOUR_LEAN_TOOLCHAIN"
 
 [merge]
 backend = "github-queue"

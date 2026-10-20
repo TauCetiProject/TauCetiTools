@@ -1,0 +1,82 @@
+name: API docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'TauCeti/**'
+      - 'TauCeti.lean'
+      - 'lean-toolchain'
+      - 'lake*'
+      - 'tauceti.toml'
+      - '.github/workflows/api-docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-docs
+  cancel-in-progress: false
+
+jobs:
+  build-docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare pinned shared tools
+        uses: __TOOLS_REPO__/.github/actions/setup@__TOOLS_REF__
+        with:
+          tools-repository: __TOOLS_REPO__
+          tools-ref: __TOOLS_REF__
+          project-directory: .
+      - uses: leanprover/lean-action@v1
+        with:
+          test: false
+          lint: false
+          use-github-cache: false
+      - name: Prepare the pinned documentation project
+        run: python3 scripts/prepare_docs.py
+      - name: Generate API documentation
+        run: lake --dir docbuild build ProjectDocs:docs
+      - name: Record the documented commit
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          mkdir -p public/docs
+          cp -a docbuild/.lake/build/doc/. public/docs/
+          printf '%s\n' "$SHA" > public/docs/SOURCE_SHA
+          printf '<!doctype html><meta http-equiv="refresh" content="0;url=docs/">\n' > public/index.html
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+  deploy:
+    needs: build-docs
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+      - name: Record the published documentation ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          count=$(gh api "repos/$REPO/git/matching-refs/heads/docgen" --jq '[.[] | select(.ref == "refs/heads/docgen")] | length')
+          if [ "$count" = 0 ]; then
+            gh api --method POST "repos/$REPO/git/refs" -f ref=refs/heads/docgen -f sha="$SHA"
+          else
+            gh api --method PATCH "repos/$REPO/git/refs/heads/docgen" -f sha="$SHA" -F force=false
+          fi

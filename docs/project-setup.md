@@ -435,6 +435,25 @@ working. Reports identify the commit actually documented; a branch name alone is
 that docs have been published. Install the Progress repository's roadmap merge templates at
 the same SHA as the generator, with the configured roadmap layout and repository.
 
+For a downstream, select a full commit SHA compatible with `lean-toolchain` in
+`[tools.docgen]` (`repo = "leanprover/doc-gen4"`, `ref = "FULL_COMMIT_SHA"`). The generated
+`api-docs.yml` builds a temporary nested documentation project from that revision's lockfile
+and the library's exact dependency pins. It generates an import-all root without changing
+the library root. It publishes a plain API reference at `/docs`, including `SOURCE_SHA`,
+then advances `docgen` to that published commit. No Tau Ceti website sources are required.
+
+Create the Pages site with `gh api --method POST repos/OWNER/PROJECT/pages -f build_type=workflow`.
+If the site already exists, use `--method PUT` instead. Alternatively open **Settings → Pages →
+Build and deployment → Source → GitHub Actions**. Dispatch `api-docs.yml` and inspect both
+**Generate API documentation** and **Deploy to GitHub Pages**. A skipped deployment is not
+evidence of publication.
+
+For progress, extend the existing automation App installation to the roadmap repository at
+`https://github.com/settings/installations`: **Configure → Repository access → Only select
+repositories**, add the roadmap alongside content, then **Save**. Upload the existing key as
+the roadmap's `SYNC_BOT_APP_PRIVATE_KEY`, and set its `SYNC_BOT_APP_ID` variable to that App's
+numeric ID. A second automation App is unnecessary.
+
 ### Announcements
 
 Set an explicit Zulip site, channel and topic. Create a bot on that site, save its email and

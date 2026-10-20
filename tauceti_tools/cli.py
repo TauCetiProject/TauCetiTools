@@ -37,7 +37,7 @@ def parser():
     doctor.add_argument("--json", action="store_true")
     upgrade = sub.add_parser("upgrade")
     upgrade.add_argument("--apply", action="store_true")
-    upgrade.add_argument("--tool", choices=("tools", "review", "progress", "bors"), required=True)
+    upgrade.add_argument("--tool", choices=("tools", "review", "progress", "docgen", "bors"), required=True)
     upgrade.add_argument("--ref", required=True)
     script = sub.add_parser("script")
     script.add_argument("name")

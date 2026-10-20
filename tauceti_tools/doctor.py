@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import shlex
 import subprocess
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -140,9 +144,11 @@ def diagnose(project: Project, *, extras=False, github=None) -> list[Finding]:
             )
 
     repo = project.content
-    for tool in ("tools", "review", "progress"):
+    for tool in ("tools", "review", "progress", "docgen"):
         pin = project.tool(tool)
-        required = tool != "progress" or project.feature("progress")
+        required = (tool not in ("progress", "docgen")
+                    or tool == "progress" and project.feature("progress")
+                    or tool == "docgen" and project.feature("docs") and not project.legacy)
         if not required:
             continue
         status, summary = "failed", "No version selected"
@@ -150,7 +156,7 @@ def diagnose(project: Project, *, extras=False, github=None) -> list[Finding]:
             resolved, pin_error = gh.read(f"repos/{pin['repo']}/commits/{pin['ref']}")
             status = "unknown" if pin_error else "ready" if resolved.get("sha") == pin["ref"] else "failed"
             summary = pin_error or pin["ref"]
-        default_repo = (
+        default_repo = "leanprover/doc-gen4" if tool == "docgen" else (
             "TauCetiProject/"
             + {"tools": "TauCetiTools", "review": "TauCetiReview", "progress": "TauCetiProgress"}[tool]
         )
@@ -600,11 +606,54 @@ def extra_findings(project, gh, again):
                     section=name.replace("_", "-"),
                 )
             )
+        if name == "github_state" and mode != "off":
+            token_file = Path(os.environ.get(
+                "TAUCETI_GITHUB_STATE_TOKEN_FILE",
+                str(Path.home() / ".config/tauceti/projects" / project.key / "github_state/client-token"),
+            )).expanduser()
+            service_finding = next(f for f in results if f.id == "services.github_state")
+            if mode == "hosted":
+                enrollment = results[-1]
+                enrollment.urls.append("https://github.com/apps/tauceti-github-state/installations/new")
+                enrollment.steps += [
+                    f"Open the App installation link, choose {owner}, select Only select repositories → {project.content.split('/')[1]}, then Install. Installing the App and receiving a service grant are separate steps.",
+                    f"Ask the operator to enroll {project.content} and supply a token scoped to that repository. Save it privately at {token_file}; chmod 600 that file. Do not use the operator's admin token or another project's token.",
+                ]
+            service_finding.commands.append(_cmd("chmod", "600", token_file))
+            service_finding.steps += [
+                f"Save the granted repository-scoped client token at {token_file}, or set TAUCETI_GITHUB_STATE_TOKEN_FILE to its actual private file. Re-run this check: it performs an authenticated, read-only health request for this repository.",
+                f"For workers pass --github-state-token-file {shlex.quote(str(token_file))}; the service URL comes from this project configuration.",
+            ]
+            if not service.get("url"):
+                service_finding.status = "failed"
+                service_finding.summary = "Set services.github_state.url to the operator's actual HTTPS endpoint"
+            elif not token_file.is_file():
+                service_finding.summary = f"Client token file missing: {token_file}"
+            else:
+                try:
+                    request = urllib.request.Request(
+                        service["url"].rstrip("/") + "/v1/health?" + urllib.parse.urlencode({"repository": project.content}),
+                        headers={"Authorization": "Bearer " + token_file.read_text().strip(),
+                                 "User-Agent": "TauCetiWorker/1.0"},
+                    )
+                    with urllib.request.urlopen(request, timeout=10) as response:
+                        health = json.load(response)["state"]
+                    identity = health.get("repository", {}).get("name")
+                    writable = health.get("storage", {}).get("mode") == "writable"
+                    ready = identity == project.content and writable and bool(health.get("bootstrap_inventory"))
+                    service_finding.status = "ready" if ready else "pending"
+                    service_finding.summary = "Repository-scoped health and bootstrap verified" if ready else "Authenticated; repository bootstrap/storage is not ready"
+                    if ready and mode == "hosted":
+                        enrollment.status = "ready"
+                        enrollment.summary = "Repository-scoped operator grant verified by authenticated health"
+                except (OSError, ValueError, KeyError) as error:
+                    service_finding.status = "failed"
+                    service_finding.summary = f"Health request failed (HTTP {error.code})" if isinstance(error, urllib.error.HTTPError) else "Health request unavailable or malformed; inspect the endpoint and scoped token"
     workflows = {
         "archives": ("data", []),
         "ci_archive": ("ci", ["collect.yml", "publish.yml"]),
         "claims": ("content", ["claims-access.yml"]),
-        "docs": ("content", ["api-docs.yml", "pages.yml"]),
+        "docs": ("content", ["api-docs.yml", "pages.yml"] if project.legacy else ["api-docs.yml"]),
         "progress": ("roadmap", ["ci.yml", "progress-merge.yml"]),
         "zulip": ("content", ["zulip-healthcheck.yml"]),
         "fleet": ("content", ["pick-runner.yml"]),
@@ -634,8 +683,14 @@ def extra_findings(project, gh, again):
             "Preview the generated callers, run the apply command to open the setup PR, inspect its diff and merge through human review."
         ]
         if name == "docs":
+            commands += [
+                _cmd("gh", "api", "repos/" + project.content + "/pages"),
+                _cmd("gh", "api", "--method", "POST", "repos/" + project.content + "/pages", "-f", "build_type=workflow"),
+                _cmd("gh", "workflow", "run", "api-docs.yml", "--repo", project.content),
+            ]
             steps += [
-                "Open Settings → Pages → Build and deployment → Source: GitHub Actions. Set publication.docs_url to the published /docs URL. Run api-docs.yml from Actions → Run workflow after the content build succeeds."
+                "Open Settings → Pages → Build and deployment → Source: GitHub Actions. Set publication.docs_url to the published /docs URL. Run api-docs.yml from Actions → Run workflow after the content build succeeds.",
+                "Use the POST command only if Pages is not created; for an existing site use gh api --method PUT with the same build_type=workflow. Select a full [tools.docgen] repository/ref compatible with lean-toolchain. Downstream API docs deploy directly; they do not require Tau Ceti's web/ or docbuild/ directories.",
             ]
         if name == "zulip":
             steps += [
@@ -646,12 +701,39 @@ def extra_findings(project, gh, again):
             steps += [
                 "Register your runners in Settings → Actions → Runners → New self-hosted runner. Use the OS/architecture shown there, run the generated ./config.sh command, assign the runner labels used by your picker and start its service. Keep the GitHub-hosted picker until your own fleet picker is installed; Tools supplies no access to Tau Ceti's private fleet."
             ]
+        if name == "progress":
+            commands.append(_cmd("tauceti", "--conf", project.source, "work", "--only", "progress"))
+            steps += [
+                "Publish the content API docs first, then run a progress worker. Its generated report PR triggers progress-merge.yml; inspect Mint the App token and Land the validated tree. A successful run which skipped the merge is not functional evidence.",
+            ]
+        status = "unknown" if missing or inaccessible else "pending"
+        summary = "; ".join(missing + inaccessible) or "Installed; functional consumption still needs a normal workflow run"
+        required_steps = {
+            "docs": ("api-docs.yml", ("Generate API documentation", "Deploy to GitHub Pages")),
+            "progress": ("progress-merge.yml", ("Mint the App token", "Land the validated tree")),
+        }.get(name)
+        if required_steps and not missing and not inaccessible and (name != "docs" or not project.legacy):
+            workflow, labels = required_steps
+            runs, _ = gh.read(f"repos/{repository}/actions/workflows/{workflow}/runs?per_page=5", paginate=False)
+            for run in _items(runs, "workflow_runs"):
+                jobs, error = gh.read(f"repos/{repository}/actions/runs/{run['id']}/jobs")
+                consumed = [step for job in _items(jobs, "jobs") for step in job.get("steps", [])]
+                if name == "progress" and not all(any(label in step.get("name", "") for step in consumed) for label in labels):
+                    continue
+                if run.get("conclusion") == "success" and not error and all(
+                    any(label in step.get("name", "") and step.get("conclusion") == "success" for step in consumed)
+                    for label in labels
+                ):
+                    status, summary = "ready", f"Run {run['id']} succeeded and its consuming steps ran successfully"
+                elif run.get("conclusion") in ("failure", "timed_out", "action_required"):
+                    status, summary = "failed", f"Run {run['id']} failed; inspect the consuming steps"
+                commands.append(_cmd("gh", "run", "view", str(run["id"]), "--repo", repository, "--log"))
+                break
         results.append(
             Finding(
                 "features." + name,
-                "unknown" if missing or inaccessible else "pending",
-                "; ".join(missing + inaccessible)
-                or "Installed; functional consumption still needs a normal workflow run",
+                status,
+                summary,
                 "Feature workflows installed and their actual consumers succeed",
                 commands=commands
                 + ([_cmd("gh", "run", "list", "--repo", repository, "--limit", "10")] if repository else []),
@@ -682,7 +764,7 @@ def auxiliary_findings(project, gh, again):
                 / ".config/tauceti/projects"
                 / project.key
                 / ("collector" if role == "ci" else "automation")
-                / name
+                / ("APP_PRIVATE_KEY" if role == "roadmap" else name)
             )
             results.append(
                 Finding(
@@ -701,6 +783,11 @@ def auxiliary_findings(project, gh, again):
                 )
             )
         if role == "roadmap":
+            results[-1].urls.append("https://github.com/settings/installations")
+            results[-1].steps += [
+                f"Open Installed GitHub Apps → the project's existing automation App → Configure. Under Repository access choose Only select repositories, add {repo.split('/')[1]} alongside {project.content.split('/')[1]}, and Save. Keep the existing installation and private key.",
+                f"Upload the existing automation PEM to {repo} as SYNC_BOT_APP_PRIVATE_KEY; no second automation App is needed.",
+            ]
             value, error = gh.read(f"repos/{repo}/actions/variables/SYNC_BOT_APP_ID")
             results.append(
                 Finding(
