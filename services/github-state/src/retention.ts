@@ -2,7 +2,6 @@
 // followed by LIMIT alone can scan an entire unindexed table on a quiet store.
 export const DAY = 86400000;
 export const RULES = {
-  expired_cursors: { table: 'cursors', clock: 'expires', age: 0 },
   expired_repair_metrics: { table: 'repair_metrics', clock: 'at', age: 7 * DAY },
   expired_changes: { table: 'changes', clock: 'at', age: 7 * DAY },
   expired_retired_objects: { table: 'retired_objects', clock: 'at', age: 30 * DAY },
@@ -12,12 +11,11 @@ export const RULES = {
 export type RetentionClass = keyof typeof RULES;
 export const R2_CLASSES = { r2_cursors: 'cursors/', raw_webhooks: 'webhooks/', daily_archives: 'snapshots/', staging_pages: 'staging/', telemetry_intervals: 'telemetry/', staging_spills: 'staging-spills/', legacy_staging_spills: 'resources/' } as const;
 export interface Checkpoint { after: number; upper: number; started: number; completed?: number; examined: number; eligible: number; deleted: number; bytes: number; oldest_expired?: number; error?: string }
-export interface Policy { mode: 'dry_run' | 'enforce'; disabled: string[]; pinned: string[]; archive_ci?: boolean }
+export interface Policy { mode: 'dry_run' | 'enforce'; disabled: string[]; pinned: string[] }
 export const DEFAULT_POLICY: Policy = { mode: 'dry_run', disabled: [], pinned: [] };
 export function policy(input: any): Policy {
   if (!input || !['dry_run', 'enforce'].includes(input.mode) || !['disabled', 'pinned'].every(k => Array.isArray(input[k]) && input[k].every((n: any) => Object.hasOwn(RULES, n) || Object.hasOwn(R2_CLASSES, n)))) throw new Error('invalid_retention_policy');
-  if (input.archive_ci !== undefined && typeof input.archive_ci !== 'boolean') throw new Error('invalid_retention_policy');
-  return { mode: input.mode, disabled: [...new Set<string>(input.disabled)], pinned: [...new Set<string>(input.pinned)], archive_ci: input.archive_ci === true };
+  return { mode: input.mode, disabled: [...new Set<string>(input.disabled)], pinned: [...new Set<string>(input.pinned)] };
 }
 export interface Budget { rows: number; bytes: number; deadline: number }
 // Names are fixed constants. No user-supplied SQL is interpolated here.
@@ -30,7 +28,7 @@ export function sweep(sql: SqlStorage, name: RetentionClass, previous: Checkpoin
   delete state.error;
   const cols = sql.exec<any>('PRAGMA table_info(' + rule.table + ')').toArray().map(c => c.name);
   const size = cols.map(c => 'COALESCE(length(CAST("' + c + '" AS BLOB)),0)').join('+');
-  const limit=Math.min(name === 'expired_cursors' ? 50 : 1000,budget.rows);
+  const limit=Math.min(1000,budget.rows);
   // The existing at index reaches expired repair samples without repeatedly
   // walking the seven-day live window. Other classes use bounded rowid scans.
   const indexed=name==='expired_repair_metrics' && sql.exec<any>("SELECT 1 FROM sqlite_master WHERE type='index' AND name='repair_metrics_at'").toArray().length>0;

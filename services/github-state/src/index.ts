@@ -12,7 +12,7 @@ function targets(env:Env,payload:any,event:string): Repository[] {
   const target=payload?.repository ? configured.filter(r=>r.id===String(payload.repository.id)) : ['installation','installation_repositories','ping'].includes(event)?configured:[];
   return target.filter(repo=>!payload?.installation?.id || String(payload.installation.id)===repo.installation);
 }
-const STORAGE_OPERATIONS=new Set(['scan','recovery','export','verify','cleanup','probe','fault','retention']);
+const STORAGE_OPERATIONS=new Set(['scan','cleanup','probe','fault','retention']);
 async function query(req:Request,env:Env,q:Query,request_id:string): Promise<Response> {
   try { validateQuery(q); } catch { return json({error:'invalid_query'},400); }
   const repo=repository(env,q.repository);

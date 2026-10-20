@@ -131,18 +131,8 @@ test('a full repository keeps serving stored reads, parks ingestion, recovers he
   const scanned=await (await adminPost(mf,'/admin/storage/scan',{table:'resources',limit:50})).json();
   assert.equal(scanned.rows,50);assert.ok(scanned.column_bytes.data>0);assert.ok('resource_parent' in scanned.index_bytes);
   assert.equal((await adminPost(mf,'/admin/storage/scan',{table:'sqlite_master'})).status,400);
-  const cursors=await (await adminPost(mf,'/admin/storage/cleanup',{class:'expired_cursors'})).json();
-  assert.equal(cursors.rows,0);assert.equal(cursors.recovery,null);
   assert.equal((await adminPost(mf,'/admin/storage/cleanup',{class:'resources'})).status,400,'semantic data is not a cleanup class');
-  const refused=await (await adminPost(mf,'/admin/storage/cleanup',{class:'stale_demand'})).json();
-  assert.equal(refused.error,'invalid_recovery');
-  const recovery=await (await adminPost(mf,'/admin/storage/recovery',{})).json();
-  assert.ok(recovery.bookmark);
-  assert.equal((await (await adminPost(mf,'/admin/storage/cleanup',{class:'stale_demand',recovery:recovery.id})).json()).error,'recovery_not_verified');
-  let exported;do exported=await (await adminPost(mf,'/admin/storage/export',{recovery:recovery.id,table:'demand'})).json(); while(!exported.complete);
-  const verified=await (await adminPost(mf,'/admin/storage/verify',{recovery:recovery.id,table:'demand'})).json();
-  assert.equal(verified.verified,true);
-  const demand=await (await adminPost(mf,'/admin/storage/cleanup',{class:'stale_demand',recovery:recovery.id})).json();
+  const demand=await (await adminPost(mf,'/admin/storage/cleanup',{class:'stale_demand'})).json();
   assert.equal(demand.rows,0,'current demand is younger than a day');
   const probe=await (await adminPost(mf,'/admin/storage/probe',{bytes:4096})).json();
   assert.equal(probe.writable,false);assert.equal(probe.reason,'storage_full');
@@ -172,7 +162,7 @@ test('a full repository keeps serving stored reads, parks ingestion, recovers he
   const db=new DatabaseSync(sqliteFile(dir,id));db.exec("DELETE FROM meta WHERE key='schema_version'");db.close();
   mf=await runtime(github,{FAULT_INJECTION:'true'},{resourcePersistencePath:dir});
   stub=(await mf.getDurableObjectNamespace('REPOSITORIES')).get((await mf.getDurableObjectNamespace('REPOSITORIES')).idFromName(repository.id));
-  assert.equal((await (await stub.fetch('https://internal/health')).json()).storage.schema,'legacy');
+  assert.equal((await (await stub.fetch('https://internal/health')).json()).storage.schema,'migration_pending');
   assert.equal((await paginate(mf,'open_prs')).rows.length,count);
   assert.equal(network.count,quota,'cold starts and recovery reads make no GitHub requests');
 

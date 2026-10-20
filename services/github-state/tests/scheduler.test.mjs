@@ -226,13 +226,13 @@ test('closed PR history and CI polling retire, then client demand reactivates th
   const sha='a'.repeat(40);
   await state.put('pr','7',{number:7,state:'MERGED',headRefOid:sha,updatedAt:new Date().toISOString()});
   await state.put('review_comments','12',{id:'12',node_id:'node'},Date.now(),false,'7');
-  for(const q of [{operation:'review_threads',args:{number:7}},{operation:'statuses',args:{sha}},{operation:'checks',args:{sha}},{operation:'reactions',args:{id:'12'}}])assert.equal(state.dormant(q),true);
+  for(const q of [{operation:'review_threads',args:{number:7}},{operation:'statuses',args:{sha}},{operation:'reactions',args:{id:'12'}}])assert.equal(state.dormant(q),true);
   const q={repository:'org/repo',operation:'review_threads',args:{number:7}},key='review_threads:{"number":7}';
   db.prepare('INSERT INTO collections VALUES(?,?,?,?,?,?,?)').run(key,q.operation,JSON.stringify(q.args),1,Date.now(),1,null);
   await state.noteDemand(q);
   assert.equal(state.dormant(q),false);
   assert.equal(db.prepare('SELECT COUNT(*) n FROM jobs WHERE key=?').get(key).n,1);
-  assert.equal(state.dormant({operation:'checks',args:{sha:'b'.repeat(40)}}),false,'unknown heads are conservative');
+  assert.equal(state.dormant({operation:'statuses',args:{sha:'b'.repeat(40)}}),false,'unknown heads are conservative');
  }finally{db.close();}
 });
 test('a webhook arriving during a staged read keeps its repair pending',async()=>{

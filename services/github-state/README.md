@@ -42,7 +42,7 @@ all pages finish. A failed page preserves the previous complete collection.
 Snapshots paginate at 500 rows or approximately 1.49 MB per page. Continuation
 pages are written to private R2 (at most four uploads at a time), never to
 SQLite; continuation reads individual pages rather than repeatedly decoding the
-entire inventory. Legacy SQL cursors stay readable until they expire.
+entire inventory.
 Concurrent queries at the same revision share a snapshot.
 
 PR and issue headers and commit statuses update from webhook payloads. A

@@ -20,7 +20,6 @@ threshold for PostgreSQL.
 
 | Data | Default window / retirement condition |
 | --- | --- |
-| Legacy SQL cursors | Ten minutes; delete only after their stored expiry |
 | R2 cursors | Ten-minute validity plus the existing one-minute deletion margin |
 | Change journal | Seven days; clients beyond retained revisions receive reset |
 | Delivery receipts | Fourteen days **from application**; automatically pin the entire class while parked/held input is observed, or its inventory is unavailable |
@@ -34,9 +33,9 @@ threshold for PostgreSQL.
 | PR headers, histories, coverage, tombstones, landing evidence | Retained; quiet or closed does not authorize deletion |
 | Workflow attempts and obsolete heads | Automatic retention preserves stored attempts, head data and memberships. S0 stops mirroring checks/workflow runs/jobs and retires their polling jobs regardless of demand. Other dormant polling retains its existing guards |
 | Survey projections/inventory | Owned by their source PR/history. Retain source and coverage; rebuild through existing invalidation, never GitHub refetch for retention |
-| Bulk CI payloads | Opt-in automatic R2 archival verifies old inline workflow-job/check/status bodies and preserves the indexed SQL path. S0's explicit `ci_resources`, `ci_members`, `ci_collections`, `ci_meta` cleanup requires a verified class export before removing disabled CI records |
+| CI records | Not mirrored. The `ci_resources`, `ci_members`, `ci_collections` and `ci_meta` cleanup classes delete stored rows from earlier versions, without an archive |
 | Resource spills | Retain indefinitely until a complete reference index and explicit archive-release protocol can prove retirement safe |
-| Recovery/migration exports and parked/held bodies/pointers | Pinned; normal expiry never deletes them, even with accidental expiry metadata |
+| Migration exports and parked/held bodies/pointers | Pinned; normal expiry never deletes them, even with accidental expiry metadata |
 
 A resource can be absent from live SQL while a retained cursor, snapshot or pinned
 recovery export still references its spill. Age alone is insufficient. The previous
@@ -60,7 +59,7 @@ operations. Synchronous SQL is bounded by rows and bytes: Workers clocks advance
 only after I/O, so this check is not a measurable 50 ms CPU limit. Profile CPU on
 test infrastructure before rollout ([Cloudflare timer
 semantics](https://developers.cloudflare.com/workers/runtime-apis/performance/)).
-Each class examines at most 1,000 rows (50 for legacy cursors); indexed repair
+Each class examines at most 1,000 rows; indexed repair
 sample expiry reads only eligible rows. Rowid keysets bound rows examined as well as
 deleted; unindexed expiry predicates do not silently scan an entire table. Classes
 rotate to prevent starvation.
@@ -83,16 +82,9 @@ in the source-migration drain barrier and stop at its fence. Bucket expiry
 rechecks the migration hold before batch deletion; migration inventories include
 the staging-spill prefix.
 
-CI archival is separately opt-in, with a maximum 100 resource candidates, 4 MiB and
-50 ms between operations. The R2 bytes are uploaded with a digest and read back for
-verification before a conditional SQL pointer update; concurrent resource changes
-win. Reads use the existing transparent spill decoder. No semantic revision,
-coverage, tombstone or membership is removed. Failed uploads leave inline data
-intact and are retried on the next pass. Resource rows/spill references are not
-retired by automatic archival. The separate S0 CI-class export/cleanup commands
-remain available for disabled CI data; their verified export is retained. Public
-checks/workflow queries continue to report `not_mirrored`. Commit statuses remain
-mirrored. This release does not reactivate CI polling.
+Checks, workflow runs and workflow jobs are not mirrored; their queries report
+`not_mirrored`. Commit statuses remain mirrored. There is no R2 archival of
+resource payloads.
 
 R2 expiry scans separate cursor, webhook, snapshot, staging, staging-spill and
 telemetry prefixes, avoiding the pinned resource/export inventory. Each pass lists
@@ -114,11 +106,6 @@ Completed SQL epochs wait one minute before restarting. This avoids repeatedly
 scanning the live window on every hot repair alarm. Operator policy updates are
 serialized, and generation checks prevent a delayed cold load from overwriting
 an acknowledged pin.
-
-CI archival's candidate count is an upper bound, not a throughput promise. Normal
-R2 latency can exhaust its cooperative I/O budget after one archived body; track
-progress and repeat passes. Protected orphan uploads from lost publication races
-remain owned by the future reference-graph collector.
 
 Malformed scalar/collection envelopes, missing identities/status fields and
 nonprogressing pagination remain explicitly unavailable, with request IDs. They
@@ -192,31 +179,29 @@ repositories sharing the bucket.
 cd /path/to/TauCetiWorker
 S=services/github-state/scripts/storage_recovery.py
 uv run python "$S" --environment test retention
-uv run python "$S" --environment test retention --mode dry_run --archive-ci
-uv run python "$S" --environment test export --table resources --table deliveries --table demand
+uv run python "$S" --environment test retention --mode dry_run
 uv run python "$S" --environment test receipt --probe-bytes 65536
 ```
 
-Expected: policy `dry_run`, bounded class counts/positions, `ci.enforce: false` and
-eligible counts after cron scans the relevant range; inspection itself does not run
-cleanup or archival; the export reports `verified: true`, and the receipt's probe
-reports `writable: true`. Record the archive ID, restore/drill evidence, deployment
-and queue/DLQ depth. Compare complete scan epochs, rather than expecting one pass to
+Expected: policy `dry_run`, bounded class counts/positions and eligible counts
+after cron scans the relevant range; inspection itself does not run cleanup; the
+receipt's probe reports `writable: true`. Record the deployment and queue/DLQ
+depth. Compare complete scan epochs, rather than expecting one pass to
 cover a large store. Then enable bounded retention on test before production:
 
 ```sh
-uv run python "$S" --environment test retention --mode enforce --archive-ci
+uv run python "$S" --environment test retention --mode enforce
 uv run python "$S" --environment test retention --mode enforce --disable expired_changes --pin expired_deliveries --pin daily_archives
 uv run python "$S" --environment test retention --mode dry_run --disable expired_changes
 ```
 
 Expected: only the named cleanup class is disabled/pinned; stored reads and input
-application continue. Omitting `--archive-ci` disables future CI archival. To stop
+application continue. To stop
 every SQL/R2 expiry class while investigating, use:
 
 ```sh
 uv run python "$S" --environment test retention --mode dry_run \
-  --disable expired_cursors --disable expired_repair_metrics \
+  --disable expired_repair_metrics \
   --disable expired_changes --disable expired_retired_objects \
   --disable expired_deliveries --disable expired_demand \
   --disable r2_cursors --disable raw_webhooks --disable daily_archives \
@@ -224,25 +209,24 @@ uv run python "$S" --environment test retention --mode dry_run \
   --disable staging_spills --disable legacy_staging_spills
 ```
 
-Expected: all thirteen SQL/R2 expiry classes disabled and `archive_ci: false`.
+Expected: all twelve SQL/R2 expiry classes disabled.
 This does not stop installation accounting's independent seven-day telemetry
 expiry. Retain migration and parked input regardless of overrides. Inspect health's stale flags and failed class checkpoints;
 repeated checkpoint failure is not proof of cleanup progress.
 
 For warning: verify real bytes and growth, inspect hourly estimates and cleanup lag,
-check prepared observation age, obtain a verified archive/restore receipt, and
-expedite [Worker #316](https://github.com/TauCetiProject/TauCetiWorker/issues/316)
+check prepared observation age, and expedite [Worker #316](https://github.com/TauCetiProject/TauCetiWorker/issues/316)
 if reusable headroom is inadequate. For critical: preserve cached reads, confirm
 parked durability, disable a faulty class, prove writable headroom and replay using
 [the Worker recovery
 runbook](https://github.com/TauCetiProject/TauCetiWorker/blob/main/docs/github-state-recovery.md).
-Stop if an archive digest/restore check fails, a reference cannot be accounted for,
+Stop if a reference cannot be accounted for,
 parking cannot be proven durable, or cleanup stops advancing. Never clear coverage,
 delete PR histories, bootstrap from GitHub, or inject production faults to complete
 a drill. Code rollback retains archives/pins and must obey S0's cursor and
 parked-ingress compatibility requirements.
 
-## Repeatable drill and restore validation
+## Repeatable drill
 
 From the service directory:
 
@@ -262,9 +246,7 @@ reads/cold starts, explicit unavailable coverage, durable acknowledgement,
 idempotent replay, retry budgets, request IDs, malformed upstream/service responses,
 R2 upload/delete/checkpoint/monitoring failures, quota exhaustion, no additional
 GitHub calls during stored-state recovery/monitoring, retained spill reads, fifty
-simulated retention days and 100,000 repair events. Restore validation verifies
-every export page digest and reconstructs an independent SQLite store, checking
-exact IDs, tombstones, membership, coverage and spills.
+simulated retention days and 100,000 repair events.
 
 The PostgreSQL drill is **not run or claimed** by this release. After [Worker
 #308](https://github.com/TauCetiProject/TauCetiWorker/issues/308), use only its

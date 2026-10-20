@@ -55,7 +55,6 @@ function fill(f){
  }
  f.db.prepare('INSERT INTO resources VALUES(?,?,?,?,?,?,?,?)').run('pr','9223372036854775807','',JSON.stringify({$r2:'resources/100/spill'}),'original-timestamp',now,123,1);
  f.db.prepare('INSERT INTO collections VALUES(?,?,?,?,?,?,?)').run('incomplete','open_prs','{}',0,now,123,'original-etag');
- f.db.prepare('INSERT INTO cursors VALUES(?,?,?)').run('old',now+3600000,JSON.stringify({legacy:'wire-format'}));
  f.db.exec("UPDATE jobs SET due=9999999999999,lease_until=9999999999998,attempt=4,started=12345,page=3,lease_id='old-worker',wait_reason='quota',generation=17,start_generation=16");
  f.db.exec('UPDATE activity_landings SET at=1792360000123456');
  // Exercise signed rowid extremes without JavaScript integer conversion.
@@ -97,14 +96,13 @@ test('full fenced export contains every table, exact integers, timestamps, lease
  assert.ok(f.archive.objects.has('migrations/100/'+generation+'/receipt.json'));
 });
 
-test('freeze fences all mutation routes and alarm dispatch, while stored reads/304/legacy cursors retain timestamps',async()=>{
+test('freeze fences all mutation routes and alarm dispatch, while stored reads/304/cursors retain timestamps',async()=>{
  const f=await fixture();
  f.db.prepare('INSERT INTO resources VALUES(?,?,?,?,?,?,?,?)').run('pr','1','',JSON.stringify({number:1,state:'OPEN'}),'',123456,7,0);
  f.db.prepare('INSERT INTO collections VALUES(?,?,?,?,?,?,?)').run('open_prs:{}','open_prs','{}',1,123456,7,'etag');
  f.db.prepare('INSERT INTO members VALUES(?,?)').run('open_prs:{}','1');
  f.state.setMeta('revision',7);
  const page={version:1,repository:repo.name,operation:'open_prs',status:'ok',revision:7,complete:true,data:[{number:1}]};
- f.db.prepare('INSERT INTO cursors VALUES(?,?,?)').run('legacy:100',Date.now()+60000,JSON.stringify({key:'open_prs:{}',result:page}));
  const cursorId='0b6c2f0e-1f7a-4b4c-9a1e-5b8d3c2a1f00';
  await f.archive.put('cursors/100/'+cursorId+'/100.json',JSON.stringify({repository:'100',key:'open_prs:{}',allow_observed:false,expires:Date.now()+60000,result:page}));
  await f.command('freeze');
@@ -114,7 +112,6 @@ test('freeze fences all mutation routes and alarm dispatch, while stored reads/3
  await f.state.alarm();
  const query={repository:repo.name,operation:'open_prs'};
  const data=await (await f.request('/query',query)).json();assert.equal(data.status,'ok');assert.equal(data.observed_at,123456);assert.equal(data.verified_at,123456);
- assert.deepEqual(await (await f.request('/query',{...query,cursor:'legacy:100'})).json(),page);
  assert.deepEqual(await (await f.request('/query',{...query,cursor:cursorId+':100'})).json(),page);
  const conditional=await f.state.fetch(new Request('https://internal/query',{method:'POST',headers:{'if-none-match':'"7"'},body:JSON.stringify(query)}));assert.equal(conditional.status,304);
  assert.equal(f.db.prepare('SELECT total_changes() n').get().n,sqlBefore,'no SQL mutation from reads or alarms');
@@ -406,9 +403,9 @@ test('legacy initialization resumes automatically after control reads recover',a
  let f=await fixture();f.db.exec("DELETE FROM meta WHERE key='schema_version'");
  f.archive.fail((op,key)=>op==='get' && key==='control/100/migration.json');
  f=await fixture(f.db,f.archive);
- assert.equal(f.state.schema,'legacy');
+ assert.equal(f.state.schema,'migration_pending');
  assert.equal((await f.request('/tick',{})).status,200);
- assert.equal(f.state.schema,'current');assert.equal(f.state.meta('schema_version'),4);
+ assert.equal(f.state.schema,'current');assert.equal(f.state.meta('schema_version'),5);
 });
 
 
@@ -453,23 +450,6 @@ test('table discovery only excludes literal engine prefixes',async()=>{
  }
 });
 
-test('freeze drains an in-flight archival job and prevents its SQL publication',async()=>{
- const f=await fixture(),body=JSON.stringify({id:7,run_attempt:1,steps:['x'.repeat(8000)]});
- f.db.prepare('INSERT INTO resources VALUES(?,?,?,?,?,?,?,?)').run('workflow_jobs','7','9',body,'',Date.now()-8*86400000,1,0);
- f.state.storageLoaded=true;f.state.retentionPolicy={mode:'enforce',disabled:[],pinned:[],archive_ci:true};f.state.receiptsChecked=Date.now();
- let release,entered;const gate=new Promise(r=>release=r),waiting=new Promise(r=>entered=r),put=f.archive.put.bind(f.archive);
- f.archive.put=async(key,...args)=>{if(key.includes('/ci/')) {entered();await gate;}return put(key,...args);};
- f.state.startStorageMaintenance();await waiting;
- const freezing=f.command('freeze');
- while(!f.archive.objects.has('control/100/migration.json'))await new Promise(r=>setImmediate(r));
- assert.ok(f.state.activeOperations>0,'background work participates in source draining');
- release();assert.equal((await freezing).status,200);
- assert.equal(f.db.prepare('SELECT data FROM resources').get().data,body,'archival cannot publish beneath a freeze');
- assert.equal(f.state.activeOperations,0);
- const before=f.db.prepare('SELECT total_changes() n').get().n;
- await f.state.storageMaintenance();f.state.expire();f.state.startStorageMaintenance();
- assert.equal(f.db.prepare('SELECT total_changes() n').get().n,before);
-});
 
 test('source migration inventories and verifies the expiring staging-spill prefix',async()=>{
  const f=await fixture(),key='staging-spills/100/nested';

@@ -9,9 +9,9 @@ import { Migration, archiveKey, beginExport, expectedTables, exportStep, generat
 import { backlog, backoff, receiptKey, controlKey, noteRepositoryFull, storageKey } from './ingress';
 import { Checkpoint, DEFAULT_POLICY, Policy, RetentionClass, R2_CLASSES, RULES, policy, sweep } from './retention';
 import { CapacitySample, RepairMetrics, RequestMetrics, SQLITE_ALLOWANCE, capacity, emitAlarm, timedBucket, within } from './monitoring';
-import { Failure, FULL_MESSAGE, AdminError, CLEANUP, PARKABLE, classify, createRecovery, deleteClass, exportPage, faultySql, log, missingSchema, requestId, readManifest, scan, summary, userTables as summaryTables, verifyExport } from './storage';
+import { Failure, FULL_MESSAGE, AdminError, CLEANUP, PARKABLE, classify, deleteClass, faultySql, log, missingSchema, requestId, scan, summary, userTables as summaryTables } from './storage';
 
-const SCHEMA_VERSION=4;
+const SCHEMA_VERSION=5;
 // 10 GiB limit less a margin. With no recorded storage state, a database this
 // large is treated as full: no startup write may risk a failed commit, which
 // resets the object and would repeat on every start.
@@ -29,7 +29,7 @@ export class RepositoryState extends DurableObject<Env> {
   sql:SqlStorage;
   // R2 owns durable full state; this is its local read-only guard.
   degraded?:{since:number,reason:Failure,operation:string};
-  schema:'current'|'legacy'|{error:Failure,missing:string[],cause:Failure}='current';
+  schema:'current'|'migration_pending'|{error:Failure,missing:string[],cause:Failure}='current';
   private faultFull=false;
   private retentionPolicy: Policy = DEFAULT_POLICY;
   private retentionState: Partial<Record<RetentionClass, Checkpoint>> = {};
@@ -42,9 +42,6 @@ export class RepositoryState extends DurableObject<Env> {
   private checkpointAt=0;
   private checkpointText='';
   private storageTurn=0;
-  private ciAfter=0;
-  private obsoleteAfter=0;
-  private ciProgress:any;
   private receiptsPinned=true;
   private receiptsChecked=0;
   private observation:any;
@@ -133,12 +130,12 @@ export class RepositoryState extends DurableObject<Env> {
     let version:unknown;
     try {version=this.meta('schema_version');} catch {version=undefined;}
     if(version===SCHEMA_VERSION) {this.schema='current';return;}
-    if(this.migrationHeld()) {this.schema='legacy';return;}
+    if(this.migrationHeld()) {this.schema='migration_pending';return;}
     if(this.degraded || defer && this.sql.exec<any>("SELECT COUNT(*) n FROM sqlite_master WHERE type='table' AND name='meta'").one().n) {
       // Never attempt a migration that cannot commit; existing data stays readable.
       let missing:string[];
       try {missing=missingSchema(this.sql);} catch {missing=['sqlite_master'];}
-      this.schema=missing.length?{error:'schema_unavailable',missing,cause:'storage_full'}:'legacy';
+      this.schema=missing.length?{error:'schema_unavailable',missing,cause:'storage_full'}:'migration_pending';
       return;
     }
     try {this.ctx.storage.transactionSync(()=>this.migrate());this.schema='current';}
@@ -146,7 +143,7 @@ export class RepositoryState extends DurableObject<Env> {
       let missing:string[];
       try {missing=missingSchema(this.sql);} catch {missing=['sqlite_master'];}
       const cause=this.noteFailure('migration',error);
-      this.schema=missing.length?{error:'schema_unavailable',missing,cause}:'legacy';
+      this.schema=missing.length?{error:'schema_unavailable',missing,cause}:'migration_pending';
     }
   }
   migrate(): void {
@@ -159,10 +156,10 @@ export class RepositoryState extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS members(collection TEXT,id TEXT,PRIMARY KEY(collection,id));
       CREATE TABLE IF NOT EXISTS deliveries(id TEXT PRIMARY KEY,event TEXT,received INTEGER);
       CREATE TABLE IF NOT EXISTS changes(revision INTEGER PRIMARY KEY,at INTEGER,kind TEXT,id TEXT,tombstone INTEGER);
-      CREATE TABLE IF NOT EXISTS jobs(key TEXT PRIMARY KEY,query TEXT,priority INTEGER,due INTEGER,started INTEGER,cursor TEXT,page INTEGER DEFAULT 1,api TEXT,etag TEXT,attempt INTEGER DEFAULT 0,dirty INTEGER DEFAULT 0,generation INTEGER DEFAULT 0,start_generation INTEGER DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS jobs(key TEXT PRIMARY KEY,query TEXT,priority INTEGER,due INTEGER,started INTEGER,cursor TEXT,page INTEGER DEFAULT 1,api TEXT,etag TEXT,attempt INTEGER DEFAULT 0,dirty INTEGER DEFAULT 0,generation INTEGER DEFAULT 0,start_generation INTEGER DEFAULT 0,lane TEXT DEFAULT 'verification',lease_id TEXT,lease_until INTEGER DEFAULT 0,requested_at INTEGER,created_at INTEGER,wait_reason TEXT,nested TEXT);
       CREATE INDEX IF NOT EXISTS jobs_due ON jobs(due,priority);
+      CREATE INDEX IF NOT EXISTS jobs_lane_due ON jobs(lane,due,lease_until);
       CREATE TABLE IF NOT EXISTS demand(key TEXT PRIMARY KEY,at INTEGER);
-      CREATE TABLE IF NOT EXISTS cursors(id TEXT PRIMARY KEY,expires INTEGER,payload TEXT);
       CREATE TABLE IF NOT EXISTS retired_objects(key TEXT PRIMARY KEY,at INTEGER);
       CREATE TABLE IF NOT EXISTS head_prs(sha TEXT,number TEXT,PRIMARY KEY(sha,number));`);
     this.sql.exec(`CREATE TABLE IF NOT EXISTS survey_fragments(kind TEXT,id TEXT,parent TEXT,data TEXT,PRIMARY KEY(kind,id));
@@ -175,28 +172,8 @@ export class RepositoryState extends DurableObject<Env> {
     this.sql.exec(`CREATE TABLE IF NOT EXISTS repair_metrics(at INTEGER,event TEXT,lane TEXT,operation TEXT,value INTEGER DEFAULT 1);
       CREATE INDEX IF NOT EXISTS repair_metrics_at ON repair_metrics(at);
       CREATE TABLE IF NOT EXISTS query_metrics(operation TEXT,coverage TEXT,requests INTEGER,last_at INTEGER,PRIMARY KEY(operation,coverage));`);
-    const columns=new Set(this.sql.exec<any>('PRAGMA table_info(jobs)').toArray().map(c=>c.name));
-    for (const name of ['dirty','generation','start_generation']) if (!columns.has(name)) {
-      this.sql.exec('ALTER TABLE jobs ADD COLUMN '+name+' INTEGER DEFAULT 0');
-      if (name==='dirty') this.sql.exec('UPDATE jobs SET dirty=1 WHERE priority<=5 AND due<=?',Date.now());
-    }
-    for (const [name,type] of Object.entries({lane:"TEXT DEFAULT 'verification'",lease_id:'TEXT',lease_until:'INTEGER DEFAULT 0',requested_at:'INTEGER',created_at:'INTEGER',wait_reason:'TEXT',nested:'TEXT'})) if (!columns.has(name)) this.sql.exec('ALTER TABLE jobs ADD COLUMN '+name+' '+type);
-    this.sql.exec('CREATE INDEX IF NOT EXISTS jobs_lane_due ON jobs(lane,due,lease_until)');
-    if (!this.meta('reconciliation_version')) {
-      this.sql.exec("UPDATE jobs SET created_at=?,lane=CASE WHEN EXISTS(SELECT 1 FROM demand d WHERE d.key=jobs.key AND d.at>?) AND NOT EXISTS(SELECT 1 FROM collections c WHERE c.key=jobs.key AND c.complete=1) THEN 'requested' WHEN dirty=1 OR priority<=5 THEN 'active' WHEN key LIKE 'recent_%' THEN 'archive' ELSE 'verification' END",Date.now(),Date.now()-300000);
-      this.setMeta('reconciliation_version',2);
-    }
-    if (!this.meta('head_index_version')) {
-      this.sql.exec("INSERT OR IGNORE INTO head_prs SELECT json_extract(data,'$.headRefOid'),id FROM resources WHERE kind='pr' AND id NOT LIKE 'pr:%' AND json_extract(data,'$.headRefOid') IS NOT NULL");
-      this.setMeta('head_index_version',1);
-    }
-    if (!this.meta('workflow_scope_version')) {
-      this.setMeta('workflow_since',new Date(Date.now()-3600000).toISOString());
-      this.setMeta('workflow_scope_version',1);
-      this.sql.exec('UPDATE jobs SET started=NULL,cursor=NULL,page=1,api=NULL,etag=NULL,due=? WHERE key=?',Date.now(),queryKey({operation:'workflow_runs'}));
-    }
-    // Delta surveys must retain their place ahead of a large bootstrap backlog.
-    this.sql.exec("UPDATE jobs SET priority=0 WHERE (key LIKE 'pr_delta:%' OR key LIKE 'issue_delta:%') AND priority!=0");
+    // Continuation pages live in R2; the SQL cursor table is gone.
+    this.sql.exec('DROP TABLE IF EXISTS cursors');
     this.setMeta('schema_version',SCHEMA_VERSION);
   }
   noteFailure(operation:string,error:unknown): Failure {
@@ -403,59 +380,6 @@ export class RepositoryState extends DurableObject<Env> {
     if (dirty || priority<=5 || q.operation.endsWith('_delta')) return 'active';
     return q.operation.startsWith('recent_') || this.dormant(q)?'archive':'verification';
   }
-  importantWorkflow(id:string): boolean {
-    const row=this.sql.exec<any>('SELECT data FROM resources WHERE kind=? AND id=?','workflow_runs',id).toArray()[0];
-    return Boolean(row && ['staging','trying'].includes(JSON.parse(row.data).head_branch));
-  }
-  importantPending(id:string): boolean {
-    return this.importantWorkflow(id) && (!this.meta('workflow_finished:'+id) || Boolean(this.meta('important_final_pending:'+id)));
-  }
-  noteWorkflow(id:string,row:any): void {
-    this.setMeta('workflow_finished:'+id,row.status==='completed');
-    this.setMeta('workflow_seen_at:'+id,Date.now());
-    if(this.importantWorkflow(id)) {
-      if(row.status!=='completed') this.setMeta('important_active:'+id,true);
-      else if(this.meta('important_active:'+id)) this.setMeta('important_final_pending:'+id,true);
-    }
-  }
-  runAttempt(id:string): number {
-    const known=this.meta('workflow_attempt:'+id);
-    if(known) return known;
-    const cached=this.sql.exec<any>('SELECT data FROM resources WHERE kind=? AND id=?','workflow_runs',id).toArray()[0];
-    if(!cached) return 1;
-    const attempt=Number(JSON.parse(cached.data).run_attempt || 1);
-    if(attempt===1) {this.optional('workflow_attempt',()=>this.setMeta('workflow_attempt:'+id,attempt));return attempt;}
-    // Legacy mirrors did not scope membership by attempt. Revalidate once;
-    // retain current webhook rows and all historical resource records. This
-    // must commit before the legacy membership can be served.
-    if(this.migrationHeld()) throw new AdminError('migration_frozen');
-    if(this.degraded) throw new Error('Exceeded the maximum database size; workflow attempt revalidation needs a write (degraded)');
-    this.ctx.storage.transactionSync(()=>{
-      this.setMeta('workflow_attempt:'+id,attempt);
-      const key=queryKey({operation:'workflow_jobs',args:{id}});
-      this.sql.exec('UPDATE collections SET complete=0,etag=NULL WHERE key=?',key);
-      this.sql.exec("DELETE FROM members WHERE collection=? AND id IN (SELECT id FROM resources WHERE kind='workflow_jobs' AND COALESCE(json_extract(data,'$.run_attempt'),1)!=?)",key,attempt);
-      this.sql.exec('UPDATE jobs SET started=NULL,cursor=NULL,page=1,api=NULL,etag=NULL,nested=NULL,lease_id=NULL,lease_until=0,dirty=1,generation=generation+1 WHERE key=?',key);
-      this.nextRevision('collection',key);
-    });
-    return attempt;
-  }
-  workflowAttempt(id:string,attempt:number): boolean {
-    const prior=this.runAttempt(id);
-    if (attempt<prior) return false;
-    if (attempt>prior) {
-      const key=queryKey({operation:'workflow_jobs',args:{id}});
-      this.sql.exec('DELETE FROM members WHERE collection=?',key);
-      this.sql.exec('UPDATE collections SET complete=0,etag=NULL WHERE key=?',key);
-      this.sql.exec('UPDATE jobs SET started=NULL,cursor=NULL,page=1,api=NULL,etag=NULL,nested=NULL,lease_id=NULL,lease_until=0,generation=generation+1 WHERE key=?',key);
-      this.nextRevision('collection',key);
-      this.setMeta('workflow_finished:'+id,false);
-      this.setMeta('important_final_pending:'+id,false);
-      this.setMeta('important_active:'+id,false);
-    }
-    this.setMeta('workflow_attempt:'+id,attempt);
-    return true;
-  }
   async configure(name:string): Promise<void> {
     const repo=repository(this.env,name); if (!repo) throw new Error('repository not allowed');
     this.setMeta('repository',repo);
@@ -493,7 +417,7 @@ export class RepositoryState extends DurableObject<Env> {
       const inventoryKnown=this.sql.exec('SELECT key FROM collections WHERE key=? AND complete=1',key).toArray().length>0;
       await this.enqueue({repository:repo.name,operation:'open_prs'},1,Date.now(),!inventoryKnown);
       if(accepted && row.headRefOid && prior?.headRefOid!==row.headRefOid) await this.enqueue({repository:repo.name,operation:'files',args:{number:row.number}},1,Date.now(),true);
-      if (accepted && row.headRefOid) for (const operation of ['statuses','checks']) {
+      if (accepted && row.headRefOid) for (const operation of ['statuses']) {
         const q={repository:repo.name,operation,args:{sha:row.headRefOid}};
         const known=this.sql.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q)).toArray().length>0;
         await this.enqueue(q,1,Date.now(),!known || prior?.headRefOid!==row.headRefOid);
@@ -526,50 +450,6 @@ export class RepositoryState extends DurableObject<Env> {
       const known=this.sql.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q)).toArray().length>0;
       await this.enqueue(q,0,Date.now(),!known);
     }
-    if (event==='check_run' || event==='check_suite') {
-      const sha=body.check_run?.head_sha || body.check_suite?.head_sha;
-      if (sha) {
-        const q={repository:repo.name,operation:'checks',args:{sha}},key=queryKey(q);
-        if (body.check_run?.id) {
-          const row={...body.check_run,updated_at:body.check_run.completed_at || body.check_run.started_at || new Date(pointer.received).toISOString()};
-          if (await this.put('checks',String(row.id),row,pointer.received,false,sha,true)) this.membership(key,String(row.id),true);
-        }
-        const known=this.sql.exec('SELECT key FROM collections WHERE key=? AND complete=1',key).toArray().length>0;
-        await this.enqueue(q,0,Date.now(),!known);
-      }
-    }
-    if (event==='workflow_run' || event==='workflow_job') {
-      const id=body.workflow_run?.id || body.workflow_job?.run_id;
-      const attempt=Number(body.workflow_run?.run_attempt || body.workflow_job?.run_attempt || this.meta('workflow_attempt:'+id) || 1);
-      if (id && !this.workflowAttempt(String(id),attempt)) {
-        this.sql.exec('INSERT OR IGNORE INTO deliveries VALUES(?,?,?)',pointer.delivery,event,Date.now());
-        return;
-      }
-      if (body.workflow_run) {
-        const row=body.workflow_run;
-        if (await this.put('workflow_runs',String(row.id),row,pointer.received,false,'',true)) {
-          this.membership(queryKey({operation:'workflow_runs'}),String(row.id),true);
-          this.noteWorkflow(String(row.id),row);
-        }
-      }
-      if (id) {
-        const q={repository:repo.name,operation:'workflow_jobs',args:{id:String(id)}},key=queryKey(q);
-        if (body.workflow_job) {
-          const row={...body.workflow_job,updated_at:body.workflow_job.completed_at || body.workflow_job.started_at || new Date(pointer.received).toISOString()};
-          if (await this.put('workflow_jobs',String(row.id),row,pointer.received,false,String(id),true)) {
-            this.membership(key,String(row.id),true);
-            this.setMeta('workflow_seen_at:'+id,Date.now());
-            if (row.status!=='completed') this.setMeta('workflow_finished:'+id,false);
-          }
-        }
-        const demanded=(this.sql.exec<any>('SELECT at FROM demand WHERE key=?',key).toArray()[0]?.at || 0)>Date.now()-300000;
-        // Observing a job does not establish exhaustive membership or create a baseline obligation.
-        if (demanded || this.importantPending(String(id))) await this.enqueue(q,1,Date.now(),Boolean(body.workflow_run) || !this.complete(q));
-      }
-      const q={repository:repo.name,operation:'workflow_runs'};
-      const known=this.sql.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q)).toArray().length>0;
-      await this.enqueue(q,1,Date.now(),!known);
-    }
     if (['push','create','delete','repository','label','milestone','merge_group'].includes(event)) {
       if (event==='push' && String(body.ref).startsWith('refs/heads/')) {
         const row={ref:body.ref,object:{sha:body.after,type:'commit',url:'https://api.github.com/repos/'+repo.name+'/git/commits/'+body.after},updated_at:new Date(pointer.received).toISOString()};
@@ -591,7 +471,7 @@ export class RepositoryState extends DurableObject<Env> {
   kind(q:Query): string { return ['open_prs','recent_prs','pr','pr_delta'].includes(q.operation)?'pr':['open_issues','recent_issues','issue_delta'].includes(q.operation)?'issue':q.operation; }
   async rows(q:Query): Promise<any[] | any | null> {
     const key=queryKey(q), collection=this.sql.exec<any>('SELECT * FROM collections WHERE key=? AND complete=1',key).toArray()[0];
-    if (!collection && !(q.operation==='workflow_jobs' && q.allow_observed && this.meta('workflow_attempt:'+q.args?.id))) return null;
+    if (!collection) return null;
     if (q.operation==='pr') {
       const row=this.sql.exec<any>('SELECT data FROM resources WHERE kind=? AND id=? AND tombstone=0','pr',String(q.args?.number)).toArray()[0];
       if (row) return this.decode(row.data);
@@ -611,7 +491,6 @@ export class RepositoryState extends DurableObject<Env> {
     const members=this.sql.exec<any>('SELECT r.data FROM members m JOIN resources r ON r.kind=? AND r.id=m.id WHERE m.collection=? AND r.tombstone=0 ORDER BY CAST(r.id AS INTEGER),r.id',this.kind(q),key).toArray();
     const rows=[];
     for await(const data of this.decodeRows(members)) {
-      if (q.operation==='workflow_jobs' && Number(data.run_attempt || 1)!==(this.meta('workflow_attempt:'+q.args?.id) || 1)) continue;
       if (q.operation==='open_prs' || q.operation==='open_issues') {
         if (data.state && data.state!=='OPEN') continue;
       }
@@ -634,10 +513,6 @@ export class RepositoryState extends DurableObject<Env> {
       catch(error) {return this.unavailable(q,this.noteFailure('configure',error));}
     }
     const key=queryKey(q);
-    if(q.operation==='workflow_jobs') {
-      try {this.runAttempt(String(q.args?.id));}
-      catch(error) {return this.unavailable(q,this.noteFailure('workflow_attempt',error));}
-    }
     if (!q.allow_observed && q.operation!=='survey') await this.optionalAsync('demand',()=>this.noteDemand(q));
     if (q.cursor) return this.continuation(q,key);
     let rows:any;
@@ -706,25 +581,14 @@ export class RepositoryState extends DurableObject<Env> {
     return {observed,verified};
   }
   async continuation(q:Query,key:string): Promise<Result> {
-    const cursor=q.cursor!,now=Date.now();
-    // Legacy SQL cursors remain readable until they expire.
-    const row=this.sql.exec<any>('SELECT payload FROM cursors WHERE (id=? OR id=?) AND expires>? ORDER BY CASE WHEN id=? THEN 0 ELSE 1 END LIMIT 1',cursor,cursor.split(':')[0],now,cursor).toArray()[0];
-    let payload:any;
-    if (row) payload=await this.decode(row.payload);
-    else {
-      const match=cursor.match(/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):([1-9][0-9]{0,8})$/);
-      const object=match?await this.env.ARCHIVE.get(cursorKey(this.meta('repository')?.id,match[1],Number(match[2]))):null;
-      payload=object?await object.json():null;
-      if (!payload || payload.repository!==this.meta('repository')?.id || !(payload.expires>now)) return this.unavailable(q,'cursor_expired');
-    }
+    const now=Date.now(),repo=this.meta('repository')?.id;
+    const match=q.cursor!.match(/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):([1-9][0-9]{0,8})$/);
+    const object=match && repo?await this.env.ARCHIVE.get(cursorKey(repo,match[1],Number(match[2]))):null;
+    const payload:any=object?await object.json():null;
+    if (!payload || payload.repository!==repo || !(payload.expires>now) || payload.result?.data===undefined) return this.unavailable(q,'cursor_expired');
     if (payload.key!==key) return this.unavailable(q,'cursor_query_mismatch');
     if (Boolean(payload.allow_observed)!==Boolean(q.allow_observed)) return this.unavailable(q,'cursor_coverage_mismatch');
-    if (payload.result?.data!==undefined) return payload.result;
-    // Existing ten-minute cursors survive a rolling deployment. Only an offset
-    // inside the stored snapshot can continue it; never fabricate an empty page.
-    const legacy=cursor.match(/^([^:]+):([1-9][0-9]{0,8})$/),offset=Number(legacy?.[2]),id=legacy?.[1] || '';
-    if (!legacy || !Array.isArray(payload.rows) || offset>=payload.rows.length) return this.unavailable(q,'cursor_invalid');
-    return this.page(payload.result,payload.rows,id,offset);
+    return payload.result;
   }
   page(result:Result,rows:any[],id:string,offset:number): Result {
     // Keep the number of client round trips bounded as inventories grow.
@@ -745,11 +609,9 @@ export class RepositoryState extends DurableObject<Env> {
       const active=this.sql.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q)).toArray()[0];
       return active?.at>Date.now()-300000?300000:86400000;
     }
-    if (q.operation==='reviews' || q.operation==='checks') return 6*3600000;
+    if (q.operation==='reviews') return 6*3600000;
     const demand=this.sql.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q)).toArray()[0];
     if (q.operation==='statuses') return demand?.at>Date.now()-300000?300000:3600000;
-    if (q.operation==='workflow_jobs') return 60000;
-    if (q.operation==='workflow_runs') return demand?.at>Date.now()-300000?60000:3600000;
     if (['issue_comments','review_comments','review_threads','reviews','reactions'].includes(q.operation)) return demand?.at>Date.now()-300000?300000:3600000;
     return 3600000;
   }
@@ -757,7 +619,7 @@ export class RepositoryState extends DurableObject<Env> {
     if (q.operation.endsWith('_delta')) return 0;
     const demand=this.sql.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q)).toArray()[0];
     if (demand?.at>Date.now()-300000) return 5;
-    if (['open_prs','open_issues','repository','refs','workflow_runs'].includes(q.operation)) return 10;
+    if (['open_prs','open_issues','repository','refs'].includes(q.operation)) return 10;
     return 20;
   }
   async noteDemand(q:Query): Promise<void> {
@@ -770,7 +632,7 @@ export class RepositoryState extends DurableObject<Env> {
       this.sql.exec("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?),due=CASE WHEN wait_reason IS NULL AND attempt=0 THEN MIN(due,?) ELSE due END WHERE key=?",now,now,key);
     }
     if (prior?.at>now-300000) return;
-    if (complete && q.operation!=='progress' && !(q.operation==='workflow_jobs' && this.meta('workflow_finished:'+q.args?.id)) && !this.sql.exec('SELECT key FROM jobs WHERE key=?',key).toArray().length) await this.enqueue(q,20,now+this.interval(q));
+    if (complete && q.operation!=='progress' && !this.sql.exec('SELECT key FROM jobs WHERE key=?',key).toArray().length) await this.enqueue(q,20,now+this.interval(q));
     // Becoming active advances a quiet audit to its hot interval. A client
     // still receives existing data immediately; actual quota waits stay intact.
     this.sql.exec("UPDATE jobs SET due=MIN(due,?),priority=5,lane=CASE WHEN ? THEN 'verification' ELSE 'requested' END WHERE key=? AND attempt=0 AND started IS NULL AND wait_reason IS NULL",complete?now+this.interval(q):now,Number(complete),key);
@@ -785,20 +647,15 @@ export class RepositoryState extends DurableObject<Env> {
     return this.sql.exec<any>('SELECT * FROM jobs WHERE due<=? AND lease_until<=? ORDER BY CASE WHEN lane=? THEN 0 WHEN lane=\'requested\' THEN 1 WHEN lane=\'active\' THEN 2 WHEN lane=\'verification\' THEN 3 ELSE 4 END,due,key LIMIT 1',now,now,preferred).toArray()[0];
   }
   dormant(q:Query): boolean {
-    if (q.operation==='workflow_jobs' && this.meta('workflow_finished:'+q.args?.id)) return true;
     const demand=this.sql.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q)).toArray()[0];
     if (demand?.at>Date.now()-300000) return false;
-    if (q.operation==='workflow_jobs') {
-      const row=this.sql.exec<any>('SELECT data FROM resources WHERE kind=? AND id=?','workflow_runs',String(q.args?.id)).toArray()[0];
-      return Boolean(this.meta('workflow_finished:'+q.args?.id) || row && JSON.parse(row.data).status==='completed');
-    }
     let numbers:string[]=[];
     if (q.args?.number) numbers=[String(q.args.number)];
     else if (q.operation==='reactions') {
       const row=this.sql.exec<any>('SELECT parent,tombstone FROM resources WHERE kind=? AND id=?','review_comments',String(q.args?.id)).toArray()[0];
       if (row?.tombstone) return true;
       if (row?.parent) numbers=[row.parent];
-    } else if (['statuses','checks'].includes(q.operation)) numbers=this.sql.exec<any>('SELECT number FROM head_prs WHERE sha=?',String(q.args?.sha)).toArray().map(r=>r.number);
+    } else if (q.operation==='statuses') numbers=this.sql.exec<any>('SELECT number FROM head_prs WHERE sha=?',String(q.args?.sha)).toArray().map(r=>r.number);
     if (!numbers.length) return false;
     return numbers.every(number=>{
       const row=this.sql.exec<any>("SELECT data FROM resources WHERE kind IN ('pr','issue') AND id=? ORDER BY kind DESC LIMIT 1",number).toArray()[0];
@@ -818,9 +675,6 @@ export class RepositoryState extends DurableObject<Env> {
       if(job.page===1 && !job.nested) this.metric('requested_single_latency_ms',q,'requested',Date.now()-requested);
     }
     this.sql.exec('UPDATE jobs SET due=?,priority=?,lane=?,dirty=?,started=NULL,cursor=NULL,page=1,api=NULL,etag=?,attempt=0,wait_reason=NULL,nested=NULL,requested_at=NULL WHERE key=?',again?Date.now():Date.now()+this.interval(q),again?current.priority:this.priority(q),this.lane(q,again),Number(again),etag || null,job.key);
-    if(!again && q.operation==='workflow_jobs' && this.meta('workflow_finished:'+q.args?.id)) {
-      this.setMeta('important_final_pending:'+q.args?.id,false);this.setMeta('important_active:'+q.args?.id,false);
-    }
     if (!again && this.dormant(q)) this.sql.exec('DELETE FROM jobs WHERE key=?',job.key);
   }
   async refresh(job:any,supplied?:any): Promise<void> {
@@ -830,8 +684,7 @@ export class RepositoryState extends DurableObject<Env> {
       job.start_generation=job.generation || 0;
       this.sql.exec('UPDATE jobs SET started=?,start_generation=? WHERE key=?',started,job.start_generation,job.key);
     }
-    const runAttempt=q.operation==='workflow_jobs'?this.runAttempt(String(q.args?.id)):undefined;
-    const upstream=q.operation==='workflow_runs'?{...q,args:{after:new Date((this.meta('workflow_watermark') || Date.parse(this.meta('workflow_since')))-300000).toISOString()}}:q.operation==='workflow_jobs'?{...q,args:{...q.args,attempt:runAttempt}}:q;
+    const upstream=q;
     let nested:any;
     if(job.nested)try {nested=await this.decode(job.nested);}catch(error) {
       if(error instanceof Error && error.message==='resource unavailable')throw new Error('staging page missing');
@@ -905,14 +758,7 @@ export class RepositoryState extends DurableObject<Env> {
           if ((!prior || prior.observed<=started) && (!before || before.updatedAt!==row.updatedAt)) changedNumbers.add(row.number);
           if ((!prior || prior.observed<=started) && (!before || before.headRefOid!==row.headRefOid)) changedHeads.add(row.number);
         }
-        if (q.operation==='workflow_jobs') row.run_attempt ||= runAttempt;
-        if (q.operation==='workflow_runs' && !this.workflowAttempt(id,Number(row.run_attempt || 1))) continue;
         if (await this.put(kind,id,row,started,false,String(q.args?.number || q.args?.id || q.args?.sha || ''))) acceptedIDs.add(id);
-        if (q.operation==='workflow_runs' && acceptedIDs.has(id)) {
-          this.noteWorkflow(id,row);
-          const key=queryKey({operation:'workflow_jobs',args:{id}});
-          if (this.importantPending(id)) await this.enqueue({repository:repo.name,operation:'workflow_jobs',args:{id}},1);
-        }
       }
       // Keep newer webhook membership when the reconciliation began before that event.
       const prior=this.sql.exec<any>('SELECT m.id,r.observed FROM members m LEFT JOIN resources r ON r.kind=? AND r.id=m.id WHERE m.collection=?',kind,job.key).toArray();
@@ -920,7 +766,7 @@ export class RepositoryState extends DurableObject<Env> {
       // from that traversal cannot delete a previously observed open resource;
       // webhooks and delta surveys supply actual state changes instead.
       const openInventory=['open_prs','open_issues'].includes(q.operation);
-      for (const row of prior) if (q.operation!=='workflow_runs' && !(openInventory && result.api==='core') && !memberIDs.has(row.id) && row.observed<=started && this.sql.exec<any>('SELECT observed FROM resources WHERE kind=? AND id=?',kind,row.id).toArray()[0]?.observed<=started) this.membership(job.key,row.id,false);
+      for (const row of prior) if (!(openInventory && result.api==='core') && !memberIDs.has(row.id) && row.observed<=started && this.sql.exec<any>('SELECT observed FROM resources WHERE kind=? AND id=?',kind,row.id).toArray()[0]?.observed<=started) this.membership(job.key,row.id,false);
       for (const id of memberIDs) {
         const current=openInventory?this.sql.exec<any>('SELECT data,tombstone FROM resources WHERE kind=? AND id=?',kind,id).toArray()[0]:null;
         if(current && (current.tombstone || (await this.decode(current.data)).state!=='OPEN')) continue;
@@ -931,7 +777,6 @@ export class RepositoryState extends DurableObject<Env> {
     if (!this.sql.exec('SELECT key FROM collections WHERE key=? AND complete=1',job.key).toArray().length) this.nextRevision('collection',job.key);
     this.sql.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET complete=1,verified=excluded.verified,revision=excluded.revision,etag=excluded.etag',job.key,q.operation,JSON.stringify(q.args || {}),1,Date.now(),this.revision(),job.page===1?result.etag || null:null);
     this.finishJob(job,q,job.page===1?result.etag || null:null);
-    if (q.operation==='workflow_runs') this.setMeta('workflow_watermark',started);
     if (['pr_delta','issue_delta'].includes(q.operation)) {
       const operation=q.operation==='pr_delta'?'open_prs':'open_issues', inventory=queryKey({operation});
       for (const row of rows) {
@@ -954,7 +799,7 @@ export class RepositoryState extends DurableObject<Env> {
           await this.put('pr',itemKey,row,started);
           this.sql.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET complete=1,verified=excluded.verified,revision=excluded.revision',itemKey,'pr',JSON.stringify({number:row.number}),1,Date.now(),this.revision(),null);
         }
-        if (q.operation==='open_prs' && row.headRefOid) for (const operation of ['statuses','checks']) await this.enqueue({repository:repo.name,operation,args:{sha:row.headRefOid}},2);
+        if (q.operation==='open_prs' && row.headRefOid) for (const operation of ['statuses']) await this.enqueue({repository:repo.name,operation,args:{sha:row.headRefOid}},2);
       }
       if(q.operation==='open_prs') this.setMeta('bootstrap_inventory',Date.now());
     }
@@ -1095,7 +940,6 @@ export class RepositoryState extends DurableObject<Env> {
             this.retentionState[name]={...row,completed:Number.isSafeInteger(row.completed) && row.completed<=Date.now()?row.completed:undefined};
           }
         }
-        if(!this.ciAfter)this.ciAfter=Number.isSafeInteger(checkpoint.ci_after) && checkpoint.ci_after>=0?checkpoint.ci_after:0;
       }
       this.retentionProgressLoaded=true;
     }catch(error) {this.noteFailure('retention_checkpoint_load',error);}
@@ -1117,12 +961,9 @@ export class RepositoryState extends DurableObject<Env> {
     }
     if(this.migrationHeld())return;
     if(this.storageLoaded) {if(runExpiry)this.expire();await this.archiveDeliveryReceipts();}
-    if(this.storageLoaded && this.retentionPolicy.archive_ci && !this.degraded) {
-      try {await this.archiveCI(this.retentionPolicy.mode==='enforce');}catch(error) {this.noteFailure('archive_ci',error);}
-    }
     if(this.migrationHeld())return;
     try {
-      const text=JSON.stringify({version:1,classes:this.retentionState,ci_after:this.ciAfter});
+      const text=JSON.stringify({version:1,classes:this.retentionState});
       if(this.storageLoaded && this.retentionProgressLoaded && text!==this.checkpointText && Date.now()-this.checkpointAt>=30000) {
         await this.ctx.storage.sync();
         await this.maintenanceArchive.put('control/'+repo+'/retention-checkpoint.json',text);
@@ -1196,7 +1037,7 @@ export class RepositoryState extends DurableObject<Env> {
       const requests=this.requestMetrics.snapshot(now),repairMinutes=this.repairMetrics.snapshot(now).filter((r:any)=>r.at>=now-60000);
       const {intervals,...requestSummary}=requests;
       const value={version:1,at:now,level,reasons,capacity:measured,capacity_history:this.capacityHistory,tables:this.tableEstimates,table_attempt_at:this.tableAttemptAt,ingress:ingressHealth,refresh_lag_ms:this.meta('last_repair')?now-this.meta('last_repair'):null,requests:requestSummary,repair_summary:this.repairMetrics.summary(now),
-        retention:{policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,ci:this.ciProgress,receipts_pinned:this.receiptsPinned,receipt_pin_backend:'r2',r2:r2Retention},
+        retention:{policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,receipts_pinned:this.receiptsPinned,receipt_pin_backend:'r2',r2:r2Retention},
         compute:{status:'unavailable',reason:'not_exposed_by_sqlite_runtime'},connections:{status:'not_applicable'}};
       const alarm=level!=='ok'?emitAlarm(this.env,repo,value):{channel:'configured_workers_observability',emitted:false,notified:false};
       this.observation={...value,alarm};
@@ -1206,40 +1047,6 @@ export class RepositoryState extends DurableObject<Env> {
       if(this.migrationHeld())return;
       if(requests.requests || repairMinutes.length)await this.maintenanceArchive.put('telemetry/'+repo+'/'+Math.floor(now/60000)+'.json',JSON.stringify({at:now,requests:intervals.filter((r:any)=>r.at>=now-60000),repair_intervals:repairMinutes}),{customMetadata:{expires:String(now+7*86400000)}});
     }catch(error) {this.noteFailure('monitoring',error);}
-  }
-  async archiveCI(enforce=true): Promise<void> {
-    if(this.migrationHeld())return;
-    const began=Date.now(),cutoff=began-7*86400000,observedGeneration=this.policyGeneration;
-    const candidates=this.sql.exec<any>('SELECT rowid rid,kind,id,observed,length(CAST(data AS BLOB)) bytes FROM resources WHERE rowid>? ORDER BY rowid LIMIT 100',this.ciAfter).toArray();
-    let bytes=0,archived=0,eligible=0;
-    for(const row of candidates) {
-      if(Date.now()-began>=50)break;
-      if(row.bytes>4*1024**2) {this.ciAfter=row.rid;continue;}
-      if(bytes+row.bytes>4*1024**2)break;
-      bytes+=row.bytes;
-      // Workflow-run headers remain inline: scheduling uses their JSON fields.
-      if(['workflow_jobs','checks','statuses'].includes(row.kind) && row.observed<cutoff && row.bytes>4096) {
-        const before=this.sql.exec<any>('SELECT data FROM resources WHERE rowid=?',row.rid).one().data;
-        const data=JSON.parse(before);
-        if(!data.$r2) {
-          eligible++;
-          if(!enforce) {this.ciAfter=row.rid;continue;}
-          const hash=await digest(before),key='resources/'+this.meta('repository').id+'/ci/'+hash;
-          await this.maintenanceArchive.put(key,before,{sha256:hash,customMetadata:{kind:'resource',sha256:hash}});
-          // Verify stored contents before publishing the transparent SQL index.
-          const stored=await this.maintenanceArchive.get(key);
-          if(!stored || await digest(await stored.text())!==hash)throw new Error('archive_verification_failed');
-          // Preserve the inline field used by legacy attempt membership guards.
-          if(this.migrationHeld() || observedGeneration!==this.policyGeneration)return;
-          const pointer=JSON.stringify({$r2:key,...(row.kind==='workflow_jobs'?{run_attempt:data.run_attempt || 1}:{})});
-          const written=this.sql.exec('UPDATE resources SET data=? WHERE rowid=? AND kind=? AND id=? AND data=?',pointer,row.rid,row.kind,row.id,before).rowsWritten;
-          if(written)archived++;
-        }
-      }
-      this.ciAfter=row.rid;
-    }
-    if(!candidates.length)this.ciAfter=0;
-    this.ciProgress={at:Date.now(),after:this.ciAfter,examined:candidates.length,eligible,archived,bytes,enforce};
   }
   async preparedObservation(): Promise<any> {
     if(!this.observation && Date.now()-this.observationReadAt>=60000) {
@@ -1269,20 +1076,11 @@ export class RepositoryState extends DurableObject<Env> {
         }
       } catch(error) {this.noteFailure('survey_hydration',error);}
     }
-    const now=Date.now();
-    // Retire queued historical CI even if an old retry placed it far in the future.
-    const obsolete="key LIKE 'workflow_jobs:%' AND lease_until<=? AND NOT EXISTS(SELECT 1 FROM demand d WHERE d.key=jobs.key AND d.at>?) AND NOT EXISTS(SELECT 1 FROM resources r WHERE r.kind='workflow_runs' AND r.id=CAST(json_extract(jobs.query,'$.args.id') AS TEXT) AND json_extract(r.data,'$.head_branch') IN ('staging','trying') AND (json_extract(r.data,'$.status')!='completed' OR EXISTS(SELECT 1 FROM meta m WHERE m.key='important_final_pending:' || r.id AND m.value='true')))";
-    const scanned=this.sql.exec<any>('SELECT MAX(rowid) last FROM (SELECT rowid FROM jobs WHERE rowid>? ORDER BY rowid LIMIT 100)',this.obsoleteAfter).one().last;
-    const retired=this.sql.exec<any>('SELECT key,lane FROM (SELECT * FROM jobs WHERE rowid>? ORDER BY rowid LIMIT 100) jobs WHERE '+obsolete,this.obsoleteAfter,now,now-300000).toArray();
-    this.obsoleteAfter=scanned ?? 0;
-    for(const row of retired) {this.sql.exec('DELETE FROM jobs WHERE key=?',row.key);this.metric('cancellation',{repository:this.meta('repository').name,operation:'workflow_jobs'},row.lane);}
   }
   retireUnneeded(job:any): boolean {
     const q:Query=JSON.parse(job.query);
     if (NOT_MIRRORED.has(q.operation)) {this.sql.exec('DELETE FROM jobs WHERE key=?',job.key);this.optional('repair_metrics',()=>this.metric('cancellation',q,job.lane));return true;}
-    const demand=(this.sql.exec<any>('SELECT at FROM demand WHERE key=?',job.key).toArray()[0]?.at || 0)>Date.now()-300000;
-    const unneeded=q.operation==='workflow_jobs' && !demand && !this.importantPending(String(q.args?.id));
-    if (!unneeded && (job.dirty || !this.dormant(q) || !this.complete(q))) return false;
+    if (job.dirty || !this.dormant(q) || !this.complete(q)) return false;
     this.sql.exec('DELETE FROM jobs WHERE key=?',job.key);
     this.metric('cancellation',q,job.lane);return true;
   }
@@ -1447,7 +1245,7 @@ export class RepositoryState extends DurableObject<Env> {
     const input:any=req.method==='POST'?await req.json():{};
     const repo=this.meta('repository')?.id ?? input.repository_id;
     if (typeof repo!=='string' || !/^[0-9]+$/.test(repo)) throw new AdminError('repository_unconfigured');
-    if (path==='/storage/summary') return json({repository:repo,storage:this.storageState(),retention:{policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,ci:this.ciProgress,receipts_pinned:this.receiptsPinned,receipt_pin_backend:'r2'},...summary(this.sql)});
+    if (path==='/storage/summary') return json({repository:repo,storage:this.storageState(),retention:{policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,receipts_pinned:this.receiptsPinned,receipt_pin_backend:'r2'},...summary(this.sql)});
     if (path==='/storage/retention') {
       if(input.policy!==undefined) {
         let next:Policy;try {next=policy(input.policy);}catch {throw new AdminError('invalid_retention_policy');}
@@ -1460,24 +1258,14 @@ export class RepositoryState extends DurableObject<Env> {
         this.policyUpdateFlight=update.catch(()=>{});
         await update;
       }
-      return json({policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,ci:this.ciProgress,receipts_pinned:this.receiptsPinned,receipt_pin_backend:'r2',budget:{rows:6000,bytes:4*1024**2,cooperative_io_budget_ms:50,cpu_bound:'rows_and_bytes',receipt_archive_io_budget_ms:2000,receipt_archive_rows:100},observation:await this.preparedObservation()});
+      return json({policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,receipts_pinned:this.receiptsPinned,receipt_pin_backend:'r2',budget:{rows:6000,bytes:4*1024**2,cooperative_io_budget_ms:50,cpu_bound:'rows_and_bytes',receipt_archive_io_budget_ms:2000,receipt_archive_rows:100},observation:await this.preparedObservation()});
     }
     if (path==='/storage/scan') return json(scan(this.sql,input));
-    if (path==='/storage/recovery') return json(await createRecovery(this.env.ARCHIVE,this.ctx.storage,this.sql,repo,this.revision()));
-    if (path==='/storage/export') return json(await exportPage(this.env.ARCHIVE,this.sql,repo,input));
-    if (path==='/storage/verify') return json(await verifyExport(this.env.ARCHIVE,repo,input));
     if (path==='/storage/cleanup') {
       const rule=CLEANUP[input.class];
       if (!rule) throw new AdminError('unknown_cleanup_class');
-      let bound:{upper:number,started:number} | null=null,recovery:string | null=null;
-      if (rule.recovery) {
-        // Non-ephemeral rows are deleted only within a verified export.
-        const manifest=await readManifest(this.env.ARCHIVE,repo,input.recovery),exported=manifest.tables['class:'+input.class] ?? (rule.bound?manifest.tables[rule.table]:undefined);
-        if (!exported?.verified || !Number.isSafeInteger(exported.started)) throw new AdminError('recovery_not_verified');
-        bound={upper:exported.upper,started:exported.started};recovery=manifest.id;
-      }
-      const before=this.sql.databaseSize,result=deleteClass(this.sql,input.class,bound,input);
-      return json({class:input.class,table:rule.table,...result,recovery,database_size_before:before,database_size_after:this.sql.databaseSize,
+      const before=this.sql.databaseSize,result=deleteClass(this.sql,input.class,input);
+      return json({class:input.class,table:rule.table,...result,database_size_before:before,database_size_after:this.sql.databaseSize,
         note:'Deleted rows become reusable free pages; the physical database size need not shrink. Prove headroom with /admin/storage/probe.'});
     }
     if (path==='/storage/probe') {
@@ -1738,10 +1526,6 @@ export class RepositoryState extends DurableObject<Env> {
         const changed=this.frozenSince();
         const planned=this.migrationState && this.migrationState.phase!=='abandoned';
         if (changed!==null && !planned) {requestUnavailable=true;return json({...this.unavailable(q,'mirror_frozen'),frozen_since:changed},200,{'X-TauCeti-Storage':'degraded'});}
-        if(q.operation==='workflow_jobs') {
-          try {this.runAttempt(String(q.args?.id));}
-          catch(error) {requestUnavailable=true;return json(this.unavailable(q,this.noteFailure('workflow_attempt',error)));}
-        }
         const etag='"'+this.revision()+'"',headers:Record<string,string>=this.degraded?{'X-TauCeti-Storage':'degraded'}:{};
         if (!q.cursor && req.headers.get('if-none-match')===etag && q.operation!=='progress' && this.sql.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q)).toArray().length) {
           await this.optionalAsync('demand',()=>this.noteDemand(q));
