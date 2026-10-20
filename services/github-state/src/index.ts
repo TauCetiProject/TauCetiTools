@@ -1,7 +1,7 @@
 import { Env, EventPointer, Query, Repository, authorize, digest, json, repositories, repository, stub, validSignature, validateQuery, parseGitHub, CI_EVENTS } from './protocol';
 import { readMigration } from './migration';
 import { classify, log, requestId } from './storage';
-import { PARK_AFTER_ATTEMPTS, backlog, backoff, drain, ingressMode, noteRepositoryFull, park, reconcile, setIngressMode, storageState } from './ingress';
+import { PARK_AFTER_ATTEMPTS, backlog, backoff, drain, maintainIngress, maintainRaw, release, ingressMode, noteRepositoryFull, park, reconcile, setIngressMode, storageState } from './ingress';
 import { R2_CLASSES, policy, retirePrefix } from './retention';
 export { RepositoryState } from './repository';
 export { InstallationScheduler } from './installation';
@@ -69,8 +69,12 @@ export default {
         // R2 overwrite on duplicate is harmless only for the same signed bytes.
         const hash=await digest(body),prior=await env.ARCHIVE.head(key);
         if (prior?.customMetadata?.sha256 && prior.customMetadata.sha256!==hash) return json({error:'delivery_conflict'},409);
-        await env.ARCHIVE.put(key,body,{customMetadata:{sha256:hash,event,expires:String(received+14*86400000)}});
-        for (const repo of target) await env.EVENTS.send({key,delivery,event,repository:repo.name,received});
+        await env.ARCHIVE.put(key,body,{customMetadata:{sha256:hash,event,targets:JSON.stringify(target.map(r=>r.id)),received:String(received),expires:String(received+14*86400000)}});
+        for (const repo of target) {
+          const pointer={key,delivery,event,repository:repo.name,received};
+          await park(env,repo,pointer,'accepted');
+          await env.EVENTS.send(pointer);
+        }
         return json({accepted:true},202);
       }
       // Reporting never enters query(), noteDemand(), configure(), or the scheduler.
@@ -103,7 +107,7 @@ export default {
         const data=await stub(env.REPOSITORIES,repo.id).fetch('https://internal/' + (url.pathname.endsWith('health')?'health':'changes?after=' + encodeURIComponent(url.searchParams.get('after') || '0')));
         if (!url.pathname.endsWith('health')) return data;
         const quota=await stub(env.INSTALLATIONS,repo.installation).fetch('https://internal/health');
-        return json({state:await data.json(),quota:await quota.json()});
+        return json({state:await data.json(),quota:await quota.json(),recovery:await backlog(env,repo,true).catch(()=>({error:'recovery_status_unavailable'}))});
       }
       if (url.pathname==='/admin/bootstrap' && req.method==='POST') {
         if (!await authorize(req,env,undefined,true)) return json({error:'unauthorized'},401);
@@ -189,7 +193,10 @@ export default {
         else {
           started=Date.now();
           const result=await stub(env.REPOSITORIES,repo.id).fetch('https://internal/event',{method:'POST',body:JSON.stringify(pointer)});
-          if (result.ok) { message.ack(); return; }
+          if (result.ok) {
+            await release(env,repo,pointer).catch(error=>log('event_cleanup_deferred',{delivery:pointer.delivery,reason:classify(error)}));
+            message.ack(); return;
+          }
           const detail:any=await result.json().catch(()=>({}));
           // A full or unavailable repository is parked immediately rather
           // than spending the queue's retry budget.
@@ -226,6 +233,7 @@ export default {
   async scheduled(_event:ScheduledController,env:Env,ctx:ExecutionContext):Promise<void> {
     const installations=new Set(repositories(env).map(repo=>repo.installation));
     for(const installation of installations)ctx.waitUntil((async()=>{await stub(env.INSTALLATIONS,installation).fetch('https://internal/maintenance',{method:'POST'});})().catch(error=>log('installation_maintenance_failed',{reason:classify(error)})));
+    ctx.waitUntil(maintainRaw(env,(payload,event)=>targets(env,payload,event)).catch(error=>log('raw_reconciliation_failed',{reason:classify(error)})));
     for (const repo of repositories(env)) {
       if(repo.bors_receipts_url || (repo.name==='TauCetiProject/TauCeti' && env.BORS_ACTIVITY)) ctx.waitUntil(stub(env.REPOSITORIES,repo.id).fetch('https://internal/activity-refresh',{method:'POST'}));
       ctx.waitUntil((async()=>{
@@ -241,13 +249,7 @@ export default {
         if (!tick.ok || state.degraded || (await ingressMode(env,repo)).mode==='parked') {log('delivery_audit_skipped',{repository:repo.name,degraded:Boolean(state.degraded),status:tick.status});return;}
         await stub(env.INSTALLATIONS,repo.installation).fetch('https://internal/audit',{method:'POST',body:JSON.stringify(repo)});
       })().catch(error=>log('scheduled_failed',{repository:repo.name,reason:classify(error)})));
-      // Drain for most of the cron minute while replay is making progress.
-      ctx.waitUntil((async()=>{
-        for (const began=Date.now();Date.now()-began<20000;) {
-          const pass=await drain(env,repo,{limit:100});
-          if (pass.stopped || !pass.remaining || !pass.replayed) break;
-        }
-      })().catch(error=>log('parked_replay_failed',{repository:repo.name,reason:classify(error)})));
+      ctx.waitUntil(maintainIngress(env,repo).catch(error=>log('parked_replay_failed',{repository:repo.name,reason:classify(error)})));
     }
     // Retention is conservatively paused for this bucket while a migration
     // retains its source. Do not expire active cursors, raw input, staging, or
@@ -270,7 +272,7 @@ export default {
         if(value) {const p=policy(value);for(const name of [...p.disabled,...p.pinned])held.add(name);}
       }
       await Promise.allSettled(Object.keys(R2_CLASSES).map(async name=>{
-        if(held.has(name))return;
+        if(name==='raw_webhooks' || held.has(name))return; // Recovery owns proof before raw expiry.
         try {await retirePrefix(env.ARCHIVE,name as keyof typeof R2_CLASSES,Date.now(),async()=>{
           if(await retentionHeld())return false;
           // Recheck pins after listing and immediately before issuing deletion.

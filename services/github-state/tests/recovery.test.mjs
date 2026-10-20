@@ -22,11 +22,12 @@ function bucket(){
   async get(key){check('get',key);const o=objects.get(key);return o?{...meta(key,o),text:async()=>o.bytes.toString(),json:async()=>JSON.parse(o.bytes.toString()),arrayBuffer:async()=>new Uint8Array(o.bytes).buffer}:null;},
   async put(key,value,options={}){check('put',key);const bytes=Buffer.from(typeof value==='string'?value:new Uint8Array(value));
    if(options.sha256 && sha(bytes)!==options.sha256) throw new Error('digest mismatch');
+   if(options.onlyIf?.etagDoesNotMatch==='*' && objects.has(key)) return null;
    if(options.onlyIf?.etagMatches && objects.get(key)?.etag!==options.onlyIf.etagMatches) return null;
-   objects.set(key,{bytes,customMetadata:options.customMetadata || {},uploaded:new Date(),etag:sha(bytes)});},
+   objects.set(key,{bytes,customMetadata:options.customMetadata || {},uploaded:new Date(),etag:sha(bytes)});return meta(key,objects.get(key));},
   async delete(keys){for(const key of [].concat(keys)){check('delete',key);objects.delete(key);}},
-  async list({prefix='',limit=1000,cursor}={}){const keys=[...objects.keys()].filter(k=>k.startsWith(prefix)).sort(),start=Number(cursor || 0);
-   return {objects:keys.slice(start,start+limit).map(k=>meta(k,objects.get(k))),truncated:start+limit<keys.length,cursor:String(start+limit)};},
+  async list({prefix='',limit=1000,cursor,startAfter}={}){check('list',prefix);const keys=[...objects.keys()].filter(k=>k.startsWith(prefix) && k>(cursor || startAfter || '')).sort();
+   return {objects:keys.slice(0,limit).map(k=>meta(k,objects.get(k))),truncated:limit<keys.length,cursor:keys[Math.min(keys.length,limit)-1]};},
  };
 }
 // Repository double: deduplicates by delivery ID like the real receipt table.
@@ -107,26 +108,29 @@ test('replay removes pointers only after the receipt commits; crashes repeat har
  h.archive.failures.push((op,key)=>op==='delete' && key.includes('/bodies/r1'));
  h.archive.failures.push((op,key)=>op==='delete' && key.includes('/pointers/') && key.endsWith('-r2.json'));
  const {drain}=await load('src/ingress.ts');
- await assert.rejects(drain(h.env,repo));
+ assert.equal((await drain(h.env,repo)).failed,2);
  assert.equal(h.state.applied.get('r1'),1);assert.equal(parked(h.archive,'r1').length,1);
  assert.equal(h.state.applied.get('r2'),1);assert.equal(parked(h.archive,'r2').length,1);
+ for(const key of parked(h.archive,'r1').concat(parked(h.archive,'r2'))){const p=JSON.parse(h.archive.objects.get(key).bytes);p.retry_at=0;await h.archive.put(key,JSON.stringify(p));}
  const result=await drain(h.env,repo);
  assert.equal(result.replayed,2);
  for(const d of ['r1','r2','r3']) {assert.equal(h.state.applied.get(d),1,d+' applied once');assert.equal(parked(h.archive,d).length,0);}
  assert.equal([...h.archive.objects.keys()].filter(k=>k.startsWith('parked/')).length,0);
  // A redelivered message after parking applies directly; its pointer then deduplicates.
  h.state.full=true;await deliver(h.env,'r4');h.state.full=false;
+ await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
  assert.equal((await deliver(h.env,'r4')).acked,true);
- assert.equal((await drain(h.env,repo)).replayed,1);assert.equal(h.state.applied.get('r4'),1);
+ assert.equal((await drain(h.env,repo)).replayed,0);assert.equal(h.state.applied.get('r4'),1);
 });
 
 test('a persistently failing parked event is held aside without blocking newer events',async()=>{
  const h=harness();h.state.full=true;
  await deliver(h.env,'bad');
  h.state.full=false;
- const {drain,backlog}=await load('src/ingress.ts');
+ const {drain,backlog,maintainIngress}=await load('src/ingress.ts');
  h.archive.objects.delete(JSON.parse(h.archive.objects.get(parked(h.archive,'bad')[0]).bytes).key);
- for(let i=0;i<5;i++) await drain(h.env,repo);
+ for(let i=0;i<5;i++){for(const key of parked(h.archive,'bad')){const p=JSON.parse(h.archive.objects.get(key).bytes);p.retry_at=0;await h.archive.put(key,JSON.stringify(p));}await drain(h.env,repo);}
+ await maintainIngress(h.env,repo);
  const report=await backlog(h.env,repo);
  assert.equal(report.parked.count,0);assert.equal(report.held.count,1);
  h.state.full=true;await deliver(h.env,'good');h.state.full=false;
@@ -838,3 +842,259 @@ test('an acknowledged archive-policy change fences a pending pointer publication
  assert.equal(db.prepare("SELECT data FROM resources WHERE id='7'").get().data,before);
  assert.ok([...archive.objects.keys()].some(k=>k.includes('/ci/')),'verified upload retained for reference-safe retirement');
 });
+
+const ingress=await load('src/ingress.ts');
+const tick=state=>state.fetch(new Request('https://internal/tick',{method:'POST',body:JSON.stringify({repository:repo.name})}));
+async function scheduled(env){const tasks=[];await worker.scheduled({},env,{waitUntil:p=>tasks.push(p)});await Promise.all(tasks);}
+const clock=async fn=>{const original=Date.now;let now=original();Date.now=()=>now;try{await fn(ms=>{now+=ms;});}finally{Date.now=original;}};
+function cronHarness(){
+ const h=harness();let githubReads=0;
+ const fetch=h.env.REPOSITORIES.get().fetch;
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{
+  if(new URL(url).pathname==='/tick'){if(!h.state.full)await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));return Response.json({ok:true});}
+  if(new URL(url).pathname==='/storage/deliveries')return Response.json({known:[]});
+  return fetch(url,init);
+ }});
+ h.env.INSTALLATIONS={idFromName:x=>x,get:()=>({fetch:async url=>{assert.ok(['/audit','/maintenance'].includes(new URL(url).pathname),'only existing installation maintenance and audit are allowed');return Response.json({ok:true});}})};
+ h.githubReads=()=>githubReads;
+ return h;
+}
+
+test('only ordinary cron passes recover held and legacy DLQ input; retry dates expire and poison is isolated',async()=>clock(async advance=>{
+ const h=cronHarness();h.state.full=true;
+ await deliver(h.env,'held-valid');h.state.full=false;h.state.error='dependency_down';
+ for(let i=0;i<5;i++){await scheduled(h.env);advance(61000);}
+ const held=[...h.archive.objects.keys()].find(k=>k.includes('/held/'));
+ assert.ok(held);assert.equal(JSON.parse(h.archive.objects.get(held).bytes).replay_failures,5);
+ // A DLQ entry is recovered from raw data; no DLQ queue poll or GitHub read.
+ await h.archive.put('webhooks/2026-10-20/dlq-valid.json',JSON.stringify({repository:{id:100},installation:{id:200}}),{customMetadata:{event:'ping',expires:String(Date.now()+1)}});
+ h.state.error=null;
+ await h.archive.put('parked/100/held/000000000000001-poison.json',JSON.stringify({key:'missing-body',delivery:'poison',event:'ping',repository:repo.name,received:1,replay_failures:5}));
+ for(let i=0;i<6;i++){await scheduled(h.env);advance(61000);}
+ assert.equal(h.state.applied.get('held-valid'),1);assert.equal(h.state.applied.get('dlq-valid'),1);
+ assert.ok(h.archive.objects.has('parked/100/held/000000000000001-poison.json'));
+ assert.equal(h.githubReads(),0);
+ const status=await ingress.backlog(h.env,repo);assert.equal(status.held.count,1);assert.ok(status.last_attempt);assert.ok(status.next_retry);
+ assert.equal(status.held_last_pass.last_error,'event_body_unavailable');
+}));
+
+test('fair continuation reaches valid input beyond a page of backed off poison pointers',async()=>clock(async advance=>{
+ const h=cronHarness();h.state.full=true;
+ for(let i=0;i<60;i++)await deliver(h.env,'old-'+String(i).padStart(2,'0'));
+ h.state.full=false;
+ for(const [key,obj] of h.archive.objects){if(key.includes('/pointers/')){const p=JSON.parse(obj.bytes);p.retry_at=Date.now()+600000;await h.archive.put(key,JSON.stringify(p));}}
+ await deliver(h.env,'z-valid',10); // Direct application already has a receipt.
+ h.state.full=true;await deliver(h.env,'zz-valid');h.state.full=false;
+ await scheduled(h.env);advance(61000);await scheduled(h.env);
+ assert.equal(h.state.applied.get('zz-valid'),1,'new event behind 60 deferred items is reached');
+ assert.equal(h.state.applied.has('old-00'),false,'future retries were honored');
+ advance(600000);await scheduled(h.env);advance(61000);await scheduled(h.env);
+ assert.equal(h.state.applied.get('old-00'),1,'expired retry became eligible');
+}));
+
+test('raw expiry cannot delete input when pinning fails; gaps and invalid dispositions are durable',async()=>clock(async advance=>{
+ const h=cronHarness();h.state.full=true;
+ const key='webhooks/2026-10-20/near-expiry.json';
+ await h.archive.put(key,JSON.stringify({repository:{id:100}}),{customMetadata:{event:'ping',expires:String(Date.now()-1)}});
+ h.archive.failures.push((op,k)=>op==='put' && k.includes('/bodies/'));
+ await ingress.maintainRaw(h.env,p=>[repo]);
+ assert.ok(h.archive.objects.has(key));
+ const gap='control/raw-gaps/near-expiry.json';assert.match(JSON.parse(h.archive.objects.get(gap).bytes).reason,/R2 put failed/);
+ advance(61000);await scheduled(h.env);
+ assert.ok(h.archive.objects.has(ingress.bodyKey(repo.id,'near-expiry')));
+ assert.equal(h.archive.objects.has(gap),false);
+ await h.archive.put('webhooks/2026-10-20/bad-json.json','{',{customMetadata:{event:'ping',expires:String(Date.now()-1)}});
+ advance(61000);await scheduled(h.env);
+ assert.equal(h.archive.objects.has('webhooks/2026-10-20/bad-json.json'),false);
+ assert.equal(JSON.parse(h.archive.objects.get('invalid/bad-json.json').bytes).reason,'invalid_json');
+ // Missing event metadata is an explicit recoverable gap, never an applied event.
+ await h.archive.put('webhooks/2026-10-20/no-metadata.json','{}',{customMetadata:{expires:String(Date.now()-1)}});
+ advance(61000);await scheduled(h.env);
+ assert.ok(h.archive.objects.has('webhooks/2026-10-20/no-metadata.json'));
+ assert.match(JSON.parse(h.archive.objects.get('control/raw-gaps/no-metadata.json').bytes).reason,/raw_event_metadata_unavailable/);
+}));
+
+test('status performs no listing or repository/GitHub request, even after maintenance errors',async()=>{
+ const h=cronHarness();await ingress.maintainIngress(h.env,repo);
+ h.archive.list=()=>{throw new Error('status must not scan');};
+ h.env.REPOSITORIES.get=()=>{throw new Error('status must not call repository');};
+ assert.equal((await ingress.backlog(h.env,repo)).parked.count,0);
+});
+
+test('durable leases coordinate overlapping cron passes and recover after owner death',async()=>clock(async advance=>{
+ const h=cronHarness();
+ await h.archive.put(ingress.recoveryKey(repo.id),JSON.stringify({lease_until:Date.now()+60000}));
+ await ingress.maintainIngress(h.env,repo);assert.equal((await ingress.backlog(h.env,repo)).prepared_at,null);
+ advance(61000);
+ let lists=0;const list=h.archive.list;h.archive.list=async options=>{lists++;return list(options);};
+ await Promise.all([ingress.maintainIngress(h.env,repo),ingress.maintainIngress(h.env,repo)]);
+ assert.equal(lists,4,'only one pass owns the two replay and count lists');
+ assert.equal((await ingress.backlog(h.env,repo)).lease_until,0);
+}));
+
+test('commit-time full probe survives reset, preserves cooldown, isolates cleanup failures, then restarts refresh',async()=>clock(async advance=>{
+ const f=repositoryFixture();await new Promise(resolve=>setImmediate(resolve));
+ const marker='control/100/storage.json';
+ f.state.degraded={since:Date.now(),reason:'storage_full',operation:'commit_failure'};
+ await ingress.noteRepositoryFull({ARCHIVE:f.archive},repo.id,'event',Date.now());
+ let commits=0;
+ f.state.ctx.storage.sync=async()=>{commits++;throw new Error('Exceeded the maximum database size.');};
+ await tick(f.state);
+ assert.ok(f.state.degraded);assert.equal(commits,1);
+ const first=JSON.parse(f.archive.objects.get(marker).bytes);assert.ok(first.next_probe_at>Date.now());
+ const reset=repositoryFixture({},0,f.db,f.archive).state;
+ await new Promise(resolve=>setImmediate(resolve));
+ let probes=0;reset.ctx.storage.sync=async()=>{probes++;};
+ // Every bounded expiry fails; recovery must still probe at the durable due time.
+ const originalSql=reset.sql;reset.sql=new Proxy(originalSql,{get(target,property){if(property==='exec')return (sql,...args)=>{if(/^DELETE FROM (cursors|repair_metrics|changes|retired_objects)/.test(sql))throw new Error('cleanup unavailable');return target.exec(sql,...args);};return Reflect.get(target,property);}});
+ await tick(reset);assert.equal(probes,0,'reset does not bypass persisted cooldown');
+ // Cleanup remains broken during successful headroom verification.
+ advance(61000);await tick(reset);
+ assert.equal(JSON.parse(f.archive.objects.get(marker).bytes).state,'writable');assert.equal(reset.degraded,undefined);
+ assert.ok(await reset.ctx.storage.getAlarm(),'ordinary refresh alarm restarted');
+}));
+
+test('repeated full probes back off durably and frozen stores never probe or apply',async()=>clock(async advance=>{
+ const f=repositoryFixture();await new Promise(resolve=>setImmediate(resolve));
+ f.state.degraded={since:Date.now(),reason:'storage_full',operation:'test'};
+ let probes=0;f.state.ctx.storage.sync=async()=>{if(f.db.prepare("SELECT COUNT(*) n FROM meta WHERE key LIKE 'storage_probe:%'").get().n){probes++;throw new Error('SQLITE_FULL');}};
+ for(let i=0;i<8;i++) {await tick(f.state);const s=JSON.parse(f.archive.objects.get('control/100/storage.json').bytes);assert.ok(s.next_probe_at>Date.now());advance(s.next_probe_at-Date.now());}
+ const s=JSON.parse(f.archive.objects.get('control/100/storage.json').bytes);assert.equal(s.probe_attempts,8);assert.equal(probes,8);
+ await f.archive.put('control/100/ingress.json',JSON.stringify({mode:'parked'}));await tick(f.state);assert.equal(probes,8);
+ f.state.migrationState={phase:'source_verified'};
+ const result=await tick(f.state);assert.equal(result.status,503);assert.equal(probes,8);
+ const response=await f.state.fetch(new Request('https://internal/event',{method:'POST',body:'{}'}));assert.equal((await response.json()).error,'migration_frozen');
+}));
+
+test('a committed receipt survives repeated cleanup failures and SQL receipt expiry',async()=>clock(async advance=>{
+ const f=repositoryFixture();await new Promise(resolve=>setImmediate(resolve));
+ await f.archive.put('body','{}');
+ const p={key:'body',delivery:'forever',event:'ping',repository:repo.name,received:Date.now()};
+ const request=()=>new Request('https://internal/event',{method:'POST',body:JSON.stringify(p)});
+ assert.equal((await f.state.fetch(request())).status,200);
+ assert.ok(f.archive.objects.has(ingress.receiptKey(repo.id,'forever')));
+ advance(15*86400000);await f.state.storageMaintenance();
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,0);
+ await f.archive.delete('body');
+ const revision=f.state.revision();assert.equal((await f.state.fetch(request())).status,200);assert.equal(f.state.revision(),revision);
+}));
+
+test('queue success releases pinned input immediately and R2 cleanup errors remain cron-owned',async()=>{
+ const h=harness();h.state.full=true;await deliver(h.env,'queue-clean');h.state.full=false;
+ assert.ok(durable(h,'queue-clean'));
+ await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
+ assert.equal((await deliver(h.env,'queue-clean')).acked,true);
+ assert.equal(parked(h.archive,'queue-clean').length,0);assert.equal(h.archive.objects.has(ingress.bodyKey(repo.id,'queue-clean')),false);
+ h.state.full=true;await deliver(h.env,'queue-clean-fail');h.state.full=false;
+ await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
+ h.archive.failures.push((op,k)=>op==='delete' && k.includes('/bodies/queue-clean-fail'));
+ assert.equal((await deliver(h.env,'queue-clean-fail')).acked,true);
+ assert.equal(parked(h.archive,'queue-clean-fail').length,1);
+ assert.equal((await ingress.drain(h.env,repo)).replayed,1);
+});
+
+test('overlapping queue and cron event calls coalesce before the first R2 await',async()=>{
+ const f=repositoryFixture();await new Promise(resolve=>setImmediate(resolve));await f.archive.put('body','{}');
+ let applications=0;const ingest=f.state.ingest.bind(f.state);f.state.ingest=async p=>{applications++;await new Promise(r=>setImmediate(r));return ingest(p);};
+ const p={key:'body',delivery:'overlap',event:'ping',repository:repo.name,received:Date.now()};
+ const responses=await Promise.all([1,2,3].map(()=>f.state.fetch(new Request('https://internal/event',{method:'POST',body:JSON.stringify(p)}))));
+ assert.ok(responses.every(r=>r.ok));assert.equal(applications,1);
+});
+
+test('systemic parking stops preserve poison budgets, and durable full mode avoids repository dispatch',async()=>{
+ const h=harness();h.state.full=true;await deliver(h.env,'full-budget');const key=parked(h.archive,'full-budget')[0];
+ await ingress.drain(h.env,repo);assert.equal(JSON.parse(h.archive.objects.get(key).bytes).replay_failures,undefined);
+ h.env.REPOSITORIES.get=()=>{throw new Error('full maintenance must not dispatch');};
+ await ingress.maintainIngress(h.env,repo);assert.equal(JSON.parse(h.archive.objects.get(key).bytes).replay_failures,undefined);
+});
+
+test('successful maintenance runs on consecutive cron minutes despite variable R2 latency',async()=>clock(async advance=>{
+ const h=cronHarness();await ingress.maintainIngress(h.env,repo);const first=(await ingress.backlog(h.env,repo)).last_attempt;
+ advance(59950);await ingress.maintainIngress(h.env,repo);assert.ok((await ingress.backlog(h.env,repo)).last_attempt>first);
+}));
+
+test('deadline exhaustion never advances an unvisited lane or skips the rest of a partial page',async()=>clock(async advance=>{
+ const h=harness();h.state.full=true;for(let i=0;i<60;i++)await deliver(h.env,'deadline-'+String(i).padStart(2,'0'));h.state.full=false;
+ const original=h.env.REPOSITORIES.get().fetch;
+ h.env.REPOSITORIES.get=()=>({fetch:async(...args)=>{advance(1000);return original(...args);}});
+ const pass=await ingress.drain(h.env,repo,{limit:50,deadline:Date.now()+1});
+ assert.equal(pass.replayed,10);assert.ok(pass.cursor.endsWith('-deadline-09.json'));
+ const unvisited=await ingress.drain(h.env,repo,{limit:50,cursor:pass.cursor,deadline:Date.now()-1});assert.equal(unvisited.cursor,pass.cursor);assert.equal(unvisited.replayed,0);
+ const resumed=await ingress.drain(h.env,repo,{limit:50,cursor:pass.cursor});assert.equal(resumed.replayed,50);assert.equal(h.state.applied.size,60);
+}));
+
+test('failed count preparation keeps the last observation timestamp and defaults survive first-owner crash',async()=>clock(async advance=>{
+ const h=cronHarness();await ingress.maintainIngress(h.env,repo);const before=await ingress.backlog(h.env,repo);
+ advance(61000);h.archive.failures.push((op,k)=>op==='list' && k.includes('/pointers/'));await ingress.maintainIngress(h.env,repo);
+ const after=await ingress.backlog(h.env,repo);assert.equal(after.prepared_at,before.prepared_at);assert.ok(after.last_attempt>before.last_attempt);assert.ok(after.last_error);
+ await h.archive.put(ingress.recoveryKey(repo.id),JSON.stringify({lease_until:Date.now()+60000,last_attempt:Date.now()}));
+ const fresh=await ingress.backlog(h.env,repo);assert.equal(fresh.parked.count,null);assert.equal(fresh.held.count,null);
+ await h.archive.put('control/raw-recovery.json',JSON.stringify({last_error:'other-repository-delivery-secret',prepared_at:1}));
+ assert.equal(JSON.stringify(await ingress.backlog(h.env,repo,true)).includes('other-repository-delivery-secret'),false);
+}));
+
+test('re-parking preserves held retries and successful probe hysteresis survives an immediate new full report',async()=>clock(async advance=>{
+ const h=harness();h.state.full=true;const message=await deliver(h.env,'held-again');
+ const normal=parked(h.archive,'held-again')[0],p=JSON.parse(h.archive.objects.get(normal).bytes),held=ingress.pointerKey(repo.id,p,true);p.replay_failures=7;p.retry_at=Date.now()+600000;
+ await h.archive.put(held,JSON.stringify(p));await h.archive.delete(normal);await ingress.park(h.env,repo,message.body,'again');
+ assert.equal(parked(h.archive,'held-again').length,0);assert.equal(JSON.parse(h.archive.objects.get(held).bytes).replay_failures,7);
+ const f=repositoryFixture();await new Promise(resolve=>setImmediate(resolve));f.state.degraded={since:Date.now(),reason:'storage_full',operation:'test'};await tick(f.state);
+ const writable=JSON.parse(f.archive.objects.get('control/100/storage.json').bytes);assert.equal(writable.bytes,4*1048576);assert.equal(writable.probe_attempts,1);
+ advance(1);await ingress.noteRepositoryFull({ARCHIVE:f.archive},repo.id,'new-event',Date.now());
+ const full=JSON.parse(f.archive.objects.get('control/100/storage.json').bytes);assert.equal(full.probe_attempts,1);assert.equal(full.next_probe_at,writable.next_probe_at);
+}));
+
+test('raw maintenance uses metadata without downloading committed bodies, promotes SQL receipts, and passes one page',async()=>clock(async advance=>{
+ const h=cronHarness();for(let i=0;i<60;i++){
+  const d='raw-'+i,bytes=JSON.stringify({repository:{id:100}}),hash=sha(Buffer.from(bytes));
+  await h.archive.put('webhooks/2026-10-20/'+d+'.json',bytes,{customMetadata:{event:'ping',sha256:hash,targets:'["100"]',received:'1'}});await h.archive.put(ingress.receiptKey(repo.id,d),'{}');
+ }
+ const get=h.archive.get;h.archive.get=async key=>{assert.ok(!key.startsWith('webhooks/'));return get(key);};await ingress.maintainRaw(h.env,()=>[repo]);
+ assert.ok(JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes).last_completed);h.archive.get=get;
+ await h.archive.put('webhooks/2026-10-20/legacy-known.json','{"repository":{"id":100}}',{customMetadata:{event:'ping'}});
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{assert.equal(new URL(url).pathname,'/storage/deliveries');return Response.json({known:JSON.parse(init.body).ids});}});
+ advance(60000);await ingress.maintainRaw(h.env,()=>[repo]);assert.ok(h.archive.objects.has(ingress.receiptKey(repo.id,'legacy-known')));assert.equal(parked(h.archive,'legacy-known').length,0);
+}));
+
+test('permanent receipts cannot delay expiry sweeps for snapshots and staging',async()=>{
+ const h=cronHarness();for(let i=0;i<150;i++)await h.archive.put('receipts/100/'+i+'.json','{}');
+ await h.archive.put('snapshots/old','{}',{customMetadata:{expires:'1'}});await h.archive.put('staging/old','{}',{customMetadata:{expires:'1'}});
+ for(let i=0;i<3;i++)await scheduled(h.env);assert.equal(h.archive.objects.has('snapshots/old'),false);assert.equal(h.archive.objects.has('staging/old'),false);
+});
+
+test('scheduled raw reconciliation honors retention policy pins before expiry, while still pinning input',async()=>clock(async advance=>{
+ const h=cronHarness();h.state.full=true;
+ const key='webhooks/2026-10-20/policy-raw.json';
+ await h.archive.put(key,'{"repository":{"id":100}}',{customMetadata:{event:'ping',expires:'1'}});
+ const control='control/100/retention-policy.json';await h.archive.put(control,JSON.stringify({mode:'enforce',disabled:[],pinned:['raw_webhooks']}));
+ await scheduled(h.env);assert.ok(h.archive.objects.has(key));assert.ok(h.archive.objects.has(ingress.bodyKey(repo.id,'policy-raw')));
+ await h.archive.put(control,JSON.stringify({mode:'enforce',disabled:[],pinned:[]}));advance(61000);await scheduled(h.env);
+ assert.equal(h.archive.objects.has(key),false);assert.ok(h.archive.objects.has(ingress.bodyKey(repo.id,'policy-raw')));
+ assert.equal(JSON.parse(h.archive.objects.get('control/retention/raw_webhooks.json').bytes).deleted,1);
+}));
+
+test('SQL receipt archival failure retains the receipt and ordinary storage maintenance retries safely',async()=>clock(async advance=>{
+ const f=repositoryFixture();await f.ready;
+ f.db.prepare('INSERT INTO deliveries VALUES(?,?,?)').run('archive-failure','push',Date.now()-30*86400000);
+ f.archive.failures.push((op,key)=>op==='put' && key===ingress.receiptKey(repo.id,'archive-failure'));
+ advance(61000);await f.state.storageMaintenance();
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,1);
+ advance(61000);await f.state.storageMaintenance();
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,0);assert.ok(f.archive.objects.has(ingress.receiptKey(repo.id,'archive-failure')));
+}));
+
+test('receipt archival advances bounded keyset pages through live rows before deleting expired receipts',async()=>clock(async advance=>{
+ const f=repositoryFixture();await f.ready;
+ for(let i=0;i<200;i++)f.db.prepare('INSERT INTO deliveries VALUES(?,?,?)').run('bounded-'+i,'ping',Date.now()-(i<100?0:30*86400000));
+ advance(61000);await f.state.storageMaintenance();
+ assert.equal(f.state.retentionState.expired_deliveries.examined,100);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,200);
+ advance(61000);await f.state.storageMaintenance();
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,100);assert.ok(f.archive.objects.has(ingress.receiptKey(repo.id,'bounded-199')));
+}));
+
+test('ordinary tick owns SQL receipt archival even when synchronous expiry already ran',async()=>clock(async advance=>{
+ const f=repositoryFixture();await f.ready;
+ f.db.prepare('INSERT INTO deliveries VALUES(?,?,?)').run('tick-receipt','ping',Date.now()-30*86400000);
+ advance(61000);await tick(f.state);await f.state.storageFlight;
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,0);assert.ok(f.archive.objects.has(ingress.receiptKey(repo.id,'tick-receipt')));
+}));

@@ -60,10 +60,10 @@ async function paginate(mf,operation){
  return {first,rows,pages};
 }
 async function event(mf,delivery,payload,attempts=1){
- const archive=await mf.getR2Bucket('ARCHIVE'),key='webhooks/2026-10-20/'+delivery+'.json';
- await archive.put(key,JSON.stringify(payload));
+ const archive=await mf.getR2Bucket('ARCHIVE'),key='webhooks/2026-10-20/'+delivery+'.json',received=Date.now();
+ await archive.put(key,JSON.stringify(payload),{customMetadata:{event:'issue_comment',received:String(received)}});
  const worker=await mf.getWorker();
- return worker.queue('events',[{id:'m-'+delivery,timestamp:new Date(),attempts,body:{key,delivery,event:'issue_comment',repository:repository.name,received:Date.now()}}]);
+ return worker.queue('events',[{id:'m-'+delivery,timestamp:new Date(),attempts,body:{key,delivery,event:'issue_comment',repository:repository.name,received}}]);
 }
 const comment=(id,number=1)=>({repository:{id:Number(repository.id)},installation:{id:Number(repository.installation)},action:'created',issue:{number},comment:{id,body:'note',created_at:'2026-10-20T00:00:00Z',updated_at:'2026-10-20T00:00:00Z',user:{login:'peer'}}});
 const sqliteFile=(dir,id)=>{
@@ -119,6 +119,7 @@ test('a full repository keeps serving stored reads, parks ingestion, recovers he
   // Ingestion parks durably instead of spending queue retries.
   const parked=await event(mf,'full-1',comment(501));
   assert.deepEqual(parked.explicitAcks,['m-full-1']);assert.deepEqual(parked.retryMessages,[]);
+  await (await mf.getWorker()).scheduled({cron:'* * * * *'});
   const backlog=await (await mf.dispatchFetch('https://test/admin/ingress?repository=org/repo',{headers:admin})).json();
   assert.equal(backlog.parked.count,1);assert.equal(backlog.mode,'apply');
   assert.ok(await archive.head('parked/'+repository.id+'/bodies/full-1.json'),'body pinned');
@@ -181,19 +182,22 @@ test('a full repository keeps serving stored reads, parks ingestion, recovers he
   const missing=await (await send((await mf.getDurableObjectNamespace('REPOSITORIES')).get(fresh),'/query',{repository:'org/repo',operation:'open_prs'})).json();
   assert.equal(missing.error,'schema_unavailable');assert.ok(missing.missing.includes('resources'));assert.equal(missing.parkable,true);
 
-  // Headroom returns: the operator probe ends degraded mode, the migration
-  // commits, and parked events replay exactly once.
+  // Restore the fixture dependency and expire its persisted cooldowns. Only
+  // ordinary scheduled passes may probe and replay; no admin recovery action.
   assert.equal((await adminPost(mf,'/admin/storage/fault',{mode:'none'})).status,200);
-  const writable=await (await adminPost(mf,'/admin/storage/probe',{bytes:4096})).json();
-  assert.equal(writable.writable,true);assert.equal(writable.storage.schema,'current');assert.equal(writable.storage.mode,'writable');
-  assert.equal(JSON.parse(await (await (await mf.getR2Bucket('ARCHIVE')).get('control/'+repository.id+'/storage.json')).text()).state,'writable');
-  const large=await (await adminPost(mf,'/admin/storage/probe',{bytes:3*1048576+5})).json();
-  assert.equal(large.writable,true);assert.equal(large.bytes,3*1048576+5);
-  const replay=await (await adminPost(mf,'/admin/ingress/replay',{})).json();
-  assert.equal(replay.replayed,1);
+  const archive2=await mf.getR2Bucket('ARCHIVE');
+  const expireRetries=async()=>{
+    for(const key of ['control/100/storage.json','control/100/recovery.json']) {
+      const o=await archive2.get(key);if(o){const s=await o.json();s.next_probe_at=0;s.next_retry=0;await archive2.put(key,JSON.stringify(s));}
+    }
+    for(const lane of ['pointers','held']) for(const o of (await archive2.list({prefix:'parked/100/'+lane+'/'})).objects){const p=await (await archive2.get(o.key)).json();p.retry_at=0;await archive2.put(o.key,JSON.stringify(p));}
+  };
+  for(let i=0;i<2;i++){await expireRetries();await (await mf.getWorker()).scheduled({cron:'* * * * *'});}
+  const writable=(await (await stub.fetch('https://internal/health')).json()).storage;
+  assert.equal(writable.schema,'current');assert.equal(writable.mode,'writable');
+  assert.equal(JSON.parse(await (await archive2.get('control/100/storage.json')).text()).state,'writable');
   const receipts=await (await send(stub,'/storage/deliveries',{ids:['full-1','unknown']})).json();
   assert.deepEqual(receipts.known,['full-1']);
-  const archive2=await mf.getR2Bucket('ARCHIVE');
   assert.equal((await archive2.list({prefix:'parked/'+repository.id+'/'})).objects.length,0,'pointer and pinned body removed after the receipt');
   const comments=await (await send(stub,'/query',{repository:'org/repo',operation:'issue_comments',args:{number:1}})).json();
   assert.ok(comments.data.some(c=>c.id==='501'));

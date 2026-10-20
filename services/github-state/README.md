@@ -64,13 +64,17 @@ Quiet closed PRs also stop periodic history and head polling once their
 baseline is complete. Webhook updates continue, and renewed client demand
 reactivates background reconciliation while returning the stored result.
 
-Raw deliveries expire after fourteen days, daily snapshots after seven days,
+Raw deliveries are eligible for expiry after fourteen days only after durable
+replay input or an explicit invalid-event disposition exists. Daily snapshots expire after seven days,
 staging pages after one day, and query cursors after ten minutes. R2 cursor
 objects expire after a one-minute grace period and have their own retention sweep.
 At the SQLite size limit, stored reads keep working and ingestion parks durably in R2
 until headroom returns. The [storage recovery runbook](https://github.com/TauCetiProject/TauCetiWorker/blob/main/docs/github-state-recovery.md)
 describes the admin endpoints and the example harness's recovery commands. Active resource spill objects
-remain readable while referenced by the SQL state.
+remain readable while referenced by the SQL state. The existing minute cron now
+retries held and parked input, reconciles retained raw/DLQ deliveries, and probes
+full-mode headroom automatically. See [scheduled recovery](../../docs/github-state-recovery.md)
+for ownership, prepared status, release evidence, and rollback requirements.
 
 The installation object owns token refresh, all GitHub read requests,
 per-resource quotas, API selection, and accounting. Every GraphQL query asks

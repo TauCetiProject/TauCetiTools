@@ -14,7 +14,7 @@ function fixture(){
  const db=new DatabaseSync(':memory:');let alarm=null;
  const objects=new Map();
  const env={ALLOWED_REPOSITORIES:JSON.stringify([{id:'100',name:'org/repo',installation:'200'}]),ARCHIVE:{
-  async put(key,text){objects.set(key,text);},async get(key){const text=objects.get(key);return text===undefined?null:{text:async()=>text,json:async()=>JSON.parse(text)};}
+  async head(key){return objects.has(key)?{key}:null;},async put(key,text){objects.set(key,text);},async get(key){const text=objects.get(key);return text===undefined?null:{text:async()=>text,json:async()=>JSON.parse(text)};}
  }};
  const ctx={blockConcurrencyWhile:fn=>fn(),storage:{sql:{exec(sql,...bindings){
   let rows=[];

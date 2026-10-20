@@ -31,6 +31,10 @@ test('webhook rejects bad signatures and conflicting duplicate bodies',async()=>
   assert.equal((await request('/webhook/github',{method:'POST',headers:base,body:text})).status,401);
   const signature='sha256='+createHmac('sha256',secret).update(text).digest('hex'); const good={...base,'x-hub-signature-256':signature};
   assert.equal((await request('/webhook/github',{method:'POST',headers:good,body:text})).status,202);
+  const pinned=await archive.head('parked/10/bodies/delivery-one.json');
+  assert.ok(pinned,'HTTP acknowledgement already has a pinned body');
+  assert.equal(pinned.customMetadata.expires,undefined);
+  assert.ok((await archive.list({prefix:'parked/10/pointers/'})).objects.some(o=>o.key.endsWith('-delivery-one.json')),'pointer is durable before queue delivery');
   assert.equal((await request('/webhook/github',{method:'POST',headers:good,body:text})).status,202);
   const other=JSON.stringify(body({title:'different'}));
   assert.equal((await request('/webhook/github',{method:'POST',headers:{...base,'x-hub-signature-256':'sha256='+createHmac('sha256',secret).update(other).digest('hex')},body:other})).status,409);
