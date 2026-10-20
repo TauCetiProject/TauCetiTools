@@ -29,6 +29,7 @@ class Finding:
     verify: str = ""
     section: str = "repositories"
     repair: str = ""
+    optional: bool = False
 
     def json(self):
         result = asdict(self)
@@ -80,7 +81,7 @@ def _cmd(*args):
     return shlex.join(str(x) for x in args)
 
 
-def diagnose(project: Project, *, extras=False, github=None) -> list[Finding]:
+def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
     gh = github or GitHub()
     findings = []
     conf = project.source
@@ -108,10 +109,12 @@ def diagnose(project: Project, *, extras=False, github=None) -> list[Finding]:
                         f"For creation choose Owner: {repo.split('/')[0]}; Repository name: {repo.split('/')[1]}; Visibility: Public; initialize a README.",
                     ],
                     verify=_cmd("gh", "repo", "view", repo, "--json", "nameWithOwner,defaultBranchRef"),
+                    optional=role not in ("content", "roadmap"),
                 )
             )
             continue
-        findings.append(Finding(f"repositories.{role}", "ready", repo, "Repository accessible"))
+        findings.append(Finding(f"repositories.{role}", "ready", repo, "Repository accessible",
+                                optional=role not in ("content", "roadmap")))
         if data.get("archived") or data.get("disabled"):
             findings.append(
                 Finding(
@@ -125,6 +128,7 @@ def diagnose(project: Project, *, extras=False, github=None) -> list[Finding]:
                         "Under General → Danger Zone, select Unarchive this repository. A disabled repository requires its owner to contact GitHub support."
                     ],
                     verify=again,
+                    optional=role not in ("content", "roadmap"),
                 )
             )
         if role == "content" and data.get("default_branch") != project.branch:
@@ -145,6 +149,8 @@ def diagnose(project: Project, *, extras=False, github=None) -> list[Finding]:
 
     repo = project.content
     for tool in ("tools", "review", "progress", "docgen"):
+        if not extras and tool in ("progress", "docgen"):
+            continue
         pin = project.tool(tool)
         required = (tool not in ("progress", "docgen")
                     or tool == "progress" and project.feature("progress")
@@ -173,6 +179,7 @@ def diagnose(project: Project, *, extras=False, github=None) -> list[Finding]:
                 ],
                 verify=again,
                 section="versions",
+                optional=tool in ("progress", "docgen"),
             )
         )
 
@@ -362,6 +369,7 @@ def diagnose(project: Project, *, extras=False, github=None) -> list[Finding]:
                     ],
                     verify=again,
                     section="actions",
+                    optional=name != "MERGE_BACKEND",
                 )
             )
 
@@ -404,6 +412,7 @@ def diagnose(project: Project, *, extras=False, github=None) -> list[Finding]:
                         ],
                         verify=again,
                         section="apps-and-credentials",
+                        optional=bool(overrides) and not env_error and not set(overrides) & {"APP_ID", "APP_PRIVATE_KEY"},
                     )
                 )
         for name in required_secrets:
@@ -452,6 +461,7 @@ def diagnose(project: Project, *, extras=False, github=None) -> list[Finding]:
                     ],
                     verify=again,
                     section="apps-and-credentials",
+                    optional=name not in ("APP_ID", "APP_PRIVATE_KEY"),
                 )
             )
 
@@ -539,8 +549,10 @@ def diagnose(project: Project, *, extras=False, github=None) -> list[Finding]:
             )
 
     if extras:
-        findings.extend(auxiliary_findings(project, gh, again))
-        findings.extend(extra_findings(project, gh, again))
+        optional_findings = auxiliary_findings(project, gh, again) + extra_findings(project, gh, again)
+        for finding in optional_findings:
+            finding.optional = True
+        findings.extend(optional_findings)
     return findings
 
 
@@ -575,7 +587,7 @@ def extra_findings(project, gh, again):
                         "Follow the deployment section for this selected provider; the deploy command writes local templates and never switches merge authority."
                     ]
                 ),
-                verify=again + " --extras",
+                verify=again,
                 section=name.replace("_", "-"),
             )
         )
@@ -599,10 +611,10 @@ def extra_findings(project, gh, again):
                     urls=[url],
                     steps=[
                         "Open the prefilled infrastructure request, confirm the repository and configuration URL, and submit it.",
-                        "For Bors, hosted means a separate Neon project only. Operate the Bors runtime in your own account.",
+                        *(["For Bors, hosted means a separate Neon project only. Operate the Bors runtime in your own account."] if name == "bors" else []),
                         "The operator records approval and supplies scoped credentials privately; do not put credentials in the issue.",
                     ],
-                    verify=again + " --extras",
+                    verify=again,
                     section=name.replace("_", "-"),
                 )
             )
@@ -642,9 +654,40 @@ def extra_findings(project, gh, again):
             if mode == "hosted":
                 enrollment = results[-1]
                 enrollment.urls.append("https://github.com/apps/tauceti-github-state/installations/new")
+                enrollment.urls += ["https://github.com/settings/installations",
+                                    f"https://github.com/organizations/{owner}/settings/installations",
+                                    "https://dash.cloudflare.com/"]
+                grant_file = token_file.with_name("client-grant.json")
+                generate = _cmd("python3", "-c", (
+                    "import hashlib, json, os, secrets\nfrom pathlib import Path\n"
+                    f"p = Path({str(token_file)!r})\n"
+                    "p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)\np.parent.chmod(0o700)\n"
+                    "if not p.exists():\n"
+                    "    with os.fdopen(os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as output:\n"
+                    "        output.write(secrets.token_urlsafe(48) + '\\n')\n"
+                    "p.chmod(0o600)\n"
+                    f"grant = {{'hash': hashlib.sha256(p.read_text().strip().encode()).hexdigest(), 'repositories': [{project.content!r}]}}\n"
+                    f"g = Path({str(grant_file)!r})\ng.write_text(json.dumps(grant) + '\\n')\ng.chmod(0o600)\n"
+                    "print(json.dumps(grant))"
+                ))
+                operator_token = Path.home() / ".config/tauceti-github-state/admin-token"
+                bootstrap = _cmd("python3", "-c", (
+                    "import json,urllib.request; from pathlib import Path; "
+                    f"r=urllib.request.Request({(service.get('url', 'https://github-state.taucetiproject.org').rstrip('/') + '/admin/bootstrap')!r}, "
+                    f"data=json.dumps({{'repository':{project.content!r}}}).encode(), "
+                    f"headers={{'Authorization':'Bearer '+Path({str(operator_token)!r}).read_text().strip(), "
+                    "'Content-Type':'application/json','User-Agent':'TauCetiWorker/1.0'}); "
+                    "response=urllib.request.urlopen(r,timeout=30); print('Bootstrap HTTP',response.status)"
+                ))
                 enrollment.steps += [
                     f"Open the App installation link, choose {owner}, select Only select repositories → {project.content.split('/')[1]}, then Install. Installing the App and receiving a service grant are separate steps.",
-                    f"Ask the operator to enroll {project.content} and supply a token scoped to that repository. Save it privately at {token_file}; chmod 600 that file. Do not use the operator's admin token or another project's token.",
+                    "The client token is a random bearer secret generated by the service operator, not a GitHub PAT or App installation token. The service scopes it by looking up its SHA-256 hash in CLIENT_TOKENS and checking the repositories list. The operator's admin token does not provide this client grant.",
+                    f"Operator: generate the private token and its grant on your machine; an existing token is reused. This prints only the hash and repository scope, and saves the grant at {grant_file}:\n    $ {generate}",
+                    f"Operator: get the repository ID:\n    $ {_cmd('gh', 'api', 'repos/' + project.content, '--jq', '.id')}\n    Open the account's Installed GitHub Apps → tauceti-github-state → Configure. Record INSTALLATION_ID from the /settings/installations/NUMBER URL; it must be the installation on {owner}.",
+                    f'Operator: open Cloudflare → Workers & Pages → tauceti-github-state → Settings → Variables and Secrets. Edit ALLOWED_REPOSITORIES, keeping all existing entries, and append {{"id":"REPOSITORY_ID","name":"{project.content}","installation":"INSTALLATION_ID"}}. Replace REPOSITORY_ID and INSTALLATION_ID with the numbers above, keeping them as JSON strings. Deploy the change; also preserve this entry in the operator\'s deployment configuration.',
+                    "Operator: in the same Variables and Secrets panel edit the Secret named CLIENT_TOKENS. Start from your privately retained complete JSON array of existing grants, append the object printed by the generation command (or reuse it if already present), and deploy the complete array. Keep the updated array privately for future enrollments. Cloudflare cannot reveal an existing secret's value: if that complete array is unavailable, recover it from the operator's private backup before proceeding; replacing it with this one grant would revoke other clients.",
+                    f"Operator: after both settings are deployed, initialize this repository using the existing private admin-token file (adjust its path if stored elsewhere):\n    $ {bootstrap}\n    Expected: Bootstrap HTTP 200. Re-run doctor until the repository's bootstrap inventory and writable storage are ready.",
+                    f"Operator: transfer only the raw client-token file to the downstream administrator using a private channel. Downstream administrator: download it as {Path.home() / 'Downloads/client-token'}, then install it with:\n    $ {_cmd('install', '-d', '-m', '700', token_file.parent)}\n    $ {_cmd('install', '-m', '600', Path.home() / 'Downloads/client-token', token_file)}\n    Re-run doctor. Never send the admin token or App private key, and never paste the raw client token into an issue or project TOML.",
                 ]
             service_finding.commands.append(_cmd("chmod", "600", token_file))
             service_finding.steps += [
@@ -769,7 +812,7 @@ def extra_findings(project, gh, again):
                 + ([_cmd("gh", "run", "list", "--repo", repository, "--limit", "10")] if repository else []),
                 urls=[f"https://github.com/{repository or project.content}/actions"],
                 steps=steps,
-                verify=again + " --extras",
+                verify=again,
                 section="extras",
                 repair=repair_id,
             )
@@ -808,7 +851,7 @@ def auxiliary_findings(project, gh, again):
                         f"Save the {'collector' if role == 'ci' else 'automation'} App credential in {path}; chmod 600 the file. Install that App on the repositories named in the manual's inventory.",
                         f"Choose New repository secret; Name: {name}; Secret: that private file's contents. Run the existing {'collect.yml' if role == 'ci' else 'progress-merge.yml'} workflow with its required inputs and inspect the App-token step.",
                     ],
-                    verify=again + " --extras",
+                    verify=again,
                     section="apps-and-credentials",
                 )
             )
@@ -841,7 +884,7 @@ def auxiliary_findings(project, gh, again):
                     steps=[
                         "Replace ENTER_AUTOMATION_APP_ID with the numeric ID from the automation App's General page. Under repository Rules → Rulesets, add this App as the intended report merge bypass actor; install only on this project's repositories."
                     ],
-                    verify=again + " --extras",
+                    verify=again,
                     section="apps-and-credentials",
                 )
             )
@@ -859,7 +902,7 @@ def auxiliary_findings(project, gh, again):
                 ],
                 urls=[f"https://github.com/{repo}/settings/actions"],
                 steps=["In Actions → General → Actions permissions select Disable actions, then Save."],
-                verify=again + " --extras",
+                verify=again,
                 section="claims",
                 repair="claims.actions",
             )
@@ -905,7 +948,12 @@ def render(findings, *, json_output=False, show_ready=False):
     if json_output:
         print(json.dumps([item.json() for item in findings], indent=2))
         return
-    for item in findings:
+    ordered = [f for f in findings if not f.optional] + [f for f in findings if f.optional]
+    extras_started = False
+    for item in ordered:
+        if item.optional and not extras_started:
+            print("\nThe remaining items are optional extras: you can omit these from the `tauceti doctor` report using the `--no-extras` flag.")
+            extras_started = True
         print(f"[{item.status.upper()}] {item.id}: {item.summary}")
         if item.status in ("ready", "disabled") and not show_ready:
             continue

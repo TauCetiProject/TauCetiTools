@@ -25,7 +25,10 @@ def parser():
     config.add_argument("--resolved", action="store_true")
     config.add_argument("--github-env", type=Path)
     doctor = sub.add_parser("doctor")
-    doctor.add_argument("--extras", action="store_true")
+    extras = doctor.add_mutually_exclusive_group()
+    extras.add_argument("--no-extras", dest="extras", action="store_false", help="Report only core setup checks")
+    extras.add_argument("--extras", dest="extras", action="store_true", help=argparse.SUPPRESS)
+    doctor.set_defaults(extras=True)
     doctor.add_argument("--online", action="store_true", help="Allow explicitly named existing workflow dispatch")
     doctor.add_argument("--workflow", help="Existing workflow_dispatch workflow to run with --online")
     doctor.add_argument(
@@ -174,13 +177,14 @@ def main(argv=None):
             render(findings, json_output=args.json, show_ready=bool(args.check))
             bad = any(f.status in ("failed", "unknown") for f in findings)
             if not args.json:
+                core_bad = any(f.status in ("failed", "unknown") and not f.optional for f in findings)
                 print(
                     "Core setup needs attention."
-                    if bad
+                    if core_bad
                     else "Core configured; pending functional checks are listed above."
                 )
-                if not args.extras:
-                    print(f"Extras not checked. Continue: tauceti-tools doctor --conf {source} --extras")
+                if bad and not core_bad:
+                    print("Optional extras need attention.")
             return 1 if bad else 0
         if args.command == "upgrade":
             from .scaffold import upgrade

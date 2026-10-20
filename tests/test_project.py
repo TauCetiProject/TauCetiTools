@@ -100,7 +100,7 @@ class ProjectTests(unittest.TestCase):
                 return None, "GitHub HTTP 404"
 
         project = parse(initial_configuration("one/Project", "human").encode(), "/tmp/project.toml")
-        findings = diagnose(project, github=Unavailable())
+        findings = diagnose(project, extras=False, github=Unavailable())
         self.assertTrue(findings)
         for item in findings:
             self.assertNotEqual(item.status, "ready")
