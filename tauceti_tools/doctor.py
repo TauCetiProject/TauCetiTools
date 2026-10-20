@@ -239,8 +239,29 @@ def diagnose(project: Project, *, extras=False, github=None) -> list[Finding]:
             )
 
         direct = project.raw.get("merge", {}).get("backend") == "github-direct"
-        rules, error = gh.read(f"repos/{repo}/rules/branches/{project.branch}")
+        rules_endpoint = f"repos/{repo}/rules/branches/{project.branch}"
+        rules_url = f"https://github.com/{repo}/settings/rules/new?target=branch"
+        rules, error = gh.read(rules_endpoint)
         active_rules = [r for page in _pages(rules or []) for r in (page if isinstance(page, list) else [page])]
+        # The rules API omits classic branch protection. Personal projects often
+        # use it, and its checks/review requirements count just like rulesets.
+        classic = False
+        if not active_rules and not error:
+            endpoint = f"repos/{repo}/branches/{project.branch}/protection"
+            protection, error = gh.read(endpoint)
+            if protection:
+                classic = True
+                rules_endpoint = endpoint
+                rules_url = f"https://github.com/{repo}/settings/branches"
+                reviews = protection.get("required_pull_request_reviews")
+                checks = protection.get("required_status_checks")
+                if reviews is not None:
+                    active_rules.append({"type": "pull_request", "parameters": {
+                        "require_code_owner_review": reviews.get("require_code_owner_reviews", False)}})
+                if checks is not None:
+                    active_rules.append({"type": "required_status_checks", "parameters": {
+                        "strict_required_status_checks_policy": checks.get("strict", False),
+                        "required_status_checks": [{"context": c} for c in checks.get("contexts", [])]}})
         types = {r.get("type") for r in active_rules if isinstance(r, dict)}
         if direct:
             strict = any(r.get("parameters", {}).get("strict_required_status_checks_policy")
@@ -249,9 +270,9 @@ def diagnose(project: Project, *, extras=False, github=None) -> list[Finding]:
                 "merge.direct", "unknown" if error else "failed" if strict or "merge_queue" in types else "ready",
                 error or ("Disable strict checks and merge queue" if strict or "merge_queue" in types else "Direct merging permits branches behind main"),
                 "Required checks without requiring an up-to-date branch or a merge queue",
-                commands=[_cmd("gh", "api", f"repos/{repo}/rules/branches/{project.branch}")],
-                urls=[f"https://github.com/{repo}/settings/rules"],
-                steps=["Edit the active default-branch ruleset. Under Require status checks to pass, clear Require branches to be up to date before merging. Clear Require merge queue. Click Save changes."],
+                commands=[_cmd("gh", "api", rules_endpoint)],
+                urls=[rules_url],
+                steps=["Edit the active default-branch rule. Under Require status checks to pass, clear Require branches to be up to date before merging. Clear Require merge queue if present. Click Save changes."],
                 verify=again, section="branch-rules"))
         needed = {"pull_request", "required_status_checks"}
         if project.raw.get("merge", {}).get("backend", "github-queue") == "github-queue":
@@ -281,10 +302,10 @@ def diagnose(project: Project, *, extras=False, github=None) -> list[Finding]:
                     else "Required rule types present; inspect configured checks"
                 ),
                 "PR review and required build, bump-guard, scope checks; merge queue when selected",
-                commands=[_cmd("gh", "api", f"repos/{repo}/rules/branches/{project.branch}")],
-                urls=[f"https://github.com/{repo}/settings/rules/new?target=branch"],
+                commands=[_cmd("gh", "api", rules_endpoint)],
+                urls=[rules_url],
                 steps=[
-                    f"Name: Tau Ceti content. Enforcement: Active. Target branch: {project.branch}.",
+                    f"Edit the existing protection rule for {project.branch}." if classic else f"Name: Tau Ceti content. Enforcement: Active. Target branch: {project.branch}.",
                     "Enable Require a pull request before merging; require code-owner review for human-owned configuration. Add required status checks build, bump-guard and scope from their expected GitHub Actions producer.",
                     "For github-queue enable Require merge queue. Keep human-owned changes subject to code-owner review. Set the automation App's bypass, if needed, to pull requests only; never grant content authors unconditional bypass.",
                 ],
