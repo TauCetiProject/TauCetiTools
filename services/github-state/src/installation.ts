@@ -12,6 +12,7 @@ class QuotaDeferred extends Error {
 
 export class InstallationScheduler extends DurableObject<Env> {
   private tokenFlight?:Promise<string>;
+  private repositoryRequests=new Map<string,number>();
   private auditFlight?:Promise<void>;
   private accountingMetrics=new AccountingMetrics();
   private accountingFailure:any;
@@ -406,10 +407,12 @@ export class InstallationScheduler extends DurableObject<Env> {
     }catch(error) {log('installation_health_prepare_failed',{reason:classify(error)});}
   }
   async fetch(req: Request): Promise<Response> {
+    let tracked:string|undefined;
     try {
       const path = new URL(req.url).pathname;
       if(['/read','/batch','/measure','/audit'].includes(path) && ['test','production'].includes(this.env.MIGRATION_ENVIRONMENT || '')) {
         const input:any=await req.clone().json(),repo=path==='/audit'?input:input.repository;
+        if(typeof repo?.id==='string') {tracked=repo.id;this.repositoryRequests.set(tracked!,1+(this.repositoryRequests.get(tracked!) || 0));}
         if(repo?.id && blocksWrites(await readMigration(this.env.ARCHIVE,repo.id)))return json({unavailable:true,reason:'migration_frozen',retry_at:Date.now()+60000},503);
       }
       if (path==='/read') return await this.read({...await req.json() as object,request_id:requestId(req)});
@@ -424,13 +427,13 @@ export class InstallationScheduler extends DurableObject<Env> {
         this.auditFlight ||= this.audit(repo).finally(()=>{this.auditFlight=undefined;});
         await this.auditFlight;return json({ok:true});
       }
-      if (path==='/health') return json({redelivery_failure:await this.ctx.storage.get('last_redelivery_failure') || null,reconciliation_version:2,deployment_id:this.env.CF_VERSION?.id,settings:settings(this.env),inflight:this.ctx.storage.sql.exec('SELECT resource,COUNT(*) requests,SUM(cost) reserved_points FROM reservations WHERE expires>? GROUP BY resource',Date.now()).toArray(),budgets:this.ctx.storage.sql.exec('SELECT * FROM budgets').toArray(),quota_types:this.ctx.storage.sql.exec('SELECT * FROM quota_types').toArray(),...(this.preparedAccounting?{...this.preparedAccounting,stale:Date.now()-this.preparedAccounting.at>180000}:this.accountingMetrics.snapshot()),telemetry_failure:this.accountingFailure});
+      if (path==='/health') return json({repository_inflight:[...this.repositoryRequests].map(([repository,requests])=>({repository,requests})),redelivery_failure:await this.ctx.storage.get('last_redelivery_failure') || null,reconciliation_version:2,deployment_id:this.env.CF_VERSION?.id,settings:settings(this.env),inflight:this.ctx.storage.sql.exec('SELECT resource,COUNT(*) requests,SUM(cost) reserved_points FROM reservations WHERE expires>? GROUP BY resource',Date.now()).toArray(),budgets:this.ctx.storage.sql.exec('SELECT * FROM budgets').toArray(),quota_types:this.ctx.storage.sql.exec('SELECT * FROM quota_types').toArray(),...(this.preparedAccounting?{...this.preparedAccounting,stale:Date.now()-this.preparedAccounting.at>180000}:this.accountingMetrics.snapshot()),telemetry_failure:this.accountingFailure});
       return json({error:'not_found'},404);
     } catch (error) {
       if (error instanceof QuotaDeferred) return json(error.result);
       const reason=error instanceof Error && error.message==='malformed_upstream_response'?'malformed_upstream_response':classify(error),request_id=requestId(req);
       try {log('installation_operation_failed',{reason,request_id});}catch {}
       return json({unavailable:true,reason,request_id,...(reason==='malformed_upstream_response'?{}:{retry_at:Date.now()+60000})},503);
-    }
+    } finally {if(tracked) {const remaining=(this.repositoryRequests.get(tracked) || 1)-1;if(remaining)this.repositoryRequests.set(tracked,remaining);else this.repositoryRequests.delete(tracked);}}
   }
 }

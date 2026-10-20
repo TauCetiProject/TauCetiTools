@@ -416,3 +416,20 @@ test('supervised start requires deployed evidence before source writes or GitHub
  assert.equal((await f.command('start')).body.error,'migration_acceptance_stale');
  assert.equal(f.db.prepare('SELECT total_changes() n').get().n,before);
 });
+
+test('installation dispatch tracks whole requests across the freeze and rejects newly arriving reference reads',async()=>{
+ const f=await fixture(),{InstallationScheduler}=await load('src/installation.ts');
+ const kv=new Map();f.ctx.storage.get=async key=>kv.get(key);f.ctx.storage.put=async(key,value)=>kv.set(key,value);
+ const installation=new InstallationScheduler(f.ctx,f.env);
+ let entered,finish;const ready=new Promise(resolve=>entered=resolve),gate=new Promise(resolve=>finish=resolve);
+ installation.read=async()=>{entered();await gate;return Response.json({ok:true});};
+ const request=()=>installation.fetch(new Request('https://internal/read',{method:'POST',body:JSON.stringify({repository:repo,query:{operation:'open_prs'}})}));
+ const old=request();await ready;
+ const health=()=>installation.fetch(new Request('https://internal/health')).then(r=>r.json());
+ assert.deepEqual((await health()).repository_inflight,[{repository:repo.id,requests:1}]);
+ const frozen={version:1,generation,repository:repo.id,target,source:{object:'source-object',deployment:'test-deployment',schema:5},phase:'freezing',created:Date.now(),updated:Date.now(),tables:{},failure:null,blobs:{},staging:{}};
+ await f.archive.put(migration.migrationKey(repo.id),JSON.stringify(frozen));
+ const refused=await request();assert.equal(refused.status,503);assert.equal((await refused.json()).reason,'migration_frozen');
+ assert.equal((await health()).repository_inflight[0].requests,1);
+ finish();await old;assert.deepEqual((await health()).repository_inflight,[]);
+});

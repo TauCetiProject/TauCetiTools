@@ -57,6 +57,7 @@ ERROR_CODES = frozenset(
         "migration_control_corrupt",
         "migration_deployment_identity_required",
         "migration_drain_pending",
+        "migration_dispatch_drain_unavailable",
         "migration_frozen",
         "migration_generation_abandoned",
         "migration_generation_used",

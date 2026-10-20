@@ -10,7 +10,7 @@ export const FREEZE_LEASE_MS=15*60000;
 export interface SourceHooks {
   storage:DurableObjectStorage; sql:SqlStorage;
   fence(state:Migration):Promise<void>; assertFence(state:Migration):void;
-  verifyStored(state:Migration):Promise<void>; drain():Promise<void>; release(state:Migration):Promise<void>; select(state:Migration):Promise<void>;
+  verifyStored(state:Migration):Promise<void>; drain(state:Migration):Promise<void>; release(state:Migration):Promise<void>; select(state:Migration):Promise<void>;
 }
 export async function acceptance(env:Env,repo:string,target:string,object:string):Promise<string> {
   const evidence=await env.ARCHIVE.get(`control/${repo}/migration-acceptance.json`);
@@ -47,9 +47,9 @@ export async function controllerStep(env:Env,state:Migration,hooks:SourceHooks):
   await saveMigration(env.ARCHIVE,state);
   if(state.phase==='aborting') {
     await abandonTarget(env,state);
-    await hooks.drain();await hooks.release(state);state.phase='abandoned';
+    await hooks.drain(state);await hooks.release(state);state.phase='abandoned';
   } else if(state.phase==='freezing') {
-    await hooks.drain();await hooks.fence(state);control.source_fenced=true;
+    await hooks.drain(state);await hooks.fence(state);control.source_fenced=true;
     await beginExport(env.ARCHIVE,hooks.storage,hooks.sql,state);
   } else if(['exporting','verifying','source_verified','importing','target_verifying','preparing','switching'].includes(state.phase)) {
     hooks.assertFence(state);

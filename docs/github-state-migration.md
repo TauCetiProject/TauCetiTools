@@ -85,7 +85,9 @@ generation, source/target identity, bookmark, revision, per-table counts and has
 progress, renewable lease, failure code, target checks and write owner.
 
 1. `freezing`: block all new repository mutations and GitHub repair/reference
-   dispatch, park signed input durably, and drain in-flight mutations/retention.
+   dispatch, park signed input durably, and drain in-flight mutations/retention and whole installation requests, including
+   references between individual upstream calls. Require the quota owner to report
+   the same deployment version.
    Install persistent triggers and a generation owner in SQLite. This fences
    deployments predating the asynchronous store adapter. Sync, take an authoritative
    recovery bookmark, discover and validate every source table.

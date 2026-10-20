@@ -29,10 +29,16 @@ async function owner(client:Client,schema:string,state:Migration,allowed:string[
   if(!row || row.generation!==state.generation || row.schema_version!==1 || !allowed.includes(row.backend))throw new AdminError('migration_target_owner_mismatch');
   return row.backend;
 }
+function enrolled(env:Env,state:Migration):void {
+  const actual=targetConfig(env),expected=state.cutover?.target_identity;
+  if(actual.identity!==state.target || expected && Object.entries(expected).some(([key,value])=>(actual as any)[key]!==value))throw new AdminError('migration_target_identity_mismatch');
+}
 export async function targetOwner(env:Env,state:Migration):Promise<string> {
+  enrolled(env,state);
   return transaction(env,state.repository,(c,s)=>owner(c,s,state,['migration','postgres','abandoned']));
 }
 export async function targetPreflight(env:Env,state:Migration):Promise<void> {
+  enrolled(env,state);
   if(targetConfig(env).identity!==state.target)throw new AdminError('migration_target_identity_mismatch');
   await transaction(env,state.repository,async(c,s)=>{
     await owner(c,s,state,['migration']);
@@ -76,6 +82,7 @@ function values(row:Row,name:string):Array<string|null> {
   })];
 }
 export async function importStep(env:Env,state:Migration):Promise<void> {
+  enrolled(env,state);
   const progress=state.cutover!.import;
   const name=Object.keys(state.tables).find(n=>!progress[n]?.complete);
   if(!name){state.phase='target_verifying';return;}
@@ -97,6 +104,7 @@ export async function importStep(env:Env,state:Migration):Promise<void> {
   check.page++;check.rows+=page.rows.length;check.hash=page.hash;check.after=page.rows.at(-1)![0];
 }
 export async function targetVerifyStep(env:Env,state:Migration):Promise<void> {
+  enrolled(env,state);
   const progress=state.cutover!.verify;
   const name=Object.keys(state.tables).find(n=>!progress[n]?.complete);
   if(!name){state.phase='preparing';return;}
@@ -119,6 +127,7 @@ export async function targetVerifyStep(env:Env,state:Migration):Promise<void> {
 // Apply explicitly recorded execution-checkpoint repairs only after exact raw
 // import validation. Cooldowns, attempts and job generations remain untouched.
 export async function prepareTargetStep(env:Env,state:Migration):Promise<void> {
+  enrolled(env,state);
   const control=state.cutover!,prefix=archiveKey(state.repository,state.generation)+'/expired-staging/';
   const listed=await env.ARCHIVE.list({prefix,startAfter:control.staging_after,limit:25});
   for(const object of listed.objects) {
@@ -137,6 +146,7 @@ export async function prepareTargetStep(env:Env,state:Migration):Promise<void> {
   }
 }
 export async function activateTarget(env:Env,state:Migration):Promise<void> {
+  enrolled(env,state);
   await transaction(env,state.repository,async(c,s)=>{
     if(await owner(c,s,state,['migration','postgres'])==='postgres')return;
     // Change only execution ownership, never the quota/backoff due, attempts,
@@ -156,6 +166,7 @@ export async function activateTarget(env:Env,state:Migration):Promise<void> {
   });
 }
 export async function abandonTarget(env:Env,state:Migration):Promise<void> {
+  enrolled(env,state);
   await transaction(env,state.repository,async(c,s)=>{
     const backend=await owner(c,s,state,['migration','abandoned','postgres']);
     if(backend==='postgres')throw new AdminError('migration_forward_recovery_required');

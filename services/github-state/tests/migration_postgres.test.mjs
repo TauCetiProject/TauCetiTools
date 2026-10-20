@@ -77,7 +77,12 @@ test('expired freeze automatically abandons before writes, retaining archives an
 test('target preflight rejects identity, nonempty state, missing restore and unsafe app roles',{skip:!enabled},async()=>{
  const f=await testFixture();try {
   const state=f.state;
-  await target.targetPreflight(f.env,state);
+  await control.preflight(f.env,state);
+  const original={...f.env},changed=JSON.parse(f.env.MIGRATION_TARGET);changed.hostname='wrong-endpoint.neon.tech';
+  f.env.MIGRATION_TARGET=JSON.stringify(changed);
+  for(const key of ['MIGRATION_DATABASE_URL','REPOSITORY_DATABASE_URL']) {const url=new URL(f.env[key]);url.hostname=changed.hostname;f.env[key]=url.toString();}
+  await assert.rejects(target.targetOwner(f.env,state),/migration_target_identity_mismatch/);
+  Object.assign(f.env,original);
   await assert.rejects(target.targetPreflight(f.env,{...state,target:'wrong-target'}),/migration_target_identity_mismatch/);
   await f.admin.query(`INSERT INTO ${f.schema}.demand(key,at) VALUES('unexpected',1)`);
   await assert.rejects(target.targetPreflight(f.env,state),/migration_target_not_empty/);
@@ -97,6 +102,10 @@ test('ordinary supervisor restarts a fenced repository, preserves cursors, and r
   const before=await (await f.request('/query',query)).json();
   const cursor='0b6c2f0e-1f7a-4b4c-9a1e-5b8d3c2a1f00',page={version:1,repository:custom.name,operation:'open_prs',status:'ok',revision:123,complete:true,data:[{number:7}]};
   await f.archive.put(`cursors/${f.id}/${cursor}/100.json`,JSON.stringify({repository:f.id,key:'open_prs:{}',allow_observed:false,expires:Date.now()+86400000,result:page}));
+  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json({deployment_id:'test-deployment',repository_inflight:[{repository:custom.id,requests:1}]})})};
+  const waiting=await f.command('start',{target:'neon-test'});assert.equal(waiting.body.error,'migration_drain_pending');
+  assert.equal((await f.archive.get(migration.migrationKey(custom.id)).then(o=>o.json())).bookmark,undefined);
+  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json({deployment_id:'test-deployment',repository_inflight:[],hour:[]})})};
   assert.equal((await f.command('start',{target:'neon-test'})).status,200);
   f.archive.fail((op,key)=>op==='get' && key===`control/${custom.id}/migration.json`);
   const outage=await fixture(f.db,f.archive,{...f.env});
@@ -141,7 +150,7 @@ test('ordinary supervisor restarts a fenced repository, preserves cursors, and r
   assert.equal((await f.admin.query(`SELECT COUNT(*)::text n FROM ${f.schema}.deliveries WHERE id='freeze-event'`)).rows[0].n,'1');
   assert.ok(f.archive.objects.has(`receipts/${custom.id}/freeze-event.json`));
   assert.ok(!(await f.archive.list({prefix:`parked/${custom.id}/pointers/`})).objects.length);
-  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json({hour:[]})})};
+  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json({deployment_id:'test-deployment',repository_inflight:[],hour:[]})})};
   await f.archive.put('control/raw-recovery.json',JSON.stringify({last_completed:Date.now(),gaps:{count:0,truncated:false}}));
   const done=await (await f.request('/migration-supervise',{})).json();
   assert.equal(done.phase,'complete');assert.equal(done.cutover.release.backend_write_owner,'postgres');

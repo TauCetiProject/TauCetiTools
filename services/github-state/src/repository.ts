@@ -1877,7 +1877,7 @@ export class RepositoryState extends DurableObject<Env> {
   private async selectMigrationBackend():Promise<void> {
     const state=this.migrationState;
     if(!state?.cutover?.target_active || this.selectedMigrationGeneration===state.generation)return;
-    if(!this.env.REPOSITORY_DATABASE_URL || targetConfig(this.env).identity!==state.target)throw new AdminError('migration_target_configuration');
+    if(!this.env.REPOSITORY_DATABASE_URL || targetConfig(this.env).identity!==state.target || state.cutover.target_identity && Object.entries(state.cutover.target_identity).some(([key,value])=>(targetConfig(this.env) as any)[key]!==value))throw new AdminError('migration_target_configuration');
     this.store=new PostgresStore(this.env.REPOSITORY_DATABASE_URL,state.repository,state.generation);
     this.selectedMigrationGeneration=state.generation;
     this.schema='current';this.degraded=undefined;this.storageMarkerUnavailable=false;
@@ -1888,9 +1888,17 @@ export class RepositoryState extends DurableObject<Env> {
     const owner=row && JSON.parse(row.value);
     if(!owner || owner.backend!=='migration' || owner.generation!==state.generation)throw new AdminError('migration_source_fence_lost');
   }
-  private async drainMigration():Promise<void> {
+  private async drainMigration(dispatches:boolean):Promise<void> {
     if(this.storageFlight)await this.storageFlight;
     await this.policyUpdateFlight;await this.retentionLane.run(async()=>{});
+    if(dispatches) {
+    const repo=this.localMeta('repository');
+    const upstream=await this.env.INSTALLATIONS.get(this.env.INSTALLATIONS.idFromName(repo.installation)).fetch('https://internal/health');
+    if(!upstream.ok)throw new AdminError('migration_dispatch_drain_unavailable');
+    const health:any=await upstream.json();
+    if(health.deployment_id!==this.env.CF_VERSION?.id || !Array.isArray(health.repository_inflight))throw new AdminError('migration_dispatch_drain_unavailable');
+    if(health.repository_inflight.some((row:any)=>row.repository===repo.id && row.requests>0))throw new AdminError('migration_drain_pending');
+    }
     if(this.activeOperations || this.mutationState.active || this.optionalWork.active || this.applying)throw new AdminError('migration_drain_pending');
   }
   private async fenceMigration(state:Migration):Promise<void> {
@@ -1943,8 +1951,10 @@ export class RepositoryState extends DurableObject<Env> {
     return this.superviseMigration(1);
   }
   private async shadowMigration(state:Migration):Promise<void> {
-    const evidence=await this.env.ARCHIVE.get(`control/${state.repository}/migration-acceptance.json`).then(o=>o?.json<any>());
-    const queries=evidence?.queries;
+    const record=await this.env.ARCHIVE.get(`control/${state.repository}/migration-acceptance.json`);
+    const text=record?await record.text():null;
+    if(!text || await digest(text)!==state.cutover!.acceptance)throw new AdminError('migration_acceptance_changed');
+    const evidence=JSON.parse(text),queries=evidence.queries;
     if(!Array.isArray(queries) || !queries.length || queries.length>20)throw new AdminError('migration_shadow_queries_missing');
     const target=Object.create(this) as RepositoryState;
     target.store=new PostgresStore(this.env.REPOSITORY_DATABASE_URL!,state.repository,state.generation);
@@ -1995,7 +2005,7 @@ export class RepositoryState extends DurableObject<Env> {
       if(state.source.object!==this.ctx.id.toString())throw new AdminError('migration_source_identity_changed');
       try {
         await controllerStep(this.env,state,{storage:this.ctx.storage,sql:this.nativeSql,
-          fence:s=>this.fenceMigration(s),assertFence:s=>this.assertMigrationFence(s),verifyStored:s=>this.shadowMigration(s),drain:()=>this.drainMigration(),release:s=>this.releaseMigration(s),
+          fence:s=>this.fenceMigration(s),assertFence:s=>this.assertMigrationFence(s),verifyStored:s=>this.shadowMigration(s),drain:s=>this.drainMigration(s.phase==='freezing'),release:s=>this.releaseMigration(s),
           select:async()=>{this.migrationState=state;await this.selectMigrationBackend();}});
         state.failure=null;await saveMigration(this.env.ARCHIVE,state);
         if(state.phase==='replaying') {await this.finishMigrationReceipt(state);break;}

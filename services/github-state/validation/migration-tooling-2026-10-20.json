@@ -5,12 +5,13 @@
   "target_schema": 1,
   "checks": {
     "python_package": {"passed": 11, "failed": 0},
-    "sqlite_service": {"passed": 190, "failed": 0, "skipped": 31},
+    "sqlite_service": {"passed": 191, "failed": 0, "skipped": 31},
     "isolated_neon_contracts": {"passed": 79, "failed": 0, "skipped": 1},
     "migration_fixtures": {"passed": 5, "failed": 0}
   },
   "migration_fixture_coverage": [
     "every source table and empty table manifests",
+    "whole installation request drain, including reference requests between upstream calls",
     "signed 64-bit rowids and exact large identifiers/timestamps",
     "incomplete collections, tombstones and R2 references",
     "preserved retry/quota cooldowns, attempts and generations",
