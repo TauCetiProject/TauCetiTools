@@ -10,6 +10,7 @@ test('S2 imports exact archives into a standby, restarts every step and recovers
   const templateJob=f.db.prepare('SELECT * FROM jobs').get(),fields=Object.keys(templateJob);
   const clone=f.db.prepare('INSERT INTO jobs('+fields.join(',')+') VALUES('+fields.map(()=>'?').join(',')+')');
   for(let i=1;i<30;i++)clone.run(...fields.map(key=>key==='key'?'expired-'+i:templateJob[key]));
+  for(const [id,until]of [['idle-lease',0],['null-lease',null]])clone.run(...fields.map(key=>key==='key'?id:key==='started' || key==='lease_id'?null:key==='lease_until'?until:templateJob[key]));
   let connections=0,widePreparation=false;f.env.migrationConnection=()=>{connections++;};
   const insert=f.db.prepare('INSERT INTO demand(rowid,key,at) VALUES(?,?,?)');
   f.db.exec('BEGIN');for(let i=500;i<5500;i++)insert.run(i,'wide-'+i,i);f.db.exec('COMMIT');
@@ -37,8 +38,11 @@ test('S2 imports exact archives into a standby, restarts every step and recovers
   assert.ok(state.tables.demand.pages<5,'large SQL batches stay below the parameter limit');
   assert.deepEqual(rows[0],{rowid:'-9223372036854775808',at:'9223372036854775807'});
   assert.deepEqual(rows.at(-1),{rowid:'9223372036854775807',at:'-9223372036854775808'});
+  const idleVersion=(await f.admin.query(`SELECT xmin::text FROM ${f.schema}.jobs WHERE key='idle-lease'`)).rows[0].xmin;
   await target.activateTarget(f.env,state); // crash before writing R2 selection
   assert.equal((await f.admin.query(`INSERT INTO ${f.schema}.demand(key,at) VALUES('after-switch',1) RETURNING rowid::text`)).rows[0].rowid,'5500');
+  assert.equal((await f.admin.query(`SELECT xmin::text FROM ${f.schema}.jobs WHERE key='idle-lease'`)).rows[0].xmin,idleVersion,'unleased jobs keep their existing tuples');
+  assert.equal((await f.admin.query(`SELECT lease_until::text FROM ${f.schema}.jobs WHERE key='null-lease'`)).rows[0].lease_until,'0');
   state.cutover.lease_until=1;await migration.saveMigration(f.archive,state);
   await control.controllerStep(f.env,await migration.readMigration(f.archive,f.id),f.hooks);
   state=await migration.readMigration(f.archive,f.id);

@@ -180,7 +180,7 @@ export async function activateTarget(env:Env,state:Migration):Promise<void> {
     if(await owner(c,s,state,['migration','postgres'])==='postgres')return;
     // Change only execution ownership, never the quota/backoff due, attempts,
     // generations or collected evidence. Expired staging is reset separately.
-    await c.query(`UPDATE ${s}.jobs SET lease_id=NULL,lease_until=0`);
+    await c.query(`UPDATE ${s}.jobs SET lease_id=NULL,lease_until=0 WHERE lease_id IS NOT NULL OR lease_until IS DISTINCT FROM 0`);
     for(const table of Object.keys(state.tables)) {
       // Imported rowids include signed extrema; a fresh sequence need only
       // allocate unused IDs. Negative archive IDs do not constrain its start.

@@ -106,7 +106,7 @@ export async function beginExport(bucket: R2Bucket, storage: DurableObjectStorag
 }
 // Every value is typed. SQLite INTEGERs and rowids cross JavaScript as decimal
 // strings, preserving all signed 64-bit values. JSON text is never reserialized.
-export function sourceRows(sql: SqlStorage, name: string, columns: TableState['columns'], after: string | null, limit: number, stagedJobsOnly=false): Row[] {
+export function sourceRows(sql: SqlStorage, name: string, columns: TableState['columns'], after: string | null, limit: number): Row[] {
   const selects = columns.flatMap((c, i) => {
     const col = quote(c.name);
     return [`typeof(${col}) AS t${i}`, `CASE typeof(${col}) WHEN 'blob' THEN hex(${col}) WHEN 'real' THEN printf('%!.17g',${col}) ELSE CAST(${col} AS TEXT) END AS v${i}`];
@@ -114,8 +114,7 @@ export function sourceRows(sql: SqlStorage, name: string, columns: TableState['c
   // Read lengths first so neither many large rows nor maliciously large input
   // limits allocate an unbounded result. Include one large row for progress.
   const sizes = columns.map(c => `COALESCE(length(CAST(${quote(c.name)} AS BLOB)),0)`).join('+');
-  if(stagedJobsOnly && name!=='jobs')throw new AdminError('migration_table_manifest_mismatch');
-  const lower=[after===null?'':'rowid>CAST(? AS INTEGER)',stagedJobsOnly?'started IS NOT NULL AND page IS NOT NULL':''].filter(Boolean).join(' AND ');
+  const lower=after===null?'':'rowid>CAST(? AS INTEGER)';
   const bindings=after===null?[]:[after];
   const candidates = sql.exec<any>(`SELECT CAST(rowid AS TEXT) id,${sizes} bytes FROM ${quote(name)} ${lower?'WHERE '+lower:''} ORDER BY rowid LIMIT ?`, ...bindings, limit).toArray();
   if (!candidates.length) return [];
@@ -229,11 +228,20 @@ export async function verifyStep(bucket: R2Bucket, sql: SqlStorage, state: Migra
 }
 // Check implicitly addressed partial-job pages in bounded groups. The SQL
 // source remains frozen, and the checkpoint advances only after every HEAD.
-// Seek between started jobs; idle jobs have no implicit staging pages.
+// Scan compact bounded windows; idle jobs have no implicit staging pages.
 async function stagingStep(bucket: R2Bucket, sql: SqlStorage, state: Migration): Promise<void> {
   const check=state.staging,columns=state.tables.jobs.columns;
-  const row=sourceRows(sql,'jobs',columns,check.after,1,true)[0];
-  if(!row) {check.complete=true;await saveMigration(bucket,state);return;}
+  const window=sql.exec<any>(`SELECT CAST(rowid AS TEXT) id,(started IS NOT NULL AND page IS NOT NULL) staged FROM jobs ${check.after===null?'':'WHERE rowid>CAST(? AS INTEGER)'} ORDER BY rowid LIMIT 5000`,...(check.after===null?[]:[check.after])).toArray();
+  const active=window.findIndex(row=>row.staged);
+  if(active<0) {
+    if(window.length)check.after=window.at(-1)!.id;else check.complete=true;
+    await saveMigration(bucket,state);return;
+  }
+  // Retain the position immediately before this job while its page checkpoint
+  // advances, so continuation never rescans its preceding idle window.
+  if(active>0)check.after=window[active-1].id;
+  const row=sourceRows(sql,'jobs',columns,check.after,1)[0];
+  if(!row || row[0]!==window[active].id)throw new AdminError('migration_source_mismatch');
   const value=(name:string)=>(row[columns.findIndex(c=>c.name===name)+1] as Cell)[1];
   const started=value('started'),next=value('page');
   if(started!==null && next!==null) {
