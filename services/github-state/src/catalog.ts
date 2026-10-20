@@ -1,7 +1,7 @@
 import { Query } from './protocol';
 import { comment, issue, pr, status } from './normalize';
 import catalog from '../../../tauceti_tools/github_catalog.json';
-export interface Recipe { api: 'core' | 'graphql'; path: string; query?: string; variables?: Record<string, unknown>; cost: number; connection?: string[]; normalize: (x: any) => any; collection: boolean }
+export interface Recipe { operation?: string; api: 'core' | 'graphql'; path: string; query?: string; variables?: Record<string, unknown>; cost: number; connection?: string[]; normalize: (x: any) => any; collection: boolean }
 const PR = catalog.fields.pr;
 const COMMENT = catalog.fields.comment;
 const PAGE = 'pageInfo{hasNextPage endCursor}';
@@ -37,8 +37,8 @@ export function recipes(repository: string, q: Query, cursor?: string, page = 1)
   const [owner, name] = repository.split('/');
   const args = q.args || {};
   const root = '/repos/' + repository;
-  const rest = (path: string, normalize = (x: any) => x, collection = true): Recipe => ({api:'core', path: root + path, cost:1, normalize, collection});
-  const gql = (fields: string, connection: string[], normalize = (x: any) => x, collection = true, extra: Record<string, unknown> = {}, cost = 1): Recipe => ({api:'graphql',path:'/graphql',query:`query($owner:String!,$name:String!${fields.includes('$cursor')?',$cursor:String':''}${Object.keys(extra).map(k => `,$${k}:${k === 'number' ? 'Int!' : 'String!'}`).join('')}){rateLimit{cost remaining resetAt} repository(owner:$owner,name:$name){${fields}}}`,variables:{owner,name,...(fields.includes('$cursor')?{cursor}:{}),...extra},connection:['repository',...connection],cost,normalize,collection});
+  const rest = (path: string, normalize = (x: any) => x, collection = true): Recipe => ({operation:q.operation,api:'core', path: root + path, cost:1, normalize, collection});
+  const gql = (fields: string, connection: string[], normalize = (x: any) => x, collection = true, extra: Record<string, unknown> = {}, cost = 1): Recipe => ({operation:q.operation,api:'graphql',path:'/graphql',query:`query($owner:String!,$name:String!${fields.includes('$cursor')?',$cursor:String':''}${Object.keys(extra).map(k => `,$${k}:${k === 'number' ? 'Int!' : 'String!'}`).join('')}){rateLimit{cost remaining resetAt} repository(owner:$owner,name:$name){${fields}}}`,variables:{owner,name,...(fields.includes('$cursor')?{cursor}:{}),...extra},connection:['repository',...connection],cost,normalize,collection});
   const suffix = `?per_page=100&page=${page}`;
   switch (q.operation) {
     case 'pr_delta': return [gql(`pullRequests(first:100,after:$cursor,orderBy:{field:UPDATED_AT,direction:DESC}){${PAGE} nodes{${PR}}}`,['pullRequests'],pr),rest('/pulls' + suffix + '&state=all&sort=updated&direction=desc',pr)];
@@ -67,6 +67,37 @@ export function recipes(repository: string, q: Query, cursor?: string, page = 1)
     default: throw new Error('no upstream recipe');
   }
 }
+const numberIdentity=(v:any)=>typeof v==='number'?Number.isSafeInteger(v) && v>0:typeof v==='string' && /^[1-9][0-9]*$/.test(v);
+const identity=(v:any)=>typeof v==='number'?Number.isSafeInteger(v) && v>0:typeof v==='string' && v.length>0;
+function validateRow(recipe:Recipe,row:any):void {
+  if(!row || typeof row!=='object' || Array.isArray(row))throw new Error('malformed collection row');
+  const operation=recipe.operation || '';
+  if(['open_prs','recent_prs','pr_delta','pr'].includes(operation)) {
+    if(!numberIdentity(row.number) || !['OPEN','CLOSED','MERGED','open','closed'].includes(row.state))throw new Error('malformed PR header');
+  }else if(['open_issues','recent_issues','issue_delta'].includes(operation)) {
+    if(!numberIdentity(row.number) || !['OPEN','CLOSED','open','closed'].includes(row.state))throw new Error('malformed issue header');
+  }else if(operation==='files') {if(typeof row.filename!=='string')throw new Error('malformed file');}
+  else if(operation==='refs') {if(typeof row.ref!=='string')throw new Error('malformed reference');}
+  else if(['issue_comments','review_comments','reviews','reactions','workflow_jobs','workflow_runs','checks','review_threads'].includes(operation)) {
+    if(!identity(row.fullDatabaseId ?? row.id))throw new Error('malformed resource identity');
+    if(['issue_comments','review_comments'].includes(operation) && typeof row.body!=='string')throw new Error('malformed comment body');
+    if(operation==='review_threads') {
+      if(!Array.isArray(row.comments?.nodes) || typeof row.comments?.pageInfo?.hasNextPage!=='boolean')throw new Error('malformed thread comments');
+      for(const comment of row.comments.nodes)validateRow({...recipe,operation:'review_comments'},comment);
+    }
+  }
+}
+function validateScalar(recipe:Recipe,value:any):void {
+  if(!value || typeof value!=='object' || Array.isArray(value))throw new Error('malformed scalar resource');
+  const id=(v:any)=>typeof v==='number'?Number.isSafeInteger(v) && v>0:typeof v==='string' && /^[1-9][0-9]*$/.test(v);
+  if(recipe.operation==='pr')validateRow(recipe,value);
+  if(recipe.operation==='repository' && (!id(value.id) || typeof value.full_name!=='string' || !value.full_name.includes('/')))throw new Error('malformed repository header');
+  if(recipe.operation==='statuses') {
+    if(recipe.api==='core' && !Array.isArray(value.statuses))throw new Error('malformed status collection');
+    if(recipe.api==='graphql' && (!Object.hasOwn(value,'status') || value.status!==null && !Array.isArray(value.status?.contexts)))throw new Error('malformed status connection');
+    for(const status of recipe.api==='core'?value.statuses:value.status?.contexts || [])if(typeof status?.context!=='string' || typeof status?.state!=='string')throw new Error('malformed status context');
+  }
+}
 export function extract(recipe: Recipe, payload: any): { rows: any; cursor?: string } {
   let value = payload;
   if (recipe.api === 'graphql') {
@@ -74,13 +105,15 @@ export function extract(recipe: Recipe, payload: any): { rows: any; cursor?: str
     for (const key of recipe.connection || []) value = value?.[key];
     if (value == null) throw new Error('missing GraphQL resource');
     if (recipe.collection) {
-      if (!Array.isArray(value.nodes) || !value.pageInfo) throw new Error('incomplete connection');
+      if (!Array.isArray(value.nodes) || typeof value.pageInfo?.hasNextPage!=='boolean' || value.pageInfo.hasNextPage && (typeof value.pageInfo.endCursor!=='string' || !value.pageInfo.endCursor || value.pageInfo.endCursor===recipe.variables?.cursor))throw new Error('incomplete connection');
       // Do not silently truncate labels or nested thread comments.
       for (const node of value.nodes) {
+        validateRow(recipe,node);
         if (node.labels && node.labels.totalCount > node.labels.nodes.length) throw new Error('labels overflow');
       }
       return {rows:value.nodes.map(recipe.normalize),cursor:value.pageInfo.hasNextPage ? value.pageInfo.endCursor : undefined};
     }
+    validateScalar(recipe,value);
     return {rows:recipe.normalize(value)};
   }
   if (recipe.collection) {
@@ -88,8 +121,10 @@ export function extract(recipe: Recipe, payload: any): { rows: any; cursor?: str
     else if (payload.workflow_runs) value = payload.workflow_runs;
     else if (payload.jobs) value = payload.jobs;
     if (!Array.isArray(value)) throw new Error('invalid REST collection');
+    for(const row of value)validateRow(recipe,row);
     value = value.filter((x:any) => !(recipe.path.includes('/issues?') && x.pull_request));
     return {rows:value.map(recipe.normalize)};
   }
+  validateScalar(recipe,value);
   return {rows:recipe.normalize(value)};
 }

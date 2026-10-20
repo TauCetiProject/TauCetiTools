@@ -746,3 +746,42 @@ test('health retains schema diagnostics when repository metadata is missing',asy
  const response=await state.fetch(new Request('https://internal/health'));
  assert.equal(response.status,200);const result=await response.json();assert.deepEqual(result.storage.schema.missing,['meta']);assert.equal(result.monitoring.stale,true);
 });
+
+test('a delayed cold policy load cannot overwrite an acknowledged operator pin',async()=>{
+ const {state,archive}=repositoryFixture();await state.fixtureReady;state.storageLoaded=false;
+ const previous={mode:'enforce',disabled:[],pinned:[]},next={...previous,pinned:['expired_changes']};
+ const key='control/100/retention-policy.json';await archive.put(key,JSON.stringify(previous));
+ const put=archive.put.bind(archive),get=archive.get.bind(archive);
+ let releasePut,enteredPut,releaseGet,enteredGet;
+ const putGate=new Promise(r=>releasePut=r),putStarted=new Promise(r=>enteredPut=r),getGate=new Promise(r=>releaseGet=r),getStarted=new Promise(r=>enteredGet=r);
+ archive.put=async(name,...args)=>{if(name===key) {enteredPut();await putGate;}return put(name,...args);};
+ const updating=state.fetch(new Request('https://internal/storage/retention',{method:'POST',body:JSON.stringify({policy:next})}));await putStarted;
+ archive.get=async name=>{if(name===key) {const old=await get(name);enteredGet();await getGate;return old;}return get(name);};
+ const loading=state.loadRetentionState();await getStarted;
+ releasePut();assert.equal((await updating).status,200);releaseGet();await loading;
+ assert.deepEqual(state.retentionPolicy.pinned,['expired_changes']);
+});
+
+test('a completed retention epoch waits for the next minute instead of rescanning on every alarm',async()=>{
+ const {state,db}=repositoryFixture();await state.fixtureReady;
+ db.prepare('INSERT INTO changes VALUES(?,?,?,?,?)').run(1,Date.now(),'pr','1',0);
+ state.expire();const first={...state.retentionState.expired_changes};
+ for(let i=0;i<20;i++)state.expire();
+ assert.deepEqual(state.retentionState.expired_changes,first);
+});
+
+test('incremental accounting projections roll the hourly window without regrouping on health reads',()=>{
+ const metrics=new monitoring.AccountingMetrics(),all=[];
+ for(let minute=0;minute<120;minute++)for(let i=0;i<10;i++) {
+  const row={api:i%2?'core':'graphql',operation:'pr',shape:'shape-'+i%3,batch_size:1,points:i%3===0?null:1,latency:i,bytes:100,predicted:1,at:minute*60000};
+  all.push(row);metrics.record(row,row.at);
+ }
+ const now=119*60000,current=all.filter(r=>r.at>=60*60000),snapshot=metrics.snapshot(now);
+ assert.equal(snapshot.hour.reduce((n,r)=>n+r.requests,0),600);
+ for(const row of snapshot.hour) {
+  const expected=current.filter(r=>r.api===row.api),measured=expected.filter(r=>r.points!==null);
+  assert.equal(row.requests,expected.length);assert.equal(row.points,measured.reduce((n,r)=>n+r.points,0));assert.equal(row.unmeasured,expected.length-measured.length);
+  assert.equal(row.latency,expected.reduce((n,r)=>n+r.latency,0)/expected.length);
+ }
+ assert.equal(metrics.snapshot(now).hour,snapshot.hour,'health reads serve the prepared projection');
+});

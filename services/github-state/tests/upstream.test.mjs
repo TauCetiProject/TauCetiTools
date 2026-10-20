@@ -38,7 +38,7 @@ test('REST numeric identifiers retain their original digits',async()=>{
  }));
  try{
   const ns=await mf.getDurableObjectNamespace('INSTALLATIONS'),stub=ns.get(ns.idFromName('200'));
-  const result=await (await send(stub,'/read',{repository,query:{operation:'issue_comments',args:{number:7}},page:1})).json();
+  const result=await (await send(stub,'/read',{repository,query:{operation:'issue_comments',args:{number:7}},api:'core',page:1})).json();
   assert.equal(result.api,'core');assert.equal(result.data[0].id,'18446744073709551600');
  }finally{await mf.dispose();}
 });
@@ -179,7 +179,7 @@ test('scalar GraphQL recipes declare only variables they use',async()=>{
   const declaration=payload.query.match(/^query\((.*?)\)\{/)[1];
   for(const [,name] of declaration.matchAll(/\$(\w+):/g)) assert.match(payload.query.slice(declaration.length+8),new RegExp('\\$'+name+'\\b'));
   assert.equal(Object.hasOwn(payload.variables,'cursor'),false);
-  return response({data:{rateLimit:{cost:1,remaining:4999,resetAt:new Date(Date.now()+300000).toISOString()},repository:{pullRequest:{number:7,headRefOid:'a'.repeat(40),author:{login:'peer'},labels:{nodes:[]}}}}});
+  return response({data:{rateLimit:{cost:1,remaining:4999,resetAt:new Date(Date.now()+300000).toISOString()},repository:{pullRequest:{number:7,state:'OPEN',headRefOid:'a'.repeat(40),author:{login:'peer'},labels:{nodes:[]}}}}});
  });
  try{
   const ns=await mf.getDurableObjectNamespace('INSTALLATIONS'),stub=ns.get(ns.idFromName('200'));
@@ -334,5 +334,30 @@ test('malformed responses without quota headers debit the existing owner budget 
   malformed=true;assert.equal((await send(stub,'/read',input)).status,503);
   const after=(await (await stub.fetch('https://internal/health')).json()).budgets.find(b=>b.resource==='graphql').remaining;
   assert.equal(before-after,1);
+ }finally{await mf.dispose();}
+});
+
+test('malformed status/header objects stay unavailable rather than becoming empty complete state',async()=>{
+ let network=0;
+ const mf=await runtime(async()=>{network++;return response({},'core');});
+ try {
+  const ns=await mf.getDurableObjectNamespace('INSTALLATIONS'),stub=ns.get(ns.idFromName(repository.installation));
+  for(const query of [{operation:'statuses',args:{sha:'a'.repeat(40)}},{operation:'pr',args:{number:7}},{operation:'repository'}]) {
+   const before=network,result=await (await stub.fetch('https://internal/read',{method:'POST',headers:{'x-request-id':'shape-drill'},body:JSON.stringify({repository,query:{repository:repository.name,...query},api:'core'})})).json();
+   assert.equal(result.unavailable,true);assert.equal(result.reason,'malformed_upstream_response');assert.equal(result.request_id,'shape-drill');assert.equal(Object.hasOwn(result,'data'),false);assert.equal(network-before,1);
+  }
+ }finally{await mf.dispose();}
+});
+
+test('malformed collection rows and pagination never publish an empty complete collection',async()=>{
+ let network=0,graphql=false;
+ const mf=await runtime(async()=>{network++;return graphql?response({data:{repository:{pullRequests:{nodes:[],pageInfo:{}}}}}):response([{}],'core');});
+ try {
+  const ns=await mf.getDurableObjectNamespace('INSTALLATIONS'),stub=ns.get(ns.idFromName(repository.installation));
+  const read=(operation,api,args={})=>send(stub,'/read',{repository,query:{repository:repository.name,operation,args},api});
+  for(const [operation,args] of [['issue_comments',{number:7}],['workflow_jobs',{id:'9'}]]) {
+   const before=network,value=await (await read(operation,'core',args)).json();assert.equal(value.unavailable,true);assert.equal(Object.hasOwn(value,'data'),false);assert.equal(network-before,1);
+  }
+  graphql=true;const value=await (await read('open_prs','graphql')).json();assert.equal(value.unavailable,true);assert.equal(Object.hasOwn(value,'data'),false);
  }finally{await mf.dispose();}
 });

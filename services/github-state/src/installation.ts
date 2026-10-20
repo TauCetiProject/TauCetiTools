@@ -208,7 +208,10 @@ export class InstallationScheduler extends DurableObject<Env> {
       if (result.status === 304) return json({unchanged:true,api:recipe.api,etag:result.etag});
       if (result.status >= 400 || result.body.errors?.length) return json({unavailable:true,status:result.status,retry_at:Date.now()+60000});
       let data;
-      try { data=extract(recipe,result.body); } catch { continue; }
+      try {data=extract(recipe,result.body);}catch(error) {
+        if(error instanceof Error && error.message==='labels overflow')continue;
+        return json({unavailable:true,reason:'malformed_upstream_response',request_id:input.request_id,retry_at:Date.now()+60000});
+      }
       if (input.query.operation==='review_threads') {
         if (data.rows.some((t:any)=>t.comments?.pageInfo?.hasNextPage)) return json({continuation:{rows:data.rows,cursor:data.cursor,etag:result.etag},api:'graphql',points:result.points});
       }
@@ -387,7 +390,7 @@ export class InstallationScheduler extends DurableObject<Env> {
   async fetch(req: Request): Promise<Response> {
     try {
       const path = new URL(req.url).pathname;
-      if (path==='/read') return await this.read(await req.json());
+      if (path==='/read') return await this.read({...await req.json() as object,request_id:requestId(req)});
       if (path==='/batch') return await this.batch(await req.json());
       if (path==='/measure') return await this.measure(await req.json());
       if (path==='/maintenance') {

@@ -104,6 +104,21 @@ expiry. Authoritative resource spills remain protected. An expired staged
 continuation restarts its traversal; a transport error retries without discarding
 its checkpoint. A single storage operation may outlast a cooperative time budget.
 
+Completed SQL epochs wait one minute before restarting. This avoids repeatedly
+scanning the live window on every hot repair alarm. Operator policy updates are
+serialized, and generation checks prevent a delayed cold load from overwriting
+an acknowledged pin.
+
+CI archival's candidate count is an upper bound, not a throughput promise. Normal
+R2 latency can exhaust its cooperative I/O budget after one archived body; track
+progress and repeat passes. Protected orphan uploads from lost publication races
+remain owned by the future reference-graph collector.
+
+Malformed scalar/collection envelopes, missing identities/status fields and
+nonprogressing pagination remain explicitly unavailable, with request IDs. They
+do not publish empty complete coverage or trigger speculative API fanout. Existing
+quota-driven recipe selection and complete-label fallback remain available.
+
 ## Prepared monitoring and alarms
 
 Cron prepares capacity/ingress observations each minute in
@@ -137,7 +152,10 @@ explicitly unavailable until a management-metrics source is configured; the reco
 CLI's full bounded inventory and operator queue metrics remain necessary. Compute is
 unavailable and connection saturation is not applicable to this SQLite runtime.
 
-Request p50/p95 are fixed bucket upper bounds. Health serves hourly repair
+Request p50/p95 are fixed bucket upper bounds using the Workers I/O clock;
+purely synchronous CPU time is not measurable by that clock. Use the configured
+Workers invocation-duration/CPU observability when assessing cached-read CPU
+latency. The response labels this measurement explicitly. Health serves hourly repair
 aggregates; detailed minute rows are only archived in telemetry receipts. Dimension
 caps evict the oldest data and report dropped sample/request counts.
 Counters/latency distributions are bounded to sixty minute intervals per instance.

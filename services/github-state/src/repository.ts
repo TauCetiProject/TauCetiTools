@@ -38,6 +38,8 @@ export class RepositoryState extends DurableObject<Env> {
   private storageFlight?: Promise<void>;
   private storageLoaded=false;
   private retentionLoadFlight?:Promise<void>;
+  private policyGeneration=0;
+  private policyUpdateFlight:Promise<void>=Promise.resolve();
   private checkpointAt=0;
   private checkpointText='';
   private storageTurn=0;
@@ -986,6 +988,7 @@ export class RepositoryState extends DurableObject<Env> {
       if(this.retentionPolicy.disabled.includes(name) || this.retentionPolicy.pinned.includes(name))continue;
       if(budget.rows<=0 || budget.bytes<=0 || Date.now()>=budget.deadline)break;
       const prior=this.retentionState[name];
+      if(prior && prior.after>=prior.upper && prior.completed && now-prior.completed<60000)continue;
       // Preserve S0's emergency expiry; new classes start as a dry run.
       const enforce=this.retentionPolicy.mode==='enforce' || name!=='expired_demand';
       try {
@@ -1023,10 +1026,14 @@ export class RepositoryState extends DurableObject<Env> {
   async readRetentionState():Promise<void> {
     let repo:string|undefined;try {repo=this.meta('repository')?.id;}catch {return;}if(!repo)return;
     if(!this.storageLoaded) {
+      const observedGeneration=this.policyGeneration;
       try {
         const control=await this.maintenanceArchive.get('control/'+repo+'/retention-policy.json').then(o=>o?.json<any>());
-        if(control)this.retentionPolicy=policy(control);
+        if(this.storageLoaded || observedGeneration!==this.policyGeneration)return;
+        const candidate=control?policy(control):DEFAULT_POLICY;
         const checkpoint=await this.maintenanceArchive.get('control/'+repo+'/retention-checkpoint.json').then(o=>o?.json<any>());
+        if(this.storageLoaded || observedGeneration!==this.policyGeneration)return;
+        this.retentionPolicy=candidate;
         if(checkpoint?.version===1 && checkpoint.classes && typeof checkpoint.classes==='object') {
           // Invalid progress is expendable: restart that scan, retaining policy.
           for(const name of Object.keys(RULES) as RetentionClass[]) {
@@ -1067,6 +1074,7 @@ export class RepositoryState extends DurableObject<Env> {
         this.checkpointAt=Date.now();this.checkpointText=text;
       }
     }catch(error) {this.noteFailure('retention_checkpoint',error);}
+    if(this.migrationHeld())return;
     this.prepareDiagnostics();
     const now=Date.now();
     if(this.observation && now-this.observation.at<60000)return;
@@ -1080,6 +1088,7 @@ export class RepositoryState extends DurableObject<Env> {
       ingressHealth={at:now,durable:true,backlog:configured?await backlog({...this.env,ARCHIVE:this.maintenanceArchive},configured,2):null,
         queue:{count:null,reason:'management_metrics_not_configured'},dlq:{count:null,reason:'management_metrics_not_configured'}};
     }catch(error) {ingressHealth={at:now,durable:false,error:classify(error)};}
+    if(this.migrationHeld())return;
     try {
       const sample={at:now,bytes:this.sql.databaseSize,allowance:SQLITE_ALLOWANCE};
       if(!this.capacityHistory.length) {
@@ -1100,6 +1109,7 @@ export class RepositoryState extends DurableObject<Env> {
         if(now-this.tableAttemptAt<3600000)throw new Error('table_estimate_throttled');
         this.tableAttemptAt=now;
         await this.maintenanceArchive.put(attemptKey,JSON.stringify({at:now}));
+        if(this.migrationHeld())return;
         const previous=this.tableEstimates;
         const tables=summaryTables(this.sql).map(name=>{
           const low=this.sql.exec<any>('SELECT rowid rid FROM "'+name+'" ORDER BY rowid LIMIT 1').toArray()[0]?.rid;
@@ -1117,6 +1127,7 @@ export class RepositoryState extends DurableObject<Env> {
         const progress=await this.maintenanceArchive.get('control/retention/'+name+'.json').then(o=>o?.json<any>()).catch(()=>undefined);
         return [name,{...(progress || {}),stale:!progress || now-progress.at>180000}];
       })));
+      if(this.migrationHeld())return;
       this.capacityHistory=this.capacityHistory.filter(r=>r.at>=now-2*3600000 && r.at<now).slice(-120);
       const baseline=this.capacityHistory.filter(r=>r.at<=now-3600000).at(-1);
       const measured=capacity(sample,baseline,now,this.lastCapacity);this.lastCapacity=measured;
@@ -1414,12 +1425,15 @@ export class RepositoryState extends DurableObject<Env> {
     if (path==='/storage/summary') return json({repository:repo,storage:this.storageState(),retention:{policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,ci:this.ciProgress,receipts_pinned:this.receiptsPinned},...summary(this.sql)});
     if (path==='/storage/retention') {
       if(input.policy!==undefined) {
-        // Do not let an in-flight startup load overwrite an operator override.
-        if(this.storageFlight)await this.storageFlight;
-        if(this.retentionLoadFlight)await this.retentionLoadFlight;
         let next:Policy;try {next=policy(input.policy);}catch {throw new AdminError('invalid_retention_policy');}
-        await this.env.ARCHIVE.put('control/'+repo+'/retention-policy.json',JSON.stringify(next));
-        this.retentionPolicy=next;this.storageLoaded=true;
+        const update=this.policyUpdateFlight.then(async()=>{
+          if(this.storageFlight)await this.storageFlight;
+          if(this.retentionLoadFlight)await this.retentionLoadFlight;
+          await this.env.ARCHIVE.put('control/'+repo+'/retention-policy.json',JSON.stringify(next));
+          this.policyGeneration++;this.retentionPolicy=next;this.storageLoaded=true;
+        });
+        this.policyUpdateFlight=update.catch(()=>{});
+        await update;
       }
       return json({policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,ci:this.ciProgress,receipts_pinned:this.receiptsPinned,budget:{rows:6000,bytes:4*1024**2,cooperative_io_budget_ms:50,cpu_bound:'rows_and_bytes'},observation:await this.preparedObservation()});
     }

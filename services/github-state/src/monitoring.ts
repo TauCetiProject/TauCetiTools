@@ -37,7 +37,7 @@ export class RequestMetrics {
     const rows = [...this.intervals].filter(([at]) => at >= now - 3600000);
     const counts = rows.reduce((a, [, r]) => ({ requests: a.requests + r.requests, errors: a.errors + r.errors, unavailable: a.unavailable + r.unavailable, latency: a.latency.map((v, i) => v + r.latency[i]) }), { requests: 0, errors: 0, unavailable: 0, latency: Array(BOUNDS.length + 1).fill(0) });
     const percentile = (p: number) => { if (!counts.requests) return null; let n = 0; for (let i = 0; i < counts.latency.length; i++) { n += counts.latency[i]; if (n >= Math.ceil(counts.requests * p)) return BOUNDS[i] ?? null; } return null; };
-    return { ...counts, bounds_ms: BOUNDS, p50_ms: percentile(.5), p95_ms: percentile(.95), overflow_bucket: '>60000ms', error_rate: counts.requests ? counts.errors / counts.requests : null, unavailable_rate: counts.requests ? counts.unavailable / counts.requests : null, intervals: rows.map(([at, r]) => ({ at, ...r })), scope: 'repository_instance_since_restart' };
+    return { ...counts, bounds_ms: BOUNDS, p50_ms: percentile(.5), p95_ms: percentile(.95), overflow_bucket: '>60000ms', error_rate: counts.requests ? counts.errors / counts.requests : null, unavailable_rate: counts.requests ? counts.unavailable / counts.requests : null, intervals: rows.map(([at, r]) => ({ at, ...r })), scope: 'repository_instance_since_restart', latency_measurement: 'worker_io_clock_elapsed; synchronous_CPU_time_not_measured' };
   }
 }
 
@@ -93,34 +93,46 @@ export function emitAlarm(env: Env, repository: string, observation: any): { cha
 // The quota owner retains its raw diagnostic window independently. Serving
 // health uses this bounded projection rather than grouping that raw table.
 export class AccountingMetrics {
+  private rows=new Map<string,any>();
+  private hours=new Map<string,any>();
+  private recipes=new Map<string,any>();
+  private minute=-1;
   private dropped=0;
-  private rows = new Map<string, any>();
   private prepared:any={hour:[],recipes:[],at:null,scope:'installation_instance_since_restart'};
-  record(row:any, now=Date.now()):void {
+  private project(row:any,aggregate=false):void {
+    const delta=aggregate?row:{...row,requests:1,points:row.points || 0,measured:Number(row.points!==null),unmeasured:Number(row.points===null),latency_sum:row.latency,predicted_sum:row.predicted,max_points:row.points || 0,max_latency:row.latency};
+    for(const recipe of [false,true]) {
+      const groups=recipe?this.recipes:this.hours,key=JSON.stringify([row.api,row.operation,...(recipe?[row.shape,row.batch_size]:[])]);
+      let g=groups.get(key);
+      if(!g) {
+        g={api:row.api,operation:row.operation,...(recipe?{shape:row.shape,batch_size:row.batch_size}:{}),requests:0,points_sum:0,measured:0,unmeasured:0,bytes:0,latency_sum:0,predicted_sum:0,max_points:0,max_latency:0};
+        groups.set(key,g);this.prepared[recipe?'recipes':'hour'].push(g);
+      }
+      for(const field of ['requests','measured','unmeasured','bytes','latency_sum','predicted_sum'])g[field]+=delta[field];
+      g.points_sum+=delta.points;g.points=g.measured?g.points_sum:null;
+      g.max_points=Math.max(g.max_points,delta.max_points);g.max_latency=Math.max(g.max_latency,delta.max_latency);
+      g.latency=g.latency_sum/g.requests;g.mean_points=g.measured?g.points_sum/g.measured:null;g.predicted=g.predicted_sum/g.requests;
+    }
+  }
+  record(row:any,now=Date.now()):void {
     const at=Math.floor(now/60000)*60000,key=JSON.stringify([at,row.api,row.operation,row.shape,row.batch_size]);
-    for(const [key,r] of this.rows)if(r.at<at-59*60000)this.rows.delete(key);
+    let rebuild=at!==this.minute;
+    if(rebuild) {this.minute=at;for(const [key,r] of this.rows)if(r.at<at-59*60000)this.rows.delete(key);}
     if(!this.rows.has(key) && this.rows.size>=10000) {
-      let oldest:string|undefined,at=Infinity;
-      for(const [k,r] of this.rows)if(r.at<at) {oldest=k;at=r.at;}
-      if(oldest!==undefined) {this.dropped+=this.rows.get(oldest).requests;this.rows.delete(oldest);}
+      let oldest:string|undefined,oldestAt=Infinity;
+      for(const [k,r] of this.rows)if(r.at<oldestAt) {oldest=k;oldestAt=r.at;}
+      if(oldest!==undefined) {this.dropped+=this.rows.get(oldest).requests;this.rows.delete(oldest);rebuild=true;}
     }
     const r=this.rows.get(key) || {...row,at,requests:0,points:0,measured:0,unmeasured:0,bytes:0,latency_sum:0,max_latency:0,max_points:0,predicted_sum:0};
     r.requests++;r.points+=row.points || 0;r.measured+=Number(row.points!==null);r.unmeasured+=Number(row.points===null);
     r.bytes+=row.bytes;r.latency_sum+=row.latency;r.max_latency=Math.max(r.max_latency,row.latency);r.max_points=Math.max(r.max_points,row.points || 0);r.predicted_sum+=row.predicted;
     this.rows.set(key,r);
-    const grouped=(recipe:boolean)=>{
-      const groups=new Map<string,any>();
-      for(const r of this.rows.values()) {
-        const key=JSON.stringify([r.api,r.operation,...(recipe?[r.shape,r.batch_size]:[])]);
-        const g=groups.get(key) || {api:r.api,operation:r.operation,...(recipe?{shape:r.shape,batch_size:r.batch_size}:{}),requests:0,points:0,measured:0,unmeasured:0,bytes:0,latency_sum:0,predicted_sum:0,max_points:0,max_latency:0};
-        for(const f of ['requests','points','measured','unmeasured','bytes','latency_sum','predicted_sum'])g[f]+=r[f];
-        g.max_latency=Math.max(g.max_latency,r.max_latency);g.max_points=Math.max(g.max_points,r.max_points);groups.set(key,g);
-      }
-      return [...groups.values()].map(g=>({...g,latency:g.latency_sum/g.requests,mean_points:g.measured?g.points/g.measured:null,predicted:g.predicted_sum/g.requests}));
-    };
-    this.prepared={at:now,hour:grouped(false),recipes:grouped(true),scope:'installation_instance_since_restart'};
+    if(rebuild) {
+      this.hours.clear();this.recipes.clear();this.prepared={at:now,hour:[],recipes:[],scope:'installation_instance_since_restart'};
+      for(const row of this.rows.values())this.project(row,true);
+    }else {this.project(row);this.prepared.at=now;}
   }
-  snapshot(now=Date.now()):any { return {...this.prepared,dropped_requests:this.dropped,stale:!this.prepared.at || now-this.prepared.at>180000}; }
+  snapshot(now=Date.now()):any {return {...this.prepared,dropped_requests:this.dropped,stale:!this.prepared.at || now-this.prepared.at>180000};}
 }
 
 export async function within<T>(work:Promise<T>,ms:number):Promise<T> {
