@@ -1,0 +1,354 @@
+{
+  "version": 1,
+  "date": "2026-10-20",
+  "issue": "https://github.com/TauCetiProject/TauCetiWorker/issues/317",
+  "environment": "disposable_synthetic_deployed_fixture",
+  "production_actions": false,
+  "shared_test_mirror_modified": false,
+  "project": "sparkling-sunset-73872362",
+  "source_branch": "br-weathered-unit-b5zm8coj",
+  "source_endpoint": "ep-plain-art-b54yw5xx",
+  "run": "issue317-drill-32c2678a",
+  "initial_deployment": "7b5c85bb-ea76-4688-9190-0ff5f13fe771",
+  "regression_deployment": "7116a35f-680a-425b-82c4-d7f0293543bd",
+  "upstream_revision_before_drill": "52459ed",
+  "sql_tables_restored": 24,
+  "local_validation": {
+    "service_passed": 224,
+    "service_skipped_postgres": 53,
+    "postgres_prevention_passed": 15,
+    "python_package_passed": 15,
+    "native_frozen_source_passed": 1
+  },
+  "spill_reuse": {
+    "revision_unchanged": true,
+    "old_and_new_resource_objects_retained": true
+  },
+  "sqlite_full": {
+    "at": 1792500536.168817,
+    "delivery": "issue317-drill-32c2678a-sqlite-full",
+    "ordinary_recovery": true,
+    "revision": 261,
+    "cached_history_count": 2
+  },
+  "latency": {
+    "at": 1792500730.1502323,
+    "scope": "same deployed fixture frontend and identical warm stored-read data; interleaved requests; no upstream dispatch",
+    "profiles": {
+      "open_prs": {
+        "samples_each": 20,
+        "sqlite_p95_ms": 330.23762493394315,
+        "postgres_p95_ms": 347.91778901126236
+      },
+      "issue_comments": {
+        "samples_each": 20,
+        "sqlite_p95_ms": 380.3429240360856,
+        "postgres_p95_ms": 338.79301394335926
+      }
+    },
+    "latency": {
+      "baseline_p95_ms": 380.3429240360856,
+      "target_p95_ms": 347.91778901126236
+    },
+    "source": {
+      "object": "8089d0a0a8592131711957b29c07b81ec951e271cd8f5fb7c2b181efbbce817c",
+      "deployment": "7b5c85bb-ea76-4688-9190-0ff5f13fe771",
+      "backend": "sqlite",
+      "revision": 261,
+      "blocked_external_fetches": 0
+    },
+    "canary": {
+      "object": "24047b00c424cbb52ea3a9c4aaa080c2c9a453b6e83653b83128e412bdec2e43",
+      "deployment": "7b5c85bb-ea76-4688-9190-0ff5f13fe771",
+      "backend": "postgres",
+      "revision": 261,
+      "blocked_external_fetches": 0
+    },
+    "within_20_percent": true
+  },
+  "migration": {
+    "generation": "309529de-5c45-4e6f-abb6-df9a0dba68ac",
+    "phase": "complete",
+    "failure": null,
+    "source_fenced": true,
+    "target_active": true,
+    "imported_tables": 20,
+    "all_import_and_verify_checksums_match": true,
+    "shadow": {
+      "queries": 2,
+      "hash": "f95b58e84448dfb3f490609b637030994a5b98a3cab19399628c01ab3d19440d",
+      "verified_at": 1792501607870,
+      "complete": true,
+      "cursor_checks": 2,
+      "expired_cursor_checks": 1,
+      "max_subrequests": 25,
+      "max_step_ms": 2849
+    },
+    "release_backlog": {
+      "parked": 0,
+      "held": 0,
+      "queue": 0,
+      "dlq": 0,
+      "queue_observed_at": 1792501667634,
+      "dlq_observed_at": 1792501667634,
+      "raw_completed": 1792501669657,
+      "raw_gaps": {
+        "count": 0,
+        "truncated": false
+      }
+    },
+    "completed_at": 1792501730003,
+    "manual_step_requests": 0
+  },
+  "steady_state_outages": {
+    "postgres-unavailable": {
+      "fault": {
+        "database": true
+      },
+      "started_at": 1792502019.0283377,
+      "safe_cached_read": true,
+      "health_ms": 1619.6795060532168,
+      "accepted_ingress": {
+        "delivery": "issue317-drill-32c2678a-postgres-unavailable",
+        "status": 202,
+        "comment_id": "44"
+      },
+      "recovered_at": 1792502094.1802182,
+      "result_count": 4
+    },
+    "postgres-slow": {
+      "fault": {
+        "slow_ms": 5000
+      },
+      "started_at": 1792502094.7674015,
+      "safe_cached_read": true,
+      "health_ms": 760.7635980239138,
+      "accepted_ingress": {
+        "delivery": "issue317-drill-32c2678a-postgres-slow",
+        "status": 202,
+        "comment_id": "45"
+      },
+      "recovered_at": 1792502115.3927214,
+      "result_count": 5
+    },
+    "r2-unavailable": {
+      "fault": {
+        "r2": true
+      },
+      "started_at": 1792502115.9244633,
+      "safe_cached_read": true,
+      "health_ms": 460.7792890165001,
+      "rejected_ingress": {
+        "delivery": "issue317-drill-32c2678a-r2-unavailable",
+        "status": 503,
+        "comment_id": "46"
+      },
+      "accepted_after_restore": {
+        "delivery": "issue317-drill-32c2678a-r2-unavailable",
+        "status": 202,
+        "comment_id": "46"
+      },
+      "recovered_at": 1792502136.099016,
+      "result_count": 6
+    }
+  },
+  "provider_restart": {
+    "started_at": 1792502195.947205,
+    "project": "sparkling-sunset-73872362",
+    "branch": "br-weathered-unit-b5zm8coj",
+    "endpoint": "ep-plain-art-b54yw5xx",
+    "operations": [
+      "14b66167-21d4-4b79-b334-378aca53c6cc",
+      "a070311f-74f1-4b49-86ca-e069cd43c130",
+      "3ca781be-bd03-4140-a4aa-74c251daa474",
+      "8f3ba7af-aa55-4044-89e3-fb614b27aeda",
+      "51cecbf3-b6c8-4d4e-94fa-0bb620f7c1bc",
+      "8056668c-99ba-4b95-8450-711602183f94"
+    ],
+    "production_fault_injection": false,
+    "safe_cached_read": true,
+    "ingress": {
+      "delivery": "issue317-drill-32c2678a-postgres-restart",
+      "status": 202,
+      "comment_id": "47"
+    },
+    "verified": true,
+    "finished_at": 1792502206.4575624
+  },
+  "point_in_time_restore": {
+    "version": 1,
+    "started_at": "2026-10-20T13:18:09.325Z",
+    "project": "sparkling-sunset-73872362",
+    "source_branch": "br-weathered-unit-b5zm8coj",
+    "source_endpoint": "ep-plain-art-b54yw5xx",
+    "schema": "github_state_317009149767",
+    "production_actions": false,
+    "verified": true,
+    "restore_branch_deleted": true,
+    "table_names": [
+      "activity_landings",
+      "activity_loc_cache",
+      "backend_control",
+      "capacity_statistics",
+      "changes",
+      "collections",
+      "cursors",
+      "deliveries",
+      "demand",
+      "head_prs",
+      "jobs",
+      "members",
+      "meta",
+      "migration_imports",
+      "query_metrics",
+      "repair_metrics",
+      "resources",
+      "retired_objects",
+      "survey_dirty",
+      "survey_fragments",
+      "survey_hydrated",
+      "survey_hydration_failures",
+      "survey_inventory",
+      "survey_state"
+    ],
+    "restore_branch": "br-young-flower-b5t44i73",
+    "restore_point": "2026-10-20T13:18:10.469064Z",
+    "tables": {
+      "activity_landings": 0,
+      "activity_loc_cache": 0,
+      "backend_control": 1,
+      "capacity_statistics": 1,
+      "changes": 271,
+      "collections": 2,
+      "cursors": 0,
+      "deliveries": 6,
+      "demand": 2,
+      "head_prs": 128,
+      "jobs": 2,
+      "members": 135,
+      "meta": 10,
+      "migration_imports": 16,
+      "query_metrics": 0,
+      "repair_metrics": 0,
+      "resources": 135,
+      "retired_objects": 0,
+      "survey_dirty": 1,
+      "survey_fragments": 0,
+      "survey_hydrated": 0,
+      "survey_hydration_failures": 0,
+      "survey_inventory": 128,
+      "survey_state": 0
+    },
+    "manifest_sha256": "8ba96abf3fdcad81087c6425ec7799e92c43e87c7a1d6151ab1d14946cb2e78e",
+    "exact_large_id_preserved": true,
+    "spill_references_preserved": true,
+    "after_point_mutation_absent": true,
+    "finished_at": "2026-10-20T13:18:16.724Z"
+  },
+  "frozen_source_regression": {
+    "readable": true,
+    "result_status": "ok",
+    "header": "retained frozen header",
+    "blocked_write": true,
+    "activated_source_rejected": true,
+    "blocked_external_fetches": 0
+  },
+  "repeatable_runner": {
+    "case": "postgres-unavailable",
+    "run": "issue317-drill-32c2678a",
+    "started_at": 1792502538.635629,
+    "production_actions": false,
+    "verified": true,
+    "safe_cached_read": true,
+    "health_ms": 865.2241720119491,
+    "ingress": {
+      "delivery": "issue317-drill-32c2678a-postgres-unavailable-d9a6ff6c",
+      "status": 202,
+      "comment_id": "1792502539706272"
+    },
+    "ordinary_recovery": true,
+    "identity": {
+      "object": "8089d0a0a8592131711957b29c07b81ec951e271cd8f5fb7c2b181efbbce817c",
+      "deployment": "7116a35f-680a-425b-82c4-d7f0293543bd",
+      "backend": "postgres",
+      "revision": 273,
+      "blocked_external_fetches": 0
+    },
+    "finished_at": 1792502577.19225
+  },
+  "final_input_accounting": {
+    "deliveries": [
+      {
+        "id": "issue317-drill-32c2678a-migration-outage",
+        "count": "1"
+      },
+      {
+        "id": "issue317-drill-32c2678a-postgres-restart",
+        "count": "1"
+      },
+      {
+        "id": "issue317-drill-32c2678a-postgres-slow",
+        "count": "1"
+      },
+      {
+        "id": "issue317-drill-32c2678a-postgres-unavailable",
+        "count": "1"
+      },
+      {
+        "id": "issue317-drill-32c2678a-postgres-unavailable-d9a6ff6c",
+        "count": "1"
+      },
+      {
+        "id": "issue317-drill-32c2678a-r2-unavailable",
+        "count": "1"
+      },
+      {
+        "id": "issue317-drill-32c2678a-sqlite-full",
+        "count": "1"
+      }
+    ],
+    "max_queue_attempt": 1,
+    "attempt_observations": 7,
+    "parked": {
+      "count": 0,
+      "truncated": false,
+      "oldest_received": null
+    },
+    "held": {
+      "count": 0,
+      "truncated": false,
+      "oldest_received": null
+    },
+    "blocked_external_fetches": 0,
+    "queue_metrics": {
+      "at": 1792502807143,
+      "queue": {
+        "at": 1792502807143,
+        "count": 0,
+        "bytes": 0,
+        "oldest_received": null,
+        "approximate": true,
+        "error": null
+      },
+      "dlq": {
+        "at": 1792502807143,
+        "count": 0,
+        "bytes": 0,
+        "oldest_received": null,
+        "approximate": true,
+        "error": null
+      }
+    }
+  },
+  "limitations": [
+    "Logical SQLite/R2/network errors are injected by the test-only fixture; compute restart and PITR used real disposable Neon resources.",
+    "The initial deployment exposed a frozen-source startup read failure; the corrected path was verified in native local and deployed tests.",
+    "Warm cache availability is bounded by instance lifetime and expiry; cold target reads fail explicitly during an outage.",
+    "Resource deletion remains conservative until every retained reference can be proven released.",
+    "Production migration/deployment and an existing provider CPU telemetry source remain operator/coordinator work."
+  ],
+  "teardown": {
+    "complete": false,
+    "status": "awaiting_final_health_audit"
+  }
+}

@@ -45,9 +45,29 @@ automatic resource-spill deletion is suspended. Include this conservative R2 gro
 in operator capacity planning; this release does not claim to complete
 reference-graph garbage collection.
 
+New authoritative resource spills use `resources/<repository>/sha256-<digest>`.
+Identical large payloads reuse one immutable object and pointer, so repeated
+refreshes do not create extra objects or semantic revisions. Conditional creation
+preserves existing pins. Upload failure prevents publication of the new pointer
+and a subsequent attempt can retry normally. Legacy pointers remain readable;
+changed contents create a separate object without retiring the old one. Expiring
+staging uploads keep unique keys because they have independent lifetimes. A
+resource digest key remains protected even if cursor expiry metadata is copied
+onto it accidentally.
+
+A current SQLite source frozen by a verified migration remains readable when
+startup is retried after its ownership fence is written. This requires matching
+migration generation and the recorded source fence. It never authorizes writes,
+and an activated PostgreSQL target cannot fall back to that source. Cold reads
+during a target outage still return an explicit storage error; only warm,
+unexpired results from the selected owner are available from memory.
+
 S0's existing frozen-mirror behavior remains: a degraded mirror with no applied
 changes for ten minutes reports `mirror_frozen` unavailable. This release adds no
 GitHub requests to status, cleanup, archival, or recovery.
+
+See the [disposable deployed drill](github-state-deployed-drill.md) for the live
+fixture, exact operator commands, evidence and teardown conditions.
 
 ## Bounded work and independent recovery
 

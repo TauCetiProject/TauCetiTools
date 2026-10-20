@@ -57,7 +57,7 @@ export function sweep(sql: SqlStorage, name: RetentionClass, previous: Checkpoin
 
 // Explicit protection wins even if a mistakenly copied expiry is present.
 export function protectedObject(key: string, metadata?: Record<string, string>): boolean {
-  return metadata?.pinned === 'true' || /^(parked|recovery|migrations?|control)\//.test(key) || key.startsWith('resources/') && metadata?.kind!=='cursor';
+  return metadata?.pinned === 'true' || /^(parked|recovery|migrations?|control)\//.test(key) || /^resources\/[^/]+\/sha256-[a-f0-9]{64}$/.test(key) || key.startsWith('resources/') && metadata?.kind!=='cursor';
 }
 
 export async function retirePrefix(bucket: R2Bucket, name: keyof typeof R2_CLASSES, now = Date.now(), canDelete:()=>Promise<boolean> = async()=>true): Promise<any> {

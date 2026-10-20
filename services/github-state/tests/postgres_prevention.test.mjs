@@ -302,3 +302,21 @@ pg('a single transient parkable event failure does not become a persistent criti
   await f.state.storageMaintenance();assert.equal((await f.state.preparedObservation()).reasons.includes('input_application_unavailable'),false);
  }finally {t.mock.timers.reset();await f.close();}
 });
+
+pg('repeated PostgreSQL resource refreshes reuse immutable spill contents across retained snapshots',async()=>{
+ const f=await postgresFixture();try {
+  f.env.ARCHIVE=bucket();
+  const data={id:'9223372036854775807',body:'retained '.repeat(200000)};
+  await f.state.put('issue_comments',data.id,data,Date.now(),false,'7');
+  const old=(await f.store.exec('SELECT data FROM resources WHERE kind=? AND id=?','issue_comments',data.id)).one().data;
+  const revision=await f.state.revision();
+  await f.store.exec('INSERT INTO cursors VALUES(?,?,?)','snapshot',Date.now()+600000,JSON.stringify({data:JSON.parse(old)}));
+  for(let n=0;n<12;n++)await f.state.put('issue_comments',data.id,data,Date.now(),false,'7');
+  assert.equal(await f.state.revision(),revision);
+  assert.equal([...f.env.ARCHIVE.objects.keys()].filter(k=>k.startsWith('resources/')).length,1);
+  await f.state.put('issue_comments',data.id,{...data,body:data.body+' changed'},Date.now(),false,'7');
+  const snapshot=JSON.parse((await f.store.exec('SELECT payload FROM cursors WHERE id=?','snapshot')).one().payload);
+  assert.deepEqual(await f.state.decode(JSON.stringify(snapshot.data)),data);
+  assert.equal([...f.env.ARCHIVE.objects.keys()].filter(k=>k.startsWith('resources/')).length,2);
+ }finally {await f.close();}
+});

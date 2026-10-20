@@ -192,7 +192,14 @@ export class RepositoryState extends DurableObject<Env> {
     let version:unknown;
     try {version=this.localMeta('schema_version');} catch {version=undefined;}
     let owner:any;try{owner=this.localMeta('backend_owner');}catch{if(version!==undefined)throw new Error('Invalid backend ownership metadata');}
-    if(owner && (owner.backend!=='sqlite' || owner.generation!==(this.env.REPOSITORY_GENERATION || 'sqlite-v1'))) {this.schema={error:'backend_fenced',missing:[],cause:'backend_fenced'};return;}
+    if(owner && (owner.backend!=='sqlite' || owner.generation!==(this.env.REPOSITORY_GENERATION || 'sqlite-v1'))) {
+      // A known frozen source remains readable after a constructor or storage
+      // marker retry. The adapters and migration gate still fence every write.
+      const frozenSource=this.migrationHeld() && owner.backend==='migration' && version===SCHEMA_VERSION &&
+        this.migrationState?.generation===owner.generation && this.migrationState?.cutover?.source_fenced &&
+        !this.migrationState?.cutover?.target_active && this.store.backend==='sqlite';
+      this.schema=frozenSource?'current':{error:'backend_fenced',missing:[],cause:'backend_fenced'};return;
+    }
     if(version===SCHEMA_VERSION) {this.schema='current';return;}
     if(this.migrationHeld()) {this.schema='migration_pending';return;}
     if(this.degraded || defer && this.sql.exec<any>("SELECT COUNT(*) n FROM sqlite_master WHERE type='table' AND name='meta'").one().n) {
@@ -407,11 +414,16 @@ export class RepositoryState extends DurableObject<Env> {
     const text = JSON.stringify(data);
     const memoKey=(expires?'staging:':'resource:')+text;
     if(this.preparedEncodings?.has(memoKey))return this.preparedEncodings.get(memoKey)!;
-    if (new TextEncoder().encode(text).length < 1500000) return text;
-    const key = `${expires?'staging-spills':'resources'}/${repositoryId || (await this.meta('repository')).id}/${crypto.randomUUID()}`;
+    const bytes=new TextEncoder().encode(text);
+    if (bytes.length < 1500000) return text;
+    const hash=expires?undefined:await digest(bytes.buffer as ArrayBuffer);
+    const key = `${expires?'staging-spills':'resources'}/${repositoryId || (await this.meta('repository')).id}/${hash?'sha256-'+hash:crypto.randomUUID()}`;
     // Active resources must remain readable for their entire SQL row lifetime.
     // Raw deliveries, staging pages, and snapshots have separate expiry rules.
-    await this.env.ARCHIVE.put(key,text,{customMetadata:{kind:expires?'cursor':'resource',...(expires?{expires:String(expires)}:{})}});
+    // Immutable resource contents reuse one object across identical refreshes.
+    // Conditional creation also preserves any existing operator/migration pin.
+    // Staging uploads retain distinct keys because their expiry can differ.
+    await this.env.ARCHIVE.put(key,bytes,{customMetadata:{kind:expires?'cursor':'resource',...(expires?{expires:String(expires)}:{})},...(hash?{sha256:hash,onlyIf:{etagDoesNotMatch:'*'}}:{})});
     return JSON.stringify({$r2:key});
   }
   async decode(text: string): Promise<any> {

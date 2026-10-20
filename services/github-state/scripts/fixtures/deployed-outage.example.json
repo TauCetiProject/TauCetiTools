@@ -1,0 +1,91 @@
+{
+  "name": "issue317-drill-00000000",
+  "account_id": "REPLACE_WITH_CLOUDFLARE_ACCOUNT",
+  "main": "deployed-outage.ts",
+  "compatibility_date": "2026-10-11",
+  "workers_dev": true,
+  "observability": {
+    "enabled": true
+  },
+  "version_metadata": {
+    "binding": "CF_VERSION"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "REPOSITORIES",
+        "class_name": "RepositoryState"
+      },
+      {
+        "name": "INSTALLATIONS",
+        "class_name": "InstallationScheduler"
+      },
+      {
+        "name": "CANARIES",
+        "class_name": "CanaryState"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "RepositoryState",
+        "InstallationScheduler",
+        "CanaryState"
+      ]
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "ARCHIVE",
+      "bucket_name": "issue317-drill-00000000"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "EVENTS",
+        "queue": "issue317-drill-00000000-events"
+      },
+      {
+        "binding": "EVENTS_DLQ",
+        "queue": "issue317-drill-00000000-dlq"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "issue317-drill-00000000-events",
+        "max_batch_size": 10,
+        "max_batch_timeout": 1,
+        "max_retries": 20,
+        "dead_letter_queue": "issue317-drill-00000000-dlq"
+      },
+      {
+        "queue": "issue317-drill-00000000-dlq",
+        "max_batch_size": 10,
+        "max_batch_timeout": 1,
+        "max_retries": 20
+      }
+    ]
+  },
+  "triggers": {
+    "crons": [
+      "* * * * *"
+    ]
+  },
+  "vars": {
+    "DRILL_RUN_ID": "issue317-drill-00000000",
+    "DRILL_DATABASE_HOST": "REPLACE_WITH_DISPOSABLE_TEST_ENDPOINT_HOST",
+    "DRILL_DISPOSABLE_BUCKET": "issue317-drill-00000000",
+    "ALLOWED_REPOSITORIES": "[{\"id\": \"317000000001\", \"name\": \"issue317/drill\", \"installation\": \"317\"}]",
+    "DRILL_CANARY_REPOSITORY": "[{\"id\": \"317000000002\", \"name\": \"issue317/canary\", \"installation\": \"318\"}]",
+    "ADMIN_TOKEN_HASH": "REPLACE_WITH_ADMIN_SHA256",
+    "CLIENT_TOKENS": "[{\"hash\": \"REPLACE_WITH_CLIENT_SHA256\", \"repositories\": [\"issue317/drill\"]}]",
+    "FAULT_INJECTION": "true",
+    "MIGRATION_ENVIRONMENT": "test",
+    "GITHUB_APP_ID": "0",
+    "GITHUB_INSTALLATION_ID": "317",
+    "GITHUB_PRIVATE_KEY": ""
+  }
+}

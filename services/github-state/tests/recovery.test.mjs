@@ -1059,3 +1059,59 @@ test('PostgreSQL queue and replay ignore an obsolete SQLite full marker',async()
  assert.equal(h.state.applied.has('postgres-replay-after-sqlite-full'),true);
  assert.equal(JSON.parse(h.archive.objects.get('control/100/storage.json').bytes).state,'full','SQLite recovery evidence remains intact');
 });
+
+test('identical large resource refreshes reuse immutable spills and do not manufacture revisions',async()=>{
+ const {state,db,archive}=repositoryFixture();await state.fixtureReady;
+ const data={id:'9223372036854775807',body:'x'.repeat(1600000),created_at:'2026-10-20T00:00:00Z'};
+ await state.put('issue_comments',data.id,data,Date.now(),false,'7');
+ const original=db.prepare('SELECT data FROM resources WHERE id=?').get(data.id).data,key=JSON.parse(original).$r2,revision=await state.revision();
+ assert.match(key,/^resources\/100\/sha256-[a-f0-9]{64}$/);
+ archive.objects.get(key).customMetadata.pinned='true';
+ for(let n=0;n<16;n++)await state.put('issue_comments',data.id,data,Date.now(),false,'7');
+ assert.equal(await state.revision(),revision);
+ assert.equal([...archive.objects.keys()].filter(k=>k.startsWith('resources/')).length,1);
+ assert.equal(archive.objects.get(key).customMetadata.pinned,'true','conditional creation must preserve an existing pin');
+ archive.failures.push((op,k)=>op==='put' && k.startsWith('resources/'));
+ await assert.rejects(state.put('issue_comments',data.id,{...data,changed:true},Date.now(),false,'7'));
+ assert.equal(await state.revision(),revision,'a failed upload cannot publish a new pointer');
+ await state.put('issue_comments',data.id,{...data,changed:true},Date.now(),false,'7');
+ assert.equal([...archive.objects.keys()].filter(k=>k.startsWith('resources/')).length,2);
+ assert.equal((await state.decode(original)).changed,undefined,'old retained references remain readable');
+ assert.equal((await state.decode(db.prepare('SELECT data FROM resources WHERE id=?').get(data.id).data)).changed,true);
+});
+
+test('spill reuse preserves legacy references and staging expiry stays independent',async()=>{
+ const {state,archive}=repositoryFixture();await state.fixtureReady;
+ const data={rows:['x'.repeat(1600000)]},old='resources/100/old-reference';
+ await archive.put(old,JSON.stringify(data),{customMetadata:{kind:'resource',expires:'1'}});
+ const encoded=await state.encode(data),key=JSON.parse(encoded).$r2;
+ // Even incorrectly copied cursor metadata cannot reclassify the new resource key.
+ archive.objects.get(key).customMetadata={kind:'cursor',expires:'1'};
+ assert.equal((await retention.retirePrefix(archive,'legacy_staging_spills')).deleted,0);
+ assert.deepEqual(await state.decode(JSON.stringify({$r2:old})),data);
+ assert.deepEqual(await state.decode(encoded),data);
+ const expires=Date.now()-1,a=await state.encode(data,expires),b=await state.encode(data,expires);
+ assert.notEqual(a,b,'expiring staging uploads cannot share a resource lifetime');
+ assert.equal((await retention.retirePrefix(archive,'staging_spills')).deleted,2);
+ assert.deepEqual(await state.decode(encoded),data);
+});
+
+test('a known frozen source survives startup retries without relaxing ownership fences',async()=>{
+ const {db,state}=repositoryFixture();try {
+  await state.fixtureReady;
+  await state.put('pr','7',{number:7,title:'retained header'});
+  await state.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?)','pr:{"number":7}','pr','{"number":7}',1,Date.now(),await state.revision(),null);
+  const generation='frozen-source';
+  state.localSetMeta('backend_owner',{backend:'migration',generation});
+  state.migrationState={phase:'switching',generation,cutover:{source_fenced:true,target_active:false}};
+  state.startup();assert.equal(state.schema,'current');
+  const result=await queryFixture(state,{operation:'pr',args:{number:7}});
+  assert.equal(result.status,'ok');assert.equal(result.data.title,'retained header');
+  await assert.rejects(state.store.exec("INSERT INTO demand VALUES('illegal',1)"));
+  await assert.rejects(state.put('pr','8',{number:8}));
+  state.migrationState={...state.migrationState,generation:'wrong-generation'};
+  state.startup();assert.equal(state.schema.error,'backend_fenced');
+  state.migrationState={phase:'complete',generation,cutover:{source_fenced:true,target_active:true}};
+  state.startup();assert.equal(state.schema.error,'backend_fenced','activated target cannot fall back to the old source');
+ }finally {db.close();}
+});
