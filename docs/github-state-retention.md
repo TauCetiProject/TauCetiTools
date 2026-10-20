@@ -28,7 +28,7 @@ threshold for PostgreSQL.
 | Installation accounting | Seven days; independent bounded maintenance also runs while repository ingestion/auditing is paused |
 | Aggregated diagnostic intervals | Seven days in R2; no payloads, credentials or event bodies |
 | Raw webhooks | Fourteen days; a parked body is a separate digest-verified, non-expiring copy |
-| Daily observational archives | Seven days, per-page expiry; they are not a transactional point-in-time backup |
+| Daily observational archives | No longer written; earlier ones expire after seven days |
 | Staging pages | One day; an expired traversal restarts through the existing quota owner |
 | Demand | One day (its scheduling significance lasts five minutes); new automatic expiry starts in dry run |
 | PR headers, histories, coverage, tombstones, landing evidence | Retained; quiet or closed does not authorize deletion |

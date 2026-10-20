@@ -188,12 +188,13 @@ export const CLEANUP: Record<string, { table: string; where: string; bound?: (no
   repair_metrics: { table: 'repair_metrics', where: 'at<?', bound: (now, input) => Math.min(now - 3600000, Number.isSafeInteger(input.before) ? input.before : now - 86400000), clock: 'at', recovery: true },
   // Demand older than its five-minute scheduling window is equivalent to absence.
   stale_demand: { table: 'demand', where: 'at<?', bound: now => now - 86400000, clock: 'at', recovery: true },
-  // GitHub Actions and check-run records are no longer mirrored (NOT_MIRRORED).
+  // GitHub Actions and check-run records are no longer mirrored (NOT_MIRRORED),
+  // so their stored rows are deleted without an archive.
   // Unary plus keeps these predicates on rowid range scans.
-  ci_resources: { table: 'resources', where: "+kind IN ('workflow_runs','workflow_jobs','checks')", clock: 'observed', recovery: true, max: 2000 },
-  ci_members: { table: 'members', where: "(+collection LIKE 'checks:%' OR +collection LIKE 'workflow_runs:%' OR +collection LIKE 'workflow_jobs:%')", recovery: true },
-  ci_collections: { table: 'collections', where: "+operation IN ('checks','workflow_runs','workflow_jobs')", recovery: true },
-  ci_meta: { table: 'meta', where: "(+key LIKE 'workflow%' OR +key LIKE 'important%')", recovery: true },
+  ci_resources: { table: 'resources', where: "+kind IN ('workflow_runs','workflow_jobs','checks')", clock: 'observed', recovery: false, max: 2000 },
+  ci_members: { table: 'members', where: "(+collection LIKE 'checks:%' OR +collection LIKE 'workflow_runs:%' OR +collection LIKE 'workflow_jobs:%')", recovery: false },
+  ci_collections: { table: 'collections', where: "+operation IN ('checks','workflow_runs','workflow_jobs')", recovery: false },
+  ci_meta: { table: 'meta', where: "(+key LIKE 'workflow%' OR +key LIKE 'important%')", recovery: false },
 };
 // A verified export covers rows with rowid <= upper that were last written
 // before it started. Rowids can be reused, so both bounds are required.

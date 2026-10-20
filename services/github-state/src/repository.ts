@@ -26,7 +26,6 @@ const cursorKey=(repo:string,id:string,offset:number)=>`cursors/${repo}/${id}/${
 export class RepositoryState extends DurableObject<Env> {
   private inflightQueries=new Map<string,Promise<Result>>();
   private completedQueries=new Map<string,{result:Result,expires:number}>();
-  private snapshotFlight?:Promise<void>;
   sql:SqlStorage;
   // R2 owns durable full state; this is its local read-only guard.
   degraded?:{since:number,reason:Failure,operation:string};
@@ -1277,37 +1276,6 @@ export class RepositoryState extends DurableObject<Env> {
     const retired=this.sql.exec<any>('SELECT key,lane FROM (SELECT * FROM jobs WHERE rowid>? ORDER BY rowid LIMIT 100) jobs WHERE '+obsolete,this.obsoleteAfter,now,now-300000).toArray();
     this.obsoleteAfter=scanned ?? 0;
     for(const row of retired) {this.sql.exec('DELETE FROM jobs WHERE key=?',row.key);this.metric('cancellation',{repository:this.meta('repository').name,operation:'workflow_jobs'},row.lane);}
-    if(!this.snapshotFlight && !this.degraded) {
-      const flight=this.snapshotPages(now);this.snapshotFlight=flight;
-      try {await flight;} catch(error) {this.noteFailure('snapshot',error);} finally {if(this.snapshotFlight===flight)this.snapshotFlight=undefined;}
-    }
-  }
-  async snapshotPages(now:number): Promise<void> {
-    let state=this.meta('snapshot_pending');
-    if(!state) {
-      if(now-(this.meta('last_snapshot') || 0)<=86400000) return;
-      state={version:2,observational:true,started:now,revision:this.revision(),key:`snapshots/${this.meta('repository').id}/${new Date(now).toISOString().slice(0,10)}-${crypto.randomUUID()}`,index:0,tables:['meta','resources','collections','members','activity_landings'].map(table=>({table,after:0,pages:0,upper:this.sql.exec<any>('SELECT COALESCE(MAX(rowid),0) last FROM '+table).one().last}))};
-      this.setMeta('snapshot_pending',state);
-    }
-    // Archive bounded pages and checkpoint each one. Repository mutations can
-    // interleave, so this is an observational archive; DO point-in-time recovery
-    // remains the authoritative database backup.
-    for(let turn=0;turn<5 && state.index<state.tables.length;turn++) {
-      const table=state.tables[state.index];
-      const columns=this.sql.exec<any>('PRAGMA table_info('+table.table+')').toArray().map(c=>c.name);
-      const size=columns.map(c=>'COALESCE(length(CAST('+c+' AS BLOB)),0)').join('+');
-      const candidates=this.sql.exec<any>('SELECT rowid AS id,'+size+' AS bytes FROM '+table.table+' WHERE rowid>? AND rowid<=? ORDER BY rowid LIMIT 1000',table.after,table.upper).toArray();
-      if(!candidates.length) {state.index++;this.setMeta('snapshot_pending',state);continue;}
-      let bytes=0,last=table.after;
-      for(const row of candidates) {if(last!==table.after && bytes+row.bytes>1000000)break;bytes+=row.bytes;last=row.id;}
-      const rows=this.sql.exec('SELECT * FROM '+table.table+' WHERE rowid>? AND rowid<=? ORDER BY rowid',table.after,last).toArray();
-      await this.env.ARCHIVE.put(state.key+'/'+table.table+'/'+table.pages+'.json',JSON.stringify(rows),{customMetadata:{expires:String(now+7*86400000)}});
-      table.after=last;table.pages++;this.setMeta('snapshot_pending',state);
-    }
-    if(state.index===state.tables.length) {
-      await this.env.ARCHIVE.put(state.key+'.json',JSON.stringify({...state,finished:Date.now(),final_revision:this.revision()}),{customMetadata:{expires:String(now+7*86400000)}});
-      this.setMeta('last_snapshot',Date.now());this.setMeta('snapshot_pending',null);
-    }
   }
   retireUnneeded(job:any): boolean {
     const q:Query=JSON.parse(job.query);
@@ -1469,7 +1437,7 @@ export class RepositoryState extends DurableObject<Env> {
   }
   prepareDiagnostics(): void {
     if(Date.now()-this.diagnosticsAt<60000)return;
-    try {this.diagnostics={storage:this.storageState(),storage_bytes:this.sql.databaseSize,snapshot_pending:this.meta('snapshot_pending'),survey:this.surveyHealth(),reconciliation_version:2,deployment_id:this.env.CF_VERSION?.id,settings:settings(this.env),repository:this.meta('repository'),revision:this.revision(),bootstrap_inventory:this.meta('bootstrap_inventory'),last_webhook:this.meta('last_webhook'),webhook_apply_ms:this.meta('webhook_apply_ms'),last_repair:this.meta('last_repair'),last_upstream_failure:this.meta('last_upstream_failure'),coverage:this.sql.exec('SELECT operation,COUNT(*) resources,SUM(complete) complete,MIN(verified) oldest_verified FROM collections GROUP BY operation').toArray(),jobs:this.sql.exec('SELECT COUNT(*) total,SUM(due<=?) due,MIN(started) oldest_started FROM jobs',Date.now()).one(),lanes:this.sql.exec('SELECT lane,COUNT(*) jobs,SUM(due<=? AND lease_until<=?) eligible,SUM(lease_until>?) inflight,MIN(CASE WHEN due<=? AND lease_until<=? THEN due END) oldest_eligible,MIN(requested_at) oldest_requested FROM jobs GROUP BY lane',...Array(5).fill(Date.now())).toArray(),waits:this.sql.exec('SELECT lane,wait_reason,COUNT(*) jobs FROM jobs WHERE wait_reason IS NOT NULL GROUP BY lane,wait_reason').toArray(),...this.repairMetrics.summary(),queries:[...this.queryCounts.values()],repair_operations:this.sql.exec("SELECT json_extract(query,'$.operation') operation,COUNT(*) jobs,SUM(due<=?) due,MIN(due) next_due,MAX(attempt) attempts FROM jobs GROUP BY operation",Date.now()).toArray()};this.diagnosticsAt=Date.now();}
+    try {this.diagnostics={storage:this.storageState(),storage_bytes:this.sql.databaseSize,survey:this.surveyHealth(),reconciliation_version:2,deployment_id:this.env.CF_VERSION?.id,settings:settings(this.env),repository:this.meta('repository'),revision:this.revision(),bootstrap_inventory:this.meta('bootstrap_inventory'),last_webhook:this.meta('last_webhook'),webhook_apply_ms:this.meta('webhook_apply_ms'),last_repair:this.meta('last_repair'),last_upstream_failure:this.meta('last_upstream_failure'),coverage:this.sql.exec('SELECT operation,COUNT(*) resources,SUM(complete) complete,MIN(verified) oldest_verified FROM collections GROUP BY operation').toArray(),jobs:this.sql.exec('SELECT COUNT(*) total,SUM(due<=?) due,MIN(started) oldest_started FROM jobs',Date.now()).one(),lanes:this.sql.exec('SELECT lane,COUNT(*) jobs,SUM(due<=? AND lease_until<=?) eligible,SUM(lease_until>?) inflight,MIN(CASE WHEN due<=? AND lease_until<=? THEN due END) oldest_eligible,MIN(requested_at) oldest_requested FROM jobs GROUP BY lane',...Array(5).fill(Date.now())).toArray(),waits:this.sql.exec('SELECT lane,wait_reason,COUNT(*) jobs FROM jobs WHERE wait_reason IS NOT NULL GROUP BY lane,wait_reason').toArray(),...this.repairMetrics.summary(),queries:[...this.queryCounts.values()],repair_operations:this.sql.exec("SELECT json_extract(query,'$.operation') operation,COUNT(*) jobs,SUM(due<=?) due,MIN(due) next_due,MAX(attempt) attempts FROM jobs GROUP BY operation",Date.now()).toArray()};this.diagnosticsAt=Date.now();}
     catch(error) {this.noteFailure('health_prepare',error);}
   }
   storageState(): any {

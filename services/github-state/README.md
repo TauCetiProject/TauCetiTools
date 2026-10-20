@@ -55,18 +55,15 @@ of the repository database. CI webhooks are acknowledged without being stored,
 and `checks`, `workflow_runs` and `workflow_jobs` queries answer
 `status: "unavailable"` with reason `not_mirrored`, so a client uses its direct
 GitHub path rather than an empty result.
-Existing CI rows are removed with the `ci_resources`, `ci_members`,
-`ci_collections` and `ci_meta` cleanup classes. Each requires a verified class
-export (`/admin/storage/export` with `class`), which archives only the rows
-that class deletes; deletion covers exported rowids only, and resources only
-when they were last observed before the export began.
+Existing CI rows are removed, without an archive, with the `ci_resources`,
+`ci_members`, `ci_collections` and `ci_meta` cleanup classes.
 Quiet closed PRs also stop periodic history and head polling once their
 baseline is complete. Webhook updates continue, and renewed client demand
 reactivates background reconciliation while returning the stored result.
 
 Raw deliveries are eligible for expiry after fourteen days only after durable
-replay input or an explicit invalid-event disposition exists. Daily snapshots expire after seven days,
-staging pages after one day, and query cursors after ten minutes. R2 cursor
+replay input or an explicit invalid-event disposition exists. There are no daily
+R2 archives; any left from earlier versions expire. Staging pages after one day, and query cursors after ten minutes. R2 cursor
 objects expire after a one-minute grace period and have their own retention sweep.
 At the SQLite size limit, stored reads keep working and ingestion parks durably in R2
 until headroom returns. The [storage recovery runbook](https://github.com/TauCetiProject/TauCetiWorker/blob/main/docs/github-state-recovery.md)

@@ -335,35 +335,22 @@ test('a degraded mirror that stopped changing is reported unavailable, not serve
  assert.notEqual((await queryFixture(state,q)).reason,'mirror_frozen','a quiet but writable mirror is current');
 });
 
-test('a CI class export archives only CI rows and cleanup deletes exactly those',async()=>{
- const {db,state,archive}=repositoryFixture();
- const now=Date.now(),put=(kind,id,observed)=>db.prepare('INSERT INTO resources VALUES(?,?,?,?,?,?,?,?)').run(kind,id,'',JSON.stringify({id,blob:'x'.repeat(200)}),'',observed,1,0);
- put('workflow_runs','1',now-5000);put('pr','7',now-5000);put('checks','2',now-5000);put('workflow_jobs','3',now-5000);
+test('CI cleanup classes delete only CI rows, without an archive',async()=>{
+ const {db,state}=repositoryFixture();
+ const now=Date.now(),put=(kind,id)=>db.prepare('INSERT INTO resources VALUES(?,?,?,?,?,?,?,?)').run(kind,id,'',JSON.stringify({id}),'',now,1,0);
+ put('workflow_runs','1');put('pr','7');put('checks','2');put('workflow_jobs','3');
  db.prepare('INSERT INTO members VALUES(?,?)').run('checks:{"sha":"a"}','2');
  db.prepare('INSERT INTO members VALUES(?,?)').run('open_prs:{}','7');
  db.prepare('INSERT INTO collections VALUES(?,?,?,?,?,?,?)').run('checks:{"sha":"a"}','checks','{}',1,now,1,null);
  db.prepare('INSERT INTO collections VALUES(?,?,?,?,?,?,?)').run('open_prs:{}','open_prs','{}',1,now,1,null);
  state.setMeta('workflow_attempt:9',1);state.setMeta('important_active:9',true);
  const call=(path,body)=>state.fetch(new Request('https://internal'+path,{method:'POST',body:JSON.stringify({repository_id:'100',...body})})).then(r=>r.json());
- const recovery=await call('/storage/recovery',{});
- const classes=['ci_resources','ci_members','ci_collections','ci_meta'];
- assert.equal((await call('/storage/cleanup',{class:'ci_resources',recovery:recovery.id})).error,'recovery_not_verified');
- for(const name of classes){
-  let page;do page=await call('/storage/export',{recovery:recovery.id,class:name,page_bytes:8000000}); while(!page.complete);
-  assert.equal((await call('/storage/verify',{recovery:recovery.id,class:name})).verified,true);
- }
- const manifest=JSON.parse(archive.objects.get('recovery/100/'+recovery.id+'.json').bytes);
- assert.equal(manifest.tables['class:ci_resources'].rows,3,'only CI resources were archived');
- // Written after the export began, or beyond its rowid bound: not covered, not deleted.
- db.prepare('UPDATE resources SET observed=? WHERE kind=? AND id=?').run(Date.now()+1000,'workflow_jobs','3');
- put('checks','4',now-5000);
- for(const name of classes) await call('/storage/cleanup',{class:name,recovery:recovery.id,limit:100});
- assert.deepEqual(db.prepare('SELECT kind,id FROM resources ORDER BY rowid').all().map(r=>r.kind+':'+r.id),['pr:7','workflow_jobs:3','checks:4']);
+ for(const name of ['ci_resources','ci_members','ci_collections','ci_meta']) assert.equal((await call('/storage/cleanup',{class:name,limit:100})).recovery,null);
+ assert.deepEqual(db.prepare('SELECT kind,id FROM resources').all().map(r=>r.kind+':'+r.id),['pr:7']);
  assert.deepEqual(db.prepare('SELECT collection FROM members').all().map(r=>r.collection),['open_prs:{}']);
  assert.deepEqual(db.prepare('SELECT key FROM collections').all().map(r=>r.key),['open_prs:{}']);
  assert.equal(db.prepare("SELECT COUNT(*) n FROM meta WHERE key LIKE 'workflow%' OR key LIKE 'important%'").get().n,0);
  assert.ok(state.meta('repository'),'other meta survives');
- assert.equal((await call('/storage/export',{recovery:recovery.id,class:'repair_metrics'})).error,'class_export_unsupported');
 });
 
 const retention=await load('src/retention.ts');

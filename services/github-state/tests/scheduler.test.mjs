@@ -182,18 +182,10 @@ test('persistent parser errors keep their pagination and back off without rapid 
  }finally{db.close();}
 });
 
-test('daily archive checkpoints bounded pages and retains active R2 references',async()=>{
- const {state,db,objects}=fixture();try {
+test('active R2 references are retained',async()=>{
+ const {state,db}=fixture();try {
   state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
   const insert=db.prepare('INSERT INTO resources VALUES(?,?,?,?,?,?,?,?)');
-  for(let i=0;i<1500;i++)insert.run('issue_comments',String(i),'7',JSON.stringify({body:'x'.repeat(2000)}),'',Date.now(),1,0);
-  for(let i=0;i<20 && !state.meta('last_snapshot');i++)await state.snapshotPages(Date.now());
-  assert.ok(state.meta('last_snapshot'));
-  const manifests=[...objects.entries()].filter(([k])=>k.startsWith('snapshots/') && k.endsWith('.json') && !/\/(meta|resources|collections|members)\//.test(k));
-  assert.equal(manifests.length,1);assert.equal(JSON.parse(manifests[0][1]).version,2);
-  const pages=[...objects.entries()].filter(([k])=>k.includes('/resources/'));
-  assert.ok(pages.length>1);assert.equal(pages.reduce((n,[,text])=>n+JSON.parse(text).length,0),1500);
-  assert.ok(pages.every(([,text])=>text.length<1300000));
   const key='resources/100/retained';insert.run('pr','7','',JSON.stringify({$r2:key}),'',Date.now(),1,0);
   assert.equal((await (await state.fetch(new Request('https://internal/retained-object?key='+encodeURIComponent(key)))).json()).retained,true);
   assert.equal((await (await state.fetch(new Request('https://internal/retained-object?key=unused'))).json()).retained,true,'unreferenced objects retain an archive grace period');
