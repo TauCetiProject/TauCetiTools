@@ -4,6 +4,19 @@ import {WebSocketPair,Response as WorkerResponse,coupleWebSocket} from 'miniflar
 import WebSocket from 'ws';
 import {testCredentials} from './postgres_credentials.mjs';
 import {initializeSchema} from '../scripts/postgres-schema.mjs';
+const cleanupRetryMs=[250,500,1000,2000,4000,8000];
+export async function dropWorkerDatabase(control,database,pause=ms=>new Promise(resolve=>setTimeout(resolve,ms))) {
+ if(!/^contract_[0-9a-f]{24}$/.test(database))throw Error('Invalid isolated worker database');
+ for(let attempt=0;;attempt++) {
+  try{await control.query('DROP DATABASE IF EXISTS "'+database+'" WITH (FORCE)');return;}
+  catch(error){
+   // Worker/provider backends can still be closing when cleanup starts.
+   const transient=error?.code==='55006' || error?.code==='42501' && error?.routine==='TerminateOtherDBBackends';
+   if(!transient || attempt===cleanupRetryMs.length)throw error;
+   await pause(cleanupRetryMs[attempt]);
+  }
+ }
+}
 export async function workerDatabase(repositories) {
  const {migration,application}=testCredentials();
  const database='contract_'+randomBytes(12).toString('hex'),control=new Client(migration.toString());
@@ -18,7 +31,7 @@ export async function workerDatabase(repositories) {
   for(const repo of repositories)await initializeSchema(admin,repo.id,'test-v1',role);
  }finally{await admin.end();}
  return {bindings:{REPOSITORY_BACKEND:'postgres',REPOSITORY_GENERATION:'test-v1',REPOSITORY_DATABASE_URL:application.toString()},
-  async close(){try{await control.query('DROP DATABASE '+database+' WITH (FORCE)');}finally{await control.end();}},
+  async close(){try{await dropWorkerDatabase(control,database);}finally{await control.end();}},
   async outbound(req){
    const url=new URL(req.url);
    if(url.hostname!==application.hostname && url.hostname!==new URL(neonConfig.fetchEndpoint(application.hostname,443)).hostname)return null;
