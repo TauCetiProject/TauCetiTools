@@ -286,3 +286,29 @@ pg('a retention pin is acknowledged only after an in-flight sweep completes',asy
   assert.equal((await f.store.exec('SELECT COUNT(*) n FROM changes WHERE revision=?',102)).one().n,1);
  }finally{release?.();await f.close();}
 });
+
+pg('a missing close handshake cannot hold the PostgreSQL writer lane',async()=>{
+ const f=await postgresFixture();try{
+  const start=performance.now();
+  await f.store.transaction(async tx=>{await tx.exec('INSERT INTO demand VALUES(?,?)','close-handshake',1);const close=tx.client.end.bind(tx.client);tx.client.end=async()=>{await close();return new Promise(()=>{});};});
+  assert.ok(performance.now()-start<6000);await f.store.exec('INSERT INTO demand VALUES(?,?)','next-writer',2);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM demand')).one().n,2);
+ }finally{await f.close();}
+});
+pg('PostgreSQL mutation and scheduling never write the obsolete SQLite alarm file',async()=>{
+ const f=await postgresFixture();try{
+  f.state.ctx.storage.setAlarm=async()=>{throw Error('obsolete SQLite file is full');};
+  f.state.ctx.storage.getAlarm=async()=>{throw Error('obsolete alarm metadata must not be read');};
+  await f.state.enqueue({repository:repo.name,operation:'pr',args:{number:7}},1,Date.now(),true);
+  assert.ok(await f.state.nextJob());await f.state.setAlarm(Date.now());
+ }finally{await f.close();}
+});
+pg('byte-cut history scans reduce subsequent SQL candidate work for large rows',async()=>{
+ const f=await postgresFixture();try{
+  const count=1000,q={repository:repo.name,operation:'issue_comments',args:{number:7}};
+  for(let offset=0;offset<count;offset+=200){const ids=Array.from({length:200},(_,i)=>String(offset+i+1));await f.admin.query(`INSERT INTO ${f.schema}.resources(kind,id,parent,data,updated,observed,revision,tombstone) VALUES `+ids.map((_,i)=>`('issue_comments',$${i*2+1},'7',$${i*2+2},'',0,0,0)`).join(','),ids.flatMap(id=>[id,JSON.stringify({id,body:'x'.repeat(8000)})]));}
+  await f.admin.query(`INSERT INTO ${f.schema}.members(collection,id) SELECT 'issue_comments:{"number":7}',id FROM ${f.schema}.resources`);await complete(f.state,q);
+  const limits=[],source=f.store;f.state.store=new Proxy(source,{get(target,key){if(key==='exec')return async(sql,...args)=>{if(sql.includes('AS bounded_page'))limits.push(Number(sql.match(/LIMIT (\d+)/)[1]));return target.exec(sql,...args);};const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;}});
+  const rows=await f.state.rows(q);assert.equal(rows.length,count);assert.equal(rows.at(-1).id,String(count));assert.ok(limits.length>=4);assert.equal(limits[0],4096);assert.ok(limits.slice(1).every(n=>n<600),'large rows must not repeatedly process the full candidate window: '+limits);
+ }finally{await f.close();}
+});

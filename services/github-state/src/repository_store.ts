@@ -192,7 +192,7 @@ export class PostgresStore implements RepositoryStore {
     client.on('error',error=>fail((error as any)?.code));client.on('end',()=>{connection.closed=true;fail();});
     try {
       await this.run(async()=>{
-        await client.connect();await client.query("BEGIN; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='15s'");
+        await client.connect();await client.query("BEGIN; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='15s'; SET LOCAL idle_in_transaction_session_timeout='30s'");
         const control=await client.query(`SELECT generation,backend,schema_version FROM "${this.schema}".backend_control WHERE singleton=1 FOR UPDATE`);
         const row=control.rows[0];
         if(!row || row.backend!=='postgres' || row.generation!==this.generation || row.schema_version!==1)throw new StoreFenced();
@@ -206,7 +206,12 @@ export class PostgresStore implements RepositoryStore {
     }catch(error){
       if(!connection.closed && !connection.error)try{await client.query('ROLLBACK');}catch{}
       throw error;
-    }finally{connection.ending=true;if(!connection.closed)try{await client.end();}catch{}}
+    }finally{
+      connection.ending=true;
+      if(!connection.closed){let timer:ReturnType<typeof setTimeout>|undefined;try{
+        await Promise.race([client.end(),new Promise<void>(resolve=>{timer=setTimeout(()=>{try{client.neonConfig.destroy();}catch{}finally{resolve();}},2000);})]);
+      }catch{}finally{if(timer)clearTimeout(timer);}}
+    }
   }
   async health():Promise<Record<string,unknown>> {
     let metadata:Record<string,unknown>;

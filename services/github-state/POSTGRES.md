@@ -70,7 +70,9 @@ activity reads batch PR, landing and LOC metadata. Read caches belong to a
 single query or publication transaction. Repair and query telemetry uses bounded
 in-memory buckets with R2 interval archives, following the existing retention
 service; legacy SQL telemetry remains available for controlled expiry/export.
-Retention pins apply on both backends. Expired SQL delivery receipts are
+Retention pins apply on both backends. SQL pin acknowledgments wait for in-flight
+SQL sweeps and receipt archival. R2 cron retains its existing per-batch policy
+checks; a previously authorized R2 deletion batch may finish after acknowledgment. Expired SQL delivery receipts are
 archived durably to `receipts/<repository>/` in R2 before batched conditional SQL
 deletion. Event application rechecks that evidence under writer ownership; the
 existing parked-input and acknowledgement contract remains authoritative.
@@ -151,9 +153,9 @@ npx wrangler deploy --env test \
 These commands are explicit operator actions. They do not select production.
 An empty provisioned PostgreSQL schema returns `repository_unconfigured` on reads
 and ticks; it does not bootstrap GitHub. Populate it through controlled test data
-or the separately authorized bootstrap endpoint. An existing repository DO's
-alarm storage can remain full after SQL migration: PostgreSQL cron ticks drive
-the same fenced scheduler if alarm metadata cannot be written.
+or the separately authorized bootstrap endpoint. PostgreSQL uses the existing once-per-minute cron ticks to drive the same fenced
+scheduler and does not write alarm metadata into the obsolete SQLite file.
+The installation Durable Object remains the sole quota owner.
 
 ## Verification
 

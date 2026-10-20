@@ -230,11 +230,10 @@ export class RepositoryState extends DurableObject<Env> {
     try {await write();} catch(error) {this.noteFailure(operation,error);}
   }
   async setAlarm(at:number): Promise<void> {
+    // PostgreSQL uses the existing cron tick, never the obsolete SQLite file.
+    if(this.store.backend==='postgres')return;
     if(this.faultFull) throw new Error(FULL_MESSAGE);
-    try{await this.ctx.storage.setAlarm(at);}catch(error){
-      if(this.store.backend!=='postgres')throw error;
-      log('repository_alarm_unavailable',{reason:classify(error),backend:'postgres'});
-    }
+    await this.ctx.storage.setAlarm(at);
   }
   async atomic<T>(apply:(state:RepositoryState)=>Promise<T>):Promise<T> {
     if(this.store.transactional)return apply(this);
@@ -277,23 +276,26 @@ export class RepositoryState extends DurableObject<Env> {
   }
   async scanRows(sql:string,...bindings:(string|number|null)[]):Promise<any[]> {
     const cached=this.store instanceof ReadCacheStore?this.store.peek(sql,bindings):undefined;if(cached!==undefined)return cached;
-    const remote=this.store.backend==='postgres',limit=remote?4096:256;
+    const remote=this.store.backend==='postgres';let limit=remote?4096:256;
     // Bound transferred bytes as well as row count, without multiplying remote
     // round trips for small rows. One oversized row is allowed for progress.
     const bounded=(query:string,order:string)=>remote?'SELECT * FROM (SELECT stored_page.*,SUM(octet_length(to_jsonb(stored_page)::text)) OVER (ORDER BY '+order+' ROWS UNBOUNDED PRECEDING) AS __bytes,ROW_NUMBER() OVER (ORDER BY '+order+') AS __position,COUNT(*) OVER () AS __candidate_count FROM ('+query+') AS stored_page) AS bounded_page WHERE __bytes<=2097152 OR __position=1 ORDER BY '+order:query;
     const finished=(page:any[])=>!page.length || (remote?page.length===page[0].__candidate_count && page[0].__candidate_count<limit:page.length<limit);
+    // A byte cut must also reduce candidate work on subsequent pages. Otherwise
+    // large rows would be converted repeatedly behind the payload filter.
+    const adapt=(page:any[])=>{if(remote)limit=Math.min(4096,page.length<page[0].__candidate_count?Math.max(1,page.length*2):limit*2);};
     const rows:any[]=[],ordered=sql.match(/ ORDER BY CAST\((r|f)\.id AS INTEGER\),\1\.id$/);
     if(ordered){
       const alias=ordered[1],inner=sql.slice(0,ordered.index).replace(/^SELECT /,`SELECT CAST(CAST(${alias}.id AS INTEGER) AS TEXT) AS __sort,${alias}.id AS __id,`);let after:{sort:string,id:string}|undefined;
       for(;;){
         const order='CAST(__sort AS NUMERIC),__id',query='SELECT * FROM ('+inner+') AS source_page'+(after?' WHERE (CAST(__sort AS NUMERIC),__id)>(CAST(? AS NUMERIC),?)':'')+' ORDER BY '+order+' LIMIT '+limit;
-        const page=(await this.store.exec<any>(bounded(query,order),...bindings,...(after?[after.sort,after.id]:[]))).toArray();rows.push(...page);if(finished(page))return rows;after={sort:String(page.at(-1).__sort),id:page.at(-1).__id};
+        const page=(await this.store.exec<any>(bounded(query,order),...bindings,...(after?[after.sort,after.id]:[]))).toArray();rows.push(...page);if(finished(page))return rows;adapt(page);after={sort:String(page.at(-1).__sort),id:page.at(-1).__id};
       }
     }
     if(/\bORDER BY\b/.test(sql))throw Error('Unsupported repository scan ordering');
     const identity=/\bFROM members m\b/.test(sql)?'m.rowid':/\bJOIN resources r\b/.test(sql)?'r.rowid':'rowid',where=sql.indexOf(' WHERE ');let after=0;
     const selected=(where<0?sql:sql.slice(0,where)).replace(/^SELECT /,`SELECT ${identity} AS __after,`),predicate=where<0?'': '('+sql.slice(where+7)+') AND ';
-    for(;;){const query=selected+' WHERE '+predicate+identity+'>? ORDER BY '+identity+' LIMIT '+limit,page=(await this.store.exec<any>(bounded(query,'__after'),...bindings,after)).toArray();rows.push(...page);if(finished(page))return rows;after=page.at(-1).__after;}
+    for(;;){const query=selected+' WHERE '+predicate+identity+'>? ORDER BY '+identity+' LIMIT '+limit,page=(await this.store.exec<any>(bounded(query,'__after'),...bindings,after)).toArray();rows.push(...page);if(finished(page))return rows;adapt(page);after=page.at(-1).__after;}
   }
   async primePublication(q:Query,rows:any[]):Promise<void> {
     const cache=new ReadCacheStore(this.store);this.store=cache;
@@ -583,7 +585,7 @@ export class RepositoryState extends DurableObject<Env> {
     const lane=(await this.lane(q,dirty || Boolean(prior?.dirty),priority)),requested=lane==='requested'?(prior?.requested_at || Date.now()):prior?.requested_at || null;
     await this.store.exec('INSERT INTO jobs(key,query,priority,due,dirty,generation,lane,requested_at,created_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET priority=excluded.priority,lane=excluded.lane,requested_at=excluded.requested_at,dirty=MAX(dirty,excluded.dirty),generation=generation+excluded.generation' + (dirty ? ",due=CASE WHEN wait_reason IS NOT NULL OR attempt>0 THEN due ELSE MIN(due,excluded.due) END" : ''),key,JSON.stringify({...q,allow_observed:undefined}),priority,due,Number(dirty),Number(dirty),lane,requested,Date.now());
     if (!prior) await this.metric('arrival',q,lane);
-    const alarm=await this.ctx.storage.getAlarm();
+    const alarm=this.store.backend==='postgres'?null:await this.ctx.storage.getAlarm();
     const scheduled=(await this.store.exec<any>('SELECT due FROM jobs WHERE key=?',key)).one().due;
     if (!alarm || alarm>scheduled) await this.setAlarm(Math.max(Date.now()+100,scheduled));
   }
@@ -637,7 +639,7 @@ export class RepositoryState extends DurableObject<Env> {
       await this.store.exec('INSERT INTO jobs(key,query,priority,due,dirty,generation,lane,requested_at,created_at) VALUES '+batch.map(()=>'(?,?,?,?,?,?,?,?,?)').join(',')+' ON CONFLICT(key) DO UPDATE SET priority=excluded.priority,lane=excluded.lane,requested_at=excluded.requested_at,dirty=MAX(dirty,excluded.dirty),generation=generation+excluded.generation,due=CASE WHEN excluded.generation>0 AND wait_reason IS NULL AND attempt=0 THEN MIN(due,excluded.due) ELSE due END',...batch.flat());
     }
     for(const [at,event,lane,operation,value] of metrics)this.repairMetrics.record(event,lane,operation,value,at);
-    const alarm=await this.ctx.storage.getAlarm();
+    const alarm=this.store.backend==='postgres'?null:await this.ctx.storage.getAlarm();
     if(!alarm || alarm>scheduled)await this.setAlarm(Math.max(now+100,scheduled));
   }
   async complete(q:Pick<Query,'operation'|'args'>): Promise<boolean> { return (await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length>0; }
@@ -954,7 +956,7 @@ export class RepositoryState extends DurableObject<Env> {
     // still receives existing data immediately; actual quota waits stay intact.
     await this.store.exec("UPDATE jobs SET due=MIN(due,?),priority=5,lane=CASE WHEN ? THEN 'verification' ELSE 'requested' END WHERE key=? AND attempt=0 AND started IS NULL AND wait_reason IS NULL",complete?now+(await this.interval(q)):now,Number(complete),key);
     const due=(await this.store.exec<any>('SELECT due FROM jobs WHERE key=?',key)).toArray()[0]?.due;
-    const alarm=await this.ctx.storage.getAlarm();
+    const alarm=this.store.backend==='postgres'?null:await this.ctx.storage.getAlarm();
     if (due && (!alarm || alarm>due)) await this.setAlarm(Math.max(now+100,due));
   }
   async nextJob(): Promise<any> {
