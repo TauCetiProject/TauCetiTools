@@ -54,3 +54,16 @@ test('HTTP and WebSocket GitHub attempts are blocked and recorded across fixture
   const audit=await (await f.send('network-audit')).json();assert.equal(audit.recorded_attempts,2);assert.equal(audit.truncated,false);assert.equal(audit.isolate_log_failures,0);assert.equal(f.calls,0);
  }finally{await f.mf.dispose();}
 });
+
+
+test('public cold PostgreSQL errors retain the service envelope, reason and request ID',async()=>{
+ const f=fixture({REPOSITORY_BACKEND:'postgres',REPOSITORY_GENERATION:'native-cutover',CLIENT_TOKENS:JSON.stringify([{hash:createHash('sha256').update('client').digest('hex'),repositories:['issue317/drill']}])});
+ try{
+  await f.send('faults',{database:true});
+  const params=new URLSearchParams({repository:'issue317/drill',operation:'files',args:'{"number":99}'});
+  const response=await f.mf.dispatchFetch('https://fixture/v1/query?'+params,{headers:{Authorization:'Bearer client','X-Request-ID':'public-cold-outage'}});
+  assert.equal(response.status,503);const result=await response.json();
+  assert.deepEqual(result,{error:'storage_unavailable',reason:'database_unavailable',request_id:'public-cold-outage'});
+  assert.equal(Object.hasOwn(result,'data'),false);assert.equal(f.calls,0);
+ }finally{await f.mf.dispose();}
+});

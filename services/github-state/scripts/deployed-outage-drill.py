@@ -161,7 +161,7 @@ def main():
                 if args.case == 'postgres-unavailable':
                     params = urllib.parse.urlencode({'repository': repo, 'operation': 'files', 'args': json.dumps({'number': number})})
                     status, missing = call('/v1/query?' + params, token='client')
-                    require(status == 503 and missing.get('error') == 'database_unavailable', "Cold PostgreSQL read did not return the expected unavailable error")
+                    require(status == 503 and missing.get('error') == 'storage_unavailable' and missing.get('reason') == 'database_unavailable', "Cold PostgreSQL read did not return the expected unavailable error")
                     require(missing.get('request_id') and 'data' not in missing, "Cold read lost its request ID or substituted data")
                     result['cold_read_error'] = missing
                 if sqlite:
