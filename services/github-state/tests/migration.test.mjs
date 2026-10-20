@@ -494,3 +494,16 @@ test('a legacy oversized B-tree identity fails the read-only scan before freeze'
  assert.throws(()=>{for(let n=0;n<100 && state.phase==='preflighting';n++)migration.compatibilityStep(f.ctx.storage.sql,state);},/migration_constraint_incompatible/);
  assert.equal(f.state.migrationHeld(),false);assert.equal(f.archive.objects.size,0);
 });
+
+test('an expired traversal deadline cannot claim a completed held pass',async t=>{
+ const f=await fixture(),ingress=await load('src/ingress.ts');
+ await f.archive.put(ingress.recoveryKey(repo.id),JSON.stringify({next_lane:'held'}));
+ const held='parked/'+repo.id+'/held/preserved.json';await f.archive.put(held,'{}');
+ let now=Date.now();t.mock.method(Date,'now',()=>now);
+ const get=f.archive.get.bind(f.archive);
+ f.archive.get=async key=>{const object=await get(key);if(key===ingress.controlKey(repo.id))now+=21000;return object;};
+ await ingress.maintainIngress(f.env,repo);
+ const recovery=await get(ingress.recoveryKey(repo.id)).then(o=>o.json());
+ assert.equal(recovery.held_last_pass.stopped,'deadline');assert.equal(recovery.held_pass_completed_at,undefined);
+ assert.ok(await f.archive.head(held));
+});

@@ -90,7 +90,7 @@ export async function release(env: Env, repo: Repository, pointer: EventPointer)
 // pointer is removed only after a committed receipt, including across resets.
 export async function drain(env: Env, repo: Repository, options: { limit?: number; held?: boolean; cursor?: string; deadline?: number } = {}): Promise<any> {
   if ((await ingressMode(env, repo)).mode === 'parked') return { replayed: 0, stopped: 'parked' };
-  if (Date.now() >= (options.deadline || Infinity)) return {replayed:0,remaining:true,cursor:options.cursor};
+  if (Date.now() >= (options.deadline || Infinity)) return {replayed:0,remaining:true,cursor:options.cursor,stopped:'deadline'};
   const prefix = `parked/${repo.id}/${options.held ? 'held' : 'pointers'}/`;
   const page = await env.ARCHIVE.list({ prefix, limit: Math.min(Math.max(1, options.limit || 25), 100), startAfter: options.cursor });
   let replayed = 0, failed = 0, stopped: string | undefined, last_error: string | undefined, next_retry: number | undefined;
@@ -143,6 +143,7 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
     await Promise.all(group.map(object => replay(object).catch(error => { failed++; last_error = classify(error); log('pointer_maintenance_failed', { key: object.key, reason: last_error }); })));
     visited += group.length;
   }
+  if(!stopped && visited<page.objects.length)stopped='deadline';
   return { replayed, failed, last_error, next_retry, cursor: visited < page.objects.length || page.truncated ? (page.objects[visited-1]?.key || options.cursor) : undefined, remaining: Boolean(stopped) || page.truncated || replayed < page.objects.length, ...(stopped ? { stopped } : {}) };
 }
 

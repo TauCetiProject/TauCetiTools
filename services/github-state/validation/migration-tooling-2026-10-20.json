@@ -9,7 +9,7 @@
       "failed": 0
     },
     "sqlite_service": {
-      "passed": 202,
+      "passed": 203,
       "failed": 0,
       "skipped": 51
     },
@@ -52,7 +52,9 @@
     "real maintainIngress held traversal with future retry deadline and typed completion evidence",
     "retired migration bindings preserve PostgreSQL ingress despite the retained SQLite full marker",
     "selected repository generation scopes monitoring observations and retention checkpoints",
-    "request budget exhaustion persists its sanitized failure checkpoint outside the exhausted budget"
+    "request budget exhaustion persists its sanitized failure checkpoint outside the exhausted budget",
+    "a deadline reached before the first held group cannot publish a completed traversal",
+    "application ownership of migration functions is rejected even without schema CREATE"
   ],
   "commands": [
     "python -m unittest discover -s tests -p 'test_*.py'",

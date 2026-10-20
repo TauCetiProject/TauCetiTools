@@ -58,6 +58,10 @@ test('target preflight rejects identity, nonempty state, missing restore and uns
   await f.archive.put(`parked/${f.id}/held/existing.json`,'{}');
   await assert.rejects(control.preflight(f.env,state),/migration_held_input_pending/);await f.archive.delete(`parked/${f.id}/held/existing.json`);
   await control.preflight(f.env,state);
+  const config=target.targetConfig(f.env),quote=value=>'"'+value.replaceAll('"','""')+'"';
+  await f.admin.query(`GRANT CREATE ON SCHEMA ${f.schema} TO ${quote(config.application_role)}; ALTER FUNCTION ${f.schema}.assert_writer(TEXT) OWNER TO ${quote(config.application_role)}; REVOKE CREATE ON SCHEMA ${f.schema} FROM ${quote(config.application_role)}`);
+  await assert.rejects(target.targetPreflight(f.env,state),/migration_application_role_unsafe/);
+  await f.admin.query(`ALTER FUNCTION ${f.schema}.assert_writer(TEXT) OWNER TO ${quote(config.migration_role)}`);
   const original={...f.env},changed=JSON.parse(f.env.MIGRATION_TARGET);changed.hostname='wrong-endpoint.neon.tech';
   f.env.MIGRATION_TARGET=JSON.stringify(changed);
   for(const key of ['MIGRATION_DATABASE_URL','REPOSITORY_DATABASE_URL']) {const url=new URL(f.env[key]);url.hostname=changed.hostname;f.env[key]=url.toString();}

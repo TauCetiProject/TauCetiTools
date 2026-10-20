@@ -200,6 +200,23 @@ python3 services/github-state/scripts/migrate.py --environment production \
   --generation GENERATION --target TARGET --apply abandon
 ```
 
+Held-input recovery is a fix-forward operation, not permission to discard input.
+Inspect the pointer/body and their digest privately; never paste payloads or secrets
+into logs or issue comments. Recover an exact missing body from retained raw/pinned
+input or migration archives, or fix the parser/target error on PostgreSQL. Preserve
+the original delivery ID and receipt timestamp. Wait for the existing retry deadline
+or invoke bounded `POST /admin/ingress/replay` with `repository`, `held:true` and a
+small `limit`; the same owner still respects per-item cooldowns. Verify the target
+SQL delivery receipt and permanent R2 receipt before pointer cleanup, then allow
+ordinary supervision to finish the release. The retained SQLite store stays fenced.
+
+If the exact input cannot be recovered or applied, keep its pointer/body and record
+a sanitized incident with delivery ID, digest, failure code and recovery attempts.
+Do not forge an applied/tombstone receipt or delete an unapplied input to obtain a
+complete migration receipt. Stored PostgreSQL reads and bounded reconciliation
+continue, while final completion and the broad retention hold intentionally wait
+for recovery. An irrecoverable data gap is not a successful migration.
+
 Abandonment is valid only before target activation. It retains archives, fences the
 target and releases a writable source. A separately selected operator ingress pause
 remains in effect. After PostgreSQL accepts writes, abandonment cannot reactivate
@@ -251,8 +268,18 @@ record and every parked body/pointer. Do not edit the source fence or change the
 control phase back to exporting. Restore the original Neon branch/database from
 a verified point-in-time backup at the original endpoint, preserving roles,
 schema and generation. Verify its owner row and the latest applied-input watermark. Keep service reads
-and writes fenced during restoration; an ordinary S2 `resume` is not a point-in-time
-reconstruction tool. A separate, verified forward-recovery procedure must:
+and writes fenced during restoration. Before changing the database, park ingress
+with `POST /admin/ingress` (`repository`, `mode:"parked"`), and block public reads
+using a reviewed temporary maintenance deployment returning HTTP 503. Disable the
+application role's login and terminate its existing sessions using a verified
+administrative role. The maintenance deployment must also suspend automatic SQL
+writers, scheduled reconciliation and repository alarms while retaining durable
+webhook parking. Verify these gates before restoration. Restores can reinstate role settings, so do not restore access at the original
+endpoint until a restricted recovery role has verified the restored role remains
+NOLOGIN and the maintenance deployment still blocks reads. Use the isolated restored
+copy first. Keep these gates in place throughout reconstruction. The CLI `resume`
+command advances ordinary S2 checkpoints; it is not a point-in-time reconstruction
+tool. A separate, verified forward-recovery procedure must:
 
 - Preserve/quarantine the R2 receipts committed after the restored SQL watermark;
   normal delivery replay skips those receipts, so it cannot reconstruct lost SQL.
