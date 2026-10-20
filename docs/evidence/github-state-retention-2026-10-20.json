@@ -1,15 +1,15 @@
 {
   "version": 2,
-  "started": "2026-10-20T04:37:18.940Z",
-  "finished": "2026-10-20T04:37:25.477Z",
-  "implementation_revision": "9b244e8d2ee17ffc0c8ac5dc4db2271a8adcc47b",
-  "workspace_sha256": "e964ce2a8e39fa09c6ac0045256ed68348eaab17d10a5c806fc8241d40aa5a63",
+  "started": "2026-10-20T05:00:17.941Z",
+  "finished": "2026-10-20T05:00:24.905Z",
+  "implementation_revision": "74d0de44ddc96a5a96cebeae3f4dd9412cc23b2d",
+  "workspace_sha256": "352c426de58483212e227cc13633172ed7dbbcba29200b120cb7b9405dec315a",
   "source_dirty": false,
   "environment": "local_fault_fixtures",
   "typecheck_exit_status": 0,
   "build_exit_status": 0,
   "exit_status": 0,
-  "passed": 143,
+  "passed": 148,
   "failed": 0,
   "test_files": [
     "tests/activity.test.mjs",
@@ -104,6 +104,9 @@
     "cold health does not wait indefinitely for the observation destination",
     "accounting instrumentation failure cannot fail an upstream semantic response",
     "health retains schema diagnostics when repository metadata is missing",
+    "a delayed cold policy load cannot overwrite an acknowledged operator pin",
+    "a completed retention epoch waits for the next minute instead of rescanning on every alarm",
+    "incremental accounting projections roll the hourly window without regrouping on health reads",
     "compact roadmap snapshot updates on comment edit/delete without reading full histories",
     "large inventory filters before statuses and serves compact facts in one page",
     "migration is outside requests and one missing resource cannot block other PRs or maintenance",
@@ -166,10 +169,12 @@
     "batch routing preserves scarce GraphQL quota when REST can carry the whole group",
     "out-of-scope query fallback reveals no data and spends no installation quota",
     "malformed upstream JSON stays unavailable, preserves request ID, and retries through the same quota owner",
-    "malformed responses without quota headers debit the existing owner budget once"
+    "malformed responses without quota headers debit the existing owner budget once",
+    "malformed status/header objects stay unavailable rather than becoming empty complete state",
+    "malformed collection rows and pagination never publish an empty complete collection"
   ],
   "failed_tests": [],
-  "transcript_sha256": "67ecfcb74fbb0d554b391586b06abf09fe8a499099406a09c63eda1b10c68a2b",
+  "transcript_sha256": "c4ba697bf6ea4def61ea7e6562508a0d18171bf0ac5c1009994a3121356856cf",
   "postgresql": {
     "run": false,
     "blocked_by": "S1 Worker issue #308 repository-store interface and isolated PostgreSQL test infrastructure"

@@ -1,76 +1,76 @@
 TAP version 13
 # {"event":"repository_storage_failure","operation":"request:/activity","reason":"internal","degraded":false,"message":"Reporting attempted upstream/scheduler access"}
-# {"event":"repository_request_failed","request_id":"60faf283-2caf-4129-9f6a-63598e0c0ba1","path":"/activity","reason":"internal"}
+# {"event":"repository_request_failed","request_id":"b6b989f0-2fb0-45af-a708-8628b269041a","path":"/activity","reason":"internal"}
 # Subtest: reporting missing/never-configured resources creates no demand, jobs, alarms or upstream calls
 ok 1 - reporting missing/never-configured resources creates no demand, jobs, alarms or upstream calls
   ---
-  duration_ms: 17.330792
+  duration_ms: 20.882645
   type: 'test'
   ...
 # Subtest: stale cached closed/merged PRs remain readable without reactivating polling
 ok 2 - stale cached closed/merged PRs remain readable without reactivating polling
   ---
-  duration_ms: 2.603217
+  duration_ms: 2.34793
   type: 'test'
   ...
 # Subtest: unavailable stored resource fails without falling back to upstream repair
 ok 3 - unavailable stored resource fails without falling back to upstream repair
   ---
-  duration_ms: 2.416471
+  duration_ms: 2.265157
   type: 'test'
   ...
 # Subtest: LOC uses complete cached files at the exact PR head without scheduling work
 ok 4 - LOC uses complete cached files at the exact PR head without scheduling work
   ---
-  duration_ms: 3.323335
+  duration_ms: 3.387031
   type: 'test'
   ...
 # Subtest: background Bors receipt import is shared and rate limited; activity reads never fetch
 ok 5 - background Bors receipt import is shared and rate limited; activity reads never fetch
   ---
-  duration_ms: 3.111701
+  duration_ms: 3.13021
   type: 'test'
   ...
 # Subtest: promotion receipts retain exact approved PR heads and the actual recorded promotion time
 ok 6 - promotion receipts retain exact approved PR heads and the actual recorded promotion time
   ---
-  duration_ms: 1.057106
+  duration_ms: 1.139189
   type: 'test'
   ...
 # Subtest: staging, CI success, other bases and mismatched construction never prove a landing
 ok 7 - staging, CI success, other bases and mismatched construction never prove a landing
   ---
-  duration_ms: 0.318001
+  duration_ms: 0.322648
   type: 'test'
   ...
 # Subtest: receipt fetch is restricted to the existing stored Bors journal and refuses redirects
 ok 8 - receipt fetch is restricted to the existing stored Bors journal and refuses redirects
   ---
-  duration_ms: 5.273315
+  duration_ms: 5.566531
   type: 'test'
   ...
 # Subtest: Workers runtime accepts the binding fetch options and never follows redirects
 ok 9 - Workers runtime accepts the binding fetch options and never follows redirects
   ---
-  duration_ms: 182.428227
+  duration_ms: 193.097205
   type: 'test'
   ...
 # Subtest: production receipt reads use the explicit service fetcher without public-network fallback
 ok 10 - production receipt reads use the explicit service fetcher without public-network fallback
   ---
-  duration_ms: 0.664244
+  duration_ms: 0.756041
   type: 'test'
   ...
 # Subtest: full fenced export contains every table, exact integers, timestamps, leases and R2 manifest; restart every step
 ok 11 - full fenced export contains every table, exact integers, timestamps, leases and R2 manifest; restart every step
   ---
-  duration_ms: 79.023684
+  duration_ms: 96.935151
   type: 'test'
   ...
 # Subtest: freeze fences all mutation routes and alarm dispatch, while stored reads/304/legacy cursors retain timestamps
 ok 12 - freeze fences all mutation routes and alarm dispatch, while stored reads/304/legacy cursors retain timestamps
   ---
-  duration_ms: 5.881376
+  duration_ms: 7.37318
   type: 'test'
   ...
 # {"event":"event_parked","delivery":"during-freeze","repository":"org/repo","reason":"planned_migration"}
@@ -108,151 +108,151 @@ ok 12 - freeze fences all mutation routes and alarm dispatch, while stored reads
 # Subtest: in-flight event finishes before bookmark; new input parks even beyond retry horizon and survives retention
 ok 13 - in-flight event finishes before bookmark; new input parks even beyond retry horizon and survives retention
   ---
-  duration_ms: 29.49609
+  duration_ms: 28.29969
   type: 'test'
   ...
 # Subtest: production and wrong identity are rejected; no caller assertion enables cutover
 ok 14 - production and wrong identity are rejected; no caller assertion enables cutover
   ---
-  duration_ms: 3.695656
+  duration_ms: 4.109331
   type: 'test'
   ...
 # Subtest: unknown tables and unavailable authoritative bookmark fail closed
 ok 15 - unknown tables and unavailable authoritative bookmark fail closed
   ---
-  duration_ms: 2.970131
+  duration_ms: 2.817608
   type: 'test'
   ...
 # Subtest: restart around before-commit export and validation checkpoint failures
 ok 16 - restart around before-commit export and validation checkpoint failures
   ---
-  duration_ms: 52.478276
+  duration_ms: 52.049105
   type: 'test'
   ...
 # Subtest: restart around after-commit export and validation checkpoint failures
 ok 17 - restart around after-commit export and validation checkpoint failures
   ---
-  duration_ms: 41.33267
+  duration_ms: 43.322158
   type: 'test'
   ...
 # Subtest: verification rejects missing R2 references and changed/corrupt source pages; abandon retains archives
 ok 18 - verification rejects missing R2 references and changed/corrupt source pages; abandon retains archives
   ---
-  duration_ms: 36.537475
+  duration_ms: 44.320288
   type: 'test'
   ...
 # Subtest: public migration endpoint requires admin auth and never exposes stored rows
 ok 19 - public migration endpoint requires admin auth and never exposes stored rows
   ---
-  duration_ms: 2.96948
+  duration_ms: 3.297198
   type: 'test'
   ...
 # Subtest: final receipt interruption resumes without repeating export; a new generation requires explicit abandonment
 ok 20 - final receipt interruption resumes without repeating export; a new generation requires explicit abandonment
   ---
-  duration_ms: 22.905534
+  duration_ms: 25.699495
   type: 'test'
   ...
 # Subtest: an initial barrier upload failure is retryable in the same process
 ok 21 - an initial barrier upload failure is retryable in the same process
   ---
-  duration_ms: 17.01244
+  duration_ms: 18.484871
   type: 'test'
   ...
 # Subtest: a cold migration-control outage fences writes but keeps complete stored SQL reads available
 ok 22 - a cold migration-control outage fences writes but keeps complete stored SQL reads available
   ---
-  duration_ms: 3.992196
+  duration_ms: 3.949084
   type: 'test'
   ...
 # Subtest: an abandoned generation cannot overwrite its retained archive after another generation
 ok 23 - an abandoned generation cannot overwrite its retained archive after another generation
   ---
-  duration_ms: 20.610212
+  duration_ms: 21.840605
   type: 'test'
   ...
 # Subtest: stale checkpoint writers cannot overwrite a newer control record
 ok 24 - stale checkpoint writers cannot overwrite a newer control record
   ---
-  duration_ms: 2.572442
+  duration_ms: 2.625492
   type: 'test'
   ...
 # Subtest: noninitial export statements seek directly into the rowid index
 ok 25 - noninitial export statements seek directly into the rowid index
   ---
-  duration_ms: 2.273019
+  duration_ms: 2.203096
   type: 'test'
   ...
 # Subtest: expired staging records an importer recovery requirement without mutating source jobs
 ok 26 - expired staging records an importer recovery requirement without mutating source jobs
   ---
-  duration_ms: 34.469931
+  duration_ms: 36.572683
   type: 'test'
   ...
 # Subtest: production startup and ingress do not depend on test migration control reads
 ok 27 - production startup and ingress do not depend on test migration control reads
   ---
-  duration_ms: 10.279504
+  duration_ms: 10.515057
   type: 'test'
   ...
 # Subtest: typed cells round-trip REAL extremes, NULL and BLOB values
 ok 28 - typed cells round-trip REAL extremes, NULL and BLOB values
   ---
-  duration_ms: 2.172059
+  duration_ms: 1.889701
   type: 'test'
   ...
 # Subtest: real R2 conditional writes enforce checkpoint and generation ownership
 ok 29 - real R2 conditional writes enforce checkpoint and generation ownership
   ---
-  duration_ms: 264.60904
+  duration_ms: 268.808134
   type: 'test'
   ...
 # Subtest: a planned source freeze retains degraded stored reads with their original timestamps
 ok 30 - a planned source freeze retains degraded stored reads with their original timestamps
   ---
-  duration_ms: 3.687264
+  duration_ms: 3.447901
   type: 'test'
   ...
 # Subtest: a new deployment can abandon the same source object while export remains fenced
 ok 31 - a new deployment can abandon the same source object while export remains fenced
   ---
-  duration_ms: 4.275436
+  duration_ms: 4.193896
   type: 'test'
   ...
 # Subtest: a failed new intent cannot abandon an older generation loaded from R2
 ok 32 - a failed new intent cannot abandon an older generation loaded from R2
   ---
-  duration_ms: 2.814631
+  duration_ms: 2.82686
   type: 'test'
   ...
 # Subtest: legacy initialization resumes automatically after control reads recover
 ok 33 - legacy initialization resumes automatically after control reads recover
   ---
-  duration_ms: 2.299979
+  duration_ms: 2.299709
   type: 'test'
   ...
 # Subtest: workerd SQLite REAL encoding matches the archive round-trip contract
 ok 34 - workerd SQLite REAL encoding matches the archive round-trip contract
   ---
-  duration_ms: 68.1031
+  duration_ms: 71.226892
   type: 'test'
   ...
 # Subtest: table discovery only excludes literal engine prefixes
 ok 35 - table discovery only excludes literal engine prefixes
   ---
-  duration_ms: 2.688274
+  duration_ms: 2.313139
   type: 'test'
   ...
 # Subtest: freeze drains an in-flight archival job and prevents its SQL publication
 ok 36 - freeze drains an in-flight archival job and prevents its SQL publication
   ---
-  duration_ms: 27.62747
+  duration_ms: 29.150842
   type: 'test'
   ...
 # Subtest: source migration inventories and verifies the expiring staging-spill prefix
 ok 37 - source migration inventories and verifies the expiring staging-spill prefix
   ---
-  duration_ms: 21.981514
+  duration_ms: 23.642616
   type: 'test'
   ...
 # {"event":"event_parked","delivery":"d1","repository":"org/repo","reason":"storage_full"}
@@ -260,7 +260,7 @@ ok 37 - source migration inventories and verifies the expiring staging-spill pre
 # Subtest: a full repository parks deliveries instead of spending queue retries
 ok 38 - a full repository parks deliveries instead of spending queue retries
   ---
-  duration_ms: 14.888303
+  duration_ms: 16.367592
   type: 'test'
   ...
 # {"event":"event_park_failed","delivery":"d2","attempts":1,"reason":"internal"}
@@ -270,7 +270,7 @@ ok 38 - a full repository parks deliveries instead of spending queue retries
 # Subtest: R2 failure while parking retries with bounded backoff and never acknowledges
 ok 39 - R2 failure while parking retries with bounded backoff and never acknowledges
   ---
-  duration_ms: 2.831235
+  duration_ms: 3.213994
   type: 'test'
   ...
 # {"event":"event_parked","delivery":"d4","repository":"org/repo","reason":"retry_budget:internal"}
@@ -279,7 +279,7 @@ ok 39 - R2 failure while parking retries with bounded backoff and never acknowle
 # Subtest: ordinary failures back off, then park before the queue retry budget is spent
 ok 40 - ordinary failures back off, then park before the queue retry budget is spent
   ---
-  duration_ms: 0.989386
+  duration_ms: 1.10607
   type: 'test'
   ...
 # {"event":"event_parked","delivery":"r1","repository":"org/repo","reason":"storage_full"}
@@ -290,7 +290,7 @@ ok 40 - ordinary failures back off, then park before the queue retry budget is s
 # Subtest: replay removes pointers only after the receipt commits; crashes repeat harmlessly
 ok 41 - replay removes pointers only after the receipt commits; crashes repeat harmlessly
   ---
-  duration_ms: 8.896383
+  duration_ms: 11.473227
   type: 'test'
   ...
 # {"event":"event_parked","delivery":"bad","repository":"org/repo","reason":"storage_full"}
@@ -306,43 +306,43 @@ ok 41 - replay removes pointers only after the receipt commits; crashes repeat h
 # Subtest: a persistently failing parked event is held aside without blocking newer events
 ok 42 - a persistently failing parked event is held aside without blocking newer events
   ---
-  duration_ms: 4.355354
+  duration_ms: 5.810383
   type: 'test'
   ...
 # Subtest: legacy SQL cursors and R2 cursors validate query, coverage and expiry
 ok 43 - legacy SQL cursors and R2 cursors validate query, coverage and expiry
   ---
-  duration_ms: 9.38697
+  duration_ms: 10.514936
   type: 'test'
   ...
 # Subtest: expiry runs before repair and hydration, survives their failure, and keeps semantic data
 ok 44 - expiry runs before repair and hydration, survives their failure, and keeps semantic data
   ---
-  duration_ms: 5.995525
+  duration_ms: 6.50958
   type: 'test'
   ...
 # Subtest: cold start on a current schema performs no writes
 ok 45 - cold start on a current schema performs no writes
   ---
-  duration_ms: 2.000765
+  duration_ms: 2.134194
   type: 'test'
   ...
 # Subtest: verified cleanup never deletes a reused rowid written after the export began
 ok 46 - verified cleanup never deletes a reused rowid written after the export began
   ---
-  duration_ms: 0.820266
+  duration_ms: 0.885122
   type: 'test'
   ...
 # Subtest: a replayed long-parked event keeps its receipt through maintenance
 ok 47 - a replayed long-parked event keeps its receipt through maintenance
   ---
-  duration_ms: 2.563709
+  duration_ms: 4.292492
   type: 'test'
   ...
 # Subtest: a database at the size limit starts read-only: no migration, degraded until a verified probe
 ok 48 - a database at the size limit starts read-only: no migration, degraded until a verified probe
   ---
-  duration_ms: 7.360638
+  duration_ms: 6.490021
   type: 'test'
   ...
 # {"event":"event_parked","delivery":"thrown","repository":"org/repo","reason":"storage_full"}
@@ -351,26 +351,26 @@ ok 48 - a database at the size limit starts read-only: no migration, degraded un
 # Subtest: a storage-full exception from the reset object parks immediately and records the state
 ok 49 - a storage-full exception from the reset object parks immediately and records the state
   ---
-  duration_ms: 0.700849
+  duration_ms: 0.797121
   type: 'test'
   ...
 # {"event":"repository_storage_failure","operation":"workflow_attempt","reason":"storage_full","degraded":true,"message":"Exceeded the maximum database size; workflow attempt revalidation needs a write (degraded)"}
 # Subtest: a recorded full state stops legacy migration even below the size threshold
 ok 50 - a recorded full state stops legacy migration even below the size threshold
   ---
-  duration_ms: 2.252318
+  duration_ms: 2.005153
   type: 'test'
   ...
 # Subtest: degraded workflow reads never run the legacy attempt rewrite
 ok 51 - degraded workflow reads never run the legacy attempt rewrite
   ---
-  duration_ms: 1.949509
+  duration_ms: 1.903662
   type: 'test'
   ...
 # Subtest: a failure report older than a verified probe cannot undo recovery
 ok 52 - a failure report older than a verified probe cannot undo recovery
   ---
-  duration_ms: 3.267773
+  duration_ms: 3.747255
   type: 'test'
   ...
 # {"event":"event_parked","delivery":"c0","repository":"org/repo","reason":"storage_full"}
@@ -378,8 +378,8 @@ ok 52 - a failure report older than a verified probe cannot undo recovery
 # {"event":"event_parked","delivery":"c2","repository":"org/repo","reason":"storage_full"}
 # {"event":"event_parked","delivery":"c3","repository":"org/repo","reason":"storage_full"}
 # {"event":"event_parked","delivery":"c4","repository":"org/repo","reason":"storage_full"}
-# {"event":"event_parked","delivery":"c6","repository":"org/repo","reason":"storage_full"}
 # {"event":"event_parked","delivery":"c5","repository":"org/repo","reason":"storage_full"}
+# {"event":"event_parked","delivery":"c6","repository":"org/repo","reason":"storage_full"}
 # {"event":"event_parked","delivery":"c7","repository":"org/repo","reason":"storage_full"}
 # {"event":"event_parked","delivery":"c8","repository":"org/repo","reason":"storage_full"}
 # {"event":"event_parked","delivery":"c9","repository":"org/repo","reason":"storage_full"}
@@ -395,582 +395,612 @@ ok 52 - a failure report older than a verified probe cannot undo recovery
 # {"event":"event_parked","delivery":"c19","repository":"org/repo","reason":"storage_full"}
 # {"event":"repository_storage_failure","operation":"retention_checkpoint","reason":"internal","degraded":false,"message":"R2 put failed"}
 # {"event":"repository_storage_failure","operation":"observation_persistence","reason":"internal","degraded":false,"message":"R2 put failed"}
-# {"event":"github_state_capacity_alarm","repository":"100","level":"critical","at":1792471040718,"capacity":{"at":1792471040718,"bytes":0,"allowance":10737418240,"backend":"sqlite","allowance_kind":"durable_object_hard_limit","growable":false,"reusable_bytes":null,"growth_bytes_per_second":null,"projected_exhaustion_at":null,"baseline_at":null,"forecast_level":"ok","forecast_breaches":0,"forecast_confirmed":false,"level":"ok","stale":false,"capacity_unknown":false},"reasons":["parked_ingress_durability_unavailable"],"operator_action":"Follow docs/github-state-retention.md"}
+# {"event":"github_state_capacity_alarm","repository":"100","level":"critical","at":1792472419926,"capacity":{"at":1792472419926,"bytes":0,"allowance":10737418240,"backend":"sqlite","allowance_kind":"durable_object_hard_limit","growable":false,"reusable_bytes":null,"growth_bytes_per_second":null,"projected_exhaustion_at":null,"baseline_at":null,"forecast_level":"ok","forecast_breaches":0,"forecast_confirmed":false,"level":"ok","stale":false,"capacity_unknown":false},"reasons":["parked_ingress_durability_unavailable"],"operator_action":"Follow docs/github-state-retention.md"}
 # Subtest: a batch parks its messages concurrently
 ok 53 - a batch parks its messages concurrently
   ---
-  duration_ms: 102.543027
+  duration_ms: 103.12735
   type: 'test'
   ...
 # Subtest: a degraded mirror that stopped changing is reported unavailable, not served stale
 ok 54 - a degraded mirror that stopped changing is reported unavailable, not served stale
   ---
-  duration_ms: 3.600906
+  duration_ms: 4.282267
   type: 'test'
   ...
 # Subtest: sustained retention volume plateaus across windows with bounded rows, bytes and time
 ok 55 - sustained retention volume plateaus across windows with bounded rows, bytes and time
   ---
-  duration_ms: 106.625957
+  duration_ms: 146.802631
   type: 'test'
   ...
 # Subtest: duplicate/stale retention checkpoints, dry runs and rowid reuse are safe
 ok 56 - duplicate/stale retention checkpoints, dry runs and rowid reuse are safe
   ---
-  duration_ms: 2.364725
+  duration_ms: 2.322483
   type: 'test'
   ...
 # Subtest: retention policy survives restart, pins receipts while parked, and isolates failed checkpoints
 ok 57 - retention policy survives restart, pins receipts while parked, and isolates failed checkpoints
   ---
-  duration_ms: 6.469277
+  duration_ms: 6.635896
   type: 'test'
   ...
 # Subtest: repair telemetry never writes authoritative SQL and its dimensions stay bounded
 ok 58 - repair telemetry never writes authoritative SQL and its dimensions stay bounded
   ---
-  duration_ms: 34.751458
+  duration_ms: 35.1947
   type: 'test'
   ...
 # Subtest: capacity thresholds handle growth, shrinkage, unknown allowance and stale samples
 ok 59 - capacity thresholds handle growth, shrinkage, unknown allowance and stale samples
   ---
-  duration_ms: 0.286715
+  duration_ms: 0.299304
   type: 'test'
   ...
 # Subtest: prepared health does no aggregate SQL or GitHub calls and survives monitoring persistence failure
 ok 60 - prepared health does no aggregate SQL or GitHub calls and survives monitoring persistence failure
   ---
-  duration_ms: 5.231212
+  duration_ms: 6.286779
   type: 'test'
   ...
 # Subtest: R2 outage alarms remain available and a later monitoring attempt recovers
 ok 61 - R2 outage alarms remain available and a later monitoring attempt recovers
   ---
-  duration_ms: 4.99369
+  duration_ms: 5.635444
   type: 'test'
   ...
 # Subtest: CI archival verifies bytes, preserves attempt guards, snapshots and cursors, and retries failed writes
 ok 62 - CI archival verifies bytes, preserves attempt guards, snapshots and cursors, and retries failed writes
   ---
-  duration_ms: 4.523142
+  duration_ms: 4.827216
   type: 'test'
   ...
 # Subtest: verified recovery archives restore exact IDs, tombstones, memberships, coverage and spill contents
 ok 63 - verified recovery archives restore exact IDs, tombstones, memberships, coverage and spill contents
   ---
-  duration_ms: 11.75482
+  duration_ms: 10.256644
   type: 'test'
   ...
 # Subtest: R2 prefix expiry preserves pinned inputs and retries after deletion/checkpoint failures
 ok 64 - R2 prefix expiry preserves pinned inputs and retries after deletion/checkpoint failures
   ---
-  duration_ms: 0.588542
+  duration_ms: 0.578457
   type: 'test'
   ...
 # Subtest: malformed retention progress restarts safely without dropping persisted pins
 ok 65 - malformed retention progress restarts safely without dropping persisted pins
   ---
-  duration_ms: 4.504275
+  duration_ms: 4.75628
   type: 'test'
   ...
 # Subtest: a single bounded sweep per interval keeps up with sustained append volume
 ok 66 - a single bounded sweep per interval keeps up with sustained append volume
   ---
-  duration_ms: 116.301706
+  duration_ms: 128.185795
   type: 'test'
   ...
 # {"event":"repository_storage_failure","operation":"retention_load","reason":"internal","degraded":false,"message":"R2 unavailable"}
 # Subtest: a concurrent resource update wins over slow CI archival
 ok 67 - a concurrent resource update wins over slow CI archival
   ---
-  duration_ms: 7.433997
+  duration_ms: 8.189529
   type: 'test'
   ...
 # Subtest: default policy retains the S0 fourteen-day receipt expiry
 ok 68 - default policy retains the S0 fourteen-day receipt expiry
   ---
-  duration_ms: 4.612816
+  duration_ms: 4.762249
   type: 'test'
   ...
 # Subtest: tick re-arms before a slow monitoring job and expires from cached policy
 ok 69 - tick re-arms before a slow monitoring job and expires from cached policy
   ---
-  duration_ms: 2.029608
+  duration_ms: 2.137759
   type: 'test'
   ...
 # Subtest: unknown durable pins fail closed while explicit emergency SQL cleanup remains available
 ok 70 - unknown durable pins fail closed while explicit emergency SQL cleanup remains available
   ---
-  duration_ms: 4.680216
+  duration_ms: 4.846764
   type: 'test'
   ...
 # Subtest: retention inspection does not launch expiry or archival
 ok 71 - retention inspection does not launch expiry or archival
   ---
-  duration_ms: 1.714791
+  duration_ms: 1.698267
   type: 'test'
   ...
 # Subtest: R2 expiry batches a full cursor page and reports oversize objects without starvation
 ok 72 - R2 expiry batches a full cursor page and reports oversize objects without starvation
   ---
-  duration_ms: 1.706949
+  duration_ms: 2.194002
   type: 'test'
   ...
 # Subtest: checkpoints are coalesced and prepared diagnostics advance from tick maintenance
 ok 73 - checkpoints are coalesced and prepared diagnostics advance from tick maintenance
   ---
-  duration_ms: 4.735187
+  duration_ms: 4.481073
   type: 'test'
   ...
 # Subtest: hourly size estimates never count a whole table and checkpoint their attempt first
 ok 74 - hourly size estimates never count a whole table and checkpoint their attempt first
   ---
-  duration_ms: 4.463204
+  duration_ms: 4.564776
   type: 'test'
   ...
 # Subtest: expired staged spills retire, then traversal restarts without an empty-result substitution
 ok 75 - expired staged spills retire, then traversal restarts without an empty-result substitution
   ---
-  duration_ms: 5.920934
+  duration_ms: 5.906936
   type: 'test'
   ...
 # Subtest: archived collection reads bound parallel R2 fetches and preserve membership order
 ok 76 - archived collection reads bound parallel R2 fetches and preserve membership order
   ---
-  duration_ms: 5.144203
+  duration_ms: 6.369421
   type: 'test'
   ...
 # Subtest: installation accounting prepares retained hourly projections with a bounded scan and expires from its oldest prefix
 ok 77 - installation accounting prepares retained hourly projections with a bounded scan and expires from its oldest prefix
   ---
-  duration_ms: 60.093241
+  duration_ms: 61.114011
   type: 'test'
   ...
 # Subtest: cold health does not wait indefinitely for the observation destination
 ok 78 - cold health does not wait indefinitely for the observation destination
   ---
-  duration_ms: 102.479853
+  duration_ms: 102.29796
   type: 'test'
   ...
 # {"event":"installation_telemetry_failed","operation":"repository","reason":"internal"}
 # Subtest: accounting instrumentation failure cannot fail an upstream semantic response
 ok 79 - accounting instrumentation failure cannot fail an upstream semantic response
   ---
-  duration_ms: 11.374055
+  duration_ms: 10.643678
   type: 'test'
   ...
 # Subtest: health retains schema diagnostics when repository metadata is missing
 ok 80 - health retains schema diagnostics when repository metadata is missing
   ---
-  duration_ms: 2.106321
+  duration_ms: 1.806848
+  type: 'test'
+  ...
+# Subtest: a delayed cold policy load cannot overwrite an acknowledged operator pin
+ok 81 - a delayed cold policy load cannot overwrite an acknowledged operator pin
+  ---
+  duration_ms: 1.897643
+  type: 'test'
+  ...
+# Subtest: a completed retention epoch waits for the next minute instead of rescanning on every alarm
+ok 82 - a completed retention epoch waits for the next minute instead of rescanning on every alarm
+  ---
+  duration_ms: 1.78099
+  type: 'test'
+  ...
+# Subtest: incremental accounting projections roll the hourly window without regrouping on health reads
+ok 83 - incremental accounting projections roll the hourly window without regrouping on health reads
+  ---
+  duration_ms: 25.900844
   type: 'test'
   ...
 # Subtest: compact roadmap snapshot updates on comment edit/delete without reading full histories
-ok 81 - compact roadmap snapshot updates on comment edit/delete without reading full histories
+ok 84 - compact roadmap snapshot updates on comment edit/delete without reading full histories
   ---
-  duration_ms: 14.320221
+  duration_ms: 14.14003
   type: 'test'
   ...
 # Subtest: large inventory filters before statuses and serves compact facts in one page
-ok 82 - large inventory filters before statuses and serves compact facts in one page
+ok 85 - large inventory filters before statuses and serves compact facts in one page
   ---
-  duration_ms: 73.983214
+  duration_ms: 75.145692
   type: 'test'
   ...
 # Subtest: migration is outside requests and one missing resource cannot block other PRs or maintenance
-ok 83 - migration is outside requests and one missing resource cannot block other PRs or maintenance
+ok 86 - migration is outside requests and one missing resource cannot block other PRs or maintenance
   ---
-  duration_ms: 4.377397
+  duration_ms: 4.444578
   type: 'test'
   ...
 # Subtest: comment bursts coalesce projection rebuilds and malformed reply IDs do not block ingestion
-ok 84 - comment bursts coalesce projection rebuilds and malformed reply IDs do not block ingestion
+ok 87 - comment bursts coalesce projection rebuilds and malformed reply IDs do not block ingestion
   ---
-  duration_ms: 5.571977
+  duration_ms: 5.414376
   type: 'test'
   ...
 # Subtest: partial PR payloads retain mergeability only for the same head and base
-ok 85 - partial PR payloads retain mergeability only for the same head and base
+ok 88 - partial PR payloads retain mergeability only for the same head and base
   ---
-  duration_ms: 1.822631
+  duration_ms: 1.964853
   type: 'test'
   ...
 # Subtest: REST offset inventory gaps retain previously observed open PRs
-ok 86 - REST offset inventory gaps retain previously observed open PRs
+ok 89 - REST offset inventory gaps retain previously observed open PRs
   ---
-  duration_ms: 4.25851
+  duration_ms: 4.321726
   type: 'test'
   ...
 # Subtest: a newer close cannot be re-added by an older inventory response
-ok 87 - a newer close cannot be re-added by an older inventory response
+ok 90 - a newer close cannot be re-added by an older inventory response
   ---
-  duration_ms: 2.262842
+  duration_ms: 2.225038
   type: 'test'
   ...
 # Subtest: expired staging restarts from page one instead of retrying a missing page forever
-ok 88 - expired staging restarts from page one instead of retrying a missing page forever
+ok 91 - expired staging restarts from page one instead of retrying a missing page forever
   ---
-  duration_ms: 13.353818
+  duration_ms: 13.259916
   type: 'test'
   ...
 # Subtest: one bad batched history does not turn a completed sibling into a retry
-ok 89 - one bad batched history does not turn a completed sibling into a retry
+ok 92 - one bad batched history does not turn a completed sibling into a retry
   ---
-  duration_ms: 3.188846
+  duration_ms: 2.88743
   type: 'test'
   ...
 # Subtest: persistent parser errors keep their pagination and back off without rapid full scans
-ok 90 - persistent parser errors keep their pagination and back off without rapid full scans
+ok 93 - persistent parser errors keep their pagination and back off without rapid full scans
   ---
-  duration_ms: 2.459814
+  duration_ms: 2.030659
   type: 'test'
   ...
 # Subtest: daily archive checkpoints bounded pages and retains active R2 references
-ok 91 - daily archive checkpoints bounded pages and retains active R2 references
+ok 94 - daily archive checkpoints bounded pages and retains active R2 references
   ---
-  duration_ms: 26.094289
+  duration_ms: 32.671511
   type: 'test'
   ...
 # Subtest: large old repair backlog cannot starve fresh deltas and still makes progress
-ok 92 - large old repair backlog cannot starve fresh deltas and still makes progress
+ok 95 - large old repair backlog cannot starve fresh deltas and still makes progress
   ---
-  duration_ms: 193.522438
+  duration_ms: 207.77958
   type: 'test'
   ...
 # Subtest: demand advances quiet reconciliation without revoking actual quota deferrals
-ok 93 - demand advances quiet reconciliation without revoking actual quota deferrals
+ok 96 - demand advances quiet reconciliation without revoking actual quota deferrals
   ---
-  duration_ms: 2.388991
+  duration_ms: 2.522118
   type: 'test'
   ...
 # Subtest: closed PR history and CI polling retire, then client demand reactivates them
-ok 94 - closed PR history and CI polling retire, then client demand reactivates them
+ok 97 - closed PR history and CI polling retire, then client demand reactivates them
   ---
-  duration_ms: 2.268292
+  duration_ms: 2.332978
   type: 'test'
   ...
 # Subtest: a webhook arriving during a staged read keeps its repair pending
-ok 95 - a webhook arriving during a staged read keeps its repair pending
+ok 98 - a webhook arriving during a staged read keeps its repair pending
   ---
-  duration_ms: 2.099481
+  duration_ms: 2.153142
   type: 'test'
   ...
 # Subtest: all four lanes get their configured share and leased work is excluded
-ok 96 - all four lanes get their configured share and leased work is excluded
+ok 99 - all four lanes get their configured share and leased work is excluded
   ---
-  duration_ms: 2.869092
+  duration_ms: 2.913228
   type: 'test'
   ...
 # Subtest: completed undemanded workflows remain observed; strict demand repairs them and reruns isolate attempts
-ok 97 - completed undemanded workflows remain observed; strict demand repairs them and reruns isolate attempts
+ok 100 - completed undemanded workflows remain observed; strict demand repairs them and reruns isolate attempts
   ---
-  duration_ms: 4.445087
+  duration_ms: 4.24293
   type: 'test'
   ...
 # Subtest: retirement keeps stored rows and important Bors builds still request a baseline
-ok 98 - retirement keeps stored rows and important Bors builds still request a baseline
+ok 101 - retirement keeps stored rows and important Bors builds still request a baseline
   ---
-  duration_ms: 2.086733
+  duration_ms: 2.041977
   type: 'test'
   ...
 # Subtest: late R2 encoding cannot overwrite a webhook and replaced leases cannot publish coverage
-ok 99 - late R2 encoding cannot overwrite a webhook and replaced leases cannot publish coverage
+ok 102 - late R2 encoding cannot overwrite a webhook and replaced leases cannot publish coverage
   ---
-  duration_ms: 3.930404
+  duration_ms: 3.887433
   type: 'test'
   ...
 # Subtest: future-due historical workflow retries retire without touching actual requested quota waits
-ok 100 - future-due historical workflow retries retire without touching actual requested quota waits
+ok 103 - future-due historical workflow retries retire without touching actual requested quota waits
   ---
-  duration_ms: 2.270555
+  duration_ms: 2.277456
   type: 'test'
   ...
 # Subtest: head-change webhooks refresh immutable file lists without resetting a quota cooldown
-ok 101 - head-change webhooks refresh immutable file lists without resetting a quota cooldown
+ok 104 - head-change webhooks refresh immutable file lists without resetting a quota cooldown
   ---
-  duration_ms: 2.482348
+  duration_ms: 2.463051
   type: 'test'
   ...
 # Subtest: legacy rerun baselines adopt the cached current attempt and cannot serve an earlier complete list
-ok 102 - legacy rerun baselines adopt the cached current attempt and cannot serve an earlier complete list
+ok 105 - legacy rerun baselines adopt the cached current attempt and cannot serve an earlier complete list
   ---
-  duration_ms: 4.690401
+  duration_ms: 5.384051
   type: 'test'
   ...
 # Subtest: REST exhaustion repairs a flat review history through its existing GraphQL thread dependency
-ok 103 - REST exhaustion repairs a flat review history through its existing GraphQL thread dependency
+ok 106 - REST exhaustion repairs a flat review history through its existing GraphQL thread dependency
   ---
-  duration_ms: 3.27322
+  duration_ms: 3.44704
   type: 'test'
   ...
 # Subtest: public health does not expose internal quota or secrets
-ok 104 - public health does not expose internal quota or secrets
+ok 107 - public health does not expose internal quota or secrets
   ---
-  duration_ms: 214.017269
+  duration_ms: 222.691944
   type: 'test'
   ...
 # Subtest: webhook rejects bad signatures and conflicting duplicate bodies
-ok 105 - webhook rejects bad signatures and conflicting duplicate bodies
+ok 108 - webhook rejects bad signatures and conflicting duplicate bodies
   ---
-  duration_ms: 24.597651
+  duration_ms: 23.67187
   type: 'test'
   ...
 # Subtest: webhooks do not invent complete inventory; duplicate and old delivery are idempotent
-ok 106 - webhooks do not invent complete inventory; duplicate and old delivery are idempotent
+ok 109 - webhooks do not invent complete inventory; duplicate and old delivery are idempotent
   ---
-  duration_ms: 51.734084
+  duration_ms: 46.767375
   type: 'test'
   ...
 # Subtest: resource tombstones advance journal without marking missing histories empty
-ok 107 - resource tombstones advance journal without marking missing histories empty
+ok 110 - resource tombstones advance journal without marking missing histories empty
   ---
-  duration_ms: 19.109819
+  duration_ms: 19.007416
   type: 'test'
   ...
 # Subtest: query validation, repo scoping, admin token independent
-ok 108 - query validation, repo scoping, admin token independent
+ok 111 - query validation, repo scoping, admin token independent
   ---
-  duration_ms: 5.173106
+  duration_ms: 5.249862
   type: 'test'
   ...
 # Subtest: observed workflow coverage is explicit, isolated by query preference, and unknown runs stay unavailable
-ok 109 - observed workflow coverage is explicit, isolated by query preference, and unknown runs stay unavailable
+ok 112 - observed workflow coverage is explicit, isolated by query preference, and unknown runs stay unavailable
   ---
-  duration_ms: 16.928276
+  duration_ms: 17.112277
   type: 'test'
   ...
 # Subtest: reference reads require an explicitly enabled environment and admin authentication
-ok 110 - reference reads require an explicitly enabled environment and admin authentication
+ok 113 - reference reads require an explicitly enabled environment and admin authentication
   ---
-  duration_ms: 1.190324
+  duration_ms: 1.122884
   type: 'test'
   ...
 # Subtest: activity observations are authenticated, repository-scoped, bounded, and tolerate missing coverage
-ok 111 - activity observations are authenticated, repository-scoped, bounded, and tolerate missing coverage
+ok 114 - activity observations are authenticated, repository-scoped, bounded, and tolerate missing coverage
   ---
-  duration_ms: 6.290181
+  duration_ms: 6.099281
   type: 'test'
   ...
-# {"fixture":"large_inventory","prs":1200,"initial_inventory_requests":12,"concurrent_clients":10,"pages":3,"query_and_continuation_ms":159}
+# {"fixture":"large_inventory","prs":1200,"initial_inventory_requests":12,"concurrent_clients":10,"pages":3,"query_and_continuation_ms":163}
 # Subtest: large inventory snapshots paginate coherently and coalesce concurrent reads
-ok 112 - large inventory snapshots paginate coherently and coalesce concurrent reads
+ok 115 - large inventory snapshots paginate coherently and coalesce concurrent reads
   ---
-  duration_ms: 3319.804968
+  duration_ms: 3090.194213
   type: 'test'
   ...
 # {"event":"repository_storage_failure","operation":"repair_dispatch","reason":"storage_full","degraded":true,"message":"Exceeded the maximum database size. SQLITE_FULL (fault injection)"}
 # {"event":"event_parked","delivery":"full-1","repository":"org/repo","reason":"storage_full"}
 # {"event":"repository_storage_failure","operation":"probe","reason":"storage_full","degraded":true,"message":"Exceeded the maximum database size. SQLITE_FULL (fault injection)"}
 # {"event":"delivery_audit_skipped","repository":"org/repo","degraded":true,"status":200}
-# {"event":"repository_storage_failure","operation":"request:/event","reason":"storage_full","degraded":true,"message":"Exceeded the maximum database size; SQLITE_FULL recorded at 2026-10-20T04:37:21.610Z"}
-# {"event":"repository_request_failed","request_id":"993a1034-d086-4478-bf44-52d58b5f5e72","path":"/event","reason":"storage_full"}
-# {"event":"parked_replay_failed","repository":"org/repo","delivery":"full-1","error":"storage_full","request_id":"993a1034-d086-4478-bf44-52d58b5f5e72"}
+# {"event":"repository_storage_failure","operation":"request:/event","reason":"storage_full","degraded":true,"message":"Exceeded the maximum database size; SQLITE_FULL recorded at 2026-10-20T05:00:20.636Z"}
+# {"event":"repository_request_failed","request_id":"01b661a9-db47-4e7f-9b97-96b8b10da7df","path":"/event","reason":"storage_full"}
+# {"event":"parked_replay_failed","repository":"org/repo","delivery":"full-1","error":"storage_full","request_id":"01b661a9-db47-4e7f-9b97-96b8b10da7df"}
 # Subtest: a full repository keeps serving stored reads, parks ingestion, recovers headroom, and spends no GitHub quota
-ok 113 - a full repository keeps serving stored reads, parks ingestion, recovers headroom, and spends no GitHub quota
+ok 116 - a full repository keeps serving stored reads, parks ingestion, recovers headroom, and spends no GitHub quota
   ---
-  duration_ms: 2368.317373
+  duration_ms: 2194.972061
   type: 'test'
   ...
 # {"event":"event_parked","delivery":"planned-1","repository":"org/repo","reason":"planned_migration"}
 # Subtest: planned migration parks every delivery without calling the repository object
-ok 114 - planned migration parks every delivery without calling the repository object
+ok 117 - planned migration parks every delivery without calling the repository object
   ---
-  duration_ms: 241.069116
+  duration_ms: 241.16609
   type: 'test'
   ...
 # Subtest: fault injection is unavailable unless the environment enables it
-ok 115 - fault injection is unavailable unless the environment enables it
+ok 118 - fault injection is unavailable unless the environment enables it
   ---
-  duration_ms: 192.654331
+  duration_ms: 194.60502
   type: 'test'
   ...
 # Subtest: Python fallback and TypeScript projection agree on 240 changing histories and scopes
-ok 116 - Python fallback and TypeScript projection agree on 240 changing histories and scopes
+ok 119 - Python fallback and TypeScript projection agree on 240 changing histories and scopes
   ---
-  duration_ms: 81.217945
+  duration_ms: 90.814908
   type: 'test'
   ...
 # Subtest: compact survey is authenticated, roadmap scoped and does not issue GitHub requests
-ok 117 - compact survey is authenticated, roadmap scoped and does not issue GitHub requests
+ok 120 - compact survey is authenticated, roadmap scoped and does not issue GitHub requests
   ---
-  duration_ms: 254.542652
+  duration_ms: 273.470265
   type: 'test'
   ...
 # Subtest: head-bound blockers retain their authenticated actor and do not trust quoted markers
-ok 118 - head-bound blockers retain their authenticated actor and do not trust quoted markers
+ok 121 - head-bound blockers retain their authenticated actor and do not trust quoted markers
   ---
-  duration_ms: 0.340755
+  duration_ms: 0.339943
   type: 'test'
   ...
 # Subtest: installation owns token, measures batch charge, preserves huge IDs
-ok 119 - installation owns token, measures batch charge, preserves huge IDs
+ok 122 - installation owns token, measures batch charge, preserves huge IDs
   ---
-  duration_ms: 259.171441
+  duration_ms: 258.884324
   type: 'test'
   ...
 # Subtest: hundred-node reaction batches isolate an unavailable alias
-ok 120 - hundred-node reaction batches isolate an unavailable alias
+ok 123 - hundred-node reaction batches isolate an unavailable alias
   ---
-  duration_ms: 198.853077
+  duration_ms: 196.928254
   type: 'test'
   ...
 # Subtest: REST numeric identifiers retain their original digits
-ok 121 - REST numeric identifiers retain their original digits
+ok 124 - REST numeric identifiers retain their original digits
   ---
-  duration_ms: 195.505597
+  duration_ms: 191.190849
   type: 'test'
   ...
-# {"event":"new_quota_type","category":"primary:core","evidence":{"operation":"files","api":"core","status":403,"remaining":"0","reset":"1792471341","retry_after":null}}
+# {"event":"new_quota_type","category":"primary:core","evidence":{"operation":"files","api":"core","status":403,"remaining":"0","reset":"1792472720","retry_after":null}}
 # Subtest: REST exhaustion swaps history to GraphQL and retains complete results
-ok 122 - REST exhaustion swaps history to GraphQL and retains complete results
+ok 125 - REST exhaustion swaps history to GraphQL and retains complete results
   ---
-  duration_ms: 196.976547
+  duration_ms: 198.853589
   type: 'test'
   ...
-# {"event":"new_quota_type","category":"primary:core","evidence":{"operation":"issue_comments","api":"core","status":403,"remaining":"0","reset":"1792471341","retry_after":null}}
+# {"event":"new_quota_type","category":"primary:core","evidence":{"operation":"issue_comments","api":"core","status":403,"remaining":"0","reset":"1792472720","retry_after":null}}
 # Subtest: mid-pagination exhaustion restarts in the other pool without mixing cursors
-ok 123 - mid-pagination exhaustion restarts in the other pool without mixing cursors
+ok 126 - mid-pagination exhaustion restarts in the other pool without mixing cursors
   ---
-  duration_ms: 200.936304
+  duration_ms: 194.186641
   type: 'test'
   ...
-# {"event":"new_quota_type","category":"primary:graphql","evidence":{"operation":"issue_comments","api":"graphql","status":200,"remaining":"0","reset":"1792471341","retry_after":null}}
+# {"event":"new_quota_type","category":"primary:graphql","evidence":{"operation":"issue_comments","api":"graphql","status":200,"remaining":"0","reset":"1792472720","retry_after":null}}
 # Subtest: GraphQL HTTP-200 RATE_LIMITED defers its pool; 401 renews token once
-ok 124 - GraphQL HTTP-200 RATE_LIMITED defers its pool; 401 renews token once
+ok 127 - GraphQL HTTP-200 RATE_LIMITED defers its pool; 401 renews token once
   ---
-  duration_ms: 195.058273
+  duration_ms: 196.098835
   type: 'test'
   ...
-# {"event":"new_quota_type","category":"primary:graphql","evidence":{"operation":"issue_comments","api":"graphql","status":200,"remaining":"0","reset":"1792471341","retry_after":null}}
+# {"event":"new_quota_type","category":"primary:graphql","evidence":{"operation":"issue_comments","api":"graphql","status":200,"remaining":"0","reset":"1792472721","retry_after":null}}
 # Subtest: GraphQL HTTP-200 RATE_LIMIT defers its pool; 401 renews token once
-ok 125 - GraphQL HTTP-200 RATE_LIMIT defers its pool; 401 renews token once
+ok 128 - GraphQL HTTP-200 RATE_LIMIT defers its pool; 401 renews token once
   ---
-  duration_ms: 195.829617
+  duration_ms: 195.815845
   type: 'test'
   ...
 # {"event":"new_quota_type","category":"secondary:content","evidence":{"operation":"issue_comments","api":"graphql","status":429,"remaining":"100","reset":null,"retry_after":"120"}}
 # Subtest: secondary limit pauses both pools even with 100 primary points
-ok 126 - secondary limit pauses both pools even with 100 primary points
+ok 129 - secondary limit pauses both pools even with 100 primary points
   ---
-  duration_ms: 199.928712
+  duration_ms: 194.243936
   type: 'test'
   ...
 # {"event":"new_quota_type","category":"secondary:content","evidence":{"operation":"issue_comments","api":"graphql","status":429,"remaining":"0","reset":null,"retry_after":"120"}}
 # Subtest: secondary limit pauses both pools even with 0 primary points
-ok 127 - secondary limit pauses both pools even with 0 primary points
+ok 130 - secondary limit pauses both pools even with 0 primary points
   ---
-  duration_ms: 197.796502
+  duration_ms: 200.668989
   type: 'test'
   ...
-# {"event":"new_quota_type","category":"primary:core","evidence":{"operation":"files","api":"core","status":403,"remaining":"0","reset":"1792471032","retry_after":null}}
+# {"event":"new_quota_type","category":"primary:core","evidence":{"operation":"files","api":"core","status":403,"remaining":"0","reset":"1792472411","retry_after":null}}
 # Subtest: late primary rejection respects its original reset -10
-ok 128 - late primary rejection respects its original reset -10
+ok 131 - late primary rejection respects its original reset -10
   ---
-  duration_ms: 195.000698
+  duration_ms: 198.210315
   type: 'test'
   ...
-# {"event":"new_quota_type","category":"primary:core","evidence":{"operation":"files","api":"core","status":403,"remaining":"0","reset":"1792471102","retry_after":null}}
+# {"event":"new_quota_type","category":"primary:core","evidence":{"operation":"files","api":"core","status":403,"remaining":"0","reset":"1792472481","retry_after":null}}
 # Subtest: late primary rejection respects its original reset 60
-ok 129 - late primary rejection respects its original reset 60
+ok 132 - late primary rejection respects its original reset 60
   ---
-  duration_ms: 200.127025
+  duration_ms: 199.469352
   type: 'test'
   ...
 # Subtest: delivery audit follows busy-repository pages and redelivers failures beyond page one
-ok 130 - delivery audit follows busy-repository pages and redelivers failures beyond page one
+ok 133 - delivery audit follows busy-repository pages and redelivers failures beyond page one
   ---
-  duration_ms: 200.913631
+  duration_ms: 193.749693
   type: 'test'
   ...
-# {"event":"delivery_redelivery_rejected","id":"101","status":404,"at":1792471043181}
+# {"event":"delivery_redelivery_rejected","id":"101","status":404,"at":1792472422289}
 # Subtest: one rejected redelivery cannot hide subsequent failed deliveries
-ok 131 - one rejected redelivery cannot hide subsequent failed deliveries
+ok 134 - one rejected redelivery cannot hide subsequent failed deliveries
   ---
-  duration_ms: 206.955504
+  duration_ms: 195.868894
   type: 'test'
   ...
-# {"event":"delivery_redelivery_rejected","id":"101","status":401,"at":1792471043377}
+# {"event":"delivery_redelivery_rejected","id":"101","status":401,"at":1792472422483}
 # Subtest: redelivery auth errors are visible and deferred without hiding other gaps
-ok 132 - redelivery auth errors are visible and deferred without hiding other gaps
+ok 135 - redelivery auth errors are visible and deferred without hiding other gaps
   ---
-  duration_ms: 198.339877
+  duration_ms: 195.374621
   type: 'test'
   ...
 # Subtest: scalar GraphQL recipes declare only variables they use
-ok 133 - scalar GraphQL recipes declare only variables they use
+ok 136 - scalar GraphQL recipes declare only variables they use
   ---
-  duration_ms: 196.045828
+  duration_ms: 187.435563
   type: 'test'
   ...
 # Subtest: REST commit statuses use the same state spelling as GraphQL
-ok 134 - REST commit statuses use the same state spelling as GraphQL
+ok 137 - REST commit statuses use the same state spelling as GraphQL
   ---
-  duration_ms: 198.296293
+  duration_ms: 187.700886
   type: 'test'
   ...
 # Subtest: four requests overlap without blocking health; excess requests defer without spending
-ok 135 - four requests overlap without blocking health; excess requests defer without spending
+ok 138 - four requests overlap without blocking health; excess requests defer without spending
   ---
-  duration_ms: 208.894037
+  duration_ms: 193.903641
   type: 'test'
   ...
 # Subtest: concurrent reads reserve the last primary point only once
-ok 136 - concurrent reads reserve the last primary point only once
+ok 139 - concurrent reads reserve the last primary point only once
   ---
-  duration_ms: 207.963939
+  duration_ms: 198.596267
   type: 'test'
   ...
 # Subtest: nested review histories checkpoint each page instead of monopolizing an installation turn
-ok 137 - nested review histories checkpoint each page instead of monopolizing an installation turn
+ok 140 - nested review histories checkpoint each page instead of monopolizing an installation turn
   ---
-  duration_ms: 199.199641
+  duration_ms: 198.135474
   type: 'test'
   ...
 # Subtest: admin reference reads bypass the mirror through the same quota owner and catalogue
-ok 138 - admin reference reads bypass the mirror through the same quota owner and catalogue
+ok 141 - admin reference reads bypass the mirror through the same quota owner and catalogue
   ---
-  duration_ms: 209.750596
+  duration_ms: 201.784222
   type: 'test'
   ...
 # Subtest: measurement batches use the owner and return costs without response bodies
-ok 139 - measurement batches use the owner and return costs without response bodies
+ok 142 - measurement batches use the owner and return costs without response bodies
   ---
-  duration_ms: 123.027443
+  duration_ms: 121.799679
   type: 'test'
   ...
 # Subtest: batch routing preserves scarce GraphQL quota when REST can carry the whole group
-ok 140 - batch routing preserves scarce GraphQL quota when REST can carry the whole group
+ok 143 - batch routing preserves scarce GraphQL quota when REST can carry the whole group
   ---
-  duration_ms: 201.623373
+  duration_ms: 193.856281
   type: 'test'
   ...
 # Subtest: out-of-scope query fallback reveals no data and spends no installation quota
-ok 141 - out-of-scope query fallback reveals no data and spends no installation quota
+ok 144 - out-of-scope query fallback reveals no data and spends no installation quota
   ---
-  duration_ms: 116.986781
+  duration_ms: 113.478022
   type: 'test'
   ...
 # installation operation failed malformed_upstream_response
 # Subtest: malformed upstream JSON stays unavailable, preserves request ID, and retries through the same quota owner
-ok 142 - malformed upstream JSON stays unavailable, preserves request ID, and retries through the same quota owner
+ok 145 - malformed upstream JSON stays unavailable, preserves request ID, and retries through the same quota owner
   ---
-  duration_ms: 198.22637
+  duration_ms: 195.629229
   type: 'test'
   ...
 # installation operation failed malformed_upstream_response
 # Subtest: malformed responses without quota headers debit the existing owner budget once
-ok 143 - malformed responses without quota headers debit the existing owner budget once
+ok 146 - malformed responses without quota headers debit the existing owner budget once
   ---
-  duration_ms: 197.853256
+  duration_ms: 194.563309
   type: 'test'
   ...
-1..143
-# tests 143
+# Subtest: malformed status/header objects stay unavailable rather than becoming empty complete state
+ok 147 - malformed status/header objects stay unavailable rather than becoming empty complete state
+  ---
+  duration_ms: 195.030221
+  type: 'test'
+  ...
+# Subtest: malformed collection rows and pagination never publish an empty complete collection
+ok 148 - malformed collection rows and pagination never publish an empty complete collection
+  ---
+  duration_ms: 199.926149
+  type: 'test'
+  ...
+1..148
+# tests 148
 # suites 0
-# pass 143
+# pass 148
 # fail 0
 # cancelled 0
 # skipped 0
 # todo 0
-# duration_ms 5192.882898
+# duration_ms 5462.891634
