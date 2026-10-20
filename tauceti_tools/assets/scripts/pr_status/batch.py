@@ -141,10 +141,14 @@ def touched_by_runs(since: str, heads: dict[str, list[int]], completed=None) -> 
     running flags remain current even when no new reconciliation is needed.
     """
     prs, running = set(), set()
+    installed = set(lines(f"/repos/{REPO}/actions/workflows?per_page=100",
+                          jq=".workflows[].path", paginate=True))
     lookback = iso(dt.datetime.fromisoformat(since.replace("Z", "+00:00")) - RUN_LOOKBACK)
     # pr-build runs for PRs are pull_request_target runs; Review is started by workflow_run and
     # issue_comment events, so its runs are listed whatever their event.
     for workflow, event in (("pr-build.yml", "&event=pull_request_target"), ("review.yml", "")):
+        if f".github/workflows/{workflow}" not in installed:
+            continue
         for status in ACTIVE + ("completed",):
             # Completed runs by completion (updated_at), not creation: a long build created before
             # `since` may finish after it.

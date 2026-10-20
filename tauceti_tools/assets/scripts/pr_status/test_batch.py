@@ -13,6 +13,7 @@ import batch
 import core
 
 REAL_UPDATED = batch.updated_prs
+REAL_TOUCHED = batch.touched_by_runs
 
 
 class ResumeTests(unittest.TestCase):
@@ -37,6 +38,13 @@ class ResumeTests(unittest.TestCase):
 
     def read(self):
         return json.loads(self.path.read_text())
+
+    def test_run_discovery_queries_only_installed_workflows(self):
+        with patch.object(batch, 'lines', return_value=['.github/workflows/pr-build.yml']), \
+                patch.object(batch, 'workflow_runs', return_value=[]) as runs:
+            self.assertEqual(REAL_TOUCHED('2026-10-19T08:00:00Z', {}), (set(), set()))
+        self.assertTrue(runs.called)
+        self.assertEqual({call.args[0] for call in runs.call_args_list}, {'pr-build.yml'})
 
     def test_labels_only_needs_no_zulip_credentials_or_client(self):
         with patch.dict(os.environ, {}, clear=True), \
