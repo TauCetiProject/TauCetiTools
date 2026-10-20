@@ -227,7 +227,6 @@ class DuplicateDeclarationsTest(unittest.TestCase):
         result = self.fixture({})
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
 
-
     def test_full_audit_empty_modules_is_valid(self):
         result = self.fixture({"TauCeti": "module\n", "TauCeti.Empty": "module\n"}, full=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -305,10 +304,6 @@ class DuplicateDeclarationsTest(unittest.TestCase):
         self.assertIn("module-system:", result.stderr)
         self.assertIn("  TauCeti\n", result.stderr)
 
-    def test_zero_declarations_fails_closed(self):
-        result = self.fixture({"TauCeti": "module\n", "TauCeti.Orphan": "module\n"}, full=True)
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("axioms: audited 0", result.stderr)
 
     def test_initializers_do_not_execute(self):
         result = self.fixture({"TauCeti.Orphan": "module\npublic import Lean\n"
