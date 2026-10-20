@@ -144,7 +144,7 @@ test('ordinary supervisor restarts a fenced repository, preserves cursors, and r
   await queueSample(Date.now(),1);assert.equal((await (await f.request('/migration-supervise',{})).json()).phase,'replaying','DLQ must drain before reconciliation resumes');
   assert.ok(!(await migration.readMigration(f.archive,custom.id)).cutover.replay_complete);
   await queueSample(Date.now(),0);
-  const poison={...parked,delivery:'held-poison'};
+  const poison={...parked,key,delivery:'held-poison'};
   const pinned=await ingress.park(f.env,custom,poison,'fixture_failure');
   const normalKey=ingress.pointerKey(custom.id,poison),heldKey=ingress.pointerKey(custom.id,poison,true);
   await f.archive.put(heldKey,JSON.stringify({...pinned,retry_at:Date.now()+86400000}));await f.archive.delete(normalKey);
