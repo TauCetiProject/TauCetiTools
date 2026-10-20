@@ -1,18 +1,18 @@
 import assert from 'node:assert/strict';
 import {randomBytes} from 'node:crypto';
 import {Client} from '@neondatabase/serverless';
-import {fixture,fill,load,migration,generation} from './migration_fixture.mjs';
+import {fixture,fill,load,migration,generation,bucket} from './migration_fixture.mjs';
 import {initializeSchema} from '../scripts/postgres-schema.mjs';
 import {testCredentials} from './postgres_credentials.mjs';
 const target=await load('src/migration_target.ts');
 const control=await load('src/migration_control.ts');
 const enabled=Boolean(process.env.TEST_POSTGRES_URL);
-async function testFixture(){
+async function testFixture(pageSize=2){
  const credentials=testCredentials(),admin=new Client(credentials.migration.toString());await admin.connect();
  const id=BigInt('0x'+randomBytes(8).toString('hex')).toString(),schema='github_state_'+id;
  await admin.query('BEGIN');await initializeSchema(admin,id,generation,decodeURIComponent(credentials.application.username),{standby:true});
  await admin.query(`INSERT INTO ${schema}.capacity_statistics VALUES(1,$1,0,1099511627776,$1)`,[Date.now()]);await admin.query('COMMIT');
- const f=await fixture();await fill(f);
+ const f=await fixture(undefined,bucket(pageSize));await fill(f);
  const state={version:1,generation,repository:id,target:'neon-test',source:{object:'source-object',deployment:'test-deployment',schema:5},phase:'freezing',created:Date.now(),updated:Date.now(),tables:{},failure:null,
   staging:{after:null,page:'1',checked:0,complete:false,expired_jobs:0,expired_hash:'0'.repeat(64)},blobs:{prefix:0,pages:0,objects:0,hash:'0'.repeat(64),complete:false},
   cutover:{environment:'test',lease_until:Date.now()+900000,epoch:0,source_fenced:false,target_active:false,import:{},verify:{},acceptance:''}};

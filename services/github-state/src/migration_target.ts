@@ -15,8 +15,10 @@ export function targetConfig(env:Env):TargetIdentity {
   }
   return {identity:value.identity,hostname:value.hostname,database:value.database,application_role:value.application_role,migration_role:value.migration_role};
 }
-async function transaction<T>(env:Env,repo:string,apply:(client:Client,schema:string)=>Promise<T>,url=env.MIGRATION_DATABASE_URL):Promise<T> {
+type MeteredEnv=Env & {migrationConnection?:()=>void};
+async function transaction<T>(env:MeteredEnv,repo:string,apply:(client:Client,schema:string)=>Promise<T>,url=env.MIGRATION_DATABASE_URL):Promise<T> {
   const schema=schemaName(repo);targetConfig(env);
+  env.migrationConnection?.();
   const client=new Client({connectionString:url,connectionTimeoutMillis:10000,query_timeout:20000});
   client.on('error',()=>{}); // The awaited operation reports a sanitized failure.
   try {await client.connect();await client.query('BEGIN');await client.query("SET LOCAL statement_timeout='15s'; SET LOCAL lock_timeout='5s'");const value=await apply(client,schema);await client.query('COMMIT');return value;}

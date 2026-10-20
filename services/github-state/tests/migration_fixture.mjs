@@ -16,7 +16,7 @@ const generation='c707ddba-076d-4a63-8696-96533031ce88';
 const target='neon-test-branch-database';
 const sha=text=>createHash('sha256').update(text).digest('hex');
 
-function bucket(){
+function bucket(pageSize=2){
  const objects=new Map();let failure=null;
  const check=(op,key,when)=>{if(failure?.(op,key,when)){failure=null;throw new Error('sensitive payload/credential detail');}};
  const meta=(key,o)=>({key,size:Buffer.byteLength(o.text),etag:sha(o.text),uploaded:new Date(0),customMetadata:o.customMetadata});
@@ -29,7 +29,7 @@ function bucket(){
   async get(key){check('get',key,'before');const o=objects.get(key);return o?{...meta(key,o),text:async()=>o.text,json:async()=>JSON.parse(o.text),arrayBuffer:async()=>new Uint8Array(Buffer.from(o.text)).buffer}:null;},
   async head(key){const o=objects.get(key);return o?meta(key,o):null;},
   async delete(keys){for(const key of [].concat(keys)){check('delete',key,'before');objects.delete(key);check('delete',key,'after');}},
-  async list({prefix='',cursor,limit=1000}={}){const keys=[...objects.keys()].filter(k=>k.startsWith(prefix)).sort();const start=Number(cursor || 0),end=start+Math.min(limit,2);return {objects:keys.slice(start,end).map(k=>meta(k,objects.get(k))),truncated:end<keys.length,cursor:String(end)};},
+  async list({prefix='',cursor,startAfter,limit=1000}={}){const keys=[...objects.keys()].filter(k=>k.startsWith(prefix) && (!startAfter || k>startAfter)).sort();const start=Number(cursor || 0),end=start+Math.min(limit,pageSize);return {objects:keys.slice(start,end).map(k=>meta(k,objects.get(k))),truncated:end<keys.length,cursor:String(end)};},
  };
 }
 async function fixture(db=new DatabaseSync(':memory:'),archive=bucket(),overrides={}){

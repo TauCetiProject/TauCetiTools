@@ -4,9 +4,13 @@ import {fixture,load,migration,generation} from './migration_fixture.mjs';
 import {testFixture,target,control} from './migration_postgres_fixture.mjs';
 const enabled=Boolean(process.env.TEST_POSTGRES_URL);
 test('S2 imports exact archives into a standby, restarts every step and recovers a lost switch commit', {skip:!enabled},async()=>{
- const f=await testFixture();
+ const f=await testFixture(1000);
  try {
   f.db.prepare('INSERT INTO demand(rowid,key,at) VALUES(9,?,1),(10,?,2),(99,?,3),(100,?,4)').run('numeric-nine','numeric-ten','numeric-ninety-nine','numeric-hundred');
+  const templateJob=f.db.prepare('SELECT * FROM jobs').get(),fields=Object.keys(templateJob);
+  const clone=f.db.prepare('INSERT INTO jobs('+fields.join(',')+') VALUES('+fields.map(()=>'?').join(',')+')');
+  for(let i=1;i<30;i++)clone.run(...fields.map(key=>key==='key'?'expired-'+i:templateJob[key]));
+  let connections=0,widePreparation=false;f.env.migrationConnection=()=>{connections++;};
   const insert=f.db.prepare('INSERT INTO demand(rowid,key,at) VALUES(?,?,?)');
   f.db.exec('BEGIN');for(let i=500;i<5500;i++)insert.run(i,'wide-'+i,i);f.db.exec('COMMIT');
   await control.preflight(f.env,f.state);await migration.saveMigration(f.archive,f.state);
@@ -20,10 +24,13 @@ test('S2 imports exact archives into a standby, restarts every step and recovers
     await migration.saveMigration(f.archive,state);
     if(op==='import') {await target.importStep(f.env,state);importedCrash=true;}
     else {await target.targetVerifyStep(f.env,state);validationCrash=true;}
-   }else await control.controllerStep(f.env,state,f.hooks);
+   }else {
+    const before=connections;await control.controllerStep(f.env,state,f.hooks);
+    if(state.phase==='preparing' && connections-before===25)widePreparation=true;
+   }
    if(n===599)assert.fail('supervisor stalled');
   }
-  assert.ok(importedCrash && validationCrash);
+  assert.ok(importedCrash && validationCrash);assert.equal(widePreparation,true,'all 25 staging-repair connections are metered');
   let state=await migration.readMigration(f.archive,f.id);assert.equal(state.phase,'switching');
   const rows=(await f.admin.query(`SELECT rowid::text,at::text FROM ${f.schema}.demand t ORDER BY t.rowid`)).rows;
   assert.equal(rows.length,5007);
@@ -35,7 +42,7 @@ test('S2 imports exact archives into a standby, restarts every step and recovers
   await control.controllerStep(f.env,await migration.readMigration(f.archive,f.id),f.hooks);
   state=await migration.readMigration(f.archive,f.id);
   assert.equal(state.phase,'replaying');assert.equal(state.cutover.target_active,true);assert.equal(f.selected,true);assert.equal(f.released,false);
-  const job=(await f.admin.query(`SELECT due::text,attempt::text,generation::text,lease_id,lease_until::text,started::text,page::text,cursor,api,etag,nested FROM ${f.schema}.jobs`)).rows[0];
+  const job=(await f.admin.query(`SELECT due::text,attempt::text,generation::text,lease_id,lease_until::text,started::text,page::text,cursor,api,etag,nested FROM ${f.schema}.jobs WHERE key='fixture'`)).rows[0];
   assert.deepEqual(job,{due:'9999999999999',attempt:'4',generation:'17',lease_id:null,lease_until:'0',started:null,page:'1',cursor:null,api:null,etag:null,nested:null});
   await assert.rejects(target.abandonTarget(f.env,state),/migration_forward_recovery_required/);
  }finally{await f.close();}
