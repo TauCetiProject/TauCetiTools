@@ -249,3 +249,37 @@ pg('monitoring has a server timeout, a failed expensive pass is not retried blin
   f.state.observation.at=Date.now()-61000;await f.state.storageMaintenance();assert.deepEqual(known,[true,true]);
  }finally {await f.close();}
 });
+
+pg('restricted connection observations include open application sessions',async()=>{
+ const f=await postgresFixture(),clients=[];try {
+  const {Client}=await import('@neondatabase/serverless');
+  for(let i=0;i<4;i++){const client=new Client({connectionString:process.env.TEST_POSTGRES_URL,connectionTimeoutMillis:5000});await client.connect();await client.query('SELECT 1');clients.push(client);}
+  await f.store.prepareMonitoring(true);
+  const value=(await f.store.health()).capacity.observation.connections;
+  assert.ok(value.used>=clients.length,'app sessions cannot disappear behind restricted backend_type visibility');
+  assert.match(value.measurement,/unclassified_authenticated_upper_bound/);
+  const member=(await f.admin.query("SELECT pg_has_role(current_user,'github_state_test_app','USAGE') member,pg_has_role(current_user,'pg_read_all_stats','USAGE') AS all_stats")).rows[0];
+  if(!member.member && !member.all_stats)assert.ok(value.unclassified_authenticated>=clients.length);
+ }finally {await Promise.allSettled(clients.map(client=>client.end()));await f.close();}
+});
+
+pg('a single transient parkable event failure does not become a persistent critical alarm',async t=>{
+ const f=await postgresFixture();try {
+  f.env.ARCHIVE=bucket();let fail=true;
+  f.state.store=new Proxy(f.store,{get(target,key){
+   if(key==='transaction')return async apply=>{if(fail)throw Error('Repository database unavailable');return target.transaction(apply);};
+   if(key==='prepareMonitoring')return async()=>({analysis_attempted:false,reason:'recent_sample'});
+   if(key==='health')return async()=>({backend:'postgres',schema_version:1,generation:'test-v1',connected:true,capacity:{prepared_at:Date.now(),database_bytes:1,storage_limit_bytes:null}});
+   const value=target[key];return typeof value==='function'?value.bind(target):value;
+  }});
+  await f.env.ARCHIVE.put('fixture/transient',JSON.stringify({issue:{number:7},comment:{id:'22',body:'durable',created_at:'2026-10-19T00:00:00Z'}}));
+  const pointer={key:'fixture/transient',delivery:'transient',event:'issue_comment',repository:repo.name,received:Date.now()};
+  assert.equal((await send(f.state,'/event',pointer)).status,503);
+  t.mock.timers.enable({apis:['Date'],now:Date.now()});t.mock.timers.tick(70000);
+  await f.state.storageMaintenance();assert.equal((await f.state.preparedObservation()).reasons.includes('input_application_unavailable'),false);
+  assert.equal((await send(f.state,'/event',pointer)).status,503);f.state.observation.at=Date.now()-61000;
+  await f.state.storageMaintenance();assert.ok((await f.state.preparedObservation()).reasons.includes('input_application_unavailable'));
+  fail=false;assert.equal((await send(f.state,'/event',pointer)).status,200);f.state.observation.at=Date.now()-61000;
+  await f.state.storageMaintenance();assert.equal((await f.state.preparedObservation()).reasons.includes('input_application_unavailable'),false);
+ }finally {t.mock.timers.reset();await f.close();}
+});

@@ -28,14 +28,16 @@ BEGIN
   SELECT * INTO previous FROM __SCHEMA__.capacity_statistics WHERE singleton=1 FOR UPDATE;
   IF NOT analyze_tables AND previous.prepared_at>stamp-50000 AND previous.observation IS NOT NULL THEN RETURN jsonb_build_object('sampled',false,'analysis_attempted',false,'reason','recent_sample'); END IF;
   SELECT jsonb_build_object(
-    'connections',jsonb_build_object('used',count(*) FILTER(WHERE backend_type='client backend'),'active',count(*) FILTER(WHERE backend_type='client backend' AND state='active'),
+    'connections',jsonb_build_object('used',count(*) FILTER(WHERE backend_type='client backend' OR backend_type IS NULL AND usesysid IS NOT NULL),
+      'unclassified_authenticated',count(*) FILTER(WHERE backend_type IS NULL AND usesysid IS NOT NULL),
+      'measurement','client_backends_plus_unclassified_authenticated_upper_bound','active',count(*) FILTER(WHERE backend_type='client backend' AND state='active'),
       'waiting',count(*) FILTER(WHERE backend_type='client backend' AND state='active' AND wait_event_type IS NOT NULL),
       'max',current_setting('max_connections')::int,
       'visibility',CASE WHEN pg_has_role(current_user,'pg_read_all_stats','USAGE') THEN 'all_session_details' ELSE 'definer_role_limited_session_details' END,
       'reserved',current_setting('superuser_reserved_connections')::int+COALESCE(current_setting('reserved_connections',true),'0')::int),
     'compute',jsonb_build_object('cpu_utilization',NULL,'reason','use_neon_compute_metrics',
-      'active_queries',count(*) FILTER(WHERE state='active' AND datname=current_database()),
-      'lock_waits',count(*) FILTER(WHERE wait_event_type='Lock' AND datname=current_database())))
+      'active_queries',count(*) FILTER(WHERE backend_type='client backend' AND state='active' AND datname=current_database()),
+      'lock_waits',count(*) FILTER(WHERE backend_type='client backend' AND wait_event_type='Lock' AND datname=current_database())))
   INTO detail FROM pg_catalog.pg_stat_activity;
   SELECT detail || jsonb_build_object('table_row_estimates',COALESCE(jsonb_object_agg(relname,jsonb_build_object(
     'live',n_live_tup,'dead',n_dead_tup,'updated',n_tup_upd,'inserted',n_tup_ins,'deleted',n_tup_del)),'{}'::jsonb))

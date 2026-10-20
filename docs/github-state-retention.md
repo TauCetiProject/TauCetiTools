@@ -281,7 +281,8 @@ node scripts/prepare-postgres-statistics.mjs "$REPOSITORY_ID" "$GENERATION"
 ```
 
 Expected: matching repository/generation with `schema_version: 1`, then
-`prepared: true`. An existing ownership mismatch stops initialization. Deployment
+`prepared: true`. A busy sampler reports `prepared: false` and exits nonzero; a
+generation mismatch is a distinct refusal. Inspect the saved outcome before retrying. An existing ownership mismatch stops initialization. Deployment
 alone performs no DDL. `prepare_monitoring(expected_generation, analyze_tables, attempt_token)`
 is a fixed-schema, security-definer function with an explicit `pg_catalog, pg_temp` search path and qualified catalog views. The
 HTTP transaction sets a server statement timeout before invoking the function,
@@ -301,7 +302,11 @@ and lock-wait observations are separate compute-pressure diagnostics, not a clai
 to measure CPU. [PostgreSQL statistics visibility](https://www.postgresql.org/docs/18/monitoring-stats.html)
 limits session detail for roles without `pg_read_all_stats`. The response reports
 the actual definer's visibility; this release grants no global statistics role.
-Connection counts include only client backends, excluding background processes.
+Connection usage includes known client backends plus authenticated sessions whose
+type the definer cannot inspect. The latter count is exposed separately: this is
+a conservative upper bound, not a precise attribution of those hidden sessions.
+Known background processes are excluded. Active-query/lock-wait counters can still
+be lower bounds when session detail is restricted.
 
 Physical table/index/TOAST sizes and their growth are prepared at most hourly.
 R2 records the expensive attempt **before** SQL so a failed/cancelled transaction
@@ -360,8 +365,9 @@ recorded **test** branch/endpoint, creates a random disposable repository schema
 records its database timestamp and table hashes, changes the source sentinel, then
 creates a temporary point-in-time child of that test branch. It verifies the old
 sentinel and every table before deleting the child and source fixture. It then closes its own connection, restarts only that just-created temporary
-endpoint, waits for every returned restart operation to finish and requires
-`pg_postmaster_start_time()` to advance before rechecking every table. The receipt
+endpoint, waits for every returned restart operation to finish or report a skipped no-op
+without an error, and requires
+`pg_postmaster_start_time()` to advance in a server-side timestamp comparison before rechecking every table. The receipt
 records the script hash, implementation revision and source dirty flag. It never restarts shared test or
 production compute or selects a production endpoint. If an API mutation has an ambiguous
 failure, inspect existing `issue317-restore-*` branches before retrying; do not

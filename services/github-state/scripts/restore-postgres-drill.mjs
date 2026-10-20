@@ -58,20 +58,21 @@ try {
  await restored.end();restored=undefined;
  const restarting=await api(`/projects/${project}/endpoints/${endpoint.id}/restart`,'POST');
  const operations=restarting.operations || [];if(!operations.length)throw Error('restart_operation_missing');
- receipt.restart_operations=operations.map(op=>op.id);
+ receipt.restart_operations=operations.map(op=>op.id);receipt.restart_operation_states=[];
  for(const operation of operations) {
   let finished=false;
   for(let attempt=0;attempt<60;attempt++) {
    const value=await api(`/projects/${project}/operations/${operation.id}`),status=value.operation?.status;
-   if(status==='finished'){finished=true;break;}
-   if(['failed','cancelled','skipped'].includes(status))throw Error('restart_operation_failed');
+   if(status==='finished' || status==='skipped' && !value.operation.error){receipt.restart_operation_states.push({id:operation.id,status,action:value.operation.action});finished=true;break;}
+   if(status==='cancelled')throw Error('restart_operation_cancelled');
    await new Promise(r=>setTimeout(r,2000));
   }
   if(!finished)throw Error('restart_operation_timeout');
  }
  restored=await reconnect();
  const startedAfter=(await restored.query('SELECT pg_postmaster_start_time()::text started')).rows[0].started;
- if(Date.parse(startedAfter)<=Date.parse(startedBefore))throw Error('restart_not_observed');
+ const advanced=(await restored.query('SELECT pg_postmaster_start_time()>$1::timestamptz advanced',[startedBefore])).rows[0].advanced;
+ if(advanced!==true)throw Error('restart_not_observed');
  receipt.postmaster_started_before=startedBefore;receipt.postmaster_started_after=startedAfter;
  receipt.restart_operations_finished=true;
  for(const table of tables)if(checksum((await restored.query(`SELECT * FROM ${schema}.${table} ORDER BY 1`)).rows)!==manifests[table])throw Error('restart_checksum_mismatch');

@@ -1417,8 +1417,9 @@ export class RepositoryState extends DurableObject<Env> {
       const old=await this.maintenanceArchive.get('control/'+repo+'/observation.json').then(o=>o?.json<any>()).catch(()=>null);
       if(old?.backend==='postgres' && old.generation===generation) {
         this.lastCapacity=old.capacity;
-        this.postgresUnavailableSince=old.database_unavailable_since;
-        this.monitoringFailureSince=old.monitoring_failure_since;
+        if(Number.isSafeInteger(old.at) && now-old.at>=0 && now-old.at<=180000) {
+          this.postgresUnavailableSince=old.database_unavailable_since;this.monitoringFailureSince=old.monitoring_failure_since;
+        }
         if(Array.isArray(old.capacity_history))this.capacityHistory=old.capacity_history.filter((r:any)=>Number.isSafeInteger(r.at) && Number.isSafeInteger(r.bytes) && r.at<=now && r.at>now-2*3600000).slice(-121);
       }
     }
@@ -1430,12 +1431,12 @@ export class RepositoryState extends DurableObject<Env> {
       let analyze=false,token=Date.now();
       try {
         const prior=await this.maintenanceArchive.get(key).then(o=>o?.json<any>());
-        if(!prior || Number.isSafeInteger(prior.at) && (prior.at<=token-3600000 || prior.not_started===true && prior.retry_at<=token)) {
+        if(!prior || !Number.isSafeInteger(prior.at) || prior.at>token+60000 || prior.at<=token-3600000 || prior.not_started===true && prior.retry_at<=token) {
           token=Date.now();await this.maintenanceArchive.put(key,JSON.stringify({at:token}));analyze=true;
         }
       }catch { /* Unknown attempt state skips expensive work, not minute gauges. */ }
       const prepared=await this.store.prepareMonitoring?.(analyze,token);
-      if(analyze && prepared?.analysis_attempted===false)await this.maintenanceArchive.put(key,JSON.stringify({at:token,not_started:true,retry_at:Math.max(Date.now()+60000,prepared.table_retry_at || 0)}));
+      if(analyze && prepared?.analysis_attempted===false)await this.maintenanceArchive.put(key,JSON.stringify({at:token,not_started:true,retry_at:Math.max(Date.now()+60000,prepared.table_retry_at || 0)})).catch(error=>this.noteFailure('postgres_monitoring_checkpoint',error));
     }catch(error) {preparationError=classify(error);this.noteFailure('postgres_monitoring_prepare',error);}
     if(this.migrationHeld())return;
     const storage=await this.store.health(),stats:any=storage.capacity;
@@ -1452,7 +1453,7 @@ export class RepositoryState extends DurableObject<Env> {
     if(preparationError==='backend_fenced' || storage.connected && (storage.generation!==generation || storage.backend!=='postgres' || storage.schema_version!==1))reasons.push('backend_generation_fenced');
     if(measured.stale || this.monitoringFailureSince!==undefined && now-this.monitoringFailureSince>=180000)reasons.push('monitoring_unavailable');
     if(this.inputFailure && now-this.inputFailure.at>180000)this.inputFailure=undefined;
-    if(this.inputFailure && now-this.inputFailure.since>=60000)reasons.push('input_application_unavailable');
+    if(this.inputFailure && this.inputFailure.at-this.inputFailure.since>=60000)reasons.push('input_application_unavailable');
     if(measured.level && measured.level!=='ok')reasons.push('storage_capacity');
     if(this.postgresUnavailableSince!==undefined && now-this.postgresUnavailableSince>=60000)reasons.push('input_application_unavailable');
     if(!ingress.durable)reasons.push('parked_ingress_durability_unavailable');
@@ -1463,7 +1464,6 @@ export class RepositoryState extends DurableObject<Env> {
     const usable=connections?connections.max-connections.reserved:0;
     const pressure=usable>0?connections.used/usable:null;
     if(pressure!==null && pressure>=.7)reasons.push('connection_saturation');
-    if(ingress.dlq?.count>0)reasons.push('input_dead_lettered');
     const uniqueReasons=[...new Set(reasons)];
     const critical=uniqueReasons.some(r=>!['storage_capacity','connection_saturation','monitoring_unavailable'].includes(r)) || measured.level==='critical' || pressure!==null && pressure>=.85;
     const level=critical?'critical':reasons.length?'warning':'ok';
@@ -2124,7 +2124,7 @@ export class RepositoryState extends DurableObject<Env> {
       requestError=true;
       if (error instanceof AdminError) return json({error:error.message,request_id},400);
       const reason=this.noteFailure('request:'+path,error);
-      if(path==='/event' && PARKABLE.has(reason))this.inputFailure={since:this.inputFailure?.since ?? Date.now(),at:Date.now(),reason};
+      if(path==='/event' && PARKABLE.has(reason))this.inputFailure={since:this.inputFailure && Date.now()-this.inputFailure.at<=180000?this.inputFailure.since:Date.now(),at:Date.now(),reason};
       log('repository_request_failed',{request_id,path,reason});
       return json({error:reason,parkable:PARKABLE.has(reason),message:(error instanceof Error?error.message:'operation failed').slice(0,200),request_id},reason==='internal'?500:503);
     }finally {
