@@ -339,7 +339,7 @@ def configuration_pr(project: Project, *, apply=False, role="content"):
     base_branch = subprocess.check_output(["git", "-C", str(directory), "branch", "--show-current"], text=True).strip()
     existing = subprocess.check_output([
         "gh", "api", "--paginate", f"repos/{repository}/pulls?state=open&per_page=100", "--jq",
-        f'.[] | select(.head.repo.full_name == {json.dumps(repository)} and (.head.ref | startswith("setup/tauceti-tools"))) | .html_url',
+        f'.[] | select((.head.repo.full_name // "" | ascii_downcase) == {json.dumps(repository.lower())} and (.head.ref | startswith("setup/tauceti-tools"))) | .html_url',
     ], text=True).splitlines()
     if existing:
         print("An existing setup PR is open: " + existing[0])
