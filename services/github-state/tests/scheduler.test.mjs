@@ -174,13 +174,13 @@ test('persistent parser errors keep their pagination and back off without rapid 
  const {state,db}=(await fixture());try {
   const q={repository:'org/repo',operation:'files',args:{number:7}};await state.enqueue(q);
   const key='files:{"number":7}';await db.prepare('UPDATE jobs SET started=?,page=2,cursor=? WHERE key=?').run(Date.now()-1000,'cursor',key);
-  let job=(await state.claim((await state.nextJob())));await state.retryJob(job,new Error('repeated upstream cursor'));
+  let job=(await state.claim((await state.nextJob())));const firstStart=Date.now();await state.retryJob(job,new Error('repeated upstream cursor'));
   let row=(await db.prepare('SELECT * FROM jobs WHERE key=?').get(key));
-  assert.equal(row.page,2);assert.equal(row.cursor,'cursor');assert.ok(row.started);assert.ok(row.due>=Date.now()+59000);
+  assert.equal(row.page,2);assert.equal(row.cursor,'cursor');assert.ok(row.started);assert.ok(row.due>=firstStart+60000);
   await db.prepare('UPDATE jobs SET due=0,lease_until=0 WHERE key=?').run(key);
-  job=(await state.claim((await state.nextJob())));await state.retryJob(job,new Error('repeated upstream cursor'));
+  job=(await state.claim((await state.nextJob())));const secondStart=Date.now();await state.retryJob(job,new Error('repeated upstream cursor'));
   row=(await db.prepare('SELECT * FROM jobs WHERE key=?').get(key));
-  assert.ok(row.due>=Date.now()+119000);assert.equal(row.attempt,2);
+  assert.ok(row.due>=secondStart+120000);assert.equal(row.attempt,2);
  }finally{await db.close();}
 });
 
@@ -380,11 +380,11 @@ test('malformed upstream state retains coverage and backs off with a traceable r
   await state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
   const q={repository:'org/repo',operation:'issue_comments',args:{number:7}};await state.enqueue(q);
   const key='issue_comments:{"number":7}',failure={unavailable:true,reason:'malformed_upstream_response',request_id:'upstream-trace'};
-  await state.refresh(await db.prepare('SELECT * FROM jobs WHERE key=?').get(key),failure);
+  const firstStart=Date.now();await state.refresh(await db.prepare('SELECT * FROM jobs WHERE key=?').get(key),failure);
   let row=await db.prepare('SELECT * FROM jobs WHERE key=?').get(key);
-  assert.equal(row.wait_reason,failure.reason);assert.equal(row.attempt,1);assert.ok(row.due>=Date.now()+59000);
-  await state.refresh(row,failure);row=await db.prepare('SELECT * FROM jobs WHERE key=?').get(key);
-  assert.equal(row.attempt,2);assert.ok(row.due>=Date.now()+119000);
+  assert.equal(row.wait_reason,failure.reason);assert.equal(row.attempt,1);assert.ok(row.due>=firstStart+60000);
+  const secondStart=Date.now();await state.refresh(row,failure);row=await db.prepare('SELECT * FROM jobs WHERE key=?').get(key);
+  assert.equal(row.attempt,2);assert.ok(row.due>=secondStart+120000);
   assert.equal((await state.meta('last_upstream_failure')).request_id,'upstream-trace');
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM collections WHERE complete=1').get()).n,0);
  }finally {await db.close();}
@@ -395,9 +395,9 @@ test('whole-batch malformed responses retain the upstream trace and scheduler ba
   await state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
   env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json({unavailable:true,reason:'malformed_upstream_response',request_id:'batch-trace'},{status:503})})};
   for(const number of [7,8])await state.enqueue({repository:'org/repo',operation:'issue_comments',args:{number}});
-  await state.dispatch(await state.claim(await state.nextJob()));
+  const firstStart=Date.now();await state.dispatch(await state.claim(await state.nextJob()));
   for(const row of await db.prepare('SELECT attempt,wait_reason,due FROM jobs').all()) {
-   assert.equal(row.wait_reason,'malformed_upstream_response');assert.equal(row.attempt,1);assert.ok(row.due>=Date.now()+59000);
+   assert.equal(row.wait_reason,'malformed_upstream_response');assert.equal(row.attempt,1);assert.ok(row.due>=firstStart+60000);
   }
   assert.equal((await state.meta('last_upstream_failure')).request_id,'batch-trace');
  }finally {await db.close();}
