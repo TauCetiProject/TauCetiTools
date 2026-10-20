@@ -18,7 +18,9 @@ branch. Independent harnesses can call the same tools without using the example 
 
 The review engine publishes head-bound scoreboards and findings. Trusted merge automation
 checks the current head, build, scope and review policy before enqueueing work. GitHub's merge
-queue or Bors validates the integrated candidate. An archive is evidence for analysis, not merge
+queue or Bors validates the integrated candidate when selected. Direct GitHub merging uses
+the passing build and review at the current PR head, without requiring that head to include the
+latest default branch. An archive is evidence for analysis, not merge
 authority. The optional GitHub state service mirrors observations and reduces read traffic; it
 does not receive worker write credentials or decide what merges.
 
@@ -334,7 +336,7 @@ must include the destination repository under their access policy. Environment s
 available only to jobs selecting that environment and may require approval. Secrets are passed
 explicitly to reusable workflows; they do not automatically follow a workflow call.
 
-Use Actions variables for non-secret values, for example `MERGE_BACKEND` (`queue` or `bors`),
+Use Actions variables for non-secret values, for example `MERGE_BACKEND` (`queue`, `direct` or `bors`),
 `LAKE_CACHE_ARTIFACT_ENDPOINT_PUBLIC`, `LAKE_CACHE_REVISION_ENDPOINT_PUBLIC` and deliberately
 enabled fleet/runner settings. Set `CI_REVIEW_ENABLED` only if paid CI review is intended;
 operator-run subscription review does not require provider API keys in the repository.
@@ -347,15 +349,23 @@ Open `https://github.com/ExampleOrg/ExampleCeti/settings/rules/new?target=branch
    branch.
 2. Require a pull request and code-owner review for human-owned changes.
 3. Require checks **build**, **bump-guard**, **scope**, with the expected check producer.
-4. With the GitHub backend, enable **Require merge queue**. The installed workflow must run
+4. With `merge.backend = "github-queue"`, enable **Require merge queue**. The installed workflow must run
    on `merge_group` and validate the actual combined commit.
 5. Configure any automation bypass only for pull requests and only for the intended App.
    Trusted merge policy must still reject unauthorized human-owned changes. Do not give
    content authors unconditional bypass or use admin merge to get past missing reviews.
 
+For `merge.backend = "github-direct"`, set the Actions variable `MERGE_BACKEND` to `direct`.
+Require the same build, scope and bump-guard checks, and leave **Require branches to be up to
+date before merging** unchecked (`required_status_checks.strict = false`). Do not require a
+merge queue. Trusted automation applies the same current-head scoreboard and path policy,
+then squash-merges through GitHub's API with the exact reviewed head SHA. Advancing the base
+branch does not invalidate a review of the same diff or require a branch update. GitHub still
+rejects merge conflicts and enforces the branch's required checks. The hourly sweep retries
+eligible PRs after missed events. This mode works for public personal-account repositories.
+
 GitHub merge queue availability depends on repository visibility and account type. The standard
-starter uses a public organization-owned repository. If a queue is unavailable, select and set
-up Bors explicitly; do not silently weaken integration checks.
+starter uses a public organization-owned repository. If a queue is unavailable, explicitly select direct GitHub merging or configure Bors.
 
 The roadmap repository separately protects authored roadmap text. Progress automation may
 merge only its validated generated report updates. Data/CI archive permissions are separate

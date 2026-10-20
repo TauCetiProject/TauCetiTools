@@ -238,9 +238,21 @@ def diagnose(project: Project, *, extras=False, github=None) -> list[Finding]:
                 )
             )
 
+        direct = project.raw.get("merge", {}).get("backend") == "github-direct"
         rules, error = gh.read(f"repos/{repo}/rules/branches/{project.branch}")
         active_rules = [r for page in _pages(rules or []) for r in (page if isinstance(page, list) else [page])]
         types = {r.get("type") for r in active_rules if isinstance(r, dict)}
+        if direct:
+            strict = any(r.get("parameters", {}).get("strict_required_status_checks_policy")
+                         for r in active_rules if r.get("type") == "required_status_checks")
+            findings.append(Finding(
+                "merge.direct", "unknown" if error else "failed" if strict or "merge_queue" in types else "ready",
+                error or ("Disable strict checks and merge queue" if strict or "merge_queue" in types else "Direct merging permits branches behind main"),
+                "Required checks without requiring an up-to-date branch or a merge queue",
+                commands=[_cmd("gh", "api", f"repos/{repo}/rules/branches/{project.branch}")],
+                urls=[f"https://github.com/{repo}/settings/rules"],
+                steps=["Edit the active default-branch ruleset. Under Require status checks to pass, clear Require branches to be up to date before merging. Clear Require merge queue. Click Save changes."],
+                verify=again, section="branch-rules"))
         needed = {"pull_request", "required_status_checks"}
         if project.raw.get("merge", {}).get("backend", "github-queue") == "github-queue":
             needed.add("merge_queue")
@@ -282,7 +294,7 @@ def diagnose(project: Project, *, extras=False, github=None) -> list[Finding]:
         )
 
         expected_variables = {
-            "MERGE_BACKEND": "bors" if project.raw.get("merge", {}).get("backend") == "bors" else "queue"
+            "MERGE_BACKEND": {"bors": "bors", "github-direct": "direct"}.get(project.raw.get("merge", {}).get("backend"), "queue")
         }
         if extras and project.service("cache").get("mode", "off") != "off":
             cache = project.service("cache")
@@ -378,6 +390,17 @@ def diagnose(project: Project, *, extras=False, github=None) -> list[Finding]:
                 else "fleet"
             )
             secret_file = Path.home() / ".config/tauceti/projects" / project.key / folder / name
+            from .deployment import app_manifest
+            from urllib.parse import urlencode
+
+            manifest = app_manifest(project, app_role)
+            owner = repo.split("/")[0]
+            settings = (f"https://github.com/organizations/{owner}/settings/apps/new"
+                        if repo_info["content"]["owner"]["type"] == "Organization"
+                        else "https://github.com/settings/apps/new")
+            registration = settings + "?" + urlencode({
+                "name": manifest["name"], "url": manifest["url"], "public": "true",
+                "webhook_active": "false", **manifest["default_permissions"]})
             findings.append(
                 Finding(
                     "secrets." + name,
@@ -389,10 +412,11 @@ def diagnose(project: Project, *, extras=False, github=None) -> list[Finding]:
                     commands=[f"{_cmd('gh', 'secret', 'set', name, '--repo', repo)} < {shlex.quote(str(secret_file))}"],
                     urls=[
                         f"https://github.com/{repo}/settings/secrets/actions",
-                        f"https://github.com/organizations/{repo.split('/')[0]}/settings/apps",
+                        registration,
                     ],
                     steps=[
-                        f"For App credentials, register the project-owned {app_role} App with tauceti-tools apps manifest --conf {shlex.quote(conf)} --role {app_role} --output {app_role}-app.json. For provider/bot credentials use the source named in the inventory.",
+                        f"For App credentials, open the prefilled registration URL. Name: {manifest['name']}; Homepage: {manifest['url']}; Webhook Active: unchecked; installation: Any account. Keep the prefilled repository permissions, then click Create GitHub App. For provider/bot credentials use the source named in the inventory.",
+                        f"Record the numeric App ID. Click Generate a private key. Under Install App choose {owner}, Only select repositories, and {'the configured claims repository' if app_role == 'claims' else repo.split('/')[1]}; click Install. Install on the roadmap too only if progress is enabled.",
                         f"Save the {'numeric App ID' if name.endswith('_ID') else 'downloaded PEM key' if name.endswith('_PRIVATE_KEY') else 'provider or bot credential'} in {secret_file}; chmod 600 that file.",
                         f"In Settings → Secrets and variables → Actions → New repository secret, Name: {name}; Secret: the contents of that file.",
                         "Organization secrets must include this repository in their access policy. A same-named environment secret can override the repository value.",
