@@ -3,17 +3,21 @@ import { log } from './storage';
 
 export interface CapacitySample { at: number; bytes: number; allowance: number | null }
 export const SQLITE_ALLOWANCE = 10 * 1024 ** 3;
-export function capacity(current: CapacitySample, previous?: CapacitySample, now = Date.now()): any {
-  const elapsed = previous ? current.at - previous.at : 0;
-  const growth = previous && elapsed >= 30000 ? (current.bytes - previous.bytes) / (elapsed / 1000) : null;
-  const allowance = current.allowance && current.allowance > 0 ? current.allowance : null;
-  const seconds = allowance && growth !== null && growth > 0 ? Math.max(0, allowance - current.bytes) / growth : null;
-  const ratio = allowance ? current.bytes / allowance : null;
-  const level = ratio !== null && ratio >= .85 || seconds !== null && seconds <= 86400 ? 'critical'
-    : ratio !== null && ratio >= .7 || seconds !== null && seconds <= 7 * 86400 ? 'warning' : 'ok';
-  return { ...current, allowance, backend: 'sqlite', allowance_kind: 'durable_object_hard_limit', growable: false,
-    reusable_bytes: null, growth_bytes_per_second: growth, projected_exhaustion_at: seconds === null ? null : current.at + seconds * 1000,
-    level, stale: now - current.at > 180000, capacity_unknown: allowance === null };
+export function capacity(current:CapacitySample,previous?:CapacitySample,now=Date.now(),prior?:{forecast_level?:string,forecast_breaches?:number,bytes?:number}):any {
+  const elapsed=previous?current.at-previous.at:0;
+  const growth=previous && elapsed>=3600000?(current.bytes-previous.bytes)/(elapsed/1000):null;
+  const allowance=current.allowance && current.allowance>0?current.allowance:null;
+  const seconds=allowance && growth!==null && growth>0?Math.max(0,allowance-current.bytes)/growth:null;
+  const ratio=allowance?current.bytes/allowance:null;
+  const forecast_level=seconds!==null && seconds<=86400?'critical':seconds!==null && seconds<=7*86400?'warning':'ok';
+  const forecast_breaches=forecast_level==='ok' || prior?.bytes!==undefined && current.bytes<=prior.bytes?0:prior?.forecast_level===forecast_level?(prior.forecast_breaches || 0)+1:1;
+  const confirmed=forecast_breaches>=3;
+  const level=ratio!==null && ratio>=.85 || confirmed && forecast_level==='critical'?'critical'
+    :ratio!==null && ratio>=.7 || confirmed && forecast_level==='warning'?'warning':'ok';
+  return {...current,allowance,backend:'sqlite',allowance_kind:'durable_object_hard_limit',growable:false,
+    reusable_bytes:null,growth_bytes_per_second:growth,projected_exhaustion_at:seconds===null?null:current.at+seconds*1000,
+    baseline_at:previous?.at ?? null,forecast_level,forecast_breaches,forecast_confirmed:confirmed,
+    level,stale:now-current.at>180000,capacity_unknown:allowance===null};
 }
 
 // Fixed logarithmic buckets: memory and persisted cardinality do not grow with
@@ -38,12 +42,17 @@ export class RequestMetrics {
 }
 
 export class RepairMetrics {
+  private dropped=0;
   private intervals = new Map<string, { at: number; event: string; lane: string; operation: string; n: number; value: number; maximum: number; latency: number[] }>();
   record(event: string, lane: string, operation: string, value: number, now = Date.now()): void {
     const at = Math.floor(now / 60000) * 60000, key = JSON.stringify([at, event, lane, operation]);
     for (const [key, row] of this.intervals) if (row.at < at - 59 * 60000) this.intervals.delete(key);
     // Dimensions are service-owned, with a hard ceiling as a final safeguard.
-    if (!this.intervals.has(key) && this.intervals.size >= 10000) return;
+    if (!this.intervals.has(key) && this.intervals.size >= 10000) {
+      let oldest:string|undefined,at=Infinity;
+      for(const [k,r] of this.intervals)if(r.at<at) {oldest=k;at=r.at;}
+      if(oldest!==undefined) {this.dropped+=this.intervals.get(oldest)!.n;this.intervals.delete(oldest);}
+    }
     const row = this.intervals.get(key) ?? { at, event, lane, operation, n: 0, value: 0, maximum: 0, latency: Array(BOUNDS.length + 1).fill(0) };
     row.n++; row.value += value; row.maximum = Math.max(row.maximum, value);
     if (event.endsWith('_ms')) { const b = BOUNDS.findIndex(b => value <= b); row.latency[b < 0 ? BOUNDS.length : b]++; }
@@ -66,7 +75,7 @@ export class RepairMetrics {
       for(let i=0;i<l.buckets.length;i++) {seen+=l.buckets[i];if(seen>=Math.ceil(l.samples*.95)) {p95_ms=BOUNDS[i] ?? null;break;}}
       return {operation,samples:l.samples,p95_ms,method:'bucket_upper_bound',scope:'repository_instance_since_restart'};
     });
-    return {repair_hour:[...groups.values()],requested_latency};
+    return {repair_hour:[...groups.values()],requested_latency,dropped_samples:this.dropped};
   }
 
 }
@@ -84,12 +93,17 @@ export function emitAlarm(env: Env, repository: string, observation: any): { cha
 // The quota owner retains its raw diagnostic window independently. Serving
 // health uses this bounded projection rather than grouping that raw table.
 export class AccountingMetrics {
+  private dropped=0;
   private rows = new Map<string, any>();
   private prepared:any={hour:[],recipes:[],at:null,scope:'installation_instance_since_restart'};
   record(row:any, now=Date.now()):void {
     const at=Math.floor(now/60000)*60000,key=JSON.stringify([at,row.api,row.operation,row.shape,row.batch_size]);
     for(const [key,r] of this.rows)if(r.at<at-59*60000)this.rows.delete(key);
-    if(!this.rows.has(key) && this.rows.size>=10000)return;
+    if(!this.rows.has(key) && this.rows.size>=10000) {
+      let oldest:string|undefined,at=Infinity;
+      for(const [k,r] of this.rows)if(r.at<at) {oldest=k;at=r.at;}
+      if(oldest!==undefined) {this.dropped+=this.rows.get(oldest).requests;this.rows.delete(oldest);}
+    }
     const r=this.rows.get(key) || {...row,at,requests:0,points:0,measured:0,unmeasured:0,bytes:0,latency_sum:0,max_latency:0,max_points:0,predicted_sum:0};
     r.requests++;r.points+=row.points || 0;r.measured+=Number(row.points!==null);r.unmeasured+=Number(row.points===null);
     r.bytes+=row.bytes;r.latency_sum+=row.latency;r.max_latency=Math.max(r.max_latency,row.latency);r.max_points=Math.max(r.max_points,row.points || 0);r.predicted_sum+=row.predicted;
@@ -106,5 +120,25 @@ export class AccountingMetrics {
     };
     this.prepared={at:now,hour:grouped(false),recipes:grouped(true),scope:'installation_instance_since_restart'};
   }
-  snapshot(now=Date.now()):any { return {...this.prepared,stale:!this.prepared.at || now-this.prepared.at>180000}; }
+  snapshot(now=Date.now()):any { return {...this.prepared,dropped_requests:this.dropped,stale:!this.prepared.at || now-this.prepared.at>180000}; }
+}
+
+export async function within<T>(work:Promise<T>,ms:number):Promise<T> {
+  let timer:ReturnType<typeof setTimeout>|undefined;
+  try {return await Promise.race([work,new Promise<T>((_,reject)=>{timer=setTimeout(()=>reject(new Error('monitoring I/O timeout')),ms);})]);}
+  finally {if(timer!==undefined)clearTimeout(timer);}
+}
+export function timedBucket(bucket:R2Bucket):R2Bucket {
+  return new Proxy(bucket,{get(target,key){
+    const value=Reflect.get(target,key,target);
+    if(typeof value!=='function')return value;
+    return async(...args:any[])=>{
+      const result=await within(Promise.resolve(value.apply(target,args)),1500);
+      if(key!=='get' || !result)return result;
+      return new Proxy(result,{get(object,property){
+        const member=Reflect.get(object,property,object);
+        return typeof member==='function'?(...params:any[])=>within(Promise.resolve(member.apply(object,params)),1500):member;
+      }});
+    };
+  }});
 }

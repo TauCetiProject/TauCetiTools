@@ -32,11 +32,12 @@ test('large inventory snapshots paginate coherently and coalesce concurrent read
   assert.ok(health.bootstrap_inventory,'inventory finished bootstrapping');
   assert.equal(inventoryRequests,count/100);
   const archive=await mf.getR2Bucket('ARCHIVE');
+  let baseline;
   do{
    await new Promise(resolve=>setTimeout(resolve,50));
-   health=await (await stub.fetch('https://internal/health')).json();
-  }while(!health.coverage.some(c=>c.operation==='statuses' && c.complete) && Date.now()<deadline);
-  assert.ok(health.coverage.some(c=>c.operation==='statuses' && c.complete),'status baseline available');
+   baseline=await (await send(stub,'/query',{repository:repository.name,operation:'statuses',args:{sha:head}})).json();
+  }while(!baseline.complete && Date.now()<deadline);
+  assert.ok(baseline.complete,'status baseline available');
   await archive.put('fixture/status',JSON.stringify({sha:head,context:'build',state:'success',created_at:'2026-10-12T01:00:00Z'}));
   await send(stub,'/event',{key:'fixture/status',delivery:'status',event:'status',repository:repository.name,received:Date.now()});
   const status=await (await send(stub,'/query',{repository:repository.name,operation:'statuses',args:{sha:head}})).json();

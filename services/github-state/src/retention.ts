@@ -10,7 +10,7 @@ export const RULES = {
   expired_demand: { table: 'demand', clock: 'at', age: DAY },
 } as const;
 export type RetentionClass = keyof typeof RULES;
-export const R2_CLASSES = { r2_cursors: 'cursors/', raw_webhooks: 'webhooks/', daily_archives: 'snapshots/', staging_pages: 'staging/', telemetry_intervals: 'telemetry/' } as const;
+export const R2_CLASSES = { r2_cursors: 'cursors/', raw_webhooks: 'webhooks/', daily_archives: 'snapshots/', staging_pages: 'staging/', telemetry_intervals: 'telemetry/', staging_spills: 'staging-spills/', legacy_staging_spills: 'resources/' } as const;
 export interface Checkpoint { after: number; upper: number; started: number; completed?: number; examined: number; eligible: number; deleted: number; bytes: number; oldest_expired?: number; error?: string }
 export interface Policy { mode: 'dry_run' | 'enforce'; disabled: string[]; pinned: string[]; archive_ci?: boolean }
 export const DEFAULT_POLICY: Policy = { mode: 'dry_run', disabled: [], pinned: [] };
@@ -30,9 +30,17 @@ export function sweep(sql: SqlStorage, name: RetentionClass, previous: Checkpoin
   delete state.error;
   const cols = sql.exec<any>('PRAGMA table_info(' + rule.table + ')').toArray().map(c => c.name);
   const size = cols.map(c => 'COALESCE(length(CAST("' + c + '" AS BLOB)),0)').join('+');
-  const rows = sql.exec<any>('SELECT rowid id,' + rule.clock + ' at,' + size + ' bytes FROM ' + rule.table + ' WHERE rowid>? AND rowid<=? ORDER BY rowid LIMIT ?', state.after, state.upper, Math.min(name === 'expired_cursors' ? 50 : 1000, budget.rows)).toArray();
+  const limit=Math.min(name === 'expired_cursors' ? 50 : 1000,budget.rows);
+  // The existing at index reaches expired repair samples without repeatedly
+  // walking the seven-day live window. Other classes use bounded rowid scans.
+  const indexed=name==='expired_repair_metrics' && sql.exec<any>("SELECT 1 FROM sqlite_master WHERE type='index' AND name='repair_metrics_at'").toArray().length>0;
+  const rows=indexed
+    ? sql.exec<any>('SELECT rowid id,'+rule.clock+' at,'+size+' bytes FROM '+rule.table+' WHERE at<? ORDER BY at LIMIT ?',now-rule.age,limit).toArray()
+    : sql.exec<any>('SELECT rowid id,'+rule.clock+' at,'+size+' bytes FROM '+rule.table+' WHERE rowid>? AND rowid<=? ORDER BY rowid LIMIT ?',state.after,state.upper,limit).toArray();
   for (const row of rows) {
-    if (Date.now() >= budget.deadline || budget.rows <= 0 || row.bytes > budget.bytes) break;
+    if (Date.now() >= budget.deadline || budget.rows <= 0) break;
+    if(row.bytes>4*1024**2) {state.error='row_exceeds_byte_budget';state.after=row.id;budget.rows--;continue;}
+    if(row.bytes>budget.bytes)break;
     budget.rows--; budget.bytes -= row.bytes;
     // Recheck expiry at deletion. Replaying an old checkpoint cannot delete a
     // reused rowid that now belongs to a new receipt, demand or cursor.
@@ -44,32 +52,35 @@ export function sweep(sql: SqlStorage, name: RetentionClass, previous: Checkpoin
     }
     state.examined++; state.after = row.id;
   }
-  if (!rows.length || state.after >= state.upper) { state.after = state.upper; state.completed = now; }
+  if (!rows.length || !indexed && state.after >= state.upper) { state.after = state.upper; state.completed = now; }
   return state;
 }
 
 // Explicit protection wins even if a mistakenly copied expiry is present.
 export function protectedObject(key: string, metadata?: Record<string, string>): boolean {
-  return /^(parked|recovery|migration|control|resources)\//.test(key) || metadata?.pinned === 'true';
+  return metadata?.pinned === 'true' || /^(parked|recovery|migration|control)\//.test(key) || key.startsWith('resources/') && metadata?.kind!=='cursor';
 }
 
 export async function retirePrefix(bucket: R2Bucket, name: keyof typeof R2_CLASSES, now = Date.now()): Promise<any> {
   const prefix = R2_CLASSES[name], checkpointKey = 'control/retention/' + name + '.json';
   const prior = await bucket.get(checkpointKey).then(o => o?.json<any>());
   const page = await bucket.list({ prefix, cursor: prior?.cursor || undefined, limit: name === 'r2_cursors' ? 500 : 100, include: ['customMetadata'] });
-  let bytes = 0, deleted = 0, examined = 0, paused = false;
-  const deadline = Date.now() + 1000;
-  for (const object of page.objects) {
-    if (Date.now() >= deadline) { paused = true; break; }
-    if (!protectedObject(object.key, object.customMetadata) && Number(object.customMetadata?.expires) < now) {
-      if (bytes + object.size > 100 * 1024 ** 2) { paused = true; break; }
-      await bucket.delete(object.key); bytes += object.size; deleted++;
+  let bytes=0,examined=0,paused=false;
+  const keys:string[]=[],oversized:{key:string,bytes:number}[]=[];
+  for(const object of page.objects) {
+    // Legacy resources/ scans retire only expiring staging-continuation spills.
+    if(!protectedObject(object.key,object.customMetadata) && Number(object.customMetadata?.expires)<now) {
+      if(object.size>100*1024**2) {oversized.push({key:object.key,bytes:object.size});examined++;continue;}
+      if(bytes+object.size>100*1024**2) {paused=true;break;}
+      keys.push(object.key);bytes+=object.size;
     }
     examined++;
   }
+  // One R2 batch operation retains the previous cursor-expiry throughput.
+  if(keys.length)await bucket.delete(keys);
   // If budget ran out, repeat the page. Advancing would skip unprocessed keys.
   // Deleting a row/object twice after a checkpoint failure is harmless.
-  const state = { at: Date.now(), cursor: paused ? prior?.cursor || null : page.truncated ? page.cursor : null, examined, deleted, bytes, paused, completed: !paused && !page.truncated ? now : prior?.completed || null };
+  const state = { at: Date.now(), cursor: paused ? prior?.cursor || null : page.truncated ? page.cursor : null, examined, deleted:keys.length, bytes, paused, oversized, completed: !paused && !page.truncated ? now : prior?.completed || null };
   await bucket.put(checkpointKey, JSON.stringify(state));
   return state;
 }

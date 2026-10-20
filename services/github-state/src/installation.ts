@@ -13,8 +13,8 @@ export class InstallationScheduler extends DurableObject<Env> {
   private tokenFlight?:Promise<string>;
   private auditFlight?:Promise<void>;
   private accountingMetrics=new AccountingMetrics();
-  private accountingAfter=0;
   private accountingFailure:any;
+  private preparedAccounting:any;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS budgets(resource TEXT PRIMARY KEY,remaining INTEGER,lim INTEGER,reset INTEGER,blocked INTEGER DEFAULT 0);
@@ -104,6 +104,7 @@ export class InstallationScheduler extends DurableObject<Env> {
     const deferred=this.deferral(resource,predicted);if(deferred) throw new QuotaDeferred(deferred);
     const reservation=crypto.randomUUID();
     this.ctx.storage.sql.exec('INSERT INTO reservations VALUES(?,?,?,?)',reservation,resource,predicted,Date.now()+settings(this.env).lease_ms);
+    let observedDebit=false;
     try {
     const headers: Record<string,string> = {'Authorization':'Bearer ' + token,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'tauceti-github-state','Content-Type':'application/json'};
     if (etag) headers['If-None-Match'] = etag;
@@ -119,17 +120,18 @@ export class InstallationScheduler extends DurableObject<Env> {
       quotaHeaders.set('x-ratelimit-reset',String(Date.parse(parsed.data.rateLimit.resetAt)/1000));
     }
     this.observe(quotaHeaders);
+    observedDebit=quotaHeaders.has('x-ratelimit-remaining');
     const cost = parsed.data?.rateLimit?.cost;
     const points = typeof cost === 'number' ? cost : api === 'core' ? response.status===304?0:1 : null;
-    this.accountingMetrics.record({api,operation,shape,batch_size:batchSize,points,bytes:text.length,latency:Date.now()-started,predicted});
     try {
-    this.ctx.storage.sql.exec('INSERT INTO accounting(at,operation,api,method,endpoint,status,points,latency,bytes,shape,batch_size,predicted) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',Date.now(),operation,api,method,path.split('?')[0].replace(/\/\d+(?=\/|$)/g,'/{id}'),response.status,points,Date.now()-started,text.length,shape,batchSize,predicted);
+      this.accountingMetrics.record({api,operation,shape,batch_size:batchSize,points,bytes:text.length,latency:Date.now()-started,predicted});
+      this.ctx.storage.sql.exec('INSERT INTO accounting(at,operation,api,method,endpoint,status,points,latency,bytes,shape,batch_size,predicted) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',Date.now(),operation,api,method,path.split('?')[0].replace(/\/\d+(?=\/|$)/g,'/{id}'),response.status,points,Date.now()-started,text.length,shape,batchSize,predicted);
       this.accountingFailure=null;
     }catch(error) {
       this.accountingFailure={at:Date.now(),reason:classify(error)};
-      log('installation_telemetry_failed',{operation,reason:classify(error)});
+      try {log('installation_telemetry_failed',{operation,reason:classify(error)});}catch {}
     }
-    if (!quotaHeaders.has('x-ratelimit-remaining')) this.ctx.storage.sql.exec('UPDATE budgets SET remaining=MAX(0,remaining-?) WHERE resource=?',points ?? predicted,resource);
+    if (!quotaHeaders.has('x-ratelimit-remaining')) {this.ctx.storage.sql.exec('UPDATE budgets SET remaining=MAX(0,remaining-?) WHERE resource=?',points ?? predicted,resource);observedDebit=true;}
     if((malformed || !text || parsed.errors!==undefined && !Array.isArray(parsed.errors)) && [200,201].includes(response.status))throw new Error('malformed_upstream_response');
     const errors = Array.isArray(parsed.errors)?parsed.errors:[];
     const logicalQuota=errors.some((e:any)=>['RATE_LIMIT','RATE_LIMITED'].includes(e.type) || ['RATE_LIMIT','RATE_LIMITED'].includes(e.extensions?.code));
@@ -158,7 +160,7 @@ export class InstallationScheduler extends DurableObject<Env> {
     return {status:response.status,body:parsed,etag:response.headers.get('etag'),link:response.headers.get('link'),points,bytes:text.length,elapsed_ms:Date.now()-started,remaining:response.headers.get('x-ratelimit-remaining'),limit:response.headers.get('x-ratelimit-limit')};
     } catch(error) {
       // A lost response can still have consumed quota; retain the predicted debit.
-      this.ctx.storage.sql.exec('UPDATE budgets SET remaining=MAX(0,remaining-?) WHERE resource=?',predicted,resource);
+      if(!observedDebit)this.ctx.storage.sql.exec('UPDATE budgets SET remaining=MAX(0,remaining-?) WHERE resource=?',predicted,resource);
       throw error;
     } finally {this.ctx.storage.sql.exec('DELETE FROM reservations WHERE id=?',reservation);}
   }
@@ -361,13 +363,26 @@ export class InstallationScheduler extends DurableObject<Env> {
   }
   expireAccounting():void {
     try {
-      const rows=this.ctx.storage.sql.exec<any>('SELECT id,at FROM accounting WHERE id>? ORDER BY id LIMIT 500',this.accountingAfter).toArray();
-      for(const row of rows) {
-        if(row.at<Date.now()-7*86400000)this.ctx.storage.sql.exec('DELETE FROM accounting WHERE id=? AND at<?',row.id,Date.now()-7*86400000);
-        this.accountingAfter=row.id;
+      // Accounting is append-only with the application clock and integer PK.
+      // Restart at the oldest row, stopping at the live diagnostic window.
+      const rows=this.ctx.storage.sql.exec<any>('SELECT id,at FROM accounting ORDER BY id LIMIT 5000').toArray();
+      const cutoff=Date.now()-7*86400000,ids:number[]=[];
+      for(const row of rows) {if(row.at>=cutoff)break;ids.push(row.id);}
+      for(let i=0;i<ids.length;i+=50) {
+        const group=ids.slice(i,i+50);
+        this.ctx.storage.sql.exec('DELETE FROM accounting WHERE at<? AND id IN ('+group.map(()=>'?').join(',')+')',cutoff,...group);
       }
-      if(!rows.length)this.accountingAfter=0;
     }catch(error) {log('installation_retention_failed',{reason:classify(error)});}
+  }
+  prepareAccounting():void {
+    const now=Date.now();if(this.preparedAccounting && now-this.preparedAccounting.at<60000)return;
+    try {
+      const source='(SELECT api,operation,shape,batch_size,at,points,bytes,latency,predicted FROM accounting ORDER BY id DESC LIMIT 10000)';
+      const bounds=this.ctx.storage.sql.exec<any>('SELECT COUNT(*) n,MIN(at) oldest FROM '+source).one();
+      this.preparedAccounting={at:now,scope:'retained_accounting_hour',window_complete:bounds.n<10000 || bounds.oldest<now-3600000,scanned_limit:10000,
+        hour:this.ctx.storage.sql.exec('SELECT api,operation,COUNT(*) requests,SUM(points) points,SUM(points IS NULL) unmeasured,SUM(bytes) bytes,AVG(latency) latency FROM '+source+' WHERE at>? GROUP BY api,operation',now-3600000).toArray(),
+        recipes:this.ctx.storage.sql.exec('SELECT api,operation,shape,batch_size,COUNT(*) requests,SUM(points) points,AVG(points) mean_points,MAX(points) max_points,AVG(predicted) predicted,AVG(latency) latency,MAX(latency) max_latency FROM '+source+' WHERE at>? GROUP BY api,operation,shape,batch_size',now-3600000).toArray()};
+    }catch(error) {log('installation_health_prepare_failed',{reason:classify(error)});}
   }
   async fetch(req: Request): Promise<Response> {
     try {
@@ -376,7 +391,7 @@ export class InstallationScheduler extends DurableObject<Env> {
       if (path==='/batch') return await this.batch(await req.json());
       if (path==='/measure') return await this.measure(await req.json());
       if (path==='/maintenance') {
-        this.expireAccounting();return json({ok:true,telemetry_failure:this.accountingFailure});
+        this.expireAccounting();this.prepareAccounting();return json({ok:true,telemetry_failure:this.accountingFailure});
       }
       if (path==='/audit') {
         this.expireAccounting();
@@ -384,7 +399,7 @@ export class InstallationScheduler extends DurableObject<Env> {
         this.auditFlight ||= this.audit(repo).finally(()=>{this.auditFlight=undefined;});
         await this.auditFlight;return json({ok:true});
       }
-      if (path==='/health') return json({redelivery_failure:await this.ctx.storage.get('last_redelivery_failure') || null,reconciliation_version:2,deployment_id:this.env.CF_VERSION?.id,settings:settings(this.env),inflight:this.ctx.storage.sql.exec('SELECT resource,COUNT(*) requests,SUM(cost) reserved_points FROM reservations WHERE expires>? GROUP BY resource',Date.now()).toArray(),budgets:this.ctx.storage.sql.exec('SELECT * FROM budgets').toArray(),quota_types:this.ctx.storage.sql.exec('SELECT * FROM quota_types').toArray(),...this.accountingMetrics.snapshot(),telemetry_failure:this.accountingFailure});
+      if (path==='/health') return json({redelivery_failure:await this.ctx.storage.get('last_redelivery_failure') || null,reconciliation_version:2,deployment_id:this.env.CF_VERSION?.id,settings:settings(this.env),inflight:this.ctx.storage.sql.exec('SELECT resource,COUNT(*) requests,SUM(cost) reserved_points FROM reservations WHERE expires>? GROUP BY resource',Date.now()).toArray(),budgets:this.ctx.storage.sql.exec('SELECT * FROM budgets').toArray(),quota_types:this.ctx.storage.sql.exec('SELECT * FROM quota_types').toArray(),...(this.preparedAccounting?{...this.preparedAccounting,stale:Date.now()-this.preparedAccounting.at>180000}:this.accountingMetrics.snapshot()),telemetry_failure:this.accountingFailure});
       return json({error:'not_found'},404);
     } catch (error) {
       if (error instanceof QuotaDeferred) return json(error.result);

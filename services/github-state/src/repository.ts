@@ -8,7 +8,7 @@ import { readPromotionReceipts } from './activity_landings';
 import { Migration, archiveKey, beginExport, expectedTables, exportStep, generation, encodeMigration, publicReceipt, readMigration, saveMigration, targetIdentity, verifyStep } from './migration';
 import { backlog, controlKey, noteRepositoryFull, storageKey } from './ingress';
 import { Checkpoint, DEFAULT_POLICY, Policy, RetentionClass, R2_CLASSES, RULES, policy, sweep } from './retention';
-import { CapacitySample, RepairMetrics, RequestMetrics, SQLITE_ALLOWANCE, capacity, emitAlarm } from './monitoring';
+import { CapacitySample, RepairMetrics, RequestMetrics, SQLITE_ALLOWANCE, capacity, emitAlarm, timedBucket, within } from './monitoring';
 import { Failure, FULL_MESSAGE, AdminError, CLEANUP, PARKABLE, classify, createRecovery, deleteClass, exportPage, faultySql, log, missingSchema, requestId, readManifest, scan, summary, userTables as summaryTables, verifyExport } from './storage';
 
 const SCHEMA_VERSION=4;
@@ -37,6 +37,9 @@ export class RepositoryState extends DurableObject<Env> {
   private retentionState: Partial<Record<RetentionClass, Checkpoint>> = {};
   private storageFlight?: Promise<void>;
   private storageLoaded=false;
+  private retentionLoadFlight?:Promise<void>;
+  private checkpointAt=0;
+  private checkpointText='';
   private storageTurn=0;
   private ciAfter=0;
   private obsoleteAfter=0;
@@ -44,9 +47,11 @@ export class RepositoryState extends DurableObject<Env> {
   private receiptsPinned=true;
   private receiptsChecked=0;
   private observation:any;
+  private observationReadAt=0;
   private diagnostics:any={coverage:[],lanes:[],waits:[],repair_hour:[],requested_latency:[],queries:[],repair_operations:[]};
   private diagnosticsAt=0;
-  private capacitySample?:CapacitySample;
+  private lastCapacity:any;
+  private capacityHistory:CapacitySample[]=[];
   private tableEstimates:any;
   private tableAttemptAt=0;
   private requestMetrics=new RequestMetrics();
@@ -96,6 +101,7 @@ export class RepositoryState extends DurableObject<Env> {
       }
       await this.storageMarker();
       if (env.FAULT_INJECTION==='true' || this.schema!=='current') this.startup();
+      await this.loadRetentionState();
     });
   }
   // A recorded full state degrades the object; a probe-verified writable state
@@ -221,7 +227,7 @@ export class RepositoryState extends DurableObject<Env> {
   async encode(data: unknown, expires?:number): Promise<string> {
     const text = JSON.stringify(data);
     if (new TextEncoder().encode(text).length < 1500000) return text;
-    const key = `resources/${this.meta('repository').id}/${crypto.randomUUID()}`;
+    const key = `${expires?'staging-spills':'resources'}/${this.meta('repository').id}/${crypto.randomUUID()}`;
     // Active resources must remain readable for their entire SQL row lifetime.
     // Raw deliveries, staging pages, and snapshots have separate expiry rules.
     await this.env.ARCHIVE.put(key,text,{customMetadata:{kind:expires?'cursor':'resource',...(expires?{expires:String(expires)}:{})}});
@@ -231,6 +237,10 @@ export class RepositoryState extends DurableObject<Env> {
     const data = JSON.parse(text);
     if (data?.$r2) { const object = await this.env.ARCHIVE.get(data.$r2); if (!object) throw new Error('resource unavailable'); return object.json(); }
     return data;
+  }
+  async *decodeRows(rows:{data:string}[]):AsyncGenerator<any> {
+    // Archived collection reads preserve order with a bounded R2 fanout.
+    for(let i=0;i<rows.length;i+=8)for(const data of await Promise.all(rows.slice(i,i+8).map(r=>this.decode(r.data))))yield data;
   }
   async put(kind:string,id:string,data:any,started=Date.now(),deleted=false,parent='',fromEvent=false): Promise<boolean> {
     let old = this.sql.exec<any>('SELECT * FROM resources WHERE kind=? AND id=?',kind,id).toArray()[0];
@@ -378,7 +388,7 @@ export class RepositoryState extends DurableObject<Env> {
   complete(q:Pick<Query,'operation'|'args'>): boolean { return this.sql.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q)).toArray().length>0; }
   metric(event:string,q:Query,lane:Lane,value=1): void {
     // Telemetry cannot turn a successfully applied page/job into a retry.
-    this.repairMetrics.record(event,lane,q.operation,value);
+    try {this.repairMetrics.record(event,lane,q.operation,value);}catch(error) {try {this.noteFailure('repair_metrics',error);}catch {}}
   }
   lane(q:Query,dirty=false,priority=20): Lane {
     const demanded=(this.sql.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q)).toArray()[0]?.at || 0)>Date.now()-300000;
@@ -588,8 +598,7 @@ export class RepositoryState extends DurableObject<Env> {
     }
     const members=this.sql.exec<any>('SELECT r.data FROM members m JOIN resources r ON r.kind=? AND r.id=m.id WHERE m.collection=? AND r.tombstone=0 ORDER BY CAST(r.id AS INTEGER),r.id',this.kind(q),key).toArray();
     const rows=[];
-    for (const row of members) {
-      const data=await this.decode(row.data);
+    for await(const data of this.decodeRows(members)) {
       if (q.operation==='workflow_jobs' && Number(data.run_attempt || 1)!==(this.meta('workflow_attempt:'+q.args?.id) || 1)) continue;
       if (q.operation==='open_prs' || q.operation==='open_issues') {
         if (data.state && data.state!=='OPEN') continue;
@@ -811,7 +820,12 @@ export class RepositoryState extends DurableObject<Env> {
     }
     const runAttempt=q.operation==='workflow_jobs'?this.runAttempt(String(q.args?.id)):undefined;
     const upstream=q.operation==='workflow_runs'?{...q,args:{after:new Date((this.meta('workflow_watermark') || Date.parse(this.meta('workflow_since')))-300000).toISOString()}}:q.operation==='workflow_jobs'?{...q,args:{...q.args,attempt:runAttempt}}:q;
-    const response=supplied?null:await stub(this.env.INSTALLATIONS,repo.installation).fetch('https://internal/read',{method:'POST',body:JSON.stringify({repository:repo,query:upstream,cursor:job.cursor,page:job.page,api:job.api,nested:job.nested?await this.decode(job.nested):undefined,etag:job.page===1 && !job.nested && q.operation!=='workflow_runs'?job.etag:undefined})});
+    let nested:any;
+    if(job.nested)try {nested=await this.decode(job.nested);}catch(error) {
+      if(error instanceof Error && error.message==='resource unavailable')throw new Error('staging page missing');
+      throw error;
+    }
+    const response=supplied?null:await stub(this.env.INSTALLATIONS,repo.installation).fetch('https://internal/read',{method:'POST',body:JSON.stringify({repository:repo,query:upstream,cursor:job.cursor,page:job.page,api:job.api,nested,etag:job.page===1 && !job.nested && q.operation!=='workflow_runs'?job.etag:undefined})});
     const result:any=supplied || await response!.json();
     if (job.lease_id && this.sql.exec<any>('SELECT lease_id FROM jobs WHERE key=?',job.key).toArray()[0]?.lease_id!==job.lease_id) return;
     if (result.continuation) {
@@ -964,6 +978,7 @@ export class RepositoryState extends DurableObject<Env> {
   expire(): Record<string,number> {
     const out:Record<string,number>={},now=Date.now();
     const budget={rows:6000,bytes:4*1024**2,deadline:now+50};
+    if(!this.storageLoaded)return out; // Unknown durable pins fail closed.
     const names=Object.keys(RULES) as RetentionClass[];
     for(let i=0;i<names.length;i++) {
       const name=names[(i+this.storageTurn)%names.length];
@@ -972,7 +987,7 @@ export class RepositoryState extends DurableObject<Env> {
       if(budget.rows<=0 || budget.bytes<=0 || Date.now()>=budget.deadline)break;
       const prior=this.retentionState[name];
       // Preserve S0's emergency expiry; new classes start as a dry run.
-      const enforce=this.retentionPolicy.mode==='enforce' || !['expired_deliveries','expired_demand'].includes(name);
+      const enforce=this.retentionPolicy.mode==='enforce' || name!=='expired_demand';
       try {
         const next=sweep(this.sql,name,prior,budget,enforce,now);
         this.retentionState[name]=next;out[name]=next.deleted-(next.started===prior?.started?prior.deleted:0);
@@ -986,18 +1001,29 @@ export class RepositoryState extends DurableObject<Env> {
   }
   // Cron calls this independently of hydration, dispatch and archive creation.
   // Checkpoints and observations live outside the potentially full SQLite DB.
-  async storageMaintenance(): Promise<void> {
+  async storageMaintenance(runExpiry=true): Promise<void> {
     if(this.storageFlight)return this.storageFlight;
-    const flight=this.prepareStorage();this.storageFlight=flight;
+    const flight=this.prepareStorage(runExpiry);this.storageFlight=flight;
     try {await flight;}finally {if(this.storageFlight===flight)this.storageFlight=undefined;}
   }
-  async prepareStorage(): Promise<void> {
-    const repo=this.meta('repository')?.id;if(!repo)return;
+  get maintenanceArchive():R2Bucket {return timedBucket(this.env.ARCHIVE);}
+  startStorageMaintenance():void {
+    const task=this.storageMaintenance(false).catch(error=>this.noteFailure('storage_maintenance',error));
+    if(this.ctx.waitUntil)this.ctx.waitUntil(task);
+  }
+  async loadRetentionState():Promise<void> {
+    if(this.storageLoaded)return;
+    if(this.retentionLoadFlight)return this.retentionLoadFlight;
+    const task=this.readRetentionState();this.retentionLoadFlight=task;
+    try {await task;}finally {if(this.retentionLoadFlight===task)this.retentionLoadFlight=undefined;}
+  }
+  async readRetentionState():Promise<void> {
+    let repo:string|undefined;try {repo=this.meta('repository')?.id;}catch {return;}if(!repo)return;
     if(!this.storageLoaded) {
       try {
-        const control=await this.env.ARCHIVE.get('control/'+repo+'/retention-policy.json').then(o=>o?.json<any>());
+        const control=await this.maintenanceArchive.get('control/'+repo+'/retention-policy.json').then(o=>o?.json<any>());
         if(control)this.retentionPolicy=policy(control);
-        const checkpoint=await this.env.ARCHIVE.get('control/'+repo+'/retention-checkpoint.json').then(o=>o?.json<any>());
+        const checkpoint=await this.maintenanceArchive.get('control/'+repo+'/retention-checkpoint.json').then(o=>o?.json<any>());
         if(checkpoint?.version===1 && checkpoint.classes && typeof checkpoint.classes==='object') {
           // Invalid progress is expendable: restart that scan, retaining policy.
           for(const name of Object.keys(RULES) as RetentionClass[]) {
@@ -1009,76 +1035,103 @@ export class RepositoryState extends DurableObject<Env> {
         this.storageLoaded=true;
       }catch(error) {this.noteFailure('retention_load',error);}
     }
+  }
+  async prepareStorage(runExpiry=true): Promise<void> {
+    const repo=this.meta('repository')?.id;if(!repo)return;
+    await this.loadRetentionState();
     if(Date.now()-this.receiptsChecked>=60000) {
       try {
         const [parked,held]=await Promise.all([
-          this.env.ARCHIVE.list({prefix:'parked/'+repo+'/pointers/',limit:1}),
-          this.env.ARCHIVE.list({prefix:'parked/'+repo+'/held/',limit:1})
+          this.maintenanceArchive.list({prefix:'parked/'+repo+'/pointers/',limit:1}),
+          this.maintenanceArchive.list({prefix:'parked/'+repo+'/held/',limit:1})
         ]);
         this.receiptsPinned=Boolean(parked.objects.length || held.objects.length);
         this.receiptsChecked=Date.now();
       }catch {this.receiptsPinned=true;}
     }
-    if(this.storageLoaded)this.expire();
+    if(runExpiry && this.storageLoaded)this.expire();
     if(this.storageLoaded && this.retentionPolicy.archive_ci && !this.degraded) {
       try {await this.archiveCI(this.retentionPolicy.mode==='enforce');}catch(error) {this.noteFailure('archive_ci',error);}
     }
     try {
-      if(!this.storageLoaded)throw new Error('retention_policy_unavailable');
-      await this.ctx.storage.sync();
-      await this.env.ARCHIVE.put('control/'+repo+'/retention-checkpoint.json',JSON.stringify({version:1,at:Date.now(),classes:this.retentionState,ci_after:this.ciAfter}));
+      const text=JSON.stringify({version:1,classes:this.retentionState,ci_after:this.ciAfter});
+      if(this.storageLoaded && text!==this.checkpointText && Date.now()-this.checkpointAt>=30000) {
+        await this.ctx.storage.sync();
+        await this.maintenanceArchive.put('control/'+repo+'/retention-checkpoint.json',text);
+        this.checkpointAt=Date.now();this.checkpointText=text;
+      }
     }catch(error) {this.noteFailure('retention_checkpoint',error);}
+    this.prepareDiagnostics();
     const now=Date.now();
     if(this.observation && now-this.observation.at<60000)return;
     let ingressHealth:any;
     try {
       // A real tiny write/read tests the parked-ingress storage destination.
       const key='control/'+repo+'/ingress-durability-probe.json',nonce=crypto.randomUUID();
-      await this.env.ARCHIVE.put(key,nonce);
-      if(await this.env.ARCHIVE.get(key).then(o=>o?.text())!==nonce)throw new Error('durability_probe_mismatch');
+      await this.maintenanceArchive.put(key,nonce);
+      if(await this.maintenanceArchive.get(key).then(o=>o?.text())!==nonce)throw new Error('durability_probe_mismatch');
       const configured=repository(this.env,repo);
-      ingressHealth={at:now,durable:true,backlog:configured?await backlog(this.env,configured,2):null,
+      ingressHealth={at:now,durable:true,backlog:configured?await backlog({...this.env,ARCHIVE:this.maintenanceArchive},configured,2):null,
         queue:{count:null,reason:'management_metrics_not_configured'},dlq:{count:null,reason:'management_metrics_not_configured'}};
     }catch(error) {ingressHealth={at:now,durable:false,error:classify(error)};}
     try {
       const sample={at:now,bytes:this.sql.databaseSize,allowance:SQLITE_ALLOWANCE};
-      if(!this.capacitySample) {
-        const old=await this.env.ARCHIVE.get('control/'+repo+'/observation.json').then(o=>o?.json<any>()).catch(()=>undefined);
-        if(old?.capacity)this.capacitySample=old.capacity;
+      if(!this.capacityHistory.length) {
+        const old=await this.maintenanceArchive.get('control/'+repo+'/observation.json').then(o=>o?.json<any>()).catch(()=>undefined);
+        if(old?.capacity)this.lastCapacity=old.capacity;
+        if(Array.isArray(old?.capacity_history))this.capacityHistory=old.capacity_history;
+        else if(old?.capacity)this.capacityHistory=[old.capacity];
         if(old?.tables)this.tableEstimates=old.tables;
         if(old?.table_attempt_at)this.tableAttemptAt=old.table_attempt_at;
       }
       // Logical size sampling/counting is hourly, never a status-read side effect.
       if(now-this.tableAttemptAt>=3600000)try {
+        // Persist the attempt before SQL analysis, so an isolate reset cannot
+        // repeat the same expensive job on every cold start.
+        const attemptKey='control/'+repo+'/table-estimate-attempt.json';
+        const last=await this.maintenanceArchive.get(attemptKey).then(o=>o?.json<any>());
+        if(last?.at>this.tableAttemptAt)this.tableAttemptAt=last.at;
+        if(now-this.tableAttemptAt<3600000)throw new Error('table_estimate_throttled');
         this.tableAttemptAt=now;
+        await this.maintenanceArchive.put(attemptKey,JSON.stringify({at:now}));
         const previous=this.tableEstimates;
         const tables=summaryTables(this.sql).map(name=>{
-          const count=this.sql.exec<any>('SELECT COUNT(*) n FROM "'+name+'"').one().n;
+          const low=this.sql.exec<any>('SELECT rowid rid FROM "'+name+'" ORDER BY rowid LIMIT 1').toArray()[0]?.rid;
+          const high=this.sql.exec<any>('SELECT rowid rid FROM "'+name+'" ORDER BY rowid DESC LIMIT 1').toArray()[0]?.rid;
+          const span=low===undefined?0:high-low+1;
           const page=scan(this.sql,{table:name,limit:100});
+          const count=page.rows?Math.round(span*page.rows/(page.last_rowid-page.first_rowid+1)):0;
           const estimate=page.rows?Math.round(page.bytes/page.rows*count):0;
           const old=previous?.values?.find((r:any)=>r.name===name);
-          return {name,rows:count,sampled_rows:page.rows,logical_bytes_estimate:estimate,growth_bytes_per_second:old && now>previous.at?(estimate-old.logical_bytes_estimate)/((now-previous.at)/1000):null};
+          return {name,rows_estimate:count,rowid_span:span,sampled_rows:page.rows,logical_bytes_estimate:estimate,growth_bytes_per_second:old && now>previous.at?(estimate-old.logical_bytes_estimate)/((now-previous.at)/1000):null};
         });
-        this.tableEstimates={at:now,method:'first_100_row_logical_mean_times_count; excludes internal metadata/free pages',values:tables};
-      }catch(error) {this.noteFailure('table_estimates',error);}
+        this.tableEstimates={at:now,method:'rowid_span_times_first_100_row_density_and_logical_mean; excludes internal metadata/free pages',values:tables};
+      }catch(error) {if(!(error instanceof Error && error.message==='table_estimate_throttled'))this.noteFailure('table_estimates',error);}
       const r2Retention=Object.fromEntries(await Promise.all(Object.keys(R2_CLASSES).map(async name=>{
-        const progress=await this.env.ARCHIVE.get('control/retention/'+name+'.json').then(o=>o?.json<any>()).catch(()=>undefined);
+        const progress=await this.maintenanceArchive.get('control/retention/'+name+'.json').then(o=>o?.json<any>()).catch(()=>undefined);
         return [name,{...(progress || {}),stale:!progress || now-progress.at>180000}];
       })));
-      const measured=capacity(sample,this.capacitySample);this.capacitySample=sample;
+      this.capacityHistory=this.capacityHistory.filter(r=>r.at>=now-2*3600000 && r.at<now).slice(-120);
+      const baseline=this.capacityHistory.filter(r=>r.at<=now-3600000).at(-1);
+      const measured=capacity(sample,baseline,now,this.lastCapacity);this.lastCapacity=measured;
+      this.capacityHistory.push(sample);
       const reasons:string[]=[];
       if(measured.level!=='ok')reasons.push('storage_capacity');
       if(this.degraded && now-this.degraded.since>=60000)reasons.push('input_application_unavailable');
       if(!ingressHealth.durable)reasons.push('parked_ingress_durability_unavailable');
       if(ingressHealth.backlog?.held?.count>0 || ingressHealth.backlog?.parked?.oldest_received && now-ingressHealth.backlog.parked.oldest_received>=86400000)reasons.push('input_application_backlog');
       const level=reasons.some(r=>r!=='storage_capacity')?'critical':measured.level;
-      const value={version:1,at:now,level,reasons,capacity:measured,tables:this.tableEstimates,table_attempt_at:this.tableAttemptAt,ingress:ingressHealth,refresh_lag_ms:this.meta('last_repair')?now-this.meta('last_repair'):null,requests:this.requestMetrics.snapshot(now),repair_intervals:this.repairMetrics.snapshot(now),
+      const requests=this.requestMetrics.snapshot(now),repairMinutes=this.repairMetrics.snapshot(now).filter((r:any)=>r.at>=now-60000);
+      const {intervals,...requestSummary}=requests;
+      const value={version:1,at:now,level,reasons,capacity:measured,capacity_history:this.capacityHistory,tables:this.tableEstimates,table_attempt_at:this.tableAttemptAt,ingress:ingressHealth,refresh_lag_ms:this.meta('last_repair')?now-this.meta('last_repair'):null,requests:requestSummary,repair_summary:this.repairMetrics.summary(now),
         retention:{policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,ci:this.ciProgress,receipts_pinned:this.receiptsPinned,r2:r2Retention},
         compute:{status:'unavailable',reason:'not_exposed_by_sqlite_runtime'},connections:{status:'not_applicable'}};
       const alarm=level!=='ok'?emitAlarm(this.env,repo,value):{channel:'configured_workers_observability',emitted:false,notified:false};
       this.observation={...value,alarm};
-      await this.env.ARCHIVE.put('control/'+repo+'/observation.json',JSON.stringify(this.observation));
-      if(value.requests.requests || value.repair_intervals.length)await this.env.ARCHIVE.put('telemetry/'+repo+'/'+Math.floor(now/60000)+'.json',JSON.stringify({at:now,requests:value.requests.intervals.filter((r:any)=>r.at>=now-60000),repair_intervals:value.repair_intervals.filter((r:any)=>r.at>=now-60000)}),{customMetadata:{expires:String(now+7*86400000)}});
+      this.observation.persistence={stored:true,at:now};
+      try {await this.maintenanceArchive.put('control/'+repo+'/observation.json',JSON.stringify(this.observation));}
+      catch(error) {this.observation.persistence={stored:false,at:now,error:classify(error)};this.noteFailure('observation_persistence',error);}
+      if(requests.requests || repairMinutes.length)await this.maintenanceArchive.put('telemetry/'+repo+'/'+Math.floor(now/60000)+'.json',JSON.stringify({at:now,requests:intervals.filter((r:any)=>r.at>=now-60000),repair_intervals:repairMinutes}),{customMetadata:{expires:String(now+7*86400000)}});
     }catch(error) {this.noteFailure('monitoring',error);}
   }
   async archiveCI(enforce=true): Promise<void> {
@@ -1086,7 +1139,9 @@ export class RepositoryState extends DurableObject<Env> {
     const candidates=this.sql.exec<any>('SELECT rowid rid,kind,id,observed,length(CAST(data AS BLOB)) bytes FROM resources WHERE rowid>? ORDER BY rowid LIMIT 100',this.ciAfter).toArray();
     let bytes=0,archived=0,eligible=0;
     for(const row of candidates) {
-      if(Date.now()-began>=50 || bytes+row.bytes>4*1024**2)break;
+      if(Date.now()-began>=50)break;
+      if(row.bytes>4*1024**2) {this.ciAfter=row.rid;continue;}
+      if(bytes+row.bytes>4*1024**2)break;
       bytes+=row.bytes;
       // Workflow-run headers remain inline: scheduling uses their JSON fields.
       if(['workflow_jobs','checks','statuses'].includes(row.kind) && row.observed<cutoff && row.bytes>4096) {
@@ -1096,14 +1151,14 @@ export class RepositoryState extends DurableObject<Env> {
           eligible++;
           if(!enforce) {this.ciAfter=row.rid;continue;}
           const hash=await digest(before),key='resources/'+this.meta('repository').id+'/ci/'+hash;
-          await this.env.ARCHIVE.put(key,before,{sha256:hash,customMetadata:{kind:'resource',sha256:hash}});
+          await this.maintenanceArchive.put(key,before,{sha256:hash,customMetadata:{kind:'resource',sha256:hash}});
           // Verify stored contents before publishing the transparent SQL index.
-          const stored=await this.env.ARCHIVE.get(key);
+          const stored=await this.maintenanceArchive.get(key);
           if(!stored || await digest(await stored.text())!==hash)throw new Error('archive_verification_failed');
           // Preserve the inline field used by legacy attempt membership guards.
           const pointer=JSON.stringify({$r2:key,...(row.kind==='workflow_jobs'?{run_attempt:data.run_attempt || 1}:{})});
-          this.sql.exec('UPDATE resources SET data=? WHERE rowid=? AND kind=? AND id=? AND data=?',pointer,row.rid,row.kind,row.id,before);
-          archived++;
+          const written=this.sql.exec('UPDATE resources SET data=? WHERE rowid=? AND kind=? AND id=? AND data=?',pointer,row.rid,row.kind,row.id,before).rowsWritten;
+          if(written)archived++;
         }
       }
       this.ciAfter=row.rid;
@@ -1112,11 +1167,20 @@ export class RepositoryState extends DurableObject<Env> {
     this.ciProgress={at:Date.now(),after:this.ciAfter,examined:candidates.length,eligible,archived,bytes,enforce};
   }
   async preparedObservation(): Promise<any> {
-    if(!this.observation) {
+    if(!this.observation && Date.now()-this.observationReadAt>=60000) {
+      this.observationReadAt=Date.now();
       const repo=this.meta('repository')?.id;
-      try {this.observation=repo?await this.env.ARCHIVE.get('control/'+repo+'/observation.json').then(o=>o?.json<any>()):undefined;}catch {}
+      if(repo) {
+        const task=this.maintenanceArchive.get('control/'+repo+'/observation.json').then(o=>o?.json<any>()).then(value=>{
+          if(value && (!this.observation || value.at>this.observation.at))this.observation=value;
+        }).catch(()=>{});
+        if(this.ctx.waitUntil)this.ctx.waitUntil(task);
+        // A cold status response stays fast even when the observation store is slow.
+        await within(task,100).catch(()=>{});
+      }
     }
-    return {...(this.observation || {}),stale:!this.observation || Date.now()-this.observation.at>180000,age_ms:this.observation?Date.now()-this.observation.at:null};
+    const {capacity_history,...publicObservation}=this.observation || {};
+    return {...publicObservation,stale:!this.observation || Date.now()-this.observation.at>180000,age_ms:this.observation?Date.now()-this.observation.at:null};
   }
   async maintenance(): Promise<void> {
     if(!this.degraded) {
@@ -1238,7 +1302,7 @@ export class RepositoryState extends DurableObject<Env> {
   async runAlarm(): Promise<void> {
     const options=settings(this.env),began=Date.now();let dispatched=0,retired=0;
     try {
-      await this.storageMaintenance();
+      this.expire();
       if(this.schema!=='current' && !this.degraded) this.startup();
       // Every dispatch writes its lease before any GitHub request, so a full
       // store stops here without spending upstream quota.
@@ -1257,13 +1321,13 @@ export class RepositoryState extends DurableObject<Env> {
       } catch(error) {this.noteFailure('repair_dispatch',error);}
       try {if(!this.migrationHeld()) await this.maintenance();} catch(error) {this.noteFailure('maintenance',error);}
     } finally {
-      this.prepareDiagnostics();
       try {
         const row=this.sql.exec<any>('SELECT MIN(MAX(due,lease_until)) AS due FROM jobs').one();
         // Degraded mode writes nothing, not even the next alarm; the cron tick
         // keeps expiring rows until a probe restores writes.
         if (row.due && !this.degraded && !this.migrationHeld()) await this.setAlarm(Math.max(Date.now()+100,row.due));
       } catch(error) {this.noteFailure('alarm',error);}
+      this.startStorageMaintenance();
     }
   }
   async refreshActivityLandings(): Promise<void> {
@@ -1328,8 +1392,8 @@ export class RepositoryState extends DurableObject<Env> {
     return Date.now()-changed>FROZEN_AFTER?changed:null;
   }
   prepareDiagnostics(): void {
-    if(Date.now()-this.diagnosticsAt<1000)return;
-    try {this.diagnostics={storage:this.storageState(),storage_bytes:this.sql.databaseSize,snapshot_pending:this.meta('snapshot_pending'),survey:this.surveyHealth(),reconciliation_version:2,deployment_id:this.env.CF_VERSION?.id,settings:settings(this.env),repository:this.meta('repository'),revision:this.revision(),bootstrap_inventory:this.meta('bootstrap_inventory'),last_webhook:this.meta('last_webhook'),webhook_apply_ms:this.meta('webhook_apply_ms'),last_repair:this.meta('last_repair'),last_upstream_failure:this.meta('last_upstream_failure'),coverage:this.sql.exec('SELECT operation,COUNT(*) resources,SUM(complete) complete,MIN(verified) oldest_verified FROM collections GROUP BY operation').toArray(),jobs:this.sql.exec('SELECT COUNT(*) total,SUM(due<=?) due,MIN(started) oldest_started FROM jobs',Date.now()).one(),lanes:this.sql.exec('SELECT lane,COUNT(*) jobs,SUM(due<=? AND lease_until<=?) eligible,SUM(lease_until>?) inflight,MIN(CASE WHEN due<=? AND lease_until<=? THEN due END) oldest_eligible,MIN(requested_at) oldest_requested FROM jobs GROUP BY lane',...Array(5).fill(Date.now())).toArray(),waits:this.sql.exec('SELECT lane,wait_reason,COUNT(*) jobs FROM jobs WHERE wait_reason IS NOT NULL GROUP BY lane,wait_reason').toArray(),repair_hour:this.sql.exec('SELECT lane,operation,event,COUNT(*) n,SUM(value) value,MAX(value) maximum FROM repair_metrics WHERE at>? GROUP BY lane,operation,event',Date.now()-3600000).toArray(),requested_latency:this.sql.exec("SELECT operation,MIN(value) p95_ms,MAX(samples) samples FROM (SELECT operation,value,ROW_NUMBER() OVER(PARTITION BY operation ORDER BY value) rank,COUNT(*) OVER(PARTITION BY operation) samples FROM repair_metrics WHERE event='requested_single_latency_ms' AND at>?) WHERE rank>=MAX(1,CAST((samples*95+99)/100 AS INTEGER)) GROUP BY operation",Date.now()-3600000).toArray(),queries:this.sql.exec('SELECT * FROM query_metrics').toArray(),repair_operations:this.sql.exec("SELECT json_extract(query,'$.operation') operation,COUNT(*) jobs,SUM(due<=?) due,MIN(due) next_due,MAX(attempt) attempts FROM jobs GROUP BY operation",Date.now()).toArray()};this.diagnosticsAt=Date.now();}
+    if(Date.now()-this.diagnosticsAt<60000)return;
+    try {this.diagnostics={storage:this.storageState(),storage_bytes:this.sql.databaseSize,snapshot_pending:this.meta('snapshot_pending'),survey:this.surveyHealth(),reconciliation_version:2,deployment_id:this.env.CF_VERSION?.id,settings:settings(this.env),repository:this.meta('repository'),revision:this.revision(),bootstrap_inventory:this.meta('bootstrap_inventory'),last_webhook:this.meta('last_webhook'),webhook_apply_ms:this.meta('webhook_apply_ms'),last_repair:this.meta('last_repair'),last_upstream_failure:this.meta('last_upstream_failure'),coverage:this.sql.exec('SELECT operation,COUNT(*) resources,SUM(complete) complete,MIN(verified) oldest_verified FROM collections GROUP BY operation').toArray(),jobs:this.sql.exec('SELECT COUNT(*) total,SUM(due<=?) due,MIN(started) oldest_started FROM jobs',Date.now()).one(),lanes:this.sql.exec('SELECT lane,COUNT(*) jobs,SUM(due<=? AND lease_until<=?) eligible,SUM(lease_until>?) inflight,MIN(CASE WHEN due<=? AND lease_until<=? THEN due END) oldest_eligible,MIN(requested_at) oldest_requested FROM jobs GROUP BY lane',...Array(5).fill(Date.now())).toArray(),waits:this.sql.exec('SELECT lane,wait_reason,COUNT(*) jobs FROM jobs WHERE wait_reason IS NOT NULL GROUP BY lane,wait_reason').toArray(),...this.repairMetrics.summary(),queries:[...this.queryCounts.values()],repair_operations:this.sql.exec("SELECT json_extract(query,'$.operation') operation,COUNT(*) jobs,SUM(due<=?) due,MIN(due) next_due,MAX(attempt) attempts FROM jobs GROUP BY operation",Date.now()).toArray()};this.diagnosticsAt=Date.now();}
     catch(error) {this.noteFailure('health_prepare',error);}
   }
   storageState(): any {
@@ -1344,12 +1408,12 @@ export class RepositoryState extends DurableObject<Env> {
       if(input.policy!==undefined) {
         // Do not let an in-flight startup load overwrite an operator override.
         if(this.storageFlight)await this.storageFlight;
+        if(this.retentionLoadFlight)await this.retentionLoadFlight;
         let next:Policy;try {next=policy(input.policy);}catch {throw new AdminError('invalid_retention_policy');}
         await this.env.ARCHIVE.put('control/'+repo+'/retention-policy.json',JSON.stringify(next));
-        this.retentionPolicy=next;
+        this.retentionPolicy=next;this.storageLoaded=true;
       }
-      await this.storageMaintenance();
-      return json({policy:this.retentionPolicy,classes:this.retentionState,budget:{rows:6000,bytes:4*1024**2,time_ms:50},observation:await this.preparedObservation()});
+      return json({policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,ci:this.ciProgress,receipts_pinned:this.receiptsPinned,budget:{rows:6000,bytes:4*1024**2,cooperative_io_budget_ms:50,cpu_bound:'rows_and_bytes'},observation:await this.preparedObservation()});
     }
     if (path==='/storage/scan') return json(scan(this.sql,input));
     if (path==='/storage/recovery') return json(await createRecovery(this.env.ARCHIVE,this.ctx.storage,this.sql,repo,this.revision()));
@@ -1623,7 +1687,7 @@ export class RepositoryState extends DurableObject<Env> {
       }
       if (path==='/health') {
         if (typeof this.schema==='object') return json({storage:this.storageState(),deployment_id:this.env.CF_VERSION?.id,monitoring:await this.preparedObservation(),request_id});
-        return json({...this.diagnostics,...this.repairMetrics.summary(),queries:[...this.queryCounts.values()],query_metrics_scope:'repository_instance_since_restart',repair_intervals:this.repairMetrics.snapshot(),storage:this.storageState(),storage_bytes:this.sql.databaseSize,
+        return json({...this.diagnostics,reconciliation_version:2,settings:settings(this.env),...this.repairMetrics.summary(),queries:[...this.queryCounts.values()],query_metrics_scope:'repository_instance_since_restart',repair_metrics_scope:'repository_instance_since_restart',storage:this.storageState(),storage_bytes:this.sql.databaseSize,
           repository:this.meta('repository'),revision:this.revision(),bootstrap_inventory:this.meta('bootstrap_inventory'),
           deployment_id:this.env.CF_VERSION?.id,monitoring:await this.preparedObservation(),diagnostics_at:this.diagnosticsAt || null,
           diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
@@ -1632,9 +1696,10 @@ export class RepositoryState extends DurableObject<Env> {
       if (path==='/activity-refresh' && req.method==='POST') {if(!this.degraded) await this.refreshActivityLandings();return json({ok:true,degraded:Boolean(this.degraded)});}
       if (path==='/tick') {
         // Cleanup/monitoring precede alarm scheduling, hydration and upstream work.
-        await this.storageMaintenance();
+        this.expire();
         if (!this.meta('repository')) await this.configure((await req.json() as any).repository);
         await this.optionalAsync('alarm',()=>this.setAlarm(Date.now()+100));
+        this.startStorageMaintenance();
         return json({ok:true,degraded:Boolean(this.degraded)});
       }
       if (path==='/repair') { this.sql.exec('UPDATE jobs SET due=CASE WHEN wait_reason IS NULL AND attempt=0 THEN ? ELSE due END,dirty=1,generation=generation+1',Date.now()); await this.setAlarm(Date.now()+100); return json({ok:true}); }
@@ -1646,14 +1711,14 @@ export class RepositoryState extends DurableObject<Env> {
       log('repository_request_failed',{request_id,path,reason});
       return json({error:reason,parkable:PARKABLE.has(reason),message:(error instanceof Error?error.message:'operation failed').slice(0,200),request_id},reason==='internal'?500:503);
     }finally {
-      if(path==='/query') {
+      if(path==='/query')try {
         this.requestMetrics.record(Date.now()-requestStarted,requestError,requestUnavailable);
         if(requestOperation) {
           const coverage=requestError?'error':requestUnavailable?'unavailable':requestCoverage,key=JSON.stringify([requestOperation,coverage]);
           const old=this.queryCounts.get(key);
           this.queryCounts.set(key,{operation:requestOperation,coverage,requests:(old?.requests || 0)+1,last_at:Date.now()});
         }
-      }
+      }catch {}
     }
   }
 }

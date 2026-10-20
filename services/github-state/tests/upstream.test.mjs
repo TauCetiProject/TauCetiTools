@@ -322,3 +322,17 @@ test('malformed upstream JSON stays unavailable, preserves request ID, and retri
   assert.deepEqual(recovered.data,[]);assert.equal(network,2,'one successful retry by the existing owner');
  }finally{await mf.dispose();}
 });
+
+test('malformed responses without quota headers debit the existing owner budget once',async()=>{
+ let malformed=false;
+ const mf=await runtime(async()=>malformed?new Response('not JSON',{status:200}):response({data:{rateLimit:{cost:1,remaining:100,resetAt:new Date(Date.now()+300000).toISOString()},repository:{pullRequests:{nodes:[],pageInfo:{hasNextPage:false,endCursor:null}}}}},'graphql',100));
+ try {
+  const ns=await mf.getDurableObjectNamespace('INSTALLATIONS'),stub=ns.get(ns.idFromName(repository.installation));
+  const input={repository,query:{repository:repository.name,operation:'open_prs'},api:'graphql'};
+  assert.equal((await send(stub,'/read',input)).status,200);
+  const before=(await (await stub.fetch('https://internal/health')).json()).budgets.find(b=>b.resource==='graphql').remaining;
+  malformed=true;assert.equal((await send(stub,'/read',input)).status,503);
+  const after=(await (await stub.fetch('https://internal/health')).json()).budgets.find(b=>b.resource==='graphql').remaining;
+  assert.equal(before-after,1);
+ }finally{await mf.dispose();}
+});
