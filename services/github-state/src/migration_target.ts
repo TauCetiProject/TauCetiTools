@@ -184,7 +184,8 @@ export async function activateTarget(env:Env,state:Migration):Promise<void> {
     for(const table of Object.keys(state.tables)) {
       // Imported rowids include signed extrema; a fresh sequence need only
       // allocate unused IDs. Negative archive IDs do not constrain its start.
-      const max=(await c.query(`SELECT COALESCE(MAX(rowid) FILTER(WHERE rowid<9223372036854775807),0)::text n FROM ${s}.${table}`)).rows[0].n;
+      // Seek through the rowid index to bound activation work on large tables.
+      const max=(await c.query(`SELECT COALESCE((SELECT rowid FROM ${s}.${table} WHERE rowid<9223372036854775807 ORDER BY rowid DESC LIMIT 1),0)::text n`)).rows[0].n;
       if(BigInt(max)>=9223372036854775806n)throw new AdminError('migration_rowid_sequence_exhausted');
       // Reserve the signed maximum as an archival ID when present.
       await c.query(`ALTER SEQUENCE ${s}.${table}_rowid_seq MAXVALUE 9223372036854775806`);

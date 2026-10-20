@@ -28,6 +28,21 @@ bounded steps; recovery does not require it. All operations reuse the same UUID 
 and target. Never reuse a completed/abandoned generation. Legacy `freeze` is the
 source-only **test** protocol and stops at `source_verified`.
 
+For large repositories, keep the resumable admin command running during the
+migration; cron provides recovery at a slower pace. Each request performs at
+most five bounded steps, so cron alone can take days across millions of rows.
+Use the enrolled generation and target from `start`:
+
+```sh
+python3 services/github-state/scripts/migrate.py --environment production \
+  --generation GENERATION --target TARGET --apply \
+  --steps 10000 --batch-steps 5 resume
+```
+
+Repeat the same command when its bounded step allowance ends. Monitor phase,
+checkpoint age and the recorded failure code; do not deploy another source
+version during a pre-switch generation.
+
 Before enabling `MIGRATION_ENVIRONMENT=test|production`, deploy the coordinator,
 queue consumers, installation quota owner and retention guards everywhere. Fence
 old deployments and drain pre-existing GitHub dispatches and R2 deletion batches.

@@ -257,6 +257,42 @@ test('expired staging records an importer recovery requirement without mutating 
  assert.equal(receipt.first_missing_page,'2');
 });
 
+test('staging verification skips idle jobs and preserves signed rowid boundaries',async()=>{
+ const f=await fixture();await fill(f);
+ const template=f.db.prepare('SELECT * FROM jobs').get(),fields=Object.keys(template);
+ f.db.exec("UPDATE jobs SET rowid=-9223372036854775808");
+ const insert=f.db.prepare('INSERT INTO jobs('+fields.join(',')+') VALUES('+fields.map(()=>'?').join(',')+')');
+ f.db.exec('BEGIN');for(let n=0;n<2000;n++)insert.run(...fields.map(key=>key==='key'?'idle-'+n:key==='started'?null:template[key]));f.db.exec('COMMIT');
+ insert.run(...fields.map(key=>key==='key'?'last':key==='page'?2:template[key]));
+ f.db.exec("UPDATE jobs SET rowid=9223372036854775807 WHERE key='last'");
+ await f.archive.put('staging/100/last/12345/1','{}');
+ const before=f.db.prepare('SELECT COUNT(*) n FROM jobs').get().n;assert.equal(before,2002);
+ await f.command('freeze');const state=await migration.readMigration(f.archive,repo.id);
+ // Isolate staging traversal; complete table export/checksums have their own fixture.
+ for(const table of Object.values(state.tables))table.verified=true;state.phase='verifying';
+ await migration.verifyStep(f.archive,f.ctx.storage.sql,state);
+ assert.equal(state.staging.after,'-9223372036854775808');assert.equal(state.staging.checked,2);
+ await migration.verifyStep(f.archive,f.ctx.storage.sql,state);
+ assert.equal(state.staging.after,'9223372036854775807');assert.equal(state.staging.checked,3);
+ await migration.verifyStep(f.archive,f.ctx.storage.sql,state);
+ assert.equal(state.staging.complete,true);assert.equal(state.staging.expired_jobs,0);
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM jobs').get().n,before);
+});
+
+test('blob inventory checkpoints bounded thousand-object pages without missing continuation',async()=>{
+ const f=await fixture(undefined,bucket(1000));
+ for(let n=0;n<1001;n++)await f.archive.put('resources/100/'+String(n).padStart(4,'0'),'{}');
+ await f.command('freeze');const state=await migration.readMigration(f.archive,repo.id);
+ for(const table of Object.values(state.tables))table.verified=true;state.phase='verifying';state.staging.complete=true;
+ await migration.verifyStep(f.archive,f.ctx.storage.sql,state);
+ assert.equal(state.blobs.objects,1000);assert.equal(state.blobs.pages,1);assert.equal(state.blobs.prefix,0);
+ const cold=await migration.readMigration(f.archive,repo.id);
+ await migration.verifyStep(f.archive,f.ctx.storage.sql,cold);
+ assert.equal(cold.blobs.objects,1001);assert.equal(cold.blobs.pages,2);assert.equal(cold.blobs.prefix,1);
+ const archived=[...f.archive.objects.entries()].filter(([key])=>key.includes('/blobs/')).flatMap(([,o])=>JSON.parse(o.text));
+ assert.equal(new Set(archived.map(o=>o.key)).size,1001);
+});
+
 test('production startup and ingress do not depend on test migration control reads',async()=>{
  let f=await fixture();
  // A permanent outage of the test-only control key must have no production effect.

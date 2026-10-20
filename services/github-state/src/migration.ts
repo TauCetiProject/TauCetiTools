@@ -106,7 +106,7 @@ export async function beginExport(bucket: R2Bucket, storage: DurableObjectStorag
 }
 // Every value is typed. SQLite INTEGERs and rowids cross JavaScript as decimal
 // strings, preserving all signed 64-bit values. JSON text is never reserialized.
-export function sourceRows(sql: SqlStorage, name: string, columns: TableState['columns'], after: string | null, limit: number): Row[] {
+export function sourceRows(sql: SqlStorage, name: string, columns: TableState['columns'], after: string | null, limit: number, stagedJobsOnly=false): Row[] {
   const selects = columns.flatMap((c, i) => {
     const col = quote(c.name);
     return [`typeof(${col}) AS t${i}`, `CASE typeof(${col}) WHEN 'blob' THEN hex(${col}) WHEN 'real' THEN printf('%!.17g',${col}) ELSE CAST(${col} AS TEXT) END AS v${i}`];
@@ -114,7 +114,8 @@ export function sourceRows(sql: SqlStorage, name: string, columns: TableState['c
   // Read lengths first so neither many large rows nor maliciously large input
   // limits allocate an unbounded result. Include one large row for progress.
   const sizes = columns.map(c => `COALESCE(length(CAST(${quote(c.name)} AS BLOB)),0)`).join('+');
-  const lower=after===null?'':'rowid>CAST(? AS INTEGER)';
+  if(stagedJobsOnly && name!=='jobs')throw new AdminError('migration_table_manifest_mismatch');
+  const lower=[after===null?'':'rowid>CAST(? AS INTEGER)',stagedJobsOnly?'started IS NOT NULL AND page IS NOT NULL':''].filter(Boolean).join(' AND ');
   const bindings=after===null?[]:[after];
   const candidates = sql.exec<any>(`SELECT CAST(rowid AS TEXT) id,${sizes} bytes FROM ${quote(name)} ${lower?'WHERE '+lower:''} ORDER BY rowid LIMIT ?`, ...bindings, limit).toArray();
   if (!candidates.length) return [];
@@ -228,9 +229,10 @@ export async function verifyStep(bucket: R2Bucket, sql: SqlStorage, state: Migra
 }
 // Check implicitly addressed partial-job pages in bounded groups. The SQL
 // source remains frozen, and the checkpoint advances only after every HEAD.
+// Seek between started jobs; idle jobs have no implicit staging pages.
 async function stagingStep(bucket: R2Bucket, sql: SqlStorage, state: Migration): Promise<void> {
   const check=state.staging,columns=state.tables.jobs.columns;
-  const row=sourceRows(sql,'jobs',columns,check.after,1)[0];
+  const row=sourceRows(sql,'jobs',columns,check.after,1,true)[0];
   if(!row) {check.complete=true;await saveMigration(bucket,state);return;}
   const value=(name:string)=>(row[columns.findIndex(c=>c.name===name)+1] as Cell)[1];
   const started=value('started'),next=value('page');
@@ -273,7 +275,7 @@ async function blobStep(bucket: R2Bucket, state: Migration): Promise<void> {
     await bucket.put(archiveKey(state.repository, state.generation) + (state.cutover?'/source-receipt.json':'/receipt.json'), encodeMigration(state));
     return;
   }
-  const page = await bucket.list({ prefix: prefixes[check.prefix], cursor: check.cursor, limit: 100, include: ['customMetadata'] });
+  const page = await bucket.list({ prefix: prefixes[check.prefix], cursor: check.cursor, limit: 1000, include: ['customMetadata'] });
   const objects = page.objects.map(o => ({ key: o.key, etag: o.etag, size: o.size, expires: o.customMetadata?.expires ?? null }));
   const text = JSON.stringify(objects), sha256 = await digest(text);
   await bucket.put(`${archiveKey(state.repository, state.generation)}/blobs/${check.pages}.json`, text, { sha256, customMetadata: { sha256 } });

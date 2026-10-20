@@ -38,10 +38,12 @@ test('S2 imports exact archives into a standby, restarts every step and recovers
   assert.deepEqual(rows[0],{rowid:'-9223372036854775808',at:'9223372036854775807'});
   assert.deepEqual(rows.at(-1),{rowid:'9223372036854775807',at:'-9223372036854775808'});
   await target.activateTarget(f.env,state); // crash before writing R2 selection
+  assert.equal((await f.admin.query(`INSERT INTO ${f.schema}.demand(key,at) VALUES('after-switch',1) RETURNING rowid::text`)).rows[0].rowid,'5500');
   state.cutover.lease_until=1;await migration.saveMigration(f.archive,state);
   await control.controllerStep(f.env,await migration.readMigration(f.archive,f.id),f.hooks);
   state=await migration.readMigration(f.archive,f.id);
   assert.equal(state.phase,'replaying');assert.equal(state.cutover.target_active,true);assert.equal(f.selected,true);assert.equal(f.released,false);
+  assert.equal((await f.admin.query(`INSERT INTO ${f.schema}.demand(key,at) VALUES('after-recovery',1) RETURNING rowid::text`)).rows[0].rowid,'5501','lost activation response never resets an active sequence');
   const job=(await f.admin.query(`SELECT due::text,attempt::text,generation::text,lease_id,lease_until::text,started::text,page::text,cursor,api,etag,nested FROM ${f.schema}.jobs WHERE key='fixture'`)).rows[0];
   assert.deepEqual(job,{due:'9999999999999',attempt:'4',generation:'17',lease_id:null,lease_until:'0',started:null,page:'1',cursor:null,api:null,etag:null,nested:null});
   await assert.rejects(target.abandonTarget(f.env,state),/migration_forward_recovery_required/);

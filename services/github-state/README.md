@@ -128,6 +128,11 @@ Follow-up jobs are deduplicated once and processed in groups of at most 512,
 reading only IDs, states, membership and scheduling fields. They do not reload
 PR bodies or nested job cursors. All writes remain in the same transaction.
 
+These limits bound the inputs to each cache group, not total isolate memory.
+Decoded inventory and temporary merge/serialization objects also consume memory.
+The publication memory fixture uses a 96 MiB Node old-space limit without forced
+garbage collection; native Worker acceptance remains a separate check.
+
 For an isolate-reset investigation, temporarily set `RECONCILIATION_TRACE` to
 `"true"`. Background alarm and publication stage logs contain only the backend,
 operation, page number, and start timestamp. They exclude query arguments, keys,
