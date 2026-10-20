@@ -2195,8 +2195,10 @@ export class RepositoryState extends DurableObject<Env> {
       // SQL reads down. An admin retry can reload the barrier after recovery.
       if(this.migrationUnavailable) {
         this.migrationState=await readMigration(this.env.ARCHIVE,repo);
-        this.migrationUnavailable=false;await this.selectMigrationBackend();state=this.migrationState;
+        this.migrationUnavailable=false;
         if(this.store.backend==='sqlite' && this.localMeta('backend_owner')?.backend==='migration')this.startup(true);
+        try{await this.selectMigrationBackend();}catch(error){this.migrationUnavailable=true;throw error;}
+        state=this.migrationState;
       }
       if(input.operation==='status') {state=await readMigration(this.env.ARCHIVE,repo);return json(publicReceipt(state));}
       if(input.operation==='start' || state?.cutover && !['preflight'].includes(input.operation)) return await this.cutover(input,state,repo);

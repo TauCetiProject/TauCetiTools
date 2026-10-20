@@ -1125,7 +1125,7 @@ test('native source fences survive fresh constructors and recovered control reva
   await state.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?)','pr:{"number":7}','pr','{"number":7}',1,Date.now(),await state.revision(),null);
   const generation='c707ddba-076d-4a63-8696-96533031ce88',checkpoint={version:1,generation,repository:'100',target:'test-target',source:{object:'fixture',deployment:'test-deployment',schema:5},phase:'switching',created:Date.now(),updated:Date.now(),tables:{},failure:null,staging:{after:null,page:'1',checked:0,complete:false,expired_jobs:0,expired_hash:'0'.repeat(64)},blobs:{prefix:0,pages:0,objects:0,hash:'0'.repeat(64),complete:false},cutover:{environment:'test',lease_until:Date.now()+900000,epoch:0,source_fenced:false,target_active:false,import:{},verify:{},acceptance:''}};
   await state.fenceMigration(checkpoint);checkpoint.cutover.source_fenced=true;
-  for(const fault of [false,true])for(const unavailable of [false,true])for(const adminRetry of [false,true]){
+  for(const fault of [false,true])for(const unavailable of [false,true])for(const adminRetry of [false,true])for(const activated of [false,true]){
    await archive.put('control/100/migration.json',JSON.stringify(checkpoint));
    if(unavailable)archive.failures.push((op,key)=>op==='get' && key==='control/100/migration.json');
    const reset=repositoryFixture({MIGRATION_ENVIRONMENT:'test',FAULT_INJECTION:fault?'true':undefined},1,db,archive);await reset.ready;
@@ -1133,7 +1133,7 @@ test('native source fences survive fresh constructors and recovered control reva
    await assert.rejects(reset.state.setMeta('forbidden',true),/migration_frozen|generation fenced/);
    assert.throws(()=>db.prepare("INSERT INTO demand VALUES('native-trigger',1)").run(),/generation fenced/);
    if(unavailable){
-    await archive.put('control/100/migration.json',JSON.stringify({...checkpoint,generation:'c707ddba-076d-4a63-8696-96533031ce89'}));
+    await archive.put('control/100/migration.json',JSON.stringify({...checkpoint,generation:'c707ddba-076d-4a63-8696-96533031ce89',cutover:{...checkpoint.cutover,target_active:activated}}));
     if(adminRetry)await reset.state.fetch(new Request('https://internal/migration',{method:'POST',body:JSON.stringify({operation:'status'})}));
     else await reset.state.retryMigrationControl();
     assert.equal((await queryFixture(reset.state,{operation:'pr',args:{number:7}})).error,'backend_fenced','recovered control rechecks previously current fallback');
