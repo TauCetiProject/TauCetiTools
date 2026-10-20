@@ -38,6 +38,7 @@ class ProjectTests(unittest.TestCase):
             (Path(tmp) / "tauceti.toml").touch()
             subprocess.run(["git", "init", "-q", str(root)], check=True)
             subprocess.run(["git", "-C", str(root), "-c", "user.name=Test", "-c", "user.email=test@example.com",
+                            "-c", "commit.gpgsign=false", "-c", "core.hooksPath=" + os.devnull,
                             "commit", "-qm", "Initial", "--allow-empty"], check=True)
             subdirectory = root / "src"
             subdirectory.mkdir()

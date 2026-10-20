@@ -13,7 +13,7 @@ import tempfile
 from functools import lru_cache
 from pathlib import Path
 
-from .project import CANONICAL, Project, bootstrap
+from .project import CANONICAL, Project, bootstrap, checkout_root
 
 HERE = Path(__file__).resolve().parent
 ASSETS = HERE / "assets"
@@ -115,20 +115,19 @@ def run_script(name: str, args: list[str], project: Project | None = None) -> in
         raise ValueError(f"No shared script named {name}")
     if project is None:
         project = bootstrap([])
-    if project is None and (Path.cwd() / "tauceti.toml").is_file():
-        project = bootstrap(["--conf", str(Path.cwd() / "tauceti.toml")])
     if project is None:
         # Legacy Tau Ceti operation needs no new configuration.
         executable = source
     else:
+        root = checkout_root()
         destination = Path(tempfile.mkdtemp(prefix="tauceti-scripts-"))
-        materialize(project, destination, policy_dir=Path.cwd() / "scripts")
+        materialize(project, destination, policy_dir=root / "scripts")
         executable = destination / name
     command = ["python3", str(executable)] if executable.suffix == ".py" else ["bash", str(executable)]
     try:
         env = dict(os.environ)
         if project is not None:
-            env.update(TAUCETI_PROJECT_ROOT=str(Path.cwd()), TAUCETI_TRUSTED_SCRIPTS=str(executable.parent))
+            env.update(TAUCETI_PROJECT_ROOT=str(root), TAUCETI_TRUSTED_SCRIPTS=str(executable.parent))
         return subprocess.call([*command, *args], env=env)
     finally:
         if project is not None:
@@ -138,14 +137,10 @@ def run_script(name: str, args: list[str], project: Project | None = None) -> in
 @lru_cache(maxsize=1)
 def shared_import_directory() -> Path:
     project = bootstrap([])
-    if project is None and (Path.cwd() / "tauceti.toml").is_file():
-        from .project import load
-
-        project = load(str(Path.cwd() / "tauceti.toml"))
     if project is None:
         return ASSETS / "scripts"
     directory = Path(tempfile.mkdtemp(prefix="tauceti-imports-"))
-    materialize(project, directory, policy_dir=Path.cwd() / "scripts")
+    materialize(project, directory, policy_dir=checkout_root() / "scripts")
     return directory
 
 

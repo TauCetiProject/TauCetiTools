@@ -335,6 +335,15 @@ def conf_argument(argv: list[str]) -> tuple[str | None, list[str]]:
     return selected, remaining
 
 
+def checkout_root() -> Path:
+    """Use this Git checkout's root, or the current directory outside Git."""
+    try:
+        git = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    except OSError:
+        return Path.cwd()
+    return Path(git.stdout.rstrip("\n")) if git.returncode == 0 else Path.cwd()
+
+
 def configuration_source(explicit: str | None = None) -> str | None:
     """Explicit settings win; otherwise use the current directory or Git root."""
     selected = explicit or os.environ.get("TAUCETI_CONF")
@@ -343,13 +352,7 @@ def configuration_source(explicit: str | None = None) -> str | None:
     local = Path.cwd() / "tauceti.toml"
     if local.is_file():
         return str(local)
-    try:
-        git = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
-    except OSError:
-        return None
-    if git.returncode:
-        return None
-    root = Path(git.stdout.rstrip("\n")) / "tauceti.toml"
+    root = checkout_root() / "tauceti.toml"
     return str(root) if root.is_file() else None
 
 
