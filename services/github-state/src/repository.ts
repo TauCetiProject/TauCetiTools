@@ -97,6 +97,12 @@ export class RepositoryState extends DurableObject<Env> {
   private migrationFlight: Promise<unknown> = Promise.resolve();
   migrationHeld(): boolean { return this.migrationUnavailable || blocksWrites(this.migrationState); }
   private repairsHeld():boolean {return this.migrationUnavailable || blocksRepairs(this.migrationState);}
+  private traceRepair(stage:string,job?:any):void {
+    if(this.env.RECONCILIATION_TRACE!=='true')return;
+    // Whitelist metadata: never log queries, keys, cursor values, response
+    // bodies, exceptions or credentials when investigating an isolate reset.
+    log('repository_repair_trace',{stage,backend:this.store.backend,...(job?{operation:JSON.parse(job.query).operation,page:job.page,started:job.started ?? null}:{} )});
+  }
   private backendGeneration():string {return this.selectedMigrationGeneration ?? this.env.REPOSITORY_GENERATION ?? 'sqlite-v1';}
   private logged=new Map<string,number>();
   constructor(ctx: DurableObjectState, env: Env) {
@@ -1049,6 +1055,7 @@ export class RepositoryState extends DurableObject<Env> {
     }
     const response=supplied?null:await stub(this.env.INSTALLATIONS,repo.installation).fetch('https://internal/read',{method:'POST',headers:{'x-request-id':crypto.randomUUID()},body:JSON.stringify({repository:repo,query:upstream,cursor:job.cursor,page:job.page,api:job.api,nested,etag:job.page===1 && !job.nested && q.operation!=='workflow_runs'?job.etag:undefined})});
     const result:any=supplied || await response!.json();
+    this.traceRepair('refresh_response',job);
     const objects=new Map<string,string>(),encodings=new Map<string,string>();
     const prefix=`staging/${repo.id}/${encodeURIComponent(job.key)}/${started}/`;
     const publish=(!response || response.ok) && !result.continuation && !result.restart && !result.deferred && !result.unavailable && !result.error && !result.unchanged && result.data!==undefined;
@@ -1057,6 +1064,7 @@ export class RepositoryState extends DurableObject<Env> {
     // Checkpointed pages are immutable. Load them before taking the publication
     // lock; the lease is checked again inside the transaction before use.
     if(publish && !preparedNext){
+      this.traceRepair('publication_load_pages',job);
       const pages=Array.from({length:Math.max(0,(job.page || 1)-1)},(_,i)=>i+1);
       for(let offset=0;offset<pages.length;offset+=8)await Promise.all(pages.slice(offset,offset+8).map(async page=>{const object=await this.env.ARCHIVE.get(stagedPageKey(checkpoint,prefix+page,started,page));if(!object)throw Error('staging page missing');objects.set(prefix+page,await object.text());}));
     }
@@ -1067,6 +1075,7 @@ export class RepositoryState extends DurableObject<Env> {
       for(const value of values){const body=JSON.stringify(value);if(new TextEncoder().encode(body).length>=1500000)encodings.set('resource:'+body,await this.encode(value));}
     }
     if(result.continuation){const text=JSON.stringify(result.continuation);if(new TextEncoder().encode(text).length>=1500000)encodings.set('staging:'+text,await this.encode(result.continuation,Date.now()+86400000));}
+    this.traceRepair('refresh_transaction',job);
     try {return await this.atomic(state=>{
       state.preparedEncodings=encodings;
       const archive=state.env.ARCHIVE;
@@ -1124,11 +1133,13 @@ export class RepositoryState extends DurableObject<Env> {
       await this.store.exec('UPDATE jobs SET cursor=?,page=page+1,api=?,due=?,etag=? WHERE key=?',next,result.api,Date.now(),result.etag || job.etag,job.key); return;
     }
     const rows:any[]=[]; let scalar:any;
+    this.traceRepair('publication_decode_pages',job);
     for (let page=1;page<=job.page;page++) {
       const object=await this.env.ARCHIVE.get(`staging/${repo.id}/${encodeURIComponent(job.key)}/${started}/${page}`);
       if (!object) throw new Error('staging page missing');
       const data:any=await object.json(); if (Array.isArray(data)) rows.push(...data); else scalar=data;
     }
+    this.traceRepair('publication_rows',job);
     if(this.store.backend==='postgres')await this.primePublication(q,rows);
     const kind=this.kind(q), memberIDs=new Set<string>(), acceptedIDs=new Set<string>();
     const changedNumbers=new Set<number>(), changedHeads=new Set<number>();
@@ -1219,6 +1230,7 @@ export class RepositoryState extends DurableObject<Env> {
     }
     await this.enqueueMany(repairs);
     await this.setMeta('last_repair',Date.now());
+    this.traceRepair('publication_complete',job);
   }
   // Expiry only deletes, which still succeeds at the storage limit. It runs
   // before repair, hydration or snapshots, any of which can fail first.
@@ -1568,6 +1580,7 @@ export class RepositoryState extends DurableObject<Env> {
     await this.setMeta('last_upstream_failure',{at:Date.now(),operation:JSON.parse(job.query).operation,category});
   }
   async dispatch(first:any): Promise<void> {
+    this.traceRepair('dispatch',first);
     const q:Query=JSON.parse(first.query),operation=q.operation,repo=(await this.meta('repository'));
     let jobs=[first];
     try {
@@ -1603,6 +1616,7 @@ export class RepositoryState extends DurableObject<Env> {
       for(const item of jobs) await this.retryJob(item,error);
     } finally {
       for(const item of jobs) await this.store.exec('UPDATE jobs SET lease_id=NULL,lease_until=0 WHERE key=? AND lease_id=?',item.key,item.lease_id);
+      this.traceRepair('dispatch_complete',first);
     }
   }
   async alarm(): Promise<void> {
@@ -1619,7 +1633,9 @@ export class RepositoryState extends DurableObject<Env> {
   async runAlarm(): Promise<void> {
     const options=settings(this.env),began=Date.now();let dispatched=0,retired=0;
     try {
+      this.traceRepair('expire');
       await this.expire();
+      this.traceRepair('select_jobs');
       if(this.schema!=='current' && !this.degraded) this.startup();
       // Every dispatch writes its lease before any GitHub request, so a full
       // store stops here without spending upstream quota.
@@ -1637,6 +1653,7 @@ export class RepositoryState extends DurableObject<Env> {
           await Promise.allSettled(wave);
         }
       } catch(error) {this.noteFailure('repair_dispatch',error);}
+      this.traceRepair('maintenance');
       try {if(!this.migrationHeld()) await this.maintenance();} catch(error) {this.noteFailure('maintenance',error);}
     } finally {
       try {
@@ -1645,7 +1662,9 @@ export class RepositoryState extends DurableObject<Env> {
         // keeps expiring rows until a probe restores writes.
         if (row.due && !this.degraded && !this.migrationHeld()) await this.setAlarm(Math.max(Date.now()+100,row.due));
       } catch(error) {this.noteFailure('alarm',error);}
+      this.traceRepair('storage_maintenance');
       this.startStorageMaintenance();
+      this.traceRepair('alarm_complete');
     }
   }
   async refreshActivityLandings(): Promise<void> {

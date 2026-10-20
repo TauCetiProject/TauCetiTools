@@ -118,6 +118,12 @@ background reads only. Health includes lane eligibility, oldest requested age,
 repair arrivals/completions/cancellations, wait reasons, requested latency p95,
 and measured cost/latency by query shape and batch size.
 
+For an isolate-reset investigation, temporarily set `RECONCILIATION_TRACE` to
+`"true"`. Background alarm and publication stage logs contain only the backend,
+operation, page number, and start timestamp. They exclude query arguments, keys,
+cursors, credentials, and payloads. Tracing is disabled by default; remove the
+variable after collecting the diagnostic trace.
+
 ## Client behavior
 
 Clients request the newest available service data, including conditional reads.

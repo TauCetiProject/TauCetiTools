@@ -402,3 +402,31 @@ test('whole-batch malformed responses retain the upstream trace and scheduler ba
   assert.equal((await state.meta('last_upstream_failure')).request_id,'batch-trace');
  }finally {await db.close();}
 });
+
+test('opt-in alarm traces identify publication stages without exposing input',async()=>{
+ const {state,db,env}=await fixture(),messages=[],original=console.log;
+ console.log=(...args)=>messages.push(args.join(' '));
+ try {
+  await state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
+  const q={repository:'org/repo',operation:'files',args:{number:7}},key='files:{"number":7}';
+  await state.enqueue(q);
+  const job=await db.prepare('SELECT * FROM jobs WHERE key=?').get(key);
+  const result={api:'core',data:[{filename:'private-file-name',patch:'private-payload-marker'}]};
+  await state.refresh(job,result);
+  assert.equal(messages.length,0,'ordinary operation has no trace logging');
+  env.RECONCILIATION_TRACE='true';
+  await state.refresh(job,result);
+  state.expire=async()=>({});state.nextJob=async()=>undefined;
+  state.maintenance=async()=>{};state.startStorageMaintenance=()=>{};
+  await state.runAlarm();
+  const trace=messages.map(message=>JSON.parse(message));
+  for(const stage of ['refresh_response','publication_load_pages','refresh_transaction','publication_decode_pages','publication_rows','publication_complete','expire','select_jobs','maintenance','storage_maintenance','alarm_complete'])
+   assert.ok(trace.some(entry=>entry.stage===stage),stage);
+  for(const entry of trace){
+   assert.equal(entry.event,'repository_repair_trace');
+   assert.ok(Object.keys(entry).every(key=>['event','stage','backend','operation','page','started'].includes(key)));
+  }
+  assert.equal(messages.join('').includes('private-'),false);
+  assert.equal(messages.join('').includes('number'),false);
+ }finally{console.log=original;await db.close();}
+});
