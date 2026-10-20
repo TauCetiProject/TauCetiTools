@@ -217,6 +217,7 @@ export class InstallationScheduler extends DurableObject<Env> {
       try {data=extract(recipe,result.body);}catch(error) {
         if(error instanceof Error && error.message==='labels overflow') {
           if(input.api) {const alternative=this.alternate(input);if(alternative)return json(alternative);}
+          if(candidates.some(r=>r.api==='core') && !available.some(r=>r.api==='core')) {const wait=this.deferral('core',1);if(wait)return json(wait);}
           continue;
         }
         return json(this.unavailableResponse(input,input.query.operation,recipe.api,error));
@@ -422,7 +423,9 @@ export class InstallationScheduler extends DurableObject<Env> {
       return json({error:'not_found'},404);
     } catch (error) {
       if (error instanceof QuotaDeferred) return json(error.result);
-      console.error('installation operation failed',error instanceof Error?error.message:'unknown'); return json({unavailable:true,reason:error instanceof Error && error.message==='malformed_upstream_response'?'malformed_upstream_response':classify(error),request_id:requestId(req),...(error instanceof Error && error.message==='malformed_upstream_response'?{}:{retry_at:Date.now()+60000})},503);
+      const reason=error instanceof Error && error.message==='malformed_upstream_response'?'malformed_upstream_response':classify(error),request_id=requestId(req);
+      try {log('installation_operation_failed',{reason,request_id});}catch {}
+      return json({unavailable:true,reason,request_id,...(reason==='malformed_upstream_response'?{}:{retry_at:Date.now()+60000})},503);
     }
   }
 }

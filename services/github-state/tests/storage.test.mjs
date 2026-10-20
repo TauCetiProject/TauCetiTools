@@ -9,7 +9,7 @@ import {runtime,repository,response,send} from './runtime.mjs';
 // A mirror with a two-page open inventory and complete histories for PR 1,
 // served by a fake GitHub that counts every upstream request.
 const count=150,head='a'.repeat(40);
-const prs=Array.from({length:count},(_,i)=>({number:i+1,title:'PR '+(i+1),body:'x'.repeat(12000),state:'OPEN',isDraft:false,mergeable:'MERGEABLE',updatedAt:'2026-10-12T00:00:00Z',headRefOid:head,headRefName:'feature',author:{login:'peer',__typename:'User'},labels:{nodes:[]}}));
+const prs=Array.from({length:count},(_,i)=>({number:i+1,title:'PR '+(i+1),body:'x'.repeat(12000),state:'OPEN',isDraft:false,mergeable:'MERGEABLE',updatedAt:'2026-10-12T00:00:00Z',headRefOid:head,headRefName:'feature',author:{login:'peer',__typename:'User'},labels:{totalCount:0,nodes:[]}}));
 const network={count:0};
 async function github(req,u){
  network.count++;

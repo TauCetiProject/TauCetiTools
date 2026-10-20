@@ -341,3 +341,16 @@ test('malformed upstream state retains coverage and backs off with a traceable r
   assert.equal(db.prepare('SELECT COUNT(*) n FROM collections WHERE complete=1').get().n,0);
  }finally {db.close();}
 });
+
+test('whole-batch malformed responses retain the upstream trace and scheduler backoff',async()=>{
+ const {state,db,env}=fixture();try {
+  state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
+  env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json({unavailable:true,reason:'malformed_upstream_response',request_id:'batch-trace'},{status:503})})};
+  for(const number of [7,8])await state.enqueue({repository:'org/repo',operation:'issue_comments',args:{number}});
+  await state.dispatch(state.claim(state.nextJob()));
+  for(const row of db.prepare('SELECT attempt,wait_reason,due FROM jobs').all()) {
+   assert.equal(row.wait_reason,'malformed_upstream_response');assert.equal(row.attempt,1);assert.ok(row.due>=Date.now()+59000);
+  }
+  assert.equal(state.meta('last_upstream_failure').request_id,'batch-trace');
+ }finally {db.close();}
+});

@@ -841,10 +841,6 @@ export class RepositoryState extends DurableObject<Env> {
       this.sql.exec('UPDATE jobs SET started=NULL,cursor=NULL,page=1,api=?,etag=NULL,due=? WHERE key=?',result.api,Date.now(),job.key);
       return;
     }
-    if (result.overflow) {
-      this.sql.exec('UPDATE jobs SET started=NULL,cursor=NULL,page=1,api=?,due=? WHERE key=?','graphql',Date.now(),job.key);
-      return;
-    }
     if (response && !response.ok || result.deferred || result.unavailable) {
       const capacity=result.category==='capacity';
       if(q.operation==='review_comments' && result.deferred && String(result.category).startsWith('primary')) {
@@ -1072,7 +1068,7 @@ export class RepositoryState extends DurableObject<Env> {
     if(this.migrationHeld())return;
     try {
       const text=JSON.stringify({version:1,classes:this.retentionState,ci_after:this.ciAfter});
-      if(this.storageLoaded && text!==this.checkpointText && Date.now()-this.checkpointAt>=30000) {
+      if(this.storageLoaded && this.retentionProgressLoaded && text!==this.checkpointText && Date.now()-this.checkpointAt>=30000) {
         await this.ctx.storage.sync();
         await this.maintenanceArchive.put('control/'+repo+'/retention-checkpoint.json',text);
         this.checkpointAt=Date.now();this.checkpointText=text;
@@ -1158,7 +1154,7 @@ export class RepositoryState extends DurableObject<Env> {
   }
   async archiveCI(enforce=true): Promise<void> {
     if(this.migrationHeld())return;
-    const began=Date.now(),cutoff=began-7*86400000;
+    const began=Date.now(),cutoff=began-7*86400000,observedGeneration=this.policyGeneration;
     const candidates=this.sql.exec<any>('SELECT rowid rid,kind,id,observed,length(CAST(data AS BLOB)) bytes FROM resources WHERE rowid>? ORDER BY rowid LIMIT 100',this.ciAfter).toArray();
     let bytes=0,archived=0,eligible=0;
     for(const row of candidates) {
@@ -1179,7 +1175,7 @@ export class RepositoryState extends DurableObject<Env> {
           const stored=await this.maintenanceArchive.get(key);
           if(!stored || await digest(await stored.text())!==hash)throw new Error('archive_verification_failed');
           // Preserve the inline field used by legacy attempt membership guards.
-          if(this.migrationHeld())return;
+          if(this.migrationHeld() || observedGeneration!==this.policyGeneration)return;
           const pointer=JSON.stringify({$r2:key,...(row.kind==='workflow_jobs'?{run_attempt:data.run_attempt || 1}:{})});
           const written=this.sql.exec('UPDATE resources SET data=? WHERE rowid=? AND kind=? AND id=? AND data=?',pointer,row.rid,row.kind,row.id,before).rowsWritten;
           if(written)archived++;
@@ -1309,7 +1305,7 @@ export class RepositoryState extends DurableObject<Env> {
         } else if (result.deferred && operation!=='review_threads' && result.category!=='capacity' && !String(result.category).startsWith('secondary')) {
           // Retry REST-capable operations in their other pool on the next quantum.
           for(const item of jobs) this.sql.exec('UPDATE jobs SET api=?,due=? WHERE key=? AND lease_id=?','core',Date.now(),item.key,item.lease_id);
-        } else for(const item of jobs) await this.refresh(item,result.deferred?result:{unavailable:true,retry_at:Date.now()+60000});
+        } else for(const item of jobs) await this.refresh(item,result.deferred || result.unavailable?result:{unavailable:true,reason:'malformed_service_response'});
       } else await this.refresh(first);
     } catch(error) {
       for(const item of jobs) this.retryJob(item,error);
@@ -1432,7 +1428,7 @@ export class RepositoryState extends DurableObject<Env> {
       if(input.policy!==undefined) {
         let next:Policy;try {next=policy(input.policy);}catch {throw new AdminError('invalid_retention_policy');}
         const update=this.policyUpdateFlight.then(async()=>{
-          if(this.storageFlight)await this.storageFlight;
+          if(this.storageFlight)await this.storageFlight.catch(()=>{});
           if(this.retentionLoadFlight)await this.retentionLoadFlight;
           await this.env.ARCHIVE.put('control/'+repo+'/retention-policy.json',JSON.stringify(next));
           this.policyGeneration++;this.retentionPolicy=next;this.storageLoaded=true;

@@ -808,3 +808,33 @@ test('a retention pin acquired while listing prevents the pending R2 delete',asy
  const result=await retention.retirePrefix(archive,'raw_webhooks',now,async()=>!pinned);
  assert.ok(await archive.get('webhooks/100/old.json'));assert.equal(result.deleted,0);
 });
+
+test('checkpoint read failures preserve durable progress while cached-policy expiry still runs',async()=>{
+ const {state,archive,db}=repositoryFixture();await state.fixtureReady;
+ state.storageLoaded=false;state.retentionProgressLoaded=false;
+ const key='control/100/retention-checkpoint.json',checkpoint=JSON.stringify({version:1,classes:{},ci_after:70});
+ await archive.put(key,checkpoint);
+ for(let i=0;i<2;i++)archive.failures.push((op,name)=>op==='get' && name===key);
+ db.prepare('INSERT INTO changes VALUES(?,?,?,?,?)').run(1,Date.now()-8*86400000,'pr','1',0);
+ await state.storageMaintenance();await state.storageMaintenance();
+ assert.equal(scalar(db,'SELECT COUNT(*) FROM changes'),0,'expiry does not wait for R2 checkpoint recovery');
+ assert.equal(state.retentionProgressLoaded,false);assert.equal(await archive.get(key).then(o=>o.text()),checkpoint);
+ await state.storageMaintenance();assert.equal(state.retentionProgressLoaded,true);assert.equal(state.ciAfter,70);
+});
+
+test('an acknowledged archive-policy change fences a pending pointer publication',async()=>{
+ const {state,db,archive}=repositoryFixture();await state.fixtureReady;
+ const before=JSON.stringify({id:'7',run_attempt:1,steps:['x'.repeat(8000)]});
+ db.prepare('INSERT INTO resources VALUES(?,?,?,?,?,?,?,?)').run('workflow_jobs','7','9',before,'',Date.now()-8*86400000,5,0);
+ const put=archive.put.bind(archive);
+ archive.put=async(key,...args)=>{
+  await put(key,...args);
+  if(key.includes('/ci/')) {
+   const result=await state.fetch(new Request('https://internal/storage/retention',{method:'POST',body:JSON.stringify({policy:{mode:'dry_run',disabled:[],pinned:[],archive_ci:false}})}));
+   assert.equal(result.status,200);
+  }
+ };
+ await state.archiveCI(true);
+ assert.equal(db.prepare("SELECT data FROM resources WHERE id='7'").get().data,before);
+ assert.ok([...archive.objects.keys()].some(k=>k.includes('/ci/')),'verified upload retained for reference-safe retirement');
+});

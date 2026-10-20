@@ -69,9 +69,14 @@ export function recipes(repository: string, q: Query, cursor?: string, page = 1)
 }
 const numberIdentity=(v:any)=>typeof v==='number'?Number.isSafeInteger(v) && v>0:typeof v==='string' && /^[1-9][0-9]*$/.test(v);
 const identity=(v:any)=>typeof v==='number'?Number.isSafeInteger(v) && v>0:typeof v==='string' && v.length>0;
+function validateLabels(value:any):void {
+  if(!value || !Number.isSafeInteger(value.totalCount) || value.totalCount<0 || !Array.isArray(value.nodes) || value.nodes.some((n:any)=>!n || typeof n.name!=='string') || value.totalCount<value.nodes.length)throw new Error('malformed labels');
+  if(value.totalCount>value.nodes.length)throw new Error('labels overflow');
+}
 function validateRow(recipe:Recipe,row:any):void {
   if(!row || typeof row!=='object' || Array.isArray(row))throw new Error('malformed collection row');
   const operation=recipe.operation || '';
+  if(recipe.api==='graphql' && ['open_prs','recent_prs','pr_delta','pr','open_issues','recent_issues','issue_delta'].includes(operation))validateLabels(row.labels);
   if(['open_prs','recent_prs','pr_delta','pr'].includes(operation)) {
     if(!numberIdentity(row.number) || !['OPEN','CLOSED','MERGED','open','closed'].includes(row.state))throw new Error('malformed PR header');
   }else if(['open_issues','recent_issues','issue_delta'].includes(operation)) {
@@ -96,7 +101,6 @@ function validateScalar(recipe:Recipe,value:any):void {
   const id=(v:any)=>typeof v==='number'?Number.isSafeInteger(v) && v>0:typeof v==='string' && /^[1-9][0-9]*$/.test(v);
   if(recipe.operation==='pr') {
     validateRow(recipe,value);
-    if(recipe.api==='graphql' && value.labels && value.labels.totalCount>value.labels.nodes.length)throw new Error('labels overflow');
   }
   if(recipe.operation==='repository' && (!id(value.id) || typeof value.full_name!=='string' || !value.full_name.includes('/')))throw new Error('malformed repository header');
   if(recipe.operation==='statuses') {
@@ -116,7 +120,6 @@ export function extract(recipe: Recipe, payload: any): { rows: any; cursor?: str
       // Do not silently truncate labels or nested thread comments.
       for (const node of value.nodes) {
         validateRow(recipe,node);
-        if (node.labels && node.labels.totalCount > node.labels.nodes.length) throw new Error('labels overflow');
       }
       return {rows:value.nodes.map(recipe.normalize),cursor:value.pageInfo.hasNextPage ? value.pageInfo.endCursor : undefined};
     }

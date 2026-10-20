@@ -179,7 +179,7 @@ test('scalar GraphQL recipes declare only variables they use',async()=>{
   const declaration=payload.query.match(/^query\((.*?)\)\{/)[1];
   for(const [,name] of declaration.matchAll(/\$(\w+):/g)) assert.match(payload.query.slice(declaration.length+8),new RegExp('\\$'+name+'\\b'));
   assert.equal(Object.hasOwn(payload.variables,'cursor'),false);
-  return response({data:{rateLimit:{cost:1,remaining:4999,resetAt:new Date(Date.now()+300000).toISOString()},repository:{pullRequest:{number:7,state:'OPEN',headRefOid:'a'.repeat(40),author:{login:'peer'},labels:{nodes:[]}}}}});
+  return response({data:{rateLimit:{cost:1,remaining:4999,resetAt:new Date(Date.now()+300000).toISOString()},repository:{pullRequest:{number:7,state:'OPEN',headRefOid:'a'.repeat(40),author:{login:'peer'},labels:{totalCount:0,nodes:[]}}}}});
  });
  try{
   const ns=await mf.getDurableObjectNamespace('INSTALLATIONS'),stub=ns.get(ns.idFromName('200'));
@@ -280,7 +280,7 @@ test('batch routing preserves scarce GraphQL quota when REST can carry the whole
  let calls=0;
  const mf=await runtime(async(req,u)=>{
   calls++;
-  if(u.pathname==='/graphql') return response({data:{rateLimit:{cost:1,remaining:1,resetAt:new Date(Date.now()+300000).toISOString()},repository:{pullRequest:{number:7,author:{login:'peer'},labels:{nodes:[]}}}}},'graphql',1);
+  if(u.pathname==='/graphql') return response({data:{rateLimit:{cost:1,remaining:1,resetAt:new Date(Date.now()+300000).toISOString()},repository:{pullRequest:{number:7,author:{login:'peer'},labels:{totalCount:0,nodes:[]}}}}},'graphql',1);
   return response([],'core');
  });
  try {
@@ -419,5 +419,26 @@ test('malformed thread overflow cannot publish a partial complete history',async
   const nested={rows:[{id:'thread',comments:{nodes:[{id:'old',fullDatabaseId:'1',body:'retained'}],pageInfo:{hasNextPage:true,endCursor:'next'}}}]};
   const result=await (await send(stub,'/read',{repository,query:{operation:'review_threads',args:{number:7}},nested})).json();
   assert.equal(result.unavailable,true);assert.equal(result.reason,'upstream_identity_unavailable');assert.equal(Object.hasOwn(result,'data'),false);assert.equal(network,1);
+ }finally {await mf.dispose();}
+});
+
+test('malformed label connections stay unavailable and overflow waits for the REST quota reset',async()=>{
+ let labels,network=0;
+ const mf=await runtime(async req=>{
+  network++;
+  if(new URL(req.url).pathname!=='/graphql')return response([],'core',0);
+  return response({data:{repository:{pullRequest:{number:7,state:'OPEN',headRefOid:'head',labels}}}});
+ });
+ try {
+  const ns=await mf.getDurableObjectNamespace('INSTALLATIONS'),stub=ns.get(ns.idFromName(repository.installation));
+  const input={repository,query:{operation:'pr',args:{number:7}},api:'graphql'};
+  for(labels of [undefined,null,{nodes:[]},{totalCount:'0',nodes:[]},{totalCount:1,nodes:[null]},{totalCount:1,nodes:[{}]}]) {
+   const before=network,result=await (await send(stub,'/read',input)).json();
+   assert.equal(result.unavailable,true);assert.equal(result.reason,'malformed_upstream_response');assert.equal(Object.hasOwn(result,'data'),false);assert.equal(network-before,1);
+  }
+  await send(stub,'/read',{repository,query:{operation:'files',args:{number:7}},api:'core'});
+  labels={totalCount:101,nodes:Array.from({length:100},(_,i)=>({name:String(i)}))};
+  const before=network,result=await (await send(stub,'/read',input)).json();
+  assert.equal(result.deferred,true);assert.match(result.category,/primary/);assert.ok(result.retry_at>Date.now()+60000);assert.equal(network-before,1);
  }finally {await mf.dispose();}
 });

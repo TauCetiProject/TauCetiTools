@@ -32,9 +32,9 @@ threshold for PostgreSQL.
 | Staging pages | One day; an expired traversal restarts through the existing quota owner |
 | Demand | One day (its scheduling significance lasts five minutes); new automatic expiry starts in dry run |
 | PR headers, histories, coverage, tombstones, landing evidence | Retained; quiet or closed does not authorize deletion |
-| Workflow attempts and obsolete heads | Retain resources, attempt metadata and memberships. Retire unneeded polling jobs only when not leased, recently demanded or important/pending; preserve current attempt isolation |
+| Workflow attempts and obsolete heads | Automatic retention preserves stored attempts, head data and memberships. S0 stops mirroring checks/workflow runs/jobs and retires their polling jobs regardless of demand. Other dormant polling retains its existing guards |
 | Survey projections/inventory | Owned by their source PR/history. Retain source and coverage; rebuild through existing invalidation, never GitHub refetch for retention |
-| Bulk CI payloads | Opt-in verified R2 archival of old inline workflow-job/check/status bodies; keep indexed SQL resource/membership and workflow attempt guard fields. Workflow-run headers stay inline |
+| Bulk CI payloads | Opt-in automatic R2 archival verifies old inline workflow-job/check/status bodies and preserves the indexed SQL path. S0's explicit `ci_resources`, `ci_members`, `ci_collections`, `ci_meta` cleanup requires a verified class export before removing disabled CI records |
 | Resource spills | Retain indefinitely until a complete reference index and explicit archive-release protocol can prove retirement safe |
 | Recovery/migration exports and parked/held bodies/pointers | Pinned; normal expiry never deletes them, even with accidental expiry metadata |
 
@@ -89,7 +89,10 @@ verification before a conditional SQL pointer update; concurrent resource change
 win. Reads use the existing transparent spill decoder. No semantic revision,
 coverage, tombstone or membership is removed. Failed uploads leave inline data
 intact and are retried on the next pass. Resource rows/spill references are not
-retired by archival.
+retired by automatic archival. The separate S0 CI-class export/cleanup commands
+remain available for disabled CI data; their verified export is retained. Public
+checks/workflow queries continue to report `not_mirrored`. Commit statuses remain
+mirrored. This release does not reactivate CI polling.
 
 R2 expiry scans separate cursor, webhook, snapshot, staging, staging-spill and
 telemetry prefixes, avoiding the pinned resource/export inventory. Each pass lists
@@ -209,9 +212,21 @@ uv run python "$S" --environment test retention --mode dry_run --disable expired
 
 Expected: only the named cleanup class is disabled/pinned; stored reads and input
 application continue. Omitting `--archive-ci` disables future CI archival. To stop
-every SQL/R2 expiry class while investigating, supply `--disable` for all names in
-`RULES` and `R2_CLASSES` in `src/retention.ts`. Retain migration and parked input
-regardless of overrides. Inspect health's stale flags and failed class checkpoints;
+every SQL/R2 expiry class while investigating, use:
+
+```sh
+uv run python "$S" --environment test retention --mode dry_run \
+  --disable expired_cursors --disable expired_repair_metrics \
+  --disable expired_changes --disable expired_retired_objects \
+  --disable expired_deliveries --disable expired_demand \
+  --disable r2_cursors --disable raw_webhooks --disable daily_archives \
+  --disable staging_pages --disable telemetry_intervals \
+  --disable staging_spills --disable legacy_staging_spills
+```
+
+Expected: all thirteen SQL/R2 expiry classes disabled and `archive_ci: false`.
+This does not stop installation accounting's independent seven-day telemetry
+expiry. Retain migration and parked input regardless of overrides. Inspect health's stale flags and failed class checkpoints;
 repeated checkpoint failure is not proof of cleanup progress.
 
 For warning: verify real bytes and growth, inspect hourly estimates and cleanup lag,

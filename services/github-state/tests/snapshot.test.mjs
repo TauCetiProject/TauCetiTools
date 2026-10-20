@@ -4,7 +4,7 @@ import {runtime,repository,response,send} from './runtime.mjs';
 
 test('large inventory snapshots paginate coherently and coalesce concurrent reads',async()=>{
  const count=Number(process.env.TAUCETI_STATE_TEST_PRS || 1200), head='a'.repeat(40);
- const prs=Array.from({length:count},(_,i)=>({number:i+1,title:'PR '+(i+1),body:'body'.repeat(300),state:'OPEN',isDraft:false,mergeable:'MERGEABLE',updatedAt:'2026-10-12T00:00:00Z',headRefOid:head,author:{login:'peer',__typename:'User'},labels:{nodes:[]}}));
+ const prs=Array.from({length:count},(_,i)=>({number:i+1,title:'PR '+(i+1),body:'body'.repeat(300),state:'OPEN',isDraft:false,mergeable:'MERGEABLE',updatedAt:'2026-10-12T00:00:00Z',headRefOid:head,author:{login:'peer',__typename:'User'},labels:{totalCount:0,nodes:[]}}));
  let inventoryRequests=0;
  const mf=await runtime(async(req,u)=>{
   if(u.pathname==='/graphql'){
