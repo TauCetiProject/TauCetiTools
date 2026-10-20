@@ -1224,6 +1224,7 @@ export class RepositoryState extends DurableObject<Env> {
       try {
         this.migrationState=await readMigration(this.env.ARCHIVE,this.meta('repository').id);
         this.migrationUnavailable=false;
+        if(this.schema!=='current' && !this.migrationHeld() && !this.degraded) this.startup();
       } catch { /* Keep stored reads and the write fence until the next tick. */ }
     });
     this.migrationFlight=result.catch(()=>{});
@@ -1269,13 +1270,13 @@ export class RepositoryState extends DurableObject<Env> {
           source:{object:this.ctx.id.toString(),deployment:this.env.CF_VERSION.id,schema:SCHEMA_VERSION},
           phase:'freezing',created:Date.now(),updated:Date.now(),tables:{},failure:null,
           blobs:{prefix:0,pages:0,objects:0,hash:'0'.repeat(64),complete:false},
-          staging:{after:null,page:'1',checked:0,complete:false}};
+          staging:{after:null,page:'1',checked:0,complete:false,expired_jobs:0,expired_hash:'0'.repeat(64)}};
         // Install the in-memory barrier before yielding. Persist the barrier
         // before waiting so a restart cannot accidentally unfreeze the source.
         this.migrationState=state;
         await saveMigration(this.env.ARCHIVE,state);
       }
-      if(state.source.object!==this.ctx.id.toString() || state.source.deployment!==this.env.CF_VERSION?.id) throw new AdminError('migration_source_identity_changed');
+      if(state.source.object!==this.ctx.id.toString() || input.operation!=='abandon' && state.source.deployment!==this.env.CF_VERSION?.id) throw new AdminError('migration_source_identity_changed');
       // Always reload the durable checkpoint: an interrupted operation may
       // have changed its local object without committing that checkpoint.
       // If the very first barrier upload failed before commit, the in-memory
@@ -1286,6 +1287,8 @@ export class RepositoryState extends DurableObject<Env> {
         checkpoint=await readMigration(this.env.ARCHIVE,repo);
       }
       if(!checkpoint) throw new AdminError('migration_checkpoint_unavailable');
+      if(checkpoint.generation!==id || checkpoint.target!==target) throw new AdminError('migration_identity_conflict');
+      if(checkpoint.source.object!==this.ctx.id.toString() || input.operation!=='abandon' && checkpoint.source.deployment!==this.env.CF_VERSION?.id) throw new AdminError('migration_source_identity_changed');
       state=checkpoint;
       this.migrationState=state;
       state.failure=null;

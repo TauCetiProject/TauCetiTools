@@ -4,6 +4,7 @@ import {createHash} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
 import {build} from 'esbuild';
 import {runtime} from './runtime.mjs';
+import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
 
 const shim={name:'fixture',setup(b){b.onResolve({filter:/^cloudflare:workers$/},()=>({path:'context',namespace:'fixture'}));b.onLoad({filter:/.*/,namespace:'fixture'},()=>({contents:'export class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}}',loader:'js'}));}};
 const load=async entry=>import('data:text/javascript;base64,'+Buffer.from((await build({entryPoints:[entry],bundle:true,platform:'node',format:'esm',write:false,plugins:[shim]})).outputFiles[0].text).toString('base64'));
@@ -304,14 +305,17 @@ test('noninitial export statements seek directly into the rowid index',async()=>
  }
 });
 
-test('verification requires each partially collected job staging page',async()=>{
+test('expired staging records an importer recovery requirement without mutating source jobs',async()=>{
  const f=await fixture();await fill(f);await f.command('freeze');
  f.archive.objects.delete('staging/100/fixture/12345/2');
- let failed;
- for(let n=0;n<200;n++){failed=await f.command('step');if(failed.status!==200)break;}
- assert.equal(failed.body.error,'migration_staging_blob_missing');
- await f.archive.put('staging/100/fixture/12345/2','[]');
- const result=await finish(f);assert.equal(result.staging.checked,2);
+ const before=f.db.prepare('SELECT * FROM jobs').get();
+ const result=await finish(f);assert.equal(result.staging.checked,1);assert.equal(result.staging.expired_jobs,1);
+ assert.deepEqual(f.db.prepare('SELECT * FROM jobs').get(),before);
+ const key=[...f.archive.objects.keys()].find(k=>k.includes('/expired-staging/'));
+ const receipt=JSON.parse(f.archive.objects.get(key).text);
+ assert.equal(receipt.reason,'staging_expired');
+ assert.equal(receipt.required_import_action,'reset_pagination_preserve_cooldown_and_generation');
+ assert.equal(receipt.first_missing_page,'2');
 });
 
 test('production startup and ingress do not depend on test migration control reads',async()=>{
@@ -373,4 +377,67 @@ test('a planned source freeze retains degraded stored reads with their original 
  await f.command('freeze');
  const result=await (await f.request('/query',query)).json();
  assert.equal(result.status,'ok');assert.equal(result.observed_at,123456);assert.equal(result.verified_at,123456);
+});
+
+
+test('a new deployment can abandon the same source object while export remains fenced',async()=>{
+ let f=await fixture();await fill(f);await f.command('freeze');await f.command('step');
+ f=await fixture(f.db,f.archive,{CF_VERSION:{id:'new-deployment'}});
+ assert.equal((await f.command('step')).body.error,'migration_source_identity_changed');
+ assert.equal((await f.command('abandon')).body.phase,'abandoned');
+ assert.notEqual((await f.request('/repair',{})).status,503);
+ assert.ok([...f.archive.objects.keys()].some(k=>k.includes('/activity_landings/')));
+ assert.ok(f.archive.objects.has('migrations/100/'+generation+'/abandoned.json'));
+});
+
+test('a failed new intent cannot abandon an older generation loaded from R2',async()=>{
+ const f=await fixture(),old='c707ddba-076d-4a63-8696-96533031ce89';
+ await f.command('freeze',{generation:old});await f.command('abandon',{generation:old});
+ let failed=false;
+ const get=f.archive.get.bind(f.archive);
+ f.archive.get=async key=>{if(failed && key==='control/100/migration.json'){failed=false;throw new Error('R2 unavailable');}return get(key);};
+ f.archive.fail((op,key,when)=>{if(op==='put' && key==='control/100/migration.json' && when==='before'){failed=true;return true;}return false;});
+ assert.equal((await f.command('freeze')).status,503);
+ assert.equal((await f.command('abandon')).body.error,'migration_identity_conflict');
+ assert.equal(f.archive.objects.has('migrations/100/'+generation+'/abandoned.json'),false);
+});
+
+test('legacy initialization resumes automatically after control reads recover',async()=>{
+ let f=await fixture();f.db.exec("DELETE FROM meta WHERE key='schema_version'");
+ f.archive.fail((op,key)=>op==='get' && key==='control/100/migration.json');
+ f=await fixture(f.db,f.archive);
+ assert.equal(f.state.schema,'legacy');
+ assert.equal((await f.request('/tick',{})).status,200);
+ assert.equal(f.state.schema,'current');assert.equal(f.state.meta('schema_version'),4);
+});
+
+
+test('workerd SQLite REAL encoding matches the archive round-trip contract',async()=>{
+ const source=`
+ import {DurableObject} from 'cloudflare:workers';
+ import {sourceRows,schema} from './src/migration';
+ export class Scalars extends DurableObject {
+  async fetch(){
+   const sql=this.ctx.storage.sql;
+   sql.exec('CREATE TABLE scalar_values(value)');
+   for(const literal of ['0.1','5e-324','9e999','-9e999','-0.0','1.0','3.141592653589793','1.7976931348623157e308'])sql.exec('INSERT INTO scalar_values VALUES('+literal+')');
+   const rows=sourceRows(sql,'scalar_values',schema(sql,'scalar_values'),null,100);
+   const original=sql.exec('SELECT value FROM scalar_values ORDER BY rowid').toArray();
+   for(let i=0;i<rows.length;i++){
+    const text=rows[i][1][1],decoded=text==='Inf'?Infinity:text==='-Inf'?-Infinity:Number(text);
+    if(decoded!==original[i].value)throw new Error('REAL did not round-trip');
+   }
+   return Response.json({rows});
+  }
+ }
+ export default {fetch(req,env){return env.SCALARS.get(env.SCALARS.idFromName('values')).fetch(req);}};
+ `;
+ const built=await build({stdin:{contents:source,resolveDir:process.cwd(),loader:'ts'},bundle:true,format:'esm',write:false,external:['cloudflare:workers']});
+ const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:built.outputFiles[0].text,compatibilityDate:'2026-10-11',durableObjects:{SCALARS:{className:'Scalars',useSQLite:true}}}));
+ try{
+  const response=await mf.dispatchFetch('https://fixture/');assert.equal(response.status,200);
+  const {rows}=await response.json();
+  assert.deepEqual(rows[2][1],['real','Inf']);assert.deepEqual(rows[3][1],['real','-Inf']);
+  assert.deepEqual(rows[4][1],['real','0.0']);assert.deepEqual(rows[5][1],['real','1.0']);
+ }finally{await mf.dispose();}
 });

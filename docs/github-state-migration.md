@@ -41,7 +41,9 @@ is mandatory. Each resume performs bounded steps and prints sanitized checkpoint
 repeat it until `source_verified`. A failure returns a fixed, sanitized reason
 code and retains the last committed checkpoint. Retry with the same generation and target.
 A deployment identity change rejects further export work and keeps the source
-fenced; do not remove the marker to bypass this check.
+fenced. The explicit abandonment command may release the same source object
+from a newer deployment; the generation and target must still match. Do not
+remove the control marker to bypass the identity check.
 
 The private R2 control record is `control/<repository ID>/migration.json`. It records
 generation, source DO/deployment/schema identity, intended target, phase,
@@ -99,7 +101,13 @@ Verification rereads each page and compares its typed rows against the still-fro
 source. It checks schema, revision, counts, hash continuity and explicit `$r2`
 reference reachability. Bounded R2 listing inventories resource, cursor and staging
 prefixes, including short list pages. Implicit staging references from partial job key/start/page checkpoints are
-checked with at most 100 HEAD requests per step. Missing pages stop verification. Inventory records preserve key, size, etag and
+checked with at most 100 HEAD requests per step. Already-expired partial-job
+pages are recorded in a hashed `expired-staging/<rowid>.json` manifest and counted
+in the source receipt. These recoverable scheduler exceptions leave the exact
+SQL archive unchanged. The importer must reset only that obsolete pagination
+checkpoint while preserving the job cooldown, priority and generation, matching
+S0 recovery; it must not publish a complete collection or seed new inventory.
+Missing explicit resource or cursor spill references still stop verification. Inventory records preserve key, size, etag and
 original expiry. A retained `receipt.json` records the verified source archive.
 SQL data is frozen at the bookmark. Stored reads can create additional R2
 continuation pages, so the R2 listing is an inventory over its scan period rather

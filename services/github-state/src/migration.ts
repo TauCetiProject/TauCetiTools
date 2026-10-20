@@ -21,7 +21,7 @@ export interface Migration {
   phase: 'freezing' | 'exporting' | 'verifying' | 'source_verified' | 'abandoned';
   created: number; updated: number; bookmark?: string; revision?: string;
   tables: Record<string, TableState>; failure: string | null;
-  staging: { after: string | null; page: string; checked: number; complete: boolean };
+  staging: { after: string | null; page: string; checked: number; complete: boolean; expired_jobs: number; expired_hash: string };
   blobs: { prefix: number; cursor?: string; pages: number; objects: number; hash: string; complete: boolean };
 }
 const fresh = (): Checkpoint => ({ after: null, rows: 0, hash: ZERO, pages: 0 });
@@ -180,7 +180,18 @@ async function stagingStep(bucket: R2Bucket, sql: SqlStorage, state: Migration):
     let page=BigInt(check.page);
     for(let n=0;page<BigInt(next) && n<100;n++,page++) {
       const key=`staging/${state.repository}/${encodeURIComponent(value('key')!)}/${started}/${page}`;
-      if(!await bucket.head(key)) throw new AdminError('migration_staging_blob_missing');
+      if(!await bucket.head(key)) {
+        // S0 already resets pagination when a partial staging page expires.
+        // Preserve the exact SQL export and cooldown/generation, but record
+        // that this execution checkpoint cannot resume from its old page.
+        const text=JSON.stringify({rowid:row[0],key:value('key'),started,next_page:next,first_missing_page:String(page),
+          reason:'staging_expired',required_import_action:'reset_pagination_preserve_cooldown_and_generation'});
+        const sha256=await digest(text);
+        await bucket.put(`${archiveKey(state.repository,state.generation)}/expired-staging/${row[0]}.json`,text,{sha256,customMetadata:{sha256}});
+        check.expired_hash=await digest(check.expired_hash+'\n'+sha256);check.expired_jobs++;
+        check.after=row[0];check.page='1';
+        await saveMigration(bucket,state);return;
+      }
       check.checked++;
     }
     check.page=String(page);
