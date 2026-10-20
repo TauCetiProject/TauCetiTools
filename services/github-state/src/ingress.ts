@@ -112,7 +112,7 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
   return { replayed, failed, remaining: Boolean(stopped) || page.truncated || replayed < page.objects.length, ...(stopped ? { stopped } : {}) };
 }
 
-export async function backlog(env: Env, repo: Repository): Promise<any> {
+export async function backlog(env: Env, repo: Repository, maxPages = 100): Promise<any> {
   const count = async (prefix: string) => {
     let cursor: string | undefined, total = 0, oldest: string | undefined, pages = 0;
     do {
@@ -120,7 +120,7 @@ export async function backlog(env: Env, repo: Repository): Promise<any> {
       total += page.objects.length; oldest ||= page.objects[0]?.key;
       cursor = page.truncated ? page.cursor : undefined;
     // R2 pages can be short; bound by pages, not by an assumed page size.
-    } while (cursor && ++pages < 100);
+    } while (cursor && ++pages < maxPages);
     const received = oldest ? Number(oldest.slice(prefix.length, prefix.length + 15)) : null;
     return { count: total, truncated: Boolean(cursor), oldest_received: received };
   };

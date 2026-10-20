@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "started": "2026-10-20T04:01:55.168Z",
+  "finished": "2026-10-20T04:02:00.952Z",
+  "revision": "ae86606605b62071a08ee74b8a9f62e6ede25311",
+  "workspace_sha256": "a2dd643bee167a929b4081514ed25e4dabb9497ceead614189620edfd5a6cb03",
+  "environment": "local_fault_fixtures",
+  "exit_status": 0,
+  "passed": 59,
+  "failed": 0,
+  "transcript_sha256": "910b9098087af6c0fd5f2d4b088b87e3b0c0a5a0137231755e7f251efcd95aa3",
+  "scenarios": [
+    "full SQLite and cold restart",
+    "durable parked ingress and idempotent recovery",
+    "R2 write/checkpoint/archive failures",
+    "GitHub quota exhaustion and recovery",
+    "malformed upstream/service responses",
+    "bounded retention over 50 simulated days",
+    "recovery export digest verification and SQLite restore"
+  ],
+  "postgresql": {
+    "run": false,
+    "blocked_by": "S1 issue #308 repository-store interface and isolated PostgreSQL test infrastructure"
+  },
+  "production_fault_injection": false,
+  "full_service_suite": {
+    "passed": 99,
+    "failed": 0
+  },
+  "transcript_location": "Operator host: /tmp/issue317-tools-drill.json.tap"
+}

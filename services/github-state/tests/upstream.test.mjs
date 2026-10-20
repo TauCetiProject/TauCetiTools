@@ -306,3 +306,19 @@ test('out-of-scope query fallback reveals no data and spends no installation quo
   assert.equal((await mf.dispatchFetch('https://test/v1/query?repository=org/repo&operation=open_prs',{headers:{Authorization:'Bearer invalid'}})).status,401);
  } finally {await mf.dispose();}
 });
+
+test('malformed upstream JSON stays unavailable, preserves request ID, and retries through the same quota owner',async()=>{
+ let malformed=true,network=0;
+ const mf=await runtime(async()=>{network++;return malformed?new Response('not json',{status:200}):response({data:{rateLimit:{cost:1,remaining:4999,resetAt:new Date(Date.now()+300000).toISOString()},repository:{pullRequests:{nodes:[],pageInfo:{hasNextPage:false,endCursor:null}}}}});});
+ try {
+  const ns=await mf.getDurableObjectNamespace('INSTALLATIONS'),stub=ns.get(ns.idFromName(repository.installation));
+  const query={repository,query:{repository:repository.name,operation:'open_prs'},api:'graphql'};
+  const first=await stub.fetch('https://internal/read',{method:'POST',headers:{'x-request-id':'malformed-drill'},body:JSON.stringify(query)});
+  assert.equal(first.status,503);const error=await first.json();
+  assert.equal(error.unavailable,true);assert.equal(error.reason,'malformed_upstream_response');assert.equal(error.request_id,'malformed-drill');assert.equal(Object.hasOwn(error,'data'),false);
+  assert.equal(network,1,'no fallback fanout for a malformed response');
+  malformed=false;
+  const recovered=await (await send(stub,'/read',query)).json();
+  assert.deepEqual(recovered.data,[]);assert.equal(network,2,'one successful retry by the existing owner');
+ }finally{await mf.dispose();}
+});

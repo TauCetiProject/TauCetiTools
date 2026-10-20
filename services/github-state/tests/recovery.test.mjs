@@ -137,7 +137,7 @@ test('a persistently failing parked event is held aside without blocking newer e
 function repositoryFixture(env={},size=0,db=new DatabaseSync(':memory:'),archive=bucket()){
  let alarm=null;
  const ctx={blockConcurrencyWhile:fn=>fn(),id:{toString:()=>'fixture'},storage:{sql:{exec(sql,...bindings){let rows=[];if(!bindings.length && sql.includes(';'))db.exec(sql);else{const st=db.prepare(sql);if(st.columns().length)rows=st.all(...bindings);else st.run(...bindings);}return {toArray:()=>rows,one:()=>rows[0]};},get databaseSize(){return size;}},
-  transactionSync(fn){db.exec('SAVEPOINT tx');try{const v=fn();db.exec('RELEASE tx');return v;}catch(e){db.exec('ROLLBACK TO tx');db.exec('RELEASE tx');throw e;}},getAlarm:async()=>alarm,setAlarm:async v=>{alarm=v;}}};
+  transactionSync(fn){db.exec('SAVEPOINT tx');try{const v=fn();db.exec('RELEASE tx');return v;}catch(e){db.exec('ROLLBACK TO tx');db.exec('RELEASE tx');throw e;}},sync:async()=>{},getAlarm:async()=>alarm,setAlarm:async v=>{alarm=v;}}};
  const state=new RepositoryState(ctx,{ALLOWED_REPOSITORIES:JSON.stringify([repo]),ARCHIVE:archive,...env});
  if(!size) state.setMeta('repository',repo);
  return {db,state,archive};
@@ -357,4 +357,206 @@ test('a CI class export archives only CI rows and cleanup deletes exactly those'
  assert.equal(db.prepare("SELECT COUNT(*) n FROM meta WHERE key LIKE 'workflow%' OR key LIKE 'important%'").get().n,0);
  assert.ok(state.meta('repository'),'other meta survives');
  assert.equal((await call('/storage/export',{recovery:recovery.id,class:'repair_metrics'})).error,'class_export_unsupported');
+});
+
+const retention=await load('src/retention.ts');
+const monitoring=await load('src/monitoring.ts');
+const budget=(rows=100,bytes=4*1024**2)=>({rows,bytes,deadline:Date.now()+10000});
+const scalar=(db,q)=>Object.values(db.prepare(q).get())[0];
+
+test('sustained retention volume plateaus across windows with bounded rows, bytes and time',()=>{
+ const {db,state}=repositoryFixture(),day=86400000,checkpoints={};
+ const start=Date.now()-60*day;
+ for(let d=0;d<50;d++) {
+  const now=start+d*day;
+  for(let i=0;i<20;i++) {
+   db.prepare('INSERT INTO deliveries VALUES(?,?,?)').run(d+'-'+i,'push',now);
+   db.prepare('INSERT INTO changes VALUES(?,?,?,?,?)').run(d*20+i+1,now,'pr',String(i),0);
+   db.prepare('INSERT INTO repair_metrics VALUES(?,?,?,?,?)').run(now,'page','active','pr',1);
+   db.prepare('INSERT INTO cursors VALUES(?,?,?)').run(d+'-'+i,now+600000,'x'.repeat(200));
+  }
+  for(const name of ['expired_deliveries','expired_changes','expired_repair_metrics','expired_cursors']) {
+   for(let pass=0;pass<1000;pass++) {
+    const b=budget(17,5000),before=b.rows;
+    const next=retention.sweep(state.sql,name,checkpoints[name],b,true,now);
+    assert.ok(before-b.rows<=17);assert.ok(b.bytes>=0);
+    checkpoints[name]=next;
+    if(next.after>=next.upper)break;
+    assert.ok(pass<999,'bounded sweeps make progress');
+   }
+  }
+  if(d>=20) {
+   assert.equal(scalar(db,'SELECT COUNT(*) FROM deliveries'),15*20);
+   assert.equal(scalar(db,'SELECT COUNT(*) FROM changes'),8*20);
+   assert.equal(scalar(db,'SELECT COUNT(*) FROM repair_metrics'),8*20);
+   assert.equal(scalar(db,'SELECT COUNT(*) FROM cursors'),20);
+  }
+ }
+ const b={rows:100,bytes:1000,deadline:0};
+ const before=scalar(db,'SELECT COUNT(*) FROM deliveries');
+ retention.sweep(state.sql,'expired_deliveries',undefined,b,true,Date.now());
+ assert.equal(scalar(db,'SELECT COUNT(*) FROM deliveries'),before,'expired time budget performs no deletion');
+});
+
+test('duplicate/stale retention checkpoints, dry runs and rowid reuse are safe',()=>{
+ const {db,state}=repositoryFixture(),now=Date.now();
+ for(let i=0;i<20;i++)db.prepare('INSERT INTO cursors VALUES(?,?,?)').run('c'+i,now-1,'x'.repeat(200));
+ const dry=retention.sweep(state.sql,'expired_cursors',undefined,budget(5),false,now);
+ assert.equal(dry.eligible,5);assert.equal(dry.deleted,0);assert.equal(scalar(db,'SELECT COUNT(*) FROM cursors'),20);
+ const first=retention.sweep(state.sql,'expired_cursors',undefined,budget(5),true,now);
+ assert.equal(first.deleted,5);
+ const old={...first,after:0};
+ // Simulate a crash after SQL deletes but before the external checkpoint write.
+ retention.sweep(state.sql,'expired_cursors',old,budget(5),true,now);
+ db.prepare('INSERT INTO cursors VALUES(?,?,?)').run('fresh',now+600000,'{}');
+ for(let i=0;i<10;i++)retention.sweep(state.sql,'expired_cursors',old,budget(),true,now);
+ assert.deepEqual(db.prepare('SELECT id FROM cursors').all().map(r=>r.id),['fresh']);
+ const b=budget(100,100);retention.sweep(state.sql,'expired_cursors',undefined,b,true,now);
+ assert.ok(b.bytes>=0);
+});
+
+test('retention policy survives restart, pins receipts while parked, and isolates failed checkpoints',async()=>{
+ const {db,state,archive}=repositoryFixture();
+ const now=Date.now(),post=body=>state.fetch(new Request('https://internal/storage/retention',{method:'POST',body:JSON.stringify(body)}));
+ const old=now-30*86400000;
+ db.prepare('INSERT INTO deliveries VALUES(?,?,?)').run('pending','push',old);
+ db.prepare('INSERT INTO demand VALUES(?,?)').run('quiet',old);
+ await archive.put('parked/100/pointers/pending.json','{}');
+ await post({policy:{mode:'enforce',disabled:[],pinned:['expired_demand']}});
+ assert.equal(scalar(db,'SELECT COUNT(*) FROM deliveries'),1,'parked input pins receipt expiry');
+ assert.equal(scalar(db,'SELECT COUNT(*) FROM demand'),1,'operator pin wins');
+ archive.objects.delete('parked/100/pointers/pending.json');
+ const restarted=repositoryFixture({},0,db,archive).state;
+ archive.failures.push((op,key)=>op==='put' && key.endsWith('retention-checkpoint.json'));
+ await restarted.storageMaintenance();
+ assert.equal(scalar(db,'SELECT COUNT(*) FROM deliveries'),0);
+ assert.equal(scalar(db,'SELECT COUNT(*) FROM demand'),1,'persisted override survived restart');
+ await restarted.storageMaintenance();
+ assert.ok(await archive.get('control/100/retention-checkpoint.json'),'later checkpoint succeeds after failed job');
+ assert.equal((await post({policy:{mode:'enforce',disabled:['resources'],pinned:[]}})).status,400,'no arbitrary cleanup classes');
+});
+
+test('repair telemetry never writes authoritative SQL and its dimensions stay bounded',async()=>{
+ const {db,state,archive}=repositoryFixture();
+ for(let i=0;i<100000;i++)state.metric('page',{operation:'pr',repository:'org/repo'},'active');
+ state.metric('requested_single_latency_ms',{operation:'pr',repository:'org/repo'},'requested',25);
+ assert.equal(scalar(db,'SELECT COUNT(*) FROM repair_metrics'),0);
+ await state.storageMaintenance();
+ const observation=await state.preparedObservation();
+ const pages=observation.repair_intervals.filter(r=>r.event==='page');
+ assert.ok(pages.length<=2);assert.equal(pages.reduce((n,r)=>n+r.value,0),100000);
+ const telemetry=[...archive.objects].filter(([key])=>key.startsWith('telemetry/'));
+ assert.equal(telemetry.length,1);assert.ok(Number(telemetry[0][1].customMetadata.expires)>Date.now());
+ const metrics=new monitoring.RequestMetrics();
+ for(let minute=0;minute<120;minute++)for(let i=0;i<10;i++)metrics.record(20,i===0,i<2,minute*60000);
+ const summary=metrics.snapshot(119*60000);
+ assert.equal(summary.intervals.length,60);assert.equal(summary.requests,600);assert.equal(summary.p50_ms,25);assert.equal(summary.p95_ms,25);
+ assert.equal(summary.error_rate,.1);assert.equal(summary.unavailable_rate,.2);
+});
+
+test('capacity thresholds handle growth, shrinkage, unknown allowance and stale samples',()=>{
+ const C=monitoring.capacity,at=1000000000,allowance=1000000;
+ assert.equal(C({at,bytes:700000,allowance}).level,'warning');
+ assert.equal(C({at,bytes:850000,allowance}).level,'critical');
+ assert.equal(C({at,bytes:1000,allowance:null},{at:at-60000,bytes:0,allowance:null}).capacity_unknown,true);
+ const previous={at:at-60000,bytes:100000,allowance};
+ assert.equal(C({at,bytes:102000,allowance},previous,at).level,'critical','positive slope projects exhaustion within 24 hours');
+ assert.equal(C({at,bytes:100200,allowance},previous,at).level,'warning','positive slope projects exhaustion within seven days');
+ assert.equal(C({at,bytes:99999,allowance},previous,at).projected_exhaustion_at,null);
+ assert.equal(C({at,bytes:1000,allowance},undefined,at+180001).stale,true);
+ const original=console.log;console.log=()=>{throw new Error('destination failed');};
+ try {const alarm=monitoring.emitAlarm({},'100',{level:'critical',at});assert.equal(alarm.emitted,false);assert.equal(alarm.notified,false);}
+ finally {console.log=original;}
+});
+
+test('prepared health does no aggregate SQL or GitHub calls and survives monitoring persistence failure',async()=>{
+ const {state,archive}=repositoryFixture({INSTALLATIONS:{get(){assert.fail('monitoring must not call quota owner');}}});
+ archive.failures.push((op,key)=>op==='put' && key.endsWith('observation.json'));
+ await state.storageMaintenance();
+ assert.equal((await state.preparedObservation()).stale,false,'in-memory diagnostics remain available');
+ const original=state.sql.exec;state.sql.exec=(q,...b)=>{assert.ok(!/COUNT\(|GROUP BY|SUM\(|AVG\(/i.test(q),'health must only read prepared observations');return original(q,...b);};
+ const response=await state.fetch(new Request('https://internal/health'));
+ assert.equal(response.status,200);assert.equal((await response.json()).monitoring.stale,false);
+ state.observation.at=Date.now()-180001;
+ assert.equal((await state.preparedObservation()).stale,true);
+});
+
+test('R2 outage alarms remain available and a later monitoring attempt recovers',async()=>{
+ const {state,archive}=repositoryFixture();
+ archive.failures.push((op,key)=>op==='put' && key.endsWith('ingress-durability-probe.json'));
+ await state.storageMaintenance();
+ let observation=await state.preparedObservation();
+ assert.equal(observation.level,'critical');assert.ok(observation.reasons.includes('parked_ingress_durability_unavailable'));
+ assert.equal(observation.alarm.notified,false);
+ state.observation.at=Date.now()-60001;
+ await state.storageMaintenance();observation=await state.preparedObservation();
+ assert.equal(observation.ingress.durable,true);assert.equal(observation.level,'ok');
+});
+
+test('CI archival verifies bytes, preserves attempt guards, snapshots and cursors, and retries failed writes',async()=>{
+ const {db,state,archive}=repositoryFixture();
+ const payload={id:'77',run_attempt:2,steps:[{name:'x'.repeat(8000)}]},old=Date.now()-8*86400000;
+ db.prepare('INSERT INTO resources VALUES(?,?,?,?,?,?,?,?)').run('workflow_jobs','77','9',JSON.stringify(payload),'',old,5,0);
+ archive.failures.push((op,key)=>op==='put' && key.includes('/ci/'));
+ await assert.rejects(state.archiveCI());
+ assert.deepEqual(JSON.parse(db.prepare('SELECT data FROM resources').get().data),payload);
+ await state.archiveCI();
+ const encoded=db.prepare('SELECT data FROM resources').get().data,pointer=JSON.parse(encoded);
+ assert.ok(pointer.$r2);assert.equal(pointer.run_attempt,2);assert.deepEqual(await state.decode(encoded),payload);
+ assert.equal(scalar(db,"SELECT json_extract(data,'$.run_attempt') FROM resources"),2,'legacy membership guard works');
+ assert.equal(scalar(db,'SELECT revision FROM resources'),5,'archival does not publish a semantic revision');
+ await archive.put('recovery/100/pinned.json',JSON.stringify({data:encoded}));
+ db.prepare('INSERT INTO cursors VALUES(?,?,?)').run('spill',Date.now()+600000,encoded);
+ db.exec('DELETE FROM resources');
+ const retained=await (await state.fetch(new Request('https://internal/retained-object?key='+encodeURIComponent(pointer.$r2)))).json();
+ assert.equal(retained.retained,true);assert.deepEqual(await state.decode(encoded),payload);
+ for(const key of ['parked/100/bodies/x','recovery/100/x','migration/100/x','resources/100/x'])assert.equal(retention.protectedObject(key,{expires:'1'}),true);
+ assert.equal(retention.protectedObject('webhooks/x',{pinned:'true',expires:'1'}),true);
+ assert.equal(retention.protectedObject('webhooks/x',{expires:'1'}),false);
+});
+
+test('verified recovery archives restore exact IDs, tombstones, memberships, coverage and spill contents',async()=>{
+ const {db,state,archive}=repositoryFixture();
+ const now=Date.now(),id='9223372036854775806';
+ await state.put('issue_comments',id,{id,body:'retained history',updated_at:'2026-10-01'},now,false,'7');
+ await state.put('issue_comments','deleted',{id:'deleted',body:'tombstone'},now,true,'7');
+ state.membership('issue_comments:{"number":7}',id,true);
+ db.prepare('INSERT INTO collections VALUES(?,?,?,?,?,?,?)').run('issue_comments:{"number":7}','issue_comments','{"number":7}',1,now,state.revision(),null);
+ const key='resources/100/pinned-spill';await archive.put(key,JSON.stringify({body:'archived raw contents'}));
+ db.prepare('INSERT INTO resources VALUES(?,?,?,?,?,?,?,?)').run('checks','spill','',JSON.stringify({$r2:key}),'',now,10,0);
+ const storageContext={getCurrentBookmark:async()=>'test-bookmark'};
+ const manifest=await storage.createRecovery(archive,storageContext,state.sql,'100',state.revision());
+ for(const table of storage.userTables(state.sql)) {
+  while(!(await storage.exportPage(archive,state.sql,'100',{recovery:manifest.id,table,limit:2})).complete){}
+  while(!(await storage.verifyExport(archive,'100',{recovery:manifest.id,table})).verified){}
+ }
+ const copy=repositoryFixture({},0,undefined,archive),restored=await storage.readManifest(archive,'100',manifest.id);
+ for(const [table,info] of Object.entries(restored.tables)) {
+  copy.db.exec('DELETE FROM "'+table+'"');
+  for(const page of info.pages) {
+   const object=await archive.get(page.key),text=await object.text();assert.equal(sha(Buffer.from(text)),page.sha256);
+   for(const {__rowid,...row} of JSON.parse(text)) {
+    const cols=Object.keys(row);copy.db.prepare('INSERT INTO "'+table+'" ('+cols.map(c=>'"'+c+'"').join(',')+') VALUES('+cols.map(()=>'?').join(',')+')').run(...Object.values(row));
+   }
+  }
+ }
+ assert.equal(copy.db.prepare("SELECT id FROM resources WHERE id=?").get(id).id,id);
+ assert.equal(copy.db.prepare("SELECT tombstone FROM resources WHERE id='deleted'").get().tombstone,1);
+ assert.equal(copy.db.prepare('SELECT complete FROM collections').get().complete,1);
+ assert.equal(copy.db.prepare('SELECT id FROM members').get().id,id);
+ assert.deepEqual(await copy.state.decode(copy.db.prepare("SELECT data FROM resources WHERE id='spill'").get().data),{body:'archived raw contents'});
+});
+
+test('R2 prefix expiry preserves pinned inputs and retries after deletion/checkpoint failures',async()=>{
+ const archive=bucket(),now=Date.now();
+ for(const [key,metadata] of [['webhooks/expired',{expires:String(now-1)}],['webhooks/pinned',{expires:'1',pinned:'true'}],['webhooks/fresh',{expires:String(now+100000)}],['parked/100/bodies/input',{expires:'1'}]])await archive.put(key,'{}',{customMetadata:metadata});
+ archive.failures.push((op,key)=>op==='put' && key==='control/retention/raw_webhooks.json');
+ await assert.rejects(retention.retirePrefix(archive,'raw_webhooks',now));
+ assert.equal(await archive.get('webhooks/expired'),null,'deletion can commit before checkpoint');
+ const progress=await retention.retirePrefix(archive,'raw_webhooks',now);
+ assert.ok(progress.completed);assert.ok(await archive.get('webhooks/pinned'));assert.ok(await archive.get('webhooks/fresh'));assert.ok(await archive.get('parked/100/bodies/input'));
+ await archive.put('staging/expired','{}',{customMetadata:{expires:'1'}});
+ archive.failures.push((op,key)=>op==='delete' && key==='staging/expired');
+ await assert.rejects(retention.retirePrefix(archive,'staging_pages',now));
+ assert.equal((await retention.retirePrefix(archive,'staging_pages',now)).deleted,1,'failed class does not disable future attempts');
 });

@@ -2,6 +2,7 @@ import { Env, EventPointer, Query, Repository, authorize, digest, json, reposito
 import { readMigration } from './migration';
 import { classify, log, requestId } from './storage';
 import { PARK_AFTER_ATTEMPTS, backlog, backoff, drain, ingressMode, noteRepositoryFull, park, reconcile, setIngressMode, storageState } from './ingress';
+import { R2_CLASSES, policy, retirePrefix } from './retention';
 export { RepositoryState } from './repository';
 export { InstallationScheduler } from './installation';
 
@@ -11,7 +12,7 @@ function targets(env:Env,payload:any,event:string): Repository[] {
   const target=payload?.repository ? configured.filter(r=>r.id===String(payload.repository.id)) : ['installation','installation_repositories','ping'].includes(event)?configured:[];
   return target.filter(repo=>!payload?.installation?.id || String(payload.installation.id)===repo.installation);
 }
-const STORAGE_OPERATIONS=new Set(['scan','recovery','export','verify','cleanup','probe','fault']);
+const STORAGE_OPERATIONS=new Set(['scan','recovery','export','verify','cleanup','probe','fault','retention']);
 async function query(req:Request,env:Env,q:Query,request_id:string): Promise<Response> {
   try { validateQuery(q); } catch { return json({error:'invalid_query'},400); }
   const repo=repository(env,q.repository);
@@ -223,6 +224,8 @@ export default {
     }));
   },
   async scheduled(_event:ScheduledController,env:Env,ctx:ExecutionContext):Promise<void> {
+    const installations=new Set(repositories(env).map(repo=>repo.installation));
+    for(const installation of installations)ctx.waitUntil(stub(env.INSTALLATIONS,installation).fetch('https://internal/maintenance',{method:'POST'}).catch(error=>log('installation_maintenance_failed',{reason:classify(error)})));
     for (const repo of repositories(env)) {
       if(repo.bors_receipts_url || (repo.name==='TauCetiProject/TauCeti' && env.BORS_ACTIVITY)) ctx.waitUntil(stub(env.REPOSITORIES,repo.id).fetch('https://internal/activity-refresh',{method:'POST'}));
       ctx.waitUntil((async()=>{
@@ -257,30 +260,21 @@ export default {
       }
       return false;
     };
-    // R2 continuation pages are numerous and short-lived; sweep them separately.
+    // Separate prefixes prevent a large pinned resource/recovery inventory
+    // from starving expiry of short-lived inputs and continuation pages.
     ctx.waitUntil((async()=>{
-      if(await retentionHeld()) return;
-      const page=await env.ARCHIVE.list({prefix:'cursors/',limit:500,include:['customMetadata'],cursor:await env.ARCHIVE.get('retention-cursor-cursors').then(o=>o?.text()) || undefined});
-      const expired=page.objects.filter(o=>Number(o.customMetadata?.expires)<Date.now()).map(o=>o.key);
-      if (expired.length && !await retentionHeld()) await env.ARCHIVE.delete(expired);
-      if (page.truncated) await env.ARCHIVE.put('retention-cursor-cursors',page.cursor); else await env.ARCHIVE.delete('retention-cursor-cursors');
-    })().catch(error=>log('cursor_retention_failed',{reason:classify(error)})));
-    // Retention is explicit so raw webhook bodies and abandoned staging pages do not accumulate.
-    ctx.waitUntil((async()=>{
-      if(await retentionHeld()) return;
-      const page=await env.ARCHIVE.list({limit:100,include:['customMetadata'],cursor:await env.ARCHIVE.get('retention-cursor').then(o=>o?.text()) || undefined});
-      for (const object of page.objects) {
-        if(await retentionHeld()) return;
-        if(Number(object.customMetadata?.expires)<Date.now()) await env.ARCHIVE.delete(object.key);
-        else if(object.customMetadata?.kind==='resource' && object.uploaded.getTime()<Date.now()-8*86400000) {
-          const repo=repositories(env).find(r=>object.key.startsWith('resources/'+r.id+'/'));
-          if(repo) {
-            const response=await stub(env.REPOSITORIES,repo.id).fetch('https://internal/retained-object?key='+encodeURIComponent(object.key));
-            if(response.ok && (await response.json() as any).retained===false) await env.ARCHIVE.delete(object.key);
-          }
-        }
+      if(await retentionHeld())return;
+      const held=new Set<string>();
+      for(const repo of repositories(env)) {
+        const value=await env.ARCHIVE.get('control/'+repo.id+'/retention-policy.json').then(o=>o?.json<any>());
+        if(value) {const p=policy(value);for(const name of [...p.disabled,...p.pinned])held.add(name);}
       }
-      if (page.truncated) await env.ARCHIVE.put('retention-cursor',page.cursor); else await env.ARCHIVE.delete('retention-cursor');
-    })());
+      await Promise.allSettled(Object.keys(R2_CLASSES).map(async name=>{
+        if(held.has(name))return;
+        try {await retirePrefix(env.ARCHIVE,name as keyof typeof R2_CLASSES);}
+        catch(error) {log('archive_retention_failed',{class:name,reason:classify(error)});}
+      }));
+    })().catch(error=>log('archive_retention_policy_failed',{reason:classify(error)})));
+
   }
 } satisfies ExportedHandler<Env,EventPointer>;

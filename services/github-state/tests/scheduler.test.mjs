@@ -198,7 +198,7 @@ test('daily archive checkpoints bounded pages and retains active R2 references',
   assert.equal((await (await state.fetch(new Request('https://internal/retained-object?key='+encodeURIComponent(key)))).json()).retained,true);
   assert.equal((await (await state.fetch(new Request('https://internal/retained-object?key=unused'))).json()).retained,true,'unreferenced objects retain an archive grace period');
   db.prepare('UPDATE retired_objects SET at=? WHERE key=?').run(Date.now()-9*86400000,'unused');
-  assert.equal((await (await state.fetch(new Request('https://internal/retained-object?key=unused'))).json()).retained,false);
+  assert.equal((await (await state.fetch(new Request('https://internal/retained-object?key=unused'))).json()).retained,true,'pinned recovery archives outlive the snapshot grace period');
  }finally{db.close();}
 });
 

@@ -2,6 +2,8 @@ import { DurableObject } from 'cloudflare:workers';
 import { Env, json, Repository, stub, parseGitHub, digest } from './protocol';
 import { Recipe, extract, recipes, batchQuery, batchLimit } from './catalog';
 import { settings } from './reconciliation';
+import { AccountingMetrics } from './monitoring';
+import { classify, log, requestId } from './storage';
 
 class QuotaDeferred extends Error {
   constructor(readonly result:any) { super('GitHub quota deferred'); }
@@ -10,6 +12,9 @@ class QuotaDeferred extends Error {
 export class InstallationScheduler extends DurableObject<Env> {
   private tokenFlight?:Promise<string>;
   private auditFlight?:Promise<void>;
+  private accountingMetrics=new AccountingMetrics();
+  private accountingAfter=0;
+  private accountingFailure:any;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS budgets(resource TEXT PRIMARY KEY,remaining INTEGER,lim INTEGER,reset INTEGER,blocked INTEGER DEFAULT 0);
@@ -17,6 +22,7 @@ export class InstallationScheduler extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS quota_types(category TEXT PRIMARY KEY,first_seen INTEGER,last_seen INTEGER,count INTEGER,evidence TEXT);`);
     this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS reservations(id TEXT PRIMARY KEY,resource TEXT,cost INTEGER,expires INTEGER);');
     this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS redelivery_retries(id TEXT PRIMARY KEY,due INTEGER,attempt INTEGER);');
+    this.ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS accounting_at ON accounting(at)');
     const columns=new Set(this.ctx.storage.sql.exec<any>('PRAGMA table_info(accounting)').toArray().map(c=>c.name));
     for(const [name,type] of Object.entries({shape:'TEXT',batch_size:'INTEGER DEFAULT 1',predicted:'INTEGER'})) if(!columns.has(name)) this.ctx.storage.sql.exec('ALTER TABLE accounting ADD COLUMN '+name+' '+type);
   }
@@ -104,8 +110,8 @@ export class InstallationScheduler extends DurableObject<Env> {
     if (etag) headers['If-None-Match'] = etag;
     const response = await fetch('https://api.github.com' + path,{method,headers,body:method === 'POST' ? JSON.stringify(body) : undefined,signal:AbortSignal.timeout(12000)});
     const text = await response.text();
-    let parsed: any;
-    try { parsed = text ? parseGitHub(text) : {}; } catch { parsed = {}; }
+    let parsed: any,malformed=false;
+    try {parsed=text?parseGitHub(text):{};if(!parsed || typeof parsed!=='object') {malformed=true;parsed={};}}catch {parsed={};malformed=true;}
     const quotaHeaders=new Headers(response.headers);
     if (api==='app' || api==='authentication') quotaHeaders.set('x-ratelimit-resource','app-core');
     if (parsed.data?.rateLimit && !quotaHeaders.has('x-ratelimit-remaining')) {
@@ -116,9 +122,17 @@ export class InstallationScheduler extends DurableObject<Env> {
     this.observe(quotaHeaders);
     const cost = parsed.data?.rateLimit?.cost;
     const points = typeof cost === 'number' ? cost : api === 'core' ? response.status===304?0:1 : null;
+    this.accountingMetrics.record({api,operation,shape,batch_size:batchSize,points,bytes:text.length,latency:Date.now()-started,predicted});
+    try {
     this.ctx.storage.sql.exec('INSERT INTO accounting(at,operation,api,method,endpoint,status,points,latency,bytes,shape,batch_size,predicted) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',Date.now(),operation,api,method,path.split('?')[0].replace(/\/\d+(?=\/|$)/g,'/{id}'),response.status,points,Date.now()-started,text.length,shape,batchSize,predicted);
+      this.accountingFailure=null;
+    }catch(error) {
+      this.accountingFailure={at:Date.now(),reason:classify(error)};
+      log('installation_telemetry_failed',{operation,reason:classify(error)});
+    }
     if (!quotaHeaders.has('x-ratelimit-remaining')) this.ctx.storage.sql.exec('UPDATE budgets SET remaining=MAX(0,remaining-?) WHERE resource=?',points ?? predicted,resource);
-    const errors = parsed.errors || [];
+    if((malformed || !text || parsed.errors!==undefined && !Array.isArray(parsed.errors)) && [200,201].includes(response.status))throw new Error('malformed_upstream_response');
+    const errors = Array.isArray(parsed.errors)?parsed.errors:[];
     const logicalQuota=errors.some((e:any)=>['RATE_LIMIT','RATE_LIMITED'].includes(e.type) || ['RATE_LIMIT','RATE_LIMITED'].includes(e.extensions?.code));
     const failed = response.status === 403 || response.status === 429 || logicalQuota;
     if (failed) {
@@ -346,23 +360,36 @@ export class InstallationScheduler extends DurableObject<Env> {
       }
     }
   }
+  expireAccounting():void {
+    try {
+      const rows=this.ctx.storage.sql.exec<any>('SELECT id,at FROM accounting WHERE id>? ORDER BY id LIMIT 500',this.accountingAfter).toArray();
+      for(const row of rows) {
+        if(row.at<Date.now()-7*86400000)this.ctx.storage.sql.exec('DELETE FROM accounting WHERE id=? AND at<?',row.id,Date.now()-7*86400000);
+        this.accountingAfter=row.id;
+      }
+      if(!rows.length)this.accountingAfter=0;
+    }catch(error) {log('installation_retention_failed',{reason:classify(error)});}
+  }
   async fetch(req: Request): Promise<Response> {
     try {
       const path = new URL(req.url).pathname;
       if (path==='/read') return await this.read(await req.json());
       if (path==='/batch') return await this.batch(await req.json());
       if (path==='/measure') return await this.measure(await req.json());
+      if (path==='/maintenance') {
+        this.expireAccounting();return json({ok:true,telemetry_failure:this.accountingFailure});
+      }
       if (path==='/audit') {
-        this.ctx.storage.sql.exec('DELETE FROM accounting WHERE at<?',Date.now()-7*86400000);
+        this.expireAccounting();
         const repo=await req.json() as Repository;
         this.auditFlight ||= this.audit(repo).finally(()=>{this.auditFlight=undefined;});
         await this.auditFlight;return json({ok:true});
       }
-      if (path==='/health') return json({redelivery_failure:await this.ctx.storage.get('last_redelivery_failure') || null,reconciliation_version:2,deployment_id:this.env.CF_VERSION?.id,settings:settings(this.env),inflight:this.ctx.storage.sql.exec('SELECT resource,COUNT(*) requests,SUM(cost) reserved_points FROM reservations WHERE expires>? GROUP BY resource',Date.now()).toArray(),budgets:this.ctx.storage.sql.exec('SELECT * FROM budgets').toArray(),quota_types:this.ctx.storage.sql.exec('SELECT * FROM quota_types').toArray(),hour:this.ctx.storage.sql.exec('SELECT api,operation,COUNT(*) requests,SUM(points) points,SUM(points IS NULL) unmeasured,SUM(bytes) bytes,AVG(latency) latency FROM accounting WHERE at>? GROUP BY api,operation',Date.now()-3600000).toArray(),recipes:this.ctx.storage.sql.exec('SELECT api,operation,shape,batch_size,COUNT(*) requests,SUM(points) points,AVG(points) mean_points,MAX(points) max_points,AVG(predicted) predicted,AVG(latency) latency,MAX(latency) max_latency FROM accounting WHERE at>? GROUP BY api,operation,shape,batch_size',Date.now()-3600000).toArray()});
+      if (path==='/health') return json({redelivery_failure:await this.ctx.storage.get('last_redelivery_failure') || null,reconciliation_version:2,deployment_id:this.env.CF_VERSION?.id,settings:settings(this.env),inflight:this.ctx.storage.sql.exec('SELECT resource,COUNT(*) requests,SUM(cost) reserved_points FROM reservations WHERE expires>? GROUP BY resource',Date.now()).toArray(),budgets:this.ctx.storage.sql.exec('SELECT * FROM budgets').toArray(),quota_types:this.ctx.storage.sql.exec('SELECT * FROM quota_types').toArray(),...this.accountingMetrics.snapshot(),telemetry_failure:this.accountingFailure});
       return json({error:'not_found'},404);
     } catch (error) {
       if (error instanceof QuotaDeferred) return json(error.result);
-      console.error('installation operation failed',error instanceof Error?error.message:'unknown'); return json({unavailable:true,retry_at:Date.now()+60000},503);
+      console.error('installation operation failed',error instanceof Error?error.message:'unknown'); return json({unavailable:true,reason:error instanceof Error && error.message==='malformed_upstream_response'?'malformed_upstream_response':classify(error),request_id:requestId(req),retry_at:Date.now()+60000},503);
     }
   }
 }
