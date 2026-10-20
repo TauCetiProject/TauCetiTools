@@ -781,13 +781,13 @@ def repair(project: Project, check: str, *, apply=False):
     raise ValueError(f"No automatic repair for {check}. Use its printed manual commands and UI instructions.")
 
 
-def render(findings, *, json_output=False):
+def render(findings, *, json_output=False, show_ready=False):
     if json_output:
         print(json.dumps([item.json() for item in findings], indent=2))
         return
     for item in findings:
         print(f"[{item.status.upper()}] {item.id}: {item.summary}")
-        if item.status in ("ready", "disabled"):
+        if item.status in ("ready", "disabled") and not show_ready:
             continue
         print(f"  Expected: {item.expected}\n  Who: {item.role}")
         for command in item.commands:

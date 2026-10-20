@@ -171,7 +171,7 @@ def main(argv=None):
                 findings = [f for f in findings if f.id == args.check]
                 if not findings:
                     raise ConfigError(f"Unknown check {args.check}; run doctor without --check to list checks")
-            render(findings, json_output=args.json)
+            render(findings, json_output=args.json, show_ready=bool(args.check))
             bad = any(f.status in ("failed", "unknown") for f in findings)
             if not args.json:
                 print(
