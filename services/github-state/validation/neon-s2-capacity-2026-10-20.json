@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "verified_at": "2026-10-20T09:35:02.314Z",
+  "project": "sparkling-sunset-73872362",
+  "name": "tauceti-github-state",
+  "region": "aws-us-east-2",
+  "postgres_version": 18,
+  "history_seconds": 604800,
+  "project_quota_bytes": 1099511627776,
+  "production_endpoint": "ep-autumn-bird-b5a2du6h",
+  "test_branch": "br-icy-feather-b54h8dxh",
+  "test_endpoint": "ep-shy-cherry-b5nnow2x",
+  "compute": {
+    "min_cu": 0.5,
+    "max_cu": 2,
+    "suspend_timeout_seconds": -1
+  },
+  "live_sql": [
+    {
+      "credential": "production-migration-url",
+      "storage_limit": "1TB",
+      "postgres_version": "180006",
+      "database": "github_state",
+      "role": "github_state_migration"
+    },
+    {
+      "credential": "test-migration-url",
+      "storage_limit": "1TB",
+      "postgres_version": "180006",
+      "database": "github_state_test",
+      "role": "github_state_test_migration"
+    },
+    {
+      "credential": "test-application-url",
+      "storage_limit": "1TB",
+      "postgres_version": "180006",
+      "database": "github_state_test",
+      "role": "github_state_test_app"
+    }
+  ],
+  "isolation": [
+    {
+      "credential": "test-migration-url",
+      "production_role_absent": true,
+      "production_connection_rejected": true
+    },
+    {
+      "credential": "test-application-url",
+      "production_role_absent": true,
+      "production_connection_rejected": true
+    }
+  ],
+  "legacy_test": {
+    "branch": "br-fancy-unit-b5kzg3kp",
+    "endpoint": "ep-odd-cherry-b5yvahvs",
+    "data_retained": true,
+    "suspend_timeout_seconds": 0,
+    "reason": "legacy endpoint retained a 3 GiB engine limit; replacement test branch verifies 1 TiB"
+  },
+  "production_cutover_performed": false
+}

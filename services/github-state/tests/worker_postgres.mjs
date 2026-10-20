@@ -18,7 +18,7 @@ export async function workerDatabase(repositories) {
   for(const repo of repositories)await initializeSchema(admin,repo.id,'test-v1',role);
  }finally{await admin.end();}
  return {bindings:{REPOSITORY_BACKEND:'postgres',REPOSITORY_GENERATION:'test-v1',REPOSITORY_DATABASE_URL:application.toString()},
-  async close(){await control.query('DROP DATABASE '+database+' WITH (FORCE)');await control.end();},
+  async close(){try{await control.query('DROP DATABASE '+database+' WITH (FORCE)');}finally{await control.end();}},
   async outbound(req){
    const url=new URL(req.url);
    if(url.hostname!==application.hostname && url.hostname!==new URL(neonConfig.fetchEndpoint(application.hostname,443)).hostname)return null;

@@ -6,7 +6,7 @@ import {runtime} from './runtime.mjs';
 import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
 
 const shim={name:'fixture',setup(b){b.onResolve({filter:/^cloudflare:workers$/},()=>({path:'context',namespace:'fixture'}));b.onLoad({filter:/.*/,namespace:'fixture'},()=>({contents:'export class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}}',loader:'js'}));}};
-const load=async entry=>import('data:text/javascript;base64,'+Buffer.from((await build({entryPoints:[entry],bundle:true,platform:'node',format:'esm',write:false,plugins:[shim]})).outputFiles[0].text).toString('base64'));
+const load=async entry=>import('data:text/javascript;base64,'+Buffer.from((await build({entryPoints:[entry],bundle:true,platform:'node',format:'esm',write:false,plugins:[shim]})).outputFiles[0].text+'\n//# sourceURL='+entry.replaceAll('/','-')+'.fixture.mjs').toString('base64'));
 const {RepositoryState}=await load('src/repository.ts');
 const migration=await load('src/migration.ts');
 const {REQUIRED_TABLES}=await load('src/storage.ts');

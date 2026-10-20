@@ -8,9 +8,9 @@ import { Lane, LANES, laneAt, settings } from './reconciliation';
 import { SURVEY_CONTRACT, compactPR, issueFragment, reviewFragment, summarizeFragments, inScope, roadmapFocuses } from './survey';
 import { readPromotionReceipts } from './activity_landings';
 import { queueMetrics } from './queue_monitoring';
-import { targetConfig } from './migration_target';
+import { targetConfig, targetOwner } from './migration_target';
 import { controllerStep, preflight as cutoverPreflight, FREEZE_LEASE_MS } from './migration_control';
-import { Migration, blocksWrites, archiveKey, beginExport, expectedTables, exportStep, generation, encodeMigration, publicReceipt, readMigration, saveMigration, targetIdentity, verifyStep } from './migration';
+import { Migration, terminalReceipt, compatibilityStep, blocksRepairs, blocksWrites, archiveKey, beginExport, expectedTables, exportStep, generation, encodeMigration, publicReceipt, readMigration, saveMigration, targetIdentity, verifyStep } from './migration';
 import { backlog, backoff, receiptKey, controlKey, noteRepositoryFull, storageKey } from './ingress';
 import { Checkpoint, DEFAULT_POLICY, Policy, RetentionClass, R2_CLASSES, RULES, policy, sweep, sweepStore } from './retention';
 import { CapacitySample, RepairMetrics, RequestMetrics, SQLITE_ALLOWANCE, capacity, postgresCapacity, emitAlarm, timedBucket, within } from './monitoring';
@@ -95,6 +95,7 @@ export class RepositoryState extends DurableObject<Env> {
   private activeOperations=0;
   private migrationFlight: Promise<unknown> = Promise.resolve();
   migrationHeld(): boolean { return this.migrationUnavailable || blocksWrites(this.migrationState); }
+  private repairsHeld():boolean {return this.migrationUnavailable || blocksRepairs(this.migrationState);}
   private logged=new Map<string,number>();
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx,env);
@@ -114,6 +115,17 @@ export class RepositoryState extends DurableObject<Env> {
       return typeof value==='function'?value.bind(target):value;
     }});
     this.store=new SQLiteStore(ctx.storage,this.sql,false,env.REPOSITORY_GENERATION || 'sqlite-v1',ctx);
+    // A committed local selection survives R2 outages and migration-binding
+    // retirement. It is written durably before accepting any target input.
+    let selected:any;try{selected=this.localMeta('backend_owner');}catch{}
+    if(selected?.backend==='postgres' && selected.protocol==='s2-selection-v1') {
+      this.selectCommittedBackend(selected);
+      const repo=this.localMeta('repository')?.id;
+      if(repo && ['test','production'].includes(env.MIGRATION_ENVIRONMENT || ''))ctx.blockConcurrencyWhile(async()=>{
+        try {this.migrationState=await readMigration(env.ARCHIVE,repo);}catch{this.migrationUnavailable=true;}
+      });
+      return;
+    }
     if(env.REPOSITORY_BACKEND==='postgres') {
       const repo=JSON.parse(env.ALLOWED_REPOSITORIES || '[]').find((r:any)=>env.REPOSITORIES.idFromName(r.id).toString()===ctx.id.toString());
       if(!repo || !env.REPOSITORY_DATABASE_URL || !env.REPOSITORY_GENERATION) throw new Error('PostgreSQL backend configuration missing');
@@ -232,11 +244,11 @@ export class RepositoryState extends DurableObject<Env> {
   // Demand, metrics, refresh scheduling and derived caches never decide
   // whether stored data can be served. Degraded mode suppresses them.
   async optional<T>(operation:string,write:()=>T|Promise<T>): Promise<T | undefined> {
-    if(this.degraded || this.migrationHeld()) return undefined;
+    if(this.degraded || this.repairsHeld()) return undefined;
     try {return await write();} catch(error) {this.noteFailure(operation,error);return undefined;}
   }
   async optionalAsync(operation:string,write:()=>Promise<unknown>): Promise<void> {
-    if(this.degraded || this.migrationHeld()) return;
+    if(this.degraded || this.repairsHeld()) return;
     try {await write();} catch(error) {this.noteFailure(operation,error);}
   }
   async setAlarm(at:number): Promise<void> {
@@ -1591,7 +1603,7 @@ export class RepositoryState extends DurableObject<Env> {
   }
   async runSingleAlarm(): Promise<void> {
     if(this.migrationUnavailable) await this.retryMigrationControl();
-    if(this.migrationHeld()) return;
+    if(this.repairsHeld()) return;
     this.activeOperations++;
     try {await this.runAlarm();} finally {this.activeOperations--;}
   }
@@ -1766,6 +1778,7 @@ export class RepositoryState extends DurableObject<Env> {
         note:'Deleted rows become reusable free pages; the physical database size need not shrink. Prove headroom with /admin/storage/probe.'});
     }
     if(path==='/storage/ownership') {
+      if(this.migrationState?.cutover || this.localMeta('backend_owner')?.backend==='postgres')throw new AdminError('migration_forward_recovery_required');
       if(this.env.MIGRATION_ENVIRONMENT!=='test')throw new AdminError('migration_production_prerequisites_unavailable');
       if(this.ingress!=='parked')throw new AdminError('ingress_must_be_drained');
       if(!['sqlite','postgres'].includes(input.backend) || !/^[A-Za-z0-9_-]{1,80}$/.test(input.generation || ''))throw new AdminError('invalid_backend_owner');
@@ -1874,14 +1887,28 @@ export class RepositoryState extends DurableObject<Env> {
     this.migrationFlight=result.catch(()=>{});
     await result;
   }
+  private selectCommittedBackend(owner:any):void {
+    const repo=this.localMeta('repository')?.id,identity=owner.target_identity;
+    if(!repo || !identity || !this.env.REPOSITORY_DATABASE_URL || !owner.selected_at)throw new AdminError('migration_target_configuration');
+    try {
+      const url=new URL(this.env.REPOSITORY_DATABASE_URL);
+      if(!['postgres:','postgresql:'].includes(url.protocol) || url.hostname!==identity.hostname || decodeURIComponent(url.pathname.slice(1))!==identity.database || decodeURIComponent(url.username)!==identity.application_role)throw 0;
+    }catch {throw new AdminError('migration_target_configuration');}
+    this.store=new PostgresStore(this.env.REPOSITORY_DATABASE_URL,repo,owner.generation);
+    this.selectedMigrationGeneration=owner.generation;this.schema='current';this.degraded=undefined;this.storageMarkerUnavailable=false;
+    this.repositoryMemo=undefined;this.revisionState.value=undefined;this.completedQueries.clear();
+  }
   private async selectMigrationBackend():Promise<void> {
     const state=this.migrationState;
     if(!state?.cutover?.target_active || this.selectedMigrationGeneration===state.generation)return;
-    if(!this.env.REPOSITORY_DATABASE_URL || targetConfig(this.env).identity!==state.target || state.cutover.target_identity && Object.entries(state.cutover.target_identity).some(([key,value])=>(targetConfig(this.env) as any)[key]!==value))throw new AdminError('migration_target_configuration');
-    this.store=new PostgresStore(this.env.REPOSITORY_DATABASE_URL,state.repository,state.generation);
-    this.selectedMigrationGeneration=state.generation;
-    this.schema='current';this.degraded=undefined;this.storageMarkerUnavailable=false;
-    this.repositoryMemo=undefined;this.revisionState.value=undefined;this.completedQueries.clear();
+    const identity=state.cutover.target_identity;
+    if(!identity || Object.entries(identity).some(([key,value])=>(targetConfig(this.env) as any)[key]!==value))throw new AdminError('migration_target_identity_mismatch');
+    const previous=this.localMeta('backend_owner');
+    if(previous?.generation!==state.generation || !['migration','postgres'].includes(previous.backend))throw new AdminError('migration_source_fence_lost');
+    const selected={...previous,backend:'postgres',selected_at:state.cutover.selected_at || Date.now(),target:state.target,target_identity:identity};
+    this.nativeSql.exec("UPDATE meta SET value=? WHERE key='backend_owner'",JSON.stringify(selected));
+    await this.ctx.storage.sync();
+    this.selectCommittedBackend(selected);
   }
   private assertMigrationFence(state:Migration):void {
     const row=this.nativeSql.exec<any>("SELECT value FROM meta WHERE key='backend_owner'").toArray()[0];
@@ -1912,7 +1939,7 @@ export class RepositoryState extends DurableObject<Env> {
         const exclude=table==='meta'?` AND ${op==='DELETE'?'OLD':'NEW'}.key!='backend_owner'`:'';
         sql.exec(`CREATE TRIGGER IF NOT EXISTS backend_fence_${table}_${op.toLowerCase()} BEFORE ${op} ON ${table} WHEN COALESCE((SELECT json_extract(value,'$.backend') FROM meta WHERE key='backend_owner'),'sqlite')!='sqlite'${exclude} BEGIN SELECT RAISE(ABORT,'Repository backend generation fenced'); END`);
       }
-      sql.exec("INSERT INTO meta VALUES('backend_owner',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",JSON.stringify({backend:'migration',generation:state.generation,frozen_at:Date.now()}));
+      sql.exec("INSERT INTO meta VALUES('backend_owner',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",JSON.stringify({protocol:'s2-selection-v1',backend:'migration',generation:state.generation,frozen_at:Date.now(),selected_at:Number.MAX_SAFE_INTEGER,target:state.target,target_identity:state.cutover!.target_identity}));
     });
     await this.ctx.storage.sync();this.assertMigrationFence(state);
   }
@@ -1936,7 +1963,7 @@ export class RepositoryState extends DurableObject<Env> {
       expectedTables(this.nativeSql);
       if((await this.env.ARCHIVE.list({prefix:archiveKey(repo,id)+'/',limit:1})).objects.length)throw new AdminError('migration_generation_used');
       state={version:1,generation:id,repository:repo,target,checkpoint_etag:prior?.checkpoint_etag,
-        source:{object:this.ctx.id.toString(),deployment:this.env.CF_VERSION.id,schema:SCHEMA_VERSION},phase:'freezing',created:Date.now(),updated:Date.now(),tables:{},failure:null,
+        source:{object:this.ctx.id.toString(),deployment:this.env.CF_VERSION.id,schema:SCHEMA_VERSION},phase:'preflighting',created:Date.now(),updated:Date.now(),tables:{},failure:null,
         blobs:{prefix:0,pages:0,objects:0,hash:'0'.repeat(64),complete:false},staging:{after:null,page:'1',checked:0,complete:false,expired_jobs:0,expired_hash:'0'.repeat(64)},
         cutover:{environment:input.environment,lease_until:Date.now()+FREEZE_LEASE_MS,epoch:0,source_fenced:false,target_active:false,import:{},verify:{},acceptance:''}};
       await cutoverPreflight(this.env,state);
@@ -1944,9 +1971,14 @@ export class RepositoryState extends DurableObject<Env> {
     }
     if(state.generation!==id || state.target!==target)throw new AdminError('migration_identity_conflict');
     if(state.source.object!==this.ctx.id.toString())throw new AdminError('migration_source_identity_changed');
+    if(input.operation==='finish-observation') {
+      if(state.phase!=='complete')throw new AdminError('migration_observation_not_ready');
+      if(!state.cutover!.observation_release){state.cutover!.observation_release={at:Date.now(),policy:policy(input.retention_policy)};await saveMigration(this.env.ARCHIVE,state);}
+      await this.finishObservation(state);return json(publicReceipt(state));
+    }
     if(input.operation==='abandon') {
       if(state.cutover!.target_active)throw new AdminError('migration_forward_recovery_required');
-      state.phase='aborting';await saveMigration(this.env.ARCHIVE,state);
+      state.phase='aborting';state.cutover!.abort_reason='operator_abandoned';await saveMigration(this.env.ARCHIVE,state);
     } else if(!['start','step','preflight'].includes(input.operation))throw new AdminError('migration_operation_invalid');
     return this.superviseMigration(1);
   }
@@ -1966,21 +1998,54 @@ export class RepositoryState extends DurableObject<Env> {
       if(query.repository!==(await this.meta('repository')).name)throw new AdminError('migration_shadow_query_invalid');
       validateQuery(query);
       const source=await this.query(query),destination=await target.query(query);
+      if(!query.cursor && (source.status!=='ok' || destination.status!=='ok' || !source.complete || !destination.complete))throw new AdminError('migration_shadow_unavailable');
       if(canonical({...source,cursor:undefined})!==canonical({...destination,cursor:undefined}))throw new AdminError('migration_shadow_mismatch');
-      check.hash=await digest(check.hash+'\n'+canonical(source));check.queries++;check.verified_at=Date.now();return;
+      if(source.cursor) {
+        const continuation={...query,cursor:source.cursor},a=await this.query(continuation),b=await target.query(continuation);
+        if(a.status!=='ok' || b.status!=='ok' || canonical(a)!==canonical(b))throw new AdminError('migration_shadow_mismatch');
+        check.cursor_checks=(check.cursor_checks || 0)+1;
+      }
+      if(!query.cursor && Array.isArray(source.data) && source.data.length>1 && !check.expired_cursor_checks) {
+        // Private acceptance snapshots use only the frozen stored result. They
+        // exercise the existing cursor protocol without publishing SQL changes.
+        const repo=(await this.meta('repository')).id,now=Date.now();
+        for(const expired of [false,true]) {
+          const id=crypto.randomUUID(),expires=expired?now-1000:now+600000;
+          const result={...source,data:source.data.slice(1),cursor:undefined};
+          await this.env.ARCHIVE.put(cursorKey(repo,id,1),JSON.stringify({repository:repo,key:queryKey(query),allow_observed:Boolean(query.allow_observed),expires,result}),{customMetadata:{kind:'cursor',expires:String(expires+60000)}});
+          const continuation={...query,cursor:id+':1'},a=await this.query(continuation),b=await target.query(continuation);
+          if(canonical(a)!==canonical(b) || (expired?a.reason!=='cursor_expired' || a.status!=='unavailable':a.status!=='ok'))throw new AdminError('migration_shadow_mismatch');
+          if(expired)check.expired_cursor_checks=(check.expired_cursor_checks || 0)+1;else check.cursor_checks=(check.cursor_checks || 0)+1;
+        }
+      }
+      check.hash=await digest(check.hash+'\n'+canonical({...source,cursor:undefined}));check.queries++;check.verified_at=Date.now();return;
+    }
+    if(Array.isArray(evidence.activity_numbers) && evidence.activity_numbers.length && !check.activity_checked) {
+      const numbers=evidence.activity_numbers;
+      if(numbers.length>20 || numbers.some((n:any)=>!Number.isSafeInteger(n) || n<=0))throw new AdminError('migration_shadow_query_invalid');
+      const input={repository:(await this.meta('repository')).name,numbers};
+      const request=()=>new Request('https://internal/activity',{method:'POST',body:JSON.stringify(input)});
+      const [a,b]=await Promise.all([this.repositoryFetch(request()),target.repositoryFetch(request())]);
+      if(!a.ok || !b.ok)throw new AdminError('migration_shadow_unavailable');
+      const left=await a.json<any>(),right=await b.json<any>();
+      if(canonical({...left,as_of:undefined})!==canonical({...right,as_of:undefined}))throw new AdminError('migration_shadow_mismatch');
+      check.activity_checked=true;check.hash=await digest(check.hash+'\n'+canonical({...left,as_of:undefined}));return;
     }
     const [sourceHealth,targetHealth]=await Promise.all([repositoryHealth(this.store),repositoryHealth(target.store)]);
     // Runtime health uses the same SQL boundary. Only stable stored fields
     // participate; current clock-based eligibility is captured separately.
+    if(canonical(sourceHealth.survey)!==canonical(targetHealth.survey))throw new AdminError('migration_health_mismatch');
     if(canonical(sourceHealth.coverage.sort((a:any,b:any)=>a.operation.localeCompare(b.operation)))!==canonical(targetHealth.coverage.sort((a:any,b:any)=>a.operation.localeCompare(b.operation))))throw new AdminError('migration_health_mismatch');
+    if(this.env.MIGRATION_ENVIRONMENT==='production' && (!(check.cursor_checks!>0) || !(check.expired_cursor_checks!>0)))throw new AdminError('migration_acceptance_incomplete');
     check.complete=true;check.verified_at=Date.now();
   }
   private async finishMigrationReceipt(state:Migration):Promise<void> {
     const recovery=await backlog(this.env,{id:state.repository,name:(await this.meta('repository')).name,installation:''});
     const empty=(prefix:string)=>this.env.ARCHIVE.list({prefix,limit:1}).then(p=>!p.objects.length && !p.truncated);
     if(!await empty(`parked/${state.repository}/pointers/`) || !await empty(`parked/${state.repository}/held/`))return;
+    if(!state.cutover!.replay_complete){state.cutover!.replay_complete=Date.now();await saveMigration(this.env.ARCHIVE,state);}
     // Raw recovery is the durable DLQ owner: completion requires a full pass
-    // which started after backend selection, with no unresolved raw gaps.
+    // completed after backend selection, with no unresolved bucket-wide gaps.
     if(!recovery.raw?.last_completed || recovery.raw.last_completed<state.cutover!.selected_at! || recovery.raw.gaps?.count!==0 || recovery.raw.gaps?.truncated)return;
     await this.prepareDiagnostics();
     const evidence=await this.env.ARCHIVE.get(`control/${state.repository}/migration-acceptance.json`);
@@ -1991,28 +2056,41 @@ export class RepositoryState extends DurableObject<Env> {
     state.cutover!.release={schema_versions:{source:state.source.schema,target:1},deployment:this.env.CF_VERSION?.id,source:state.source,target:state.target,
       revision:await this.meta('revision'),latest_applied_input:await this.meta('latest_applied_input'),latest_webhook:await this.meta('last_webhook'),latest_repair:await this.meta('last_repair'),
       backlog:{parked:0,held:0,raw_completed:recovery.raw.last_completed,raw_gaps:0},backend_write_owner:'postgres',
-      latency:acceptance.latency,cursor_coverage:acceptance.cursor_coverage ?? null,github_hour:rate.hour ?? null,health};
+      latency:{baseline_p95_ms:acceptance.latency.baseline_p95_ms,target_p95_ms:acceptance.latency.target_p95_ms},cursor_coverage:{versions:['r2-v1'],active_checked:state.cutover!.shadow?.cursor_checks || 0,expired_checked:state.cutover!.shadow?.expired_cursor_checks || 0},github_hour:rate.hour ?? null,health};
     state.cutover!.completed_at=Date.now();state.phase='complete';await saveMigration(this.env.ARCHIVE,state);
-    await this.env.ARCHIVE.put(archiveKey(state.repository,state.generation)+'/receipt.json',encodeMigration(state));
+    await terminalReceipt(this.env.ARCHIVE,state);
+  }
+  private async finishObservation(state:Migration):Promise<void> {
+    const release=state.cutover!.observation_release;if(!release)return;
+    if(state.cutover!.observation_finished_at){await terminalReceipt(this.env.ARCHIVE,state,'observation-receipt.json');return;}
+    if(await targetOwner(this.env,state)!=='postgres')throw new AdminError('migration_forward_recovery_required');
+    await this.storage('/storage/retention',new Request('https://internal/storage/retention',{method:'POST',body:JSON.stringify({policy:policy(release.policy)})}));
+    state.cutover!.observation_finished_at=release.at;state.failure=null;await saveMigration(this.env.ARCHIVE,state);
+    await terminalReceipt(this.env.ARCHIVE,state,'observation-receipt.json');
   }
   private async superviseMigration(steps=100):Promise<Response> {
     const repo=JSON.parse(this.env.ALLOWED_REPOSITORIES || '[]').find((r:any)=>this.env.REPOSITORIES.idFromName(r.id).toString()===this.ctx.id.toString())?.id || this.localMeta('repository')?.id;
     if(!repo)return json({migration:null});
-    for(const deadline=Date.now()+20000;steps-->0 && Date.now()<deadline;) {
-      const state=await readMigration(this.env.ARCHIVE,repo);this.migrationState=state;
+    let io=0;
+    const bucket=new Proxy(this.env.ARCHIVE,{get(target,key){const value=Reflect.get(target,key,target);return typeof value==='function'?(...args:any[])=>{if(['get','head','put','list','delete'].includes(String(key)))io++;return value.apply(target,args);}:value;}});
+    const controlEnv={...this.env,ARCHIVE:bucket};
+    // Reserve room for the next bounded page (up to 250 blob HEADs), target
+    // connections and terminal bookkeeping below the platform request limit.
+    for(const deadline=Date.now()+20000;steps-->0 && Date.now()<deadline && io<650;) {
+      const state=await readMigration(bucket,repo);this.migrationState=state;
       if(!state?.cutover)break;
-      if(['complete','abandoned'].includes(state.phase)) {await this.selectMigrationBackend();await this.env.ARCHIVE.put(archiveKey(repo,state.generation)+'/receipt.json',encodeMigration(state));break;}
+      if(['complete','abandoned'].includes(state.phase)) {await this.selectMigrationBackend();if(state.phase==='complete')await this.finishObservation(state);await terminalReceipt(this.env.ARCHIVE,state);if(state.phase==='complete' && state.failure){state.failure=null;await saveMigration(bucket,state);}break;}
       if(state.source.object!==this.ctx.id.toString())throw new AdminError('migration_source_identity_changed');
       try {
-        await controllerStep(this.env,state,{storage:this.ctx.storage,sql:this.nativeSql,
+        io+=2;await controllerStep(controlEnv,state,{storage:this.ctx.storage,sql:this.nativeSql,compatibility:async s=>{compatibilityStep(this.nativeSql,s);if(s.phase==='freezing'){s.phase='preflighting';await cutoverPreflight(this.env,s);s.phase='freezing';}},
           fence:s=>this.fenceMigration(s),assertFence:s=>this.assertMigrationFence(s),verifyStored:s=>this.shadowMigration(s),drain:s=>this.drainMigration(s.phase==='freezing'),release:s=>this.releaseMigration(s),
           select:async()=>{this.migrationState=state;await this.selectMigrationBackend();}});
-        state.failure=null;await saveMigration(this.env.ARCHIVE,state);
+        state.failure=state.phase==='abandoned'?(state.cutover!.abort_reason || null):null;await saveMigration(bucket,state);
         if(state.phase==='replaying') {await this.finishMigrationReceipt(state);break;}
       } catch(error) {
         const reason=error instanceof AdminError?error.message:'migration_storage_failure';
-        const saved=await readMigration(this.env.ARCHIVE,repo);
-        if(saved && saved.generation===state.generation) {saved.failure=reason;if(reason==='migration_source_fence_lost' && !saved.cutover?.target_active)saved.phase='aborting';await saveMigration(this.env.ARCHIVE,saved);this.migrationState=saved;}
+        const saved=await readMigration(bucket,repo);
+        if(saved && saved.generation===state.generation) {saved.failure=reason;if(saved.cutover)saved.cutover.last_failure=reason;if(reason==='migration_source_fence_lost' && !saved.cutover?.target_active)saved.phase='aborting';await saveMigration(bucket,saved);this.migrationState=saved;}
         return json({error:reason,...publicReceipt(this.migrationState) as object},503);
       }
     }
@@ -2045,7 +2123,7 @@ export class RepositoryState extends DurableObject<Env> {
           source_export_environment:this.env.MIGRATION_ENVIRONMENT ?? null,
           backend_supported:['sqlite','postgres'],supervised_cutover_available:true,
           blockers:!this.env.MIGRATION_DATABASE_URL || !this.env.REPOSITORY_DATABASE_URL || !this.env.MIGRATION_TARGET?['migration_target_configuration']:[],
-          acceptance_required:true,preflight_verified:verified,production_cutover_supported:this.env.MIGRATION_ENVIRONMENT==='production' });
+          acceptance_required:true,target_preflight_verified:verified,source_type_scan:'bounded_before_freeze',production_cutover_supported:this.env.MIGRATION_ENVIRONMENT==='production' });
       }
       const id=generation(input.generation),target=targetIdentity(input.target);
       // Source export does not authorize target import or production selection.
@@ -2140,6 +2218,7 @@ export class RepositoryState extends DurableObject<Env> {
       this.migrationFlight=result.catch(()=>{});
       return result;
     }
+    if(this.migrationState?.phase==='replaying' && !this.migrationState.cutover?.replay_complete && ['/repair','/configure','/activity-refresh'].includes(path))return json({error:'migration_replaying',parkable:true},503);
     if(this.migrationHeld()) {
       if(path==='/event') return json({error:'migration_frozen',parkable:true},503);
       if(!['/query','/activity','/health','/changes','/retained-object','/storage/summary','/storage/scan','/storage/deliveries'].includes(path)) return json({error:'migration_frozen',parkable:true},503);
@@ -2208,7 +2287,7 @@ export class RepositoryState extends DurableObject<Env> {
         await this.meta('repository');
         if(q.cursor)this.backgroundDemand(q);
         const changed=await this.frozenSince();
-        const planned=this.migrationHeld() || this.migrationState && this.migrationState.phase!=='abandoned';
+        const planned=this.migrationHeld() || this.migrationState?.phase==='replaying';
         if(changed!==null && !planned){requestUnavailable=true;return json({...await this.unavailable(q,'mirror_frozen'),frozen_since:changed},200,{'X-TauCeti-Storage':'degraded'});}
         const etag='"'+(await this.revision())+'"',headers:Record<string,string>=this.degraded?{'X-TauCeti-Storage':'degraded'}:{};
         if(this.migrationUnavailable && this.store.backend==='sqlite') {headers['X-TauCeti-Read-Fallback']='last-known-source';const frozen=this.localMeta('backend_owner')?.frozen_at;if(frozen)headers['X-TauCeti-Source-Frozen-At']=String(frozen);}

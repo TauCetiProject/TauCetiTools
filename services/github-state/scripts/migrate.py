@@ -35,6 +35,7 @@ ERROR_CODES = frozenset(
         "migration_health_mismatch",
         "migration_retention_not_pinned",
         "migration_shadow_mismatch",
+        "migration_shadow_unavailable",
         "migration_shadow_queries_missing",
         "migration_source_fence_lost",
         "migration_target_configuration",
@@ -77,6 +78,10 @@ ERROR_CODES = frozenset(
         "migration_staging_blob_missing",
         "migration_storage_failure",
         "migration_table_manifest_mismatch",
+        "migration_column_manifest_mismatch",
+        "migration_observation_not_ready",
+        "migration_receipt_conflict",
+        "migration_staging_reset_mismatch",
         "migration_target_backend_unavailable",
         "repository_unconfigured",
         "repository_not_allowed",
@@ -137,9 +142,10 @@ def main():
     parser.add_argument("--target", help="opaque project/branch/database label; never a DSN")
     parser.add_argument("--apply", action="store_true", help="perform the selected operation (requires deployed acceptance)")
     parser.add_argument("--limit", type=int, default=100)
+    parser.add_argument("--retention-policy", type=Path, help="explicit post-observation retention policy JSON")
     parser.add_argument("--steps", type=int, default=1, help="bounded export/verification steps per invocation")
     parser.add_argument(
-        "command", choices=["preflight", "status", "start", "freeze", "resume", "abandon"], nargs="?", default="preflight"
+        "command", choices=["preflight", "status", "start", "freeze", "resume", "abandon", "finish-observation"], nargs="?", default="preflight"
     )
     args = parser.parse_args()
     options = {}
@@ -161,7 +167,7 @@ def main():
         options["credentials_dir"] = args.credentials_dir.expanduser()
     if not 1 <= args.limit <= 250 or not 1 <= args.steps <= 10000:
         parser.error("limit must be 1..250 and steps 1..10000")
-    mutating = args.command in {"start", "freeze", "resume", "abandon"} and args.apply
+    mutating = args.command in {"start", "freeze", "resume", "abandon", "finish-observation"} and args.apply
     if mutating and (not args.generation or not args.target):
         parser.error("--apply requires --generation and --target")
     body = {"repository": args.repository, "environment": args.environment}
@@ -173,12 +179,19 @@ def main():
         body["operation"] = "status" if args.command == "status" else "preflight"
     else:
         body.update(
-            operation={"start": "start", "freeze": "freeze", "resume": "step", "abandon": "abandon"}[args.command],
+            operation={"start": "start", "freeze": "freeze", "resume": "step", "abandon": "abandon", "finish-observation": "finish-observation"}[args.command],
             generation=args.generation,
             target=args.target,
             apply=True,
             limit=args.limit,
         )
+    if mutating and args.command == "finish-observation":
+        if not args.retention_policy:
+            parser.error("finish-observation requires an explicit --retention-policy")
+        try:
+            body["retention_policy"] = json.loads(args.retention_policy.read_text())
+        except (OSError, ValueError):
+            parser.error("cannot read retention policy JSON")
     for _ in range(args.steps if mutating and args.command == "resume" else 1):
         result = call(args.environment, body, **options)
         print(json.dumps(result, sort_keys=True), flush=True)

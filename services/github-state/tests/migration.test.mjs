@@ -433,3 +433,44 @@ test('installation dispatch tracks whole requests across the freeze and rejects 
  assert.equal((await health()).repository_inflight[0].requests,1);
  finish();await old;assert.deepEqual((await health()).repository_inflight,[]);
 });
+
+test('an altered source column manifest is rejected before freeze instead of remapping imported fields',async()=>{
+ const f=await fixture();
+ f.db.exec('ALTER TABLE resources ADD COLUMN unknown_column TEXT');
+ assert.equal((await f.command('freeze')).body.error,'migration_column_manifest_mismatch');
+ assert.equal(f.archive.objects.size,0);
+});
+
+test('a reordered legacy jobs schema exports its named field order explicitly',async()=>{
+ const f=await fixture();
+ const ddl=f.db.prepare("SELECT sql FROM sqlite_master WHERE name='jobs'").get().sql;
+ f.db.exec('ALTER TABLE jobs RENAME TO previous_jobs');
+ f.db.exec(ddl.replace('api TEXT,etag TEXT','etag TEXT,api TEXT'));
+ f.db.exec('DROP TABLE previous_jobs');
+ assert.equal((await f.command('freeze')).status,200);
+ const state=await migration.readMigration(f.archive,repo.id);
+ assert.ok(state.tables.jobs.columns.findIndex(c=>c.name==='etag')<state.tables.jobs.columns.findIndex(c=>c.name==='api'));
+});
+for(const [name,sql] of [
+ ['REAL',"INSERT INTO demand VALUES('incompatible',1.25)"],
+ ['BLOB',"INSERT INTO resources(kind,id,data) VALUES('pr','incompatible',X'00')"],
+ ['NUL',"INSERT INTO resources(kind,id,data) VALUES('pr','incompatible',char(0))"],
+])test(`read-only compatibility scan rejects ${name} before freezing SQL`,async()=>{
+ const f=await fixture();f.db.exec(sql);const before=f.db.prepare('SELECT total_changes() n').get().n;
+ const state={phase:'preflighting',cutover:{}};
+ assert.throws(()=>{for(let n=0;n<100 && state.phase==='preflighting';n++)migration.compatibilityStep(f.ctx.storage.sql,state);},/migration_cell_incompatible/);
+ assert.equal(f.db.prepare('SELECT total_changes() n').get().n,before);assert.equal(f.archive.objects.size,0);
+ assert.equal(f.state.migrationHeld(),false);
+});
+
+for(const failure of ['exception','http'])test(`supervision ${failure} is reported without skipping the ordinary repository tick`,async()=>{
+ const f=await fixture(),background=[];let ticks=0;
+ f.env.REPOSITORIES.get=()=>({fetch:async(url)=>{
+  const path=new URL(url).pathname;
+  if(path==='/migration-supervise'){if(failure==='exception')throw Error('unavailable');return Response.json({error:'migration_storage_failure'},{status:503});}
+  if(path==='/tick'){ticks++;return Response.json({degraded:true});}
+  return Response.json({});
+ }});
+ await worker.scheduled({},f.env,{waitUntil:work=>background.push(work)});await Promise.allSettled(background);
+ assert.equal(ticks,1);
+});

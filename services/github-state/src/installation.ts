@@ -1,4 +1,4 @@
-import { blocksWrites, readMigration } from './migration';
+import { blocksRepairs, readMigration } from './migration';
 import { DurableObject } from 'cloudflare:workers';
 import { Env, json, Repository, stub, parseGitHub, digest } from './protocol';
 import { Recipe, extract, recipes, batchQuery, batchLimit } from './catalog';
@@ -413,7 +413,7 @@ export class InstallationScheduler extends DurableObject<Env> {
       if(['/read','/batch','/measure','/audit'].includes(path) && ['test','production'].includes(this.env.MIGRATION_ENVIRONMENT || '')) {
         const input:any=await req.clone().json(),repo=path==='/audit'?input:input.repository;
         if(typeof repo?.id==='string') {tracked=repo.id;this.repositoryRequests.set(tracked!,1+(this.repositoryRequests.get(tracked!) || 0));}
-        if(repo?.id && blocksWrites(await readMigration(this.env.ARCHIVE,repo.id)))return json({unavailable:true,reason:'migration_frozen',retry_at:Date.now()+60000},503);
+        if(repo?.id && blocksRepairs(await readMigration(this.env.ARCHIVE,repo.id)))return json({unavailable:true,reason:'migration_frozen',retry_at:Date.now()+60000},503);
       }
       if (path==='/read') return await this.read({...await req.json() as object,request_id:requestId(req)});
       if (path==='/batch') return await this.batch({...await req.json() as object,request_id:requestId(req)});

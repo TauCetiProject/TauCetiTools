@@ -1,5 +1,5 @@
 import { Env, EventPointer, Repository, digest, parseGitHub, stub, CI_EVENTS, repositories } from './protocol';
-import { blocksWrites, readMigration } from './migration';
+import { blocksWrites, holdsRetention, readMigration } from './migration';
 import { classify, log } from './storage';
 import { policy, protectedObject } from './retention';
 
@@ -244,7 +244,7 @@ export async function maintainRaw(env: Env, targets: (payload: any, event: strin
         for(const repo of repositories(env)) {
           if(['test','production'].includes(env.MIGRATION_ENVIRONMENT || '')) {
             const migration=await readMigration(env.ARCHIVE,repo.id);
-            if(migration && migration.phase!=='abandoned') {frozen=true;break;}
+            if(holdsRetention(migration)) {frozen=true;break;}
           }
           const control=await env.ARCHIVE.get('control/'+repo.id+'/retention-policy.json').then(o=>o?.json<any>());
           if(control) {const p=policy(control);if(p.disabled.includes('raw_webhooks') || p.pinned.includes('raw_webhooks')) {frozen=true;break;}}

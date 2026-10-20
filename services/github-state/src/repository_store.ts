@@ -71,6 +71,10 @@ export const columns:Record<string,string[]>={
   survey_hydrated:['number','contract'],survey_dirty:['number'],survey_hydration_failures:['number','retry_at'],
   repair_metrics:['at','event','lane','operation','value'],query_metrics:['operation','coverage','requests','last_at']
 };
+// Shared import/read contract. The activity number columns intentionally stay
+// TEXT in PostgreSQL while SQLite's source uses INTEGER there.
+const integerColumns=new Set(['observed','revision','tombstone','complete','verified','received','at','priority','due','started','page','attempt','dirty','generation','start_generation','lease_until','requested_at','created_at','retry_at','requests','last_at']);
+export function integerColumn(table:string,name:string):boolean {return integerColumns.has(name) || table==='repair_metrics' && name==='value';}
 export function schemaName(repository:string):string {
   if(!/^[0-9]{1,50}$/.test(repository)) throw new Error('Invalid repository identity');
   return 'github_state_'+repository;

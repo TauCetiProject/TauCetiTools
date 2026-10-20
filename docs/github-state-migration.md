@@ -54,7 +54,10 @@ the migration and application roles of the **same** enrolled Neon endpoint/datab
 `MIGRATION_TARGET` is JSON containing sanitized `identity`, `hostname`, `database`,
 `application_role`, and `migration_role`. URLs are never returned in receipts.
 The target checks exact expected tables/columns, generation/schema, database/role,
-application grants, capacity/restore and empty data before freezing.
+application grants, live PostgreSQL 18/storage settings, restore evidence and empty
+data before freezing. Preflight authenticates the application credential separately
+and proves that role cannot update backend ownership. Application and migration
+roles/URLs must differ.
 
 Install the private deployed acceptance receipt at
 `control/<repo>/migration-acceptance.json`, after performing its checks. It contains:
@@ -67,9 +70,11 @@ Install the private deployed acceptance receipt at
   `warm_read_p95`.
 - `latency.baseline_p95_ms` and `latency.target_p95_ms` from comparable deployed,
   warm stored-read workloads. Target must be positive and at most 1.2 times baseline.
-- `queries`: up to 20 representative stored API queries, including surveys,
-  inventories, histories and existing continuation cursors. Include
-  `cursor_coverage` describing tested versions/expiry coverage.
+- `queries`: 1–20 valid stored API queries. Production requires a survey, an
+  inventory and a history query, plus `activity_numbers` (1–20 positive integers).
+  Include existing continuation cursors and `cursor_coverage` describing tested
+  versions/expiry coverage. Non-cursor shadow results must be complete successes;
+  two unavailable results do not validate a target.
 
 These are release evidence from verified operations, not request flags. The
 service binds the receipt hash to the generation and separately verifies target
@@ -84,48 +89,69 @@ SQL. Etag preconditions reject stale controllers. Sanitized status exposes phase
 generation, source/target identity, bookmark, revision, per-table counts and hashes,
 progress, renewable lease, failure code, target checks and write owner.
 
-1. `freezing`: block all new repository mutations and GitHub repair/reference
+1. `preflighting`: scan source cells in bounded keyset pages while ordinary input
+   still applies. Reject incompatible REAL/BLOB/NUL cells and malformed manifests.
+   Revalidate target readiness before entering the freeze. Every exported page
+   rechecks compatibility to cover rows changed after this scan.
+2. `freezing`: block all new repository mutations and GitHub repair/reference
    dispatch, park signed input durably, and drain in-flight mutations/retention and whole installation requests, including
    references between individual upstream calls. Require the quota owner to report
    the same deployment version.
    Install persistent triggers and a generation owner in SQLite. This fences
    deployments predating the asynchronous store adapter. Sync, take an authoritative
    recovery bookmark, discover and validate every source table.
-2. `exporting` / `verifying`: export bounded rowid keyset pages and compare them
+3. `exporting` / `verifying`: export bounded rowid keyset pages and compare them
    against the frozen source, including schema/revision/count/hash and R2 references.
-3. `source_verified` / `importing`: import each page and its ledger entry in one
+4. `source_verified` / `importing`: import each page and its ledger entry in one
    PostgreSQL transaction. Response loss reuses the ledger, never inserts twice.
-4. `target_verifying`: compare every target page, exact ID/time/text value, total
+5. `target_verifying`: compare every target page, exact ID/time/text value, total
    count and canonical archive hash. Check explicit referenced blobs again.
-5. `preparing`: reset only recorded expired partial staging checkpoints, preserving
-   cooldowns, attempts, priority and generations. All other partial jobs remain intact.
-6. `switching`: compare representative stored queries and prepared coverage through
-   both adapters without GitHub requests. Retain proof, expire obsolete source-worker
+6. `preparing`: reset only recorded expired partial staging checkpoints, including their API/ETag
+   state, preserving cooldowns, attempts, priority and generations. All other partial jobs remain intact.
+7. `switching`: compare representative stored queries, activity/landing results
+   and prepared coverage through both adapters without GitHub requests. Retain proof, expire obsolete source-worker
    leases, prepare rowid sequences, and atomically activate PostgreSQL's generation
-   under its ownership lock. SQLite was already durably fenced. A gap with no writer
+   under its ownership lock. Save activation intent before that transaction. Commit
+   a local PostgreSQL ownership marker in SQLite before enabling target input.
+   SQLite was already durably fenced. A gap with no writer
    is safe; there is never a canary with two writable stores.
-7. `replaying`: select PostgreSQL in the coordinator and resume the existing bounded
+8. `replaying`: select PostgreSQL in the coordinator and resume the existing bounded
    ingress/reconciliation owners. Permanent delivery receipts commit before parked
    body/pointer cleanup; duplicates cannot publish another semantic change.
-8. `complete`: record release evidence after parked/held pointers drain and the raw
+9. `complete`: record release evidence after parked/held pointers drain and the raw
    recovery/DLQ owner completes a post-selection pass without unresolved gaps.
 
-The freeze lease is 15 minutes and renewed by ordinary supervision. Expiry or a
-source deployment change invalidates a pre-switch export and automatically begins
-abort. The target is marked abandoned under its ownership lock **before** SQLite
-can be released. Stale importers/switchers fail that lock check. If the target
-activation committed but its response/checkpoint was lost, supervision discovers
-PostgreSQL ownership and fixes forward, including after lease expiry. R2 or target
-outages retain stored reads/parked input and retry through the ordinary supervisor.
-A cold control outage exposes the retained source only as an explicit
-`X-TauCeti-Read-Fallback: last-known-source` response with its
-`X-TauCeti-Source-Frozen-At` timestamp; the SQL write fence remains installed.
-A source too full to commit a release remains safely fenced; it is not discarded.
+The freeze lease is 15 minutes and renews only after successful progress. A crash
+within that interval resumes automatically. Expiry or a source deployment change
+aborts a pre-switch generation; retained archives cannot silently resume as that
+generation. This bounds unattended freezes during persistent faults. Start a new
+operator-authorized generation after resolving the cause.
+
+Abort is persisted before fencing an inactive target and releasing a writable
+source. If the inactive target is unreachable or removed **before activation
+intent**, supervision quarantines it and releases SQLite: the durable abort
+checkpoint prevents stale controllers from saving activation intent. Imported
+partial data remains non-authoritative and cannot be reused as a new generation.
+After activation intent, an unavailable/missing target requires forward recovery;
+SQLite is never released without proving that activation did not commit. A
+committed activation discovered after lease expiry always selects PostgreSQL.
+A source too full to commit its release remains fenced with stored reads/parked
+input, and ordinary supervision retries.
+
+The local `backend_owner` marker records PostgreSQL generation, target identity
+and selection time before any target event can apply. Cold starts honour it even
+when R2 is unavailable or migration bindings have been retired. They never serve
+stale SQLite data as the current PostgreSQL revision. Before selection only, a
+cold control outage can expose the retained source with an explicit
+`X-TauCeti-Read-Fallback: last-known-source` response and
+`X-TauCeti-Source-Frozen-At` timestamp; its SQL write fence remains installed.
 
 ## Archive and data preservation
 
-Every SQL user table must match `REQUIRED_TABLES`; unknown/missing tables stop the
-operation. Empty tables are included. Archive pages preserve schema/version,
+Every SQL user table must match `REQUIRED_TABLES`; unknown/missing tables or
+columns stop the operation. Historical column order is supported: imports and
+verification use archived column names after validating the allowed manifest,
+so positional differences cannot silently swap same-type fields. Empty tables are included. Archive pages preserve schema/version,
 rowids, IDs, revisions, observed/verified timestamps, tombstones, collection coverage,
 metadata, surveys, activity/landings, membership/history, deliveries, head indices,
 jobs, demand and cooldowns. Daily observational snapshots and the changes journal
@@ -143,7 +169,8 @@ Each page also has a content digest. Checkpoints have constant size per table.
 R2 inventories include resources, cursors, staging and staging-spills. Implicit
 partial-job references are checked in bounded HEAD groups. Previously expired
 staging is recorded in a hashed, numerically ordered `expired-staging/` manifest;
-only its execution pagination is repaired after raw target verification. Explicit
+only its execution pagination/API/ETag state is repaired after raw target
+verification, with an exact one-row update and checked postconditions. Explicit
 missing resource spills stop validation. Read-created continuation pages retain
 normal expiry and stay in the shared bucket; inventory spans its scan period.
 
@@ -165,7 +192,9 @@ target and releases a writable source. A separately selected operator ingress pa
 remains in effect. After PostgreSQL accepts writes, abandonment cannot reactivate
 SQLite: preserve PostgreSQL and parked input and repair/restore forward.
 
-The retained `receipt.json` includes schema/deployment and sanitized source/target
+Terminal `receipt.json` is immutable and recovered with create-only publication;
+ordinary cron does not rewrite it. Separate source/cutover stage receipts remain
+available. The terminal receipt includes schema/deployment and sanitized source/target
 identities, bookmark/revision, counts/checksums, shadow proof, staging transforms,
 cursor/latency evidence, parked/held/raw recovery state, latest applied input,
 GitHub request accounting, health and backend write owner. Confirm unchanged external
@@ -174,5 +203,24 @@ clients and backlog drain against live telemetry before declaring release accept
 Keep the original DO and referenced archives read-only through observation. It can
 only be an explicitly timestamped emergency last-known-data read fallback after
 selection. Never flip writes back and call it lossless rollback. Retirement,
-releasing retention pins, deletion and any reverse migration are separate deliberate
-operations after recoverability is demonstrated.
+deletion and any reverse migration are separate deliberate operations after
+recoverability is demonstrated.
+
+After observing a completed migration and verifying recovery, release the broad
+retention hold explicitly with an approved policy file (the original DO and
+migration archives remain retained/read-only):
+
+```sh
+python3 services/github-state/scripts/migrate.py --environment production \
+  --generation GENERATION --target TARGET --retention-policy approved-policy.json \
+  --apply finish-observation
+```
+
+The command requires `complete` and proves the PostgreSQL owner. It checkpoints
+intent before updating retention; ordinary supervision finishes an interrupted
+release and publishes a separate immutable observation receipt. No SQL source
+is unfenced or deleted. Afterwards set `REPOSITORY_BACKEND=postgres` and
+`REPOSITORY_GENERATION` to the selected generation for an explicit deployment
+configuration; the committed local marker also preserves authority independently.
+Migration-only bindings/credentials may then be retired. Keep the application URL
+and archive access needed for normal operation.

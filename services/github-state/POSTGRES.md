@@ -244,3 +244,11 @@ selection, rollback requires preserving/reconciling PostgreSQL writes and parked
 inputs with an explicitly chosen authoritative store. Switching a variable or
 routing back to the old SQLite object is not a lossless rollback. Never reset an
 authoritative repository or bootstrap GitHub to recover database capacity.
+
+The S2 test branch is `br-icy-feather-b54h8dxh` (`test-s2`), endpoint
+`ep-shy-cherry-b5nnow2x`. Its live PostgreSQL limit, credential isolation and full
+migrated-fixture restore are recorded in `validation/neon-s2-capacity-2026-10-20.json`
+and `validation/migration-restore-2026-10-20.json`. The original test branch remains
+retained with automatic idle suspension; its legacy compute reported a 3 GiB
+engine limit despite the project quota. S2 checks the live engine limit before
+freezing.

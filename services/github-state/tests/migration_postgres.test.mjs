@@ -1,34 +1,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {randomBytes} from 'node:crypto';
-import {Client} from '@neondatabase/serverless';
-import {fixture,fill,load,migration,generation} from './migration_fixture.mjs';
-import {initializeSchema} from '../scripts/postgres-schema.mjs';
-import {testCredentials} from './postgres_credentials.mjs';
-const target=await load('src/migration_target.ts');
-const control=await load('src/migration_control.ts');
+import {fixture,load,migration,generation} from './migration_fixture.mjs';
+import {testFixture,target,control} from './migration_postgres_fixture.mjs';
 const enabled=Boolean(process.env.TEST_POSTGRES_URL);
-async function testFixture(){
- const credentials=testCredentials(),admin=new Client(credentials.migration.toString());await admin.connect();
- const id=BigInt('0x'+randomBytes(8).toString('hex')).toString(),schema='github_state_'+id;
- await admin.query('BEGIN');await initializeSchema(admin,id,generation,decodeURIComponent(credentials.application.username),{standby:true});
- await admin.query(`INSERT INTO ${schema}.capacity_statistics VALUES(1,$1,0,1099511627776,$1)`,[Date.now()]);await admin.query('COMMIT');
- const f=await fixture();await fill(f);
- const state={version:1,generation,repository:id,target:'neon-test',source:{object:'source-object',deployment:'test-deployment',schema:5},phase:'freezing',created:Date.now(),updated:Date.now(),tables:{},failure:null,
-  staging:{after:null,page:'1',checked:0,complete:false,expired_jobs:0,expired_hash:'0'.repeat(64)},blobs:{prefix:0,pages:0,objects:0,hash:'0'.repeat(64),complete:false},
-  cutover:{environment:'test',lease_until:Date.now()+900000,epoch:0,source_fenced:false,target_active:false,import:{},verify:{},acceptance:''}};
- f.env.REPOSITORY_DATABASE_URL=credentials.application.toString();f.env.MIGRATION_DATABASE_URL=credentials.migration.toString();
- f.env.MIGRATION_TARGET=JSON.stringify({identity:state.target,hostname:credentials.migration.hostname,database:decodeURIComponent(credentials.migration.pathname.slice(1)),application_role:decodeURIComponent(credentials.application.username),migration_role:decodeURIComponent(credentials.migration.username)});
- const checks=Object.fromEntries(['s0_compatibility','parked_ingress','queue_dlq_ownership','r2_retention_drained','s1_schema_roles','capacity','restore','unchanged_clients','stored_shadow','no_github_refetch','warm_read_p95'].map(x=>[x,true]));
- await f.archive.put(`control/${id}/migration-acceptance.json`,JSON.stringify({version:1,environment:'test',repository:id,target:state.target,deployment:'test-deployment',source_object:'source-object',valid_until:Date.now()+86400000,checks,queries:[{repository:'org/repo',operation:'open_prs'}],latency:{baseline_p95_ms:100,target_p95_ms:100}}));
- const retention=(await load('src/retention.ts')).R2_CLASSES;
- await f.archive.put(`control/${id}/retention-policy.json`,JSON.stringify({mode:'dry_run',disabled:[],pinned:Object.keys(retention)}));
- // This focused protocol fixture uses SQL belonging to a random isolated target;
- // R2 references remain exact source addresses, with no public/GitHub requests.
- let fenced=false,selected=false,released=false;
- const hooks={storage:f.ctx.storage,sql:f.ctx.storage.sql,async verifyStored(state){state.cutover.shadow={queries:1,hash:"fixture",verified_at:Date.now(),complete:true};},async drain(){},async fence(){fenced=true;},assertFence(){assert.ok(fenced);},async release(){released=true;fenced=false;},async select(){assert.ok(fenced);selected=true;}};
- return {...f,source:f.state,state,id,schema,admin,hooks,get selected(){return selected;},get released(){return released;},async close(){f.db.close();await admin.query(`DROP SCHEMA ${schema} CASCADE`);await admin.end();}};
-}
 test('S2 imports exact archives into a standby, restarts every step and recovers a lost switch commit', {skip:!enabled},async()=>{
  const f=await testFixture();
  try {
@@ -56,8 +30,8 @@ test('S2 imports exact archives into a standby, restarts every step and recovers
   await control.controllerStep(f.env,await migration.readMigration(f.archive,f.id),f.hooks);
   state=await migration.readMigration(f.archive,f.id);
   assert.equal(state.phase,'replaying');assert.equal(state.cutover.target_active,true);assert.equal(f.selected,true);assert.equal(f.released,false);
-  const job=(await f.admin.query(`SELECT due::text,attempt::text,generation::text,lease_id,lease_until::text FROM ${f.schema}.jobs`)).rows[0];
-  assert.deepEqual(job,{due:'9999999999999',attempt:'4',generation:'17',lease_id:null,lease_until:'0'});
+  const job=(await f.admin.query(`SELECT due::text,attempt::text,generation::text,lease_id,lease_until::text,started::text,page::text,cursor,api,etag,nested FROM ${f.schema}.jobs`)).rows[0];
+  assert.deepEqual(job,{due:'9999999999999',attempt:'4',generation:'17',lease_id:null,lease_until:'0',started:null,page:'1',cursor:null,api:null,etag:null,nested:null});
   await assert.rejects(target.abandonTarget(f.env,state),/migration_forward_recovery_required/);
  }finally{await f.close();}
 });
@@ -103,7 +77,8 @@ test('ordinary supervisor restarts a fenced repository, preserves cursors, and r
   const cursor='0b6c2f0e-1f7a-4b4c-9a1e-5b8d3c2a1f00',page={version:1,repository:custom.name,operation:'open_prs',status:'ok',revision:123,complete:true,data:[{number:7}]};
   await f.archive.put(`cursors/${f.id}/${cursor}/100.json`,JSON.stringify({repository:f.id,key:'open_prs:{}',allow_observed:false,expires:Date.now()+86400000,result:page}));
   f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json({deployment_id:'test-deployment',repository_inflight:[{repository:custom.id,requests:1}]})})};
-  const waiting=await f.command('start',{target:'neon-test'});assert.equal(waiting.body.error,'migration_drain_pending');
+  let waiting;for(let n=0;n<100;n++){waiting=await f.command('start',{target:'neon-test'});if(waiting.body.error==='migration_drain_pending')break;assert.equal(waiting.status,200,JSON.stringify(waiting.body));}
+  assert.equal(waiting.body.error,'migration_drain_pending');
   assert.equal((await f.archive.get(migration.migrationKey(custom.id)).then(o=>o.json())).bookmark,undefined);
   f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json({deployment_id:'test-deployment',repository_inflight:[],hour:[]})})};
   assert.equal((await f.command('start',{target:'neon-test'})).status,200);
@@ -144,6 +119,13 @@ test('ordinary supervisor restarts a fenced repository, preserves cursors, and r
   await f.archive.put(pointer.key,JSON.stringify({...pending,retry_at:0}));
   await ingress.drain(f.env,custom);
   const revision=(await f.admin.query(`SELECT value FROM ${f.schema}.meta WHERE key='revision'`)).rows[0].value;
+  f.archive.fail((op,key)=>op==='get' && key===`control/${custom.id}/migration.json`);
+  const cold=await fixture(f.db,f.archive,{...f.env});
+  assert.equal(cold.state.store.backend,'postgres');
+  const current=await cold.request('/changes',{});assert.equal((await current.json()).revision,Number(revision));
+  assert.equal(current.headers.get('X-TauCeti-Read-Fallback'),null);
+  const steady=await fixture(f.db,f.archive,{...f.env,MIGRATION_ENVIRONMENT:undefined,MIGRATION_DATABASE_URL:undefined,MIGRATION_TARGET:undefined});
+  assert.equal(steady.state.store.backend,'postgres');assert.equal((await (await steady.request('/changes',{})).json()).revision,Number(revision));
   assert.equal(revision,committedRevision,'replaying a committed event cannot publish another change');
   await ingress.drain(f.env,custom);
   assert.equal((await f.admin.query(`SELECT value FROM ${f.schema}.meta WHERE key='revision'`)).rows[0].value,revision);
@@ -155,9 +137,18 @@ test('ordinary supervisor restarts a fenced repository, preserves cursors, and r
   const done=await (await f.request('/migration-supervise',{})).json();
   assert.equal(done.phase,'complete');assert.equal(done.cutover.release.backend_write_owner,'postgres');
   const receiptKey=migration.archiveKey(custom.id,generation)+'/receipt.json';
+  const immutable=f.archive.objects.get(receiptKey).text;await f.request('/migration-supervise',{});assert.equal(f.archive.objects.get(receiptKey).text,immutable);
   await f.archive.delete(receiptKey); // crash at release receipt publication
   assert.equal((await f.request('/migration-supervise',{})).status,200);
   assert.equal((await f.archive.get(receiptKey).then(o=>o.json())).phase,'complete');
+  const release=await f.command('finish-observation',{target:'neon-test',retention_policy:{mode:'dry_run',disabled:[],pinned:[]}});
+  assert.equal(release.status,200,JSON.stringify(release.body));
+  assert.equal(migration.holdsRetention(await migration.readMigration(f.archive,custom.id)),false);
+  assert.deepEqual((await f.archive.get(`control/${custom.id}/retention-policy.json`).then(o=>o.json())).pinned,[]);
+  const observationKey=migration.archiveKey(custom.id,generation)+'/observation-receipt.json';
+  assert.ok(await f.archive.head(observationKey));await f.archive.delete(observationKey);
+  await f.request('/migration-supervise',{});assert.ok(await f.archive.head(observationKey));
+  assert.equal(f.archive.objects.get(receiptKey).text,immutable);
  }finally{await cleanup();}
 });
 test('a still-full source stays fenced after lease expiry and ordinary supervision retries release',{skip:!enabled},async()=>{
@@ -169,5 +160,97 @@ test('a still-full source stays fenced after lease expiry and ordinary supervisi
   assert.equal(await target.targetOwner(f.env,state),'abandoned');
   await control.controllerStep(f.env,state,f.hooks);
   assert.equal((await migration.readMigration(f.archive,f.id)).phase,'abandoned');assert.equal(f.released,true);
+ }finally{await f.close();}
+});
+
+test('preflight rejects duplicate privileged URLs and authenticates the application credential',{skip:!enabled},async()=>{
+ const f=await testFixture();try {
+  const original=f.env.REPOSITORY_DATABASE_URL;
+  f.env.REPOSITORY_DATABASE_URL=f.env.MIGRATION_DATABASE_URL;
+  assert.throws(()=>target.targetConfig(f.env),/migration_target_configuration/);
+  f.env.REPOSITORY_DATABASE_URL=original;
+  const wrong=new URL(original);wrong.password='invalid-fixture-password';f.env.REPOSITORY_DATABASE_URL=wrong.toString();
+  await assert.rejects(target.targetPreflight(f.env,f.state),error=>error.message==='migration_target_unavailable');
+  f.env.REPOSITORY_DATABASE_URL=original;await target.targetPreflight(f.env,f.state);
+ }finally{await f.close();}
+});
+test('lease expiry during partial import releases SQLite and quarantines an inactive removed target',{skip:!enabled},async()=>{
+ const f=await testFixture();try {
+  await control.preflight(f.env,f.state);await migration.saveMigration(f.archive,f.state);
+  let state=f.state;
+  for(let n=0;n<500;n++){state=await migration.readMigration(f.archive,f.id);if(state.phase==='importing')break;await control.controllerStep(f.env,state,f.hooks);if(n===499)assert.fail('did not export');}
+  await control.controllerStep(f.env,state,f.hooks); // one committed import page
+  state=await migration.readMigration(f.archive,f.id);state.cutover.lease_until=1;await migration.saveMigration(f.archive,state);
+  await f.admin.query(`DROP SCHEMA ${f.schema} CASCADE`);
+  await control.controllerStep(f.env,await migration.readMigration(f.archive,f.id),f.hooks);
+  const done=await migration.readMigration(f.archive,f.id);assert.equal(done.phase,'abandoned');assert.equal(f.released,true);
+  assert.equal(done.cutover.abort_reason,'migration_freeze_lease_expired');assert.ok(done.cutover.target_quarantined);
+ }finally{await f.close();}
+});
+test('a missing target after activation intent always requires forward recovery',{skip:!enabled},async()=>{
+ const f=await testFixture();try {
+  await control.preflight(f.env,f.state);await migration.saveMigration(f.archive,f.state);await control.controllerStep(f.env,f.state,f.hooks);
+  const state=await migration.readMigration(f.archive,f.id);state.phase='switching';state.cutover.activation_intent=true;state.cutover.lease_until=1;await migration.saveMigration(f.archive,state);
+  await f.admin.query(`DROP SCHEMA ${f.schema} CASCADE`);
+  await assert.rejects(control.controllerStep(f.env,await migration.readMigration(f.archive,f.id),f.hooks),/migration_forward_recovery_required/);
+  assert.equal(f.released,false);
+ }finally{await f.close();}
+});
+
+test('legacy column order imports fields by archived names and preserves raw checksums',{skip:!enabled},async()=>{
+ const f=await testFixture();try {
+  f.db.exec("UPDATE jobs SET api='graphql',etag='original-etag',requested_at=1001,created_at=2002");
+  const old=f.db.prepare('SELECT * FROM jobs').get(),ddl=f.db.prepare("SELECT sql FROM sqlite_master WHERE name='jobs'").get().sql;
+  f.db.exec('ALTER TABLE jobs RENAME TO previous_jobs');
+  f.db.exec(ddl.replace('api TEXT,etag TEXT','etag TEXT,api TEXT').replace('requested_at INTEGER,created_at INTEGER','created_at INTEGER,requested_at INTEGER'));
+  const names=f.db.prepare('PRAGMA table_info(previous_jobs)').all().map(c=>c.name).join(',');
+  f.db.exec(`INSERT INTO jobs(${names}) SELECT ${names} FROM previous_jobs`);f.db.exec('DROP TABLE previous_jobs');
+  await control.preflight(f.env,f.state);await migration.saveMigration(f.archive,f.state);
+  let state=f.state;
+  for(let n=0;n<500;n++){state=await migration.readMigration(f.archive,f.id);if(state.phase==='preparing')break;await control.controllerStep(f.env,state,f.hooks);if(n===499)assert.fail('did not verify');}
+  const job=(await f.admin.query(`SELECT api,etag,requested_at::text,created_at::text FROM ${f.schema}.jobs`)).rows[0];
+  assert.deepEqual(job,{api:old.api,etag:old.etag,requested_at:String(old.requested_at),created_at:String(old.created_at)});
+  assert.equal(state.cutover.verify.jobs.hash,state.tables.jobs.hash);
+ }finally{await f.close();}
+});
+
+test('stored shadows reject real target differences and matching unavailable results',{skip:!enabled},async()=>{
+ const f=await testFixture();try {
+  f.db.prepare('INSERT INTO resources(kind,id,data,observed,revision,tombstone) VALUES(?,?,?,?,?,0)').run('pr','7',JSON.stringify({number:7,state:'OPEN',title:'source title'}),123456,123);
+  f.db.prepare('INSERT INTO collections VALUES(?,?,?,?,?,?,?)').run('open_prs:{}','open_prs','{}',1,123456,123,'etag');
+  f.db.prepare('INSERT INTO members VALUES(?,?)').run('open_prs:{}','7');
+  await control.preflight(f.env,f.state);await migration.saveMigration(f.archive,f.state);
+  let state=f.state;
+  for(let n=0;n<500;n++){state=await migration.readMigration(f.archive,f.id);if(state.phase==='switching')break;await control.controllerStep(f.env,state,f.hooks);if(n===499)assert.fail('did not verify');}
+  f.source.migrationState=state;await f.source.shadowMigration(state);assert.equal(state.cutover.shadow.queries,1);
+  await f.admin.query(`UPDATE ${f.schema}.resources SET data=$1 WHERE kind='pr' AND id='7'`,[JSON.stringify({number:7,state:'OPEN',title:'different target title'})]);
+  state.cutover.shadow=undefined;await assert.rejects(f.source.shadowMigration(state),/migration_shadow_mismatch/);
+  f.db.prepare('UPDATE collections SET complete=0 WHERE key=?').run('open_prs:{}');
+  await f.admin.query(`UPDATE ${f.schema}.collections SET complete=0 WHERE key=$1`,['open_prs:{}']);
+  state.cutover.shadow=undefined;await assert.rejects(f.source.shadowMigration(state),/migration_shadow_unavailable/);
+ }finally{await f.close();}
+});
+
+for(const when of ['before','after'])test(`restart around ${when} local PostgreSQL selection commit preserves exclusive ownership`,{skip:!enabled},async()=>{
+ const f=await testFixture();try {
+  const custom={id:f.id,name:'org/repo',installation:'200'};await f.source.setMeta('repository',custom);f.env.ALLOWED_REPOSITORIES=JSON.stringify([custom]);
+  f.db.prepare('INSERT INTO resources(kind,id,data,observed,revision,tombstone) VALUES(?,?,?,?,?,0)').run('pr','7',JSON.stringify({number:7,state:'OPEN'}),123456,123);
+  f.db.prepare('INSERT INTO collections VALUES(?,?,?,?,?,?,?)').run('open_prs:{}','open_prs','{}',1,123456,123,'etag');f.db.prepare('INSERT INTO members VALUES(?,?)').run('open_prs:{}','7');
+  assert.equal((await f.command('start',{target:'neon-test'})).status,200);
+  let interrupted=false;const exec=f.ctx.storage.sql.exec;
+  f.ctx.storage.sql.exec=(sql,...bindings)=>{
+    const marker=sql.startsWith("UPDATE meta SET value=? WHERE key='backend_owner'") && JSON.parse(bindings[0]).backend==='postgres';
+    if(marker && !interrupted){interrupted=true;if(when==='after')exec(sql,...bindings);throw Error('selection interrupted');}
+    return exec(sql,...bindings);
+  };
+  let failed;
+  for(let n=0;n<50;n++){const response=await f.request('/migration-supervise',{}),body=await response.json();if(response.status===503){failed=body;break;}assert.equal(response.status,200,JSON.stringify(body));}
+  assert.ok(interrupted);assert.equal(failed.phase,'switching');assert.equal(failed.cutover.target_active,true);
+  assert.throws(()=>f.db.prepare("INSERT INTO demand VALUES('stale-worker',1)").run(),/generation fenced/);
+  const cold=await fixture(f.db,f.archive,{...f.env});assert.equal(cold.state.store.backend,'postgres');
+  const resumed=await (await cold.request('/migration-supervise',{})).json();assert.equal(resumed.phase,'replaying');
+  assert.equal(cold.state.localMeta('backend_owner').backend,'postgres');
+  const sourceRevision=f.db.prepare("SELECT value FROM meta WHERE key='revision'").get().value;
+  assert.equal((await cold.state.meta('revision')),JSON.parse(sourceRevision));
  }finally{await f.close();}
 });

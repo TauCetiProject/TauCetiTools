@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "scope": "real Neon point-in-time restore of the complete migrated SQL fixture",
+  "verified_at": "2026-10-20T08:54:07.613Z",
+  "project": "sparkling-sunset-73872362",
+  "test_branch": "br-icy-feather-b54h8dxh",
+  "restore_branch": "br-winter-bread-b5ca0mvs",
+  "restore_point": "2026-10-20T08:53:50.843285Z",
+  "source_schema": 5,
+  "target_schema": 1,
+  "source_mutated_after_restore_point": true,
+  "tables": {
+    "activity_landings": {
+      "rows": 1,
+      "hash": "007d11f63238f1de05e54512de0dde1e6bed3617245ae2e88a79cb6fe52452f4"
+    },
+    "activity_loc_cache": {
+      "rows": 1,
+      "hash": "9931f57907afba657aa7dcd220b95d1e24c3f607d9489452d957e3d79dcee7b4"
+    },
+    "changes": {
+      "rows": 1,
+      "hash": "063eb4e9c6b94572751954737c5a05696ae5963a51c8c3fcc2f3e0dd0eb451fb"
+    },
+    "collections": {
+      "rows": 2,
+      "hash": "59b20227f3bddf97ca72bfeaf4fab04dded8295b532f16f17cf2faffe0f9bbd3"
+    },
+    "deliveries": {
+      "rows": 1,
+      "hash": "11f3b2763c90a1d0fb1f0e0ce970f79c5bb79d2783c8b8eb5cadb231354c4b15"
+    },
+    "demand": {
+      "rows": 3,
+      "hash": "7d100b12b34bf1c609e15beefc21b4941825023fd54ee6f1b11fa36d568d2670"
+    },
+    "head_prs": {
+      "rows": 1,
+      "hash": "1757396185295ff8f5b180df8c8b7e531517a2282b1c12e6766a2029b0ac2f53"
+    },
+    "jobs": {
+      "rows": 1,
+      "hash": "bca6909e30f4e4a41b84ff44ec007410a4be67d559a81cecc738b136fd103acd"
+    },
+    "members": {
+      "rows": 1,
+      "hash": "1757396185295ff8f5b180df8c8b7e531517a2282b1c12e6766a2029b0ac2f53"
+    },
+    "meta": {
+      "rows": 3,
+      "hash": "b4e6000e1f8d0ddd3fab28991327eaeac9f36fcc66baed2282bc92e182e74092"
+    },
+    "query_metrics": {
+      "rows": 1,
+      "hash": "707bc738fafd4b40e2c14c73e7c95621d782a9a343119278880212051565a1fd"
+    },
+    "repair_metrics": {
+      "rows": 1,
+      "hash": "a92065a55a46e832a1459583b94026a4f9662e6ea8718088a4d427b1564adc55"
+    },
+    "resources": {
+      "rows": 2,
+      "hash": "91d817a4ff8a40efb839775b0deae6eca6bf730c463c970fe67b5b9c5d65124e"
+    },
+    "retired_objects": {
+      "rows": 1,
+      "hash": "3e759150b65b37ad363363ca788e9963d1b7bb7e03728bc7f22285615d732264"
+    },
+    "survey_dirty": {
+      "rows": 1,
+      "hash": "12ee043e0e4a127b26bc790f33b1c1c670b0a148c3ffdb75d8ed5e961e9ec7aa"
+    },
+    "survey_fragments": {
+      "rows": 1,
+      "hash": "768fcdc3e2713293a6a25abeb79c6b061fabc594c92ef18bb0482bee05b086a1"
+    },
+    "survey_hydrated": {
+      "rows": 1,
+      "hash": "1757396185295ff8f5b180df8c8b7e531517a2282b1c12e6766a2029b0ac2f53"
+    },
+    "survey_hydration_failures": {
+      "rows": 1,
+      "hash": "3e759150b65b37ad363363ca788e9963d1b7bb7e03728bc7f22285615d732264"
+    },
+    "survey_inventory": {
+      "rows": 1,
+      "hash": "1757396185295ff8f5b180df8c8b7e531517a2282b1c12e6766a2029b0ac2f53"
+    },
+    "survey_state": {
+      "rows": 1,
+      "hash": "11f3b2763c90a1d0fb1f0e0ce970f79c5bb79d2783c8b8eb5cadb231354c4b15"
+    }
+  },
+  "all_tables_verified": true,
+  "production_data": false,
+  "restore_branch_deleted": true
+}

@@ -1,5 +1,6 @@
 // S2 source protocol. This is deliberately separate from observational recovery
 // exports: only a drained, fenced repository may produce a migration archive.
+import { columns, integerColumn } from './repository_store';
 import { AdminError, REQUIRED_TABLES } from './storage';
 import { digest, stagingStateKey, stagedPageKey } from './protocol';
 
@@ -15,16 +16,17 @@ interface TableState extends Checkpoint {
   count: number; complete: boolean; verified: boolean; check: Checkpoint;
 }
 export interface TargetCheckpoint {page:number;rows:number;hash:string;complete:boolean;after?:string}
-export function blocksWrites(state:Migration|null):boolean {return Boolean(state && !['abandoned','replaying','complete'].includes(state.phase));}
+export function blocksWrites(state:Migration|null):boolean {return Boolean(state && !['preflighting','abandoned','replaying','complete'].includes(state.phase));}
+export function blocksRepairs(state:Migration|null):boolean {return blocksWrites(state) || Boolean(state?.phase==='replaying' && !state.cutover?.replay_complete);}
 export interface Migration {
   checkpoint_etag?: string;
   version: 1; generation: string; repository: string; target: string;
   source: { object: string; deployment: string; schema: number };
-  phase: 'freezing' | 'exporting' | 'verifying' | 'source_verified' | 'importing' | 'target_verifying' | 'preparing' | 'switching' | 'replaying' | 'complete' | 'aborting' | 'abandoned';
+  phase: 'preflighting' | 'freezing' | 'exporting' | 'verifying' | 'source_verified' | 'importing' | 'target_verifying' | 'preparing' | 'switching' | 'replaying' | 'complete' | 'aborting' | 'abandoned';
   cutover?: {target_identity?:Record<string,string>; environment:'test'|'production'; lease_until:number; epoch:number; source_fenced:boolean; target_active:boolean;
-    import:Record<string,TargetCheckpoint>; verify:Record<string,TargetCheckpoint>; acceptance:string;
+    compatibility?:Record<string,{after:string|null;complete:boolean}>; import:Record<string,TargetCheckpoint>; verify:Record<string,TargetCheckpoint>; acceptance:string;
     staging_after?:string; staging_rows?:number; staging_hash?:string; staging_complete?:boolean;
-    shadow?:{queries:number;hash:string;verified_at:number;complete:boolean}; selected_at?:number; completed_at?:number; release?:Record<string,unknown>};
+    observation_release?:{at:number;policy:unknown}; observation_finished_at?:number; abort_reason?:string; last_failure?:string; activation_intent?:boolean; target_quarantined?:{reason:string;at:number}; shadow?:{queries:number;hash:string;verified_at:number;complete:boolean;activity_checked?:boolean;cursor_checks?:number;expired_cursor_checks?:number}; replay_complete?:number; selected_at?:number; completed_at?:number; release?:Record<string,unknown>};
   created: number; updated: number; bookmark?: string; revision?: string;
   tables: Record<string, TableState>; failure: string | null;
   staging: { after: string | null; page: string; checked: number; complete: boolean; expired_jobs: number; expired_hash: string };
@@ -44,7 +46,7 @@ export async function readMigration(bucket: R2Bucket, repo: string): Promise<Mig
   const object = await bucket.get(migrationKey(repo));
   if(!object) return null;
   const state=await object.json<Migration>();
-  if(state.version!==1 || state.repository!==repo || !['freezing','exporting','verifying','source_verified','importing','target_verifying','preparing','switching','replaying','complete','aborting','abandoned'].includes(state.phase) || !state.source?.object || !state.source.deployment || !state.tables || !state.blobs || !state.staging) throw new AdminError('migration_control_corrupt');
+  if(state.version!==1 || state.repository!==repo || !['preflighting','freezing','exporting','verifying','source_verified','importing','target_verifying','preparing','switching','replaying','complete','aborting','abandoned'].includes(state.phase) || !state.source?.object || !state.source.deployment || !state.tables || !state.blobs || !state.staging) throw new AdminError('migration_control_corrupt');
   generation(state.generation); targetIdentity(state.target);
   if(state.cutover && (!['test','production'].includes(state.cutover.environment) || !Number.isSafeInteger(state.cutover.epoch) || !Number.isSafeInteger(state.cutover.lease_until) || !state.cutover.import || !state.cutover.verify || typeof state.cutover.source_fenced!=='boolean' || typeof state.cutover.target_active!=='boolean' || ['replaying','complete'].includes(state.phase) && !state.cutover.target_active))throw new AdminError('migration_control_corrupt');
   state.checkpoint_etag=object.etag;
@@ -57,6 +59,7 @@ export function expectedTables(sql: SqlStorage): string[] {
     .map(row=>row.name as string).filter(name=>!name.startsWith('sqlite_') && !name.startsWith('_cf_'));
   const expected = [...REQUIRED_TABLES].sort();
   if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new AdminError('migration_table_manifest_mismatch');
+  for(const name of actual)if(JSON.stringify(schema(sql,name).map(c=>c.name).sort())!==JSON.stringify([...columns[name]].sort()))throw new AdminError('migration_column_manifest_mismatch');
   return actual;
 }
 export function schema(sql: SqlStorage, name: string): TableState['columns'] {
@@ -127,6 +130,24 @@ function references(rows: Row[]): string[] {
   }
   return [...keys].sort();
 }
+export function compatibleRows(name:string,fields:TableState['columns'],rows:Row[]):void {
+  if(JSON.stringify(fields.map(c=>c.name).sort())!==JSON.stringify([...columns[name]].sort()))throw new AdminError('migration_column_manifest_mismatch');
+  for(const row of rows)for(let i=0;i<fields.length;i++) {
+    const [type,value]=row[i+1] as Cell,field=fields[i];
+    if(type==='null') {if(field.pk || field.notnull)throw new AdminError('migration_cell_incompatible');continue;}
+    if(!['integer','text'].includes(type) || value===null || value.includes('\0') || integerColumn(name,field.name) && type!=='integer')throw new AdminError('migration_cell_incompatible');
+  }
+}
+// This bounded scan runs while SQLite still accepts ordinary input. Export
+// rechecks every frozen page to cover changes made after a row was scanned.
+export function compatibilityStep(sql:SqlStorage,state:Migration):void {
+  const names=expectedTables(sql),progress=state.cutover!.compatibility ||= Object.fromEntries(names.map(n=>[n,{after:null,complete:false}]));
+  const name=names.find(n=>!progress[n]?.complete);
+  if(!name) {state.phase='freezing';return;}
+  const check=progress[name],fields=schema(sql,name),rows=sourceRows(sql,name,fields,check.after,250);
+  compatibleRows(name,fields,rows);
+  if(rows.length)check.after=rows.at(-1)![0];else check.complete=true;
+}
 export async function exportStep(bucket: R2Bucket, sql: SqlStorage, state: Migration, requestedLimit: unknown): Promise<void> {
   if (state.phase !== 'exporting') return;
   const name = Object.keys(state.tables).find(n => !state.tables[n].complete);
@@ -134,6 +155,7 @@ export async function exportStep(bucket: R2Bucket, sql: SqlStorage, state: Migra
   const table = state.tables[name];
   const limit = Number.isSafeInteger(requestedLimit) && Number(requestedLimit) > 0 ? Math.min(Number(requestedLimit), 250) : 100;
   const rows = sourceRows(sql, name, table.columns, table.after, limit);
+  if(state.cutover)compatibleRows(name,table.columns,rows);
   if (!rows.length) {
     if (table.rows !== table.count) throw new AdminError('migration_source_count_changed');
     table.complete = true;
@@ -222,7 +244,7 @@ async function blobStep(bucket: R2Bucket, state: Migration): Promise<void> {
     check.complete = true; state.phase = 'source_verified';
     await saveMigration(bucket, state);
     // Retained receipt, separate from the mutable current-generation control.
-    await bucket.put(archiveKey(state.repository, state.generation) + '/receipt.json', encodeMigration(state));
+    await bucket.put(archiveKey(state.repository, state.generation) + (state.cutover?'/source-receipt.json':'/receipt.json'), encodeMigration(state));
     return;
   }
   const page = await bucket.list({ prefix: prefixes[check.prefix], cursor: check.cursor, limit: 100, include: ['customMetadata'] });
@@ -234,6 +256,17 @@ async function blobStep(bucket: R2Bucket, state: Migration): Promise<void> {
   else { check.prefix++; delete check.cursor; }
   await saveMigration(bucket, state);
 }
+// A terminal receipt is immutable. HEAD avoids repeated conditional PUTs once
+// publication is known durable; create-only PUT covers concurrent recovery.
+export async function terminalReceipt(bucket:R2Bucket,state:Migration,filename='receipt.json'):Promise<void> {
+  const key=archiveKey(state.repository,state.generation)+'/'+filename;
+  const matches=(o:R2Object|null)=>o?.customMetadata?.generation===state.generation && o.customMetadata.phase===state.phase;
+  const prior=await bucket.head(key);
+  if(prior) {if(!matches(prior))throw new AdminError('migration_receipt_conflict');return;}
+  const written=await bucket.put(key,encodeMigration(state),{onlyIf:{etagDoesNotMatch:'*'},customMetadata:{generation:state.generation,phase:state.phase}});
+  if(!written && !matches(await bucket.head(key)))throw new AdminError('migration_receipt_conflict');
+}
+export function holdsRetention(state:Migration|null):boolean {return Boolean(state && state.phase!=='abandoned' && !state.cutover?.observation_finished_at);}
 export function publicReceipt(state: Migration | null): unknown {
   if (!state) return { migration: null };
   // Do not return SQL cells, R2 reference keys, query arguments, or secrets.
