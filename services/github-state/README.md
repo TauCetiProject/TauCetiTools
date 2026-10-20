@@ -222,5 +222,5 @@ Downstream deployment and credential setup are documented in the
 [manual](../../docs/project-setup.md#github-state).
 
 The [migration source runbook](../../docs/github-state-migration.md) describes
-S2's test-only, fenced full-table export protocol and its production blockers.
+S2's supervised export/import, exclusive write switch, production gates and recovery protocol.
 Source verification does not select PostgreSQL or constitute a release receipt.

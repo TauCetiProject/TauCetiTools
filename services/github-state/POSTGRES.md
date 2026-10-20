@@ -190,7 +190,7 @@ BASELINE_REF=<pre-change-TauCetiTools-commit> npm run benchmark:postgres
 For the original Worker baseline, set `BASELINE_REPOSITORY` to a TauCetiWorker
 checkout and `BASELINE_REF=5d5f4b870`. The service now lives in TauCetiTools; its
 source migration/export protocol and frozen-mirror recovery behavior remain in
-place. Source-export preflight still blocks target import and production cutover.
+place. The [migration runbook](../../docs/github-state-migration.md) defines the supervised target import and production acceptance gates.
 
 The harness seeds 1,200 PRs and 5,000 comments, checks equivalent response data,
 warms both implementations, and measures five fixed trials of 1,200 samples per workload/backend

@@ -241,6 +241,7 @@ export default {
       if(repo.bors_receipts_url || (repo.name==='TauCetiProject/TauCeti' && env.BORS_ACTIVITY)) ctx.waitUntil(stub(env.REPOSITORIES,repo.id).fetch('https://internal/activity-refresh',{method:'POST'}));
       ctx.waitUntil((async()=>{
         let tick:Response;const started=Date.now();
+        if(['test','production'].includes(env.MIGRATION_ENVIRONMENT || ''))await stub(env.REPOSITORIES,repo.id).fetch('https://internal/migration-supervise',{method:'POST'});
         try {tick=await stub(env.REPOSITORIES,repo.id).fetch('https://internal/tick',{method:'POST',body:JSON.stringify({repository:repo.name})});}
         catch(error) {
           if (classify(error)==='storage_full') await noteRepositoryFull(env,repo.id,'tick',started);
@@ -258,7 +259,7 @@ export default {
     // retains its source. Do not expire active cursors, raw input, staging, or
     // old resource versions underneath an export/observation period.
     const retentionHeld=async()=>{
-      if(env.MIGRATION_ENVIRONMENT!=='test') return false;
+      if(!['test','production'].includes(env.MIGRATION_ENVIRONMENT || '')) return false;
       for(const repo of repositories(env)) {
         const state=await readMigration(env.ARCHIVE,repo.id);
         if(state && state.phase!=='abandoned') return true;

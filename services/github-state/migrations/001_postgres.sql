@@ -56,3 +56,6 @@ END $$;
 CREATE INDEX IF NOT EXISTS resource_id ON __SCHEMA__.resources USING hash(id);
 CREATE INDEX IF NOT EXISTS member_collection ON __SCHEMA__.members(collection);
 CREATE INDEX IF NOT EXISTS member_id ON __SCHEMA__.members USING hash(id);
+
+-- S2 idempotent import ledger, owned exclusively by the migration role.
+CREATE TABLE IF NOT EXISTS __SCHEMA__.migration_imports(generation TEXT NOT NULL,name TEXT NOT NULL,page INTEGER NOT NULL,hash TEXT NOT NULL,PRIMARY KEY(generation,name,page));

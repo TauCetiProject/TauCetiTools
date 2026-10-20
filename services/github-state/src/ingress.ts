@@ -1,5 +1,5 @@
 import { Env, EventPointer, Repository, digest, parseGitHub, stub, CI_EVENTS, repositories } from './protocol';
-import { readMigration } from './migration';
+import { blocksWrites, readMigration } from './migration';
 import { classify, log } from './storage';
 import { policy, protectedObject } from './retention';
 
@@ -34,11 +34,12 @@ export function backoff(attempts: number): number { return Math.min(600, 5 * 2 *
 export async function storageState(env: Env, repo: Repository): Promise<any> {
   // This record describes the old SQLite file, not the selected remote store.
   if(env.REPOSITORY_BACKEND==='postgres')return null;
+  if(['test','production'].includes(env.MIGRATION_ENVIRONMENT || '') && (await readMigration(env.ARCHIVE,repo.id))?.cutover?.target_active)return null;
   return env.ARCHIVE.get(storageKey(repo.id)).then(o => o ? o.json() : null);
 }
 export async function ingressMode(env: Env, repo: Repository): Promise<{ mode: 'apply' | 'parked'; reason?: string; at?: number }> {
-  const migration=env.MIGRATION_ENVIRONMENT==='test'?await readMigration(env.ARCHIVE,repo.id):null;
-  if(migration && migration.phase!=='abandoned') return {mode:'parked',reason:'migration'};
+  const migration=['test','production'].includes(env.MIGRATION_ENVIRONMENT || '')?await readMigration(env.ARCHIVE,repo.id):null;
+  if(blocksWrites(migration)) return {mode:'parked',reason:'migration'};
   const object = await env.ARCHIVE.get(controlKey(repo.id));
   return object ? object.json() : { mode: 'apply' };
 }
@@ -241,7 +242,7 @@ export async function maintainRaw(env: Env, targets: (payload: any, event: strin
       if(expired.length) {
         let frozen=false;
         for(const repo of repositories(env)) {
-          if(env.MIGRATION_ENVIRONMENT==='test') {
+          if(['test','production'].includes(env.MIGRATION_ENVIRONMENT || '')) {
             const migration=await readMigration(env.ARCHIVE,repo.id);
             if(migration && migration.phase!=='abandoned') {frozen=true;break;}
           }

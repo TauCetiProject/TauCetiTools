@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "scope": "S2 local tooling acceptance; not production cutover authorization",
+  "source_schema": 5,
+  "target_schema": 1,
+  "checks": {
+    "python_package": {"passed": 11, "failed": 0},
+    "sqlite_service": {"passed": 190, "failed": 0, "skipped": 31},
+    "isolated_neon_contracts": {"passed": 79, "failed": 0, "skipped": 1},
+    "migration_fixtures": {"passed": 5, "failed": 0}
+  },
+  "migration_fixture_coverage": [
+    "every source table and empty table manifests",
+    "signed 64-bit rowids and exact large identifiers/timestamps",
+    "incomplete collections, tombstones and R2 references",
+    "preserved retry/quota cooldowns, attempts and generations",
+    "expired execution leases and expired partial staging checkpoints",
+    "restart and lost response during import and validation",
+    "lost PostgreSQL activation response with expired controller lease",
+    "lease expiry before activation and still-full source recovery",
+    "stored-only shadows, old cursors and unchanged 304 behavior",
+    "input arriving during freeze beyond queue retry budget",
+    "crash after SQL event commit before permanent R2 receipt",
+    "crash after parked-pointer deletion before acknowledgement",
+    "crash during final release receipt publication"
+  ],
+  "commands": [
+    "python -m unittest discover -s tests -p 'test_*.py'",
+    "npm test",
+    "npm run test:postgres"
+  ],
+  "postgres_credentials": "isolated test roles; supplied privately through environment",
+  "production_cutover_performed": false,
+  "production_acceptance": "requires deployed S0/S1 checks and a generation-bound private receipt"
+}
