@@ -606,7 +606,7 @@ def extra_findings(project, gh, again):
         "claims": ("content", ["claims-access.yml"]),
         "docs": ("content", ["api-docs.yml", "pages.yml"]),
         "progress": ("roadmap", ["ci.yml", "progress-merge.yml"]),
-        "zulip": ("content", ["zulip-healthcheck.yml", "pr-status.yml"]),
+        "zulip": ("content", ["zulip-healthcheck.yml"]),
         "fleet": ("content", ["pick-runner.yml"]),
         "security_audit": ("content", ["nightly-verify.yml"]),
     }
