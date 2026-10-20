@@ -1,6 +1,6 @@
 // Build a committed fixture once, then deploy these exact bytes with no_bundle.
 import {build} from 'esbuild';
-import {mkdir,writeFile} from 'node:fs/promises';
+import {mkdir,readFile,writeFile} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
@@ -13,6 +13,7 @@ if(output.outputFiles.length!==1)throw Error('Unexpected fixture bundle modules'
 const dir=resolve(destination),bundle=output.outputFiles[0].contents;
 await mkdir(dir,{recursive:true,mode:0o700});
 await writeFile(resolve(dir,'deployed-outage.mjs'),bundle,{mode:0o600,flag:'wx'});
-const manifest={...identity,bundle_file:'deployed-outage.mjs',bundle_bytes:bundle.length,bundle_sha256:createHash('sha256').update(bundle).digest('hex'),built_at:new Date().toISOString(),deployment_mode:'wrangler no_bundle=true; immutable emitted module'};
+const dependencies=Object.fromEntries(await Promise.all(['esbuild','@neondatabase/serverless','wrangler'].map(async name=>[name,JSON.parse(await readFile(resolve(cwd,'node_modules',name,'package.json'),'utf8')).version])));
+const manifest={...identity,node_version:process.versions.node,dependencies,package_lock_sha256:createHash('sha256').update(await readFile(resolve(cwd,'package-lock.json'))).digest('hex'),bundle_file:'deployed-outage.mjs',bundle_bytes:bundle.length,bundle_sha256:createHash('sha256').update(bundle).digest('hex'),built_at:new Date().toISOString(),deployment_mode:'wrangler no_bundle=true; immutable emitted module'};
 await writeFile(resolve(dir,'build-manifest.json'),JSON.stringify(manifest,null,2)+'\n',{mode:0o600,flag:'wx'});
 console.log(JSON.stringify(manifest));

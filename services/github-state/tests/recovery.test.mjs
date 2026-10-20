@@ -1117,3 +1117,37 @@ test('a known frozen source survives startup retries without relaxing ownership 
   state.startup();assert.equal(state.schema.error,'backend_fenced','activated target cannot fall back to the old source');
  }finally {db.close();}
 });
+
+test('native source fences survive fresh constructors and recovered control revalidates fallback reads',async()=>{
+ const first=repositoryFixture();await first.fixtureReady;const {db,archive,state}=first;
+ try{
+  await state.put('pr','7',{number:7,title:'frozen history'});
+  await state.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?)','pr:{"number":7}','pr','{"number":7}',1,Date.now(),await state.revision(),null);
+  const generation='c707ddba-076d-4a63-8696-96533031ce88',checkpoint={version:1,generation,repository:'100',target:'test-target',source:{object:'fixture',deployment:'test-deployment',schema:5},phase:'switching',created:Date.now(),updated:Date.now(),tables:{},failure:null,staging:{after:null,page:'1',checked:0,complete:false,expired_jobs:0,expired_hash:'0'.repeat(64)},blobs:{prefix:0,pages:0,objects:0,hash:'0'.repeat(64),complete:false},cutover:{environment:'test',lease_until:Date.now()+900000,epoch:0,source_fenced:false,target_active:false,import:{},verify:{},acceptance:''}};
+  await state.fenceMigration(checkpoint);checkpoint.cutover.source_fenced=true;
+  for(const fault of [false,true])for(const unavailable of [false,true]){
+   await archive.put('control/100/migration.json',JSON.stringify(checkpoint));
+   if(unavailable)archive.failures.push((op,key)=>op==='get' && key==='control/100/migration.json');
+   const reset=repositoryFixture({MIGRATION_ENVIRONMENT:'test',FAULT_INJECTION:fault?'true':undefined},1,db,archive);await reset.ready;
+   assert.equal((await queryFixture(reset.state,{operation:'pr',args:{number:7}})).data.title,'frozen history');
+   await assert.rejects(reset.state.setMeta('forbidden',true),/migration_frozen|generation fenced/);
+   assert.throws(()=>db.prepare("INSERT INTO demand VALUES('native-trigger',1)").run(),/generation fenced/);
+   if(unavailable){
+    await archive.put('control/100/migration.json',JSON.stringify({...checkpoint,generation:'c707ddba-076d-4a63-8696-96533031ce89'}));
+    await reset.state.retryMigrationControl();
+    assert.equal((await queryFixture(reset.state,{operation:'pr',args:{number:7}})).error,'backend_fenced','recovered control rechecks previously current fallback');
+   }
+  }
+ }finally{db.close();}
+});
+
+test('test-migration constructor waits for a full marker before attempting a legacy schema upgrade',async()=>{
+ const first=repositoryFixture();await first.fixtureReady;const {db,archive}=first;
+ try{
+  db.prepare("DELETE FROM meta WHERE key='schema_version'").run();
+  await archive.put('control/100/storage.json',JSON.stringify({state:'full',since:Date.now(),source:'queue'}));
+  const reset=repositoryFixture({MIGRATION_ENVIRONMENT:'test'},1,db,archive);await reset.ready;
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM meta WHERE key='schema_version'").get().n,0);
+  assert.equal(reset.state.schema,'migration_pending');assert.ok(reset.state.degraded);
+ }finally{db.close();}
+});

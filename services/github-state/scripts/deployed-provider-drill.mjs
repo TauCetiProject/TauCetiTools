@@ -9,10 +9,12 @@ const [directory,tokenFile,mode]=process.argv.slice(2);
 if(!directory || !tokenFile || !['restart','restore'].includes(mode))throw Error('Usage: deployed-provider-drill.mjs PRIVATE_STATE_DIR NEON_TOKEN_FILE restart|restore');
 const dir=resolve(directory),read=name=>readFile(resolve(dir,name),'utf8'),state=JSON.parse(await read('state.json'));
 const provision=JSON.parse(await readFile(new URL('../validation/neon-provisioning-2026-10-20.json',import.meta.url),'utf8'));
+const manifest=JSON.parse(await read('build-deployment-manifest.json'));
+if(createHash('sha256').update(await readFile(resolve(dir,manifest.bundle_file))).digest('hex')!==manifest.bundle_sha256)throw Error('immutable_bundle_hash_mismatch');
 const uri=new URL((await read('migration-url')).trim()),service=new URL(state.service_url),project=provision.project.id;
 if(!/^issue317-drill-[a-f0-9]{8}$/.test(state.name) || state.production_actions!==false || state.project!==project || !/^[0-9]{1,50}$/.test(state.repository.id) || service.protocol!=='https:' || service.port && service.port!=='443' || service.hostname!==state.worker_hostname || !service.hostname.startsWith(state.name+'.') || !service.hostname.endsWith('.workers.dev') || service.username || service.password || service.search || service.hash || service.pathname!=='/' || !['postgres:','postgresql:'].includes(uri.protocol) || uri.hostname!==state.hostname || !state.hostname.startsWith(state.endpoint+'.') || decodeURIComponent(uri.username)!=='github_state_test_migration' || uri.pathname!=='/github_state_test')throw Error('disposable_identity_required');
 const token=(await readFile(tokenFile,'utf8')).trim(),schema='github_state_'+state.repository.id;
-const receipt={version:1,mode,run:state.name,...sourceFingerprint(fileURLToPath(new URL('..',import.meta.url))),started_at:new Date().toISOString(),project,source_branch:state.branch,source_endpoint:state.endpoint,schema,production_actions:false,verified:false};
+const receipt={version:1,mode,build_manifest:manifest,run:state.name,...sourceFingerprint(fileURLToPath(new URL('..',import.meta.url))),started_at:new Date().toISOString(),project,source_branch:state.branch,source_endpoint:state.endpoint,schema,production_actions:false,verified:false};
 const save=()=>writeFile(resolve(dir,'receipt-provider-'+mode+'.json'),JSON.stringify(receipt,null,2)+'\n',{mode:0o600});
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 const api=async(path,method='GET',body)=>{
@@ -27,6 +29,9 @@ const connect=async(url=uri)=>{for(let n=0;n<30;n++){const c=new Client({connect
 const checksum=rows=>createHash('sha256').update(JSON.stringify(rows.map(row=>Object.fromEntries(Object.keys(row).sort().map(k=>[k,row[k]]))).sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b))))).digest('hex');
 let source,restored,restoreBranch,sentinel,paused=false;
 try {
+ const deployment=(await worker('/fixture/state')).value;
+ if(!manifest.uploaded_deployments.some(entry=>entry.version===deployment.deployment))throw Error('unverified_worker_deployment');
+ receipt.deployed_identity=deployment;
  const parent=(await api(`/projects/${project}/branches/${state.parent}`)).branch,branch=(await api(`/projects/${project}/branches/${state.branch}`)).branch,endpoint=(await api(`/projects/${project}/endpoints/${state.endpoint}`)).endpoint;
  if(!['test','test-s2'].includes(parent.name) || branch.parent_id!==parent.id || branch.name!==state.name || branch.id===parent.id || endpoint.branch_id!==branch.id || endpoint.id!==state.endpoint || [provision.production_compute.id,provision.test_compute.id].includes(endpoint.id))throw Error('unowned_disposable_endpoint');
  source=await connect();const identity=(await source.query('SELECT current_database() database,current_user role,pg_postmaster_start_time()::text started')).rows[0];
@@ -37,11 +42,16 @@ try {
   const warm=(await worker('/v1/query?'+params,undefined,'client')).value;if(warm.status!=='ok')throw Error('warm_read_unavailable');
   await source.end();source=undefined;
   const restarting=await api(`/projects/${project}/endpoints/${state.endpoint}/restart`,'POST');receipt.operations=(restarting.operations || []).map(op=>op.id);if(!receipt.operations.length)throw Error('restart_operation_missing');await save();
+  receipt.overlap=[];
+  const operationStates=async(stage)=>{const states=[];for(const id of receipt.operations)states.push((await api(`/projects/${project}/operations/${id}`)).operation);const sample={stage,at:new Date().toISOString(),states:states.map(op=>({id:op.id,status:op.status,action:op.action}))};receipt.overlap.push(sample);return sample;};
+  await operationStates('before_cached_read');
   const cached=(await worker('/v1/query?'+params,undefined,'client')).value;
-  if(cached.status!=='ok' || JSON.stringify(cached.data)!==JSON.stringify(warm.data) || ['revision','observed_at','verified_at'].some(k=>cached[k]!==warm[k]))throw Error('cached_read_changed');receipt.safe_cached_read=true;
+  if(cached.status!=='ok' || JSON.stringify(cached.data)!==JSON.stringify(warm.data) || ['revision','observed_at','verified_at'].some(k=>cached[k]!==warm[k]))throw Error('cached_read_changed');receipt.safe_cached_read=true;await operationStates('after_cached_read');
   const number=Date.now()*1000,delivery=state.name+'-restart-'+randomUUID().slice(0,8),payload={repository:{id:Number(state.repository.id)},installation:{id:Number(state.repository.installation)},action:'created',issue:{number:1,pull_request:{url:'https://example.invalid/pulls/1'}},comment:{id:number,body:'provider restart drill',user:{login:'fixture',type:'User'},created_at:'2026-10-20T00:00:00Z',updated_at:'2026-10-20T00:00:00Z'}};
   const signed=createHmac('sha256',(await read('webhook-token')).trim()).update(JSON.stringify(payload)).digest('hex');
-  const accepted=await worker('/webhook/github',payload,null,{'X-Hub-Signature-256':'sha256='+signed,'X-GitHub-Delivery':delivery,'X-GitHub-Event':'issue_comment'});if(accepted.status!==202)throw Error('ingress_not_acknowledged');receipt.ingress={delivery,status:accepted.status,comment_id:String(number),at:Date.now()};
+  await operationStates('before_webhook');
+  const accepted=await worker('/webhook/github',payload,null,{'X-Hub-Signature-256':'sha256='+signed,'X-GitHub-Delivery':delivery,'X-GitHub-Event':'issue_comment'});if(accepted.status!==202)throw Error('ingress_not_acknowledged');receipt.ingress={delivery,status:accepted.status,comment_id:String(number),at:Date.now()};await operationStates('after_webhook');
+  receipt.requests_overlapped_in_progress_operation=receipt.overlap.some(s=>s.states.some(op=>!['finished','skipped','failed','error','cancelled'].includes(op.status)));
   for(const operation of receipt.operations){let done=false;for(let n=0;n<40;n++){const status=(await api(`/projects/${project}/operations/${operation}`)).operation.status;if(['finished','skipped'].includes(status)){done=true;break;}if(['failed','error','cancelled'].includes(status))throw Error('restart_operation_failed');await pause(2000);}if(!done)throw Error('restart_operation_timeout');}
   source=await connect();const restarted=(await source.query('SELECT pg_postmaster_start_time()::text started,pg_postmaster_start_time()>$1::timestamptz advanced',[identity.started])).rows[0];if(restarted.advanced!==true)throw Error('restart_not_observed');receipt.after_restart=restarted;
   let committed=false;for(let n=0;n<36;n++){const rows=(await source.query(`SELECT id FROM ${schema}.deliveries WHERE id=$1`,[delivery])).rows;if(rows.length===1){committed=true;break;}await pause(5000);}if(!committed)throw Error('ordinary_recovery_timeout');receipt.ordinary_recovery=true;receipt.delivery_receipt_count=1;

@@ -30,13 +30,18 @@ Never restart the parent test endpoint.
 Commit the implementation and build one immutable module before deploying:
 
 ```bash
+npm ci
 node scripts/build-deployed-drill.mjs "$DRILL_DIR"
 ```
 
 Record `build-manifest.json`, including commit, source fingerprint and bundle SHA256.
 Set `no_bundle:true` and `main` to `$DRILL_DIR/deployed-outage.mjs` in the private
 config so Wrangler uploads these exact module bytes. Associate each resulting
-version ID (including a secret-only version) with that manifest.
+version ID (including a secret-only version) with that manifest. Store the manifest
+plus `uploaded_deployments:[{"version":"<ACTUAL_VERSION_ID>","kind":"deploy"}]`
+in private `build-deployment-manifest.json`. Both runners verify the local module
+hash and require the actual `/fixture/state` version to be enrolled. The provider
+helper separately labels its local operator source identity.
 
 Copy [the configuration template](../services/github-state/scripts/fixtures/deployed-outage.example.json)
 to `$DRILL_CONFIG`. Replace every example name, account, hostname, repository ID
@@ -155,6 +160,12 @@ a fresh PITR child and reads its retained spill references through R2. A failed
 restore preserves the child for investigation and clears the source fault flag;
 only a verified restore child is deleted automatically.
 
+The restart receipt records operation states/timestamps around each cached read
+and webhook request and reports whether in-progress operations overlapped those
+requests. If the provider finishes too quickly to observe overlap, retain that
+limitation explicitly; postmaster timestamps alone do not prove request overlap.
+The separate unavailable case verifies actual failed SQL requests.
+
 For a real restart, first verify via Neon API that the endpoint belongs to the
 freshly created child and its branch name exactly equals `$DRILL_NAME`. Record
 `pg_postmaster_start_time()`, issue the single provider endpoint restart, wait for
@@ -218,6 +229,10 @@ child using their recorded IDs. Record teardown outcomes. Never delete the share
 test branch, shared bucket, production bindings or retained migration data from a
 real repository. On failed acceptance, preserve the failing fixture until recovery
 is complete rather than treating teardown as success.
+
+The deployed frozen-source endpoint is a same-instance probe using real fence
+triggers; fresh-constructor/fault-mode/control-outage coverage runs in both local
+SQLite and isolated PostgreSQL test suites.
 
 The [2026-10-20 deployed receipt](evidence/github-state-deployed-2026-10-20.json)
 separates the historical mutable-source rehearsal from a fresh immutable-build

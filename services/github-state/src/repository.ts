@@ -157,9 +157,9 @@ export class RepositoryState extends DurableObject<Env> {
       try {repo=this.localMeta('repository')?.id;} catch { /* Fresh test objects have no schema yet. */ }
       if(repo && this.env.ARCHIVE && ['test','production'].includes(this.env.MIGRATION_ENVIRONMENT || '')) {
         try {this.migrationState=await readMigration(this.env.ARCHIVE,repo);await this.selectMigrationBackend();
-          if(this.store.backend==='sqlite')this.startup();}
+          if(this.store.backend==='sqlite')this.startup(true);}
         catch {this.migrationUnavailable=true;
-          if(this.store.backend==='sqlite')this.startup();}
+          if(this.store.backend==='sqlite')this.startup(true);}
       }
       await this.storageMarker();
       if (env.FAULT_INJECTION==='true' || this.schema!=='current') this.startup();
@@ -1935,8 +1935,9 @@ export class RepositoryState extends DurableObject<Env> {
       try {
         this.migrationState=await readMigration(this.env.ARCHIVE,(await this.meta('repository')).id);
         this.migrationUnavailable=false;await this.selectMigrationBackend();
-        if(this.schema!=='current' && !this.migrationHeld() && !this.degraded) this.startup();
-      } catch {this.migrationUnavailable=true;if(this.store.backend==='sqlite')this.startup(); /* Retry without enabling source writes. */ }
+        if(this.store.backend==='sqlite' && this.localMeta('backend_owner')?.backend==='migration')this.startup(true);
+        else if(this.schema!=='current' && !this.migrationHeld() && !this.degraded) this.startup();
+      } catch {this.migrationUnavailable=true;if(this.store.backend==='sqlite')this.startup(true); /* Retry without enabling source writes. */ }
     });
     this.migrationFlight=result.catch(()=>{});
     await result;

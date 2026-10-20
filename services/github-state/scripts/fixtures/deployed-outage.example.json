@@ -1,7 +1,7 @@
 {
   "name": "issue317-drill-00000000",
   "account_id": "REPLACE_WITH_CLOUDFLARE_ACCOUNT",
-  "main": "deployed-outage.ts",
+  "main": "REPLACE_WITH_ABSOLUTE_PRIVATE_DIR/deployed-outage.mjs",
   "compatibility_date": "2026-10-11",
   "workers_dev": true,
   "observability": {
@@ -87,5 +87,6 @@
     "GITHUB_APP_ID": "0",
     "GITHUB_INSTALLATION_ID": "317",
     "GITHUB_PRIVATE_KEY": ""
-  }
+  },
+  "no_bundle": true
 }

@@ -30,6 +30,9 @@ def main():
     args = parser.parse_args()
     root = args.state_dir
     state = json.loads((root / 'state.json').read_text())
+    manifest = json.loads((root / 'build-deployment-manifest.json').read_text())
+    require(hashlib.sha256((root / manifest['bundle_file']).read_bytes()).hexdigest() == manifest['bundle_sha256'], 'Immutable bundle hash mismatch')
+    deployments = {entry['version'] for entry in manifest['uploaded_deployments']}
     run, url, repo = state['name'], state['service_url'], state['repository']['name']
     parsed = urllib.parse.urlsplit(url)
     if not (re.fullmatch(r'issue317-drill-[a-f0-9]{8}', run)
@@ -41,7 +44,7 @@ def main():
             and not parsed.username and not parsed.password and parsed.port in [None, 443]
             and re.fullmatch(r'issue317/[a-z]+', repo)):
         raise RuntimeError('Disposable fixture identity required')
-    result = {'case': args.case, 'runner_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), 'run': run, 'started_at': time.time(), 'production_actions': False, 'verified': False}
+    result = {'build_manifest': manifest, 'case': args.case, 'runner_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), 'run': run, 'started_at': time.time(), 'production_actions': False, 'verified': False}
     delivery_suffix = args.case + '-' + uuid.uuid4().hex[:8]
 
     def call(path, body=None, token='admin', headers=None):
@@ -105,7 +108,13 @@ def main():
             time.sleep(5)
         raise RuntimeError('Ordinary recovery timed out; preserve fixture and parked input')
 
+    def deployed_identity():
+        value = ok('/fixture/state')
+        require(value['deployment'] in deployments, 'Worker deployment is not enrolled in the immutable build manifest')
+        return value
+
     try:
+        result['initial_identity'] = deployed_identity()
         if args.case == 'seed':
             for after in range(0, 128, 8):
                 ok('/fixture/seed', {'after': after})
@@ -175,7 +184,7 @@ def main():
             result['ordinary_recovery'] = True
         result['network_audit'] = ok('/fixture/network-audit')
         require(result['network_audit']['recorded_attempts'] == 0 and not result['network_audit']['truncated'] and result['network_audit']['isolate_log_failures'] == 0, 'Unexpected external network attempts or audit failure')
-        result['identity'] = ok('/fixture/state')
+        result['identity'] = deployed_identity()
         require(result['identity']['blocked_external_fetches'] == 0, "Unexpected non-database request attempt in reporting repository isolate")
         result['verified'] = True
     finally:
