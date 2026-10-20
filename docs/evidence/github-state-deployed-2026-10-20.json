@@ -491,7 +491,1689 @@
     }
   ],
   "final_run": {
-    "complete": false,
-    "reason": "fresh immutable build rehearsal pending"
+    "version": 1,
+    "run": "issue317-drill-59e72589",
+    "project": "sparkling-sunset-73872362",
+    "source_branch": "br-old-heart-b5xijtve",
+    "source_endpoint": "ep-autumn-surf-b51p9z0c",
+    "production_actions": false,
+    "shared_test_mirror_modified": false,
+    "complete": true,
+    "phase_builds": {
+      "sqlite_and_migration": {
+        "implementation_revision": "b169fe70ca1d27f87760b3085b3b496cd07cd86d",
+        "workspace_sha256": "4bba911cb0b9d492a66f45d08e234b82ee86ed150e22a585f77b4a94faf46721",
+        "source_dirty": false,
+        "node_version": "24.20.0",
+        "dependencies": {
+          "esbuild": "0.28.2",
+          "@neondatabase/serverless": "1.2.0",
+          "wrangler": "4.149.0"
+        },
+        "package_lock_sha256": "a8e2b899e7de174491492057270f235e77c0c4f50e44b4248eccfdb2f74f400d",
+        "bundle_file": "final-build/deployed-outage.mjs",
+        "bundle_bytes": 662096,
+        "bundle_sha256": "e89db5dd9296721c358d8ef8f5c38b93955b5248c9f6cd14eb5acb86f5993ccf",
+        "built_at": "2026-10-20T14:03:01.440Z",
+        "deployment_mode": "wrangler no_bundle=true; immutable emitted module",
+        "uploaded_deployments": [
+          {
+            "version": "5218ac1a-3304-4a71-a558-026bf7c9f38f",
+            "kind": "deploy"
+          }
+        ]
+      },
+      "steady_state": {
+        "implementation_revision": "95fd28a3d199ad7d447911db303783a6fc31391e",
+        "workspace_sha256": "c2803f961ecfd66effa03cbcdff911f46159249a55c9b6fb0ce5639b02855e66",
+        "source_dirty": false,
+        "node_version": "24.20.0",
+        "dependencies": {
+          "esbuild": "0.28.2",
+          "@neondatabase/serverless": "1.2.0",
+          "wrangler": "4.149.0"
+        },
+        "package_lock_sha256": "a8e2b899e7de174491492057270f235e77c0c4f50e44b4248eccfdb2f74f400d",
+        "bundle_file": "post-cutover-build/deployed-outage.mjs",
+        "bundle_bytes": 662439,
+        "bundle_sha256": "194d08fc6175fee0211b49e04e03b32d868e09a44c6b1f6cf4c2d87da7ee44fb",
+        "built_at": "2026-10-20T14:14:54.330Z",
+        "deployment_mode": "wrangler no_bundle=true; immutable emitted module",
+        "uploaded_deployments": [
+          {
+            "version": "3bc3d582-83f9-4f11-8203-20826935359b",
+            "kind": "post-cutover-deploy"
+          }
+        ]
+      }
+    },
+    "operator_source_revision": "8528ec10fc2f474a0df0e8bcf194d322828e4660",
+    "local_validation": {
+      "service_passed": 230,
+      "service_skipped_postgres": 53,
+      "focused_postgres_migration_prevention_passed": 27,
+      "focused_constructor_contract_rerun_passed": 1,
+      "python_package_passed": 15
+    },
+    "bootstrap": {
+      "initial_scheduler_timeout": {
+        "case": "sqlite-full",
+        "run": "issue317-drill-59e72589",
+        "started_at": 1792504427.6297822,
+        "production_actions": false,
+        "verified": false,
+        "safe_cached_read": true,
+        "health_ms": 1269.5217540021986,
+        "missing_coverage": {
+          "version": 1,
+          "repository": "issue317/drill",
+          "operation": "files",
+          "status": "unavailable",
+          "revision": 258,
+          "complete": false,
+          "reason": "coverage_unavailable"
+        },
+        "ingress": {
+          "delivery": "issue317-drill-59e72589-sqlite-full-5bdf3f20",
+          "status": 202,
+          "comment_id": "1792504428249971"
+        },
+        "finished_at": 1792504638.9222858,
+        "enrolled_build_revision": "d8ed8461000f214b755719d7339e5b7ef3140d84",
+        "scope": "Bootstrap before the final b169fe7 migration-phase build; no scheduler observation existed at the initial fault."
+      },
+      "ordinary_recovery": {
+        "started_at": 1792504677.6714718,
+        "recovered_at": 1792504764.4724753,
+        "delivery": "issue317-drill-59e72589-sqlite-full-5bdf3f20",
+        "comment_id": "1792504428249971",
+        "scheduler_metrics": {
+          "at": 1792504748266,
+          "queue": {
+            "at": 1792504748266,
+            "count": 0,
+            "bytes": 0,
+            "oldest_received": null,
+            "approximate": true,
+            "error": null
+          },
+          "dlq": {
+            "at": 1792504748266,
+            "count": 0,
+            "bytes": 0,
+            "oldest_received": null,
+            "approximate": true,
+            "error": null
+          }
+        },
+        "health_recovery": {
+          "mode": "apply",
+          "prepared_at": 1792504756472,
+          "parked": {
+            "count": 0,
+            "truncated": false,
+            "oldest_received": null
+          },
+          "held": {
+            "count": 0,
+            "truncated": false,
+            "oldest_received": null
+          },
+          "next_lane": "pointers",
+          "failures": 0,
+          "last_error": null,
+          "next_retry": 1792504778232,
+          "last_attempt": 1792504748232,
+          "lease_until": 0,
+          "held_last_pass": {
+            "replayed": 0,
+            "failed": 0,
+            "remaining": false
+          },
+          "held_pass_completed_at": 1792504751982,
+          "pointers_last_pass": {
+            "replayed": 1,
+            "failed": 0,
+            "remaining": false
+          },
+          "pointers_pass_completed_at": 1792504755962,
+          "storage": {
+            "state": "writable",
+            "verified_at": 1792504702696,
+            "bytes": 4194304,
+            "database_size": 3006464,
+            "probe_attempts": 1,
+            "last_probe_at": 1792504702546,
+            "next_probe_at": 1792504762546
+          },
+          "raw": {
+            "prepared_at": 1792504752343,
+            "last_attempt": 1792504748231,
+            "next_retry": 1792504778231
+          }
+        },
+        "storage": {
+          "mode": "writable",
+          "mutation_fence": null,
+          "degraded": null,
+          "frozen_since": null,
+          "schema": "current",
+          "database_size": 3006464,
+          "fault_injection": {
+            "full": false
+          },
+          "backend": "sqlite",
+          "schema_version": 5
+        },
+        "ordinary_recovery": true,
+        "manual_replay_or_tick": false
+      },
+      "manual_tick_or_replay": false,
+      "cold_assertion_mismatch": {
+        "case": "postgres-unavailable",
+        "runner_sha256": "335987f2d3576d9390878666a7ef0d8de938732b8ac3fbedfef7a13f541c271d",
+        "run": "issue317-drill-59e72589",
+        "started_at": 1792505845.6906905,
+        "production_actions": false,
+        "verified": false,
+        "initial_identity": {
+          "object": "4633d4d3bdbd0f31616bb1f34b143f3e2ad744893753fb125a22a89376944363",
+          "deployment": "3bc3d582-83f9-4f11-8203-20826935359b",
+          "backend": "postgres",
+          "revision": 264,
+          "blocked_external_fetches": 0,
+          "monitoring_repository": "317393095335",
+          "migration_held": false,
+          "mutation_blocked": false,
+          "storage_loaded": true,
+          "maintenance_flight": false
+        },
+        "scheduler_preflight": {
+          "at": 1792505828193,
+          "queue": {
+            "at": 1792505828193,
+            "count": 0,
+            "bytes": 0,
+            "oldest_received": null,
+            "approximate": true,
+            "error": null
+          },
+          "dlq": {
+            "at": 1792505828193,
+            "count": 0,
+            "bytes": 0,
+            "oldest_received": null,
+            "approximate": true,
+            "error": null
+          }
+        },
+        "safe_cached_read": true,
+        "health_ms": 795.2665640041232,
+        "errors": [
+          {
+            "status": 503,
+            "error": "storage_unavailable",
+            "reason": "database_unavailable",
+            "request_id": "issue317-drill-59e72589-8a1c871c4f3b44208d71b8b37184ae08"
+          }
+        ],
+        "finished_at": 1792505849.125709
+      },
+      "cold_assertion_explanation": "Runner initially checked the internal error shape; the public endpoint correctly returned storage_unavailable with reason database_unavailable and a request ID. The corrected public-envelope check passed on rerun."
+    },
+    "seed": {
+      "case": "seed",
+      "runner_sha256": "335987f2d3576d9390878666a7ef0d8de938732b8ac3fbedfef7a13f541c271d",
+      "run": "issue317-drill-59e72589",
+      "started_at": 1792505005.8656087,
+      "production_actions": false,
+      "verified": true,
+      "initial_identity": {
+        "object": "4633d4d3bdbd0f31616bb1f34b143f3e2ad744893753fb125a22a89376944363",
+        "deployment": "5218ac1a-3304-4a71-a558-026bf7c9f38f",
+        "backend": "sqlite",
+        "revision": 260,
+        "blocked_external_fetches": 0,
+        "monitoring_repository": "317393095335",
+        "migration_held": false,
+        "mutation_blocked": false,
+        "storage_loaded": true,
+        "maintenance_flight": false
+      },
+      "spill_reuse": {
+        "revision": 260,
+        "objects": 1,
+        "object_metadata": [
+          {
+            "key": "resources/317393095335/sha256-ca5cb0d5b605c943b22ca4469005841c15564c914f3e0c6445733eb4de9b8de5",
+            "size": 1680103,
+            "etag": "1cfced7f8285c239fa8c02b73a5fb8e2",
+            "uploaded": "2026-10-20T14:03:34.246Z",
+            "metadata": {
+              "kind": "resource",
+              "pinned": "true"
+            }
+          }
+        ],
+        "pin_and_uploaded_metadata_unchanged": true
+      },
+      "network_audit": {
+        "recorded_attempts": 0,
+        "truncated": false,
+        "isolate_log_failures": 0,
+        "scope": "R2 receipts across fixture isolates; persistence failures may undercount attempts",
+        "physical_non_database_egress": "denied_by_guard"
+      },
+      "identity": {
+        "object": "4633d4d3bdbd0f31616bb1f34b143f3e2ad744893753fb125a22a89376944363",
+        "deployment": "5218ac1a-3304-4a71-a558-026bf7c9f38f",
+        "backend": "sqlite",
+        "revision": 260,
+        "blocked_external_fetches": 0,
+        "monitoring_repository": "317393095335",
+        "migration_held": false,
+        "mutation_blocked": false,
+        "storage_loaded": true,
+        "maintenance_flight": false
+      },
+      "finished_at": 1792505018.76797
+    },
+    "frozen_source_same_instance_probe": {
+      "case": "frozen-source",
+      "runner_sha256": "335987f2d3576d9390878666a7ef0d8de938732b8ac3fbedfef7a13f541c271d",
+      "run": "issue317-drill-59e72589",
+      "started_at": 1792505844.0017946,
+      "production_actions": false,
+      "verified": true,
+      "initial_identity": {
+        "object": "4633d4d3bdbd0f31616bb1f34b143f3e2ad744893753fb125a22a89376944363",
+        "deployment": "3bc3d582-83f9-4f11-8203-20826935359b",
+        "backend": "postgres",
+        "revision": 264,
+        "blocked_external_fetches": 0,
+        "monitoring_repository": "317393095335",
+        "migration_held": false,
+        "mutation_blocked": false,
+        "storage_loaded": true,
+        "maintenance_flight": false
+      },
+      "probe": {
+        "readable": true,
+        "result_status": "ok",
+        "header": "retained frozen header",
+        "blocked_write": true,
+        "activated_source_rejected": true,
+        "blocked_external_fetches": 0
+      },
+      "network_audit": {
+        "recorded_attempts": 0,
+        "truncated": false,
+        "isolate_log_failures": 0,
+        "scope": "R2 receipts across fixture isolates; persistence failures may undercount attempts",
+        "physical_non_database_egress": "denied_by_guard"
+      },
+      "identity": {
+        "object": "4633d4d3bdbd0f31616bb1f34b143f3e2ad744893753fb125a22a89376944363",
+        "deployment": "3bc3d582-83f9-4f11-8203-20826935359b",
+        "backend": "postgres",
+        "revision": 264,
+        "blocked_external_fetches": 0,
+        "monitoring_repository": "317393095335",
+        "migration_held": false,
+        "mutation_blocked": false,
+        "storage_loaded": true,
+        "maintenance_flight": false
+      },
+      "finished_at": 1792505845.6331584,
+      "phase": "post-cutover same-instance probe on 95fd28a module"
+    },
+    "sqlite_full": {
+      "case": "sqlite-full",
+      "runner_sha256": "335987f2d3576d9390878666a7ef0d8de938732b8ac3fbedfef7a13f541c271d",
+      "run": "issue317-drill-59e72589",
+      "started_at": 1792505020.925059,
+      "production_actions": false,
+      "verified": true,
+      "initial_identity": {
+        "object": "4633d4d3bdbd0f31616bb1f34b143f3e2ad744893753fb125a22a89376944363",
+        "deployment": "5218ac1a-3304-4a71-a558-026bf7c9f38f",
+        "backend": "sqlite",
+        "revision": 260,
+        "blocked_external_fetches": 0,
+        "monitoring_repository": "317393095335",
+        "migration_held": false,
+        "mutation_blocked": false,
+        "storage_loaded": true,
+        "maintenance_flight": false
+      },
+      "scheduler_preflight": {
+        "at": 1792504987314,
+        "queue": {
+          "at": 1792504987314,
+          "count": 0,
+          "bytes": 0,
+          "oldest_received": null,
+          "approximate": true,
+          "error": null
+        },
+        "dlq": {
+          "at": 1792504987314,
+          "count": 0,
+          "bytes": 0,
+          "oldest_received": null,
+          "approximate": true,
+          "error": null
+        }
+      },
+      "safe_cached_read": true,
+      "health_ms": 1888.0447070114315,
+      "missing_coverage": {
+        "version": 1,
+        "repository": "issue317/drill",
+        "operation": "files",
+        "status": "unavailable",
+        "revision": 260,
+        "complete": false,
+        "reason": "coverage_unavailable"
+      },
+      "ingress": {
+        "delivery": "issue317-drill-59e72589-sqlite-full-69a5b012",
+        "status": 202,
+        "comment_id": "1792505022909590"
+      },
+      "ordinary_recovery": true,
+      "network_audit": {
+        "recorded_attempts": 0,
+        "truncated": false,
+        "isolate_log_failures": 0,
+        "scope": "R2 receipts across fixture isolates; persistence failures may undercount attempts",
+        "physical_non_database_egress": "denied_by_guard"
+      },
+      "identity": {
+        "object": "4633d4d3bdbd0f31616bb1f34b143f3e2ad744893753fb125a22a89376944363",
+        "deployment": "5218ac1a-3304-4a71-a558-026bf7c9f38f",
+        "backend": "sqlite",
+        "revision": 262,
+        "blocked_external_fetches": 0,
+        "monitoring_repository": "317393095335",
+        "migration_held": false,
+        "mutation_blocked": false,
+        "storage_loaded": true,
+        "maintenance_flight": false
+      },
+      "finished_at": 1792505056.1423333
+    },
+    "latency": {
+      "at": 1792505153.0693593,
+      "scope": "same deployed fixture frontend and identical warm stored-read data; interleaved requests; no upstream dispatch",
+      "profiles": {
+        "open_prs": {
+          "samples_each": 20,
+          "sqlite_p95_ms": 854.279323015362,
+          "postgres_p95_ms": 838.9810199150816
+        },
+        "issue_comments": {
+          "samples_each": 20,
+          "sqlite_p95_ms": 859.1061059851199,
+          "postgres_p95_ms": 849.9433270189911
+        }
+      },
+      "latency": {
+        "baseline_p95_ms": 859.1061059851199,
+        "target_p95_ms": 849.3719990365207
+      },
+      "source": {
+        "object": "4633d4d3bdbd0f31616bb1f34b143f3e2ad744893753fb125a22a89376944363",
+        "deployment": "5218ac1a-3304-4a71-a558-026bf7c9f38f",
+        "backend": "sqlite",
+        "revision": 262,
+        "blocked_external_fetches": 0,
+        "monitoring_repository": "317393095335",
+        "migration_held": false,
+        "mutation_blocked": false,
+        "storage_loaded": true,
+        "maintenance_flight": false
+      },
+      "canary": {
+        "object": "03d6e69b1a5602d19274e1d7ef13b5b3fd505d4726a6ffc718103034ea319386",
+        "deployment": "5218ac1a-3304-4a71-a558-026bf7c9f38f",
+        "backend": "postgres",
+        "revision": 262,
+        "blocked_external_fetches": 0,
+        "monitoring_repository": "318264107616",
+        "migration_held": false,
+        "mutation_blocked": false,
+        "storage_loaded": false,
+        "maintenance_flight": false
+      },
+      "within_20_percent": true
+    },
+    "target_preflight": {
+      "verified_at": "2026-10-20T13:54:10.091Z",
+      "repository": "317393095335",
+      "branch": "br-old-heart-b5xijtve",
+      "endpoint": "ep-autumn-surf-b51p9z0c",
+      "generation": "6fd7746b-4b23-423f-824f-3a25766dac47",
+      "checks": [
+        "same authenticated database and separate roles",
+        "PostgreSQL18 and 1TiB live engine allowance",
+        "recent dedicated-project restore receipt",
+        "empty standby and exact schema",
+        "least privileged application grants and fenced ownership"
+      ]
+    },
+    "bounded_migration_acceleration": {
+      "step_requests": 35,
+      "max_batch_steps": 5,
+      "stopped_before_activation": true
+    },
+    "limitations": [
+      "Version IDs are operator-enrolled and associated with locally verified immutable module hashes; no independent Cloudflare attestation of uploaded bytes is claimed.",
+      "Frozen-source deployed endpoint is a same-instance probe; fresh constructors, retries and admin control recovery are covered by local SQLite and real PostgreSQL contracts.",
+      "Slow injection delays HTTP SQL/upgrade requests, not an established WebSocket stream.",
+      "Migration and steady-state fault phases can use separately identified builds; only their explicitly associated phases are claimed.",
+      "Production migration/deployment and the existing CPU metrics source remain rollout-operator work.",
+      "General resource-spill deletion remains disabled until all row/cursor/snapshot/archive references can be proven released.",
+      "The real restart overlapped the cached read; its webhook did not overlap a provider operation observed unfinished both before and after. Durable ingress under an unavailable database was verified in the separate network-fault case."
+    ],
+    "migration_recovery": {
+      "generation": "6fd7746b-4b23-423f-824f-3a25766dac47",
+      "phase": "replaying",
+      "failure": null,
+      "target_active": true,
+      "shadow": {
+        "queries": 2,
+        "hash": "9366948088b4fb31f6597d82f933209a1c7d6155dd4171bb67242e47ef530dcf",
+        "verified_at": 1792505647277,
+        "complete": true,
+        "cursor_checks": 2,
+        "expired_cursor_checks": 1,
+        "max_subrequests": 25,
+        "max_step_ms": 3201
+      },
+      "private_receipt_sha256": "a06f9b014543ebba709d251b4a0b6733b7001bba96e4493194702c2ce41c8986"
+    },
+    "migration_outage_observation": {
+      "generation": "6fd7746b-4b23-423f-824f-3a25766dac47",
+      "phase": "switching",
+      "failure": "migration_target_unavailable",
+      "target_active": false,
+      "shadow": {
+        "queries": 1,
+        "hash": "448ad30bac16bacc882e157816f2e6a73a7bc5ac5bfe62a3a93f0a43f0df7779",
+        "verified_at": 1792505470782,
+        "complete": false,
+        "cursor_checks": 2,
+        "expired_cursor_checks": 1,
+        "max_subrequests": 25,
+        "max_step_ms": 3201
+      },
+      "private_receipt_sha256": "ada1368a715ed01e1f7aa1e12526beb154b832ae2726fe7cd00205c0eb0299b6"
+    },
+    "migration_parked_input": {
+      "at": 1792505486.3071666,
+      "phase": "switching",
+      "delivery": "issue317-drill-59e72589-migration-outage"
+    },
+    "migration": {
+      "generation": "6fd7746b-4b23-423f-824f-3a25766dac47",
+      "phase": "complete",
+      "source_fenced": true,
+      "target_active": true,
+      "tables": {
+        "activity_landings": {
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "verified": true
+        },
+        "activity_loc_cache": {
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "verified": true
+        },
+        "changes": {
+          "rows": 262,
+          "hash": "5ba8a89d426764f129a75fb729ac655e19d8b09c7175cb3ca35de8237acc91eb",
+          "verified": true
+        },
+        "collections": {
+          "rows": 2,
+          "hash": "607dc4f82fc28bc2c694931cb94c6703e6938bdc751b316f697b69475215e280",
+          "verified": true
+        },
+        "deliveries": {
+          "rows": 2,
+          "hash": "c9a1bc1f19b244f1b42eb68245912533c57a01b3452b268aa23bc3fe962d5bcb",
+          "verified": true
+        },
+        "demand": {
+          "rows": 2,
+          "hash": "81052d425c56c27cfdd4c364402dd221185e7b1646922155228596c15ddabe8f",
+          "verified": true
+        },
+        "head_prs": {
+          "rows": 128,
+          "hash": "8cd328d3423986f58f320d07c1b68a7390b58e84136cfc4ceb299e7cbb5e4937",
+          "verified": true
+        },
+        "jobs": {
+          "rows": 2,
+          "hash": "e2d27ea184814d0d92a37f5501e1ffb01268e6eef89ca6b8a00c2bfa322fc22e",
+          "verified": true
+        },
+        "members": {
+          "rows": 131,
+          "hash": "3e7e8b5fce6f361ba9126731148772ca14775334bcf41357d67ff932e2aaa926",
+          "verified": true
+        },
+        "meta": {
+          "rows": 10,
+          "hash": "e8f70e197a1bba6b869166a9abb44bcdad912a9bd108fabc80ec5a186468ee83",
+          "verified": true
+        },
+        "query_metrics": {
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "verified": true
+        },
+        "repair_metrics": {
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "verified": true
+        },
+        "resources": {
+          "rows": 131,
+          "hash": "42a169ee886787122e755b74832f527a435894a42774b115b464e62bdde00910",
+          "verified": true
+        },
+        "retired_objects": {
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "verified": true
+        },
+        "survey_dirty": {
+          "rows": 1,
+          "hash": "a968a7f9d39e877b2afc062f6ceb6273c797dd82c7152d68b3d67d3bf4020af9",
+          "verified": true
+        },
+        "survey_fragments": {
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "verified": true
+        },
+        "survey_hydrated": {
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "verified": true
+        },
+        "survey_hydration_failures": {
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "verified": true
+        },
+        "survey_inventory": {
+          "rows": 128,
+          "hash": "3b2a92e0559e6aa1f9da1a5e1eea0ff1a905a507f09bff8ab439c2ba9e853685",
+          "verified": true
+        },
+        "survey_state": {
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "verified": true
+        }
+      },
+      "import": {
+        "activity_landings": {
+          "page": 0,
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "complete": true
+        },
+        "activity_loc_cache": {
+          "page": 0,
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "complete": true
+        },
+        "changes": {
+          "page": 1,
+          "rows": 262,
+          "hash": "5ba8a89d426764f129a75fb729ac655e19d8b09c7175cb3ca35de8237acc91eb",
+          "complete": true,
+          "after": "262"
+        },
+        "collections": {
+          "page": 1,
+          "rows": 2,
+          "hash": "607dc4f82fc28bc2c694931cb94c6703e6938bdc751b316f697b69475215e280",
+          "complete": true,
+          "after": "2"
+        },
+        "deliveries": {
+          "page": 1,
+          "rows": 2,
+          "hash": "c9a1bc1f19b244f1b42eb68245912533c57a01b3452b268aa23bc3fe962d5bcb",
+          "complete": true,
+          "after": "2"
+        },
+        "demand": {
+          "page": 1,
+          "rows": 2,
+          "hash": "81052d425c56c27cfdd4c364402dd221185e7b1646922155228596c15ddabe8f",
+          "complete": true,
+          "after": "2"
+        },
+        "head_prs": {
+          "page": 1,
+          "rows": 128,
+          "hash": "8cd328d3423986f58f320d07c1b68a7390b58e84136cfc4ceb299e7cbb5e4937",
+          "complete": true,
+          "after": "128"
+        },
+        "jobs": {
+          "page": 1,
+          "rows": 2,
+          "hash": "e2d27ea184814d0d92a37f5501e1ffb01268e6eef89ca6b8a00c2bfa322fc22e",
+          "complete": true,
+          "after": "2"
+        },
+        "members": {
+          "page": 1,
+          "rows": 131,
+          "hash": "3e7e8b5fce6f361ba9126731148772ca14775334bcf41357d67ff932e2aaa926",
+          "complete": true,
+          "after": "131"
+        },
+        "meta": {
+          "page": 1,
+          "rows": 10,
+          "hash": "e8f70e197a1bba6b869166a9abb44bcdad912a9bd108fabc80ec5a186468ee83",
+          "complete": true,
+          "after": "10"
+        },
+        "query_metrics": {
+          "page": 0,
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "complete": true
+        },
+        "repair_metrics": {
+          "page": 0,
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "complete": true
+        },
+        "resources": {
+          "page": 6,
+          "rows": 131,
+          "hash": "42a169ee886787122e755b74832f527a435894a42774b115b464e62bdde00910",
+          "complete": true,
+          "after": "131"
+        },
+        "retired_objects": {
+          "page": 0,
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "complete": true
+        },
+        "survey_dirty": {
+          "page": 1,
+          "rows": 1,
+          "hash": "a968a7f9d39e877b2afc062f6ceb6273c797dd82c7152d68b3d67d3bf4020af9",
+          "complete": true,
+          "after": "1"
+        },
+        "survey_fragments": {
+          "page": 0,
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "complete": true
+        },
+        "survey_hydrated": {
+          "page": 0,
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "complete": true
+        },
+        "survey_hydration_failures": {
+          "page": 0,
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "complete": true
+        },
+        "survey_inventory": {
+          "page": 1,
+          "rows": 128,
+          "hash": "3b2a92e0559e6aa1f9da1a5e1eea0ff1a905a507f09bff8ab439c2ba9e853685",
+          "complete": true,
+          "after": "128"
+        },
+        "survey_state": {
+          "page": 0,
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "complete": true
+        }
+      },
+      "verify": {
+        "activity_landings": {
+          "page": 0,
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "complete": true
+        },
+        "activity_loc_cache": {
+          "page": 0,
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "complete": true
+        },
+        "changes": {
+          "page": 1,
+          "rows": 262,
+          "hash": "5ba8a89d426764f129a75fb729ac655e19d8b09c7175cb3ca35de8237acc91eb",
+          "complete": true,
+          "after": "262"
+        },
+        "collections": {
+          "page": 1,
+          "rows": 2,
+          "hash": "607dc4f82fc28bc2c694931cb94c6703e6938bdc751b316f697b69475215e280",
+          "complete": true,
+          "after": "2"
+        },
+        "deliveries": {
+          "page": 1,
+          "rows": 2,
+          "hash": "c9a1bc1f19b244f1b42eb68245912533c57a01b3452b268aa23bc3fe962d5bcb",
+          "complete": true,
+          "after": "2"
+        },
+        "demand": {
+          "page": 1,
+          "rows": 2,
+          "hash": "81052d425c56c27cfdd4c364402dd221185e7b1646922155228596c15ddabe8f",
+          "complete": true,
+          "after": "2"
+        },
+        "head_prs": {
+          "page": 1,
+          "rows": 128,
+          "hash": "8cd328d3423986f58f320d07c1b68a7390b58e84136cfc4ceb299e7cbb5e4937",
+          "complete": true,
+          "after": "128"
+        },
+        "jobs": {
+          "page": 1,
+          "rows": 2,
+          "hash": "e2d27ea184814d0d92a37f5501e1ffb01268e6eef89ca6b8a00c2bfa322fc22e",
+          "complete": true,
+          "after": "2"
+        },
+        "members": {
+          "page": 1,
+          "rows": 131,
+          "hash": "3e7e8b5fce6f361ba9126731148772ca14775334bcf41357d67ff932e2aaa926",
+          "complete": true,
+          "after": "131"
+        },
+        "meta": {
+          "page": 1,
+          "rows": 10,
+          "hash": "e8f70e197a1bba6b869166a9abb44bcdad912a9bd108fabc80ec5a186468ee83",
+          "complete": true,
+          "after": "10"
+        },
+        "query_metrics": {
+          "page": 0,
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "complete": true
+        },
+        "repair_metrics": {
+          "page": 0,
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "complete": true
+        },
+        "resources": {
+          "page": 6,
+          "rows": 131,
+          "hash": "42a169ee886787122e755b74832f527a435894a42774b115b464e62bdde00910",
+          "complete": true,
+          "after": "131"
+        },
+        "retired_objects": {
+          "page": 0,
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "complete": true
+        },
+        "survey_dirty": {
+          "page": 1,
+          "rows": 1,
+          "hash": "a968a7f9d39e877b2afc062f6ceb6273c797dd82c7152d68b3d67d3bf4020af9",
+          "complete": true,
+          "after": "1"
+        },
+        "survey_fragments": {
+          "page": 0,
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "complete": true
+        },
+        "survey_hydrated": {
+          "page": 0,
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "complete": true
+        },
+        "survey_hydration_failures": {
+          "page": 0,
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "complete": true
+        },
+        "survey_inventory": {
+          "page": 1,
+          "rows": 128,
+          "hash": "3b2a92e0559e6aa1f9da1a5e1eea0ff1a905a507f09bff8ab439c2ba9e853685",
+          "complete": true,
+          "after": "128"
+        },
+        "survey_state": {
+          "page": 0,
+          "rows": 0,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "complete": true
+        }
+      },
+      "failure": null,
+      "shadow": {
+        "queries": 2,
+        "hash": "9366948088b4fb31f6597d82f933209a1c7d6155dd4171bb67242e47ef530dcf",
+        "verified_at": 1792505647277,
+        "complete": true,
+        "cursor_checks": 2,
+        "expired_cursor_checks": 1,
+        "max_subrequests": 25,
+        "max_step_ms": 3201
+      },
+      "release": {
+        "parked": 0,
+        "held": 0,
+        "queue": 0,
+        "dlq": 0,
+        "queue_observed_at": 1792505769805,
+        "dlq_observed_at": 1792505769805,
+        "raw_completed": 1792505714865,
+        "raw_gaps": {
+          "count": 0,
+          "truncated": false
+        }
+      }
+    },
+    "postgres_unavailable": {
+      "case": "postgres-unavailable",
+      "runner_sha256": "56b678cd8005006a2c62af35ae127a0042b88fbff82873626b8b92525ea23af0",
+      "run": "issue317-drill-59e72589",
+      "started_at": 1792505931.8486023,
+      "production_actions": false,
+      "verified": true,
+      "initial_identity": {
+        "object": "4633d4d3bdbd0f31616bb1f34b143f3e2ad744893753fb125a22a89376944363",
+        "deployment": "3bc3d582-83f9-4f11-8203-20826935359b",
+        "backend": "postgres",
+        "revision": 268,
+        "blocked_external_fetches": 0,
+        "monitoring_repository": "317393095335",
+        "migration_held": false,
+        "mutation_blocked": false,
+        "storage_loaded": false,
+        "maintenance_flight": false
+      },
+      "scheduler_preflight": {
+        "at": 1792505888038,
+        "queue": {
+          "at": 1792505888038,
+          "count": 1,
+          "bytes": 220,
+          "oldest_received": 1792505853256,
+          "approximate": true,
+          "error": null
+        },
+        "dlq": {
+          "at": 1792505888038,
+          "count": 0,
+          "bytes": 0,
+          "oldest_received": null,
+          "approximate": true,
+          "error": null
+        }
+      },
+      "safe_cached_read": true,
+      "health_ms": 1030.9700309298933,
+      "errors": [
+        {
+          "status": 503,
+          "error": "storage_unavailable",
+          "reason": "database_unavailable",
+          "request_id": "issue317-drill-59e72589-a75fe79c72884a3ea66999a9ec04accb"
+        }
+      ],
+      "cold_read_error": {
+        "error": "storage_unavailable",
+        "reason": "database_unavailable",
+        "request_id": "issue317-drill-59e72589-a75fe79c72884a3ea66999a9ec04accb"
+      },
+      "ingress": {
+        "delivery": "issue317-drill-59e72589-postgres-unavailable-93ff2944",
+        "status": 202,
+        "comment_id": "1792505933293009"
+      },
+      "ordinary_recovery": true,
+      "network_audit": {
+        "recorded_attempts": 0,
+        "truncated": false,
+        "isolate_log_failures": 0,
+        "scope": "R2 receipts across fixture isolates; persistence failures may undercount attempts",
+        "physical_non_database_egress": "denied_by_guard"
+      },
+      "identity": {
+        "object": "4633d4d3bdbd0f31616bb1f34b143f3e2ad744893753fb125a22a89376944363",
+        "deployment": "3bc3d582-83f9-4f11-8203-20826935359b",
+        "backend": "postgres",
+        "revision": 270,
+        "blocked_external_fetches": 0,
+        "monitoring_repository": "317393095335",
+        "migration_held": false,
+        "mutation_blocked": false,
+        "storage_loaded": true,
+        "maintenance_flight": false
+      },
+      "finished_at": 1792505965.9032938
+    },
+    "postgres_slow": {
+      "case": "postgres-slow",
+      "runner_sha256": "335987f2d3576d9390878666a7ef0d8de938732b8ac3fbedfef7a13f541c271d",
+      "run": "issue317-drill-59e72589",
+      "started_at": 1792505849.1917677,
+      "production_actions": false,
+      "verified": true,
+      "initial_identity": {
+        "object": "4633d4d3bdbd0f31616bb1f34b143f3e2ad744893753fb125a22a89376944363",
+        "deployment": "3bc3d582-83f9-4f11-8203-20826935359b",
+        "backend": "postgres",
+        "revision": 264,
+        "blocked_external_fetches": 0,
+        "monitoring_repository": "317393095335",
+        "migration_held": false,
+        "mutation_blocked": false,
+        "storage_loaded": true,
+        "maintenance_flight": false
+      },
+      "scheduler_preflight": {
+        "at": 1792505828193,
+        "queue": {
+          "at": 1792505828193,
+          "count": 0,
+          "bytes": 0,
+          "oldest_received": null,
+          "approximate": true,
+          "error": null
+        },
+        "dlq": {
+          "at": 1792505828193,
+          "count": 0,
+          "bytes": 0,
+          "oldest_received": null,
+          "approximate": true,
+          "error": null
+        }
+      },
+      "safe_cached_read": true,
+      "health_ms": 813.6666329810396,
+      "ingress": {
+        "delivery": "issue317-drill-59e72589-postgres-slow-7e9edbf6",
+        "status": 202,
+        "comment_id": "1792505850117706"
+      },
+      "ordinary_recovery": true,
+      "network_audit": {
+        "recorded_attempts": 0,
+        "truncated": false,
+        "isolate_log_failures": 0,
+        "scope": "R2 receipts across fixture isolates; persistence failures may undercount attempts",
+        "physical_non_database_egress": "denied_by_guard"
+      },
+      "identity": {
+        "object": "4633d4d3bdbd0f31616bb1f34b143f3e2ad744893753fb125a22a89376944363",
+        "deployment": "3bc3d582-83f9-4f11-8203-20826935359b",
+        "backend": "postgres",
+        "revision": 266,
+        "blocked_external_fetches": 0,
+        "monitoring_repository": "317393095335",
+        "migration_held": false,
+        "mutation_blocked": false,
+        "storage_loaded": true,
+        "maintenance_flight": false
+      },
+      "finished_at": 1792505866.6780403
+    },
+    "r2_unavailable": {
+      "case": "r2-unavailable",
+      "runner_sha256": "335987f2d3576d9390878666a7ef0d8de938732b8ac3fbedfef7a13f541c271d",
+      "run": "issue317-drill-59e72589",
+      "started_at": 1792505866.7468534,
+      "production_actions": false,
+      "verified": true,
+      "initial_identity": {
+        "object": "4633d4d3bdbd0f31616bb1f34b143f3e2ad744893753fb125a22a89376944363",
+        "deployment": "3bc3d582-83f9-4f11-8203-20826935359b",
+        "backend": "postgres",
+        "revision": 266,
+        "blocked_external_fetches": 0,
+        "monitoring_repository": "317393095335",
+        "migration_held": false,
+        "mutation_blocked": false,
+        "storage_loaded": true,
+        "maintenance_flight": false
+      },
+      "scheduler_preflight": {
+        "at": 1792505828193,
+        "queue": {
+          "at": 1792505828193,
+          "count": 0,
+          "bytes": 0,
+          "oldest_received": null,
+          "approximate": true,
+          "error": null
+        },
+        "dlq": {
+          "at": 1792505828193,
+          "count": 0,
+          "bytes": 0,
+          "oldest_received": null,
+          "approximate": true,
+          "error": null
+        }
+      },
+      "safe_cached_read": true,
+      "health_ms": 304.9786810297519,
+      "errors": [
+        {
+          "status": 503,
+          "error": "service_unavailable",
+          "reason": "internal",
+          "request_id": "issue317-drill-59e72589-8d0de190a68a4527ae8221763cd180d2"
+        }
+      ],
+      "ingress": {
+        "delivery": "issue317-drill-59e72589-r2-unavailable-a655239d",
+        "status": 503,
+        "comment_id": "1792505867602097"
+      },
+      "ingress_after_restore": {
+        "delivery": "issue317-drill-59e72589-r2-unavailable-a655239d",
+        "status": 202,
+        "comment_id": "1792505867602097"
+      },
+      "ordinary_recovery": true,
+      "network_audit": {
+        "recorded_attempts": 0,
+        "truncated": false,
+        "isolate_log_failures": 0,
+        "scope": "R2 receipts across fixture isolates; persistence failures may undercount attempts",
+        "physical_non_database_egress": "denied_by_guard"
+      },
+      "identity": {
+        "object": "4633d4d3bdbd0f31616bb1f34b143f3e2ad744893753fb125a22a89376944363",
+        "deployment": "3bc3d582-83f9-4f11-8203-20826935359b",
+        "backend": "postgres",
+        "revision": 268,
+        "blocked_external_fetches": 0,
+        "monitoring_repository": "317393095335",
+        "migration_held": false,
+        "mutation_blocked": false,
+        "storage_loaded": true,
+        "maintenance_flight": false
+      },
+      "finished_at": 1792505889.440553
+    },
+    "provider_restart": {
+      "version": 1,
+      "mode": "restart",
+      "run": "issue317-drill-59e72589",
+      "implementation_revision": "8528ec10fc2f474a0df0e8bcf194d322828e4660",
+      "workspace_sha256": "2690967af51c7511aee0ea42e22801fd44ed0ffc193d1aaaa6d6e6b338760ec5",
+      "source_dirty": false,
+      "started_at": "2026-10-20T14:19:50.440Z",
+      "project": "sparkling-sunset-73872362",
+      "source_branch": "br-old-heart-b5xijtve",
+      "source_endpoint": "ep-autumn-surf-b51p9z0c",
+      "schema": "github_state_317393095335",
+      "production_actions": false,
+      "verified": true,
+      "deployed_identity": {
+        "object": "4633d4d3bdbd0f31616bb1f34b143f3e2ad744893753fb125a22a89376944363",
+        "deployment": "3bc3d582-83f9-4f11-8203-20826935359b",
+        "backend": "postgres",
+        "revision": 270,
+        "blocked_external_fetches": 0,
+        "monitoring_repository": "317393095335",
+        "migration_held": false,
+        "mutation_blocked": false,
+        "storage_loaded": false,
+        "maintenance_flight": false
+      },
+      "before": {
+        "database": "github_state_test",
+        "role": "github_state_test_migration",
+        "started": "2026-10-20 13:50:08.580221+00"
+      },
+      "operations": [
+        "1a6d0840-8e0d-4d3f-bea8-6b9cc8bd2c3f",
+        "9be6afdb-5d69-4699-8eb0-ea8969f2c085",
+        "451803bc-a3ae-4132-b7c9-2c7777771873",
+        "b565ea23-fde1-4d64-afb5-86cfba0b6140",
+        "06b3beb8-5535-4490-a892-843a5013903a",
+        "f8728d10-d5dc-47ea-bdd4-634119797889"
+      ],
+      "overlap": [
+        {
+          "stage": "before_cached_read",
+          "at": "2026-10-20T14:19:52.365Z",
+          "states": [
+            {
+              "id": "1a6d0840-8e0d-4d3f-bea8-6b9cc8bd2c3f",
+              "status": "running",
+              "action": "start_compute"
+            },
+            {
+              "id": "9be6afdb-5d69-4699-8eb0-ea8969f2c085",
+              "status": "scheduling",
+              "action": "prewarm_replica"
+            },
+            {
+              "id": "451803bc-a3ae-4132-b7c9-2c7777771873",
+              "status": "scheduling",
+              "action": "suspend_compute"
+            },
+            {
+              "id": "b565ea23-fde1-4d64-afb5-86cfba0b6140",
+              "status": "scheduling",
+              "action": "promote_replica"
+            },
+            {
+              "id": "06b3beb8-5535-4490-a892-843a5013903a",
+              "status": "scheduling",
+              "action": "start_compute"
+            },
+            {
+              "id": "f8728d10-d5dc-47ea-bdd4-634119797889",
+              "status": "scheduling",
+              "action": "suspend_compute"
+            }
+          ]
+        },
+        {
+          "stage": "after_cached_read",
+          "at": "2026-10-20T14:19:53.163Z",
+          "states": [
+            {
+              "id": "1a6d0840-8e0d-4d3f-bea8-6b9cc8bd2c3f",
+              "status": "finished",
+              "action": "start_compute"
+            },
+            {
+              "id": "9be6afdb-5d69-4699-8eb0-ea8969f2c085",
+              "status": "running",
+              "action": "prewarm_replica"
+            },
+            {
+              "id": "451803bc-a3ae-4132-b7c9-2c7777771873",
+              "status": "scheduling",
+              "action": "suspend_compute"
+            },
+            {
+              "id": "b565ea23-fde1-4d64-afb5-86cfba0b6140",
+              "status": "scheduling",
+              "action": "promote_replica"
+            },
+            {
+              "id": "06b3beb8-5535-4490-a892-843a5013903a",
+              "status": "scheduling",
+              "action": "start_compute"
+            },
+            {
+              "id": "f8728d10-d5dc-47ea-bdd4-634119797889",
+              "status": "scheduling",
+              "action": "suspend_compute"
+            }
+          ]
+        },
+        {
+          "stage": "before_webhook",
+          "at": "2026-10-20T14:19:53.478Z",
+          "states": [
+            {
+              "id": "1a6d0840-8e0d-4d3f-bea8-6b9cc8bd2c3f",
+              "status": "finished",
+              "action": "start_compute"
+            },
+            {
+              "id": "9be6afdb-5d69-4699-8eb0-ea8969f2c085",
+              "status": "running",
+              "action": "prewarm_replica"
+            },
+            {
+              "id": "451803bc-a3ae-4132-b7c9-2c7777771873",
+              "status": "scheduling",
+              "action": "suspend_compute"
+            },
+            {
+              "id": "b565ea23-fde1-4d64-afb5-86cfba0b6140",
+              "status": "scheduling",
+              "action": "promote_replica"
+            },
+            {
+              "id": "06b3beb8-5535-4490-a892-843a5013903a",
+              "status": "scheduling",
+              "action": "start_compute"
+            },
+            {
+              "id": "f8728d10-d5dc-47ea-bdd4-634119797889",
+              "status": "scheduling",
+              "action": "suspend_compute"
+            }
+          ]
+        },
+        {
+          "stage": "after_webhook",
+          "at": "2026-10-20T14:19:55.279Z",
+          "states": [
+            {
+              "id": "1a6d0840-8e0d-4d3f-bea8-6b9cc8bd2c3f",
+              "status": "finished",
+              "action": "start_compute"
+            },
+            {
+              "id": "9be6afdb-5d69-4699-8eb0-ea8969f2c085",
+              "status": "finished",
+              "action": "prewarm_replica"
+            },
+            {
+              "id": "451803bc-a3ae-4132-b7c9-2c7777771873",
+              "status": "finished",
+              "action": "suspend_compute"
+            },
+            {
+              "id": "b565ea23-fde1-4d64-afb5-86cfba0b6140",
+              "status": "finished",
+              "action": "promote_replica"
+            },
+            {
+              "id": "06b3beb8-5535-4490-a892-843a5013903a",
+              "status": "skipped",
+              "action": "start_compute"
+            },
+            {
+              "id": "f8728d10-d5dc-47ea-bdd4-634119797889",
+              "status": "finished",
+              "action": "suspend_compute"
+            }
+          ]
+        }
+      ],
+      "safe_cached_read": true,
+      "ingress": {
+        "delivery": "issue317-drill-59e72589-restart-d9c99bbf",
+        "status": 202,
+        "comment_id": "1792505993163000",
+        "at": 1792505994994
+      },
+      "request_overlap": {
+        "cached_read": {
+          "operations_in_progress_before_and_after": [
+            "9be6afdb-5d69-4699-8eb0-ea8969f2c085",
+            "451803bc-a3ae-4132-b7c9-2c7777771873",
+            "b565ea23-fde1-4d64-afb5-86cfba0b6140",
+            "06b3beb8-5535-4490-a892-843a5013903a",
+            "f8728d10-d5dc-47ea-bdd4-634119797889"
+          ]
+        },
+        "webhook": {
+          "operations_in_progress_before_and_after": []
+        }
+      },
+      "requests_overlapped_in_progress_operation": false,
+      "after_restart": {
+        "started": "2026-10-20 14:19:52.331553+00",
+        "advanced": true
+      },
+      "ordinary_recovery": true,
+      "delivery_receipt_count": 1,
+      "network_audit": {
+        "recorded_attempts": 0,
+        "truncated": false,
+        "isolate_log_failures": 0,
+        "scope": "R2 receipts across fixture isolates; persistence failures may undercount attempts",
+        "physical_non_database_egress": "denied_by_guard"
+      },
+      "finished_at": "2026-10-20T14:20:01.191Z"
+    },
+    "point_in_time_restore": {
+      "version": 1,
+      "mode": "restore",
+      "run": "issue317-drill-59e72589",
+      "implementation_revision": "8528ec10fc2f474a0df0e8bcf194d322828e4660",
+      "workspace_sha256": "2690967af51c7511aee0ea42e22801fd44ed0ffc193d1aaaa6d6e6b338760ec5",
+      "source_dirty": false,
+      "started_at": "2026-10-20T14:21:15.811Z",
+      "project": "sparkling-sunset-73872362",
+      "source_branch": "br-old-heart-b5xijtve",
+      "source_endpoint": "ep-autumn-surf-b51p9z0c",
+      "schema": "github_state_317393095335",
+      "production_actions": false,
+      "verified": true,
+      "deployed_identity": {
+        "object": "4633d4d3bdbd0f31616bb1f34b143f3e2ad744893753fb125a22a89376944363",
+        "deployment": "3bc3d582-83f9-4f11-8203-20826935359b",
+        "backend": "postgres",
+        "revision": 272,
+        "blocked_external_fetches": 0,
+        "monitoring_repository": "317393095335",
+        "migration_held": false,
+        "mutation_blocked": false,
+        "storage_loaded": true,
+        "maintenance_flight": false
+      },
+      "before": {
+        "database": "github_state_test",
+        "role": "github_state_test_migration",
+        "started": "2026-10-20 14:19:52.331553+00"
+      },
+      "restore_branch": "br-shy-wildflower-b54p0q8d",
+      "restore_point": "2026-10-20T14:21:18.088397Z",
+      "spills": [
+        {
+          "key": "resources/317393095335/sha256-ca5cb0d5b605c943b22ca4469005841c15564c914f3e0c6445733eb4de9b8de5",
+          "exists": true,
+          "bytes": 1680103,
+          "sha256": "ca5cb0d5b605c943b22ca4469005841c15564c914f3e0c6445733eb4de9b8de5",
+          "valid": true
+        }
+      ],
+      "tables": {
+        "activity_landings": 0,
+        "activity_loc_cache": 0,
+        "backend_control": 1,
+        "capacity_statistics": 1,
+        "changes": 272,
+        "collections": 2,
+        "cursors": 0,
+        "deliveries": 7,
+        "demand": 2,
+        "head_prs": 128,
+        "jobs": 2,
+        "members": 136,
+        "meta": 10,
+        "migration_imports": 16,
+        "query_metrics": 0,
+        "repair_metrics": 0,
+        "resources": 136,
+        "retired_objects": 0,
+        "survey_dirty": 1,
+        "survey_fragments": 0,
+        "survey_hydrated": 0,
+        "survey_hydration_failures": 0,
+        "survey_inventory": 128,
+        "survey_state": 0
+      },
+      "manifest_sha256": "77c6221c73a69e054ddb7044696a577561d532483b954e991d73d1fb4f5cabd0",
+      "exact_large_id_preserved": true,
+      "after_point_mutation_absent": true,
+      "spill_references_readable": true,
+      "network_audit": {
+        "recorded_attempts": 0,
+        "truncated": false,
+        "isolate_log_failures": 0,
+        "scope": "R2 receipts across fixture isolates; persistence failures may undercount attempts",
+        "physical_non_database_egress": "denied_by_guard"
+      },
+      "restore_branch_deleted": true,
+      "finished_at": "2026-10-20T14:21:24.827Z"
+    },
+    "idempotent_duplicate": {
+      "run": "issue317-drill-59e72589",
+      "verified": true,
+      "at": 1792506163.5643601,
+      "delivery": "issue317-drill-59e72589-postgres-unavailable-93ff2944",
+      "acknowledged_status": 202,
+      "receipt_count": 1,
+      "revision_before": 272,
+      "revision_after": 272,
+      "network_audit": {
+        "recorded_attempts": 0,
+        "truncated": false,
+        "isolate_log_failures": 0,
+        "scope": "R2 receipts across fixture isolates; persistence failures may undercount attempts",
+        "physical_non_database_egress": "denied_by_guard"
+      }
+    },
+    "input_accounting": {
+      "run": "issue317-drill-59e72589",
+      "verified": true,
+      "at": 1792506201.3450818,
+      "acknowledged_deliveries": [
+        "issue317-drill-59e72589-migration-outage",
+        "issue317-drill-59e72589-postgres-slow-7e9edbf6",
+        "issue317-drill-59e72589-postgres-unavailable-93ff2944",
+        "issue317-drill-59e72589-r2-unavailable-a655239d",
+        "issue317-drill-59e72589-restart-d9c99bbf",
+        "issue317-drill-59e72589-sqlite-full-5bdf3f20",
+        "issue317-drill-59e72589-sqlite-full-69a5b012"
+      ],
+      "deliveries": [
+        {
+          "id": "issue317-drill-59e72589-migration-outage",
+          "count": "1"
+        },
+        {
+          "id": "issue317-drill-59e72589-postgres-slow-7e9edbf6",
+          "count": "1"
+        },
+        {
+          "id": "issue317-drill-59e72589-postgres-unavailable-93ff2944",
+          "count": "1"
+        },
+        {
+          "id": "issue317-drill-59e72589-r2-unavailable-a655239d",
+          "count": "1"
+        },
+        {
+          "id": "issue317-drill-59e72589-restart-d9c99bbf",
+          "count": "1"
+        },
+        {
+          "id": "issue317-drill-59e72589-sqlite-full-5bdf3f20",
+          "count": "1"
+        },
+        {
+          "id": "issue317-drill-59e72589-sqlite-full-69a5b012",
+          "count": "1"
+        }
+      ],
+      "comments": [
+        {
+          "id": "1792504428249971"
+        },
+        {
+          "id": "1792505022909590"
+        },
+        {
+          "id": "1792505850117706"
+        },
+        {
+          "id": "1792505867602097"
+        },
+        {
+          "id": "1792505933293009"
+        },
+        {
+          "id": "1792505993163000"
+        },
+        {
+          "id": "43"
+        },
+        {
+          "id": "9223372036854775807"
+        }
+      ],
+      "source_input_count": 7,
+      "max_queue_attempt": 1,
+      "attempt_observations": 7,
+      "queue_metrics": {
+        "at": 1792506187589,
+        "queue": {
+          "at": 1792506187589,
+          "count": 0,
+          "bytes": 0,
+          "oldest_received": null,
+          "approximate": true,
+          "error": null
+        },
+        "dlq": {
+          "at": 1792506187589,
+          "count": 0,
+          "bytes": 0,
+          "oldest_received": null,
+          "approximate": true,
+          "error": null
+        }
+      },
+      "recovery": {
+        "mode": "apply",
+        "prepared_at": 1792506191317,
+        "parked": {
+          "count": 0,
+          "truncated": false,
+          "oldest_received": null
+        },
+        "held": {
+          "count": 0,
+          "truncated": false,
+          "oldest_received": null
+        },
+        "next_lane": "pointers",
+        "failures": 0,
+        "last_error": null,
+        "next_retry": 1792506217589,
+        "last_attempt": 1792506187589,
+        "lease_until": 0,
+        "held_last_pass": {
+          "replayed": 0,
+          "failed": 0,
+          "remaining": false
+        },
+        "held_pass_completed_at": 1792506189906,
+        "pointers_last_pass": {
+          "replayed": 0,
+          "failed": 0,
+          "remaining": false
+        },
+        "pointers_pass_completed_at": 1792506190817,
+        "storage": null,
+        "raw": {
+          "prepared_at": 1792506192829,
+          "last_attempt": 1792506187606,
+          "next_retry": 1792506217606
+        }
+      },
+      "monitoring": {
+        "at": 1792506188147,
+        "stale": false,
+        "age_ms": 12269,
+        "backend": "postgres",
+        "level": "ok",
+        "reasons": []
+      },
+      "network_audit": {
+        "recorded_attempts": 0,
+        "truncated": false,
+        "isolate_log_failures": 0,
+        "scope": "R2 receipts across fixture isolates; persistence failures may undercount attempts",
+        "physical_non_database_egress": "denied_by_guard"
+      },
+      "identity": {
+        "object": "4633d4d3bdbd0f31616bb1f34b143f3e2ad744893753fb125a22a89376944363",
+        "deployment": "3bc3d582-83f9-4f11-8203-20826935359b",
+        "backend": "postgres",
+        "revision": 272,
+        "blocked_external_fetches": 0,
+        "monitoring_repository": "317393095335",
+        "migration_held": false,
+        "mutation_blocked": false,
+        "storage_loaded": true,
+        "maintenance_flight": false
+      },
+      "object_count_before_teardown": 80
+    },
+    "teardown": {
+      "started_at": 1792506258.9342437,
+      "production_actions": false,
+      "run": "issue317-drill-59e72589",
+      "cron_stopped": true,
+      "consumers_removed": true,
+      "steps": [
+        {
+          "step": "empty-disposable-bucket",
+          "state": "complete",
+          "result": {
+            "objects_deleted": 80,
+            "empty_verified": true
+          }
+        },
+        {
+          "step": "delete-worker",
+          "state": "complete",
+          "result": {
+            "exit_status": 0
+          }
+        },
+        {
+          "step": "delete-events-queue",
+          "state": "complete",
+          "result": {
+            "exit_status": 0
+          }
+        },
+        {
+          "step": "delete-dlq",
+          "state": "complete",
+          "result": {
+            "exit_status": 0
+          }
+        },
+        {
+          "step": "delete-bucket",
+          "state": "complete",
+          "result": {
+            "exit_status": 0
+          }
+        },
+        {
+          "step": "delete-neon-child",
+          "state": "complete",
+          "result": {
+            "branch": "br-old-heart-b5xijtve",
+            "deleted_verified": true,
+            "shared_test_parent_present": true
+          }
+        }
+      ],
+      "complete": true,
+      "finished_at": 1792506265.828324
+    }
   }
 }

@@ -124,8 +124,11 @@ receipt or issuing a manual tick.
 Measure the SQLite and canary warm read p95 before migration; require the S2
 latency boundary. Install a measured acceptance receipt and start the synthetic
 repository's migration using the S2 protocol. Keep deployment identity stable until
-selection completes. The ordinary minute scheduler must export/import/checksum,
-shadow-compare, activate and replay input. Record source/target identities and table
+selection completes. The controller must export/import/checksum, shadow-compare, activate and replay
+input. Optional S2 CLI acceleration must retain the five-step invocation ceiling
+and record the number of step requests. Stop acceleration before activation, inject
+the target outage, and require ordinary cron to recover shadow comparison, select
+the target and replay parked input without further manual steps. Record source/target identities and table
 checksums, cursor/expired-cursor comparisons and acknowledged delivery IDs. A
 source deployment change or expired pre-switch lease intentionally aborts that
 generation; follow S2 recovery rather than changing the lease/checkpoint by hand.
@@ -262,3 +265,16 @@ name, parent and endpoint. Check the provider branch listing afterward and retai
 proof that the shared parent still exists. The recorded drill encountered one
 transient cleanup HTTP 500; a read-only inventory showed no deletion, and a later
 attempt completed. Its subsequent recovery and teardown were not disabled.
+
+
+The completed 2026-10-20 rehearsal records seven acknowledged inputs committed
+exactly once, maximum observed queue attempt 1, zero final queue/DLQ and
+parked/held counts, fresh healthy monitoring, a duplicate with unchanged revision,
+a real compute restart and a verified 24-table PITR copy with readable retained
+spill references. All owned disposable Worker/queue/bucket/Neon-child resources
+were removed; the shared test parent and production were unchanged. The initial
+scheduler-propagation timeout and a corrected runner error-envelope assertion are
+retained as failed attempts alongside their successful recovery/rerun receipts.
+The restart overlapped the cached read but not an observed in-progress operation
+around the webhook. Database-unavailable ingress/recovery was independently
+verified; the receipt does not claim restart overlap that was not observed.
