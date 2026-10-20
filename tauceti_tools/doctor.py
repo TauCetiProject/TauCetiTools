@@ -450,7 +450,7 @@ def diagnose(project: Project, *, extras=False, github=None) -> list[Finding]:
 
         for consumer, workflow in (("pr-build", "pr-build.yml"), ("Auto-merge", "auto-merge.yml")):
             runs, error = gh.read(
-                f"repos/{repo}/actions/workflows/{workflow}/runs?event=pull_request_target&status=success&per_page=1",
+                f"repos/{repo}/actions/workflows/{workflow}/runs?per_page=1",
                 paginate=False,
             )
             candidates = _items(runs, "workflow_runs")
@@ -462,6 +462,8 @@ def diagnose(project: Project, *, extras=False, github=None) -> list[Finding]:
                 else "No consuming workflow run observed"
             )
             if latest:
+                if latest.get("conclusion") in ("failure", "timed_out", "action_required"):
+                    status = "failed"
                 jobs, job_error = gh.read(f"repos/{repo}/actions/runs/{latest['id']}/jobs")
                 token_steps = [
                     step
