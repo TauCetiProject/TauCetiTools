@@ -9,12 +9,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .project import ConfigError, bootstrap, conf_argument, load, save_snapshot
+from .project import ConfigError, bootstrap, conf_argument, configuration_source, load, save_snapshot
 
 
 def parser():
     p = argparse.ArgumentParser(prog="tauceti-tools", description=__doc__)
-    p.add_argument("--conf", help="Canonical project TOML file or HTTPS URL")
+    p.add_argument("--conf", help="Project TOML file or HTTPS URL (default: TAUCETI_CONF, current directory, Git root)")
     sub = p.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init", help="Write the full project configuration template")
     init.add_argument("--repo", required=True)
@@ -90,7 +90,7 @@ def main(argv=None):
         args = parser().parse_args(argv)
         if args.command == "init":
             return init_config(args)
-        source = conf or os.environ.get("TAUCETI_CONF")
+        source = configuration_source(conf)
         if args.command == "script" and not source:
             from .templates import run_script
 

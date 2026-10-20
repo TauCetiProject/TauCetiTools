@@ -75,6 +75,11 @@ Its main fields are `repositories.content`, `repositories.roadmap`, `project.bra
 Use actual repository names and immutable full commit SHAs. Do not place passwords,
 tokens, PEM keys or database URLs in the public configuration.
 
+Commands select configuration in this order: explicit `--conf PATH_OR_HTTPS_URL`,
+`TAUCETI_CONF`, `./tauceti.toml`, then `tauceti.toml` at the current Git checkout's root.
+For example, `tauceti doctor` works from the content checkout or any of its subdirectories.
+Git worktrees use their own root. Other parent directories are not searched.
+
 Use `.github/CODEOWNERS` to assign human ownership, for example:
 
 ```text

@@ -12,11 +12,57 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tauceti_tools.doctor import diagnose, repair
-from tauceti_tools.project import ConfigError, bootstrap, parse
+from tauceti_tools.project import ConfigError, bootstrap, configuration_source, parse
 from tauceti_tools.scaffold import initial_configuration
 
 
 class ProjectTests(unittest.TestCase):
+    def test_configuration_discovery_and_explicit_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=True):
+            root = Path(tmp)
+            config = root / "tauceti.toml"
+            config.touch()
+            with patch("tauceti_tools.project.Path.cwd", return_value=root), patch("subprocess.run") as run:
+                self.assertEqual(configuration_source(), str(config))
+                os.environ["TAUCETI_CONF"] = "environment.toml"
+                self.assertEqual(configuration_source(), "environment.toml")
+                self.assertEqual(configuration_source("explicit.toml"), "explicit.toml")
+                run.assert_not_called()
+
+    def test_git_discovery_respects_checkout_and_worktree_boundaries(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ):
+            for name in ("TAUCETI_CONF", "GIT_DIR", "GIT_WORK_TREE"):
+                os.environ.pop(name, None)
+            root = Path(tmp) / "project"
+            root.mkdir()
+            (Path(tmp) / "tauceti.toml").touch()
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "-c", "user.name=Test", "-c", "user.email=test@example.com",
+                            "commit", "-qm", "Initial", "--allow-empty"], check=True)
+            subdirectory = root / "src"
+            subdirectory.mkdir()
+            previous = Path.cwd()
+            try:
+                os.chdir(subdirectory)
+                self.assertIsNone(configuration_source())
+                (root / "tauceti.toml").touch()
+                self.assertEqual(configuration_source(), str(root / "tauceti.toml"))
+                nested = subdirectory / "tauceti.toml"
+                nested.touch()
+                self.assertEqual(configuration_source(), str(nested))
+                nested.unlink()
+                subprocess.run(["git", "init", "-q", str(subdirectory)], check=True)
+                self.assertIsNone(configuration_source())
+                os.chdir(root)
+                worktree = Path(tmp) / "worktree"
+                subprocess.run(["git", "worktree", "add", "-qb", "other", str(worktree)], check=True)
+                (worktree / "tauceti.toml").touch()
+                (worktree / "src").mkdir()
+                os.chdir(worktree / "src")
+                self.assertEqual(configuration_source(), str(worktree / "tauceti.toml"))
+            finally:
+                os.chdir(previous)
+
     def test_downstream_docs_use_parent_pins_and_need_no_website(self):
         from tauceti_tools.templates import ASSETS, write_project
 

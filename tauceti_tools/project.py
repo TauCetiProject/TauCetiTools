@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import urllib.parse
@@ -334,11 +335,29 @@ def conf_argument(argv: list[str]) -> tuple[str | None, list[str]]:
     return selected, remaining
 
 
+def configuration_source(explicit: str | None = None) -> str | None:
+    """Explicit settings win; otherwise use the current directory or Git root."""
+    selected = explicit or os.environ.get("TAUCETI_CONF")
+    if selected:
+        return selected
+    local = Path.cwd() / "tauceti.toml"
+    if local.is_file():
+        return str(local)
+    try:
+        git = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    except OSError:
+        return None
+    if git.returncode:
+        return None
+    root = Path(git.stdout.rstrip("\n")) / "tauceti.toml"
+    return str(root) if root.is_file() else None
+
+
 def bootstrap(argv: list[str] | None = None) -> Project | None:
     global _active
     args = sys.argv[1:] if argv is None else argv
     explicit, _ = conf_argument(args)
-    source = explicit or os.environ.get("TAUCETI_CONF")
+    source = configuration_source(explicit)
     if not source:
         return _active
     inherited = os.environ.get("TAUCETI_CONF_SNAPSHOT")

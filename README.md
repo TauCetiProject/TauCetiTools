@@ -13,8 +13,8 @@ It does not require doctor.
 ```sh
 uv tool install git+https://github.com/TauCetiProject/TauCetiTools
 tauceti-tools init --repo YOUR_ORG/YOUR_PROJECT --owner-login YOUR_LOGIN
-tauceti-tools doctor --conf ./tauceti.toml
-tauceti-tools doctor --conf ./tauceti.toml --no-extras
+tauceti-tools doctor
+tauceti-tools doctor --no-extras
 ```
 
 Select immutable tool versions in the generated configuration before installing workflows.
@@ -23,9 +23,10 @@ Credential presence and successful use are reported separately.
 Optional extras are included by default, after the core checks; `--no-extras` omits them.
 Disabled extras are reported as disabled and do not need setting up.
 
-Configuration comes from an explicit `--conf PATH_OR_HTTPS_URL`, or `TAUCETI_CONF` when
-`--conf` is absent. The tools do not search the current directory for `tauceti.toml`.
-Without either setting, `tauceti doctor` checks the worker host rather than a project.
+Configuration is selected in this order: explicit `--conf PATH_OR_HTTPS_URL`,
+`TAUCETI_CONF`, `tauceti.toml` in the current directory, then `tauceti.toml` at the
+current Git checkout's root. This works from subdirectories and Git worktrees too.
+Without any project configuration, `tauceti doctor` checks the worker host.
 
 Worker and engine commands use the same `--conf PATH_OR_HTTPS_URL`. A worker keeps a local
 configuration snapshot for its process tree and adopts online edits only on restart or explicit refresh.
