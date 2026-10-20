@@ -609,10 +609,11 @@ def extra_findings(project, gh, again):
             if name == "bors":
                 registry = Path.home() / ".config/tauceti/neon-projects.json"
                 try:
-                    grant = json.loads(registry.read_text()).get(project.content, {})
+                    grants = json.loads(registry.read_text())
+                    grant = grants.get(project.content, {}) if isinstance(grants, dict) else {}
                 except (OSError, ValueError):
                     grant = {}
-                if grant.get("approved") is True and grant.get("project_id"):
+                if isinstance(grant, dict) and grant.get("approved") is True and grant.get("project_id"):
                     enrollment = results[-1]
                     enrollment.status = "ready"
                     enrollment.summary = "Approved Neon project recorded in the private operator registry: " + grant["project_id"]
