@@ -96,7 +96,7 @@ function validateScalar(recipe:Recipe,value:any):void {
   const id=(v:any)=>typeof v==='number'?Number.isSafeInteger(v) && v>0:typeof v==='string' && /^[1-9][0-9]*$/.test(v);
   if(recipe.operation==='pr') {
     validateRow(recipe,value);
-    if(value.labels && value.labels.totalCount>value.labels.nodes.length)throw new Error('labels overflow');
+    if(recipe.api==='graphql' && value.labels && value.labels.totalCount>value.labels.nodes.length)throw new Error('labels overflow');
   }
   if(recipe.operation==='repository' && (!id(value.id) || typeof value.full_name!=='string' || !value.full_name.includes('/')))throw new Error('malformed repository header');
   if(recipe.operation==='statuses') {
