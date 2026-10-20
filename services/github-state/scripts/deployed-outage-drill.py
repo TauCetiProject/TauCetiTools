@@ -41,7 +41,7 @@ def main():
             and not parsed.username and not parsed.password and parsed.port in [None, 443]
             and re.fullmatch(r'issue317/[a-z]+', repo)):
         raise RuntimeError('Disposable fixture identity required')
-    result = {'case': args.case, 'run': run, 'started_at': time.time(), 'production_actions': False, 'verified': False}
+    result = {'case': args.case, 'runner_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), 'run': run, 'started_at': time.time(), 'production_actions': False, 'verified': False}
     delivery_suffix = args.case + '-' + uuid.uuid4().hex[:8]
 
     def call(path, body=None, token='admin', headers=None):
@@ -117,7 +117,7 @@ def main():
             inventory = query('open_prs', {})
             require(inventory['status'] == 'ok' and inventory.get('cursor'), "Seeded inventory is unavailable or lacks a continuation")
             require(any(row['id'] == '9223372036854775807' for row in query()['data']), "Exact large identifier is missing")
-            result['spill_reuse'] = {'revision': second['revision'], 'objects': len(again['objects'])}
+            result['spill_reuse'] = {'revision': second['revision'], 'objects': len(again['objects']), 'object_metadata': again['objects'], 'pin_and_uploaded_metadata_unchanged': True}
         elif args.case == 'frozen-source':
             probe = ok('/fixture/frozen-source', {})
             require(probe == {'readable': True, 'result_status': 'ok', 'header': 'retained frozen header', 'blocked_write': True, 'activated_source_rejected': True, 'blocked_external_fetches': 0}, "Frozen-source read/fence probe failed")
@@ -126,6 +126,9 @@ def main():
             result['health'] = ok('/v1/health?' + urllib.parse.urlencode({'repository': repo}), token='client')
         else:
             sqlite = args.case == 'sqlite-full'
+            scheduler = ok('/fixture/queue-metrics')
+            require(all(scheduler.get(k, {}).get('at') and time.time() * 1000 - scheduler[k]['at'] < 180000 for k in ['queue', 'dlq']), 'Wait for fresh ordinary scheduler observations before injecting a fault')
+            result['scheduler_preflight'] = scheduler
             identity = ok('/fixture/state')
             require(identity['backend'] == ('sqlite' if sqlite else 'postgres'), "Fault case does not match selected storage backend")
             warm = query()

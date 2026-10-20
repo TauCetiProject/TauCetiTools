@@ -105,6 +105,14 @@ warm reads, report missing files as unavailable, acknowledge a durable webhook,
 and apply it through the existing scheduler after the fault is cleared. No manual
 replay or queue retry consumption is needed.
 
+Before any fault, require fresh `/fixture/queue-metrics` observations from the
+ordinary scheduled owner. [Cloudflare documents](https://developers.cloudflare.com/workers/configuration/cron-triggers/)
+that a new cron trigger can take up to 15 minutes to propagate. The runner refuses
+to inject faults until both queue observations are fresh. Keep an already
+acknowledged bootstrap input retained if scheduler activation exceeds the case
+window; record its later ordinary recovery rather than manufacturing a successful
+receipt or issuing a manual tick.
+
 Measure the SQLite and canary warm read p95 before migration; require the S2
 latency boundary. Install a measured acceptance receipt and start the synthetic
 repository's migration using the S2 protocol. Keep deployment identity stable until
