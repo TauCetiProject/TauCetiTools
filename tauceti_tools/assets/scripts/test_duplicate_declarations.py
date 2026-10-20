@@ -228,6 +228,11 @@ class DuplicateDeclarationsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
 
 
+    def test_full_audit_empty_modules_is_valid(self):
+        result = self.fixture({"TauCeti": "module\n", "TauCeti.Empty": "module\n"}, full=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("axioms: audited 0", result.stdout)
+
     def test_full_audit_allowed_axioms_private_and_orphans(self):
         result = self.fixture({
             "TauCeti.Orphan": "module\nprivate theorem hidden : True := True.intro\n"

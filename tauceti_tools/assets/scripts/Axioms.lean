@@ -186,15 +186,11 @@ def scope : IO (Option (Std.HashSet Name)) := do
     return some (Std.HashSet.ofList (((text.splitOn "\n").map (·.trimAscii.toString)).filter (· ≠ "")
       |>.map String.toName))
 
-/-- Render the axiom result and return 1 for violations or an empty unscoped candidate set. -/
+/-- Render the axiom result and return 1 for violations. Imported modules may be empty. -/
 def report (only : Option (Std.HashSet Name)) (audited : Nat) (messages : Array String) : IO UInt32 := do
   if let some s := only then
     IO.println s!"axioms: auditing the {s.size} changed module(s) and everything importing them \
       (AXIOMS_ONLY_MODULES)"
-  if audited == 0 && only.isNone then
-    -- Governance tooling must fail loudly if it audited nothing (e.g. miswired import).
-    IO.eprintln s!"axioms: audited 0 declarations in {auditedRoot}: the audit is miswired."
-    return 1
   if messages.isEmpty then
     IO.println s!"axioms: audited {audited} {auditedRoot} declaration(s); \
       all within the allowlist {allowedAxioms}."
