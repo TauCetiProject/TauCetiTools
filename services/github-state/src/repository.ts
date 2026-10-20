@@ -97,11 +97,11 @@ export class RepositoryState extends DurableObject<Env> {
   private migrationFlight: Promise<unknown> = Promise.resolve();
   migrationHeld(): boolean { return this.migrationUnavailable || blocksWrites(this.migrationState); }
   private repairsHeld():boolean {return this.migrationUnavailable || blocksRepairs(this.migrationState);}
-  private traceRepair(stage:string,job?:any):void {
+  private traceRepair(stage:string,job?:any,counts?:{rows?:number,repairs?:number,staged_chars?:number}):void {
     if(this.env.RECONCILIATION_TRACE!=='true')return;
     // Whitelist metadata: never log queries, keys, cursor values, response
     // bodies, exceptions or credentials when investigating an isolate reset.
-    log('repository_repair_trace',{stage,backend:this.store.backend,...(job?{operation:JSON.parse(job.query).operation,page:job.page,started:job.started ?? null}:{} )});
+    log('repository_repair_trace',{stage,backend:this.store.backend,...(job?{operation:JSON.parse(job.query).operation,page:job.page,started:job.started ?? null}:{}),...counts});
   }
   private backendGeneration():string {return this.selectedMigrationGeneration ?? this.env.REPOSITORY_GENERATION ?? 'sqlite-v1';}
   private logged=new Map<string,number>();
@@ -1075,13 +1075,13 @@ export class RepositoryState extends DurableObject<Env> {
       for(const value of values){const body=JSON.stringify(value);if(new TextEncoder().encode(body).length>=1500000)encodings.set('resource:'+body,await this.encode(value));}
     }
     if(result.continuation){const text=JSON.stringify(result.continuation);if(new TextEncoder().encode(text).length>=1500000)encodings.set('staging:'+text,await this.encode(result.continuation,Date.now()+86400000));}
-    this.traceRepair('refresh_transaction',job);
-    try {return await this.atomic(state=>{
+    this.traceRepair('refresh_transaction',job,{staged_chars:this.env.RECONCILIATION_TRACE==='true'?[...objects.values()].reduce((n,text)=>n+text.length,0):0});
+    try {await this.atomic(state=>{
       state.preparedEncodings=encodings;
       const archive=state.env.ARCHIVE;
       state.env={...state.env,ARCHIVE:new Proxy(archive,{get(target,key){if(key==='get')return async(name:string,...args:any[])=>objects.has(name)?{text:async()=>objects.get(name)!,json:async()=>JSON.parse(objects.get(name)!)}:(target.get as any)(name,...args);const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;}})};
       return RepositoryState.prototype.applyRefresh.call(state,job,q,repo,started,response,result,preparedNext,staged);
-    });}
+    });this.traceRepair('refresh_committed',job);}
     catch(error){if(!(error instanceof LeaseLost))throw error;}
   }
   async applyRefresh(job:any,q:Query,repo:any,started:number,response:Response|null,result:any,preparedNext:string|undefined,staged:{key:string,expires:number}|undefined):Promise<void> {
@@ -1139,7 +1139,7 @@ export class RepositoryState extends DurableObject<Env> {
       if (!object) throw new Error('staging page missing');
       const data:any=await object.json(); if (Array.isArray(data)) rows.push(...data); else scalar=data;
     }
-    this.traceRepair('publication_rows',job);
+    this.traceRepair('publication_rows',job,{rows:rows.length});
     if(this.store.backend==='postgres')await this.primePublication(q,rows);
     const kind=this.kind(q), memberIDs=new Set<string>(), acceptedIDs=new Set<string>();
     const changedNumbers=new Set<number>(), changedHeads=new Set<number>();
@@ -1228,9 +1228,10 @@ export class RepositoryState extends DurableObject<Env> {
         await this.store.exec('UPDATE jobs SET lease_id=NULL,lease_until=0 WHERE key=?',flatKey);
       }
     }
+    this.traceRepair('publication_repairs',job,{repairs:repairs.length});
     await this.enqueueMany(repairs);
     await this.setMeta('last_repair',Date.now());
-    this.traceRepair('publication_complete',job);
+    this.traceRepair('publication_applied',job);
   }
   // Expiry only deletes, which still succeeds at the storage limit. It runs
   // before repair, hydration or snapshots, any of which can fail first.
@@ -1294,8 +1295,9 @@ export class RepositoryState extends DurableObject<Env> {
     if(this.migrationHeld() || this.mutationState.blocked)return;
     if(this.storageFlight)return this.storageFlight;
     this.activeOperations++;
+    this.traceRepair('storage_prepare');
     const flight=this.prepareStorage(runExpiry);this.storageFlight=flight;
-    try {await flight;}finally {this.activeOperations--;if(this.storageFlight===flight)this.storageFlight=undefined;}
+    try {await flight;this.traceRepair('storage_prepared');}finally {this.activeOperations--;if(this.storageFlight===flight)this.storageFlight=undefined;}
   }
   get maintenanceArchive():R2Bucket {return timedBucket(this.env.ARCHIVE);}
   startStorageMaintenance():void {

@@ -123,6 +123,11 @@ For an isolate-reset investigation, temporarily set `RECONCILIATION_TRACE` to
 operation, page number, and start timestamp. They exclude query arguments, keys,
 cursors, credentials, and payloads. Tracing is disabled by default; remove the
 variable after collecting the diagnostic trace.
+Set it in the selected environment's Wrangler `vars` and deploy; changing the
+variable restarts the object. Traces include aggregate row, repair and staged-character
+counts. `publication_applied` precedes commit; only `refresh_committed` confirms
+the transaction completed. Background storage work can continue after
+`alarm_complete`; its completion is recorded separately as `storage_prepared`.
 
 ## Client behavior
 
