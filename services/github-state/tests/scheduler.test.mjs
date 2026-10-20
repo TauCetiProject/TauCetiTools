@@ -497,3 +497,17 @@ test('large staged repair fan-out rolls back, resumes, and reads scheduling meta
   assert.ok(checked>0);assert.equal(upstream,0);
  }finally{await db.close();}
 });
+
+test('bounded fan-out deduplicates dirty generations across batch boundaries and retains quota cooldowns',async()=>{
+ const {state,db}=await fixture();try{
+  await state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
+  const first={repository:'org/repo',operation:'issue_comments',args:{number:1}},key='issue_comments:{"number":1}',cooldown=Date.now()+3600000;
+  await state.enqueue(first);await db.prepare("UPDATE jobs SET generation=17,due=?,attempt=4,wait_reason='quota' WHERE key=?").run(cooldown,key);
+  const input=Array.from({length:513},(_,i)=>({q:{...first,args:{number:i+1}},priority:20,dirty:true}));
+  input.push({q:first,priority:2,dirty:true},{q:first,priority:3});
+  await state.enqueueMany(input);
+  const row=await db.prepare('SELECT generation,due,attempt,wait_reason,dirty,priority FROM jobs WHERE key=?').get(key);
+  assert.deepEqual({...row},{generation:18,due:cooldown,attempt:4,wait_reason:'quota',dirty:1,priority:3});
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM jobs').get()).n,513);
+ }finally{await db.close();}
+});

@@ -118,14 +118,15 @@ background reads only. Health includes lane eligibility, oldest requested age,
 repair arrivals/completions/cancellations, wait reasons, requested latency p95,
 and measured cost/latency by query shape and batch size.
 
-Repair publication releases buffered staging text as it decodes pages. Large
-PostgreSQL publications replace their prefetch cache after groups of at most
-128 rows and 2 MiB of serialized string storage (allowing one oversized row).
-Old-body prefetches transfer at most 2 MiB; larger existing resources use point
-reads and retain the same timestamp/tombstone guards. Follow-up job fan-out reads
-only IDs, states, membership and scheduling fields, so it does not reload PR
-bodies or nested job cursors for every dependent repair. Publication, membership
-and fan-out remain in the same transaction.
+Repair publication releases buffered staging text as it decodes pages and drops
+its decoded inventory before preparing dependent jobs. PostgreSQL publication
+cache groups contain at most 128 rows and 2 MiB each of old body bytes and new
+serialized string storage (allowing one oversized row). Old body sizes determine
+the groups before bodies are fetched, including compact listings over large
+stored detail rows. Membership is decided from the final stored resource state.
+Follow-up jobs are deduplicated once and processed in groups of at most 512,
+reading only IDs, states, membership and scheduling fields. They do not reload
+PR bodies or nested job cursors. All writes remain in the same transaction.
 
 For an isolate-reset investigation, temporarily set `RECONCILIATION_TRACE` to
 `"true"`. Background alarm and publication stage logs contain only the backend,
@@ -203,6 +204,7 @@ variables, so later code deployments preserve the App and allowlist settings.
 cd services/github-state
 npm ci
 npm test
+npm run test:publication-memory
 npm run deploy -- --env test
 npm run deploy -- --env ''
 ```

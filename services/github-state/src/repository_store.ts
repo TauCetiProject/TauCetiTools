@@ -89,7 +89,13 @@ export function postgresSQL(input:string,schema:string):string {
     if(!columns[table])throw new Error('Unknown repository table');
     return `INSERT INTO ${table}(${columns[table].join(',')}) ${op}`;
   });
-  sql=sql.replace(/json_extract\((\w+(?:\.\w+)?),'\$\.([\w.]+)'\)/g,(_,value,path)=>`(${value}::jsonb #>> '{${path.replaceAll('.',',')}}')`);
+  sql=sql.replace(/json_extract\((\w+(?:\.\w+)?),'\$\.([\w.]+)'\)/g,(_,value,path)=>{
+    // Only project the state enum. PostgreSQL otherwise rejects escaped NULs
+    // and lone surrogates anywhere in an unrelated payload body. Substitute
+    // those escapes in this temporary projection, preserving the stored text.
+    if(path==='state')value=`regexp_replace(${value},'\\\\u(0000|[dD][89a-fA-F][0-9a-fA-F]{2})','\\\\ufffd','g')`;
+    return `(${value}::jsonb #>> '{${path.replaceAll('.',',')}}')`;
+  });
   sql=sql.replace(/COALESCE\((\([^)]*::jsonb[^)]*\)),1\)/g,'COALESCE(($1)::bigint,1)');
   // SQLite casts nonnumeric IDs to zero and clamps oversized integers. Decimal
   // ordering avoids both PostgreSQL cast errors and bigint overflow.

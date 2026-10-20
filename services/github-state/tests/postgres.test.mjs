@@ -193,11 +193,11 @@ pg('large publication writes are set based and do not open a transaction per row
   let statements=0;f.state.store=intercept(f.store,()=>statements++);
   const data=Array.from({length:1200},(_,i)=>({number:i+1,state:'OPEN',headRefOid:'a'.repeat(40),isDraft:true,author:{login:'peer'},labels:[]}));
   const start=performance.now();await f.state.refresh(job,{api:'graphql',data});const duration=performance.now()-start;
-  assert.ok(statements<300,'SQL statement count must scale by batches, observed '+statements);
+  assert.ok(statements<400,'bounded cache groups must retain set-based writes, observed '+statements);
   assert.equal(await f.state.complete(q),true);assert.equal((await f.store.exec("SELECT COUNT(*) n FROM members WHERE collection='open_prs:{}'")).one().n,1200);
   console.log(JSON.stringify({publication_rows:1200,sql_statements:statements,duration_ms:duration}));
   statements=0;await f.state.enqueue(q);await f.store.exec('UPDATE jobs SET lease_id=NULL,lease_until=0,due=0 WHERE key=?',job.key);const unchanged=await f.state.claim((await f.store.exec('SELECT * FROM jobs WHERE key=?',job.key)).one());await f.state.refresh(unchanged,{api:'graphql',data});
-  assert.ok(statements<330,'unchanged observations must also use set writes, observed '+statements);
+  assert.ok(statements<450,'unchanged observations must also use bounded set writes, observed '+statements);
  }finally{await f.close();}
 });
 
@@ -316,10 +316,10 @@ pg('byte-cut history scans reduce subsequent SQL candidate work for large rows',
  }finally{await f.close();}
 });
 
-pg('publication prefetch preserves a large newer resource that is omitted from the body cache',async()=>{
+pg('publication prefetch preserves a large newer resource',async()=>{
  const f=await postgresFixture();try{
   const q={repository:repo.name,operation:'open_prs'},started=Date.now()-1000;
-  const current={number:7,state:'OPEN',updatedAt:'2026-10-20T00:00:00Z',body:'retained webhook body '.repeat(1000)};
+  const current={number:7,state:'OPEN',updatedAt:'2026-10-20T00:00:00Z',body:'retained webhook body '.repeat(1000)+'\u0000tail'};
   await f.state.put('pr','7',current,Date.now(),false,'7');
   await f.state.enqueue(q);const job=await f.state.claim(await f.state.nextJob());
   await f.store.exec('UPDATE jobs SET started=? WHERE key=?',started,job.key);job.started=started;
@@ -327,5 +327,57 @@ pg('publication prefetch preserves a large newer resource that is omitted from t
   const stored=(await f.store.exec("SELECT data FROM resources WHERE kind='pr' AND id='7'")).one();
   assert.deepEqual(JSON.parse(stored.data),current);
   assert.equal((await f.store.exec("SELECT COUNT(*) n FROM members WHERE collection='open_prs:{}' AND id='7'")).one().n,1);
+ }finally{await f.close();}
+});
+
+pg('grouped publication packs mixed old bodies and preserves duplicate, tombstone, webhook and delta state',async()=>{
+ const f=await postgresFixture(),originalNow=Date.now;try{
+  const fixed=Date.now(),updated=new Date(fixed).toISOString(),head='b'.repeat(40),records=[];
+  for(let number=1;number<=270;number++)for(const id of [String(number),'pr:'+JSON.stringify({number})]){
+   const value={number,state:'OPEN',updatedAt:updated,headRefOid:head,body:number%2?'small':'large '.repeat(4000)+(number===260?'\u0000tail':'')};
+   records.push(['pr',id,'',JSON.stringify(value),updated,number===260?fixed+1:fixed-1,1,Number(number===261)]);
+  }
+  await f.admin.query('INSERT INTO '+f.schema+'.resources(kind,id,parent,data,updated,observed,revision,tombstone) VALUES '+records.map((_,i)=>'('+Array.from({length:8},(_,j)=>'$'+(i*8+j+1)).join(',')+')').join(','),records.flat());
+  await f.state.setMeta('revision',1);
+  const q={repository:repo.name,operation:'open_prs'};await f.state.enqueue(q);const job=await f.state.claim((await f.store.exec('SELECT * FROM jobs WHERE key=?','open_prs:{}')).one());
+  job.started=fixed;await f.store.exec('UPDATE jobs SET started=? WHERE key=?',fixed,job.key);
+  let pointReads=0,groups=0,maxOld=0;
+  f.state.store=intercept(f.store,sql=>{if(/^SELECT (\*|data,updated,observed|data,tombstone) FROM resources WHERE kind=\? AND id=\?$/.test(sql))pointReads++;});
+  const prime=f.state.primePublication;
+  f.state.primePublication=async function(query,rows){
+   const ids=rows.flatMap(row=>[String(row.number),'pr:'+JSON.stringify({number:row.number})]);
+   const bytes=Number((await this.store.exec('SELECT COALESCE(SUM(octet_length(data)),0) bytes FROM resources WHERE kind=? AND id IN ('+ids.map(()=>'?').join(',')+')','pr',...ids)).one().bytes);
+   groups++;maxOld=Math.max(maxOld,bytes);assert.ok(rows.length<=128);assert.ok(bytes<=2097152);
+   return prime.call(this,query,rows);
+  };
+  Date.now=()=>fixed;
+  const rows=Array.from({length:270},(_,i)=>({number:i+1,state:'OPEN',updatedAt:updated,headRefOid:head,body:'incoming'}));
+  rows.push({...rows[0],state:'CLOSED',updatedAt:new Date(fixed+1).toISOString(),body:'duplicate final state'});
+  await f.state.refresh(job,{api:'graphql',data:rows});
+  assert.equal((await f.store.exec("SELECT COUNT(*) n FROM members WHERE collection='open_prs:{}'")).one().n,268);
+  for(const id of ['1','261'])assert.equal((await f.store.exec("SELECT COUNT(*) n FROM members WHERE collection='open_prs:{}' AND id=?",id)).one().n,0);
+  const newer=JSON.parse((await f.store.exec("SELECT data FROM resources WHERE kind='pr' AND id='260'")).one().data);
+  assert.equal(newer.body.endsWith('\u0000tail'),true);
+  assert.equal((await f.store.exec("SELECT tombstone FROM resources WHERE kind='pr' AND id='261'")).one().tombstone,1);
+  assert.equal(JSON.parse((await f.store.exec("SELECT data FROM resources WHERE kind='pr' AND id=?",'pr:{"number":1}')).one().data).state,'CLOSED');
+  const delta={repository:repo.name,operation:'pr_delta'};await f.state.enqueue(delta,0);
+  const deltaJob=await f.state.claim((await f.store.exec('SELECT * FROM jobs WHERE key=?','pr_delta:{}')).one());
+  const changed=rows.slice(0,180).map(row=>({...row,state:row.number===1?'OPEN':'CLOSED',updatedAt:new Date(fixed+2).toISOString()}));
+  await f.state.refresh(deltaJob,{api:'graphql',data:changed});
+  assert.equal((await f.store.exec("SELECT COUNT(*) n FROM members WHERE collection='open_prs:{}'")).one().n,90);
+  const revision=await f.state.revision();await f.state.refresh(deltaJob,{api:'graphql',data:changed});
+  assert.equal(await f.state.revision(),revision);
+  assert.ok(groups>3);assert.ok(maxOld>1048576);assert.equal(pointReads,0,'large old bodies must remain batched');
+ }finally{Date.now=originalNow;await f.close();}
+});
+
+pg('state projections tolerate payload Unicode escapes without changing the stored JSON text',async()=>{
+ const f=await postgresFixture();try{
+  const bodies=['null\u0000body','high\ud800body','low\udfffbody',String.raw`literal\u0000`,String.raw`literal\ud800`,'emoji😀','quotes"state":"CLOSED"'];
+  for(const body of bodies){
+   const text=JSON.stringify({body,state:'OPEN'});
+   const row=(await f.store.exec("SELECT data original,json_extract(data,'$.state') state FROM (SELECT CAST(? AS TEXT) data) AS payload",text)).one();
+   assert.equal(row.state,'OPEN');assert.ok(row.original===text,'stored payload text must remain exact');
+  }
  }finally{await f.close();}
 });

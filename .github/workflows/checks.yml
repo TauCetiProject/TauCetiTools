@@ -19,7 +19,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - run: npm ci && npm test
+      - run: npm ci && npm test && npm run test:publication-memory
         working-directory: services/github-state
 
   github-state-postgres:
