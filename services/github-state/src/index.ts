@@ -160,10 +160,10 @@ export default {
         if(input.jobs) {
           if(!Array.isArray(input.jobs) || !input.jobs.length || input.jobs.length>100) return json({error:'invalid_batch'},400);
           try {for(const job of input.jobs) {validateQuery({...job.query,repository:repo.name});if(job.query.operation!==input.query.operation) throw new Error('mixed batch');}} catch {return json({error:'invalid_batch'},400);}
-          return stub(env.INSTALLATIONS,repo.installation).fetch('https://internal/measure',{method:'POST',body:JSON.stringify({repository:repo,jobs:input.jobs,profile:input.profile})});
+          return stub(env.INSTALLATIONS,repo.installation).fetch('https://internal/measure',{method:'POST',headers:{'x-request-id':request_id},body:JSON.stringify({repository:repo,jobs:input.jobs,profile:input.profile})});
         }
         // The quota owner performs an uncached, catalog-only reference read. No arbitrary proxy.
-        return stub(env.INSTALLATIONS,repo.installation).fetch('https://internal/read',{method:'POST',body:JSON.stringify({repository:repo,query:referenceQuery,page:input.page || 1,cursor:input.cursor,api:input.api,nested:input.nested,reference:true})});
+        return stub(env.INSTALLATIONS,repo.installation).fetch('https://internal/read',{method:'POST',headers:{'x-request-id':request_id},body:JSON.stringify({repository:repo,query:referenceQuery,page:input.page || 1,cursor:input.cursor,api:input.api,nested:input.nested,reference:true})});
       }
       return json({error:'not_found'},404);
     } catch(error) {
@@ -271,7 +271,16 @@ export default {
       }
       await Promise.allSettled(Object.keys(R2_CLASSES).map(async name=>{
         if(held.has(name))return;
-        try {await retirePrefix(env.ARCHIVE,name as keyof typeof R2_CLASSES,Date.now(),async()=>!await retentionHeld());}
+        try {await retirePrefix(env.ARCHIVE,name as keyof typeof R2_CLASSES,Date.now(),async()=>{
+          if(await retentionHeld())return false;
+          // Recheck pins after listing and immediately before issuing deletion.
+          // A batch already dispatched to R2 cannot be recalled.
+          for(const repo of repositories(env)) {
+            const value=await env.ARCHIVE.get('control/'+repo.id+'/retention-policy.json').then(o=>o?.json<any>());
+            if(value) {const p=policy(value);if(p.disabled.includes(name) || p.pinned.includes(name))return false;}
+          }
+          return true;
+        });}
         catch(error) {log('archive_retention_failed',{class:name,reason:classify(error)});}
       }));
     })().catch(error=>log('archive_retention_policy_failed',{reason:classify(error)})));

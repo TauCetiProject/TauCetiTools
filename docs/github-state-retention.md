@@ -97,7 +97,10 @@ at most 100 objects (500 cursors), deletes at most 100 MiB, using one batch dele
 operation per page. Oversized objects are reported and retained for operator action,
 without preventing other objects from expiring. A budget stop repeats the current
 page; a failed delete/checkpoint does not advance it. Protected prefixes and
-`pinned: true` metadata win over expiry. Checkpoints live in
+`pinned: true` metadata win over expiry. Class pins and migration holds are rechecked
+before each delete request; an R2 batch already dispatched cannot be recalled.
+Quiesce cleanup and wait for outstanding batches before relying on a new pin to
+protect an already expired object. Checkpoints live in
 `control/retention/<class>.json`. Legacy expiring staging spills under `resources/`
 have a separate conservative sweep that only deletes `kind: cursor` objects after
 expiry. Authoritative resource spills remain protected. An expired staged

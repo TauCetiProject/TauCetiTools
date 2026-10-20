@@ -748,7 +748,9 @@ test('health retains schema diagnostics when repository metadata is missing',asy
 });
 
 test('a delayed cold policy load cannot overwrite an acknowledged operator pin',async()=>{
- const {state,archive}=repositoryFixture();await state.fixtureReady;state.storageLoaded=false;
+ const {state,archive}=repositoryFixture();await state.fixtureReady;state.storageLoaded=false;state.retentionProgressLoaded=false;
+ const checkpoint={after:20,upper:100,started:Date.now()-60000,examined:20,eligible:0,deleted:0,bytes:1000};
+ await archive.put('control/100/retention-checkpoint.json',JSON.stringify({version:1,classes:{expired_changes:checkpoint},ci_after:80}));
  const previous={mode:'enforce',disabled:[],pinned:[]},next={...previous,pinned:['expired_changes']};
  const key='control/100/retention-policy.json';await archive.put(key,JSON.stringify(previous));
  const put=archive.put.bind(archive),get=archive.get.bind(archive);
@@ -760,6 +762,7 @@ test('a delayed cold policy load cannot overwrite an acknowledged operator pin',
  const loading=state.loadRetentionState();await getStarted;
  releasePut();assert.equal((await updating).status,200);releaseGet();await loading;
  assert.deepEqual(state.retentionPolicy.pinned,['expired_changes']);
+ assert.equal(state.retentionState.expired_changes.after,20);assert.equal(state.ciAfter,80);
 });
 
 test('a completed retention epoch waits for the next minute instead of rescanning on every alarm',async()=>{
@@ -784,4 +787,24 @@ test('incremental accounting projections roll the hourly window without regroupi
   assert.equal(row.latency,expected.reduce((n,r)=>n+r.latency,0)/expected.length);
  }
  assert.equal(metrics.snapshot(now).hour,snapshot.hour,'health reads serve the prepared projection');
+});
+
+
+test('a future completion timestamp cannot indefinitely suppress expiry',async()=>{
+ const {state,archive,db}=repositoryFixture();await state.fixtureReady;
+ state.storageLoaded=false;state.retentionProgressLoaded=false;
+ const now=Date.now(),row={after:1,upper:1,started:now,completed:now+365*86400000,examined:1,eligible:0,deleted:0,bytes:1};
+ await archive.put('control/100/retention-policy.json',JSON.stringify({mode:'enforce',pinned:[],disabled:[]}));
+ await archive.put('control/100/retention-checkpoint.json',JSON.stringify({version:1,classes:{expired_changes:row}}));
+ db.prepare('INSERT INTO changes VALUES(?,?,?,?,?)').run(1,now-8*86400000,'pr','1',0);
+ await state.loadRetentionState();state.expire();
+ assert.equal(scalar(db,'SELECT COUNT(*) FROM changes'),0);
+});
+
+test('a retention pin acquired while listing prevents the pending R2 delete',async()=>{
+ const archive=bucket(),now=Date.now();let pinned=false;
+ await archive.put('webhooks/100/old.json','retained',{customMetadata:{expires:String(now-1)}});
+ const list=archive.list.bind(archive);archive.list=async options=>{const page=await list(options);pinned=true;return page;};
+ const result=await retention.retirePrefix(archive,'raw_webhooks',now,async()=>!pinned);
+ assert.ok(await archive.get('webhooks/100/old.json'));assert.equal(result.deleted,0);
 });

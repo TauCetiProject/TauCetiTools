@@ -325,3 +325,19 @@ test('REST exhaustion repairs a flat review history through its existing GraphQL
   assert.equal(db.prepare('SELECT wait_reason FROM jobs WHERE key=?').get(key).wait_reason,null);
  } finally {db.close();}
 });
+
+
+test('malformed upstream state retains coverage and backs off with a traceable request ID',async()=>{
+ const {state,db}=fixture();try {
+  state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
+  const q={repository:'org/repo',operation:'issue_comments',args:{number:7}};await state.enqueue(q);
+  const key='issue_comments:{"number":7}',failure={unavailable:true,reason:'malformed_upstream_response',request_id:'upstream-trace'};
+  await state.refresh(db.prepare('SELECT * FROM jobs WHERE key=?').get(key),failure);
+  let row=db.prepare('SELECT * FROM jobs WHERE key=?').get(key);
+  assert.equal(row.wait_reason,failure.reason);assert.equal(row.attempt,1);assert.ok(row.due>=Date.now()+59000);
+  await state.refresh(row,failure);row=db.prepare('SELECT * FROM jobs WHERE key=?').get(key);
+  assert.equal(row.attempt,2);assert.ok(row.due>=Date.now()+119000);
+  assert.equal(state.meta('last_upstream_failure').request_id,'upstream-trace');
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM collections WHERE complete=1').get().n,0);
+ }finally {db.close();}
+});

@@ -166,6 +166,12 @@ export class InstallationScheduler extends DurableObject<Env> {
   }
   // All GitHub requests from all repository objects pass through this installation owner.
   // Budget selection affects background reads only; authoring writes never enter this service.
+  unavailableResponse(input:any,operation:string,api:string,error?:unknown):any {
+    const request_id=/^[A-Za-z0-9-]{1,64}$/.test(input.request_id || '')?input.request_id:crypto.randomUUID();
+    const reason=error instanceof Error && error.message==='upstream_identity_unavailable'?'upstream_identity_unavailable':'malformed_upstream_response';
+    try {log('upstream_response_unavailable',{request_id,operation,api,reason});}catch {}
+    return {unavailable:true,reason,request_id};
+  }
   async read(input: any): Promise<Response> {
     if (input.nested) return this.threadPage(input);
     const candidates = recipes(input.repository.name,input.query,input.cursor,input.page).map(r=>({...r,cost:this.estimate(input.query.operation,r.api,undefined,r.cost)}));
@@ -210,7 +216,7 @@ export class InstallationScheduler extends DurableObject<Env> {
       let data;
       try {data=extract(recipe,result.body);}catch(error) {
         if(error instanceof Error && error.message==='labels overflow')continue;
-        return json({unavailable:true,reason:'malformed_upstream_response',request_id:input.request_id,retry_at:Date.now()+60000});
+        return json(this.unavailableResponse(input,input.query.operation,recipe.api,error));
       }
       if (input.query.operation==='review_threads') {
         if (data.rows.some((t:any)=>t.comments?.pageInfo?.hasNextPage)) return json({continuation:{rows:data.rows,cursor:data.cursor,etag:result.etag},api:'graphql',points:result.points});
@@ -230,8 +236,11 @@ export class InstallationScheduler extends DurableObject<Env> {
     const request=()=>this.http('/graphql',token,'POST',body,(input.reference?'reference_':'')+'review_thread_overflow','graphql');
     let result=await request();if(result.status===401) {token=await this.token(input.repository.installation,true);result=await request();}
     if(result.deferred || result.status!==200 || result.body.errors?.length) return json({...result,unavailable:true});
-    const conn=result.body.data?.node?.comments;
-    if(!Array.isArray(conn?.nodes) || !conn.pageInfo || conn.pageInfo.hasNextPage && conn.pageInfo.endCursor===cursor) throw new Error('incomplete thread overflow');
+    let conn:any;
+    try {
+      const recipe:Recipe={operation:'review_comments',api:'graphql',path:'/graphql',cost:1,connection:['node','comments'],collection:true,normalize:(value:any)=>value,variables:{cursor}};
+      extract(recipe,result.body);conn=result.body.data.node.comments;
+    }catch(error) {return json(this.unavailableResponse(input,'review_thread_overflow','graphql',error));}
     const ids=new Set(thread.comments.nodes.map((n:any)=>n.id));
     thread.comments.nodes.push(...conn.nodes.filter((n:any)=>!ids.has(n.id)));thread.comments.pageInfo=conn.pageInfo;
     return pending.rows.some((t:any)=>t.comments?.pageInfo?.hasNextPage)?json({continuation:pending,api:'graphql',points:result.points}):json({data:pending.rows,cursor:pending.cursor,etag:pending.etag,api:'graphql',points:result.points});
@@ -275,13 +284,17 @@ export class InstallationScheduler extends DurableObject<Env> {
       if (errors.some((e:any)=>e.path?.includes('q'+i))) return {key:j.key,unavailable:true,retry_at:Date.now()+60000};
       const item=operation==='reactions'?result.body.data?.['q'+i]:result.body.data?.repository?.['q'+i];
       if (!item) return {key:j.key,unavailable:true,retry_at:Date.now()+60000};
-      if (operation==='statuses') return {key:j.key,data:(item.status?.contexts || []).map((c:any)=>({context:c.context,state:c.state,startedAt:c.createdAt})),api:'graphql'};
-      const conn=item[operation==='review_threads'?'reviewThreads':operation==='reactions'?'reactions':'comments'];
-      if (!conn?.nodes || !conn.pageInfo) return {key:j.key,unavailable:true,retry_at:Date.now()+60000};
-      if (operation==='review_threads' && conn.nodes.some((t:any)=>t.comments?.pageInfo?.hasNextPage)) return {key:j.key,continuation:{rows:conn.nodes,cursor:conn.pageInfo.hasNextPage?conn.pageInfo.endCursor:undefined},api:'graphql'};
-      const recipe=operation==='issue_comments'?recipes(input.repository.name,j.query).find(r=>r.api==='graphql'):null;
-      const rows=operation==='reactions'?conn.nodes.map((n:any)=>({id:String(n.databaseId),content:emojis[n.content],created_at:n.createdAt,user:n.user || {}})):recipe?conn.nodes.map(recipe.normalize):conn.nodes;
-      return {key:j.key,data:rows,api:'graphql',cursor:conn.pageInfo.hasNextPage?conn.pageInfo.endCursor:undefined};
+      try {
+        const normalize=operation==='statuses'?(value:any)=>(value.status===null?[]:value.status.contexts.map((c:any)=>({context:c.context,state:c.state,startedAt:c.createdAt})))
+          :operation==='issue_comments'?recipes(input.repository.name,j.query).find(r=>r.api==='graphql')!.normalize
+          :operation==='reactions'?(node:any)=>{if(!emojis[node.content])throw new Error('unsupported reaction');return {id:String(node.databaseId),content:emojis[node.content],created_at:node.createdAt,user:node.user || {}};}:(value:any)=>value;
+        const field=operation==='review_threads'?'reviewThreads':operation==='reactions'?'reactions':'comments';
+        const recipe:Recipe={operation,api:'graphql',path:'/graphql',cost:1,collection:operation!=='statuses',connection:operation==='statuses'?['item']:['item',field],normalize};
+        const data=extract(recipe,{data:{item}});
+        if(operation==='review_threads' && data.rows.some((thread:any)=>thread.comments.pageInfo.hasNextPage))return {key:j.key,continuation:{rows:data.rows,cursor:data.cursor},api:'graphql'};
+        return {key:j.key,data:data.rows,api:'graphql',cursor:data.cursor};
+      }catch(error) {return {key:j.key,...this.unavailableResponse(input,operation,'graphql',error)};}
+
     })});
   }
   async measure(input:any): Promise<Response> {
@@ -391,8 +404,8 @@ export class InstallationScheduler extends DurableObject<Env> {
     try {
       const path = new URL(req.url).pathname;
       if (path==='/read') return await this.read({...await req.json() as object,request_id:requestId(req)});
-      if (path==='/batch') return await this.batch(await req.json());
-      if (path==='/measure') return await this.measure(await req.json());
+      if (path==='/batch') return await this.batch({...await req.json() as object,request_id:requestId(req)});
+      if (path==='/measure') return await this.measure({...await req.json() as object,request_id:requestId(req)});
       if (path==='/maintenance') {
         this.expireAccounting();this.prepareAccounting();return json({ok:true,telemetry_failure:this.accountingFailure});
       }
@@ -406,7 +419,7 @@ export class InstallationScheduler extends DurableObject<Env> {
       return json({error:'not_found'},404);
     } catch (error) {
       if (error instanceof QuotaDeferred) return json(error.result);
-      console.error('installation operation failed',error instanceof Error?error.message:'unknown'); return json({unavailable:true,reason:error instanceof Error && error.message==='malformed_upstream_response'?'malformed_upstream_response':classify(error),request_id:requestId(req),retry_at:Date.now()+60000},503);
+      console.error('installation operation failed',error instanceof Error?error.message:'unknown'); return json({unavailable:true,reason:error instanceof Error && error.message==='malformed_upstream_response'?'malformed_upstream_response':classify(error),request_id:requestId(req),...(error instanceof Error && error.message==='malformed_upstream_response'?{}:{retry_at:Date.now()+60000})},503);
     }
   }
 }

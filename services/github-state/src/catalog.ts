@@ -79,10 +79,14 @@ function validateRow(recipe:Recipe,row:any):void {
   }else if(operation==='files') {if(typeof row.filename!=='string')throw new Error('malformed file');}
   else if(operation==='refs') {if(typeof row.ref!=='string')throw new Error('malformed reference');}
   else if(['issue_comments','review_comments','reviews','reactions','workflow_jobs','workflow_runs','checks','review_threads'].includes(operation)) {
-    if(!identity(row.fullDatabaseId ?? row.id))throw new Error('malformed resource identity');
-    if(['issue_comments','review_comments'].includes(operation) && typeof row.body!=='string')throw new Error('malformed comment body');
+    if(operation!=='reactions' || recipe.api!=='graphql')if(!identity(row.fullDatabaseId ?? row.id))throw new Error('malformed resource identity');
+    if(['issue_comments','review_comments'].includes(operation)) {
+      if(typeof row.body!=='string')throw new Error('malformed comment body');
+      if(recipe.api==='graphql' && (!numberIdentity(row.fullDatabaseId) || row.replyTo && !numberIdentity(row.replyTo.fullDatabaseId)))throw new Error('upstream_identity_unavailable');
+    }
+    if(operation==='reactions' && recipe.api==='graphql' && !numberIdentity(row.databaseId))throw new Error('upstream_identity_unavailable');
     if(operation==='review_threads') {
-      if(!Array.isArray(row.comments?.nodes) || typeof row.comments?.pageInfo?.hasNextPage!=='boolean')throw new Error('malformed thread comments');
+      if(!Array.isArray(row.comments?.nodes) || typeof row.comments?.pageInfo?.hasNextPage!=='boolean' || row.comments.pageInfo.hasNextPage && (typeof row.comments.pageInfo.endCursor!=='string' || !row.comments.pageInfo.endCursor))throw new Error('malformed thread comments');
       for(const comment of row.comments.nodes)validateRow({...recipe,operation:'review_comments'},comment);
     }
   }
@@ -90,7 +94,10 @@ function validateRow(recipe:Recipe,row:any):void {
 function validateScalar(recipe:Recipe,value:any):void {
   if(!value || typeof value!=='object' || Array.isArray(value))throw new Error('malformed scalar resource');
   const id=(v:any)=>typeof v==='number'?Number.isSafeInteger(v) && v>0:typeof v==='string' && /^[1-9][0-9]*$/.test(v);
-  if(recipe.operation==='pr')validateRow(recipe,value);
+  if(recipe.operation==='pr') {
+    validateRow(recipe,value);
+    if(value.labels && value.labels.totalCount>value.labels.nodes.length)throw new Error('labels overflow');
+  }
   if(recipe.operation==='repository' && (!id(value.id) || typeof value.full_name!=='string' || !value.full_name.includes('/')))throw new Error('malformed repository header');
   if(recipe.operation==='statuses') {
     if(recipe.api==='core' && !Array.isArray(value.statuses))throw new Error('malformed status collection');

@@ -37,6 +37,7 @@ export class RepositoryState extends DurableObject<Env> {
   private retentionState: Partial<Record<RetentionClass, Checkpoint>> = {};
   private storageFlight?: Promise<void>;
   private storageLoaded=false;
+  private retentionProgressLoaded=false;
   private retentionLoadFlight?:Promise<void>;
   private policyGeneration=0;
   private policyUpdateFlight:Promise<void>=Promise.resolve();
@@ -827,7 +828,7 @@ export class RepositoryState extends DurableObject<Env> {
       if(error instanceof Error && error.message==='resource unavailable')throw new Error('staging page missing');
       throw error;
     }
-    const response=supplied?null:await stub(this.env.INSTALLATIONS,repo.installation).fetch('https://internal/read',{method:'POST',body:JSON.stringify({repository:repo,query:upstream,cursor:job.cursor,page:job.page,api:job.api,nested,etag:job.page===1 && !job.nested && q.operation!=='workflow_runs'?job.etag:undefined})});
+    const response=supplied?null:await stub(this.env.INSTALLATIONS,repo.installation).fetch('https://internal/read',{method:'POST',headers:{'x-request-id':crypto.randomUUID()},body:JSON.stringify({repository:repo,query:upstream,cursor:job.cursor,page:job.page,api:job.api,nested,etag:job.page===1 && !job.nested && q.operation!=='workflow_runs'?job.etag:undefined})});
     const result:any=supplied || await response!.json();
     if (job.lease_id && this.sql.exec<any>('SELECT lease_id FROM jobs WHERE key=?',job.key).toArray()[0]?.lease_id!==job.lease_id) return;
     if (result.continuation) {
@@ -854,9 +855,9 @@ export class RepositoryState extends DurableObject<Env> {
         await this.noteDemand(source);await this.enqueue(source,1,Date.now(),!existing || !existing.started && !existing.dirty);
         if(!this.complete(q)) this.sql.exec("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?) WHERE key=?",job.requested_at || Date.now(),queryKey(source));
       }
-      this.sql.exec('UPDATE jobs SET due=?,attempt=attempt+?,wait_reason=? WHERE key=?',result.retry_at || Date.now()+Math.min(3600000,60000*2**Math.min(6,job.attempt)),capacity?0:1,result.category || 'upstream',job.key);
+      this.sql.exec('UPDATE jobs SET due=?,attempt=attempt+?,wait_reason=? WHERE key=?',result.retry_at || Date.now()+Math.min(3600000,60000*2**Math.min(6,job.attempt)),capacity?0:1,result.category || result.reason || 'upstream',job.key);
       this.metric(capacity?'capacity_wait':'retry',q,job.lane || 'verification');
-      if(!capacity) this.setMeta('last_upstream_failure',{at:Date.now(),operation:q.operation,category:result.category || 'upstream'}); return;
+      if(!capacity) this.setMeta('last_upstream_failure',{at:Date.now(),operation:q.operation,category:result.category || result.reason || 'upstream',request_id:result.request_id}); return;
     }
     if (result.unchanged) {
       this.sql.exec('UPDATE collections SET verified=? WHERE key=?',Date.now(),job.key);
@@ -1018,34 +1019,37 @@ export class RepositoryState extends DurableObject<Env> {
     if(this.ctx.waitUntil)this.ctx.waitUntil(task);
   }
   async loadRetentionState():Promise<void> {
-    if(this.storageLoaded)return;
+    if(this.storageLoaded && this.retentionProgressLoaded)return;
     if(this.retentionLoadFlight)return this.retentionLoadFlight;
     const task=this.readRetentionState();this.retentionLoadFlight=task;
     try {await task;}finally {if(this.retentionLoadFlight===task)this.retentionLoadFlight=undefined;}
   }
   async readRetentionState():Promise<void> {
     let repo:string|undefined;try {repo=this.meta('repository')?.id;}catch {return;}if(!repo)return;
-    if(!this.storageLoaded) {
-      const observedGeneration=this.policyGeneration;
-      try {
-        const control=await this.maintenanceArchive.get('control/'+repo+'/retention-policy.json').then(o=>o?.json<any>());
-        if(this.storageLoaded || observedGeneration!==this.policyGeneration)return;
-        const candidate=control?policy(control):DEFAULT_POLICY;
-        const checkpoint=await this.maintenanceArchive.get('control/'+repo+'/retention-checkpoint.json').then(o=>o?.json<any>());
-        if(this.storageLoaded || observedGeneration!==this.policyGeneration)return;
-        this.retentionPolicy=candidate;
-        if(checkpoint?.version===1 && checkpoint.classes && typeof checkpoint.classes==='object') {
-          // Invalid progress is expendable: restart that scan, retaining policy.
-          for(const name of Object.keys(RULES) as RetentionClass[]) {
-            const row=checkpoint.classes[name];
-            if(row && ['after','upper','started','examined','eligible','deleted','bytes'].every(k=>Number.isSafeInteger(row[k]) && row[k]>=0) && row.after<=row.upper)this.retentionState[name]=row;
+    const observedGeneration=this.policyGeneration;
+    if(!this.storageLoaded)try {
+      const control=await this.maintenanceArchive.get('control/'+repo+'/retention-policy.json').then(o=>o?.json<any>());
+      if(!this.storageLoaded && observedGeneration===this.policyGeneration) {
+        this.retentionPolicy=control?policy(control):DEFAULT_POLICY;this.storageLoaded=true;
+      }
+    }catch(error) {this.noteFailure('retention_load',error);}
+    // Policy publication can race the initial load. Progress is independent:
+    // retain the acknowledged policy while restoring the scan's old checkpoint.
+    if(!this.retentionProgressLoaded)try {
+      const checkpoint=await this.maintenanceArchive.get('control/'+repo+'/retention-checkpoint.json').then(o=>o?.json<any>());
+      if(checkpoint?.version===1 && checkpoint.classes && typeof checkpoint.classes==='object') {
+        for(const name of Object.keys(RULES) as RetentionClass[]) {
+          const row=checkpoint.classes[name];
+          if(!this.retentionState[name] && row && ['after','upper','started','examined','eligible','deleted','bytes'].every(k=>Number.isSafeInteger(row[k]) && row[k]>=0) && row.after<=row.upper) {
+            this.retentionState[name]={...row,completed:Number.isSafeInteger(row.completed) && row.completed<=Date.now()?row.completed:undefined};
           }
-          this.ciAfter=Number.isSafeInteger(checkpoint.ci_after) && checkpoint.ci_after>=0?checkpoint.ci_after:0;
         }
-        this.storageLoaded=true;
-      }catch(error) {this.noteFailure('retention_load',error);}
-    }
+        if(!this.ciAfter)this.ciAfter=Number.isSafeInteger(checkpoint.ci_after) && checkpoint.ci_after>=0?checkpoint.ci_after:0;
+      }
+      this.retentionProgressLoaded=true;
+    }catch(error) {this.noteFailure('retention_checkpoint_load',error);}
   }
+
   async prepareStorage(runExpiry=true): Promise<void> {
     const repo=this.meta('repository')?.id;if(!repo)return;
     await this.loadRetentionState();
@@ -1148,6 +1152,7 @@ export class RepositoryState extends DurableObject<Env> {
       this.observation.persistence={stored:true,at:now};
       try {await this.maintenanceArchive.put('control/'+repo+'/observation.json',JSON.stringify(this.observation));}
       catch(error) {this.observation.persistence={stored:false,at:now,error:classify(error)};this.noteFailure('observation_persistence',error);}
+      if(this.migrationHeld())return;
       if(requests.requests || repairMinutes.length)await this.maintenanceArchive.put('telemetry/'+repo+'/'+Math.floor(now/60000)+'.json',JSON.stringify({at:now,requests:intervals.filter((r:any)=>r.at>=now-60000),repair_intervals:repairMinutes}),{customMetadata:{expires:String(now+7*86400000)}});
     }catch(error) {this.noteFailure('monitoring',error);}
   }
@@ -1294,7 +1299,7 @@ export class RepositoryState extends DurableObject<Env> {
           if (supported.length!==jobs.length) { await this.refresh(first);return; }
           jobs=supported;
         }
-        const response=await stub(this.env.INSTALLATIONS,repo.installation).fetch('https://internal/batch',{method:'POST',body:JSON.stringify({repository:repo,jobs:jobs.map(j=>({key:j.key,query:JSON.parse(j.query),node_id:j.node_id}))})});
+        const response=await stub(this.env.INSTALLATIONS,repo.installation).fetch('https://internal/batch',{method:'POST',headers:{'x-request-id':crypto.randomUUID()},body:JSON.stringify({repository:repo,jobs:jobs.map(j=>({key:j.key,query:JSON.parse(j.query),node_id:j.node_id}))})});
         const result:any=await response.json();
         if (result.results) {
           for(let i=0;i<jobs.length;i++) {

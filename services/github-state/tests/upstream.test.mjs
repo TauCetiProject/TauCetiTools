@@ -237,7 +237,7 @@ test('nested review histories checkpoint each page instead of monopolizing an in
   const rateLimit={cost:1,remaining:4999,resetAt:new Date(Date.now()+300000).toISOString()};
   if(query.includes('reviewThreads(')) return response({data:{rateLimit,repository:{pullRequest:{reviewThreads:{nodes:[{id:'thread',comments:{nodes:[{id:'c1',fullDatabaseId:'1',body:'first'}],pageInfo:{hasNextPage:true,endCursor:'a'}}}],pageInfo:{hasNextPage:false,endCursor:null}}}}}});
   assert.equal(variables.id,'thread');
-  return response({data:{rateLimit,node:{comments:{nodes:[{id:variables.cursor==='a'?'c2':'c3'}],pageInfo:{hasNextPage:variables.cursor==='a',endCursor:'b'}}}}});
+  return response({data:{rateLimit,node:{comments:{nodes:[{id:variables.cursor==='a'?'c2':'c3',fullDatabaseId:variables.cursor==='a'?'2':'3',body:'overflow comment'}],pageInfo:{hasNextPage:variables.cursor==='a',endCursor:'b'}}}}});
  });
  try {
   const ns=await mf.getDurableObjectNamespace('INSTALLATIONS'),stub=ns.get(ns.idFromName('200'));
@@ -360,4 +360,32 @@ test('malformed collection rows and pagination never publish an empty complete c
   }
   graphql=true;const value=await (await read('open_prs','graphql')).json();assert.equal(value.unavailable,true);assert.equal(Object.hasOwn(value,'data'),false);
  }finally{await mf.dispose();}
+});
+
+test('batch validation isolates malformed aliases without empty substitution or extra upstream requests',async()=>{
+ let payload,network=0;
+ const mf=await runtime(async()=>{network++;return response({data:payload});});
+ try {
+  const ns=await mf.getDurableObjectNamespace('INSTALLATIONS'),stub=ns.get(ns.idFromName(repository.installation));
+  const connection=nodes=>({nodes,pageInfo:{hasNextPage:false,endCursor:null}});
+  const comment={id:'node',fullDatabaseId:'18446744073709551600',body:'retained'};
+  const cases=[
+   ['statuses',{status:{}},{status:null},'malformed_upstream_response'],
+   ['issue_comments',{comments:{nodes:[],pageInfo:{}}},{comments:connection([comment])},'malformed_upstream_response'],
+   ['issue_comments',{comments:connection([{id:'node',fullDatabaseId:null,body:'cannot address by node id'}])},{comments:connection([comment])},'upstream_identity_unavailable'],
+   ['issue_comments',{comments:connection([{...comment,replyTo:{fullDatabaseId:null}}])},{comments:connection([comment])},'upstream_identity_unavailable'],
+   ['reactions',{reactions:connection([{content:'HEART'}])},{reactions:connection([{databaseId:'18446744073709551600',content:'HEART'}])},'upstream_identity_unavailable'],
+   ['review_threads',{reviewThreads:connection([{id:'thread',comments:connection([{...comment,body:null}])}])},{reviewThreads:connection([{id:'thread',comments:connection([comment])}])},'malformed_upstream_response']
+  ];
+  for(const [operation,bad,good,reason] of cases) {
+   payload=operation==='reactions'?{q0:bad,q1:good}:{repository:{q0:bad,q1:good}};
+   const jobs=[0,1].map(i=>({key:String(i),node_id:'node'+i,query:{operation,args:{number:7,sha:'a'.repeat(40),id:String(i+1)}}}));
+   const before=network,result=await (await stub.fetch('https://internal/batch',{method:'POST',headers:{'x-request-id':'batch-validation'},body:JSON.stringify({repository,jobs})})).json();
+   assert.equal(network-before,1);assert.equal(result.results[0].unavailable,true);assert.equal(result.results[0].reason,reason);
+   assert.equal(result.results[0].request_id,'batch-validation');assert.equal(Object.hasOwn(result.results[0],'data'),false);
+   assert.equal(Object.hasOwn(result.results[0],'retry_at'),false,'scheduler owns exponential retry');
+   assert.ok(Array.isArray(result.results[1].data),'valid sibling retained');
+   if(['issue_comments','reactions'].includes(operation))assert.equal(result.results[1].data[0].id,comment.fullDatabaseId);
+  }
+ }finally {await mf.dispose();}
 });
