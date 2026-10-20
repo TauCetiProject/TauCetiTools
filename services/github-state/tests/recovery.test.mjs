@@ -1110,7 +1110,7 @@ test('ordinary ticks recover a full marker published after construction and retr
  // Control dependency outage must fence a legacy constructor, then ordinary
  // ticks retry the marker and verify capacity once the dependency recovers.
  f.db.exec("DELETE FROM meta WHERE key='schema_version'");
- for(let i=0;i<3;i++)f.archive.failures.push((op,key)=>op==='get' && key==='control/100/storage.json');
+ for(let i=0;i<2;i++)f.archive.failures.push((op,key)=>op==='get' && key==='control/100/storage.json');
  const reset=repositoryFixture({},0,f.db,f.archive);await reset.ready;
  assert.equal(reset.state.schema,'legacy');assert.ok(reset.state.degraded);
  await tick(reset.state);advance(61000);await tick(reset.state);
@@ -1149,4 +1149,17 @@ test('per-object raw pins survive recovery-owned expiry and page policy reads re
  await ingress.maintainRaw(h.env,()=>[repo]);
  assert.ok(h.archive.objects.has(key));assert.ok(h.archive.objects.has(ingress.bodyKey(repo.id,'object-pin')));assert.equal(policyReads,1);
  assert.equal([...h.archive.objects.keys()].filter(k=>k.startsWith('webhooks/')).length,1);
+}));
+
+test('a transient tick marker-read failure clears on the next read without publishing full or probing',async()=>clock(async advance=>{
+ const f=repositoryFixture();await f.ready;
+ const key='control/100/storage.json';
+ const writable={state:'writable',verified_at:Date.now(),probe_attempts:8,next_probe_at:Date.now()+600000};await f.archive.put(key,JSON.stringify(writable));
+ let writes=0,probes=0;const put=f.archive.put;f.archive.put=async(k,...args)=>{if(k===key)writes++;return put(k,...args);};
+ f.state.ctx.storage.sync=async()=>{if(f.db.prepare("SELECT COUNT(*) n FROM meta WHERE key LIKE 'storage_probe:%'").get().n)probes++;};
+ advance(1000);f.archive.failures.push((op,k)=>op==='get' && k===key);
+ await tick(f.state);assert.equal(f.state.degraded.reason,'storage_error');assert.equal(writes,0);assert.equal(probes,0);
+ const event=await f.state.fetch(new Request('https://internal/event',{method:'POST',body:JSON.stringify({key:'missing',delivery:'control-wait',event:'ping',repository:repo.name,received:Date.now()})}));
+ assert.equal((await event.json()).error,'storage_control_unavailable');
+ advance(61000);await tick(f.state);assert.equal(f.state.degraded,undefined);assert.equal(writes,0);assert.equal(probes,0);assert.deepEqual(JSON.parse(f.archive.objects.get(key).bytes),writable);
 }));

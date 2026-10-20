@@ -60,6 +60,7 @@ export class RepositoryState extends DurableObject<Env> {
   private queryCounts=new Map<string,{operation:string,coverage:string,requests:number,last_at:number}>();
   private repairMetrics=new RepairMetrics();
   private probeFlight?: Promise<void>;
+  private storageMarkerUnavailable=false;
   private deliveryFlights = new Map<string,Promise<void>>();
   // Planned-migration barrier: loaded from R2 once per instance and updated
   // by the admin endpoint, which waits for in-flight applications to finish.
@@ -115,9 +116,12 @@ export class RepositoryState extends DurableObject<Env> {
     try {repo=this.meta('repository')?.id;} catch {return;} // Fresh objects have no schema yet.
     try {
       marker=repo?await this.env.ARCHIVE.get(storageKey(repo)).then(o=>o?.json<any>()):undefined;
-    } catch {this.degraded ||= {since:Date.now(),reason:'storage_error',operation:'storage_marker_unavailable'};return;}
+    } catch {this.storageMarkerUnavailable=true;this.degraded ||= {since:Date.now(),reason:'storage_error',operation:'storage_marker_unavailable'};return;}
+    this.storageMarkerUnavailable=false;
+    const unknown=this.degraded?.operation==='storage_marker_unavailable';
     if (marker?.state==='full') this.degraded={since:Number(marker.since) || Date.now(),reason:'storage_full',operation:'recorded:'+marker.source};
-    else if (marker?.state==='writable' && (this.degraded?.operation==='database_size' || this.degraded && Number(marker.verified_at)>=this.degraded.since)) this.degraded=undefined;
+    else if (unknown || marker?.state==='writable' && (this.degraded?.operation==='database_size' || this.degraded && Number(marker.verified_at)>=this.degraded.since)) this.degraded=undefined;
+    if(unknown && !this.degraded && this.schema!=='current')this.startup();
   }
   markFull(operation:string): void {
     const repo=(()=>{try {return this.meta('repository')?.id;} catch {return undefined;}})();
@@ -466,7 +470,10 @@ export class RepositoryState extends DurableObject<Env> {
     // Receipt retention counts from application, not original receipt: a
     // replay of a long-parked event must keep deduplicating its cleanup.
     if (this.sql.exec('SELECT id FROM deliveries WHERE id=?',pointer.delivery).toArray().length) return;
-    if (this.degraded) throw new Error('Exceeded the maximum database size; SQLITE_FULL recorded at '+new Date(this.degraded.since).toISOString());
+    if (this.degraded) {
+      if(this.degraded.reason!=='storage_full')throw new Error('repository storage control unavailable');
+      throw new Error('Exceeded the maximum database size; SQLITE_FULL recorded at '+new Date(this.degraded.since).toISOString());
+    }
     if (CI_EVENTS.has(pointer.event)) {this.sql.exec('INSERT OR IGNORE INTO deliveries VALUES(?,?,?)',pointer.delivery,'ignored:'+pointer.event,Date.now());return;}
     const object=await this.env.ARCHIVE.get(pointer.key); if (!object) throw new Error('event body unavailable');
     const body:any=parseGitHub(await object.text()); const repo=repository(this.env,pointer.repository); if (!repo) throw new Error('repository not allowed');
@@ -1553,7 +1560,7 @@ export class RepositoryState extends DurableObject<Env> {
   async recoverHeadroom(): Promise<void> {
     if (this.probeFlight) return this.probeFlight;
     const run = async () => {
-      if (this.migrationHeld() || this.ingress === 'parked') return;
+      if (this.storageMarkerUnavailable || this.migrationHeld() || this.ingress === 'parked') return;
       const repo = this.meta('repository')?.id;
       if (!repo) return;
       const control = await this.env.ARCHIVE.get(controlKey(repo));
@@ -1715,6 +1722,7 @@ export class RepositoryState extends DurableObject<Env> {
       if (path==='/configure') { await this.configure((await req.json() as any).repository); return json({ok:true}); }
       if (path==='/event') {
         const pointer=await req.json() as EventPointer,repo=repository(this.env,pointer.repository);
+        if(this.storageMarkerUnavailable)return json({error:'storage_control_unavailable',parkable:true,request_id},503);
         if (this.ingress===undefined && repo) this.ingress=(await this.env.ARCHIVE.get(controlKey(repo.id)).then(o=>o?.json<any>()))?.mode ?? 'apply';
         if (this.ingress==='parked') return json({error:'ingress_parked',parkable:true,request_id},503);
         if(!repo) throw new Error('repository not allowed');

@@ -40,7 +40,9 @@ days. Receipt retention is deliberately independent of raw-body expiry.
 
 R2 conditional writes coordinate 60-second recovery leases and reject stale
 completion writes. Every tick reloads the durable full marker, including markers published after
-object construction and retries after control-store errors. Full-mode ticks
+object construction and retries after control-store errors. A marker-read error
+temporarily fences mutations; the next successful read clears that fence
+without reporting full storage or probing a healthy store. Full-mode ticks
 perform bounded expiry, then persist the
 next probe time before allocating. Probe cooldowns survive process resets,
 grow from one minute to ten minutes, and coalesce concurrent ticks in the
