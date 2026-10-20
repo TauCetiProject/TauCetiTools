@@ -26,6 +26,7 @@ test('large inventory snapshots paginate coherently and coalesce concurrent read
   let health;
   const deadline=Date.now()+(process.env.TEST_POSTGRES_URL?600000:20000);
   do{
+   if(process.env.TEST_POSTGRES_URL)await send(stub,'/tick',{repository:repository.name});
    await new Promise(resolve=>setTimeout(resolve,50));
    health=await (await stub.fetch('https://internal/health')).json();
   }while(!health.bootstrap_inventory && Date.now()<deadline);
@@ -34,6 +35,7 @@ test('large inventory snapshots paginate coherently and coalesce concurrent read
   const archive=await mf.getR2Bucket('ARCHIVE');
   let baseline;
   do{
+   if(process.env.TEST_POSTGRES_URL)await send(stub,'/tick',{repository:repository.name});
    await new Promise(resolve=>setTimeout(resolve,50));
    baseline=await (await send(stub,'/query',{repository:repository.name,operation:'statuses',args:{sha:head}})).json();
   }while(!baseline.complete && Date.now()<deadline);
