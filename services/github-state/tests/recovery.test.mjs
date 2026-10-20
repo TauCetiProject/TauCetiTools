@@ -422,7 +422,7 @@ test('duplicate/stale retention checkpoints, dry runs and rowid reuse are safe',
  assert.ok(b.bytes>=0);
 });
 
-test('retention policy survives restart, pins receipts while parked, and isolates failed checkpoints',async()=>{
+test('retention policy survives restart, preserves durable receipts, and isolates failed checkpoints',async()=>{
  const {db,state,archive}=repositoryFixture();
  const now=Date.now(),post=body=>state.fetch(new Request('https://internal/storage/retention',{method:'POST',body:JSON.stringify(body)}));
  const old=now-30*86400000;
@@ -430,7 +430,9 @@ test('retention policy survives restart, pins receipts while parked, and isolate
  db.prepare('INSERT INTO demand VALUES(?,?)').run('quiet',old);
  await archive.put('parked/100/pointers/pending.json','{}');
  await post({policy:{mode:'enforce',disabled:[],pinned:['expired_demand']}});
- assert.equal(scalar(db,'SELECT COUNT(*) FROM deliveries'),1,'parked input pins receipt expiry');
+ await state.storageMaintenance();
+ assert.equal(scalar(db,'SELECT COUNT(*) FROM deliveries'),0,'durable R2 receipts permit SQL expiry while replay stays pending');
+ assert.ok(await archive.head('receipts/100/pending.json'),'pending input retains its durable receipt');
  assert.equal(scalar(db,'SELECT COUNT(*) FROM demand'),1,'operator pin wins');
  archive.objects.delete('parked/100/pointers/pending.json');
  const restarted=repositoryFixture({},0,db,archive).state;
@@ -1097,4 +1099,54 @@ test('ordinary tick owns SQL receipt archival even when synchronous expiry alrea
  f.db.prepare('INSERT INTO deliveries VALUES(?,?,?)').run('tick-receipt','ping',Date.now()-30*86400000);
  advance(61000);await tick(f.state);await f.state.storageFlight;
  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,0);assert.ok(f.archive.objects.has(ingress.receiptKey(repo.id,'tick-receipt')));
+}));
+
+test('ordinary ticks recover a full marker published after construction and retry failed marker reads',async()=>clock(async advance=>{
+ const f=repositoryFixture();await f.ready;
+ assert.equal(f.state.degraded,undefined);
+ await f.archive.put('control/100/storage.json',JSON.stringify({state:'full',since:Date.now(),source:'late_commit_failure'}));
+ await tick(f.state);assert.equal(f.state.degraded,undefined);assert.equal(JSON.parse(f.archive.objects.get('control/100/storage.json').bytes).state,'writable');
+ advance(61000);
+ // Control dependency outage must fence a legacy constructor, then ordinary
+ // ticks retry the marker and verify capacity once the dependency recovers.
+ f.db.exec("DELETE FROM meta WHERE key='schema_version'");
+ for(let i=0;i<3;i++)f.archive.failures.push((op,key)=>op==='get' && key==='control/100/storage.json');
+ const reset=repositoryFixture({},0,f.db,f.archive);await reset.ready;
+ assert.equal(reset.state.schema,'legacy');assert.ok(reset.state.degraded);
+ await tick(reset.state);advance(61000);await tick(reset.state);
+ assert.equal(reset.state.degraded,undefined);assert.equal(reset.state.schema,'current');
+}));
+
+test('a poison pointer cannot hold all SQL receipts indefinitely; explicit class pins still win',async()=>clock(async advance=>{
+ const f=repositoryFixture();await f.ready;
+ await f.archive.put('parked/100/held/000000000000001-poison.json','{}');
+ f.db.prepare('INSERT INTO deliveries VALUES(?,?,?)').run('unrelated-old','ping',Date.now()-30*86400000);
+ advance(61000);await f.state.storageMaintenance();
+ assert.equal(f.state.receiptsPinned,true,'pending replay remains visible');assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,0);
+ assert.ok(f.archive.objects.has(ingress.receiptKey(repo.id,'unrelated-old')));
+ f.state.retentionPolicy={mode:'enforce',pinned:['expired_deliveries'],disabled:[]};
+ f.db.prepare('INSERT INTO deliveries VALUES(?,?,?)').run('explicit-pin','ping',Date.now()-30*86400000);
+ advance(61000);await f.state.storageMaintenance();assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,1);
+}));
+
+test('receipt archive uses a separate I/O budget and bounded concurrency as R2 advances time',async()=>clock(async advance=>{
+ const f=repositoryFixture();await f.ready;let active=0,peak=0;
+ for(let i=0;i<100;i++)f.db.prepare('INSERT INTO deliveries VALUES(?,?,?)').run('io-'+i,'ping',Date.now()-30*86400000);
+ const put=f.archive.put;f.archive.put=async(key,...args)=>{
+  if(!key.startsWith('receipts/'))return put(key,...args);
+  active++;peak=Math.max(peak,active);advance(5);await new Promise(r=>setImmediate(r));
+  try{return await put(key,...args);}finally{active--;}
+ };
+ advance(61000);await f.state.storageMaintenance();
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,0);assert.ok(peak>1 && peak<=10);assert.equal(f.state.retentionState.expired_deliveries.examined,100);
+}));
+
+test('per-object raw pins survive recovery-owned expiry and page policy reads remain bounded',async()=>clock(async advance=>{
+ const h=cronHarness();
+ const key='webhooks/2026-10-20/object-pin.json';await h.archive.put(key,'{"repository":{"id":100}}',{customMetadata:{event:'ping',expires:'1',pinned:'true'}});
+ for(let i=0;i<20;i++)await h.archive.put('webhooks/2026-10-20/expired-'+i+'.json','{"repository":{"id":100}}',{customMetadata:{event:'ping',expires:'1'}});
+ let policyReads=0;const get=h.archive.get;h.archive.get=async key=>{if(key.endsWith('retention-policy.json'))policyReads++;return get(key);};
+ await ingress.maintainRaw(h.env,()=>[repo]);
+ assert.ok(h.archive.objects.has(key));assert.ok(h.archive.objects.has(ingress.bodyKey(repo.id,'object-pin')));assert.equal(policyReads,1);
+ assert.equal([...h.archive.objects.keys()].filter(k=>k.startsWith('webhooks/')).length,1);
 }));

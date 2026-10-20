@@ -31,12 +31,17 @@ An event response waits for SQL durability and then records a durable R2
 application receipt under `receipts/<repository>/<delivery>.json`. Replay checks
 that receipt before reading a body or applying again. SQL receipt expiry first
 archives old committed receipts to R2 in bounded rowid batches of 100, preserving
-the retention policy’s explicit pins/disables and its parked-input receipt fence. A crash between
+the retention policy’s explicit pins/disables. Pending pointers are observed,
+while durable R2 receipts protect deduplication independently of SQL retention.
+Archival uses groups of ten with a separate two-second I/O dispatch budget,
+so network latency does not consume the synchronous SQL expiry budget. A crash between
 application and cleanup therefore remains idempotent even beyond fourteen
 days. Receipt retention is deliberately independent of raw-body expiry.
 
 R2 conditional writes coordinate 60-second recovery leases and reject stale
-completion writes. Full-mode ticks perform bounded expiry, then persist the
+completion writes. Every tick reloads the durable full marker, including markers published after
+object construction and retries after control-store errors. Full-mode ticks
+perform bounded expiry, then persist the
 next probe time before allocating. Probe cooldowns survive process resets,
 grow from one minute to ten minutes, and coalesce concurrent ticks in the
 repository object. Automatic probes prove 4 MiB and retain recent probe
@@ -63,7 +68,9 @@ successful scheduled preparation. When maintenance fails, the last prepared
 observation remains available with its timestamp. Independent expiry sweeps visit only registered retention-class prefixes;
 permanent receipts/dispositions cannot lengthen those sweeps. Raw expiry
 remains recovery-owned and honors the same raw-webhook retention pins/disables;
-its prepared progress feeds the existing retention observation.
+its prepared progress feeds the existing retention observation. Per-object
+`pinned: true` metadata also protects raw bodies. Class policies and migration
+fences are checked immediately before each page’s batch deletion.
 
 ## Validation and release boundary
 
@@ -91,7 +98,9 @@ this implementation have **not** been recorded by this change. A release receipt
 must separately record environment/version, prepared backlog before/after,
 latest applied delivery, last successful probe, refresh resumption, delivery
 volume per repository and measured recovery throughput, remaining
-invalid/gapped inputs, and measured request/read behavior. Legacy bodies without any surviving receipt must replay rather than be
+invalid/gapped inputs, and measured request/read behavior. Legacy raw bodies without receipt-time metadata may temporarily create a
+second pointer keyed by upload time; delivery receipts and coalescing keep
+application idempotent. Legacy bodies without any surviving receipt must replay rather than be
 marked applied or discarded; resulting repair jobs use the existing scheduler
 and quota limits. Existing emergency
 release and Neon implementation retain their independent acceptance boundaries.

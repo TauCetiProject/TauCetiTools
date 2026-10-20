@@ -111,13 +111,13 @@ export class RepositoryState extends DurableObject<Env> {
   // A recorded full state degrades the object; a probe-verified writable state
   // overrides the size rule after cleanup, since freed pages do not shrink the file.
   async storageMarker(): Promise<void> {
-    let marker:any;
+    let marker:any,repo:string|undefined;
+    try {repo=this.meta('repository')?.id;} catch {return;} // Fresh objects have no schema yet.
     try {
-      const repo=this.meta('repository')?.id;
       marker=repo?await this.env.ARCHIVE.get(storageKey(repo)).then(o=>o?.json<any>()):undefined;
-    } catch {return;}
+    } catch {this.degraded ||= {since:Date.now(),reason:'storage_error',operation:'storage_marker_unavailable'};return;}
     if (marker?.state==='full') this.degraded={since:Number(marker.since) || Date.now(),reason:'storage_full',operation:'recorded:'+marker.source};
-    else if (marker?.state==='writable' && this.degraded?.operation==='database_size') this.degraded=undefined;
+    else if (marker?.state==='writable' && (this.degraded?.operation==='database_size' || this.degraded && Number(marker.verified_at)>=this.degraded.since)) this.degraded=undefined;
   }
   markFull(operation:string): void {
     const repo=(()=>{try {return this.meta('repository')?.id;} catch {return undefined;}})();
@@ -1006,7 +1006,7 @@ export class RepositoryState extends DurableObject<Env> {
   // expiry, but SQL receipt deletion must follow durable R2 archival.
   async archiveDeliveryReceipts():Promise<void> {
     const name='expired_deliveries',now=Date.now(),repo=this.meta('repository')?.id;
-    if(!repo || !this.storageLoaded || this.migrationHeld() || this.receiptsPinned || this.retentionPolicy.disabled.includes(name) || this.retentionPolicy.pinned.includes(name))return;
+    if(!repo || !this.storageLoaded || this.migrationHeld() || this.retentionPolicy.disabled.includes(name) || this.retentionPolicy.pinned.includes(name))return;
     const previous=this.retentionState[name];
     if(previous?.completed && previous.after>=previous.upper && now-previous.completed<60000)return;
     const state:Checkpoint=previous && previous.after<previous.upper ? {...previous} : {after:0,upper:this.sql.exec<any>('SELECT COALESCE(MAX(rowid),0) n FROM deliveries').one().n,started:now,examined:0,eligible:0,deleted:0,bytes:0};
@@ -1014,17 +1014,35 @@ export class RepositoryState extends DurableObject<Env> {
     try {
       const rows=this.sql.exec<any>('SELECT rowid rid,id,event,received,length(CAST(id AS BLOB))+length(CAST(event AS BLOB))+8 bytes FROM deliveries WHERE rowid>? AND rowid<=? ORDER BY rowid LIMIT 100',state.after,state.upper).toArray();
       let bytes=0;
-      for(const row of rows) {
-        if(Date.now()-now>=50 || bytes+row.bytes>4*1024**2)break;
-        bytes+=row.bytes;
-        if(this.migrationHeld())break;
-        if(row.received<now-14*86400000) {
-          await this.maintenanceArchive.put(receiptKey(repo,row.id),JSON.stringify({delivery:row.id,committed_at:row.received,disposition:row.event.startsWith('ignored:')?'not_mirrored':'applied'}),{onlyIf:{etagDoesNotMatch:'*'}});
-          if(this.migrationHeld() || this.retentionPolicy.disabled.includes(name) || this.retentionPolicy.pinned.includes(name))break;
-          this.sql.exec('DELETE FROM deliveries WHERE rowid=? AND id=? AND received<?',row.rid,row.id,now-14*86400000);
-          state.eligible++;state.deleted++;state.bytes+=row.bytes;state.oldest_expired=Math.min(state.oldest_expired ?? row.received,row.received);
+      // SQL work stays row/byte bounded. R2 I/O has a separate two-second
+      // dispatch budget and groups of ten, rather than consuming a 50ms SQL turn.
+      for(let offset=0;offset<rows.length && Date.now()-now<2000;offset+=10) {
+        const group=[];
+        for(const row of rows.slice(offset,offset+10)) {
+          if(bytes+row.bytes>4*1024**2)break;
+          bytes+=row.bytes;group.push(row);
         }
-        state.after=row.rid;state.examined++;
+        if(!group.length)break;
+        const results=await Promise.allSettled(group.map(async row=>{
+          if(row.received>=now-14*86400000)return 0;
+          await this.maintenanceArchive.put(receiptKey(repo,row.id),JSON.stringify({delivery:row.id,committed_at:row.received,disposition:row.event.startsWith('ignored:')?'not_mirrored':'applied'}),{onlyIf:{etagDoesNotMatch:'*'}});
+          if(this.migrationHeld() || this.retentionPolicy.disabled.includes(name) || this.retentionPolicy.pinned.includes(name))return null;
+          return this.sql.exec('DELETE FROM deliveries WHERE rowid=? AND id=? AND received<?',row.rid,row.id,now-14*86400000).rowsWritten;
+        }));
+        let paused=false;
+        for(let i=0;i<group.length;i++) {
+          const row=group[i],result=results[i];
+          if(result.status==='fulfilled' && result.value===null) {paused=true;break;}
+          if(result.status==='rejected') {state.error=classify(result.reason);this.noteFailure('receipt_archive',result.reason);}
+          if(row.received<now-14*86400000) {
+            state.eligible++;state.bytes+=row.bytes;state.oldest_expired=Math.min(state.oldest_expired ?? row.received,row.received);
+            if(result.status==='fulfilled')state.deleted+=result.value || 0;
+          }
+          // Failed uploads retain SQL rows and are revisited on the next cycle;
+          // one R2 failure must not strand the rest of this bounded page.
+          state.after=row.rid;state.examined++;
+        }
+        if(paused || this.migrationHeld())break;
       }
       if(!rows.length || state.after>=state.upper)state.completed=now;
     } catch(error) {state.error=classify(error);this.noteFailure('receipt_archive',error);}
@@ -1172,7 +1190,7 @@ export class RepositoryState extends DurableObject<Env> {
       const requests=this.requestMetrics.snapshot(now),repairMinutes=this.repairMetrics.snapshot(now).filter((r:any)=>r.at>=now-60000);
       const {intervals,...requestSummary}=requests;
       const value={version:1,at:now,level,reasons,capacity:measured,capacity_history:this.capacityHistory,tables:this.tableEstimates,table_attempt_at:this.tableAttemptAt,ingress:ingressHealth,refresh_lag_ms:this.meta('last_repair')?now-this.meta('last_repair'):null,requests:requestSummary,repair_summary:this.repairMetrics.summary(now),
-        retention:{policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,ci:this.ciProgress,receipts_pinned:this.receiptsPinned,r2:r2Retention},
+        retention:{policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,ci:this.ciProgress,receipts_pinned:this.receiptsPinned,receipt_pin_backend:'r2',r2:r2Retention},
         compute:{status:'unavailable',reason:'not_exposed_by_sqlite_runtime'},connections:{status:'not_applicable'}};
       const alarm=level!=='ok'?emitAlarm(this.env,repo,value):{channel:'configured_workers_observability',emitted:false,notified:false};
       this.observation={...value,alarm};
@@ -1454,7 +1472,7 @@ export class RepositoryState extends DurableObject<Env> {
     const input:any=req.method==='POST'?await req.json():{};
     const repo=this.meta('repository')?.id ?? input.repository_id;
     if (typeof repo!=='string' || !/^[0-9]+$/.test(repo)) throw new AdminError('repository_unconfigured');
-    if (path==='/storage/summary') return json({repository:repo,storage:this.storageState(),retention:{policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,ci:this.ciProgress,receipts_pinned:this.receiptsPinned},...summary(this.sql)});
+    if (path==='/storage/summary') return json({repository:repo,storage:this.storageState(),retention:{policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,ci:this.ciProgress,receipts_pinned:this.receiptsPinned,receipt_pin_backend:'r2'},...summary(this.sql)});
     if (path==='/storage/retention') {
       if(input.policy!==undefined) {
         let next:Policy;try {next=policy(input.policy);}catch {throw new AdminError('invalid_retention_policy');}
@@ -1467,7 +1485,7 @@ export class RepositoryState extends DurableObject<Env> {
         this.policyUpdateFlight=update.catch(()=>{});
         await update;
       }
-      return json({policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,ci:this.ciProgress,receipts_pinned:this.receiptsPinned,budget:{rows:6000,bytes:4*1024**2,cooperative_io_budget_ms:50,cpu_bound:'rows_and_bytes'},observation:await this.preparedObservation()});
+      return json({policy:this.retentionPolicy,policy_loaded:this.storageLoaded,classes:this.retentionState,ci:this.ciProgress,receipts_pinned:this.receiptsPinned,receipt_pin_backend:'r2',budget:{rows:6000,bytes:4*1024**2,cooperative_io_budget_ms:50,cpu_bound:'rows_and_bytes',receipt_archive_io_budget_ms:2000,receipt_archive_rows:100},observation:await this.preparedObservation()});
     }
     if (path==='/storage/scan') return json(scan(this.sql,input));
     if (path==='/storage/recovery') return json(await createRecovery(this.env.ARCHIVE,this.ctx.storage,this.sql,repo,this.revision()));
@@ -1787,7 +1805,9 @@ export class RepositoryState extends DurableObject<Env> {
       if (path==='/changes') { const after=Number(new URL(req.url).searchParams.get('after') || 0); const first=this.sql.exec<any>('SELECT MIN(revision) AS revision FROM changes').one(); return json({revision:this.revision(),reset:after>0 && first.revision && after<first.revision-1,changes:this.sql.exec('SELECT * FROM changes WHERE revision>? ORDER BY revision LIMIT 1000',after).toArray()}); }
       if (path==='/activity-refresh' && req.method==='POST') {if(!this.degraded) await this.refreshActivityLandings();return json({ok:true,degraded:Boolean(this.degraded)});}
       if (path==='/tick') {
-        // Cleanup/monitoring precede alarm scheduling, hydration and upstream work.
+        // A full marker may arrive after this instance starts, or its startup
+        // read may fail. Every ordinary tick reloads durable recovery ownership.
+        await this.storageMarker();
         this.expire();
         if(this.degraded) await this.recoverHeadroom();
         if (!this.meta('repository')) await this.configure((await req.json() as any).repository);

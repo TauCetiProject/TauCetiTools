@@ -1,7 +1,7 @@
 import { Env, EventPointer, Repository, digest, parseGitHub, stub, CI_EVENTS, repositories } from './protocol';
 import { readMigration } from './migration';
 import { classify, log } from './storage';
-import { policy } from './retention';
+import { policy, protectedObject } from './retention';
 
 // Parked ingress keeps acknowledged webhooks durable while the repository
 // object cannot apply them (storage full or a planned migration). Pointers and
@@ -217,6 +217,7 @@ export async function maintainRaw(env: Env, targets: (payload: any, event: strin
     for(let pages=0;pages<20 && Date.now()-began<20000;pages++) {
       const page = await env.ARCHIVE.list({ prefix: 'webhooks/', startAfter: state.after, limit: 50, include: ['customMetadata'] });
       let processed = 0;
+      const expired:R2Object[]=[];
       for (const raw of page.objects) {
         if (Date.now() - began >= 20000) break;
         const gapKey = 'control/raw-gaps/' + raw.key.slice(raw.key.lastIndexOf('/') + 1);
@@ -224,17 +225,7 @@ export async function maintainRaw(env: Env, targets: (payload: any, event: strin
         if (!gap || gap.retry_at <= Date.now()) {
           try {
             await retainRaw(env, raw, targets);
-            // Migration holds retain original archives as well as pinned input.
-            let frozen = false;
-            if (env.MIGRATION_ENVIRONMENT === 'test') for (const repo of repositories(env)) {
-              const migration = await readMigration(env.ARCHIVE,repo.id);
-              if (migration && migration.phase !== 'abandoned') {frozen = true;break;}
-            }
-            for(const repo of repositories(env)) {
-              const control=await env.ARCHIVE.get('control/'+repo.id+'/retention-policy.json').then(o=>o?.json<any>());
-              if(control) {const p=policy(control);if(p.disabled.includes('raw_webhooks') || p.pinned.includes('raw_webhooks')) {frozen=true;break;}}
-            }
-            if (!frozen && Number(raw.customMetadata?.expires) < Date.now()) {await env.ARCHIVE.delete(raw.key);deleted++;bytes+=raw.size;}
+            if(!protectedObject(raw.key,raw.customMetadata) && Number(raw.customMetadata?.expires)<Date.now())expired.push(raw);
             if (gap) await env.ARCHIVE.delete(gapKey);
           } catch (error) {
             const failures = (gap?.failures || 0) + 1;
@@ -242,6 +233,20 @@ export async function maintainRaw(env: Env, targets: (payload: any, event: strin
           }
         }
         processed++; examined++; state.after = raw.key;
+      }
+      // Read policies/fences once per page immediately before its batch
+      // deletion. Recovery input has already been pinned or dispositioned.
+      if(expired.length) {
+        let frozen=false;
+        for(const repo of repositories(env)) {
+          if(env.MIGRATION_ENVIRONMENT==='test') {
+            const migration=await readMigration(env.ARCHIVE,repo.id);
+            if(migration && migration.phase!=='abandoned') {frozen=true;break;}
+          }
+          const control=await env.ARCHIVE.get('control/'+repo.id+'/retention-policy.json').then(o=>o?.json<any>());
+          if(control) {const p=policy(control);if(p.disabled.includes('raw_webhooks') || p.pinned.includes('raw_webhooks')) {frozen=true;break;}}
+        }
+        if(!frozen) {await env.ARCHIVE.delete(expired.map(o=>o.key));deleted+=expired.length;bytes+=expired.reduce((n,o)=>n+o.size,0);}
       }
       if (!page.truncated && processed === page.objects.length) {state.after = undefined; state.last_completed = Date.now();break;}
     }
