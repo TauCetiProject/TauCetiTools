@@ -606,6 +606,32 @@ def extra_findings(project, gh, again):
                     section=name.replace("_", "-"),
                 )
             )
+            if name == "bors":
+                registry = Path.home() / ".config/tauceti/neon-projects.json"
+                try:
+                    grant = json.loads(registry.read_text()).get(project.content, {})
+                except (OSError, ValueError):
+                    grant = {}
+                if grant.get("approved") is True and grant.get("project_id"):
+                    enrollment = results[-1]
+                    enrollment.status = "ready"
+                    enrollment.summary = "Approved Neon project recorded in the private operator registry: " + grant["project_id"]
+                    enrollment.urls = ["https://console.neon.tech/app/projects/" + grant["project_id"]]
+                    enrollment.commands = [_cmd(
+                        "tauceti-tools", "neon", "inspect", "--conf", project.source,
+                        "--registry", registry, "--token-file", Path.home() / ".config/tauceti/neon-api-key",
+                    )]
+                    enrollment.steps = [
+                        f"The operator grant is recorded in {registry}. Run the inspect command; if the operator's API key is elsewhere, replace --token-file with its actual private file. No second infrastructure request is needed.",
+                        "This records the database grant, not Bors runtime health. The database URI stays private and the downstream still operates its own runtime.",
+                    ]
+                runtime = next(f for f in results if f.id == "services.bors")
+                runtime.summary = "Hosted Neon selected; Bors runtime setup is separate"
+                runtime.steps += [
+                    f"Set services.bors.url in {project.source} to the public HTTPS URL of the runtime you operate. Hosted means Neon only, not a shared Bors runtime.",
+                    "For Docker, set services.bors.image to a released image with @sha256:DIGEST, then run the deploy command to generate Compose, HTTPS proxy and heartbeat files. For Cloudflare, set deployment=cloudflare, account_id and an immutable [tools.bors] repo/ref, then generate that provider's installation commands.",
+                    "Keep the current merge.backend until Bors has consumed its real credentials and passed a pilot staging build. Provisioning a database does not switch merge authority.",
+                ]
         if name == "github_state" and mode != "off":
             token_file = Path(os.environ.get(
                 "TAUCETI_GITHUB_STATE_TOKEN_FILE",

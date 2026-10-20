@@ -129,6 +129,22 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(finding.status, "failed")
         self.assertIn("Run 2 failed", finding.summary)
 
+    def test_recorded_neon_grant_does_not_claim_runtime_is_ready(self):
+        from tauceti_tools.doctor import extra_findings
+
+        project = parse(initial_configuration("one/Project", "human").encode())
+        project.raw["services"]["bors"]["mode"] = "hosted"
+        with tempfile.TemporaryDirectory() as tmp, patch("tauceti_tools.doctor.Path.home", return_value=Path(tmp)):
+            registry = Path(tmp) / ".config/tauceti/neon-projects.json"
+            registry.parent.mkdir(parents=True)
+            registry.write_text(json.dumps({"one/Project": {"approved": True, "project_id": "project-123"}}))
+            rows = {f.id: f for f in extra_findings(project, object(), "doctor")}
+            self.assertEqual(rows["services.bors.enrollment"].status, "ready")
+            self.assertEqual(rows["services.bors"].status, "pending")
+            registry.write_text(json.dumps({"other/Project": {"approved": True, "project_id": "project-456"}}))
+            rows = {f.id: f for f in extra_findings(project, object(), "doctor")}
+            self.assertEqual(rows["services.bors.enrollment"].status, "pending")
+
 
 if __name__ == "__main__":
     unittest.main()
