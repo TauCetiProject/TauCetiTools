@@ -1,15 +1,15 @@
 {
   "version": 2,
-  "started": "2026-10-20T05:19:31.949Z",
-  "finished": "2026-10-20T05:19:39.611Z",
-  "implementation_revision": "851781cec43821e54edb3674ace4af2143365972",
-  "workspace_sha256": "430d97c69058fbdeab7fce8ecc0822ebb7a8536809172200c4081a7128556e1d",
+  "started": "2026-10-20T05:27:53.695Z",
+  "finished": "2026-10-20T05:28:01.351Z",
+  "implementation_revision": "1295e45bad7e77d681305e81a1095e9749feddd8",
+  "workspace_sha256": "a8222f35d302bbaac24e1df41d2af5a3b577bfa406f9c4a480f5f2298af35c3c",
   "source_dirty": false,
   "environment": "local_fault_fixtures",
   "typecheck_exit_status": 0,
   "build_exit_status": 0,
   "exit_status": 0,
-  "passed": 151,
+  "passed": 155,
   "failed": 0,
   "test_files": [
     "tests/activity.test.mjs",
@@ -110,6 +110,8 @@
     "incremental accounting projections roll the hourly window without regrouping on health reads",
     "a future completion timestamp cannot indefinitely suppress expiry",
     "a retention pin acquired while listing prevents the pending R2 delete",
+    "checkpoint read failures preserve durable progress while cached-policy expiry still runs",
+    "an acknowledged archive-policy change fences a pending pointer publication",
     "compact roadmap snapshot updates on comment edit/delete without reading full histories",
     "large inventory filters before statuses and serves compact facts in one page",
     "migration is outside requests and one missing resource cannot block other PRs or maintenance",
@@ -130,6 +132,7 @@
     "head-change webhooks refresh immutable file lists without resetting a quota cooldown",
     "REST exhaustion repairs a flat review history through its existing GraphQL thread dependency",
     "malformed upstream state retains coverage and backs off with a traceable request ID",
+    "whole-batch malformed responses retain the upstream trace and scheduler backoff",
     "public health does not expose internal quota or secrets",
     "webhook rejects bad signatures and conflicting duplicate bodies",
     "webhooks do not invent complete inventory; duplicate and old delivery are idempotent",
@@ -174,10 +177,11 @@
     "malformed collection rows and pagination never publish an empty complete collection",
     "batch validation isolates malformed aliases without empty substitution or extra upstream requests",
     "label overflow restarts a pinned GraphQL traversal through the same quota owner",
-    "malformed thread overflow cannot publish a partial complete history"
+    "malformed thread overflow cannot publish a partial complete history",
+    "malformed label connections stay unavailable and overflow waits for the REST quota reset"
   ],
   "failed_tests": [],
-  "transcript_sha256": "35672d7a0da0163a6a4135b8601369a4f859189d59eabfa1df8712175d91b56f",
+  "transcript_sha256": "297e5c76c2cd4a6ebad7ee0c9d17ab0e4f2f955eae34f1cac047aa58cb4da29d",
   "postgresql": {
     "run": false,
     "blocked_by": "S1 Worker issue #308 repository-store interface and isolated PostgreSQL test infrastructure"
