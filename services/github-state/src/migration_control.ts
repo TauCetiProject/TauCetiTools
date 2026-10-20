@@ -1,4 +1,5 @@
 import { Env, digest, repositories, validateQuery } from './protocol';
+import { queueMetrics } from './queue_monitoring';
 import { R2_CLASSES, policy } from './retention';
 import { AdminError } from './storage';
 import { Migration, terminalReceipt, archiveKey, beginExport, exportStep, verifyStep, saveMigration, encodeMigration } from './migration';
@@ -35,6 +36,8 @@ export async function preflight(env:Env,state:Migration):Promise<void> {
   const pinned=await env.ARCHIVE.get(`control/${state.repository}/retention-policy.json`).then(o=>o?.json());
   const retention=pinned ? policy(pinned) : null;
   if(!retention || Object.keys(R2_CLASSES).some(name=>!retention.pinned.includes(name) && !retention.disabled.includes(name)))throw new AdminError('migration_retention_not_pinned');
+  const queues=await queueMetrics(env);
+  if(['queue','dlq'].some(name=>queues[name].stale || !Number.isSafeInteger(queues[name].count) || queues[name].count<0))throw new AdminError('migration_queue_dlq_unavailable');
   await targetPreflight(env,state);
 }
 export async function controllerStep(env:Env,state:Migration,hooks:SourceHooks):Promise<void> {

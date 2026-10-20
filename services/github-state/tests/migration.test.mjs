@@ -48,6 +48,11 @@ test('freeze fences all mutation routes and alarm dispatch, while stored reads/3
  const data=await (await f.request('/query',query)).json();assert.equal(data.status,'ok');assert.equal(data.observed_at,123456);assert.equal(data.verified_at,123456);
  assert.deepEqual(await (await f.request('/query',{...query,cursor:cursorId+':100'})).json(),page);
  const conditional=await f.state.fetch(new Request('https://internal/query',{method:'POST',headers:{'if-none-match':'"7"'},body:JSON.stringify(query)}));assert.equal(conditional.status,304);
+ f.env.CLIENT_TOKENS=JSON.stringify([{hash:sha('client'),repositories:[repo.name]}]);
+ for(const validator of ['W/"7"','"older", W/"7"']) {
+  const publicRead=await worker.fetch(new Request('https://public/v1/query?repository=org%2Frepo&operation=open_prs',{headers:{Authorization:'Bearer client','If-None-Match':validator}}),f.env,{});
+  assert.equal(publicRead.status,304,'ordinary client can return the edge-weakened ETag');
+ }
  assert.equal(f.db.prepare('SELECT total_changes() n').get().n,sqlBefore,'no SQL mutation from reads or alarms');
  await assert.rejects(f.state.setMeta('forbidden',true),/migration_frozen/);
  assert.throws(()=>f.state.sql.exec("SELECT 1; UPDATE meta SET value='0' WHERE key='revision'"),/migration_frozen/);
@@ -473,4 +478,16 @@ for(const failure of ['exception','http'])test(`supervision ${failure} is report
  }});
  await worker.scheduled({},f.env,{waitUntil:work=>background.push(work)});await Promise.allSettled(background);
  assert.equal(ticks,1);
+});
+
+test('missing primary-key enforcement is rejected before a source freeze',async()=>{
+ const f=await fixture();f.db.exec('DROP TABLE demand; CREATE TABLE demand(key TEXT,at INTEGER)');
+ f.db.exec("INSERT INTO demand VALUES('duplicate',1),('duplicate',2)");
+ assert.equal((await f.command('freeze')).body.error,'migration_constraint_incompatible');assert.equal(f.archive.objects.size,0);
+});
+test('a legacy oversized B-tree identity fails the read-only scan before freeze',async()=>{
+ const f=await fixture();f.db.prepare('INSERT INTO demand VALUES(?,1)').run('k'.repeat(2001));
+ const state={phase:'preflighting',cutover:{}};
+ assert.throws(()=>{for(let n=0;n<100 && state.phase==='preflighting';n++)migration.compatibilityStep(f.ctx.storage.sql,state);},/migration_constraint_incompatible/);
+ assert.equal(f.state.migrationHeld(),false);assert.equal(f.archive.objects.size,0);
 });

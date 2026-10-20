@@ -18,6 +18,7 @@ async function testFixture(){
   cutover:{environment:'test',lease_until:Date.now()+900000,epoch:0,source_fenced:false,target_active:false,import:{},verify:{},acceptance:''}};
  f.env.REPOSITORY_DATABASE_URL=credentials.application.toString();f.env.MIGRATION_DATABASE_URL=credentials.migration.toString();
  f.env.MIGRATION_TARGET=JSON.stringify({identity:state.target,hostname:credentials.migration.hostname,database:decodeURIComponent(credentials.migration.pathname.slice(1)),application_role:decodeURIComponent(credentials.application.username),migration_role:decodeURIComponent(credentials.migration.username)});
+ await f.archive.put('control/queue-metrics.json',JSON.stringify({queue:{at:Date.now(),count:0,error:null},dlq:{at:Date.now(),count:0,error:null}}));
  const checks=Object.fromEntries(['s0_compatibility','parked_ingress','queue_dlq_ownership','r2_retention_drained','s1_schema_roles','capacity','restore','unchanged_clients','stored_shadow','no_github_refetch','warm_read_p95'].map(x=>[x,true]));
  await f.archive.put(`control/${id}/migration-acceptance.json`,JSON.stringify({version:1,environment:'test',repository:id,target:state.target,deployment:'test-deployment',source_object:'source-object',valid_until:Date.now()+86400000,checks,queries:[{repository:'org/repo',operation:'open_prs'}],latency:{baseline_p95_ms:100,target_p95_ms:100}}));
  const retention=(await load('src/retention.ts')).R2_CLASSES;

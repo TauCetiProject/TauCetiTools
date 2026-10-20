@@ -26,7 +26,7 @@ export interface Migration {
   cutover?: {target_identity?:Record<string,string>; environment:'test'|'production'; lease_until:number; epoch:number; source_fenced:boolean; target_active:boolean;
     compatibility?:Record<string,{after:string|null;complete:boolean}>; import:Record<string,TargetCheckpoint>; verify:Record<string,TargetCheckpoint>; acceptance:string;
     staging_after?:string; staging_rows?:number; staging_hash?:string; staging_complete?:boolean;
-    observation_release?:{at:number;policy:unknown}; observation_finished_at?:number; abort_reason?:string; last_failure?:string; activation_intent?:boolean; target_quarantined?:{reason:string;at:number}; shadow?:{queries:number;hash:string;verified_at:number;complete:boolean;activity_checked?:boolean;cursor_checks?:number;expired_cursor_checks?:number}; replay_complete?:number; selected_at?:number; completed_at?:number; release?:Record<string,unknown>};
+    observation_release?:{at:number;policy:unknown}; observation_finished_at?:number; abort_reason?:string; last_failure?:string; activation_intent?:boolean; target_quarantined?:{reason:string;at:number}; shadow?:{queries:number;hash:string;verified_at:number;complete:boolean;activity_checked?:boolean;cursor_checks?:number;expired_cursor_checks?:number;max_subrequests?:number;max_step_ms?:number}; replay_complete?:number; selected_at?:number; completed_at?:number; release?:Record<string,unknown>};
   created: number; updated: number; bookmark?: string; revision?: string;
   tables: Record<string, TableState>; failure: string | null;
   staging: { after: string | null; page: string; checked: number; complete: boolean; expired_jobs: number; expired_hash: string };
@@ -52,6 +52,9 @@ export async function readMigration(bucket: R2Bucket, repo: string): Promise<Mig
   state.checkpoint_etag=object.etag;
   return state;
 }
+const PRIMARY_KEYS:Record<string,string[]>={
+  meta:['key'],resources:['kind','id'],activity_loc_cache:['number'],activity_landings:['number','head'],collections:['key'],members:['collection','id'],deliveries:['id'],changes:['revision'],jobs:['key'],demand:['key'],retired_objects:['key'],head_prs:['sha','number'],survey_fragments:['kind','id'],survey_state:['number'],survey_inventory:['number'],survey_hydrated:['number'],survey_dirty:['number'],survey_hydration_failures:['number'],repair_metrics:[],query_metrics:['operation','coverage']
+};
 export function expectedTables(sql: SqlStorage): string[] {
   // Use literal prefixes: SQL LIKE's underscore wildcard can accidentally
   // hide application tables such as scf_extra or sqliteXstate.
@@ -59,7 +62,11 @@ export function expectedTables(sql: SqlStorage): string[] {
     .map(row=>row.name as string).filter(name=>!name.startsWith('sqlite_') && !name.startsWith('_cf_'));
   const expected = [...REQUIRED_TABLES].sort();
   if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new AdminError('migration_table_manifest_mismatch');
-  for(const name of actual)if(JSON.stringify(schema(sql,name).map(c=>c.name).sort())!==JSON.stringify([...columns[name]].sort()))throw new AdminError('migration_column_manifest_mismatch');
+  for(const name of actual) {
+    const fields=schema(sql,name);
+    if(JSON.stringify(fields.map(c=>c.name).sort())!==JSON.stringify([...columns[name]].sort()))throw new AdminError('migration_column_manifest_mismatch');
+    if(JSON.stringify(fields.filter(c=>c.pk).sort((a,b)=>a.pk-b.pk).map(c=>c.name))!==JSON.stringify(PRIMARY_KEYS[name]))throw new AdminError('migration_constraint_incompatible');
+  }
   return actual;
 }
 export function schema(sql: SqlStorage, name: string): TableState['columns'] {
@@ -132,10 +139,15 @@ function references(rows: Row[]): string[] {
 }
 export function compatibleRows(name:string,fields:TableState['columns'],rows:Row[]):void {
   if(JSON.stringify(fields.map(c=>c.name).sort())!==JSON.stringify([...columns[name]].sort()))throw new AdminError('migration_column_manifest_mismatch');
-  for(const row of rows)for(let i=0;i<fields.length;i++) {
-    const [type,value]=row[i+1] as Cell,field=fields[i];
-    if(type==='null') {if(field.pk || field.notnull)throw new AdminError('migration_cell_incompatible');continue;}
-    if(!['integer','text'].includes(type) || value===null || value.includes('\0') || integerColumn(name,field.name) && type!=='integer')throw new AdminError('migration_cell_incompatible');
+  for(const row of rows) {
+    // Other identity indexes are ordinary B-trees. Reserve tuple overhead;
+    // resources/members use exact hash exclusion and permit long full keys.
+    if(!['resources','members'].includes(name) && fields.reduce((bytes,c,i)=>bytes+(c.pk && !integerColumn(name,c.name)?new TextEncoder().encode((row[i+1] as Cell)[1] || '').byteLength:0),0)>2000)throw new AdminError('migration_constraint_incompatible');
+    for(let i=0;i<fields.length;i++) {
+      const [type,value]=row[i+1] as Cell,field=fields[i];
+      if(type==='null') {if(field.pk || field.notnull)throw new AdminError('migration_cell_incompatible');continue;}
+      if(!['integer','text'].includes(type) || value===null || value.includes('\0') || integerColumn(name,field.name) && type!=='integer')throw new AdminError('migration_cell_incompatible');
+    }
   }
 }
 // This bounded scan runs while SQLite still accepts ordinary input. Export

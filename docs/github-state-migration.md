@@ -32,6 +32,10 @@ Before enabling `MIGRATION_ENVIRONMENT=test|production`, deploy the coordinator,
 queue consumers, installation quota owner and retention guards everywhere. Fence
 old deployments and drain pre-existing GitHub dispatches and R2 deletion batches.
 Keep the normal backend SQLite; do not select PostgreSQL with a global canary flag.
+Verify the normal queue and DLQ each have this deployment as their consumer. The
+DLQ consumer uses batches of ten and one concurrent invocation; it applies or
+parks pointers with the same receipt-before-acknowledgement contract. Fresh queue
+metrics are required before releasing migration replay and its receipt.
 Pin **every** R2 retention class in `control/<repo>/retention-policy.json` and ensure
 no bucket lifecycle independently expires this data.
 
@@ -118,8 +122,12 @@ progress, renewable lease, failure code, target checks and write owner.
 8. `replaying`: select PostgreSQL in the coordinator and resume the existing bounded
    ingress/reconciliation owners. Permanent delivery receipts commit before parked
    body/pointer cleanup; duplicates cannot publish another semantic change.
-9. `complete`: record release evidence after parked/held pointers drain and the raw
-   recovery/DLQ owner completes a post-selection pass without unresolved gaps.
+9. `complete`: record release evidence after parked/held pointers drain and fresh,
+   post-selection queue and DLQ metrics both report zero backlog. The same deployed
+   durable parking/receipt handler owns both consumers. A held-lane pass after selection permits bounded reconciliation to resume even
+   if a poison input remains deferred; such inputs are logged and still block
+   the final completion receipt. Historical bucket recovery
+   continues independently; its checkpoint/gaps remain explicit in the receipt.
 
 The freeze lease is 15 minutes and renews only after successful progress. A crash
 within that interval resumes automatically. Expiry or a source deployment change
@@ -219,8 +227,28 @@ python3 services/github-state/scripts/migrate.py --environment production \
 The command requires `complete` and proves the PostgreSQL owner. It checkpoints
 intent before updating retention; ordinary supervision finishes an interrupted
 release and publishes a separate immutable observation receipt. No SQL source
-is unfenced or deleted. Afterwards set `REPOSITORY_BACKEND=postgres` and
-`REPOSITORY_GENERATION` to the selected generation for an explicit deployment
-configuration; the committed local marker also preserves authority independently.
-Migration-only bindings/credentials may then be retired. Keep the application URL
-and archive access needed for normal operation.
+is unfenced or deleted. Retire `MIGRATION_ENVIRONMENT` with the migration-only
+bindings/credentials after observation. Keep the application URL and archive
+access needed for normal operation. The local marker selects each repository's
+own generation; leave deployment-wide `REPOSITORY_BACKEND` and
+`REPOSITORY_GENERATION` unset so unmigrated or newly added repositories still use
+SQLite. Do not roll back to code predating the local selection protocol.
+
+A retained archive includes expiring execution staging and cursors as well as
+semantic data. After observation, an approved retention release can expire those
+objects. Keep the staging/spill classes pinned if a complete source recovery
+snapshot must remain restorable. The SQL archive is never a promise to extend a
+client cursor beyond its original expiry. Removing original SQL or migration
+archives is a separate deliberate operation.
+
+If the target is lost or unreachable after activation intent, retain its control
+record and every parked body/pointer. Do not edit the source fence or change the
+control phase back to exporting. Restore the original Neon branch/database from
+a verified point-in-time backup at the original endpoint, preserving roles,
+schema and generation. Verify its owner row and the latest applied-input watermark;
+restore/replay the retained input after that point through the delivery owner.
+Resume supervision only after the original enrolled identity is healthy. If a new
+endpoint is required, stop and perform an independently verified forward recovery
+with a new identity and migrated write-owner metadata; ordinary S2 abandonment
+cannot authorize that identity change. The retained SQLite copy may be exposed
+only as an explicitly timestamped emergency read fallback, never as a writer.

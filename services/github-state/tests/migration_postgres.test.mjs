@@ -6,6 +6,7 @@ const enabled=Boolean(process.env.TEST_POSTGRES_URL);
 test('S2 imports exact archives into a standby, restarts every step and recovers a lost switch commit', {skip:!enabled},async()=>{
  const f=await testFixture();
  try {
+  f.db.prepare('INSERT INTO demand(rowid,key,at) VALUES(9,?,1),(10,?,2),(99,?,3),(100,?,4)').run('numeric-nine','numeric-ten','numeric-ninety-nine','numeric-hundred');
   await control.preflight(f.env,f.state);await migration.saveMigration(f.archive,f.state);
   let importedCrash=false,validationCrash=false;
   for(let n=0;n<600;n++){
@@ -22,7 +23,7 @@ test('S2 imports exact archives into a standby, restarts every step and recovers
   }
   assert.ok(importedCrash && validationCrash);
   let state=await migration.readMigration(f.archive,f.id);assert.equal(state.phase,'switching');
-  const rows=(await f.admin.query(`SELECT rowid::text,at::text FROM ${f.schema}.demand ORDER BY rowid`)).rows;
+  const rows=(await f.admin.query(`SELECT rowid::text,at::text FROM ${f.schema}.demand t ORDER BY t.rowid`)).rows;
   assert.deepEqual(rows[0],{rowid:'-9223372036854775808',at:'9223372036854775807'});
   assert.deepEqual(rows.at(-1),{rowid:'9223372036854775807',at:'-9223372036854775808'});
   await target.activateTarget(f.env,state); // crash before writing R2 selection
@@ -51,6 +52,9 @@ test('expired freeze automatically abandons before writes, retaining archives an
 test('target preflight rejects identity, nonempty state, missing restore and unsafe app roles',{skip:!enabled},async()=>{
  const f=await testFixture();try {
   const state=f.state;
+  await f.archive.delete('control/queue-metrics.json');
+  await assert.rejects(control.preflight(f.env,state),/migration_queue_dlq_unavailable/);
+  await f.archive.put('control/queue-metrics.json',JSON.stringify({queue:{at:Date.now(),count:0,error:null},dlq:{at:Date.now(),count:0,error:null}}));
   await control.preflight(f.env,state);
   const original={...f.env},changed=JSON.parse(f.env.MIGRATION_TARGET);changed.hostname='wrong-endpoint.neon.tech';
   f.env.MIGRATION_TARGET=JSON.stringify(changed);
@@ -133,7 +137,23 @@ test('ordinary supervisor restarts a fenced repository, preserves cursors, and r
   assert.ok(f.archive.objects.has(`receipts/${custom.id}/freeze-event.json`));
   assert.ok(!(await f.archive.list({prefix:`parked/${custom.id}/pointers/`})).objects.length);
   f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json({deployment_id:'test-deployment',repository_inflight:[],hour:[]})})};
-  await f.archive.put('control/raw-recovery.json',JSON.stringify({last_completed:Date.now(),gaps:{count:0,truncated:false}}));
+  // An unrelated historical raw gap does not own this migration's queues.
+  await f.archive.put('control/raw-recovery.json',JSON.stringify({last_completed:1,gaps:{count:1,truncated:false}}));
+  const queueSample=async(at,count)=>f.archive.put('control/queue-metrics.json',JSON.stringify({queue:{at,count:0,error:null},dlq:{at,count,error:null}}));
+  await queueSample(1,0);assert.equal((await (await f.request('/migration-supervise',{})).json()).phase,'replaying','pre-selection queue observations cannot release');
+  await queueSample(Date.now(),1);assert.equal((await (await f.request('/migration-supervise',{})).json()).phase,'replaying','DLQ must drain before reconciliation resumes');
+  assert.ok(!(await migration.readMigration(f.archive,custom.id)).cutover.replay_complete);
+  await queueSample(Date.now(),0);
+  const poison={...parked,delivery:'held-poison'};
+  const pinned=await ingress.park(f.env,custom,poison,'fixture_failure');
+  const normalKey=ingress.pointerKey(custom.id,poison),heldKey=ingress.pointerKey(custom.id,poison,true);
+  await f.archive.put(heldKey,JSON.stringify({...pinned,retry_at:Date.now()+86400000}));await f.archive.delete(normalKey);
+  await f.archive.put(ingress.recoveryKey(custom.id),JSON.stringify({held_last_pass:Date.now(),held:{count:1},next_retry:Date.now()+86400000}));
+  assert.equal((await (await f.request('/migration-supervise',{})).json()).phase,'replaying');
+  assert.equal(migration.blocksRepairs(await migration.readMigration(f.archive,custom.id)),false,'a deferred poison item cannot indefinitely stop bounded reconciliation');
+  assert.ok(await f.archive.head(heldKey),'failed input remains durable and blocks final completion');
+  assert.equal((await f.request('/event',poison)).status,200); // target receipt commits first
+  await ingress.release(f.env,custom,poison);assert.ok(!await f.archive.head(heldKey));
   const done=await (await f.request('/migration-supervise',{})).json();
   assert.equal(done.phase,'complete');assert.equal(done.cutover.release.backend_write_owner,'postgres');
   const receiptKey=migration.archiveKey(custom.id,generation)+'/receipt.json';
@@ -141,6 +161,12 @@ test('ordinary supervisor restarts a fenced repository, preserves cursors, and r
   await f.archive.delete(receiptKey); // crash at release receipt publication
   assert.equal((await f.request('/migration-supervise',{})).status,200);
   assert.equal((await f.archive.get(receiptKey).then(o=>o.json())).phase,'complete');
+  const invalid=await f.command('finish-observation',{target:'neon-test',retention_policy:{mode:'invalid'}});assert.equal(invalid.body.error,'migration_retention_policy_invalid');
+  f.archive.fail((op,key)=>op==='put' && key.endsWith('/retention-policy.json'));
+  assert.equal((await f.command('finish-observation',{target:'neon-test',retention_policy:{mode:'dry_run',disabled:[],pinned:[]}})).status,503);
+  f.archive.fail((op,key)=>op==='put' && key.endsWith('/retention-policy.json'));
+  assert.equal((await f.request('/migration-supervise',{})).status,503);
+  assert.equal((await migration.readMigration(f.archive,custom.id)).failure,'migration_storage_failure');
   const release=await f.command('finish-observation',{target:'neon-test',retention_policy:{mode:'dry_run',disabled:[],pinned:[]}});
   assert.equal(release.status,200,JSON.stringify(release.body));
   assert.equal(migration.holdsRetention(await migration.readMigration(f.archive,custom.id)),false);

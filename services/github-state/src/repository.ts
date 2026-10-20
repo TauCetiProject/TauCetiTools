@@ -1,7 +1,7 @@
 import { RepositoryStore, SQLiteStore, PostgresStore, ReadCacheStore, BufferedStore, SerialLane, columns } from './repository_store';
 import { repositoryHealth } from './repository_health';
 import { DurableObject } from 'cloudflare:workers';
-import { Env, EventPointer, Query, Result, digest, json, queryKey, repository, stub, validateQuery, parseGitHub, CI_EVENTS, NOT_MIRRORED, stagingStateKey, stagedPageKey } from './protocol';
+import { Env, EventPointer, matchesETag, Query, Result, digest, json, queryKey, repository, stub, validateQuery, parseGitHub, CI_EVENTS, NOT_MIRRORED, stagingStateKey, stagedPageKey } from './protocol';
 import { comment, issue, pr, status } from './normalize';
 import { batchLimit } from './catalog';
 import { Lane, LANES, laneAt, settings } from './reconciliation';
@@ -1973,7 +1973,8 @@ export class RepositoryState extends DurableObject<Env> {
     if(state.source.object!==this.ctx.id.toString())throw new AdminError('migration_source_identity_changed');
     if(input.operation==='finish-observation') {
       if(state.phase!=='complete')throw new AdminError('migration_observation_not_ready');
-      if(!state.cutover!.observation_release){state.cutover!.observation_release={at:Date.now(),policy:policy(input.retention_policy)};await saveMigration(this.env.ARCHIVE,state);}
+      let approved:Policy;try{approved=policy(input.retention_policy);}catch{throw new AdminError('migration_retention_policy_invalid');}
+      if(!state.cutover!.observation_release){state.cutover!.observation_release={at:Date.now(),policy:approved};await saveMigration(this.env.ARCHIVE,state);}
       await this.finishObservation(state);return json(publicReceipt(state));
     }
     if(input.operation==='abandon') {
@@ -1982,14 +1983,14 @@ export class RepositoryState extends DurableObject<Env> {
     } else if(!['start','step','preflight'].includes(input.operation))throw new AdminError('migration_operation_invalid');
     return this.superviseMigration(1);
   }
-  private async shadowMigration(state:Migration):Promise<void> {
+  private async shadowMigration(state:Migration,onQuery:()=>void=()=>{}):Promise<void> {
     const record=await this.env.ARCHIVE.get(`control/${state.repository}/migration-acceptance.json`);
     const text=record?await record.text():null;
     if(!text || await digest(text)!==state.cutover!.acceptance)throw new AdminError('migration_acceptance_changed');
     const evidence=JSON.parse(text),queries=evidence.queries;
     if(!Array.isArray(queries) || !queries.length || queries.length>20)throw new AdminError('migration_shadow_queries_missing');
     const target=Object.create(this) as RepositoryState;
-    target.store=new PostgresStore(this.env.REPOSITORY_DATABASE_URL!,state.repository,state.generation);
+    target.store=new PostgresStore(this.env.REPOSITORY_DATABASE_URL!,state.repository,state.generation,undefined,undefined,undefined,onQuery);
     target.revisionState={};target.repositoryMemo=undefined;
     const canonical=(value:any):string=>JSON.stringify(value,(_key,v)=>v && typeof v==='object' && !Array.isArray(v)?Object.fromEntries(Object.keys(v).sort().map(k=>[k,v[k]])):v);
     const check=state.cutover!.shadow ||= {queries:0,hash:'0'.repeat(64),verified_at:0,complete:false};
@@ -2042,11 +2043,15 @@ export class RepositoryState extends DurableObject<Env> {
   private async finishMigrationReceipt(state:Migration):Promise<void> {
     const recovery=await backlog(this.env,{id:state.repository,name:(await this.meta('repository')).name,installation:''});
     const empty=(prefix:string)=>this.env.ARCHIVE.list({prefix,limit:1}).then(p=>!p.objects.length && !p.truncated);
-    if(!await empty(`parked/${state.repository}/pointers/`) || !await empty(`parked/${state.repository}/held/`))return;
-    if(!state.cutover!.replay_complete){state.cutover!.replay_complete=Date.now();await saveMigration(this.env.ARCHIVE,state);}
-    // Raw recovery is the durable DLQ owner: completion requires a full pass
-    // completed after backend selection, with no unresolved bucket-wide gaps.
-    if(!recovery.raw?.last_completed || recovery.raw.last_completed<state.cutover!.selected_at! || recovery.raw.gaps?.count!==0 || recovery.raw.gaps?.truncated)return;
+    if(!await empty(`parked/${state.repository}/pointers/`))return;
+    const heldEmpty=await empty(`parked/${state.repository}/held/`);
+    const queues=await queueMetrics(this.env);
+    // Both queues have this deployment as their consumer. The same durable
+    // parking/receipt handler owns normal and dead-letter inputs. Historical
+    // bucket scans remain visible, but are independent recovery work.
+    if(['queue','dlq'].some(name=>queues[name].stale || queues[name].count!==0 || queues[name].at<state.cutover!.selected_at!))return;
+    if(!state.cutover!.replay_complete && (heldEmpty || recovery.held_last_pass>=state.cutover!.selected_at!)){state.cutover!.replay_complete=Date.now();await saveMigration(this.env.ARCHIVE,state);}
+    if(!heldEmpty){log('migration_held_input_pending',{repository:state.repository,held:recovery.held?.count ?? null,next_retry:recovery.next_retry ?? null,reconciliation_resumed:Boolean(state.cutover!.replay_complete)});return;}
     await this.prepareDiagnostics();
     const evidence=await this.env.ARCHIVE.get(`control/${state.repository}/migration-acceptance.json`);
     const evidenceText=evidence?await evidence.text():null,acceptance=evidenceText?JSON.parse(evidenceText):null;
@@ -2055,7 +2060,7 @@ export class RepositoryState extends DurableObject<Env> {
     const rate=await this.env.INSTALLATIONS.get(this.env.INSTALLATIONS.idFromName((await this.meta('repository')).installation)).fetch('https://internal/health').then(r=>r.json<any>());
     state.cutover!.release={schema_versions:{source:state.source.schema,target:1},deployment:this.env.CF_VERSION?.id,source:state.source,target:state.target,
       revision:await this.meta('revision'),latest_applied_input:await this.meta('latest_applied_input'),latest_webhook:await this.meta('last_webhook'),latest_repair:await this.meta('last_repair'),
-      backlog:{parked:0,held:0,raw_completed:recovery.raw.last_completed,raw_gaps:0},backend_write_owner:'postgres',
+      backlog:{parked:0,held:0,queue:0,dlq:0,queue_observed_at:queues.queue.at,dlq_observed_at:queues.dlq.at,raw_completed:recovery.raw?.last_completed ?? null,raw_gaps:recovery.raw?.gaps ?? null},backend_write_owner:'postgres',
       latency:{baseline_p95_ms:acceptance.latency.baseline_p95_ms,target_p95_ms:acceptance.latency.target_p95_ms},cursor_coverage:{versions:['r2-v1'],active_checked:state.cutover!.shadow?.cursor_checks || 0,expired_checked:state.cutover!.shadow?.expired_cursor_checks || 0},github_hour:rate.hour ?? null,health};
     state.cutover!.completed_at=Date.now();state.phase='complete';await saveMigration(this.env.ARCHIVE,state);
     await terminalReceipt(this.env.ARCHIVE,state);
@@ -2072,21 +2077,37 @@ export class RepositoryState extends DurableObject<Env> {
     const repo=JSON.parse(this.env.ALLOWED_REPOSITORIES || '[]').find((r:any)=>this.env.REPOSITORIES.idFromName(r.id).toString()===this.ctx.id.toString())?.id || this.localMeta('repository')?.id;
     if(!repo)return json({migration:null});
     let io=0;
-    const bucket=new Proxy(this.env.ARCHIVE,{get(target,key){const value=Reflect.get(target,key,target);return typeof value==='function'?(...args:any[])=>{if(['get','head','put','list','delete'].includes(String(key)))io++;return value.apply(target,args);}:value;}});
+    const bucket=new Proxy(this.env.ARCHIVE,{get(target,key){const value=Reflect.get(target,key,target);return typeof value==='function'?(...args:any[])=>{if(['get','head','put','list','delete'].includes(String(key)) && ++io>900)throw new AdminError('migration_shadow_request_budget');return value.apply(target,args);}:value;}});
     const controlEnv={...this.env,ARCHIVE:bucket};
     // Reserve room for the next bounded page (up to 250 blob HEADs), target
     // connections and terminal bookkeeping below the platform request limit.
+    let advanced=false;
     for(const deadline=Date.now()+20000;steps-->0 && Date.now()<deadline && io<650;) {
       const state=await readMigration(bucket,repo);this.migrationState=state;
       if(!state?.cutover)break;
-      if(['complete','abandoned'].includes(state.phase)) {await this.selectMigrationBackend();if(state.phase==='complete')await this.finishObservation(state);await terminalReceipt(this.env.ARCHIVE,state);if(state.phase==='complete' && state.failure){state.failure=null;await saveMigration(bucket,state);}break;}
+      if(state.phase==='switching' && advanced)break;
       if(state.source.object!==this.ctx.id.toString())throw new AdminError('migration_source_identity_changed');
       try {
+        if(['complete','abandoned'].includes(state.phase)) {
+          await this.selectMigrationBackend();
+          if(state.phase==='complete')await this.finishObservation(state);
+          await terminalReceipt(this.env.ARCHIVE,state);
+          if(state.phase==='complete' && state.failure){state.failure=null;await saveMigration(bucket,state);}
+          break;
+        }
         io+=2;await controllerStep(controlEnv,state,{storage:this.ctx.storage,sql:this.nativeSql,compatibility:async s=>{compatibilityStep(this.nativeSql,s);if(s.phase==='freezing'){s.phase='preflighting';await cutoverPreflight(this.env,s);s.phase='freezing';}},
-          fence:s=>this.fenceMigration(s),assertFence:s=>this.assertMigrationFence(s),verifyStored:s=>this.shadowMigration(s),drain:s=>this.drainMigration(s.phase==='freezing'),release:s=>this.releaseMigration(s),
+          fence:s=>this.fenceMigration(s),assertFence:s=>this.assertMigrationFence(s),verifyStored:async s=>{
+            const shadow=Object.create(this) as RepositoryState;shadow.env=controlEnv;
+            const before=io,began=Date.now();
+            await shadow.shadowMigration(s,()=>{if(++io>900)throw new AdminError('migration_shadow_request_budget');});
+            const check=s.cutover!.shadow;
+            if(check){check.max_subrequests=Math.max(check.max_subrequests || 0,io-before);check.max_step_ms=Math.max(check.max_step_ms || 0,Date.now()-began);}
+          },drain:s=>this.drainMigration(s.phase==='freezing'),release:s=>this.releaseMigration(s),
           select:async()=>{this.migrationState=state;await this.selectMigrationBackend();}});
+        advanced=true;
         state.failure=state.phase==='abandoned'?(state.cutover!.abort_reason || null):null;await saveMigration(bucket,state);
         if(state.phase==='replaying') {await this.finishMigrationReceipt(state);break;}
+        if(state.phase==='switching')break;
       } catch(error) {
         const reason=error instanceof AdminError?error.message:'migration_storage_failure';
         const saved=await readMigration(bucket,repo);
@@ -2291,7 +2312,7 @@ export class RepositoryState extends DurableObject<Env> {
         if(changed!==null && !planned){requestUnavailable=true;return json({...await this.unavailable(q,'mirror_frozen'),frozen_since:changed},200,{'X-TauCeti-Storage':'degraded'});}
         const etag='"'+(await this.revision())+'"',headers:Record<string,string>=this.degraded?{'X-TauCeti-Storage':'degraded'}:{};
         if(this.migrationUnavailable && this.store.backend==='sqlite') {headers['X-TauCeti-Read-Fallback']='last-known-source';const frozen=this.localMeta('backend_owner')?.frozen_at;if(frozen)headers['X-TauCeti-Source-Frozen-At']=String(frozen);}
-        if (!q.cursor && req.headers.get('if-none-match')===etag && q.operation!=='progress' && (await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length) {
+        if (!q.cursor && matchesETag(req.headers.get('if-none-match'),etag) && q.operation!=='progress' && (await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length) {
           this.backgroundDemand(q);
           return new Response(null,{status:304,headers:{ETag:etag,...headers}});
         }

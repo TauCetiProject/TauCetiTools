@@ -125,13 +125,14 @@ export class PostgresStore implements RepositoryStore {
 
   private http;
   private writer=new SerialLane();
-  constructor(private url:string,repository:string,private generation:string,private client?:Client,private diagnostics:{connections:number,queries:number,lastConnection?:number}={connections:0,queries:0},private connectionState?:ConnectionState) {
+  constructor(private url:string,repository:string,private generation:string,private client?:Client,private diagnostics:{connections:number,queries:number,lastConnection?:number}={connections:0,queries:0},private connectionState?:ConnectionState,private onQuery?:()=>void) {
     this.schema=schemaName(repository);
     try{this.http=neon(url);}catch{throw new StoreUnavailable();}
   }
   get transactional():boolean {return Boolean(this.client);}
   private async run<T>(action:()=>Promise<T>,connection=this.connectionState):Promise<T> {
     if(connection?.error)throw connection.error;
+    this.onQuery?.();
     try{return await action();}catch(error){
       if(connection?.error)throw connection.error;
       if(error instanceof StoreFenced || error instanceof StoreUnavailable)throw error;

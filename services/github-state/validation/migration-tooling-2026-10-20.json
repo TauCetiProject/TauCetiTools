@@ -4,10 +4,24 @@
   "source_schema": 5,
   "target_schema": 1,
   "checks": {
-    "python_package": {"passed": 11, "failed": 0},
-    "sqlite_service": {"passed": 191, "failed": 0, "skipped": 31},
-    "isolated_neon_contracts": {"passed": 79, "failed": 0, "skipped": 1},
-    "migration_fixtures": {"passed": 5, "failed": 0}
+    "python_package": {
+      "passed": 12,
+      "failed": 0
+    },
+    "sqlite_service": {
+      "passed": 202,
+      "failed": 0,
+      "skipped": 51
+    },
+    "isolated_neon_contracts": {
+      "passed": 101,
+      "failed": 0,
+      "skipped": 1
+    },
+    "migration_fixtures": {
+      "passed": 12,
+      "failed": 0
+    }
   },
   "migration_fixture_coverage": [
     "every source table and empty table manifests",
@@ -23,7 +37,18 @@
     "input arriving during freeze beyond queue retry budget",
     "crash after SQL event commit before permanent R2 receipt",
     "crash after parked-pointer deletion before acknowledgement",
-    "crash during final release receipt publication"
+    "crash during final release receipt publication",
+    "reordered historical columns imported by archived names",
+    "durable local selection before and after commit, cold R2 failure and retired migration bindings",
+    "separate authenticated application role and duplicate privileged URL rejection",
+    "missing/inaccessible inactive target quarantine and activation-intent forward recovery",
+    "REAL/BLOB/NUL preflight before freeze",
+    "stored shadow detects different or unavailable target data",
+    "explicit observation release and immutable recovered receipts",
+    "numeric keyset verification across 9/10/99/100 row boundaries",
+    "edge-weakened ETags preserve public conditional reads",
+    "fresh queue/DLQ observations gate final release; held poison inputs remain durable without indefinitely blocking reconciliation",
+    "missing primary-key constraints and oversized indexed identities rejected before freeze"
   ],
   "commands": [
     "python -m unittest discover -s tests -p 'test_*.py'",

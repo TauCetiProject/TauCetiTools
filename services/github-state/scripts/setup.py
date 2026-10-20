@@ -255,8 +255,10 @@ def cli():
             config["routes"] = [{"pattern": url.split("://", 1)[1].rstrip("/"), "custom_domain": True}]
             config.pop("services", None)
             config["r2_buckets"] = [{"binding": "ARCHIVE", "bucket_name": name}]
-            config["queues"]["producers"][0]["queue"] = name + "-events"
+            for producer in config["queues"]["producers"]:
+                producer["queue"] = name + ("-events-dlq" if producer["binding"] == "EVENTS_DLQ" else "-events")
             config["queues"]["consumers"][0].update(queue=name + "-events", dead_letter_queue=name + "-events-dlq")
+            config["queues"]["consumers"][1]["queue"] = name + "-events-dlq"
             config["env"] = {}
             target = config
         target["vars"] = {

@@ -144,7 +144,9 @@ pg('legacy SQL cursors, complete versus observed coverage, timestamps and condit
   await f.state.put('issue_comments','1',{id:'1',body:'stored'},Date.now(),false,'7');await f.state.membership('issue_comments:{"number":7}','1',true);await complete(f.state,q);
   const initialResponse=await send(f.state,'/query',q),first=await initialResponse.json();
   assert.equal(first.complete,true);assert.equal(first.coverage,'complete');assert.ok(Number.isSafeInteger(first.observed_at));assert.ok(Number.isSafeInteger(first.verified_at));
-  const conditional=await f.state.fetch(new Request('https://internal/query',{method:'POST',headers:{'if-none-match':initialResponse.headers.get('etag')},body:JSON.stringify(q)}));assert.equal(conditional.status,304);
+  for(const validator of [initialResponse.headers.get('etag'),'W/'+initialResponse.headers.get('etag')]) {
+   const conditional=await f.state.fetch(new Request('https://internal/query',{method:'POST',headers:{'if-none-match':validator},body:JSON.stringify(q)}));assert.equal(conditional.status,304);
+  }
   const payload={key:'issue_comments:{"number":7}',result:{...first,data:[{id:'legacy'}]}};
   await f.store.exec('INSERT INTO cursors VALUES(?,?,?)','legacy:100',Date.now()+60000,JSON.stringify(payload));
   assert.deepEqual((await (await send(f.state,'/query',{...q,cursor:'legacy:100'})).json()).data,[{id:'legacy'}]);

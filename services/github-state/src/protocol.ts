@@ -26,6 +26,10 @@ export interface Result {
 export function json(value: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return Response.json(value, { status, headers: { 'Cache-Control': 'private, no-cache', ...headers } });
 }
+// GET validators use weak comparison; edge compression may weaken our numeric ETag.
+export function matchesETag(header:string|null,etag:string):boolean {
+  return Boolean(header?.split(',').some(value=>value.trim()==='*' || value.trim().replace(/^W\//,'')===etag.replace(/^W\//,'')));
+}
 // GitHub REST database identifiers can exceed JavaScript's exact integer range.
 // The reviver source retains the original digits before Number rounds them.
 export function parseGitHub(text: string): any {

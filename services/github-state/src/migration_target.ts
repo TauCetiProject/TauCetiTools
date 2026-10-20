@@ -22,7 +22,7 @@ async function transaction<T>(env:Env,repo:string,apply:(client:Client,schema:st
   try {await client.connect();await client.query('BEGIN');await client.query("SET LOCAL statement_timeout='15s'; SET LOCAL lock_timeout='5s'");const value=await apply(client,schema);await client.query('COMMIT');return value;}
   catch(error) {try{await client.query('ROLLBACK');}catch{}if(error instanceof AdminError)throw error;
     const code=typeof (error as any)?.code==='string' && /^[0-9A-Z]{5}$/.test((error as any).code)?(error as any).code:'transport';
-    console.log(JSON.stringify({event:'migration_target_unavailable',code}));throw new AdminError('migration_target_unavailable');}
+    console.log(JSON.stringify({event:'migration_target_unavailable',code}));throw new AdminError(['23502','23505','23P01','22001','54000'].includes(code)?'migration_constraint_incompatible':'migration_target_unavailable');}
   finally {let timer:ReturnType<typeof setTimeout>|undefined;try{await Promise.race([client.end().catch(()=>{}),new Promise<void>(resolve=>{timer=setTimeout(()=>{try{client.neonConfig.destroy();}catch{}resolve();},2000);})]);}finally{if(timer)clearTimeout(timer);}}
 }
 async function owner(client:Client,schema:string,state:Migration,allowed:string[]):Promise<string> {
@@ -64,7 +64,9 @@ export async function targetPreflight(env:Env,state:Migration):Promise<void> {
     if(!role || role.rolsuper || role.rolcreatedb || role.rolcreaterole)throw new AdminError('migration_application_role_unsafe');
     for(const table of REQUIRED_TABLES)if(!(await c.query("SELECT has_table_privilege($1,$2,'SELECT') AND has_table_privilege($1,$2,'INSERT') AND has_table_privilege($1,$2,'UPDATE') AND has_table_privilege($1,$2,'DELETE') allowed",[config.application_role,s+'.'+table])).rows[0].allowed)throw new AdminError('migration_application_grants_missing');
     if(!(await c.query("SELECT has_function_privilege($1,$2,'EXECUTE') allowed",[config.application_role,s+'.assert_writer(text)'])).rows[0].allowed)throw new AdminError('migration_application_grants_missing');
-    if((await c.query("SELECT has_column_privilege($1,$2,'backend','UPDATE') allowed",[config.application_role,s+'.backend_control'])).rows[0].allowed)throw new AdminError('migration_application_role_unsafe');
+    for(const privilege of ['INSERT','DELETE','TRUNCATE'])if((await c.query('SELECT has_table_privilege($1,$2,$3) allowed',[config.application_role,s+'.backend_control',privilege])).rows[0].allowed)throw new AdminError('migration_application_role_unsafe');
+    for(const column of ['backend','generation','schema_version'])if((await c.query("SELECT has_column_privilege($1,$2,$3,'UPDATE') allowed",[config.application_role,s+'.backend_control',column])).rows[0].allowed)throw new AdminError('migration_application_role_unsafe');
+    if((await c.query("SELECT pg_has_role($1,$2,'MEMBER') allowed",[config.application_role,config.migration_role])).rows[0].allowed)throw new AdminError('migration_application_role_unsafe');
   });
   await transaction(env,state.repository,async(c,s)=>{
     const identity=(await c.query('SELECT current_database() database,current_user role')).rows[0],config=targetConfig(env);
@@ -139,7 +141,7 @@ export async function targetVerifyStep(env:Env,state:Migration):Promise<void> {
     }
     const page=await archivePage(env,state,name,check.page);
     if(page.before!==(check.after ?? null) || await chain(check.hash,page.rows)!==page.hash)throw new AdminError('migration_checksum_mismatch');
-    const rows=(await c.query(`SELECT rowid::text,${table.columns.map(c=>c.name+'::text').join(',')} FROM ${s}.${name} WHERE ${check.after===undefined?'TRUE':'rowid>$1::bigint'} ORDER BY rowid LIMIT ${page.rows.length}`,check.after===undefined?[]:[check.after])).rows;
+    const rows=(await c.query(`SELECT rowid::text,${table.columns.map(c=>c.name+'::text').join(',')} FROM ${s}.${name} t WHERE ${check.after===undefined?'TRUE':'rowid>$1::bigint'} ORDER BY t.rowid LIMIT ${page.rows.length}`,check.after===undefined?[]:[check.after])).rows;
     if(rows.length!==page.rows.length || rows.some((row,i)=>JSON.stringify([row.rowid,...table.columns.map(c=>row[c.name])])!==JSON.stringify(values(page.rows[i],name))))throw new AdminError('migration_target_data_mismatch');
     for(const key of page.refs)if(!await env.ARCHIVE.head(key))throw new AdminError('migration_blob_missing');
     check.page++;check.rows+=page.rows.length;check.hash=page.hash;check.after=page.rows.at(-1)![0];

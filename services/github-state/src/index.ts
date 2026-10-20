@@ -1,4 +1,4 @@
-import { Env, EventPointer, Query, Repository, authorize, digest, json, repositories, repository, stub, validSignature, validateQuery, parseGitHub, CI_EVENTS } from './protocol';
+import { Env, EventPointer, matchesETag, Query, Repository, authorize, digest, json, repositories, repository, stub, validSignature, validateQuery, parseGitHub, CI_EVENTS } from './protocol';
 import { blocksRepairs, holdsRetention, readMigration } from './migration';
 import { classify, log, requestId } from './storage';
 import { PARK_AFTER_ATTEMPTS, backlog, backoff, drain, maintainIngress, maintainRaw, release, ingressMode, noteRepositoryFull, park, reconcile, setIngressMode, storageState } from './ingress';
@@ -36,7 +36,7 @@ async function query(req:Request,env:Env,q:Query,request_id:string): Promise<Res
     return json({error:'storage_unavailable',reason:typeof detail.error==='string'?detail.error:'status_'+response.status,request_id},503);
   }
   const etag=response.headers.get('etag');
-  if (etag && req.headers.get('if-none-match')===etag && !q.cursor) {
+  if (etag && matchesETag(req.headers.get('if-none-match'),etag) && !q.cursor) {
     const copy:any=await response.clone().json();
     if (copy.status==='ok') return new Response(null,{status:304,headers:{ETag:etag,'Cache-Control':'private, no-cache'}});
   }
