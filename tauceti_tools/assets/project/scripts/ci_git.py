@@ -76,7 +76,7 @@ class Git:
         return ref
 
     def fetch(self, url, references):
-        self.run("fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--filter=blob:none",
+        self.run("fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--filter=tree:0",
                  url, *(f"+{source}:{destination}" for source, destination in references))
 
     def commit(self, value):

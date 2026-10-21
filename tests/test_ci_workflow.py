@@ -107,10 +107,16 @@ else:
                     self.assertEqual(calls[0][0], "bors_train_identity.py")
                     self.assertEqual(calls[-1][-2:], ["--staging-ref", "bors/staging/main/123"])
 
-    def test_failed_git_identity_cannot_publish_head_or_status_outputs(self):
-        result, _, outputs = self.resolve("workflow_dispatch", git_fails=True)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(outputs, {})
+    def test_failed_git_identity_retains_head_for_failure_reporting_without_authorizing_build(self):
+        for event in ("workflow_dispatch", "pull_request_target", "repository_dispatch"):
+            with self.subTest(event=event):
+                result, _, outputs = self.resolve(event, git_fails=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(outputs["status_sha"], "a" * 40)
+                self.assertEqual(outputs["sha"], "a" * 40)
+                self.assertNotIn("base_sha", outputs)
+                self.assertNotIn("mergebase", outputs)
+                self.assertIn("reporting failure", result.stdout)
 
     def test_invalid_manual_pr_stops_before_any_request(self):
         result, calls, outputs = self.resolve("workflow_dispatch", requested_pr="123;bad")
