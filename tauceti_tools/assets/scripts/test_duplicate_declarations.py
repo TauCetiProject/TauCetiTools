@@ -291,6 +291,16 @@ class DuplicateDeclarationsTest(unittest.TestCase):
         self.assertIn("counterfeit → [counterfeit]", result.stderr)
         self.assertNotIn("bad →", result.stderr)
 
+    def test_scoped_importer_checks_unscoped_library_dependency(self):
+        result = self.fixture({
+            "TauCeti.Base": "module\npublic axiom counterfeit : False\n",
+            "TauCeti.Importer": "module\npublic import TauCeti.Base\n"
+                               "public theorem bad : False := counterfeit\n",
+        }, full=True, scope="TauCeti.Importer\n")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("bad → [counterfeit]", result.stderr)
+        self.assertNotIn("counterfeit →", result.stderr)
+
     def test_scope_skips_unchanged_importer_but_full_audit_catches_it(self):
         modules = {
             "TauCeti.Base": "module\npublic def clean := 1\n",

@@ -490,6 +490,8 @@ branch does not invalidate a review of the same diff or require a branch update.
 rejects merge conflicts. Keep the direct-merge App out of the ruleset bypass list so
 GitHub also enforces the required checks. The hourly sweep retries
 eligible PRs after missed events. This mode works for public personal-account repositories.
+PR axiom audits check changed modules only; without staging, violations confined to rebuilt,
+unchanged importers are caught by the full main audit after merging.
 
 GitHub merge queue availability depends on repository visibility and account type. The standard
 starter uses a public organization-owned repository. If a queue is unavailable, explicitly select direct GitHub merging or configure Bors.

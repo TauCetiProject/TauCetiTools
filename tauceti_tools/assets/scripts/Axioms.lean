@@ -69,12 +69,11 @@ is marked `false` before recursing so cycles terminate; axioms are leaves, so a 
 in-progress constant contributes nothing. Adapted from Robin Arnez's mathlib-wide version
 (leanprover Zulip, #general > "Checking which axioms are used in a project").
 
-The fail-if-any-disallowed-axiom guarantee is sound: the declaration that *directly* mentions a
-disallowed axiom is always cached `true` (its badness comes from its own edge to the leaf axiom,
-not a back edge), and since the imported libraries are axiom-clean that declaration is itself an
-audited `TauCeti` candidate — so any violation fails the run. The `false` sentinel can, in a
-cyclic declaration cluster, leave *other* members of the cluster cached clean, so the reported
-offender list may under-count (the next run flags the rest); it never lets a violation pass. -/
+If any candidate reaches a disallowed axiom, the run fails: before the first such candidate,
+earlier traversals visit only clean constants, so cannot cache a bad dependency as clean. The
+first bad candidate's traversal therefore reaches a disallowed leaf. The `false` sentinel can,
+in a cyclic declaration cluster, leave other members cached clean and under-count the reported
+offenders, but cannot turn a failing run into a pass. This also holds for a scoped candidate set. -/
 partial def reachesDisallowedAxiom (c : Name) : AxiomCacheM Bool := do
   if let some res := (← get).find? c then return res
   modify (·.insert c false)
