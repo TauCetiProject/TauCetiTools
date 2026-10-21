@@ -191,7 +191,7 @@ class FinalizerTests(unittest.TestCase):
             target = str(Path(directory) / "intent.json")
             with patch.dict(os.environ, dict(ENV, TAUCETI_STATUS_INTENT=target), clear=True), \
                  patch.object(finalizer, "terminal_state", return_value=("success", "confirmed")), \
-                 patch.object(finalizer, "api", side_effect=finalizer.Deferred("ci-status-app", 4000)) as post, \
+                 patch.object(finalizer, "api", side_effect=finalizer.Deferred("ci-status-app", finalizer.time.time() + 4000)) as post, \
                  patch.object(finalizer.time, "sleep") as sleep, \
                  contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(finalizer.main(), 75)

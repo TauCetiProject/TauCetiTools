@@ -36,7 +36,8 @@ def api(path, payload=None):
     """Use the shared credential-aware quota client; never repeat ambiguous reruns."""
     global _client
     if _client is None:
-        _client = GitHub(max_wait=post_retry_seconds(), jitter=2)
+        # Publication owns waits so it can revalidate the run after sleeping.
+        _client = GitHub(max_wait=0, jitter=2)
     return _client.request("GET" if payload is None else "POST", "repos/" + REPO + path,
                            payload, conditional=payload is None,
                            idempotent=path.startswith("/statuses/"))
@@ -134,8 +135,12 @@ def terminal_state(env, *, wait=wait_publication, observe=observation):
 
 def status_intent(env, payload):
     """A data-only record lets another trusted job publish without rebuilding."""
-    return dict(schema="tauceti-ci.status-intent/v1", repo=REPO, revision=env["STATUS_SHA"],
-                run_id=int(env["GITHUB_RUN_ID"]), attempt=int(env["GITHUB_RUN_ATTEMPT"]), payload=payload)
+    intent = dict(schema="tauceti-ci.status-intent/v1", repo=REPO, revision=env["STATUS_SHA"],
+                  run_id=int(env["GITHUB_RUN_ID"]), attempt=int(env["GITHUB_RUN_ATTEMPT"]), payload=payload)
+    if env.get("BORS_STAGING") == "true":
+        intent["bors"] = dict(batch_id=int(env["BORS_BATCH_ID"]), base_ref=env["BORS_BASE_REF"],
+                              base_sha=env["BORS_BASE_SHA"])
+    return intent
 
 
 EVIDENCE_FIELDS = {"BUILD_JOB_RESULT", "BUILD_STATE", "BUILD_DESCRIPTION", "PUBLICATION_REQUIRED",
@@ -177,7 +182,17 @@ def validate_intent(intent):
                 raise ValueError("invalid bors finalization evidence")
         return intent
     payload = intent.get("payload", {})
-    if (set(intent) != {"schema", "repo", "revision", "run_id", "attempt", "payload"}
+    expected = {"schema", "repo", "revision", "run_id", "attempt", "payload"}
+    if "bors" in intent:
+        expected.add("bors")
+        bors = intent["bors"]
+        if (not isinstance(bors, dict) or set(bors) != {"batch_id", "base_ref", "base_sha"}
+                or type(bors["batch_id"]) is not int or bors["batch_id"] <= 0
+                or not sha(bors["base_sha"]) or not isinstance(bors["base_ref"], str)
+                or not 0 < len(bors["base_ref"]) <= 200
+                or any(char.isspace() or ord(char) < 32 for char in bors["base_ref"])):
+            raise ValueError("invalid status intent bors identity")
+    if (set(intent) != expected
             or not isinstance(payload, dict)
             or set(payload) != {"state", "context", "description", "target_url"}
             or payload.get("state") not in {"success", "failure"} or payload.get("context") != "build"
@@ -198,13 +213,21 @@ def save_intent(intent, target):
 
 def finalize(env, target):
     save_intent(finalization_intent(env), target)
-    try:
-        state, description = terminal_state(env)
-    except Deferred as error:
-        print(f"::error::batch evidence unavailable: {error}; retained finalization intent can be resumed", file=sys.stderr)
-        return 75
-    except (OSError, APIError, ValueError, KeyError, TypeError) as error:
-        state, description = "failure", "batch finalization failed: " + type(error).__name__
+    deadline = time.monotonic() + post_retry_seconds()
+    while True:
+        try:
+            state, description = terminal_state(env)
+            break
+        except Deferred as error:
+            delay = max(1, error.until - time.time())
+            if time.monotonic() + delay > deadline:
+                print(f"::error::batch evidence unavailable: {error}; retained finalization intent can be resumed", file=sys.stderr)
+                return 75
+            print(f"::warning::{error}; retrying finalization evidence without rebuilding", flush=True)
+            time.sleep(delay)
+        except (OSError, APIError, ValueError, KeyError, TypeError) as error:
+            state, description = "failure", "batch finalization failed: " + type(error).__name__
+            break
     payload = dict(state=state, context="build", description=description[:140],
                    target_url=f"https://github.com/{REPO}/actions/runs/{env['GITHUB_RUN_ID']}")
     intent = status_intent(env, payload)
@@ -230,14 +253,30 @@ def publish(intent):
                 return 1
             if latest.get("conclusion") == "cancelled":
                 payload.update(state="failure", description="batch workflow was canceled; redispatch current batch")
+            if payload["state"] == "success" and intent.get("bors"):
+                bors = intent["bors"]
+                # A staging generation can become obsolete without this run
+                # acquiring a new attempt. Revalidate after every quota wait.
+                try:
+                    observed = observation(bors["batch_id"], bors["base_ref"])
+                    candidate_ref(observed, revision, bors["base_sha"],
+                                  batch_id=bors["batch_id"], branch=bors["base_ref"])
+                except (ValueError, KeyError, TypeError):
+                    print("::notice::obsolete or unconfirmed bors generation will not publish success", flush=True)
+                    return 1
             api(f"/statuses/{revision}", payload)
             print(f"Posted build={payload['state']} on {revision}: {payload['description']}", flush=True)
             return 0 if payload["state"] == "success" else 1
         except Deferred as error:
-            # The shared client already waited if reset fitted the budget. A
-            # later status-only job can consume the retained intent after reset.
-            print(f"::error::terminal status pending: {error}; retained status intent can be resumed", file=sys.stderr)
-            return 75
+            # Wait outside POST, then refresh the run fence: an attempt may
+            # have been canceled or superseded during a long quota wait.
+            delay = max(1, error.until - time.time())
+            if time.monotonic() + delay > deadline:
+                print(f"::error::terminal status pending: {error}; retained status intent can be resumed", file=sys.stderr)
+                return 75
+            print(f"::warning::{error}; will refresh run identity before retry", flush=True)
+            time.sleep(delay)
+            continue
         except APIError as error:
             if error.status and error.status < 500:
                 print(f"::error::terminal status rejected: {error}", file=sys.stderr)

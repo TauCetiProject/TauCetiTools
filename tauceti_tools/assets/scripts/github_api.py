@@ -128,15 +128,20 @@ class GitHub:
         self.stats = {}
         self.known_labels = set()
         self.last_write = None
+        self.renewed_status_token = None
 
     def _credential(self, read):
         env = dict(os.environ)
         env.pop("GH_DEBUG", None)  # Request debug logs can contain comment bodies.
+        env.pop("CI_STATUS_APP_PRIVATE_KEY", None)
         token = env.pop("GH_READ_TOKEN", None)
         if read and token:
             env["GH_TOKEN"] = token
             env.pop("GITHUB_TOKEN", None)
             return os.environ.get("TAUCETI_GITHUB_READ_ROLE", "workflow-read"), env
+        if not read and self.renewed_status_token:
+            env["GH_TOKEN"] = self.renewed_status_token
+            env.pop("GITHUB_TOKEN", None)
         return os.environ.get("TAUCETI_GITHUB_WRITE_ROLE", "app-write" if token else "gh-default"), env
 
     def _record(self, credential, method, path, status, headers, read):
@@ -169,6 +174,7 @@ class GitHub:
         now = time.time()
         if self.blocked.get(credential, 0) > now:
             raise Deferred(credential, self.blocked[credential])
+        renewed = False
         for attempt in range(3):
             # GitHub recommends at least a second between mutative requests.
             if not read and self.last_write is not None:
@@ -224,6 +230,25 @@ class GitHub:
                 if conditional and method == "GET" and headers.get("etag"):
                     self.cached[cache_key] = (headers["etag"], payload)
                 return payload
+            if (status == 401 and not renewed and method == "POST"
+                    and re.fullmatch(r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/statuses/[0-9a-f]{40}", path)
+                    and os.environ.get("CI_STATUS_APP_ID") and os.environ.get("CI_STATUS_APP_PRIVATE_KEY")
+                    and attempt < 2):
+                # A definite authentication rejection performed no mutation.
+                # Only trusted status-only jobs receive these optional secrets;
+                # intents cannot select an App, key, endpoint or permissions.
+                from github_app_token import status_token
+                self.renewed_status_token = status_token("/".join(path.split("/")[1:3]),
+                    os.environ["CI_STATUS_APP_ID"], os.environ["CI_STATUS_APP_PRIVATE_KEY"], record=self._record)
+                env["GH_TOKEN"] = self.renewed_status_token
+                env.pop("GITHUB_TOKEN", None)
+                renewed = True
+                continue
+            if isinstance(payload, dict) and isinstance(payload.get("message"), str):
+                payload = dict(payload)
+                for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+                    if env.get(name):
+                        payload["message"] = payload["message"].replace(env[name], "[redacted]")
             error = APIError(method, safe_path(path), status, payload, headers)
             message = str(error).lower()
             limited = status == 429 or (status == 403 and

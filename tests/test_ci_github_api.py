@@ -86,7 +86,7 @@ class CIAPI(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "intent.json"
             with patch.dict(os.environ, dict(env, TAUCETI_STATUS_INTENT=str(path)), clear=True), \
-                 patch.object(finalizer, "terminal_state", side_effect=api.Deferred("ci-read", 4000)), \
+                 patch.object(finalizer, "terminal_state", side_effect=api.Deferred("ci-read", api.time.time() + 4000)), \
                  patch.object(finalizer, "publish") as publish, contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(finalizer.main(), 75)
             publish.assert_not_called()
