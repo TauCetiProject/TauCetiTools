@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "scope": "Publication memory evidence: isolated Node fixture and separate native inventory completion observations",
+  "scope": "SQLite publication-fixture process memory and separate native recent_prs collection/job status observations",
   "issue": "TauCetiProject/TauCetiWorker#316",
-  "isolated_fixture": {
+  "historical_ci_fixture": {
     "at": "2026-10-20T19:53:07.765Z",
     "fixture": {
       "staged_pages": 111,
@@ -34,15 +34,17 @@
     "ci_run": "https://github.com/TauCetiProject/TauCetiTools/actions/runs/39487156998",
     "forced_gc": false,
     "max_sampled_node_heap_used_bytes": 140267192,
-    "measurement_scope": "Node heapUsed samples at three publication stages; old-space limit does not cap total Node heap, RSS, or native Worker isolate memory"
+    "measurement_scope": "Historical CI report with three process heapUsed samples and no baseline, RSS or runtime metadata; the old-space flag does not cap total process heap or RSS",
+    "backend": "sqlite (node:sqlite in-memory)"
   },
+  "instrumented_local_fixture": null,
   "native": {
     "environment": "test",
     "repository": "1256881326",
     "backend": "sqlite",
     "code_commit": "89dc427f0b920d67933e05b1f3f5fd430a054f6c",
     "deployment": "19a2d235-1d45-4d3b-8737-0ed43dafb241",
-    "measurement_scope": "Observed complete stored collection and job status; inventory size and isolate memory usage were not measured in these observations",
+    "measurement_scope": "Recorded native collection/job status only; neither inventory size, a full publication, nor isolate memory usage was measured",
     "observations": [
       {
         "observed_at": "2026-10-20T15:27:25.170Z",
@@ -50,12 +52,12 @@
         "operation": "recent_prs",
         "collection_count": 1,
         "complete_collection_count": 1,
-        "job": {
-          "count": 1,
-          "due": 0,
-          "next_due_ms": 1792513605535,
-          "attempts": 0
-        }
+        "job_count": 1,
+        "job_attempts": 0,
+        "publication_path": "not captured; full publication and unchanged-response verification are both possible",
+        "normal_existing_reconciler": null,
+        "operator_forced_due_or_attempt_reset": null,
+        "provenance": "recorded operator observation; null means not recorded"
       },
       {
         "observed_at": "2026-10-20T17:38:07.346Z",
@@ -63,16 +65,23 @@
         "operation": "recent_prs",
         "collection_count": 1,
         "complete_collection_count": 1,
-        "job": {
-          "count": 1,
-          "due": 1,
-          "next_due_ms": 1792517829480,
-          "attempts": 0
-        },
+        "job_count": 1,
+        "job_attempts": 0,
+        "publication_path": "not captured; full publication and unchanged-response verification are both possible",
         "normal_existing_reconciler": true,
-        "operator_forced_due_or_attempt_reset": false
+        "operator_forced_due_or_attempt_reset": false,
+        "provenance": "recorded operator observation; null means not recorded"
       }
     ]
+  },
+  "publication_implementation_comparison": {
+    "from_commit": "89dc427f0b920d67933e05b1f3f5fd430a054f6c",
+    "to_commit": "2af88e1de3427c2d4d133e136c780fc50041b8a8",
+    "unchanged_paths": [
+      "services/github-state/src/repository.ts",
+      "services/github-state/src/repository_store.ts"
+    ],
+    "basis": "git diff between the two recorded commits"
   },
   "migration_release": false
 }

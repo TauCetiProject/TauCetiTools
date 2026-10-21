@@ -128,13 +128,19 @@ Follow-up jobs are deduplicated once and processed in groups of at most 512,
 reading only IDs, states, membership and scheduling fields. They do not reload
 PR bodies or nested job cursors. All writes remain in the same transaction.
 
-These limits bound cache-group inputs. Decoded inventory and temporary merge or
-serialization objects also consume memory. The publication fixture uses a 96 MiB
-Node old-space cap without forced garbage collection; that cap does not bound
-total Node heap, RSS, or Durable Object isolate memory. The
-[publication evidence](validation/publication-memory-native-2026-10-20.json) records
-its sampled heap usage separately from native inventory completion observations.
-The native observations measure completion status, not isolate memory usage.
+These limits describe PostgreSQL cache-group inputs. Decoded inventory and
+objects used for merging or serialization also consume memory.
+
+The SQLite publication fixture records process memory, a pre-refresh baseline,
+and Node/V8 heap-limit metadata. It runs with a 96 MiB Node old-space flag without
+forced garbage collection. A historical CI run with that flag sampled
+140,267,192 bytes (133.8 MiB) of Node heap usage. Process-wide samples can include
+startup allocations and uncollected garbage; Worker-isolate capacity requires
+separate runtime evidence. The
+[publication evidence](validation/publication-memory-native-2026-10-20.json) also
+records native `recent_prs` collection/job completion observations. Those may
+follow an unchanged response and do not establish full publication or measure
+isolate memory usage.
 
 For an isolate-reset investigation, temporarily set `RECONCILIATION_TRACE` to
 `"true"`. Background alarm and publication stage logs contain only the backend,
