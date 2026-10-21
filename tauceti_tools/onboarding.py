@@ -25,7 +25,10 @@ def configuration_problem(source, reason, *, fresh=False):
         lines += ["Install GitHub CLI using the instructions at https://cli.github.com/.", ""]
     lines += [
         "From a checkout of the content repository, sign in as the human maintainer:",
-        "  gh auth login --hostname github.com --git-protocol https --web",
+        "  gh auth login --hostname github.com --git-protocol https --web --scopes workflow",
+        "  gh auth setup-git",
+        "If already signed in, grant permission to push workflow files:",
+        "  gh auth refresh --hostname github.com --scopes workflow",
         "Choose your own GitHub account; it will become the initial human CODEOWNER.",
         "If this checkout has several remotes, select the upstream content repository once:",
         "  gh repo set-default",

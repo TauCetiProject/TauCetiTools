@@ -1,5 +1,6 @@
 """Actionable reports and private GitHub-state enrollment requests."""
 
+import base64
 import hashlib
 import io
 import json
@@ -19,6 +20,58 @@ from tauceti_tools.scaffold import initial_configuration
 
 
 class DoctorReportTests(unittest.TestCase):
+    def test_dependency_overrides_are_distinct_from_invalid_update_policy(self):
+        from tauceti_tools.doctor import dependency_findings
+
+        project = parse(initial_configuration("one/Project", "human").encode(), "/tmp/tauceti.toml")
+        project.raw["upstreams"] = [{"package": "cslib", "repo": "leanprover/cslib", "update": True}]
+        cslib = {"name": "cslib", "type": "git", "url": "https://github.com/leanprover/cslib",
+                 "rev": "a" * 40, "inputRev": "main", "inherited": False}
+        mathlib = {"name": "mathlib", "type": "git", "url": "https://github.com/leanprover-community/mathlib4",
+                   "rev": "b" * 40, "inherited": True}
+
+        class GitHub:
+            def read(self, path):
+                if "lean-toolchain" in path:
+                    value = "leanprover/lean4:v4.36.0-rc1"
+                elif "repos/one/Project/" in path:
+                    value = json.dumps({"packages": [cslib, mathlib]})
+                else:
+                    value = json.dumps({"packages": [dict(mathlib, rev="c" * 40)]})
+                return {"content": base64.b64encode(value.encode()).decode()}, ""
+
+        finding, = dependency_findings(project, GitHub(), "doctor")
+        self.assertEqual(finding.status, "pending")
+        self.assertIn("c" * 40, finding.summary)
+        self.assertIn("b" * 40, finding.summary)
+        self.assertIn("do not prove", "\n".join(finding.steps))
+        project.raw["upstreams"][0]["branch"] = "other"
+        finding, = dependency_findings(project, GitHub(), "doctor")
+        self.assertEqual(finding.status, "failed")
+        self.assertIn("inputRev = 'main'", finding.summary)
+        project.raw["upstreams"][0]["branch"] = "main"
+        project.raw["upstreams"].append({"package": "mathlib", "repo": "leanprover-community/mathlib4", "update": True})
+        finding, = dependency_findings(project, GitHub(), "doctor")
+        self.assertEqual(finding.status, "failed")
+        self.assertIn("mathlib has update = true but is inherited", finding.summary)
+
+    def test_access_precedes_version_selection_and_private_projects_are_explicit(self):
+        from tauceti_tools.doctor import diagnose
+
+        class GitHub:
+            def read(self, path, **kwargs):
+                if path == "repos/one/Project":
+                    return {"private": True, "default_branch": "main", "owner": {"type": "Organization"}}, ""
+                return None, "GitHub HTTP 404; inaccessible does not establish absence"
+
+        project = parse(initial_configuration("one/Project", "human").encode(), "/tmp/tauceti.toml")
+        findings = diagnose(project, github=GitHub())
+        self.assertEqual(next(f for f in findings if f.id == "repositories.content.visibility").status, "failed")
+        output = io.StringIO()
+        with redirect_stdout(output):
+            render(findings)
+        self.assertLess(output.getvalue().index("Roadmap repository"), output.getvalue().index("Tools version"))
+
     def test_first_run_from_missing_empty_and_invalid_configuration(self):
         from tauceti_tools.project import ConfigError, load
 

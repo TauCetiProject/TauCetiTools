@@ -95,7 +95,7 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
                 "github.auth", "failed", "GitHub CLI is not signed in" if installed else "GitHub CLI is not installed",
                 "Authenticated GitHub CLI with access to administer this project",
                 urls=[] if installed else ["https://cli.github.com/"],
-                commands=["gh auth login --hostname github.com --git-protocol https --web", "gh api user --jq .login"],
+                commands=["gh auth login --hostname github.com --git-protocol https --web --scopes workflow", "gh auth setup-git", "gh api user --jq .login"],
                 steps=(["Install GitHub CLI using the command for your operating system at the linked page."] if not installed else []) + [
                     "Sign in as the project's human maintainer using the browser login command. Then run the status command to confirm the active account.",
                     "If GH_TOKEN or GITHUB_TOKEN is set, it overrides saved CLI credentials. Unset it in this terminal to use the account you just signed in to.",
@@ -133,7 +133,8 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
                     commands=commands,
                     urls=[f"https://github.com/{repo}", "https://github.com/new"],
                     steps=[
-                        "Sign in as an organization owner or repository administrator.",
+                        "Ask the repository owner to confirm the exact URL and give your GitHub account access. A 404 does not distinguish an absent repository from one you cannot access.",
+                        "Repository write access permits setup PRs; changing branch rules and secrets requires administration permission. Organization App installation may require an organization owner. Broader token scopes cannot grant permissions your account does not hold.",
                         f"First check repository access with gh repo view. A 404 can mean missing access. Only if the owner confirms it is absent, create it:\n$ {_cmd('gh', 'repo', 'create', repo, '--public', '--add-readme')}",
                         f"For creation choose Owner: {repo.split('/')[0]}; Repository name: {repo.split('/')[1]}; Visibility: Public; initialize a README.",
                     ],
@@ -144,6 +145,14 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
             continue
         findings.append(Finding(f"repositories.{role}", "ready", repo, "Repository accessible",
                                 optional=role not in ("content", "roadmap")))
+        if data.get("private") or data.get("visibility") in ("private", "internal"):
+            findings.append(Finding(
+                f"repositories.{role}.visibility", "failed", f"{repo} is not public; private projects are not currently supported",
+                "Public project repositories", urls=[f"https://github.com/{repo}/settings"],
+                steps=[
+                    "Stop before installing workflows or enrolling hosted services. The supported setup uses public project repositories: configuration fetching, worker forks, reusable workflows, publication and hosted services have not been adapted for private projects.",
+                    f"Ask the owner whether to use a separate public repository. If so, edit repositories.{role} in {conf} to its owner/name, then rerun doctor. Do not publish the existing repository merely to clear this check; a visibility change requires the owner's deliberate review of its contents and history.",
+                ], verify=again, optional=role not in ("content", "roadmap")))
         if data.get("archived") or data.get("disabled"):
             findings.append(
                 Finding(
@@ -215,6 +224,8 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
         )
 
     findings.extend(package_findings(project, gh, repo_info, again))
+    if any(f.id == "lean.content" and f.status == "ready" for f in findings):
+        findings.extend(dependency_findings(project, gh, again))
     if repo_info.get("content"):
         value, error = gh.read(f"repos/{repo}/actions/permissions")
         status = "unknown" if error else "ready" if value.get("enabled") else "failed"
@@ -640,6 +651,68 @@ def package_findings(project, gh, repo_info, again):
                 "Merge the setup PR as a human. After its build check has run, open Settings → Rules → Rulesets and require pull-request review, code-owner review and the build check on the roadmap's default branch.",
             ], urls=[f"https://github.com/{repo}/actions"], verify=again, section="roadmaps"))
     return findings
+
+
+def dependency_findings(project, gh, again):
+    """Compare published pins with updater policy, without resolving or executing Lake."""
+    def read(repo, revision, name):
+        value, error = gh.read(f"repos/{repo}/contents/{name}?ref={revision}")
+        if error:
+            raise ValueError(f"Cannot read {repo}@{revision}/{name}: {error}")
+        return base64.b64decode(value["content"]).decode().strip()
+
+    policy = project.raw.get("upstreams", [])
+    if not any(u.get("update") for u in policy):
+        return []
+    problems, mismatches = [], []
+    status = "ready"
+    try:
+        manifest = json.loads(read(project.content, project.branch, "lake-manifest.json"))
+        toolchain = read(project.content, project.branch, "lean-toolchain")
+        packages = {p["name"]: p for p in manifest["packages"]}
+        for upstream in policy:
+            if not upstream.get("update"):
+                continue
+            package = packages.get(upstream["package"])
+            if not package or package.get("inherited", False):
+                problems.append(f"{upstream['package']} has update = true but is {'inherited' if package else 'absent'} in the published manifest.")
+            elif package.get("url", "").rstrip("/").removesuffix(".git") != f"https://github.com/{upstream['repo']}":
+                problems.append(f"{upstream['package']}'s published URL differs from configured {upstream['repo']}.")
+            elif package.get("inputRev") != upstream.get("branch", "main"):
+                problems.append(f"{upstream['package']} has inputRev = {package.get('inputRev')!r}, but its configured update branch is {upstream.get('branch', 'main')!r}. Set branch in its [[upstreams]] table to that nominated inputRev; selecting a different Lake requirement is a human-owned change.")
+        for package in packages.values():
+            if package.get("inherited", False):
+                continue
+            url = package.get("url", "").rstrip("/").removesuffix(".git")
+            if package.get("type") != "git" or not url.startswith("https://github.com/"):
+                mismatches.append(f"Cannot inspect {package['name']}: automatic updates require a GitHub Git dependency.")
+                continue
+            repo, revision = url.removeprefix("https://github.com/"), package["rev"]
+            upstream_toolchain = read(repo, revision, "lean-toolchain")
+            if upstream_toolchain != toolchain:
+                mismatches.append(f"{repo}@{revision} declares {upstream_toolchain}; this project uses {toolchain}.")
+            upstream_manifest = json.loads(read(repo, revision, "lake-manifest.json"))
+            for inherited in upstream_manifest["packages"]:
+                actual = packages.get(inherited["name"], {})
+                if any(actual.get(k) != inherited.get(k) for k in ("type", "url", "rev")):
+                    mismatches.append(f"{repo}@{revision} pins {inherited['name']} to {inherited.get('url')}@{inherited.get('rev')}; the project pins {actual.get('url', 'no repository')}@{actual.get('rev', 'no revision')}.")
+        status = "failed" if problems else "pending" if mismatches else "ready"
+    except (ValueError, KeyError, TypeError, UnicodeError) as error:
+        status = "failed" if problems else "unknown"
+        mismatches.append(str(error))
+    return [Finding(
+        "dependencies.updates", status,
+        "\n".join(problems + mismatches) or "Published dependency pins match the conservative automatic-update policy; this does not check newer branch heads or prove a build.",
+        "Explicit direct-dependency update policy", role="Human Lean maintainer",
+        commands=[_cmd("gh", "repo", "clone", project.content),
+                  _cmd("tauceti-tools", "upstreams", "inspect", "--conf", project.source,
+                       "--checkout", project.content.split("/")[1])],
+        steps=[
+            "Use an existing clean content checkout, or clone it with the command below. Compare lakefile.toml (or lakefile.lean), lake-manifest.json and [[upstreams]] in tauceti.toml. Keep the project's existing Lake dependencies; the Mathlib-only starter is not a replacement for a CSLib project.",
+            "For each inherited or absent package reported above, set update = false in its existing [[upstreams]] table. Keep overlap and upstream_destination as desired. To update a direct dependency, add its own table with repo = \"OWNER/REPOSITORY\", package = \"LAKE_PACKAGE_NAME\", branch = \"NOMINATED_BRANCH\", update = true, using the exact URL, package name and inputRev in the manifest. Do not make transitive Mathlib an independent update target.",
+            "Different upstream Mathlib pins do not prove that the current project is broken. Lake can give a direct requirement priority over an inherited one. The automatic updater and bump guard conservatively require exact agreement across upstream manifests; they do not resolve or test overrides. A pending result here means the automatic policy needs attention, not that the current build failed.",
+            "Run the inspect command to check the proposed branch heads without changing files. For a conflict, wait for compatible upstream revisions and rerun it. To pause automatic updates meanwhile, set update = false for every enabled [[upstreams]] entry and merge that configuration change. For a new project, establish and build its combined dependencies before installing the guard. An installed guard rejects deliberate override PRs before CI builds them; this release has no approval-based override path. Pausing updates does not disable that guard.",
+        ], verify=again, section="lean-and-upstream-dependencies")]
 
 
 def extra_findings(project, gh, again):
@@ -1170,6 +1243,7 @@ def _label(check):
         "configuration.ownership": "Human configuration ownership",
         "lean.content": "Content Lean package",
         "lean.roadmap": "Roadmap Lean package",
+        "dependencies.updates": "Automatic dependency updates",
         "roadmap.workflows": "Roadmap build workflow",
     }
     if check in names:
@@ -1190,13 +1264,14 @@ def _paragraph(text, indent="  "):
 
 def _render_tasks(findings):
     groups = {}
-    for item in sorted(findings, key=lambda f: {"failed": 0, "unknown": 1, "pending": 2}.get(f.status, 3)):
+    for item in findings:
         groups.setdefault(_label(item.id), []).append(item)
     for title, items in groups.items():
         print("\n" + title)
         print("  Checks: " + ", ".join(item.id for item in items))
         for summary in dict.fromkeys(item.summary for item in items):
-            _paragraph(summary)
+            for line in summary.splitlines():
+                _paragraph(line)
         if all(item.status in ("ready", "disabled") for item in items):
             continue
         for url in dict.fromkeys(url for item in items for url in item.urls):

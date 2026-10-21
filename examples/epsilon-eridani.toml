@@ -36,14 +36,15 @@ completed_dir = "Completed"
 # ref = "FULL_COMMIT_SHA"
 
 [merge]
-backend = "github-queue"
+backend = "github-direct"
 checks = ["build", "bump-guard", "scope"]
 
 [[upstreams]]
 repo = "leanprover-community/mathlib4"
 package = "mathlib"
 branch = "master"
-update = true
+# Mathlib is inherited through CSLib; do not update it independently.
+update = false
 overlap = true
 upstream_destination = true
 

@@ -31,6 +31,29 @@ artifacts, not independent implementations to edit.
 
 ## Repositories
 
+The supported deployment uses **public project repositories**, including content, roadmap,
+archives, claims and custom rubrics. Private and internal projects are not currently supported.
+Authenticated GitHub API access alone is insufficient: canonical configuration is fetched
+without authentication, and worker forks, dependency fetching, reusable workflows, Pages and
+hosted-service access also need a coordinated private-project design. Do not install this setup
+on a private project on the assumption that adding a token makes the entire deployment private.
+Do not change visibility without the owner's deliberate review of the contents and history.
+
+Install [GitHub CLI](https://cli.github.com/) and sign in as a human maintainer:
+
+```sh
+gh auth login --hostname github.com --git-protocol https --web --scopes workflow
+gh auth setup-git
+# For an existing browser-based login:
+gh auth refresh --hostname github.com --scopes workflow
+```
+
+The OAuth `workflow` scope is needed to push generated workflow files. `GH_TOKEN` or
+`GITHUB_TOKEN`, when set, overrides saved credentials; unset it to use the browser login.
+Scopes do not grant repository permissions the human account lacks. Setup PRs need repository
+write access, rules and secrets need administration permission, and organization App
+installation may require an organization owner.
+
 Run as an organization owner or someone permitted to create repositories:
 
 ```sh
@@ -174,7 +197,7 @@ and roadmap maps live in `scripts/`; new projects start with empty policy files.
 `scripts/lint-docscan-sentinels.txt` sets a minimum declaration count on its first line and lists
 known documented declarations, one per subsequent line.
 
- For CSLib or another
+For CSLib or another
 upstream, obtain the toolchain from that upstream's selected commit instead and add its Lake
 dependency before resolving the manifest. Do not copy a Mathlib-only manifest into a project
 with additional direct dependencies.
@@ -182,10 +205,34 @@ with additional direct dependencies.
 Declare each relevant upstream using a `[[upstreams]]` table: its GitHub repository,
 Lake package name and nominated branch, and whether to update it or scan for overlaps.
 The upstreaming destination is a separate property. A project may depend on both CSLib
-and TauCeti; Mathlib can be a transitive dependency. Those packages must agree on their
-Lean toolchain and shared dependency pins. Resolve incompatible upstream versions before
-opening an automated dependency update. Never independently update transitive Mathlib
-to a version rejected by another direct dependency.
+and TauCeti; Mathlib can be a transitive dependency. Set `update = true` only for direct
+dependencies already present in the manifest. For inherited Mathlib set `update = false`;
+`overlap` and `upstream_destination` remain independent choices. The Mathlib-only starter
+must be adapted to the actual package rather than replacing its existing lakefile.
+
+Lake can give a direct requirement priority over an inherited one. Different upstream Mathlib
+pins therefore do not by themselves prove a combined project is broken. A human can deliberately
+select a shared revision in the lakefile, resolve it with `lake update`, fetch available caches
+with `lake exe cache get`, and run `lake build`. For a new project, establish this integration
+before installing the automated guard. Once installed, the guard rejects deliberate override
+PRs before CI builds them: human review alone does not unblock the required check, and this
+release has no approval-based override path. A working overridden graph can support ordinary
+source PRs but is outside the automatic updater's supported exact-match policy.
+
+The automatic updater is deliberately more conservative: the selected upstreams must agree
+on the Lean toolchain and exact shared pins. Inspect nominated branch heads without changing
+the checkout:
+
+```sh
+tauceti-tools upstreams inspect --conf tauceti.toml --checkout .
+```
+
+If this reports a conflict, wait for compatible upstream branch heads and rerun it. To pause
+automatic bumps, set `update = false` on every enabled upstream entry and merge that
+configuration change. This does not remove dependencies or prevent normal source work.
+It also does not disable the bump guard or permit override PRs.
+An inspection of published pins cannot prove that a newer combination builds; the build
+remains necessary. A pending dependency-policy report is distinct from a failed build.
 
 Keep forward-only dependency changes separate from source authoring. Protected lakefile
 changes remain human-owned. Configure the build policy rather than removing guards to
@@ -258,6 +305,20 @@ automation even when Zulip is off; the same reconciler skips notifications in th
 
 Project lint baselines and exceptions remain in project `scripts/`. The setup action overlays
 shared implementations but preserves the selected project's policy data.
+
+Review the generated diff before opening or merging a setup PR. Generated workflow callers
+replace files at the same paths; preserve any additional existing project build or review
+requirements in the reviewed result. A setup clone uses the maintainer's Git identity, including
+checkout-local `user.name` and `user.email`. If these are unset, configure them in the content
+checkout before preparing the PR:
+
+```sh
+git config user.name "YOUR FULL NAME"
+git config user.email "YOUR VERIFIED GITHUB EMAIL"
+```
+
+Use your own name and a verified or GitHub-provided noreply address from
+<https://github.com/settings/emails>.
 
 ## Actions
 
@@ -499,7 +560,7 @@ writer credentials or bucket permissions.
 
 Bors is always operated by the downstream. `hosted` supplies its PostgreSQL database as a
 separate Neon project managed by the Tau Ceti operator. `custom` supplies PostgreSQL from the
-downstream's provider. `off` keeps the GitHub queue. The database option does not select where
+downstream's provider. `off` keeps the selected GitHub merge backend. The database option does not select where
 the runtime runs.
 
 Configure the Bors URL, deployment (`docker` or `cloudflare`), project repository, default
@@ -571,7 +632,7 @@ printing the URI. Reuse an existing project on a repeated provisioning run.
 
 ### Enable merging
 
-Keep GitHub queue active while registering and inspecting Bors. Confirm App delivery,
+Keep the selected GitHub merge backend active while registering and inspecting Bors. Confirm App delivery,
 repository synchronization and a successful pilot staging build using the required
 `build`, `bump-guard` and `scope` checks. Then explicitly select the Bors merge backend in
 configuration and the corresponding repository variable/rules. A responding health endpoint

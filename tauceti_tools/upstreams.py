@@ -25,7 +25,8 @@ def inspect(project, checkout: Path):
     packages = {row["name"]: row for row in current["packages"]}
     proposed = []
     shared = {}
-    toolchains = set()
+    sources = {}
+    toolchains = {}
     for upstream in project.raw.get("upstreams", []):
         if not upstream.get("update", False):
             continue
@@ -36,8 +37,13 @@ def inspect(project, checkout: Path):
             )
         repo = upstream["repo"]
         branch = upstream.get("branch", "main")
-        commit = api(f"repos/{repo}/commits/{branch}")["sha"]
         old = packages[package]
+        if old.get("inherited", False):
+            raise ConfigError(
+                f"{package} is inherited, not a direct dependency. Set update = false in its [[upstreams]] table "
+                "and enable updates for its direct parent instead; keep the human-owned lakefile unchanged."
+            )
+        commit = api(f"repos/{repo}/commits/{branch}")["sha"]
         expected_url = f"https://github.com/{repo}"
         if old.get("url", "").removesuffix(".git").rstrip("/") != expected_url:
             raise ConfigError(
@@ -46,15 +52,23 @@ def inspect(project, checkout: Path):
         relation = api(f"repos/{repo}/compare/{old['rev']}...{commit}")["status"]
         if relation not in ("ahead", "identical"):
             raise ConfigError(f"{repo} is {relation}; refusing a backwards or divergent update")
-        toolchains.add(file_at(repo, commit, "lean-toolchain").strip())
+        toolchain = file_at(repo, commit, "lean-toolchain").strip()
+        toolchains.setdefault(toolchain, []).append(f"{repo}@{commit}")
         manifest = json.loads(file_at(repo, commit, "lake-manifest.json"))
         for row in manifest["packages"]:
             binding = (row.get("type"), row.get("url"), row.get("rev"))
             if row["name"] in shared and shared[row["name"]] != binding:
                 raise ConfigError(
-                    f"Proposed upstreams disagree on {row['name']}; select mutually compatible upstream revisions before updating"
+                    f"Automatic update blocked: {row['name']} differs. "
+                    f"{sources[row['name']]} requires {shared[row['name']][1]}@{shared[row['name']][2]}; "
+                    f"{repo}@{commit} requires {binding[1]}@{binding[2]}. "
+                    "No pins changed. Wait for compatible nominated branch heads and rerun upstreams inspect, "
+                    "or set update = false for all enabled [[upstreams]] entries to pause automatic updates. "
+                    "This exact-match policy does not establish that your existing Lake project is broken; "
+                    "a deliberate dependency override needs human integration and review."
                 )
             shared[row["name"]] = binding
+            sources[row["name"]] = f"{repo}@{commit}"
         # A direct dependency can also be inherited through another upstream.
         binding = ("git", expected_url, commit)
         if package in shared:
@@ -64,9 +78,15 @@ def inspect(project, checkout: Path):
                     f"{package}'s direct and inherited pins disagree; update its downstream upstream first"
                 )
         shared[package] = binding
+        sources[package] = f"{repo}@{commit}"
         proposed.append({"package": package, "repo": repo, "old": old["rev"], "new": commit})
     if len(toolchains) > 1:
-        raise ConfigError("Configured upstreams require different Lean toolchains; no update prepared")
+        versions = "; ".join(f"{', '.join(repos)} requires {version}" for version, repos in toolchains.items())
+        raise ConfigError(
+            "Automatic update blocked: " + versions + ". No pins changed. Wait for upstream branch heads "
+            "with a common Lean toolchain and rerun upstreams inspect, or set update = false for all enabled "
+            "[[upstreams]] entries. A human must choose and build any deliberate integration."
+        )
     return proposed, next(iter(toolchains), None)
 
 

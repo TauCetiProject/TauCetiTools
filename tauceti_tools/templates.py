@@ -13,7 +13,7 @@ import tempfile
 from functools import lru_cache
 from pathlib import Path
 
-from .project import CANONICAL, Project, bootstrap, checkout_root
+from .project import CANONICAL, ConfigError, Project, bootstrap, checkout_root
 
 HERE = Path(__file__).resolve().parent
 ASSETS = HERE / "assets"
@@ -328,9 +328,17 @@ def configuration_pr(project: Project, *, apply=False, role="content"):
     repository = project.repos.get(role)
     if not repository:
         raise ValueError(f"Set repositories.{role} before preparing this repository")
+    # Preserve a maintainer's checkout-local identity in the temporary setup clone.
+    identity = {}
+    for key in ("user.name", "user.email"):
+        result = subprocess.run(["git", "config", "--get", key], capture_output=True, text=True)
+        if result.returncode == 0:
+            identity[key] = result.stdout.strip()
     print(f"Install pinned Tools helpers and workflow callers in {repository}; open a human-reviewed PR.")
     directory = Path(tempfile.mkdtemp(prefix="tauceti-setup-"))
     subprocess.run(["gh", "repo", "clone", repository, str(directory), "--", "--depth", "1"], check=True)
+    for key, value in identity.items():
+        subprocess.run(["git", "-C", str(directory), "config", key, value], check=True)
     base_branch = subprocess.check_output(["git", "-C", str(directory), "branch", "--show-current"], text=True).strip()
     existing = subprocess.check_output([
         "gh", "api", "--paginate", f"repos/{repository}/pulls?state=open&per_page=100", "--jq",
@@ -350,16 +358,37 @@ def configuration_pr(project: Project, *, apply=False, role="content"):
     subprocess.run(["git", "-C", str(directory), "add", "--all"], check=True)
     if not apply:
         subprocess.run(["git", "-C", str(directory), "diff", "--cached"], check=True)
+        print("Review every generated workflow replacement against your existing build and review policy; retain any project-specific requirements before applying.")
         print(f"Preview saved in {directory}; inspect its files. Add --apply to commit, push and open the setup PR.")
         return
     if subprocess.run(["git", "-C", str(directory), "diff", "--cached", "--quiet"]).returncode == 0:
         print("Already configured; no PR needed.")
         return
+    author = subprocess.run(["git", "-C", str(directory), "var", "GIT_AUTHOR_IDENT"], capture_output=True, text=True)
+    if author.returncode:
+        raise ConfigError(
+            "Git needs your commit identity before creating the setup PR. In your original content checkout run:\n"
+            '  git config user.name "YOUR FULL NAME"\n'
+            '  git config user.email "YOUR VERIFIED GITHUB EMAIL"\n'
+            "Replace both values with your own identity; find your verified or GitHub-provided noreply address at "
+            "https://github.com/settings/emails . Rerun the same doctor --fix command from that checkout. "
+            "The setup clone inherits this local identity."
+        )
     subprocess.run(
         ["git", "-C", str(directory), "commit", "-m", "Configure shared Tau Ceti project tooling"], check=True
     )
     # gh pr create can choose the operator's fork when upstream write access is absent.
-    subprocess.run(["git", "-C", str(directory), "push", "-u", "origin", branch], check=True)
+    pushed = subprocess.run(["git", "-C", str(directory), "push", "-u", "origin", branch])
+    if pushed.returncode:
+        raise ConfigError(
+            f"Could not push the setup branch; your prepared commit is in {directory}. "
+            "For browser-based GitHub CLI authentication run:\n"
+            "  gh auth refresh --hostname github.com --scopes workflow\n"
+            "  gh auth setup-git\n"
+            "If GH_TOKEN or GITHUB_TOKEN is set, it overrides saved credentials; unset it to use browser login. "
+            "Confirm your account has repository write access; token scopes do not grant that access. "
+            "Then rerun the same doctor --fix command, or retry git push from the saved directory."
+        )
     body = directory / ".git/tauceti-pr-body"
     body.write_text("Configure the project with pinned shared TauCetiTools helpers and workflows.\n\nRoadmap: none\n")
     subprocess.run(
