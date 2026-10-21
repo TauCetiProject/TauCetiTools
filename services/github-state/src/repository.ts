@@ -25,7 +25,7 @@ const cursorKey=(repo:string,id:string,offset:number)=>`cursors/${repo}/${id}/${
 
 export class RepositoryState extends DurableObject<Env> {
   private inflightQueries=new Map<string,Promise<Result>>();
-  private completedQueries=new Map<string,{result:Result,expires:number}>();
+  private completedQueries=new Map<string,{result:Result,expires:number,built:number}>();
   sql:SqlStorage;
   // R2 owns durable full state; this is its local read-only guard.
   degraded?:{since:number,reason:Failure,operation:string};
@@ -1533,7 +1533,8 @@ export class RepositoryState extends DurableObject<Env> {
         }
         const key=queryKey(q)+'|observed:'+Boolean(q.allow_observed)+'|'+(q.cursor || '');
         const cached=this.completedQueries.get(key);
-        if (!q.cursor && cached?.result.revision===this.revision() && cached.expires>Date.now()) {
+        if (!q.cursor && cached && cached.expires>Date.now() &&
+          (cached.result.revision===this.revision() || q.operation==='survey' && Date.now()-cached.built<10000)) {
           requestCoverage=cached.result.coverage || 'unknown';
           await this.optionalAsync('demand',()=>this.noteDemand(q));
           return json(cached.result,200,{ETag:'"'+cached.result.revision+'"',...headers});
@@ -1548,7 +1549,7 @@ export class RepositoryState extends DurableObject<Env> {
         finally { if (this.inflightQueries.get(key)===pending) this.inflightQueries.delete(key); }
         if (!q.cursor && result.status==='ok') {
           this.completedQueries.delete(key);
-          this.completedQueries.set(key,{result,expires:Date.now()+540000});
+          this.completedQueries.set(key,{result,expires:Date.now()+540000,built:Date.now()});
           while (this.completedQueries.size>16) this.completedQueries.delete(this.completedQueries.keys().next().value!);
         }
         requestUnavailable=result.status==='unavailable';

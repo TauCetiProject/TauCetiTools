@@ -1,3 +1,4 @@
+import {build} from 'esbuild';
 import {readFileSync} from 'node:fs';
 import {generateKeyPairSync,createHash} from 'node:crypto';
 import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
@@ -5,7 +6,13 @@ const key=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({for
 const hash=s=>createHash('sha256').update(s).digest('hex');
 export const repository={id:'100',name:'org/repo',installation:'200'};
 export async function runtime(handler,bindings={},options={}){
- return new Miniflare(convertV4MiniflareOptions({...options,modules:true,script:readFileSync('dist/index.js','utf8'),compatibilityDate:'2026-10-11',durableObjects:{REPOSITORIES:{className:'RepositoryState',useSQLite:true},INSTALLATIONS:{className:'InstallationScheduler',useSQLite:true}},r2Buckets:['ARCHIVE'],queueProducers:{EVENTS:'events'},bindings:{ALLOWED_REPOSITORIES:JSON.stringify([repository]),GITHUB_APP_ID:'42',GITHUB_INSTALLATION_ID:'200',GITHUB_PRIVATE_KEY:String(key),WEBHOOK_SECRET:'secret',CLIENT_TOKENS:JSON.stringify([{hash:hash('client'),repositories:['org/repo']}]),ADMIN_TOKEN_HASH:hash('admin'),...bindings},outboundService:async req=>{
+ const {repositoryAlarms,repositoryExtension,...runtimeOptions}=options;
+ let script=readFileSync('dist/index.js','utf8');
+ if(repositoryAlarms===false || repositoryExtension){
+  const result=await build({stdin:{contents:"import worker,{RepositoryState as Base,InstallationScheduler} from './src/index';class RepositoryState extends Base{"+(repositoryAlarms===false?"async setAlarm(){}":"")+(repositoryExtension || "")+"};export{RepositoryState,InstallationScheduler};export default worker;",resolveDir:process.cwd(),loader:'ts'},bundle:true,format:'esm',platform:'browser',target:'es2022',external:['cloudflare:workers'],write:false});
+  script=result.outputFiles[0].text;
+ }
+ return new Miniflare(convertV4MiniflareOptions({...runtimeOptions,modules:true,script,compatibilityDate:'2026-10-11',durableObjects:{REPOSITORIES:{className:'RepositoryState',useSQLite:true},INSTALLATIONS:{className:'InstallationScheduler',useSQLite:true}},r2Buckets:['ARCHIVE'],queueProducers:{EVENTS:'events'},bindings:{ALLOWED_REPOSITORIES:JSON.stringify([repository]),GITHUB_APP_ID:'42',GITHUB_INSTALLATION_ID:'200',GITHUB_PRIVATE_KEY:String(key),WEBHOOK_SECRET:'secret',CLIENT_TOKENS:JSON.stringify([{hash:hash('client'),repositories:['org/repo']}]),ADMIN_TOKEN_HASH:hash('admin'),...bindings},outboundService:async req=>{
   const u=new URL(req.url);
   if(u.pathname.endsWith('/access_tokens'))return Response.json({token:'installation-read-token',expires_at:new Date(Date.now()+3600000).toISOString()},{status:201});
   return handler(req,u);
