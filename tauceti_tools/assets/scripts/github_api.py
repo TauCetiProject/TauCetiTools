@@ -7,15 +7,18 @@ without GH_READ_TOKEN use the normal gh credential for both.
 
 from __future__ import annotations
 
+import argparse
 import datetime as dt
 import email.utils
 import json
 import math
 import os
 import re
+import random
 import subprocess
 import sys
 import time
+import urllib.parse
 
 
 class APIError(RuntimeError):
@@ -26,9 +29,13 @@ class APIError(RuntimeError):
     message identifies the method/path and the server's message, if present.
     """
 
-    def __init__(self, method, path, status, data):
+    def __init__(self, method, path, status, data, headers=None):
         self.status, self.data = status, data
+        self.headers = headers or {}
         message = data.get("message", "request failed") if isinstance(data, dict) else "request failed"
+        for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_READ_TOKEN"):
+            if os.environ.get(name):
+                message = str(message).replace(os.environ[name], "[redacted]")
         super().__init__(f"GitHub {method} {path}: HTTP {status}: {message}")
 
 
@@ -37,6 +44,7 @@ class Deferred(RuntimeError):
 
     def __init__(self, credential, until):
         self.until = until
+        mark_quota_unavailable()
         reset = dt.datetime.fromtimestamp(until, dt.timezone.utc).isoformat()
         super().__init__(f"GitHub {credential} rate limited; deferred until {reset}")
 
@@ -80,6 +88,22 @@ def retry_after(value, now, *, default=0):
     return max(0, delay) if math.isfinite(delay) else default
 
 
+
+def safe_path(path):
+    """Log endpoint identity without arbitrary query values or credentials."""
+    parsed = urllib.parse.urlsplit(path)
+    clean = parsed.path
+    for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_READ_TOKEN"):
+        if os.environ.get(name):
+            clean = clean.replace(os.environ[name], "[redacted]")
+    keys = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    if keys:
+        clean += "?" + "&".join(
+            key + "=" + (value if key in {"page", "per_page"} and value.isdigit() else "[redacted]")
+            for key, value in keys)
+    return clean
+
+
 class GitHub:
     """A gh-backed client with separate read/write credentials and bounded retries.
 
@@ -95,9 +119,11 @@ class GitHub:
     GraphQL costs and observed quota headers to stderr and the Actions summary.
     """
 
-    def __init__(self, *, max_wait=180):
+    def __init__(self, *, max_wait=180, jitter=0):
         self.max_wait = max_wait
         self.waited = 0
+        self.jitter = jitter
+        self.cached = {}
         self.blocked = {}
         self.stats = {}
         self.known_labels = set()
@@ -110,21 +136,25 @@ class GitHub:
         if read and token:
             env["GH_TOKEN"] = token
             env.pop("GITHUB_TOKEN", None)
-            return "workflow-read", env
-        return "app-write" if token else "gh-default", env
+            return os.environ.get("TAUCETI_GITHUB_READ_ROLE", "workflow-read"), env
+        return os.environ.get("TAUCETI_GITHUB_WRITE_ROLE", "app-write" if token else "gh-default"), env
 
     def _record(self, credential, method, path, status, headers, read):
         stat = self.stats.setdefault(credential, {"requests": 0, "reads": 0, "writes": 0, "buckets": {}})
         stat["requests"] += 1
         stat["reads" if read else "writes"] += 1
         resource = headers.get("x-ratelimit-resource", "core")
-        quota = {k: headers.get(f"x-ratelimit-{k}") for k in ("limit", "remaining", "reset")}
+        if resource not in {"core", "search", "graphql", "integration_manifest", "code_search"}:
+            resource = "other"
+        quota = {k: headers.get(f"x-ratelimit-{k}") if str(headers.get(f"x-ratelimit-{k}", "")).isdigit()
+                 else None for k in ("limit", "remaining", "reset")}
+        path = safe_path(path)
         stat["buckets"][resource] = quota
         # Only fixed API paths and numeric quota values are logged, never tokens or PR bodies.
         print("github-api: " + json.dumps({"credential": credential, "method": method,
               "path": path, "status": status, "resource": resource, **quota}), file=sys.stderr)
 
-    def request(self, method, path, data=None, *, read=None):
+    def request(self, method, path, data=None, *, read=None, conditional=False, idempotent=False):
         """Return parsed JSON using the read/write credential selected by ``read``.
 
         GET defaults to a read; GraphQL queries explicitly opt in. Apply bounded
@@ -132,6 +162,8 @@ class GitHub:
         an ambiguous creation POST. Raise ``Deferred`` when quota waits exceed
         the budget, or ``APIError`` for other unsuccessful responses.
         """
+        if path.startswith(("http:", "https:", "//")):
+            raise ValueError("GitHub requests must use a relative API path")
         read = method == "GET" if read is None else read
         credential, env = self._credential(read)
         now = time.time()
@@ -142,10 +174,17 @@ class GitHub:
             if not read and self.last_write is not None:
                 time.sleep(max(0, self.last_write + 1 - time.monotonic()))
             argv = ["gh", "api", "--include", "--method", method, path]
+            cache_key = (credential, path)
+            cached = self.cached.get(cache_key) if conditional and method == "GET" else None
+            if cached:
+                argv += ["--header", "If-None-Match: " + cached[0]]
             if data is not None:
                 argv += ["--input", "-"]
-            result = subprocess.run(argv, input=json.dumps(data) if data is not None else None,
-                                    env=env, capture_output=True, text=True)
+            try:
+                result = subprocess.run(argv, input=json.dumps(data) if data is not None else None,
+                                        env=env, capture_output=True, text=True, timeout=30)
+            except (subprocess.TimeoutExpired, OSError):
+                result = subprocess.CompletedProcess(argv, 1, "", "GitHub request timed out or could not start")
             if not read:
                 self.last_write = time.monotonic()
             # Network/CLI failures are ambiguous for a POST; do not blindly repeat it.
@@ -159,6 +198,7 @@ class GitHub:
                     if secret:
                         diagnostic = diagnostic.replace(secret, "[redacted]")
                 status, headers, payload = 0, {}, {"message": diagnostic[:300]}
+            self.last_headers = headers
             self._record(credential, method, path, status, headers, read)
             if path == "graphql" and isinstance(payload, dict):
                 rate = (payload.get("data") or {}).get("rateLimit") or {}
@@ -178,9 +218,13 @@ class GitHub:
                     status = 503
                 else:
                     status = 422
+            if status == 304 and cached:
+                return cached[1]
             if 200 <= status < 300 and result.returncode == 0:
+                if conditional and method == "GET" and headers.get("etag"):
+                    self.cached[cache_key] = (headers["etag"], payload)
                 return payload
-            error = APIError(method, path, status, payload)
+            error = APIError(method, safe_path(path), status, payload, headers)
             message = str(error).lower()
             limited = status == 429 or (status == 403 and
                        (headers.get("retry-after") or headers.get("x-ratelimit-remaining") == "0" or
@@ -196,11 +240,16 @@ class GitHub:
                     and "secondary" not in message)
                 if primary:
                     # Missing reset data must not license a fast retry against an exhausted quota.
-                    reset = float(headers.get("x-ratelimit-reset") or now + 3600)
+                    try:
+                        reset = float(headers.get("x-ratelimit-reset") or now + 3600)
+                        if not math.isfinite(reset):
+                            reset = now + 3600
+                    except (ValueError, OverflowError):
+                        reset = now + 3600
                     delay = max(5, delay, reset - now + 5)
                 elif not delay:
                     delay = 60 * 2 ** attempt
-                delay = math.ceil(delay)
+                delay = math.ceil(delay + random.uniform(0, self.jitter))
                 until = now + delay
                 if attempt == 2 or self.waited + delay > self.max_wait:
                     self.blocked[credential] = until
@@ -211,7 +260,7 @@ class GitHub:
                 continue
             # Retry reads and idempotent updates after server errors. Comment and label
             # creation POSTs are ambiguous after a server error, so reconciliation rereads state.
-            if (status == 0 or status >= 500) and (read or (status != 0 and method in {"PATCH", "PUT", "DELETE"})) and attempt < 2:
+            if (status == 0 or status >= 500) and (read or idempotent or (status != 0 and method in {"PATCH", "PUT", "DELETE"})) and attempt < 2:
                 delay = 2 ** (attempt + 1)
                 if self.waited + delay <= self.max_wait:
                     time.sleep(delay)
@@ -388,3 +437,87 @@ def pr_snapshot(api, repo, pr):
                 raise RuntimeError(f"PR #{pr}: file pagination did not advance")
             after = next_cursor
     raise RuntimeError(f"PR #{pr}: changed while fetching its diff; retry reconciliation")
+
+
+def mark_quota_unavailable():
+    """Expose a trusted step outcome without parsing candidate-produced logs."""
+    target = os.environ.get("GITHUB_ENV")
+    if target:
+        with open(target, "a") as stream:
+            stream.write("TAUCETI_CI_QUOTA_UNAVAILABLE=1\n")
+
+
+def main(argv=None):
+    """Small gh-api-compatible JSON CLI using the same bounded client as CI scripts."""
+    ap = argparse.ArgumentParser(description=main.__doc__)
+    ap.add_argument("path")
+    ap.add_argument("-X", "--method")
+    ap.add_argument("--jq", "-q")
+    ap.add_argument("-f", "--raw-field", action="append", default=[])
+    ap.add_argument("-F", "--field", action="append", default=[])
+    ap.add_argument("--input")
+    ap.add_argument("--paginate", action="store_true")
+    ap.add_argument("--slurp", action="store_true")
+    ap.add_argument("--silent", action="store_true")
+    args = ap.parse_args(argv)
+    fields = {}
+    for typed, values in ((False, args.raw_field), (True, args.field)):
+        for value in values:
+            key, sep, text = value.partition("=")
+            if not sep or not key or any(c in key for c in "[]"):
+                ap.error("fields require a simple name=value")
+            if typed and text.startswith("@"):
+                text = sys.stdin.read() if text == "@-" else open(text[1:]).read()
+            elif typed and re.fullmatch(r"-?\d+|true|false|null", text):
+                text = json.loads(text)
+            fields[key] = text
+    if args.input and fields:
+        ap.error("--input and fields cannot be combined")
+    data = (json.load(sys.stdin) if args.input == "-" else json.load(open(args.input))) if args.input else (fields or None)
+    method = (args.method or ("POST" if data is not None else "GET")).upper()
+    path = args.path
+    if method == "GET" and data:
+        path += ("&" if "?" in path else "?") + urllib.parse.urlencode(data)
+        data = None
+    api = GitHub(max_wait=int(os.environ.get("TAUCETI_GITHUB_MAX_WAIT", "180")), jitter=2)
+    try:
+        if args.paginate:
+            if method != "GET":
+                ap.error("pagination requires GET")
+            pages = []
+            while path:
+                pages.append(api.request("GET", path))
+                next_link = re.search(r'<([^>]+)>;\s*rel="next"', api.last_headers.get("link", ""))
+                if next_link:
+                    parsed = urllib.parse.urlsplit(next_link[1])
+                    if parsed.scheme != "https" or parsed.netloc != "api.github.com":
+                        raise ValueError("unsafe GitHub pagination link")
+                    path = parsed.path.lstrip("/") + ("?" + parsed.query if parsed.query else "")
+                else:
+                    path = None
+            values = [pages] if args.slurp else pages
+        else:
+            value = api.request(method, path, data)
+            values = [[value]] if args.slurp else [value]
+        if not args.silent:
+            for value in values:
+                if args.jq:
+                    # Never run a jq filter against an error response.
+                    filtered = subprocess.run(["jq", "-r", args.jq], input=json.dumps(value), text=True)
+                    if filtered.returncode:
+                        return filtered.returncode
+                else:
+                    print(json.dumps(value))
+        return 0
+    except Deferred as error:
+        print(f"::error::{error}", file=sys.stderr)
+        return 75
+    except (APIError, ValueError, OSError) as error:
+        print(f"::error::{error}", file=sys.stderr)
+        return 1
+    finally:
+        api.report()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

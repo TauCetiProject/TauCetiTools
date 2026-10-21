@@ -179,33 +179,45 @@ class FinalizerTests(unittest.TestCase):
                 if posted_state:
                     self.assertEqual(post.call_args.args[1]["state"], posted_state)
 
-    def test_observation_api_has_fixed_authority_bounded_io_and_scoped_attempt(self):
-        with patch.dict(os.environ, GH_TOKEN="test-token"), patch.object(finalizer.urllib.request, "urlopen") as request:
-            response = request.return_value.__enter__.return_value
-            response.read.return_value = b'{"jobs": [], "total_count": 0}'
+    def test_observation_api_uses_shared_client_and_conditional_attempt_reads(self):
+        client = Mock()
+        with patch.object(finalizer, "_client", client):
             finalizer.api("/actions/runs/12/attempts/2/jobs?per_page=100")
-            self.assertEqual(request.call_args.args[0].full_url,
-                             "https://api.github.com/repos/TauCetiProject/TauCeti/actions/runs/12/attempts/2/jobs?per_page=100")
-            self.assertEqual(request.call_args.kwargs["timeout"], 15)
-            response.read.assert_called_once_with(finalizer.MAX_BYTES + 1)
+        client.request.assert_called_once_with("GET", "repos/TauCetiProject/TauCeti/actions/runs/12/attempts/2/jobs?per_page=100",
+                                               None, conditional=True, idempotent=False)
 
-    def test_final_post_honors_retry_after_with_a_bounded_recovery_budget(self):
-        for retry_after in ["60", "Thu, 01 Jan 1970 00:01:00 GMT", "600", "invalid"]:
-            with self.subTest(retry_after=retry_after):
-                clock = Clock()
-                error = HTTPError("https://api.github.com", 429, "rate limited", {"Retry-After": retry_after}, None)
-                self.addCleanup(error.close)
-                with patch.dict(os.environ, ENV, clear=True), \
-                     patch.object(finalizer, "terminal_state", return_value=("success", "confirmed")), \
-                     patch.object(finalizer, "api", side_effect=error) as post, \
-                     patch.object(finalizer.time, "monotonic", clock), \
-                     patch.object(finalizer.time, "time", return_value=0), \
-                     patch.object(finalizer.time, "sleep", side_effect=clock.sleep), \
-                     contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                    self.assertEqual(finalizer.main(), 1)
-                    self.assertEqual(clock.now, finalizer.POST_RETRY_SECONDS)
-                    self.assertGreater(post.call_count, 0)
-                    self.assertLessEqual(post.call_count, 10)
+    def test_quota_exhaustion_exits_without_fast_retry_and_preserves_intent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = str(Path(directory) / "intent.json")
+            with patch.dict(os.environ, dict(ENV, TAUCETI_STATUS_INTENT=target), clear=True), \
+                 patch.object(finalizer, "terminal_state", return_value=("success", "confirmed")), \
+                 patch.object(finalizer, "api", side_effect=finalizer.Deferred("ci-status-app", 4000)) as post, \
+                 patch.object(finalizer.time, "sleep") as sleep, \
+                 contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(finalizer.main(), 75)
+            post.assert_called_once()
+            sleep.assert_not_called()
+            intent = json.loads(Path(target).read_text())
+            self.assertEqual(intent["payload"]["state"], "success")
+            with patch.object(finalizer, "terminal_state", side_effect=AssertionError("must not rebuild")), \
+                 patch.object(finalizer, "api", side_effect=[dict(run_attempt=2), {}]) as post, \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(finalizer.main(["--resume", target]), 0)
+            self.assertEqual(post.call_args.args[0], "/statuses/" + ENV["STATUS_SHA"])
+
+    def test_resuming_intent_rejects_tampering_and_fences_successor(self):
+        payload = dict(state="success", context="build", description="ok",
+                       target_url="https://github.com/TauCetiProject/TauCeti/actions/runs/12")
+        original = finalizer.status_intent(ENV, payload)
+        for field, value in [("revision", "main"), ("repo", "other/repo"), ("attempt", 0),
+                             ("run_id", "12"), ("payload", dict(payload, context="arbitrary")),
+                             ("payload", dict(payload, target_url="https://evil.example"))]:
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                finalizer.validate_intent(dict(original, **{field: value}))
+        with patch.object(finalizer, "api", return_value=dict(run_attempt=3)) as post, \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(finalizer.publish(original), 1)
+        post.assert_called_once()
 
 
 class WorkflowBoundaryTests(unittest.TestCase):

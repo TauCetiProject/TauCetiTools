@@ -4,12 +4,14 @@
 Executed only from the immutable workflow checkout. The finalizer starts beside
 the publisher after the full sandbox audit; it never consumes candidate files.
 """
+import argparse
 import json
 import os
 import sys
 import time
-import urllib.request
-from email.utils import parsedate_to_datetime
+from pathlib import Path
+
+from github_api import APIError, Deferred, GitHub
 
 from bors_observation import MAX_BYTES, REPO, observation, sha
 from bors_train_identity import candidate_ref
@@ -18,25 +20,26 @@ PUBLISHER = "publish-merge-group-cache / publish"
 CONFIRM = "Confirm the exact revision map on the public endpoint"
 ACQUISITION_SECONDS = 300
 PUBLICATION_SECONDS = 1200
-POST_RETRY_SECONDS = 180
+POST_RETRY_SECONDS = 600
 MACHINE_LABEL = "nscloud-ubuntu-24.04-amd64-4x8-with-features;job.priority=0"
 API_ROOT = "https://api.github.com/repos/" + REPO
 
 
+_client = None
+
+
+def post_retry_seconds():
+    return max(0, min(3700, int(os.environ.get("TAUCETI_GITHUB_MAX_WAIT", POST_RETRY_SECONDS))))
+
+
 def api(path, payload=None):
-    """Bound API I/O and keep the status token on the fixed repository authority."""
-    request = urllib.request.Request(API_ROOT + path, headers={
-        "Authorization": "Bearer " + os.environ["GH_TOKEN"],
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "TauCetiBatchFinalizer/1.0",
-        "Content-Type": "application/json",
-    }, data=None if payload is None else json.dumps(payload).encode())
-    with urllib.request.urlopen(request, timeout=15) as response:
-        raw = response.read(MAX_BYTES + 1)
-    if len(raw) > MAX_BYTES:
-        raise ValueError("GitHub response exceeds bound")
-    return json.loads(raw)
+    """Use the shared credential-aware quota client; never repeat ambiguous reruns."""
+    global _client
+    if _client is None:
+        _client = GitHub(max_wait=post_retry_seconds(), jitter=2)
+    return _client.request("GET" if payload is None else "POST", "repos/" + REPO + path,
+                           payload, conditional=payload is None,
+                           idempotent=path.startswith("/statuses/"))
 
 
 def publication_job(data):
@@ -69,7 +72,9 @@ def wait_publication(run_id, attempt, *, fetch=api, clock=time.monotonic, sleep=
         try:
             data = fetch(f"/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
             job = publication_job(data)
-        except (OSError, ValueError, KeyError, TypeError) as error:
+        except Deferred:
+            raise
+        except (OSError, APIError, ValueError, KeyError, TypeError) as error:
             # A transient API failure gets a bounded retry, never a green result.
             print(f"::warning::publisher observation unavailable: {type(error).__name__}", flush=True)
             job = None
@@ -127,7 +132,81 @@ def terminal_state(env, *, wait=wait_publication, observe=observation):
     return state, description
 
 
-def main():
+def status_intent(env, payload):
+    """A data-only record lets another trusted job publish without rebuilding."""
+    return dict(schema="tauceti-ci.status-intent/v1", repo=REPO, revision=env["STATUS_SHA"],
+                run_id=int(env["GITHUB_RUN_ID"]), attempt=int(env["GITHUB_RUN_ATTEMPT"]), payload=payload)
+
+
+def validate_intent(intent):
+    if (intent.get("schema") != "tauceti-ci.status-intent/v1" or intent.get("repo") != REPO
+            or not sha(intent.get("revision"))):
+        raise ValueError("invalid status intent identity")
+    for key in ("run_id", "attempt"):
+        if type(intent.get(key)) is not int or intent[key] <= 0:
+            raise ValueError("invalid status intent run identity")
+    payload = intent.get("payload", {})
+    if (set(payload) != {"state", "context", "description", "target_url"}
+            or payload.get("state") not in {"success", "failure"} or payload.get("context") != "build"
+            or not isinstance(payload.get("description"), str) or len(payload["description"]) > 140
+            or payload.get("target_url") != f"https://github.com/{REPO}/actions/runs/{intent['run_id']}"):
+        raise ValueError("invalid status intent payload")
+    return intent
+
+
+def publish(intent):
+    """Retry only publication, preserving the completed result and attempt fence."""
+    validate_intent(intent)
+    payload = dict(intent["payload"])
+    revision = intent["revision"]
+    deadline = time.monotonic() + post_retry_seconds()
+    while time.monotonic() < deadline:
+        try:
+            # This read remains authoritative: a previous attempt cannot overwrite
+            # a successor. Conditional requests require server revalidation.
+            latest = api(f"/actions/runs/{intent['run_id']}")
+            if latest["run_attempt"] != intent["attempt"]:
+                print("::notice::superseded run attempt will not overwrite its successor's status", flush=True)
+                return 1
+            if latest.get("conclusion") == "cancelled":
+                payload.update(state="failure", description="batch workflow was canceled; redispatch current batch")
+            api(f"/statuses/{revision}", payload)
+            print(f"Posted build={payload['state']} on {revision}: {payload['description']}", flush=True)
+            return 0 if payload["state"] == "success" else 1
+        except Deferred as error:
+            # The shared client already waited if reset fitted the budget. A
+            # later status-only job can consume the retained intent after reset.
+            print(f"::error::terminal status pending: {error}; retained status intent can be resumed", file=sys.stderr)
+            return 75
+        except APIError as error:
+            if error.status and error.status < 500:
+                print(f"::error::terminal status rejected: {error}", file=sys.stderr)
+                return 1
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        print("::warning::terminal status publication unavailable; retrying without rebuilding", flush=True)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(10, remaining))
+    print("::error::terminal status could not be posted; retained intent can be resumed", file=sys.stderr)
+    return 1
+
+
+def main(argv=()):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--resume", help="publish an existing trusted status intent without repeating the build")
+    args = parser.parse_args(argv)
+    if args.resume:
+        path = Path(args.resume)
+        if path.stat().st_size > 16384:
+            raise ValueError("status intent exceeds bound")
+        intent = validate_intent(json.loads(path.read_text()))
+        for variable, field in (("CI_STATUS_SOURCE_RUN_ID", "run_id"), ("CI_STATUS_SOURCE_ATTEMPT", "attempt")):
+            expected = os.environ.get(variable)
+            if expected is not None and str(intent[field]) != expected:
+                raise ValueError("status intent does not match trusted source run/attempt")
+        return publish(intent)
     env = os.environ
     revision = env.get("STATUS_SHA")
     if not sha(revision):
@@ -135,47 +214,24 @@ def main():
         return 1
     try:
         state, description = terminal_state(env)
-    except (OSError, ValueError, KeyError, TypeError) as error:
+    except Deferred as error:
+        print(f"::error::batch evidence unavailable: {error}; build result was not reclassified", file=sys.stderr)
+        return 75
+    except (OSError, APIError, ValueError, KeyError, TypeError) as error:
         state, description = "failure", "batch finalization failed: " + type(error).__name__
     payload = dict(state=state, context="build", description=description[:140],
                    target_url=f"https://github.com/{REPO}/actions/runs/{env['GITHUB_RUN_ID']}")
-    deadline = time.monotonic() + POST_RETRY_SECONDS
-    delay = 5
-    while time.monotonic() < deadline:
-        try:
-            # Defense in depth for completed/canceled/rerun API states. This is a
-            # best-effort check; GitHub does not make the GET and POST atomic.
-            latest = api(f"/actions/runs/{env['GITHUB_RUN_ID']}")
-            if latest["run_attempt"] != int(env["GITHUB_RUN_ATTEMPT"]):
-                print("::notice::superseded run attempt will not overwrite its successor's status", flush=True)
-                return 1
-            if latest.get("conclusion") == "cancelled":
-                payload.update(state="failure", description="batch workflow was canceled; redispatch current batch")
-                state = "failure"
-            api(f"/statuses/{revision}", payload)
-            print(f"Posted build={state} on {revision}: {description}", flush=True)
-            return 0 if state == "success" else 1
-        except (OSError, ValueError, KeyError, TypeError) as error:
-            print(f"::warning::terminal status POST failed: {type(error).__name__}", flush=True)
-            headers = getattr(error, "headers", None)
-            retry_after = headers.get("Retry-After") if headers else None
-            requested_delay = delay
-            if retry_after:
-                try:
-                    requested_delay = max(0, int(retry_after))
-                except ValueError:
-                    try:
-                        requested_delay = max(0, parsedate_to_datetime(retry_after).timestamp() - time.time())
-                    except (ValueError, TypeError, OverflowError):
-                        pass
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            time.sleep(min(max(1, requested_delay), remaining))
-            delay = min(delay * 2, 30)
-    print("::error::terminal status could not be posted; inspect GitHub API availability", file=sys.stderr)
-    return 1
+    intent = status_intent(env, payload)
+    target = env.get("TAUCETI_STATUS_INTENT")
+    if not target and env.get("RUNNER_TEMP"):
+        target = str(Path(env["RUNNER_TEMP"]) / "tauceti-status-intent.json")
+    if target:
+        destination = Path(target)
+        temporary = destination.with_suffix(".tmp")
+        temporary.write_text(json.dumps(intent) + "\n")
+        temporary.replace(destination)
+    return publish(intent)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

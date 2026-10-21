@@ -6,41 +6,32 @@ identity. Attempt two is forced to Namespace by the trusted picker. Force-cancel
 bypasses always() finalizers; failed recovery publishes an infrastructure verdict.
 """
 
-import json
 from http.client import HTTPException
 import os
 import re
 import sys
 import time
-import urllib.request
 import urllib.error
+
+from github_api import APIError, Deferred, GitHub
 
 TITLE = re.compile(
     r"^bors branch=[^ ]+ batch=[1-9][0-9]* head=(?P<head>[0-9a-f]{40}) base=[0-9a-f]{40}$"
 )
-ROOT = "https://api.github.com/repos/TauCetiProject/TauCeti"
+
+
+_client = None
 
 
 def api(path, data=None):
-    """Read or mutate the fixed repository API with bounded response size.
-
-    Supplying data sends a JSON POST. HTTP/transport/decoding failures propagate;
-    callers must not automatically repeat an ambiguous cancellation or rerun.
-    """
-    request = urllib.request.Request(
-        ROOT + path,
-        data=None if data is None else json.dumps(data).encode(),
-        headers={
-            "Authorization": "Bearer " + os.environ["GH_TOKEN"],
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "TauCetiFleetRecovery/1.0",
-        },
-    )
-    with urllib.request.urlopen(request, timeout=15) as response:
-        raw = response.read(2 * 1024 * 1024 + 1)
-    if len(raw) > 2 * 1024 * 1024:
-        raise ValueError("API response exceeds bound")
-    return json.loads(raw) if raw else {}
+    """Revalidate reads cheaply, and only retry definitely rejected mutations."""
+    global _client
+    if _client is None:
+        _client = GitHub(max_wait=180, jitter=2)
+    return _client.request("GET" if data is None else "POST",
+                           "repos/TauCetiProject/TauCeti" + path, data,
+                           conditional=data is None,
+                           idempotent=path.startswith("/statuses/"))
 
 
 def eligible(run):
@@ -98,6 +89,8 @@ def recover(
         return "not-an-initial-bors-attempt"
     try:
         return wait_for_fleet(run_id, fetch=fetch, clock=clock, sleep=sleep, run=run)
+    except Deferred:
+        raise  # Do not spend an exhausted credential on failure-status probes.
     except (OSError, HTTPException, ValueError, KeyError, TypeError, RuntimeError):
         failure_status(run_id, run, fetch=fetch)
         raise
@@ -111,8 +104,14 @@ def wait_for_fleet(run_id, *, fetch, clock, sleep, run):
     """
     deadline = clock() + 420
     placed = False
+    next_run_read = clock() + 30
+    latest = run
     while clock() < deadline:
-        latest = fetch(f"/actions/runs/{run_id}")
+        # Job observations carry placement/acquisition evidence. Run-attempt
+        # polling needs only one read per 30s, plus a fresh fence before cancel.
+        if clock() >= next_run_read:
+            latest = fetch(f"/actions/runs/{run_id}")
+            next_run_read = clock() + 30
         if latest.get("run_attempt") != 1 or latest.get("status") == "completed":
             return "already-terminal-or-retried"
         job = build_job(fetch(f"/actions/runs/{run_id}/attempts/1/jobs?per_page=100"))
@@ -137,11 +136,15 @@ def handoff(run_id, run, *, fetch, clock, sleep):
     The caller owns terminal failure reporting if any observation or mutation
     fails. No mutation is repeated after an ambiguous HTTP result.
     """
+    latest = fetch(f"/actions/runs/{run_id}")
+    if latest.get("run_attempt") != 1 or latest.get("status") == "completed":
+        return "already-terminal-or-retried"
     # Mutations are not automatically retried after an ambiguous HTTP failure.
     try:
         fetch(f"/actions/runs/{run_id}/force-cancel", {})
-    except urllib.error.HTTPError as error:
-        if 400 <= error.code < 500 and error.code != 409:
+    except (urllib.error.HTTPError, APIError) as error:
+        code = getattr(error, "code", getattr(error, "status", 0))
+        if 400 <= code < 500 and code not in {409, 429}:
             # Definite rejection: ordinary cancellation still has a finalizer
             # and cannot silently strand bors.
             fetch(f"/actions/runs/{run_id}/cancel", {})
@@ -166,7 +169,7 @@ def handoff(run_id, run, *, fetch, clock, sleep):
             try:
                 fetch(f"/actions/runs/{run_id}/rerun", {})
                 return "rerun-on-namespace-requested"
-            except (OSError, HTTPException):
+            except (OSError, HTTPException, APIError):
                 # POST may have succeeded despite a lost response. Observe the
                 # successor before deciding to hand recovery back to bors.
                 deadline = clock() + 60

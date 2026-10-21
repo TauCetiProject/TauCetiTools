@@ -16,8 +16,11 @@ import urllib.parse
 import urllib.request
 import zipfile
 
+from github_api import GitHub
+
 ORIGIN = "https://ci-data.taucetiproject.org"
 MAX_BYTES = 24 * 1024 * 1024
+_API_TELEMETRY = GitHub(max_wait=0)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -48,10 +51,22 @@ def request(url, token, data=None):
         headers=headers,
         data=json.dumps(data).encode() if data is not None else None,
     )
+    github = urllib.parse.urlparse(url).hostname == "api.github.com"
+
+    def record(status, response_headers):
+        if github:
+            _API_TELEMETRY._record(os.environ.get("TAUCETI_GITHUB_READ_ROLE", "ci-summary-read"),
+                                   "GET" if data is None else "POST",
+                                   urllib.parse.urlsplit(url).path + ("?" + urllib.parse.urlsplit(url).query
+                                       if urllib.parse.urlsplit(url).query else ""),
+                                   status, {k.lower(): v for k, v in response_headers.items()}, data is None)
+
     try:
         with urllib.request.build_opener(NoRedirect).open(req, timeout=30) as response:
+            record(response.status, response.headers)
             value = response.read(MAX_BYTES + 1)
     except urllib.error.HTTPError as error:
+        record(error.code, error.headers)
         if error.code not in (301, 302, 303, 307, 308):
             raise HTTPFailure(error, url) from None
         location = error.headers["Location"]
@@ -134,7 +149,7 @@ def main():
         try:
             value = request(
                 "https://api.github.com/repos/TauCetiProject/TauCeti/" + path,
-                os.environ["GH_TOKEN"],
+                os.environ.get("GH_READ_TOKEN") or os.environ["GH_TOKEN"],
             )
         except HTTPFailure as error:
             if error.status in (403, 429):
