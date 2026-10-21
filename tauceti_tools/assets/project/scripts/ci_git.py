@@ -63,7 +63,7 @@ class Git:
 
     def run(self, *args, check=True):
         return subprocess.run(self.command + list(args), env=self.env, check=check,
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
 
     def branch(self, value):
         # Branches must be full ordinary branch names, never revisions, refspecs,
@@ -178,10 +178,11 @@ def main():
                                      token=os.environ.get("CI_GIT_TOKEN") or os.environ.get("GH_TOKEN"))))
         else:
             print(tree_entry(args.checkout, args.commit, args.path))
-    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+    except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         # Do not print network stderr or the environment: either could contain
         # credentials. Local identity diagnostics above are safe and actionable.
-        diagnostic = f"Git operation exited {error.returncode}" if isinstance(error, subprocess.CalledProcessError) else str(error)
+        diagnostic = ("Git operation exceeded its 120-second deadline" if isinstance(error, subprocess.TimeoutExpired)
+                      else f"Git operation exited {error.returncode}" if isinstance(error, subprocess.CalledProcessError) else str(error))
         parser.exit(1, f"ci-git: {diagnostic}\n")
 
 

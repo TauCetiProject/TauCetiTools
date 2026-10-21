@@ -1,0 +1,69 @@
+name: CI API credentials
+description: Keep essential status writes out of the repository workflow read quota
+inputs:
+  owner:
+    required: true
+  repository:
+    required: true
+  workflow-token:
+    required: true
+  read-app-id:
+    default: ''
+  read-app-private-key:
+    default: ''
+  status-app-id:
+    default: ''
+  status-app-private-key:
+    default: ''
+outputs:
+  read-token:
+    value: ${{ steps.read.outputs.token || inputs.workflow-token }}
+  status-token:
+    value: ${{ steps.status.outputs.token || inputs.workflow-token }}
+  read-role:
+    value: ${{ steps.read.outputs.token && 'ci-read-app' || 'ci-workflow-read' }}
+  status-role:
+    value: ${{ steps.status.outputs.token && 'ci-status-app' || 'ci-workflow-write' }}
+runs:
+  using: composite
+  steps:
+    - name: Validate CI credential configuration
+      shell: bash
+      env:
+        READ_ID: ${{ inputs.read-app-id }}
+        READ_KEY: ${{ inputs.read-app-private-key }}
+        STATUS_ID: ${{ inputs.status-app-id }}
+        STATUS_KEY: ${{ inputs.status-app-private-key }}
+      run: |
+        set -euo pipefail
+        if { [ -n "$READ_ID" ] && [ -z "$READ_KEY" ]; } || { [ -z "$READ_ID" ] && [ -n "$READ_KEY" ]; } \
+            || { [ -n "$STATUS_ID" ] && [ -z "$STATUS_KEY" ]; } || { [ -z "$STATUS_ID" ] && [ -n "$STATUS_KEY" ]; }; then
+          echo '::error::CI App ID and private key must be configured together'
+          exit 1
+        fi
+        if [ -z "$STATUS_ID" ]; then
+          echo '::notice::CI_STATUS_APP_ID is unset; reads and statuses share the repository workflow quota'
+        fi
+        # Different tokens for the same installation share a quota. Keep the
+        # repository token for reads unless a separate read App is configured.
+    - uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf
+      id: read
+      if: ${{ inputs.read-app-id != '' }}
+      with:
+        app-id: ${{ inputs.read-app-id }}
+        private-key: ${{ inputs.read-app-private-key }}
+        owner: ${{ inputs.owner }}
+        repositories: ${{ inputs.repository }}
+        permission-contents: read
+        permission-pull-requests: read
+    - uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf
+      id: status
+      if: ${{ inputs.status-app-id != '' }}
+      with:
+        app-id: ${{ inputs.status-app-id }}
+        private-key: ${{ inputs.status-app-private-key }}
+        owner: ${{ inputs.owner }}
+        repositories: ${{ inputs.repository }}
+        permission-statuses: write
+    # Actions run/job reads are public on the TauCeti deployment. A private
+    # deployment must give its workflow token actions:read (as callers do).
