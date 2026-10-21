@@ -66,6 +66,16 @@ class Recovery(unittest.TestCase):
             with self.subTest(context=context, url=url), patch.object(finalizer, "api", return_value=[dict(context=context, target_url=url)]):
                 self.assertFalse(finalizer.newer_build_status(self.intent()))
 
+    def test_only_newest_build_status_is_authoritative(self):
+        newer_history = dict(context="build", target_url="https://github.com/TauCetiProject/TauCeti/actions/runs/13")
+        for current in [dict(context="build", target_url="https://github.com/TauCetiProject/TauCeti/actions/runs/12"),
+                        dict(context="build", target_url="https://github.com/TauCetiProject/TauCeti/actions/runs/11"),
+                        dict(context="build", target_url="https://other.example/current-verdict")]:
+            with self.subTest(current=current), patch.object(finalizer, "api", return_value=[current, newer_history]):
+                self.assertFalse(finalizer.newer_build_status(self.intent()))
+        with patch.object(finalizer, "api", return_value=[dict(context="scope"), newer_history]):
+            self.assertTrue(finalizer.newer_build_status(self.intent()))
+
     def test_newer_status_appearing_during_quota_wait_is_rechecked(self):
         now = [0]
         def sleep(delay): now[0] += delay

@@ -247,8 +247,9 @@ def newer_build_status(intent):
             continue
         target = row.get("target_url")
         match = pattern.fullmatch(target) if isinstance(target, str) else None
-        if match and int(match.group(1)) > intent["run_id"]:
-            return True
+        # GitHub orders statuses newest first. Older rows are historical;
+        # only the current build verdict can supersede this publication.
+        return bool(match and int(match.group(1)) > intent["run_id"])
     return False
 
 
