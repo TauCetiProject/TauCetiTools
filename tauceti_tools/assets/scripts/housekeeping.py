@@ -42,11 +42,14 @@ separate stack_policy.py policy includes drafts, dependency bumps and all labels
 it has its own evidence, race and idempotency checks before commenting/closing.
 Its close also emits the normal GitHub event consumed by bors withdrawal.
 
-A scoreboard is trusted only if it carries the `tauceti-scoreboard` marker AND its author is
-repo-associated (OWNER/MEMBER/COLLABORATOR). This destructive close policy is deliberately stricter
+The review-budget policy trusts a scoreboard only if it carries the `tauceti-scoreboard` marker AND its author is
+repo-associated (OWNER/MEMBER/COLLABORATOR). This budget-based close policy is deliberately stricter
 than the worker and auto-merge scoreboard readers. The reviewer and the PR author are frequently the
 same account, so trust is by association, not by "not the author": an external author cannot forge a
 repo-associated comment that makes housekeeping close a PR.
+
+Seven-day stale retirement uses the repository-managed awaiting-author status label, just as red
+retirement uses ci-failed. These labels follow the normal review/status trust policy.
 
 Env: GH_TOKEN (a token that can close PRs), REPO (owner/name), optional DRY_RUN=1, REVIEW_BUDGET,
 BUDGET_LABEL, STALE_DAYS, EMPTY_QUIET_MINUTES, CI_FAILED_DAYS.

@@ -532,7 +532,7 @@ export class RepositoryState extends DurableObject<Env> {
     if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.projectSurvey.call(state,kind,id,parent,data,deleted));
     if(!parent || !(await this.store.exec("SELECT id FROM resources WHERE kind='pr' AND id=?",parent)).toArray().length) return;
     const fragment=kind==='issue_comments'?issueFragment(data):reviewFragment(data);
-    const useful=kind==='issue_comments'?fragment.meta!==null || fragment.marker || fragment.rebase_heads.length || fragment.blocked.length:fragment.root || fragment.parent && fragment.reply;
+    const useful=kind==='issue_comments'?fragment.meta!==null || fragment.marker || fragment.rebase_heads.length:fragment.root || fragment.parent && fragment.reply;
     if(deleted || !useful) await this.store.exec('DELETE FROM survey_fragments WHERE kind=? AND id=?',kind,id);
     else await this.store.exec('INSERT INTO survey_fragments VALUES(?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET parent=excluded.parent,data=excluded.data',kind,id,parent,JSON.stringify(fragment));
   }
@@ -594,7 +594,7 @@ export class RepositoryState extends DurableObject<Env> {
       const decoded=await Promise.all(rows.slice(offset,offset+8).map(async row=>({row,data:await this.decode(row.data)})));
       for(const {row,data} of decoded) {
         const fragment=row.kind==='issue_comments'?issueFragment(data):reviewFragment(data);
-        const useful=row.kind==='issue_comments'?fragment.meta!==null || fragment.marker || fragment.rebase_heads.length || fragment.blocked.length:fragment.root || fragment.parent && fragment.reply;
+        const useful=row.kind==='issue_comments'?fragment.meta!==null || fragment.marker || fragment.rebase_heads.length:fragment.root || fragment.parent && fragment.reply;
         if(useful)fragments.push([row.kind,row.id,number,JSON.stringify(fragment)]);
       }
       if(fragments.length>=200)await flush();

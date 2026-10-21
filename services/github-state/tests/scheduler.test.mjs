@@ -102,6 +102,7 @@ test('comment bursts coalesce projection rebuilds and malformed reply IDs do not
   await state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
   await state.put('pr','7',{number:7,labels:[{name:'roadmap/PDE'}]});await state.membership('open_prs:{}','7',true);
   await db.prepare('INSERT INTO collections VALUES(?,?,?,?,?,?,?)').run('open_prs:{}','open_prs','{}',1,Date.now(),0,null);
+  await state.put('issue_comments','50',{id:'50',body:'plain comment'},Date.now(),false,'7');await state.membership('issue_comments:{"number":7}','50',true);
   await state.hydrateSurvey('7');let rebuilds=0;const rebuild=state.rebuildSurvey.bind(state);state.rebuildSurvey=function(n){rebuilds++;return rebuild(n);};
   await state.put('review_comments','100',{id:'100',body:'<!--tauceti-rubric:reuse -->'},Date.now(),false,'7');await state.membership('review_comments:{"number":7}','100',true);
   for(let i=101;i<121;i++) {await state.put('review_comments',String(i),{id:String(i),in_reply_to_id:'100',body:'contest'},Date.now(),false,'7');await state.membership('review_comments:{"number":7}',String(i),true);}
