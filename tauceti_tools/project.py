@@ -173,10 +173,21 @@ class Project:
 
 
 def parse(data: bytes, source: str = "") -> Project:
+    from .onboarding import configuration_problem
+
     try:
         raw = tomllib.loads(data.decode("utf-8"))
     except (ValueError, UnicodeError) as error:
-        raise ConfigError(f"Invalid TOML in {source}: {error}") from error
+        raise ConfigError(configuration_problem(source, f"Invalid TOML: {error}")) from None
+    try:
+        if not raw:
+            raise ConfigError("The file contains no project settings.")
+        return _validate(raw, source)
+    except ConfigError as error:
+        raise ConfigError(configuration_problem(source, str(error), fresh=not data.strip())) from None
+
+
+def _validate(raw: dict, source: str) -> Project:
     allowed = {
         "schema_version",
         "project",
@@ -196,7 +207,7 @@ def parse(data: bytes, source: str = "") -> Project:
     if unknown:
         raise ConfigError(f"Unknown configuration sections: {', '.join(sorted(unknown))}")
     if raw.get("schema_version") != 1 or isinstance(raw.get("schema_version"), bool):
-        raise ConfigError("schema_version must be 1")
+        raise ConfigError("Set schema_version = 1 at the top of the file, before any [table] header.")
     repos = _table(raw, "repositories")
     for key in ("content", "roadmap"):
         if key not in repos:
@@ -226,7 +237,7 @@ def parse(data: bytes, source: str = "") -> Project:
             raise ConfigError(f"tools.{name} must have repo and ref fields")
         repository(value.get("repo", ""), f"tools.{name}.repo")
         if not isinstance(value.get("ref"), str) or not REF_RE.fullmatch(value["ref"]):
-            raise ConfigError(f"tools.{name}.ref must be a full immutable 40-character commit SHA")
+            raise ConfigError(f"tools.{name}.ref must be a full immutable 40-character commit SHA. Run gh api repos/{value['repo']}/commits/HEAD --jq .sha and put the returned SHA in ref under [tools.{name}].")
     review = _table(raw, "review")
     if "rubrics" in review and (
         not isinstance(review["rubrics"], list)
@@ -292,6 +303,10 @@ def read_source(source: str) -> bytes:
         return data
     try:
         return Path(source).expanduser().read_bytes()
+    except FileNotFoundError:
+        from .onboarding import configuration_problem
+
+        raise ConfigError(configuration_problem(source, "The file does not exist.", fresh=True)) from None
     except OSError as error:
         raise ConfigError(f"Cannot read {source}: {error}") from error
 

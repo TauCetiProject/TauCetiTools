@@ -67,7 +67,16 @@ Install the tools, clone the content repository and create `tauceti.toml` at its
 uv tool install git+https://github.com/TauCetiProject/TauCetiTools
 gh repo clone ExampleOrg/ExampleCeti
 cd ExampleCeti
+tauceti-tools init --repo ExampleOrg/ExampleCeti --owner-login ExampleMaintainer
 ```
+
+`init` can fill an empty `tauceti.toml`; it refuses to replace a nonempty file.
+For an existing configuration, use `--output tauceti.toml.example` to generate a separate
+reference and compare the settings. The template selects `merge.backend = "github-direct"`:
+merges happen automatically after the required build and review, with no merge queue and
+no requirement to be up to date with the default branch. Change that setting only when
+intentionally selecting another merge backend. Check the generated Lean module roots,
+roadmap directory names and human ownership against the existing project.
 
 The [complete example](../examples/epsilon-eridani.toml) shows the full configuration.
 Its main fields are `repositories.content`, `repositories.roadmap`, `project.branch`,
@@ -79,6 +88,9 @@ Commands select configuration in this order: explicit `--conf PATH_OR_HTTPS_URL`
 `TAUCETI_CONF`, `./tauceti.toml`, then `tauceti.toml` at the current Git checkout's root.
 For example, `tauceti doctor` works from the content checkout or any of its subdirectories.
 Git worktrees use their own root. Other parent directories are not searched.
+Inside a Git checkout with no project configuration, `tauceti doctor` reports how to
+create one; outside a checkout it retains the worker-host diagnostics. `tauceti-tools doctor`
+always diagnoses project setup, including a missing configuration.
 
 Use `.github/CODEOWNERS` to assign human ownership, for example:
 

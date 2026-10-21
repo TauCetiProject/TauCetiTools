@@ -19,6 +19,76 @@ from tauceti_tools.scaffold import initial_configuration
 
 
 class DoctorReportTests(unittest.TestCase):
+    def test_first_run_from_missing_empty_and_invalid_configuration(self):
+        from tauceti_tools.project import ConfigError, load
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "tauceti.toml"
+            for contents in (None, b"", b"# settings will go here\n", b"schema_version = 7\n", b"[broken"):
+                if contents is not None:
+                    config.write_bytes(contents)
+                with self.assertRaises(ConfigError) as caught:
+                    load(str(config))
+                report = str(caught.exception)
+                self.assertIn("tauceti-tools init --repo", report)
+                self.assertIn("gh api user --jq .login", report)
+                self.assertIn("tauceti-tools doctor --conf", report)
+                self.assertIn(str(config), report)
+                if contents is not None:
+                    self.assertEqual(config.read_bytes(), contents)
+            config.write_bytes(b"")
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["init", "--repo", "one/Epsilon-Eridani", "--owner-login", "human",
+                                       "--output", str(config)]), 0)
+            project = load(str(config))
+            self.assertEqual(project.roots, ["EpsilonEridani"])
+            self.assertEqual(project.raw["merge"]["backend"], "github-direct")
+            original = config.read_bytes()
+            with redirect_stdout(io.StringIO()), patch("sys.stderr", new_callable=io.StringIO) as errors:
+                self.assertEqual(main(["init", "--repo", "one/Project", "--owner-login", "human",
+                                       "--output", str(config)]), 2)
+            self.assertIn("--output", errors.getvalue())
+            self.assertEqual(config.read_bytes(), original)
+
+    def test_first_diagnosis_and_optional_credentials_have_specific_next_steps(self):
+        from tauceti_tools.doctor import diagnose
+
+        class GitHub:
+            def read(self, path, **kwargs):
+                if path in ("repos/one/Project", "repos/one/ProjectRoadmap"):
+                    return {"owner": {"type": "Organization"}, "default_branch": "main"}, ""
+                return None, "GitHub HTTP 404; inaccessible does not establish absence"
+
+        project = parse(initial_configuration("one/Project", "human").encode(), "/tmp/tauceti.toml")
+        project.raw["features"].update(docs=True, progress=True, claims=True, ci_archive=True,
+                                       archives=True, zulip=True, fleet=True, security_audit=True)
+        for name in ("github_state", "bors", "cache"):
+            project.raw["services"][name]["mode"] = "hosted"
+        rows = {f.id: f for f in diagnose(project, github=GitHub())}
+        self.assertIn('[tools.tools]', "\n".join(rows["pins.tools"].steps))
+        rules = "\n".join(rows["rules.content"].steps)
+        self.assertIn("Clear Require branches to be up to date", rules)
+        for name, expected in (("LAKE_CACHE_KEY", "Object Read & Write"), ("ZULIP_EMAIL", "email="),
+                               ("ZULIP_API_KEY", "key="), ("FLEET_READ_TOKEN", "features.fleet = false")):
+            steps = "\n".join(rows["secrets." + name].steps)
+            self.assertIn(expected, steps)
+            self.assertNotIn("Click Create GitHub App", steps)
+        self.assertIn("Generate a private key", "\n".join(rows["secrets.APP_PRIVATE_KEY"].steps))
+        self.assertIn("lakefile.toml", "\n".join(rows["lean.roadmap"].steps))
+        for finding in rows.values():
+            if finding.status not in ("ready", "disabled"):
+                self.assertTrue(finding.steps, finding.id)
+
+    def test_missing_github_login_stops_cascading_access_failures(self):
+        from tauceti_tools.doctor import diagnose
+
+        project = parse(initial_configuration("one/Project", "human").encode(), "/tmp/tauceti.toml")
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            findings = diagnose(project)
+        self.assertEqual([f.id for f in findings], ["github.auth"])
+        self.assertIn("https://cli.github.com/", findings[0].urls)
+        self.assertIn("gh auth login", findings[0].commands[0])
+
     def test_check_only_filters_and_keeps_operator_procedure(self):
         class GitHub:
             def read(self, path, **kwargs):

@@ -83,10 +83,38 @@ def _cmd(*args):
 
 
 def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
+    if github is None:
+        try:
+            auth = subprocess.run(["gh", "auth", "status", "--hostname", "github.com"], capture_output=True, text=True)
+            authenticated = auth.returncode == 0
+            installed = True
+        except FileNotFoundError:
+            installed = authenticated = False
+        if not authenticated:
+            return [Finding(
+                "github.auth", "failed", "GitHub CLI is not signed in" if installed else "GitHub CLI is not installed",
+                "Authenticated GitHub CLI with access to administer this project",
+                urls=[] if installed else ["https://cli.github.com/"],
+                commands=["gh auth login --hostname github.com --git-protocol https --web", "gh auth status --hostname github.com"],
+                steps=(["Install GitHub CLI using the command for your operating system at the linked page."] if not installed else []) + [
+                    "Sign in as the project's human maintainer using the browser login command. Then run the status command to confirm the active account.",
+                    "If GH_TOKEN or GITHUB_TOKEN is set, it overrides saved CLI credentials. Unset it in this terminal to use the account you just signed in to.",
+                    "Run doctor again after signing in; it will then inspect repositories, workflows and credentials.",
+                ], section="repositories")]
     gh = github or GitHub()
     findings = []
     conf = project.source
     again = _cmd("tauceti-tools", "doctor", "--conf", conf)
+    owners = project.raw.get("project", {}).get("codeowners", [])
+    if not isinstance(owners, list) or not owners or any(not isinstance(x, str) or not x.startswith("@") for x in owners):
+        findings.append(Finding(
+            "configuration.ownership", "failed", "No human CODEOWNER selected",
+            "Human maintainers own configuration and workflow policy",
+            commands=["gh api user --jq .login"],
+            steps=[
+                f"Run the command below as a human maintainer. In {conf}, under [project], set codeowners = [\"@LOGIN\"], replacing LOGIN with that returned GitHub login. Add other authorized human maintainers or teams to the array as needed.",
+                "The workflow setup generates .github/CODEOWNERS for tauceti.toml, .github/, scripts/ and Lake configuration when that file is absent. If CODEOWNERS already exists, edit it to cover those paths while retaining existing ownership. Require code-owner review in the branch rule.",
+            ], verify=again, section="configuration-and-ownership"))
     repo_info = {}
     wanted = {"content": project.content, "roadmap": project.repos["roadmap"]}
     if extras:
@@ -102,11 +130,11 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
                     "unknown",
                     f"{repo}: {error}",
                     "Repository exists and is accessible",
-                    commands=commands + [_cmd("gh", "repo", "create", repo, "--public", "--add-readme")],
+                    commands=commands,
                     urls=[f"https://github.com/{repo}", "https://github.com/new"],
                     steps=[
                         "Sign in as an organization owner or repository administrator.",
-                        "First check repository access with gh repo view. Create the repository only if the owner confirms it is absent.",
+                        f"First check repository access with gh repo view. A 404 can mean missing access. Only if the owner confirms it is absent, create it:\n$ {_cmd('gh', 'repo', 'create', repo, '--public', '--add-readme')}",
                         f"For creation choose Owner: {repo.split('/')[0]}; Repository name: {repo.split('/')[1]}; Visibility: Public; initialize a README.",
                     ],
                     verify=_cmd("gh", "repo", "view", repo, "--json", "nameWithOwner,defaultBranchRef"),
@@ -123,7 +151,7 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
                     "failed",
                     "Repository archived or disabled",
                     "Active repository",
-                    commands=[_cmd("gh", "repo", "unarchive", repo)],
+                    commands=[_cmd("gh", "repo", "unarchive", repo)] if data.get("archived") else [],
                     urls=[f"https://github.com/{repo}/settings"],
                     steps=[
                         "Under General → Danger Zone, select Unarchive this repository. A disabled repository requires its owner to contact GitHub support."
@@ -176,7 +204,9 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
                 commands=[_cmd("gh", "api", f"repos/{pin.get('repo', default_repo)}/commits/HEAD", "--jq", ".sha")],
                 urls=[f"https://github.com/{pin.get('repo', default_repo)}/commits"],
                 steps=[
-                    f"Put the selected repository and full SHA in [tools.{tool}], then regenerate the workflow callers with the workflows repair. Review and generator versions must agree with their corresponding merge workflows."
+                    f"Run the gh api command to obtain a full commit SHA. In {conf}, add or edit the following table, replacing PASTE_FULL_SHA with that output:\n[tools.{tool}]\nrepo = \"{pin.get('repo', default_repo)}\"\nref = \"PASTE_FULL_SHA\"",
+                    "Select all required tool versions before installing workflows. The generated callers use these exact SHAs; rerun doctor after editing the configuration.",
+                    *(["For doc-gen4, select a commit whose lean-toolchain matches this project's lean-toolchain; the latest commit may require a different Lean version."] if tool == "docgen" else []),
                 ],
                 verify=again,
                 section="versions",
@@ -242,10 +272,12 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
                     status,
                     summary,
                     "Trusted default-branch configuration and workflow",
-                    commands=[_cmd("tauceti-tools", "doctor", "--conf", conf, "--fix", "workflows", "--apply")],
+                    commands=[],
                     urls=[f"https://github.com/{repo}/tree/{project.branch}/.github"],
                     steps=[
-                        "Install the pinned project templates in a local checkout, inspect the diff, and open the configuration PR. Merge through the normal human review process."
+                        "First select the Tools and Review versions reported above, and create/access the content repository. The preview command clones it into a temporary checkout; your working tree is preserved.",
+                        f"Preview the configuration and workflow changes:\n$ {_cmd('tauceti-tools', 'doctor', '--conf', conf, '--fix', 'workflows')}\nInspect the printed diff and files, then open the setup PR:\n$ {_cmd('tauceti-tools', 'doctor', '--conf', conf, '--fix', 'workflows', '--apply')}",
+                        "Open the PR URL printed by the command, review and merge it as a human. On a new repository, install these workflows before requiring their status checks. Then rerun doctor.",
                     ],
                     verify=again,
                     section="workflows",
@@ -320,9 +352,12 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
                 commands=[_cmd("gh", "api", rules_endpoint)],
                 urls=[rules_url],
                 steps=[
-                    f"Edit the existing protection rule for {project.branch}." if classic else f"Name: Tau Ceti content. Enforcement: Active. Target branch: {project.branch}.",
-                    "Enable Require a pull request before merging; require code-owner review for human-owned configuration. Add required status checks build, bump-guard and scope from their expected GitHub Actions producer.",
-                    "For github-queue enable Require merge queue. Keep human-owned changes subject to code-owner review. Set the automation App's bypass, if needed, to pull requests only; never grant content authors unconditional bypass.",
+                    f"Edit the existing protection rule for {project.branch}." if classic else f"Name: Tau Ceti content. Enforcement status: Active. Target branches → Add target → Include by pattern → {project.branch}.",
+                    "After the setup PR has installed the workflows, enable Require a pull request before merging and Require review from Code Owners. Under Require status checks to pass, Add checks: " + ", ".join(sorted(required_checks)) + ". Select their GitHub Actions producer. If a name is not listed yet, run pr-build on the setup PR before making the check mandatory.",
+                    ("Clear Require branches to be up to date before merging and Require merge queue. Keep the automation App out of the bypass list: it merges reviewed content through the normal PR checks." if direct else
+                     "Enable Require merge queue." if project.raw.get("merge", {}).get("backend", "github-queue") == "github-queue" else
+                     "Bors is the selected merger. Keep the existing merge authority until its pilot staging build succeeds; then use the Bors branch rules in the manual."),
+                    "Keep configuration changes subject to human code-owner review. Click Save changes (classic protection) or Create/Save changes with Enforcement Active (ruleset).",
                 ],
                 verify=again,
                 section="branch-rules",
@@ -429,19 +464,10 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
                 else "fleet"
             )
             secret_file = Path.home() / ".config/tauceti/projects" / project.key / folder / name
-            from .deployment import app_manifest
+            from .credentials import credential_setup
 
-            manifest = app_manifest(project, app_role)
-            owner = repo.split("/")[0]
-            settings = (f"https://github.com/organizations/{owner}/settings/apps/new"
-                        if repo_info["content"]["owner"]["type"] == "Organization"
-                        else "https://github.com/settings/apps/new")
-            permissions = ", ".join(
-                {"statuses": "Commit statuses", "actions_variables": "Variables"}.get(
-                    name, name.replace("_", " ").title()
-                ) + ": " + ("read and write" if access == "write" else "read-only")
-                for name, access in manifest["default_permissions"].items()
-            )
+            urls, steps = credential_setup(project, name, repo, secret_file,
+                organization=repo_info["content"]["owner"]["type"] == "Organization")
             findings.append(
                 Finding(
                     "secrets." + name,
@@ -451,17 +477,8 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
                     else "; ".join(errors) or f"{name} unavailable",
                     "Selected feature credential available to its trusted consuming workflow",
                     commands=[f"{_cmd('gh', 'secret', 'set', name, '--repo', repo)} < {shlex.quote(str(secret_file))}"],
-                    urls=[
-                        f"https://github.com/{repo}/settings/secrets/actions",
-                        settings,
-                    ],
-                    steps=[
-                        f"For App credentials, open the registration URL. Name: {manifest['name']}; Homepage: {manifest['url']}; Webhook Active: unchecked; installation: Any account. Repository permissions: {permissions}. Click Create GitHub App. For provider/bot credentials use the source named in the inventory.",
-                        f"Record the numeric App ID. Click Generate a private key. Under Install App choose {owner}, Only select repositories, and {'the configured claims repository' if app_role == 'claims' else repo.split('/')[1]}; click Install. Install on the roadmap too only if progress is enabled.",
-                        f"Save the {'numeric App ID' if name.endswith('_ID') else 'downloaded PEM key' if name.endswith('_PRIVATE_KEY') else 'provider or bot credential'} in {secret_file}; chmod 600 that file.",
-                        f"In Settings → Secrets and variables → Actions → New repository secret, Name: {name}; Secret: the contents of that file.",
-                        "Organization secrets must include this repository in their access policy. A same-named environment secret can override the repository value.",
-                    ],
+                    urls=urls,
+                    steps=steps,
                     verify=again,
                     section="apps-and-credentials",
                     optional=name not in ("APP_ID", "APP_PRIVATE_KEY"),
@@ -544,6 +561,8 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
                     urls=[latest["html_url"] if latest else f"https://github.com/{repo}/actions"],
                     steps=[
                         "Use the existing workflow's normal trigger. pr-build runs on a content pull request; Auto-merge runs after a build or review update.",
+                        f"For pr-build, list open content PRs and choose the number to build:\n$ {_cmd('gh', 'pr', 'list', '--repo', repo, '--state', 'open')}\nThen run:\n$ {_cmd('gh', 'workflow', 'run', 'pr-build.yml', '--repo', repo, '-f', 'pr=PR_NUMBER')}\nReplace PR_NUMBER with that open PR's number. The setup workflows must already be merged into the default branch.",
+                        "Auto-merge has no manual-dispatch trigger. It runs after a normal content build or review update; use the Actions run linked above to inspect its App-token step. It only merges content that passes the configured review and build policy.",
                         "A successful overall run is not proof that an optional credential was used. Inspect the App-token and consuming steps; skipped/fallback steps leave the credential unverified.",
                     ],
                     verify=again,
@@ -551,11 +570,73 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
                 )
             )
 
+    findings.extend(package_findings(project, gh, repo_info, again))
     if extras:
         optional_findings = auxiliary_findings(project, gh, again) + extra_findings(project, gh, again)
         for finding in optional_findings:
             finding.optional = True
         findings.extend(optional_findings)
+    return findings
+
+
+def package_findings(project, gh, repo_info, again):
+    """A workflow cannot build a newly created repository until its Lake package exists."""
+    findings = []
+    for role in ("content", "roadmap"):
+        if not repo_info.get(role):
+            continue
+        repo = project.repos[role]
+        missing = []
+        for path in ("lean-toolchain", "lake-manifest.json"):
+            _, error = gh.read(f"repos/{repo}/contents/{path}")
+            if error:
+                missing.append(path)
+        _, toml_error = gh.read(f"repos/{repo}/contents/lakefile.toml")
+        if toml_error:
+            _, lean_error = gh.read(f"repos/{repo}/contents/lakefile.lean")
+            if lean_error:
+                missing.append("lakefile.toml or lakefile.lean")
+        root = project.roots[0] if role == "content" else project.roadmap_dir
+        if role == "content":
+            lakefile = (f'name = "{root}"\ndefaultTargets = ["{root}"]\nplatformIndependent = true\n'
+                        '[[require]]\nname = "mathlib"\ngit = "https://github.com/leanprover-community/mathlib4"\nrev = "master"\n'
+                        f'[[lean_lib]]\nname = "{root}"\nglobs = ["{root}.*"]\n'
+                        'leanOptions = { weak.linter.mathlibStandardSet = true, warningAsError = true }\n'
+                        '[[lean_exe]]\nname = "axioms"\nroot = "scripts.Axioms"\n'
+                        '[[lean_exe]]\nname = "module-system"\nroot = "scripts.ModuleSystem"')
+            setup = [
+                f"In a local checkout of {repo}, keep the existing Lean package if it has one. Commit and publish lean-toolchain, lakefile.toml (or lakefile.lean), and lake-manifest.json. API inaccessibility does not establish that files are absent.",
+                f"Set lean.roots in {project.source} to the package's actual Lean module root ({root} is currently selected). In the checkout run lake update and lake build; commit the resolved lake-manifest.json with the reviewed package configuration.",
+                "Only if starting a new Mathlib-based package, obtain its matching toolchain:\n$ gh api repos/leanprover-community/mathlib4/contents/lean-toolchain?ref=master --jq '.content | @base64d' > lean-toolchain\n$ elan toolchain install \"$(cat lean-toolchain)\"\nFor a different direct dependency use that dependency's selected toolchain; keep its existing package dependencies.",
+                f"For that new package, write lakefile.toml with:\n{lakefile}\nThe axioms and module-system sources arrive with the project workflow setup; install that setup before building these executables.",
+                f"For a new package create its source directory and empty root module:\n$ mkdir -p {shlex.quote(root.replace('.', '/'))}\n$ printf 'module\\n' > {shlex.quote(root.replace('.', '/') + '.lean')}\nAdd your mathematical source modules there, with a Mathlib-style copyright/license/Authors header followed by module. After the workflow setup supplies scripts/Axioms.lean and scripts/ModuleSystem.lean:\n$ lake update\n$ lake exe cache get\n$ lake build\nCommit the toolchain, lakefile, manifest and Lean sources through a human-reviewed PR.",
+            ]
+        else:
+            lakefile = (f'name = "{root}"\ndefaultTargets = ["{root}", "{project.completed_dir}"]\n'
+                        f'[[require]]\nname = "{project.roots[0]}"\ngit = "https://github.com/{project.content}"\nrev = "{project.branch}"\n'
+                        f'[[lean_lib]]\nname = "{root}"\nglobs = ["{root}.*"]\n'
+                        f'[[lean_lib]]\nname = "{project.completed_dir}"\nglobs = ["{project.completed_dir}.+"]')
+            setup = [
+                f"In a local checkout of {repo}, keep an existing working roadmap package. For a new one, copy the content repository's toolchain:\n$ gh api repos/{project.content}/contents/lean-toolchain?ref={project.branch} --jq '.content | @base64d' > lean-toolchain",
+                f"For a new package write lakefile.toml with:\n{lakefile}\nUse the actual name from the content repository's lakefile for the require name if it differs from {project.roots[0]}.",
+                f"For a new package create the empty root modules and source directories:\n$ mkdir -p {shlex.quote(root)} {shlex.quote(project.completed_dir)}\n$ touch {shlex.quote(root + '.lean')} {shlex.quote(project.completed_dir + '.lean')}\n$ lake update\n$ lake build\nCommit the Lake files and root modules through a human-reviewed PR. Add human-written target statements under the configured roadmap directory; they may contain sorry.",
+            ]
+        findings.append(Finding(
+            "lean." + role, "unknown" if missing else "ready",
+            "Cannot read package files: " + ", ".join(missing) if missing else f"Lean package files are published in {repo}",
+            "Published Lean toolchain, Lake package and resolved dependencies", steps=setup,
+            urls=[f"https://github.com/{repo}"], verify=again, section="lean-and-upstream-dependencies" if role == "content" else "roadmap-lean-package"))
+    if repo_info.get("roadmap"):
+        repo = project.repos["roadmap"]
+        _, error = gh.read(f"repos/{repo}/contents/.github/workflows/ci.yml")
+        findings.append(Finding(
+            "roadmap.workflows", "unknown" if error else "ready",
+            error or "Roadmap build workflow installed", "Roadmap targets build in their own Lean package",
+            steps=[
+                "First publish the content configuration with its selected Tools version and prepare the roadmap Lake package.",
+                f"Preview, then install the roadmap CI workflow through a reviewed setup PR:\n$ {_cmd('tauceti-tools', 'doctor', '--conf', project.source, '--fix', 'roadmap.workflows')}\n$ {_cmd('tauceti-tools', 'doctor', '--conf', project.source, '--fix', 'roadmap.workflows', '--apply')}",
+                "Merge the setup PR as a human. After its build check has run, open Settings → Rules → Rulesets and require pull-request review, code-owner review and the build check on the roadmap's default branch.",
+            ], urls=[f"https://github.com/{repo}/actions"], verify=again, section="roadmaps"))
     return findings
 
 
@@ -596,6 +677,42 @@ def extra_findings(project, gh, again):
                 section=name.replace("_", "-"),
             )
         )
+        runtime = results[-1]
+        if mode == "custom" and name == "github_state":
+            pin = project.tool("tools")
+            arguments = (" --repository " + shlex.quote(project.content) +
+                         " --name " + shlex.quote(project.key.replace("__", "-") + "-state") +
+                         " --url " + shlex.quote(service.get("url") or "https://YOUR_STATE_DOMAIN") +
+                         " --account-id YOUR_CLOUDFLARE_ACCOUNT_ID --credentials-dir " +
+                         shlex.quote(str(Path.home() / ".config/tauceti/projects" / project.key / "github_state")))
+            runtime.commands = []
+            runtime.steps = [
+                f"Select [tools.tools] first. Open https://dash.cloudflare.com/, select your own account, and copy its Account ID from the account/Worker overview. Set services.github_state.url in {project.source} to the public HTTPS domain you control. Replace YOUR_CLOUDFLARE_ACCOUNT_ID and any YOUR_STATE_DOMAIN placeholder in the commands below.",
+                f"In a new deployment directory, check out the selected Tools revision:\n$ gh repo clone {pin.get('repo', 'TauCetiProject/TauCetiTools')} state-deployment\n$ git -C state-deployment checkout --detach {pin.get('ref', 'PASTE_SELECTED_TOOLS_SHA')}\n$ cd state-deployment/services/github-state\n$ npm ci\n$ npx wrangler login",
+                "Prepare the private credentials and App registration form:\n$ python3 scripts/setup.py prepare" + arguments + "\nOpen the local HTML form printed by prepare in a browser signed in as your account's App manager. Click Register dedicated read-only App, confirm the permissions and public installation setting, then Create GitHub App. Follow the printed one-time code-exchange command; the returned App key stays private.",
+                "Install that App on the content repository with Only select repositories. Copy NUMBER from the resulting /settings/installations/NUMBER URL. Run these initial-installation commands with that number:\n$ python3 scripts/setup.py inspect" + arguments + " --installation NUMBER\n$ python3 scripts/setup.py deploy" + arguments + " --installation NUMBER\n$ python3 scripts/setup.py bootstrap" + arguments + " --installation NUMBER\nFor later code updates run npx wrangler deploy; do not rerun initial deploy after adding clients because it resets their grants.",
+            ]
+        elif mode == "custom" and name == "cache":
+            runtime.commands = []
+            runtime.steps = [
+                f"In https://dash.cloudflare.com/ select your account → R2 object storage → Create bucket. Name it {project.key.replace('__', '-')}-cache, choose the intended jurisdiction, and Create bucket. Under its Settings → Custom Domains → Add, enter your cache domain in this account's Cloudflare zone and wait for Active.",
+                "R2 overview → Manage API Tokens → Create Account API token. Name it for this project's cache writer; Object Read & Write → Apply to specific buckets only → your new bucket → Create. Save the Access Key ID, Secret Access Key and HTTPS S3 endpoint from the confirmation page.",
+                f"In {project.source}, under [services.cache], set name to a unique cache name, artifact_url=PUBLIC_DOMAIN/artifacts, revision_url=PUBLIC_DOMAIN/revisions, artifact_write_url=S3_ENDPOINT/BUCKET/artifacts and revision_write_url=S3_ENDPOINT/BUCKET/revisions. Replace PUBLIC_DOMAIN and S3_ENDPOINT with full HTTPS URLs and BUCKET with the actual bucket name.",
+                f"In https://github.com/{project.content}/settings/variables/actions create LAKE_CACHE_ARTIFACT_ENDPOINT_PUBLIC=artifact_url, LAKE_CACHE_REVISION_ENDPOINT_PUBLIC=revision_url, LAKE_CACHE_ARTIFACT_ENDPOINT=artifact_write_url and LAKE_CACHE_REVISION_ENDPOINT=revision_write_url using those actual values. Under Secrets → New repository secret set LAKE_CACHE_KEY to ACCESS_KEY_ID:SECRET_ACCESS_KEY with the returned credentials.",
+                "Run a normal post-merge CI build. Inspect its publish-lake-cache upload and public confirmation steps; ordinary PR builds never receive the writer credential.",
+            ]
+        elif mode != "off" and name == "bors":
+            runtime.commands = []
+            runtime.steps = [
+                f"Choose the downstream runtime's public HTTPS domain and set services.bors.url in {project.source}. Hosted mode supplies Neon only; the Bors process runs in your account.",
+                "For Docker, select a released Bors image pinned with @sha256:DIGEST in services.bors.image. Obtain releases at https://github.com/TauCetiProject/bors-ng/releases. For Cloudflare set deployment=cloudflare, account_id to your paying account ID, and select [tools.bors] repo=TauCetiProject/bors-ng with a full commit ref.",
+                f"Generate local deployment files in a new directory (choose another --output if it exists):\n$ {_cmd('tauceti-tools', 'deploy', 'bors', '--conf', project.source, '--output', 'deployment/bors')}",
+                f"Register a Bors App at https://github.com/settings/apps/new (personal owner) or https://github.com/organizations/{project.content.split('/')[0]}/settings/apps/new (organization owner). Name it {project.content.split('/')[1]}-bors; Homepage: your runtime URL; Callback URL: RUNTIME_URL/auth/github/callback; Webhook URL: RUNTIME_URL/webhook/github; Webhook Active: checked; installation: Any account. Repository permissions: Contents, Pull requests, Issues, Commit statuses: Read and write; Checks, Actions, Variables: Read-only. Subscribe to Pull request, Issue comment, Pull request review, Check run, Check suite, Status and Push. Click Create GitHub App.",
+                "On the App General page record the numeric App ID and Client ID; Generate a new client secret, and Generate a private key. Under Install App choose your account → Only select repositories → the content repository → Install. Generate a separate random webhook secret with openssl rand -hex 32 and enter it in the App's Webhook secret field, then Save changes.",
+                "For Docker, cd deployment/bors, copy bors.private.env.example to bors.private.env and chmod 600 bors.private.env. Set DATABASE_URL to your private direct PostgreSQL URI; remove its libpq sslmode/channel_binding query suffix because Compose sets DATABASE_USE_SSL=true. Set GITHUB_INTEGRATION_ID=the Bors App ID; GITHUB_INTEGRATION_PEM=base64 PEM (openssl base64 -A -in /PRIVATE/BORS_KEY.pem); GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET=the App OAuth values; GITHUB_WEBHOOK_SECRET=the same random webhook value; SECRET_KEY_BASE=output of openssl rand -base64 64; TAUCETI_REVIEW_APP_ID=the automation App ID. Keep all values in this private file.",
+                "For Docker, run docker compose up -d. Point DNS to your host and serve Caddyfile with your HTTPS proxy; block public /internal/* routes. Open the Bors URL, sign in with GitHub and synchronize its repository installation. Install heartbeat.cron's line using crontab -e from the host deployment directory. For Cloudflare, deployment/bors/README.md contains the generated exact resource and deploy commands; its secret upload helper accepts these same private credentials from files.",
+                "Check the runtime's /health/ endpoint and complete a pilot staging build with required checks before selecting merge.backend=bors and MERGE_BACKEND=bors. Keep the project's existing merge backend until then.",
+            ]
         if mode == "hosted":
             title = f"Infrastructure request: {project.content} ({name})"
             results.append(
@@ -663,6 +780,10 @@ def extra_findings(project, gh, again):
                     "Service operator: supply the downstream with artifact_url=PUBLIC_DOMAIN/artifacts, revision_url=PUBLIC_DOMAIN/revisions, artifact_write_url=S3_ENDPOINT/BUCKET/artifacts and revision_write_url=S3_ENDPOINT/BUCKET/revisions, replacing PUBLIC_DOMAIN with its HTTPS URL, S3_ENDPOINT with the confirmation page's HTTPS endpoint and BUCKET with the selected bucket. Send ACCESS_KEY_ID:SECRET_ACCESS_KEY privately; never put it in the issue.",
                     f"Downstream administrator: enter those four endpoint values under services.cache in {project.source}. In https://github.com/{project.content}/settings/variables/actions, create LAKE_CACHE_ARTIFACT_ENDPOINT_PUBLIC=artifact_url, LAKE_CACHE_REVISION_ENDPOINT_PUBLIC=revision_url, LAKE_CACHE_ARTIFACT_ENDPOINT=artifact_write_url and LAKE_CACHE_REVISION_ENDPOINT=revision_write_url. In Settings → Secrets and variables → Actions → Secrets → New repository secret, Name: LAKE_CACHE_KEY; Secret: the supplied ACCESS_KEY_ID:SECRET_ACCESS_KEY line. Inspect the next post-merge CI run's publish-lake-cache upload and confirmation steps.",
                 ]
+                runtime.commands = []
+                runtime.steps = list(results[-1].steps)
+            if name == "bors" and enrollment.status != "ready":
+                runtime.steps += enrollment.steps
         if name == "github_state" and mode != "off":
             token_file = client_token_file(project)
             service_finding = next(f for f in results if f.id == "services.github_state")
@@ -679,7 +800,7 @@ def extra_findings(project, gh, again):
                 repository_id = str((info or {}).get("id", "REPOSITORY_ID"))
                 enrollment.summary = "Install the read-only App and request hosted access."
                 enrollment.urls = []
-                repository_lookup = (f" If REPOSITORY_ID is shown below, obtain it with:\n$ " +
+                repository_lookup = (" If REPOSITORY_ID is shown below, obtain it with:\n$ " +
                                      _cmd("gh", "api", f"repos/{project.content}", "--jq", ".id")
                                      if repository_id == "REPOSITORY_ID" else "")
                 enrollment.steps = [
@@ -705,7 +826,7 @@ def extra_findings(project, gh, again):
             if not service.get("url"):
                 service_finding.status = "failed"
                 service_finding.summary = "Set services.github_state.url to the operator's actual HTTPS endpoint"
-                service_finding.steps.insert(0, f"Edit {project.source}: set services.github_state.url to the HTTPS endpoint supplied by the service operator, then rerun doctor.")
+                service_finding.steps.insert(0, f"Edit {project.source}: set services.github_state.url = \"https://github-state.taucetiproject.org\" for Tau Ceti's hosted service." if mode == "hosted" else f"Edit {project.source}: set services.github_state.url to your service's public HTTPS endpoint, then rerun doctor.")
             elif not token_file.is_file():
                 service_finding.summary = f"Client token file missing: {token_file}"
             else:
@@ -722,9 +843,15 @@ def extra_findings(project, gh, again):
                     ready = identity == project.content and writable and bool(health.get("bootstrap_inventory"))
                     service_finding.status = "ready" if ready else "pending"
                     service_finding.summary = "Repository-scoped health and bootstrap verified" if ready else "Authenticated; repository bootstrap/storage is not ready"
-                    if ready and mode == "hosted":
+                    if mode == "hosted":
                         enrollment.status = "ready"
                         enrollment.summary = "Repository-scoped operator grant verified by authenticated health"
+                        if not ready:
+                            service_finding.steps = [
+                                "Hosted access is already approved; keep the existing client token and grant. Initialization or writable storage is still pending.",
+                                enrollment.steps[4],
+                                "Allow the initialization to finish, then rerun doctor. If storage remains unavailable, the service operator must restore its writable backend using the service recovery runbook; another enrollment request is unnecessary.",
+                            ]
                 except (OSError, ValueError, KeyError) as error:
                     service_finding.status = "failed"
                     service_finding.summary = f"Health request failed (HTTP {error.code})" if isinstance(error, urllib.error.HTTPError) else "Health request unavailable or malformed; inspect the endpoint and scoped token"
@@ -750,8 +877,9 @@ def extra_findings(project, gh, again):
             if error:
                 inaccessible.append(path + ": " + error)
         if not repository:
+            proposed = project.content + {"data": "Data", "ci": "CI", "claims": "-claims"}.get(role, "Roadmap")
             missing.append(
-                f"Set repositories.{role} in {project.source} and create it with gh repo create OWNER/NAME --public --add-readme"
+                f"Set repositories.{role} = \"{proposed}\" in {project.source}, or use the actual existing repository. Check access with gh repo view {proposed}. Only if the owner confirms it is absent, create it:\n$ gh repo create {proposed} --public --add-readme"
             )
         repair_id = "workflows" if role == "content" else role + ".workflows"
         commands = [
@@ -779,6 +907,16 @@ def extra_findings(project, gh, again):
         if name == "fleet":
             steps += [
                 "Register your runners in Settings → Actions → Runners → New self-hosted runner. Use the OS/architecture shown there, run the generated ./config.sh command, assign the runner labels used by your picker and start its service. Keep the GitHub-hosted picker until your own fleet picker is installed; Tools supplies no access to Tau Ceti's private fleet."
+            ]
+        if name == "archives":
+            steps += [
+                "Install the Data repository setup first. Extend the automation App installation to that Data repository: Installed GitHub Apps → the project's automation App → Configure → Repository access → Only select repositories → add Data alongside content → Save.",
+                "Let a normal review worker finish a review. Its archive publisher writes the canonical review records to Data; inspect the worker's archive/publish result and the Data repository's default branch. A repository existing by itself does not establish that publication worked.",
+            ]
+        if name == "ci_archive":
+            steps += [
+                "Create the collector App and upload COLLECTOR_APP_ID and COLLECTOR_APP_PRIVATE_KEY using the CI credential tasks. Merge the CI setup PR first, then run collection:\n$ " + _cmd("gh", "workflow", "run", "collect.yml", "--repo", repository or proposed),
+                "Open the CI repository's Actions → collect run. The App-token step and Collect must succeed; a GITHUB_TOKEN fallback does not prove the collector App works. Keep its collected canonical records; publication derives the archive database from those records.",
             ]
         if name == "progress":
             commands.append(_cmd("tauceti", "--conf", project.source, "work", "--only", "progress"))
@@ -872,13 +1010,18 @@ def extra_findings(project, gh, again):
 
 
 def auxiliary_findings(project, gh, again):
+    from .credentials import app_setup, credential_setup
+
     results = []
+    content_info, _ = gh.read(f"repos/{project.content}")
+    organization = (content_info or {}).get("owner", {}).get("type") == "Organization"
     for role, feature, names in (
         ("ci", "ci_archive", ("COLLECTOR_APP_ID", "COLLECTOR_APP_PRIVATE_KEY")),
         ("roadmap", "progress", ("SYNC_BOT_APP_PRIVATE_KEY",)),
+        ("roadmap", "zulip", ("ZULIP_EMAIL", "ZULIP_API_KEY")),
     ):
         repo = project.repos.get(role)
-        if not repo or not project.feature(feature):
+        if not repo or not project.feature(feature) or feature == "zulip" and not project.feature("progress"):
             continue
         value, error = gh.read(f"repos/{repo}/actions/secrets")
         present = {row["name"] for row in _items(value, "secrets")}
@@ -887,9 +1030,15 @@ def auxiliary_findings(project, gh, again):
                 Path.home()
                 / ".config/tauceti/projects"
                 / project.key
-                / ("collector" if role == "ci" else "automation")
-                / ("APP_PRIVATE_KEY" if role == "roadmap" else name)
+                / ("collector" if role == "ci" else "zulip" if feature == "zulip" else "automation")
+                / ("APP_PRIVATE_KEY" if feature == "progress" else name)
             )
+            if feature == "zulip":
+                urls, steps = credential_setup(project, name, repo, path, organization=organization)
+            else:
+                urls, steps = app_setup(project, "collector" if role == "ci" else "automation", organization=organization)
+                urls.append(f"https://github.com/{repo}/settings/secrets/actions")
+                steps += [f"Upload the existing private file {path} using the command below. In the UI: Settings → Secrets and variables → Actions → Secrets → New repository secret; Name: {name}; Secret: that file's contents; Add secret."]
             results.append(
                 Finding(
                     f"secrets.{role}.{name}",
@@ -897,16 +1046,13 @@ def auxiliary_findings(project, gh, again):
                     name + (": metadata present; consumer unverified" if name in present else ": unavailable"),
                     "Credential in the repository that consumes it",
                     commands=[f"{_cmd('gh', 'secret', 'set', name, '--repo', repo)} < {shlex.quote(str(path))}"],
-                    urls=[f"https://github.com/{repo}/settings/secrets/actions"],
-                    steps=[
-                        f"Save the {'collector' if role == 'ci' else 'automation'} App credential in {path}; chmod 600 the file. Install that App on the repositories named in the manual's inventory.",
-                        f"Choose New repository secret; Name: {name}; Secret: that private file's contents. Run the existing {'collect.yml' if role == 'ci' else 'progress-merge.yml'} workflow with its required inputs and inspect the App-token step.",
-                    ],
+                    urls=urls,
+                    steps=steps,
                     verify=again,
                     section="apps-and-credentials",
                 )
             )
-        if role == "roadmap":
+        if role == "roadmap" and feature == "progress":
             results[-1].urls.append("https://github.com/settings/installations")
             results[-1].steps += [
                 f"Open Installed GitHub Apps → the project's existing automation App → Configure. Under Repository access choose Only select repositories, add {repo.split('/')[1]} alongside {project.content.split('/')[1]}, and Save. Keep the existing installation and private key.",
@@ -916,8 +1062,8 @@ def auxiliary_findings(project, gh, again):
             results.append(
                 Finding(
                     "variables.roadmap.SYNC_BOT_APP_ID",
-                    "unknown" if error else "ready",
-                    error or "Roadmap App ID present",
+                    "unknown" if error else "ready" if str(value.get("value", "")).isdecimal() else "failed",
+                    error or "Roadmap App ID must be the automation App's numeric ID",
                     "Numeric ID of the roadmap merge App",
                     commands=[
                         _cmd(
@@ -1002,6 +1148,7 @@ def _label(check):
         "services.bors": "Bors",
         "services.bors.enrollment": "Bors",
         "services.cache": "Build cache",
+        "services.cache.enrollment": "Build cache",
         "features.progress": "Progress reports",
         "features.docs": "API documentation",
         "features.archives": "Archives",
@@ -1017,11 +1164,16 @@ def _label(check):
         "rules.content": "Content branch protection",
         "merge.direct": "Direct merging",
         "actions.enabled": "GitHub Actions",
+        "github.auth": "GitHub access",
+        "configuration.ownership": "Human configuration ownership",
+        "lean.content": "Content Lean package",
+        "lean.roadmap": "Roadmap Lean package",
+        "roadmap.workflows": "Roadmap build workflow",
     }
     if check in names:
         return names[check]
     if check.startswith("files."):
-        return "Required file: " + check[6:]
+        return "Project files and workflows"
     if check.startswith("repositories."):
         return check.split(".")[1].capitalize() + " repository"
     if check.startswith("pins."):
@@ -1040,14 +1192,13 @@ def _render_tasks(findings):
         groups.setdefault(_label(item.id), []).append(item)
     for title, items in groups.items():
         print("\n" + title)
+        print("  Checks: " + ", ".join(item.id for item in items))
         for summary in dict.fromkeys(item.summary for item in items):
             _paragraph(summary)
         if all(item.status in ("ready", "disabled") for item in items):
             continue
         for url in dict.fromkeys(url for item in items for url in item.urls):
             print("  Open: " + url)
-        for command in dict.fromkeys(command for item in items for command in item.commands):
-            print("  $ " + command)
         steps = list(dict.fromkeys(step for item in items for step in item.steps))
         for index, step in enumerate(steps, 1):
             lines = step.splitlines()
@@ -1058,8 +1209,12 @@ def _render_tasks(findings):
             for line in lines[1:]:
                 if line.startswith("$ "):
                     print("     " + line)
+                elif line.startswith(("[", "name =", "repo =", "ref =", "git =", "rev =", "defaultTargets =", "platformIndependent =", "globs =", "leanOptions =", "root =")):
+                    print("     " + line)
                 else:
                     _paragraph(line, "     ")
+        for command in dict.fromkeys(command for item in items for command in item.commands):
+            print("  $ " + command)
         print("  Guide: " + DOCS + "#" + items[0].section)
 
 
@@ -1096,3 +1251,6 @@ def render(findings, *, json_output=False, show_ready=False, project=None):
         _render_tasks(extras if show_ready else unresolved(extras))
         if not unresolved(extras):
             print("All enabled extras are ready.")
+    if project and unresolved(findings):
+        print("\nAfter making changes, run:")
+        print("  $ " + _cmd("tauceti-tools", "doctor", "--conf", project.source))

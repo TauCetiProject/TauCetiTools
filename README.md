@@ -12,6 +12,7 @@ It does not require doctor.
 
 ```sh
 uv tool install git+https://github.com/TauCetiProject/TauCetiTools
+tauceti-tools doctor
 tauceti-tools init --repo YOUR_ORG/YOUR_PROJECT --owner-login YOUR_LOGIN
 tauceti-tools doctor
 tauceti-tools doctor --no-extras
@@ -25,6 +26,9 @@ Disabled extras are reported as disabled and do not need setting up.
 The human report summarizes successful checks and prints the full repair procedure for
 each outstanding item, including service-operator work. `--check CHECK_ID` selects one
 check; it does not change the instructions. `--json` includes every check's ID and evidence.
+Missing, empty and invalid configuration files produce starter-generation and repair commands.
+`init` fills a missing or empty file, preserves a nonempty file, and defaults to direct
+automatic merging without a queue or an up-to-date branch requirement.
 
 Configuration is selected in this order: explicit `--conf PATH_OR_HTTPS_URL`,
 `TAUCETI_CONF`, `tauceti.toml` in the current directory, then `tauceti.toml` at the

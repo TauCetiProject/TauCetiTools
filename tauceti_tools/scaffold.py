@@ -13,6 +13,9 @@ def initial_configuration(repo: str, owner: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", owner):
         raise ConfigError("--owner-login must be a GitHub login")
     org, name = repo.split("/")
+    root = re.sub(r"[^A-Za-z0-9_]", "", name)
+    if not root or not root[0].isalpha():
+        root = "Project" + root
     return f'''# Canonical, human-owned project configuration. No credentials belong here.
 schema_version = 1
 
@@ -31,11 +34,11 @@ review = "TauCetiProject/TauCetiReview"
 # claims = "{org}/{name}-claims"
 
 [lean]
-roots = ["{name}"]
+roots = ["{root}"]
 root_module = "empty"
 
 [roadmap]
-active_dir = "{name}Roadmap"
+active_dir = "{root}Roadmap"
 completed_dir = "Completed"
 
 # Select full commit SHAs before installing the core workflows.
@@ -54,7 +57,7 @@ completed_dir = "Completed"
 # ref = "FULL_COMMIT_SHA_COMPATIBLE_WITH_YOUR_LEAN_TOOLCHAIN"
 
 [merge]
-backend = "github-queue"
+backend = "github-direct"
 checks = ["build", "bump-guard", "scope"]
 
 [[upstreams]]
