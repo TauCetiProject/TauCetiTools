@@ -22,6 +22,10 @@ class FakeGitHub:
 
     def request(self, method, path, data=None, **kwargs):
         self.calls.append((method, path, data, kwargs))
+        # Existing fixtures default to an empty current status history. Tests
+        # covering cross-run fencing supply an explicit list for this endpoint.
+        if '/commits/' in path and '/statuses?' in path and (not self.replies or not isinstance(self.replies[0], list)):
+            return []
         result = self.replies.pop(0)
         if isinstance(result, Exception):
             raise result
@@ -66,12 +70,12 @@ class StatusIntentTests(unittest.TestCase):
             self.assertEqual(json.loads(path.read_text()), record)
             api.assert_not_called()
 
-    def test_healthy_three_status_group_reuses_two_fences(self):
+    def test_healthy_three_status_group_reuses_identity_and_status_snapshot(self):
         records = [self.record(context) for context in ('bump-guard', 'build', 'scope')]
         result, fake = self.publish(records, [self.run, self.pull, {}, {}, {}])
         self.assertTrue(result)
-        self.assertEqual([call[0] for call in fake.calls], ['GET', 'GET', 'POST', 'POST', 'POST'])
-        self.assertTrue(all(call[3] == {'idempotent': True} for call in fake.calls[2:]))
+        self.assertEqual([call[0] for call in fake.calls], ['GET', 'GET', 'GET', 'POST', 'POST', 'POST'])
+        self.assertTrue(all(call[3] == {'idempotent': True} for call in fake.calls[3:]))
         self.assertTrue(all(not path.exists() for path, _ in records))
 
     def test_failed_post_retains_intent_without_repeating_other_success(self):
@@ -81,14 +85,14 @@ class StatusIntentTests(unittest.TestCase):
         self.assertFalse(result)
         self.assertTrue(first[0].exists())
         self.assertFalse(second[0].exists())
-        self.assertEqual(len(fake.calls), 4)
+        self.assertEqual(len(fake.calls), 5)
 
     def test_quota_without_wait_budget_retains_intent(self):
         record = self.record()
         result, fake = self.publish([record], [self.run, self.pull, ci_status.Deferred('write', ci_status.time.time() + 3600)], max_wait=0)
         self.assertFalse(result)
         self.assertTrue(record[0].exists())
-        self.assertEqual(len(fake.calls), 3)
+        self.assertEqual(len(fake.calls), 4)
 
     def test_after_quota_wait_rechecks_pr_and_skips_moved_head(self):
         record = self.record()
@@ -98,7 +102,7 @@ class StatusIntentTests(unittest.TestCase):
                                        ci_status.Deferred('write', ci_status.time.time() + 2), self.run, moved], max_wait=10)
         self.assertTrue(result)
         self.assertEqual(sleep.call_count, 1)
-        self.assertEqual([call[0] for call in fake.calls], ['GET', 'GET', 'POST', 'GET', 'GET'])
+        self.assertEqual([call[0] for call in fake.calls], ['GET', 'GET', 'GET', 'POST', 'GET', 'GET'])
         self.assertFalse(record[0].exists())
 
     def test_obsolete_attempt_cancelled_or_pr_retargeted_never_posts(self):
@@ -116,7 +120,7 @@ class StatusIntentTests(unittest.TestCase):
         record = ci_status.record_intent(self.sha, 'bump-guard', 'success', 'pass')
         result, fake = self.publish([record], [self.run, {}])
         self.assertTrue(result)
-        self.assertEqual([call[0] for call in fake.calls], ['GET', 'POST'])
+        self.assertEqual([call[0] for call in fake.calls], ['GET', 'GET', 'POST'])
 
     def test_strict_schema_rejects_wrong_repo_run_context_payload_and_url(self):
         _, original = self.record()
@@ -201,7 +205,7 @@ class StatusIntentTests(unittest.TestCase):
                                        ci_status.Deferred('write', ci_status.time.time() + 1), self.run, self.pull, {}], max_wait=10)
         self.assertFalse(result)
         self.assertEqual(approval.call_count, 2)
-        self.assertEqual(fake.calls[2][2]['state'], 'success')
+        self.assertEqual(fake.calls[3][2]['state'], 'success')
         self.assertEqual(fake.calls[-1][2]['state'], 'failure')
 
     def test_scope_verification_uses_shared_api_and_quota_is_not_revocation(self):
@@ -229,6 +233,88 @@ class StatusIntentTests(unittest.TestCase):
         path, record = ci_status.record_intent(self.sha, 'scope', 'success', 'approved', approval=approval)
         self.assertGreater(path.stat().st_size, 16384)
         self.assertEqual(ci_status.load_intents(path.parent), [(path, record)])
+
+    def test_bors_network_failure_retains_intent_and_never_posts_red(self):
+        record = self.approved_scope()
+        with patch.object(ci_status, 'scope_approved', side_effect=OSError('temporary network failure')):
+            result, fake = self.publish([record], [self.run, self.pull], max_wait=0)
+        self.assertFalse(result)
+        self.assertTrue(record[0].exists())
+        self.assertTrue(all(call[0] == 'GET' for call in fake.calls))
+
+    def test_bors_network_retry_recovers_without_false_revocation(self):
+        record = self.approved_scope()
+        with patch.object(ci_status, 'scope_approved', side_effect=[OSError('temporary'), True]), patch.object(ci_status.time, 'sleep'):
+            result, fake = self.publish([record], [self.run, self.pull, self.run, self.pull, {}], max_wait=10)
+        self.assertTrue(result)
+        self.assertFalse(record[0].exists())
+        self.assertEqual(fake.calls[-1][2]['state'], 'success')
+
+    def test_scope_observation_network_failure_is_not_a_valid_revocation(self):
+        with patch.dict(os.environ, {'GITHUB_REPOSITORY': 'TauCetiProject/TauCeti'}):
+            _, record = self.approved_scope()
+        with patch.object(ci_status.bors_scope_approval, 'observation', side_effect=OSError('network')), self.assertRaises(OSError):
+            ci_status.scope_approved(FakeGitHub([]), record)
+
+    def test_newer_run_skips_only_its_exact_context(self):
+        records = [self.record(context) for context in ('build', 'scope', 'bump-guard')]
+        rows = [{'context': 'build', 'target_url': 'https://github.com/Owner/Repo/actions/runs/124'},
+                {'context': 'scope', 'target_url': 'https://github.com/Owner/Repo/actions/runs/122'}]
+        result, fake = self.publish(records, [self.run, self.pull, rows, {}, {}])
+        self.assertTrue(result)
+        posts = [call for call in fake.calls if call[0] == 'POST']
+        self.assertEqual([call[2]['context'] for call in posts], ['scope', 'bump-guard'])
+        self.assertEqual(len([call for call in fake.calls if '/statuses?' in call[1]]), 1)
+        self.assertEqual(fake.calls[2][3], {'conditional': True})
+        self.assertTrue(all(not path.exists() for path, _ in records))
+
+    def test_status_target_must_be_exact_same_repository_run_url(self):
+        for target in ('https://github.com/Other/Repo/actions/runs/999',
+                       'https://github.com/Owner/Repo/actions/runs/999?evil=1',
+                       'https://github.com/Owner/Repo/actions/runs/999/extra',
+                       'https://evil.invalid/Owner/Repo/actions/runs/999',
+                       'https://github.com/Owner/Repo/actions/runs/not-numeric', None):
+            with self.subTest(target=target):
+                record = self.record()
+                result, fake = self.publish([record], [self.run, self.pull, [{'context': 'build', 'target_url': target}], {}])
+                self.assertTrue(result)
+                self.assertEqual(fake.calls[-1][0], 'POST')
+
+    def test_only_first_matching_context_status_is_current(self):
+        record = self.record()
+        rows = [{'context': 'build', 'target_url': 'https://github.com/Owner/Repo/actions/runs/122'},
+                {'context': 'build', 'target_url': 'https://github.com/Owner/Repo/actions/runs/124'}]
+        result, fake = self.publish([record], [self.run, self.pull, rows, {}])
+        self.assertTrue(result)
+        self.assertEqual(fake.calls[-1][0], 'POST')
+
+    def test_status_snapshot_refreshed_after_quota_wait(self):
+        record = self.record()
+        newer = [{'context': 'build', 'target_url': 'https://github.com/Owner/Repo/actions/runs/124'}]
+        with patch.object(ci_status.time, 'sleep'):
+            result, fake = self.publish([record], [self.run, self.pull, [],
+                                       ci_status.Deferred('write', ci_status.time.time() + 1), self.run, self.pull, newer], max_wait=10)
+        self.assertTrue(result)
+        self.assertEqual(len([call for call in fake.calls if call[0] == 'POST']), 1)
+        self.assertEqual(len([call for call in fake.calls if '/statuses?' in call[1]]), 2)
+        self.assertFalse(record[0].exists())
+
+    def test_truncated_history_without_context_retains_intent_without_pagination(self):
+        record = self.record()
+        rows = [{'context': 'other', 'target_url': None}] * 100
+        result, fake = self.publish([record], [self.run, self.pull, rows])
+        self.assertFalse(result)
+        self.assertTrue(record[0].exists())
+        self.assertEqual(len(fake.calls), 3)
+        self.assertTrue(all(call[0] == 'GET' for call in fake.calls))
+
+    def test_credential_renewal_error_retains_context_and_does_not_skip_others(self):
+        first, second = self.record('build'), self.record('scope')
+        result, fake = self.publish([first, second], [self.run, self.pull, RuntimeError('renewal temporarily unavailable'), {}], max_wait=0)
+        self.assertFalse(result)
+        self.assertTrue(first[0].exists())
+        self.assertFalse(second[0].exists())
+        self.assertEqual(fake.calls[-1][2]['context'], 'scope')
 
     def test_asset_copies_match(self):
         self.assertEqual((SCRIPTS / 'ci_status.py').read_bytes(),
