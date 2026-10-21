@@ -279,7 +279,9 @@
     "database": "isolated PostgreSQL fixture",
     "trigger": "Cluster resource storage by kind/id while preserving all imported rowids and values",
     "before": "migration_shadow_mismatch",
-    "after": "Isolated clustered fixture shadow passes; title-only payload differences and matching unavailable coverage remain rejected."
+    "after": "Isolated clustered fixture shadow passes; title-only payload differences and matching unavailable coverage remain rejected.",
+    "code_commit": "7b2abe88ad221e47a563a8dccc752c5e463fef65",
+    "worktree_changes": "subsequent test refinement preserves headRefOid in the title-only negative case and asserts physical ctid order"
   },
   "fix_validation": {
     "fix_introduced_in_commit": "7b2abe88ad221e47a563a8dccc752c5e463fef65",
@@ -288,7 +290,9 @@
       "rows": 317,
       "revision": 6259516,
       "exact_match_excluding_cursor": true,
-      "scope": "Local fixed-code PostgreSQL query against retained standby compared with the captured frozen SQLite first page; no source reads or target writes performed."
+      "scope": "Local fixed-code PostgreSQL query against retained standby compared with the captured frozen SQLite first page; no source reads or target writes performed.",
+      "code_commit": "7b2abe88ad221e47a563a8dccc752c5e463fef65",
+      "worktree_changes": "test and evidence refinements only; repository runtime matches the named commit"
     },
     "full_corrected_deployed_rehearsal_completed": false,
     "public_read_p95_completed": false,
@@ -321,5 +325,6 @@
         ]
       }
     }
-  }
+  },
+  "amended_at": "2026-10-21T21:38:30.121913+00:00"
 }
