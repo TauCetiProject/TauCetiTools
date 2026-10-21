@@ -394,7 +394,9 @@ export class RepositoryState extends DurableObject<Env> {
       const statusKeys=hs.map(sha=>queryKey({operation:'statuses',args:{sha}}));
       if(hs.length) {
         tasks.push({sql:"SELECT * FROM resources WHERE kind='statuses' AND id IN ("+statusKeys.map(()=>'?').join(',')+')',bindings:statusKeys});
-        tasks.push({sql:"SELECT * FROM resources WHERE kind='status_context' AND parent IN ("+hs.map(()=>'?').join(',')+') AND tombstone=0',bindings:hs});
+        // Cache seeding must preserve the rowid order used by scanRows on
+        // SQLite. Heap/index order changes would otherwise reorder rollups.
+        tasks.push({sql:"SELECT * FROM resources WHERE kind='status_context' AND parent IN ("+hs.map(()=>'?').join(',')+') AND tombstone=0 ORDER BY rowid',bindings:hs});
       }
       const results=await cache.batch(tasks.map(t=>({...t,sql:t.sql+' LIMIT 50001'})));
       if(results.some(r=>r.toArray().length>50000))throw new Error('Related repository read exceeds batch bound');

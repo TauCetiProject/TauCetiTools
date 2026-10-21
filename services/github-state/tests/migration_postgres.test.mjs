@@ -302,13 +302,23 @@ test('legacy column order imports fields by archived names and preserves raw che
 test('stored shadows reject real target differences and matching unavailable results',{skip:!enabled},async()=>{
  const f=await testFixture();try {
   const custom={id:f.id,name:'org/repo',installation:'200'};await f.source.setMeta('repository',custom);f.env.ALLOWED_REPOSITORIES=JSON.stringify([custom]);
-  f.db.prepare('INSERT INTO resources(kind,id,data,observed,revision,tombstone) VALUES(?,?,?,?,?,0)').run('pr','7',JSON.stringify({number:7,state:'OPEN',title:'source title'}),123456,123);
+  f.db.prepare('INSERT INTO resources(kind,id,data,observed,revision,tombstone) VALUES(?,?,?,?,?,0)').run('pr','7',JSON.stringify({number:7,state:'OPEN',title:'source title',headRefOid:'head-seven'}),123456,123);
   f.db.prepare('INSERT INTO collections VALUES(?,?,?,?,?,?,?)').run('open_prs:{}','open_prs','{}',1,123456,123,'etag');
   f.db.prepare('INSERT INTO members VALUES(?,?)').run('open_prs:{}','7');
+  f.db.prepare('INSERT INTO collections VALUES(?,?,?,?,?,?,?)').run('statuses:{"sha":"head-seven"}','statuses','{"sha":"head-seven"}',1,123456,123,'status-etag');
+  f.db.prepare('INSERT INTO resources(kind,id,parent,data,observed,revision,tombstone) VALUES(?,?,?,?,?,?,0)').run('statuses','statuses:{"sha":"head-seven"}','',JSON.stringify([]),123456,123);
+  for(const context of ['z-last','m-middle','a-first'])f.db.prepare('INSERT INTO resources(kind,id,parent,data,observed,revision,tombstone) VALUES(?,?,?,?,?,?,0)').run('status_context','head-seven:'+context,'head-seven',JSON.stringify({context,state:'SUCCESS',startedAt:'2026-10-20T00:00:00Z'}),123456,123);
   await control.preflight(f.env,f.state);await migration.saveMigration(f.archive,f.state);
   let state=f.state;
   for(let n=0;n<500;n++){state=await migration.readMigration(f.archive,f.id);if(state.phase==='switching')break;await control.controllerStep(f.env,state,f.hooks);if(n===499)assert.fail('did not verify');}
-  f.source.migrationState=state;await f.source.shadowMigration(state);assert.equal(state.cutover.shadow.queries,1);
+  // PostgreSQL heap/index order can differ from the imported rowids. Reorder
+  // storage without changing any archived value, then exercise the real cache
+  // priming and shadow comparison against SQLite's original context order.
+  await f.admin.query(`CREATE INDEX shadow_resource_order ON ${f.schema}.resources(kind,id); CLUSTER ${f.schema}.resources USING shadow_resource_order`);
+  f.source.migrationState=state;
+  const source=await f.source.query({repository:custom.name,operation:'open_prs'});
+  assert.deepEqual(source.data[0].statusCheckRollup.map(s=>s.context),['z-last','m-middle','a-first']);
+  await f.source.shadowMigration(state);assert.equal(state.cutover.shadow.queries,1);
   await f.admin.query(`UPDATE ${f.schema}.resources SET data=$1 WHERE kind='pr' AND id='7'`,[JSON.stringify({number:7,state:'OPEN',title:'different target title'})]);
   state.cutover.shadow=undefined;await assert.rejects(f.source.shadowMigration(state),/migration_shadow_mismatch/);
   f.db.prepare('UPDATE collections SET complete=0 WHERE key=?').run('open_prs:{}');

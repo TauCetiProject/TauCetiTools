@@ -1,0 +1,276 @@
+{
+  "version": 1,
+  "recorded_at": "2026-10-21T21:29:39.640Z",
+  "issue": "TauCetiProject/TauCetiWorker#316",
+  "environment": "test",
+  "scope": "full test import rejected by stored-read shadow; safely abandoned before PostgreSQL writes; this is not a release receipt",
+  "production_cutover_performed": false,
+  "generation": "ed088e33-d8f0-41a5-92c5-55cc1a734b57",
+  "code_commit": "89dc427f0b920d67933e05b1f3f5fd430a054f6c",
+  "cloudflare_version": "19a2d235-1d45-4d3b-8737-0ed43dafb241",
+  "source": {
+    "object": "23f902806a4c8c7ee732d42035bb9f15223bb9421dde59063ecda03025122b46",
+    "deployment": "19a2d235-1d45-4d3b-8737-0ed43dafb241",
+    "schema": 5
+  },
+  "target": {
+    "identity": "neon-test-br-icy-feather-b54h8dxh",
+    "hostname": "ep-shy-cherry-b5nnow2x.c-7.us-east-2.aws.neon.tech",
+    "database": "github_state_test",
+    "application_role": "github_state_test_app",
+    "migration_role": "github_state_test_migration"
+  },
+  "authoritative_source_recovery_bookmark_sha256": "81e54fdd57cd81e8779e0a3d516c278c1fdc038fd755efa296806906f1d7d1ac",
+  "archives_retained_in": "migrations/1256881326/ed088e33-d8f0-41a5-92c5-55cc1a734b57/",
+  "verification": {
+    "tables": {
+      "activity_landings": {
+        "rows": 1046,
+        "pages": 1,
+        "source_sha256": "037ab32496ed38197c2bc7a00be41809ee58caf3efc1f9728ce75c8bbe887d72",
+        "import_sha256": "037ab32496ed38197c2bc7a00be41809ee58caf3efc1f9728ce75c8bbe887d72",
+        "target_sha256": "037ab32496ed38197c2bc7a00be41809ee58caf3efc1f9728ce75c8bbe887d72",
+        "source_verified": true,
+        "import_complete": true,
+        "target_complete": true
+      },
+      "activity_loc_cache": {
+        "rows": 4,
+        "pages": 1,
+        "source_sha256": "d9f963a0d5e4ddf906aea7fa1a02ed5a48df5b77a30fe5a4cddcfc602016ee3a",
+        "import_sha256": "d9f963a0d5e4ddf906aea7fa1a02ed5a48df5b77a30fe5a4cddcfc602016ee3a",
+        "target_sha256": "d9f963a0d5e4ddf906aea7fa1a02ed5a48df5b77a30fe5a4cddcfc602016ee3a",
+        "source_verified": true,
+        "import_complete": true,
+        "target_complete": true
+      },
+      "changes": {
+        "rows": 4648494,
+        "pages": 930,
+        "source_sha256": "04d7a26868f837869321a6962fe07bd5ca374d7aa3ca78c4c4236e5537650ca6",
+        "import_sha256": "04d7a26868f837869321a6962fe07bd5ca374d7aa3ca78c4c4236e5537650ca6",
+        "target_sha256": "04d7a26868f837869321a6962fe07bd5ca374d7aa3ca78c4c4236e5537650ca6",
+        "source_verified": true,
+        "import_complete": true,
+        "target_complete": true
+      },
+      "collections": {
+        "rows": 150981,
+        "pages": 32,
+        "source_sha256": "2bf871f2ec7d34963b87dbba769ad2197292247904b05fef40246b40cf929c12",
+        "import_sha256": "2bf871f2ec7d34963b87dbba769ad2197292247904b05fef40246b40cf929c12",
+        "target_sha256": "2bf871f2ec7d34963b87dbba769ad2197292247904b05fef40246b40cf929c12",
+        "source_verified": true,
+        "import_complete": true,
+        "target_complete": true
+      },
+      "deliveries": {
+        "rows": 3061856,
+        "pages": 613,
+        "source_sha256": "acdfa553dac4c2e5e3a47cb01cda6ae5ecf4fcbc39f59f1d64e2f4b88798dbdf",
+        "import_sha256": "acdfa553dac4c2e5e3a47cb01cda6ae5ecf4fcbc39f59f1d64e2f4b88798dbdf",
+        "target_sha256": "acdfa553dac4c2e5e3a47cb01cda6ae5ecf4fcbc39f59f1d64e2f4b88798dbdf",
+        "source_verified": true,
+        "import_complete": true,
+        "target_complete": true
+      },
+      "demand": {
+        "rows": 263,
+        "pages": 1,
+        "source_sha256": "949001c97cb6e1a161d1fff4f80afb6a315703d80fa8c0a02ebbccb77d498c28",
+        "import_sha256": "949001c97cb6e1a161d1fff4f80afb6a315703d80fa8c0a02ebbccb77d498c28",
+        "target_sha256": "949001c97cb6e1a161d1fff4f80afb6a315703d80fa8c0a02ebbccb77d498c28",
+        "source_verified": true,
+        "import_complete": true,
+        "target_complete": true
+      },
+      "head_prs": {
+        "rows": 20159,
+        "pages": 5,
+        "source_sha256": "193229efb9106ecf6a50a50228f396277bf9ed57b98520a29648a597138f18e7",
+        "import_sha256": "193229efb9106ecf6a50a50228f396277bf9ed57b98520a29648a597138f18e7",
+        "target_sha256": "193229efb9106ecf6a50a50228f396277bf9ed57b98520a29648a597138f18e7",
+        "source_verified": true,
+        "import_complete": true,
+        "target_complete": true
+      },
+      "jobs": {
+        "rows": 32502,
+        "pages": 12,
+        "source_sha256": "86f236ae28a8939f89b88df44558fad3470e76645538900b8d9ca96706ec1be6",
+        "import_sha256": "86f236ae28a8939f89b88df44558fad3470e76645538900b8d9ca96706ec1be6",
+        "target_sha256": "86f236ae28a8939f89b88df44558fad3470e76645538900b8d9ca96706ec1be6",
+        "source_verified": true,
+        "import_complete": true,
+        "target_complete": true
+      },
+      "members": {
+        "rows": 275917,
+        "pages": 56,
+        "source_sha256": "e8ed3da9f0779e170fca4b98dc07029cca2b00cff006f93ebc11a947c4f069e5",
+        "import_sha256": "e8ed3da9f0779e170fca4b98dc07029cca2b00cff006f93ebc11a947c4f069e5",
+        "target_sha256": "e8ed3da9f0779e170fca4b98dc07029cca2b00cff006f93ebc11a947c4f069e5",
+        "source_verified": true,
+        "import_complete": true,
+        "target_complete": true
+      },
+      "meta": {
+        "rows": 25,
+        "pages": 1,
+        "source_sha256": "5f519ca08065b7e0d74091708e5edff6010b31e9948a99a14dbcfa49be1499de",
+        "import_sha256": "5f519ca08065b7e0d74091708e5edff6010b31e9948a99a14dbcfa49be1499de",
+        "target_sha256": "5f519ca08065b7e0d74091708e5edff6010b31e9948a99a14dbcfa49be1499de",
+        "source_verified": true,
+        "import_complete": true,
+        "target_complete": true
+      },
+      "query_metrics": {
+        "rows": 20,
+        "pages": 1,
+        "source_sha256": "6be0d21ba14855b61d6db66959f65408b4bead1392597dd16fe4504107f3f2c4",
+        "import_sha256": "6be0d21ba14855b61d6db66959f65408b4bead1392597dd16fe4504107f3f2c4",
+        "target_sha256": "6be0d21ba14855b61d6db66959f65408b4bead1392597dd16fe4504107f3f2c4",
+        "source_verified": true,
+        "import_complete": true,
+        "target_complete": true
+      },
+      "repair_metrics": {
+        "rows": 10787840,
+        "pages": 2158,
+        "source_sha256": "36e534b45b07157690bd81e8bacb778294844bfe49b2fe9462e3e8cf24efe9e8",
+        "import_sha256": "36e534b45b07157690bd81e8bacb778294844bfe49b2fe9462e3e8cf24efe9e8",
+        "target_sha256": "36e534b45b07157690bd81e8bacb778294844bfe49b2fe9462e3e8cf24efe9e8",
+        "source_verified": true,
+        "import_complete": true,
+        "target_complete": true
+      },
+      "resources": {
+        "rows": 347969,
+        "pages": 1915,
+        "source_sha256": "c298ff59a514e5968e9babbf86feb404d02cd2660e6b26961e0aa3323464fec2",
+        "import_sha256": "c298ff59a514e5968e9babbf86feb404d02cd2660e6b26961e0aa3323464fec2",
+        "target_sha256": "c298ff59a514e5968e9babbf86feb404d02cd2660e6b26961e0aa3323464fec2",
+        "source_verified": true,
+        "import_complete": true,
+        "target_complete": true
+      },
+      "retired_objects": {
+        "rows": 0,
+        "pages": 0,
+        "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "import_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "target_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "source_verified": true,
+        "import_complete": true,
+        "target_complete": true
+      },
+      "survey_dirty": {
+        "rows": 1,
+        "pages": 1,
+        "source_sha256": "7197283b9ec2bb7114a3ad10164a514980af147022ba45d85f176d414cffc1a0",
+        "import_sha256": "7197283b9ec2bb7114a3ad10164a514980af147022ba45d85f176d414cffc1a0",
+        "target_sha256": "7197283b9ec2bb7114a3ad10164a514980af147022ba45d85f176d414cffc1a0",
+        "source_verified": true,
+        "import_complete": true,
+        "target_complete": true
+      },
+      "survey_fragments": {
+        "rows": 33915,
+        "pages": 22,
+        "source_sha256": "045dde71bfd93d643e02a5521c0372d20d6d0bc603dcd2e0e165a042b0a60324",
+        "import_sha256": "045dde71bfd93d643e02a5521c0372d20d6d0bc603dcd2e0e165a042b0a60324",
+        "target_sha256": "045dde71bfd93d643e02a5521c0372d20d6d0bc603dcd2e0e165a042b0a60324",
+        "source_verified": true,
+        "import_complete": true,
+        "target_complete": true
+      },
+      "survey_hydrated": {
+        "rows": 3668,
+        "pages": 1,
+        "source_sha256": "89bf56eced68c8bb917a6d86b9d927049a44632181a6654e09a7a0d0674f5253",
+        "import_sha256": "89bf56eced68c8bb917a6d86b9d927049a44632181a6654e09a7a0d0674f5253",
+        "target_sha256": "89bf56eced68c8bb917a6d86b9d927049a44632181a6654e09a7a0d0674f5253",
+        "source_verified": true,
+        "import_complete": true,
+        "target_complete": true
+      },
+      "survey_hydration_failures": {
+        "rows": 0,
+        "pages": 0,
+        "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "import_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "target_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "source_verified": true,
+        "import_complete": true,
+        "target_complete": true
+      },
+      "survey_inventory": {
+        "rows": 11636,
+        "pages": 20,
+        "source_sha256": "aa15111b09627fc1380b845ea01b9521a78917699d1f677da116c9ab15d4151c",
+        "import_sha256": "aa15111b09627fc1380b845ea01b9521a78917699d1f677da116c9ab15d4151c",
+        "target_sha256": "aa15111b09627fc1380b845ea01b9521a78917699d1f677da116c9ab15d4151c",
+        "source_verified": true,
+        "import_complete": true,
+        "target_complete": true
+      },
+      "survey_state": {
+        "rows": 4262,
+        "pages": 8,
+        "source_sha256": "f1e7885c2230fdbeb6e114a036a7e5696165633a04a3f46a82ead663e131ea5d",
+        "import_sha256": "f1e7885c2230fdbeb6e114a036a7e5696165633a04a3f46a82ead663e131ea5d",
+        "target_sha256": "f1e7885c2230fdbeb6e114a036a7e5696165633a04a3f46a82ead663e131ea5d",
+        "source_verified": true,
+        "import_complete": true,
+        "target_complete": true
+      }
+    },
+    "total_rows": 19380558,
+    "sql_pages": 5778,
+    "r2_inventory": {
+      "objects": 980207,
+      "pages": 9805,
+      "complete": true
+    },
+    "staging": {
+      "jobs": 32502,
+      "checked_references": 101,
+      "expired_jobs": 0,
+      "complete": true
+    }
+  },
+  "switch_rejection": {
+    "reason": "migration_shadow_mismatch",
+    "operation": "open_prs",
+    "diagnostic_scope": "first open_prs page local read-only comparison; does not bypass deployed shadow gate",
+    "first_page_rows": 317,
+    "source_revision": 6259516,
+    "target_revision": 6259516,
+    "status_context_order_only": true,
+    "cause": "Batched PostgreSQL status-context cache used unspecified heap/index order instead of SQLite scan rowid order"
+  },
+  "recovery": {
+    "at": "2026-10-21T21:29:05.894Z",
+    "generation": "ed088e33-d8f0-41a5-92c5-55cc1a734b57",
+    "source_backend": "sqlite",
+    "source_mutation_fence": null,
+    "source_mode": "writable",
+    "target_owner": {
+      "backend": "abandoned",
+      "generation": "ed088e33-d8f0-41a5-92c5-55cc1a734b57"
+    },
+    "postgres_writes_activated": false
+  },
+  "retention": {
+    "archives": "preserved",
+    "original_neon_standby": "retained with abandoned generation",
+    "r2_input": "pinned through retry; bounded replay resumed on SQLite",
+    "expiry": "remains disabled; no observation retirement performed"
+  },
+  "regression": {
+    "database": "isolated PostgreSQL fixture",
+    "trigger": "Cluster resource storage by kind/id while preserving all imported rowids and values",
+    "before": "migration_shadow_mismatch",
+    "after": "shadow passes; real target payload changes and matching unavailable results still rejected"
+  }
+}
