@@ -163,6 +163,73 @@ class StatusIntentTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ci_status.load_intents(path.parent)
 
+    def test_creation_truncates_description_but_replay_remains_strict(self):
+        _, record = ci_status.record_intent(self.sha, 'build', 'success', 'x' * 300)
+        self.assertEqual(record['payload']['description'], 'x' * 140)
+        record['payload']['description'] += 'x'
+        with self.assertRaises(ValueError):
+            ci_status.validate(record)
+
+    def approved_scope(self):
+        return ci_status.record_intent(self.sha, 'scope', 'success', 'restricted paths approved', pr=7,
+                                       base_ref='main', approval={'head': self.sha, 'base': 'b' * 40, 'pr': 7})
+
+    def test_scope_approval_is_validated_and_bound_to_exact_status(self):
+        path, record = self.approved_scope()
+        self.assertEqual(ci_status.load_intents(path.parent), [(path, record)])
+        for change in ({'head': 'c' * 40}, {'base': 'main'}, {'pr': 8}, {'pr': True}, {'extra': True}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                ci_status.validate(dict(record, approval=dict(record['approval'], **change)))
+        with self.assertRaises(ValueError):
+            ci_status.record_intent(self.sha, 'build', 'success', 'pass', pr=7, base_ref='main',
+                                    approval=record['approval'])
+
+    def test_revoked_scope_posts_red_instead_of_leaving_old_green(self):
+        record = self.approved_scope()
+        with patch.object(ci_status, 'scope_approved', return_value=False) as approval:
+            result, fake = self.publish([record], [self.run, self.pull, {}])
+        self.assertFalse(result)
+        self.assertEqual(approval.call_count, 1)
+        self.assertEqual(fake.calls[-1][2]['state'], 'failure')
+        self.assertEqual(fake.calls[-1][2]['context'], 'scope')
+        self.assertFalse(record[0].exists())
+
+    def test_quota_retry_rechecks_scope_approval_before_posting(self):
+        record = self.approved_scope()
+        with patch.object(ci_status, 'scope_approved', side_effect=[True, False]) as approval, patch.object(ci_status.time, 'sleep'):
+            result, fake = self.publish([record], [self.run, self.pull,
+                                       ci_status.Deferred('write', ci_status.time.time() + 1), self.run, self.pull, {}], max_wait=10)
+        self.assertFalse(result)
+        self.assertEqual(approval.call_count, 2)
+        self.assertEqual(fake.calls[2][2]['state'], 'success')
+        self.assertEqual(fake.calls[-1][2]['state'], 'failure')
+
+    def test_scope_verification_uses_shared_api_and_quota_is_not_revocation(self):
+        with patch.dict(os.environ, {'GITHUB_REPOSITORY': 'TauCetiProject/TauCeti'}):
+            _, record = self.approved_scope()
+        fake = FakeGitHub([{'number': 7}, {'id': 123}])
+        def verify(data, head, base, **kwargs):
+            self.assertEqual(kwargs['api']('pulls/7'), {'number': 7})
+            self.assertEqual(kwargs['api']('/user/123'), {'id': 123})
+            return True
+        with patch.object(ci_status.bors_scope_approval, 'observation', return_value={}), patch.object(ci_status.bors_scope_approval, 'verify', side_effect=verify):
+            self.assertTrue(ci_status.scope_approved(fake, record))
+        self.assertEqual([call[1] for call in fake.calls], ['repos/TauCetiProject/TauCeti/pulls/7', '/user/123'])
+        limited = ci_status.Deferred('read', ci_status.time.time() + 3600)
+        with patch.object(ci_status.bors_scope_approval, 'observation', return_value={}), patch.object(ci_status.bors_scope_approval, 'verify', side_effect=limited), self.assertRaises(ci_status.Deferred):
+            ci_status.scope_approved(fake, record)
+
+    def test_batch_paths_are_relative_unique_sorted_and_bounded(self):
+        approval = {'head': self.sha, 'base': 'b' * 40, 'batch_id': 5, 'paths': ['TauCeti/X.lean', 'scripts/x']}
+        _, record = ci_status.record_intent(self.sha, 'scope', 'success', 'approved', approval=approval)
+        for paths in (['/etc/passwd'], ['../foo'], ['x/../foo'], ['x\nother'], ['x\\other'], ['x', 'x'], ['z', 'a'], []):
+            with self.subTest(paths=paths), self.assertRaises(ValueError):
+                ci_status.validate(dict(record, approval=dict(approval, paths=paths)))
+        approval['paths'] = [f'TauCeti/LongModuleName{i:04d}.lean' for i in range(2000)]
+        path, record = ci_status.record_intent(self.sha, 'scope', 'success', 'approved', approval=approval)
+        self.assertGreater(path.stat().st_size, 16384)
+        self.assertEqual(ci_status.load_intents(path.parent), [(path, record)])
+
     def test_asset_copies_match(self):
         self.assertEqual((SCRIPTS / 'ci_status.py').read_bytes(),
                          (SCRIPTS.parent / 'project/scripts/ci_status.py').read_bytes())

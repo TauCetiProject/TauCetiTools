@@ -13,6 +13,7 @@ import tempfile
 import time
 
 from github_api import APIError, Deferred, GitHub
+import bors_scope_approval
 
 SCHEMA = "tauceti-ci.pr-status-intent/v1"
 CONTEXTS = {"build", "bump-guard", "scope"}
@@ -38,7 +39,7 @@ def source():
 
 def validate(record):
     repo, run, attempt = source()
-    if not isinstance(record, dict) or set(record) != FIELDS or record.get("schema") != SCHEMA:
+    if not isinstance(record, dict) or set(record) not in (FIELDS, FIELDS | {"approval"}) or record.get("schema") != SCHEMA:
         raise ValueError("unsupported status intent schema")
     if record["repo"] != repo or record["run_id"] != run or record["attempt"] != attempt:
         raise ValueError("status intent differs from the selected source run")
@@ -64,15 +65,41 @@ def validate(record):
         raise ValueError("invalid status description")
     if payload["target_url"] != f"https://github.com/{repo}/actions/runs/{run}":
         raise ValueError("status target does not identify the selected source run")
+    if "approval" in record:
+        approval = record["approval"]
+        if payload["context"] != "scope" or payload["state"] != "success" or not isinstance(approval, dict):
+            raise ValueError("scope approval applies only to a successful scope status")
+        if (approval.get("head") != record["sha"] or not isinstance(approval.get("base"), str)
+                or not re.fullmatch(r"[0-9a-f]{40}", approval["base"]) or approval["base"] == "0" * 40):
+            raise ValueError("invalid scope approval revision")
+        if record["pr"] is not None:
+            if set(approval) != {"head", "base", "pr"} or approval["pr"] != record["pr"] or type(approval["pr"]) is not int:
+                raise ValueError("scope approval PR differs from status identity")
+        else:
+            if (set(approval) != {"head", "base", "batch_id", "paths"}
+                    or type(approval["batch_id"]) is not int or positive(approval["batch_id"]) != approval["batch_id"]):
+                raise ValueError("invalid scope approval batch")
+            paths = approval["paths"]
+            if not isinstance(paths, list) or not 0 < len(paths) <= 4096:
+                raise ValueError("invalid scope approval paths")
+            for path in paths:
+                if (not isinstance(path, str) or not path or len(path) > 4096 or path.startswith("/")
+                        or any(c in path for c in "\\\n\r\0") or any(part in ("", ".", "..") for part in path.split("/"))):
+                    raise ValueError("invalid relative scope approval path")
+            if paths != sorted(set(paths)) or sum(len(path.encode()) for path in paths) > 512 * 1024:
+                raise ValueError("scope approval paths must be bounded, unique and sorted")
     return record
 
 
-def record_intent(sha, context, state, description, pr=None, base_ref=None):
+def record_intent(sha, context, state, description, pr=None, base_ref=None, *, approval=None):
     repo, run, attempt = source()
-    record = validate(dict(schema=SCHEMA, repo=repo, sha=sha, run_id=run, attempt=attempt,
+    record = dict(schema=SCHEMA, repo=repo, sha=sha, run_id=run, attempt=attempt,
                            pr=positive(pr) if pr is not None else None, base_ref=base_ref,
-                           payload=dict(context=context, state=state, description=description,
-                                        target_url=f"https://github.com/{repo}/actions/runs/{run}")))
+                           payload=dict(context=context, state=state, description=description[:140],
+                                        target_url=f"https://github.com/{repo}/actions/runs/{run}"))
+    if approval is not None:
+        record["approval"] = approval
+    validate(record)
     directory = Path(os.environ["RUNNER_TEMP"]) / "tauceti-status-intents"
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{context}.json"
@@ -100,7 +127,7 @@ def load_intents(directory):
     # Validate every file before any write. An artifact cannot smuggle unrelated
     # statuses or bind one context to two competing payloads.
     for path in sorted(paths):
-        if path.is_symlink() or not path.is_file() or path.stat().st_size > 16384:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 1024 * 1024:
             raise ValueError("invalid status intent file")
         if path.suffix != ".json":
             raise ValueError("unexpected status intent file")
@@ -127,6 +154,24 @@ def fence(api, record):
     return True
 
 
+def scope_approved(api, record):
+    approval = record.get("approval")
+    if approval is None:
+        return True
+    if record["repo"] != bors_scope_approval.REPO:
+        return False
+    def read(path):
+        endpoint = path if path.startswith("/") else f"repos/{record['repo']}/{path}"
+        return api.request("GET", endpoint)
+    try:
+        return bors_scope_approval.verify(
+            bors_scope_approval.observation(approval.get("batch_id")), approval["head"], approval["base"],
+            pr=approval.get("pr"), batch_id=approval.get("batch_id"), combined_paths=approval.get("paths"), api=read)
+    except (KeyError, TypeError, ValueError, OSError) as error:
+        print(f"ci-status: scope approval unavailable: {type(error).__name__}", file=sys.stderr)
+        return False
+
+
 def binding(record):
     return tuple(record[key] for key in ("repo", "run_id", "attempt", "sha", "pr", "base_ref"))
 
@@ -149,10 +194,18 @@ def publish(records, *, max_wait=600):
                             path.unlink(missing_ok=True)
                             break
                         fenced.add(key)
+                    payload = record["payload"]
+                    approval_ok = scope_approved(api, record)
+                    if not approval_ok:
+                        # Clear an older green waiver on the same SHA. Revocation
+                        # cannot be represented by silently skipping publication.
+                        payload = dict(payload, state="failure", description="no valid current bors scope approval")
                     api.request("POST", f"repos/{record['repo']}/statuses/{record['sha']}",
-                                record["payload"], idempotent=True)
+                                payload, idempotent=True)
                     path.unlink(missing_ok=True)
-                    print(f"ci-status: posted {record['payload']['context']}={record['payload']['state']}")
+                    if not approval_ok:
+                        failures += 1
+                    print(f"ci-status: posted {payload['context']}={payload['state']}")
                     break
                 except Deferred as error:
                     delay = max(1, error.until - time.time())
@@ -186,12 +239,32 @@ def main():
     post.add_argument("--pr")
     post.add_argument("--base-ref")
     post.add_argument("--record-only", action="store_true")
+    post.add_argument("--scope-approval-base")
+    approval_kind = post.add_mutually_exclusive_group()
+    approval_kind.add_argument("--scope-approval-pr", type=int)
+    approval_kind.add_argument("--scope-approval-batch", type=int)
+    post.add_argument("--scope-paths-file", type=Path)
     resume = commands.add_parser("resume")
     resume.add_argument("directory", type=Path)
     args = parser.parse_args()
     try:
         if args.command == "post":
-            path, record = record_intent(args.sha, args.context, args.state, args.description, args.pr, args.base_ref)
+            approval = None
+            if args.scope_approval_base is not None:
+                approval = {"head": args.sha, "base": args.scope_approval_base}
+                if args.scope_approval_pr is not None:
+                    approval["pr"] = args.scope_approval_pr
+                elif args.scope_approval_batch is not None and args.scope_paths_file is not None:
+                    if args.scope_paths_file.stat().st_size > 512 * 1024:
+                        raise ValueError("scope paths file exceeds bound")
+                    approval.update(batch_id=args.scope_approval_batch,
+                                    paths=sorted(set(args.scope_paths_file.read_text().splitlines())))
+                else:
+                    raise ValueError("scope approval requires a PR or batch with paths")
+            elif any(value is not None for value in (args.scope_approval_pr, args.scope_approval_batch, args.scope_paths_file)):
+                raise ValueError("scope approval requires an exact base")
+            path, record = record_intent(args.sha, args.context, args.state, args.description, args.pr, args.base_ref,
+                                         approval=approval)
             if args.record_only:
                 return 0
             records = [(path, record)]
