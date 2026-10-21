@@ -109,6 +109,17 @@ test('GET and batch queries retain unquoted IDs beyond the JavaScript safe range
  assert.equal(result.results[0].result.reason,'coverage_unavailable');assert.equal(result.results[1].result.reason,'repository_unavailable');assert.equal(result.results[2].result.reason,'coverage_unavailable');
 });
 
+test('coordination adoption deduplicates webhook redelivery and survives deletion',async()=>{
+ const at=new Date().toISOString(),c={id:990123,body:'<!--tauceti-review-in-progress '+JSON.stringify({schema:'tauceti-review-in-progress/v1',coordination_protocol:'git+comment/v1',git_claim:true})+'-->',created_at:at,updated_at:at,user:{login:'reviewer'}};
+ const created={...body(),action:'created',issue:{number:7},comment:c};
+ assert.equal((await ingest('coordination-created','issue_comment',created)).status,200);
+ assert.equal((await ingest('coordination-created','issue_comment',created)).status,200);
+ await ingest('coordination-deleted','issue_comment',{...created,action:'deleted'});
+ const r=await request('/v1/activity',{method:'POST',headers,body:JSON.stringify({repository:'org/repo',numbers:[]})});
+ const counts=(await r.json()).review_coordination.windows['24h'];
+ assert.equal(counts.dual,1);assert.equal(counts.git_held,1);
+});
+
 test('explicit SQLite ownership fencing works in the Worker SQL runtime',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
  const post=(path,body)=>request('/admin/'+path,{method:'POST',headers:{Authorization:'Bearer '+admin},body:JSON.stringify({repository:repo.name,...body})});
  assert.equal((await post('ingress',{mode:'parked'})).status,200);
@@ -116,3 +127,4 @@ test('explicit SQLite ownership fencing works in the Worker SQL runtime',{skip:B
  assert.equal(fence.status,200,JSON.stringify(await fence.json()));
  const response=await post('storage/probe',{});assert.equal(response.status,400);assert.equal((await response.json()).error,'backend_fenced');
 });
+

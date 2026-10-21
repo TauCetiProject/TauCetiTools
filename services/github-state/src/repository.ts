@@ -742,8 +742,8 @@ export class RepositoryState extends DurableObject<Env> {
   async recordReviewStart(comment:any,received:number):Promise<void> {
     const marker=String(comment.body || '').match(/<!--tauceti-review-in-progress (.*?)-->/s);
     if(!marker || !comment.id)return;
-    // Existing resource rows deduplicate repeated creates and survive marker deletion.
-    if((await this.store.exec("SELECT id FROM resources WHERE kind='issue_comments' AND id=?",String(comment.id))).toArray().length)return;
+    // ingest() already deduplicates GitHub delivery GUIDs, including redeliveries.
+    // A cached/deleted comment may precede its create webhook; it must not hide a start.
     let data:any;try{data=JSON.parse(marker[1]);}catch{data={};}
     const now=Date.now(),hour=3600000,history=await this.meta('review_coordination') || {observed_since:now,buckets:{}};
     const parsed=Date.parse(comment.created_at || '');const at=Number.isFinite(parsed)?parsed:received;

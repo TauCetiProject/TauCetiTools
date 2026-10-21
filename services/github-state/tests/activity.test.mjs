@@ -104,14 +104,13 @@ test('background Bors receipt import is shared and rate limited; activity reads 
  }finally{globalThis.fetch=original;await db.close();}
 });
 
-test('review coordination counts created markers once and survives deletion without upstream reads',async()=>{
+test('review coordination counts starts even when cached/deleted comments precede the create webhook',async()=>{
  const {db,state}=await fixture();try{
   const at=Date.now(),base={created_at:new Date(at).toISOString()};
   const marker=(id,extra)=>({...base,id,body:'<!--tauceti-review-in-progress '+JSON.stringify({schema:'tauceti-review-in-progress/v1',expires_at:Math.floor(at/1000)+1800,...extra})+'-->'});
   const dual=marker(100,{coordination_protocol:'git+comment/v1',git_claim:true});
-  await state.recordReviewStart(dual,at);
   await db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?,?)').run('issue_comments','100','7',JSON.stringify(dual),'',at,1,1);
-  await state.recordReviewStart(dual,at); // distinct delivery, same already-retained/deleted comment
+  await state.recordReviewStart(dual,at); // delivery receipts handle retries, not resource presence
   await state.recordReviewStart(marker(101,{}),at);
   await state.recordReviewStart(marker(102,{coordination_protocol:'future'}),at);
   const result=await (await query(state,[])).json(),counts=result.review_coordination.windows['24h'];
