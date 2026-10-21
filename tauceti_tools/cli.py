@@ -34,7 +34,7 @@ def parser():
     doctor.add_argument(
         "--field", action="append", default=[], help="Existing workflow input NAME=VALUE; used with --online"
     )
-    doctor.add_argument("--check")
+    doctor.add_argument("--check", metavar="CHECK_ID", help="Report only this check, with its full repair instructions")
     doctor.add_argument("--fix")
     doctor.add_argument("--apply", action="store_true")
     doctor.add_argument("--json", action="store_true")
@@ -61,6 +61,17 @@ def parser():
     neon.add_argument("--token-file", type=Path, required=True)
     neon.add_argument("--output", type=Path)
     neon.add_argument("--apply", action="store_true")
+    state = sub.add_parser("github-state", help="Prepare access requests or initialize an approved repository")
+    state_actions = state.add_subparsers(dest="action", required=True)
+    request = state_actions.add_parser("request", help="Save a private client token and a shareable access request")
+    request.add_argument("--installation", type=int, required=True, help="Number from the GitHub App installation URL")
+    initial = state_actions.add_parser("initial-grants", help="Recover the initial client grant into a new local file")
+    operator = Path.home() / ".config/tauceti-github-state"
+    initial.add_argument("--token-file", type=Path, default=operator / "client-token")
+    initial.add_argument("--repository", default="TauCetiProject/TauCeti")
+    initial.add_argument("--output", type=Path, default=operator / "client-tokens.json")
+    boot = state_actions.add_parser("bootstrap", help="Operator: initialize an already approved repository")
+    boot.add_argument("--admin-token-file", type=Path, default=operator / "admin-token")
     upstreams = sub.add_parser("upstreams", help="Inspect consistent forward dependency targets")
     upstreams.add_argument("action", choices=("inspect", "update", "guard"))
     upstreams.add_argument("--checkout", type=Path, default=Path.cwd())
@@ -114,6 +125,11 @@ def main(argv=None):
             return 0
         if args.command == "neon":
             from .neon import run
+
+            run(project, args)
+            return 0
+        if args.command == "github-state":
+            from .github_state_setup import run
 
             run(project, args)
             return 0
@@ -173,18 +189,9 @@ def main(argv=None):
             if args.check:
                 findings = [f for f in findings if f.id == args.check]
                 if not findings:
-                    raise ConfigError(f"Unknown check {args.check}; run doctor without --check to list checks")
-            render(findings, json_output=args.json, show_ready=bool(args.check))
+                    raise ConfigError(f"Unknown check {args.check}; run doctor --json without --check to list check IDs")
+            render(findings, json_output=args.json, show_ready=bool(args.check), project=project)
             bad = any(f.status in ("failed", "unknown") for f in findings)
-            if not args.json:
-                core_bad = any(f.status in ("failed", "unknown") and not f.optional for f in findings)
-                print(
-                    "Core setup needs attention."
-                    if core_bad
-                    else "Core configured; pending functional checks are listed above."
-                )
-                if bad and not core_bad:
-                    print("Optional extras need attention.")
             return 1 if bad else 0
         if args.command == "upgrade":
             from .scaffold import upgrade

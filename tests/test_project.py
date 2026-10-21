@@ -181,6 +181,7 @@ class ProjectTests(unittest.TestCase):
 
         project = parse(initial_configuration("one/Project", "human").encode())
         project.raw["services"]["bors"]["mode"] = "hosted"
+        project.raw["merge"]["backend"] = "bors"
         with tempfile.TemporaryDirectory() as tmp, patch("tauceti_tools.doctor.Path.home", return_value=Path(tmp)):
             registry = Path(tmp) / ".config/tauceti/neon-projects.json"
             registry.parent.mkdir(parents=True)
@@ -188,6 +189,10 @@ class ProjectTests(unittest.TestCase):
             rows = {f.id: f for f in extra_findings(project, object(), "doctor")}
             self.assertEqual(rows["services.bors.enrollment"].status, "ready")
             self.assertEqual(rows["services.bors"].status, "pending")
+            project.raw["merge"]["backend"] = "github-direct"
+            rows = {f.id: f for f in extra_findings(project, object(), "doctor")}
+            self.assertEqual(rows["services.bors"].status, "ready")
+            self.assertIn("not the selected merger", rows["services.bors"].summary)
             registry.write_text(json.dumps({"other/Project": {"approved": True, "project_id": "project-456"}}))
             rows = {f.id: f for f in extra_findings(project, object(), "doctor")}
             self.assertEqual(rows["services.bors.enrollment"].status, "pending")

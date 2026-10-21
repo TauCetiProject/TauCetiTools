@@ -22,6 +22,9 @@ Doctor reads by default. `--fix CHECK_ID` previews a repair; adding `--apply` pe
 Credential presence and successful use are reported separately.
 Optional extras are included by default, after the core checks; `--no-extras` omits them.
 Disabled extras are reported as disabled and do not need setting up.
+The human report summarizes successful checks and prints the full repair procedure for
+each outstanding item, including service-operator work. `--check CHECK_ID` selects one
+check; it does not change the instructions. `--json` includes every check's ID and evidence.
 
 Configuration is selected in this order: explicit `--conf PATH_OR_HTTPS_URL`,
 `TAUCETI_CONF`, `tauceti.toml` in the current directory, then `tauceti.toml` at the
