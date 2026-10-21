@@ -277,20 +277,47 @@ class DuplicateDeclarationsTest(unittest.TestCase):
             "Dependency": "module\npublic axiom counterfeit : False\n",
             "TauCeti.Orphan": "module\npublic import Dependency\n"
                              "public theorem bad : False := counterfeit\n",
-        }, full=True)
+        }, full=True, scope="TauCeti.Orphan\n")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("bad → [counterfeit]", result.stderr)
 
-    def test_scope_includes_unchanged_importers(self):
+    def test_scope_checks_changed_module_without_adding_importers(self):
         result = self.fixture({
             "TauCeti.Base": "module\npublic axiom counterfeit : False\n",
             "TauCeti.Importer": "module\npublic import TauCeti.Base\n"
                                "public theorem bad : False := counterfeit\n",
         }, full=True, scope="TauCeti.Base\n")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("bad → [counterfeit]", result.stderr)
+        self.assertIn("counterfeit → [counterfeit]", result.stderr)
+        self.assertNotIn("bad →", result.stderr)
 
-    def test_scope_does_not_scope_ownership_or_module_flags(self):
+    def test_scope_skips_unchanged_importer_but_full_audit_catches_it(self):
+        modules = {
+            "TauCeti.Base": "module\npublic def clean := 1\n",
+            "TauCeti.Importer": "module\npublic import TauCeti.Base\n"
+                               "public theorem bad : False := by sorry\n",
+        }
+        scoped = self.fixture(modules, full=True, scope="TauCeti.Base\n")
+        self.assertEqual(scoped.returncode, 0, scoped.stdout + scoped.stderr)
+        self.assertIn("axioms: audited 1 TauCeti declaration(s)", scoped.stdout)
+        self.assertIn("changed module(s) only", scoped.stdout)
+        full = self.fixture(modules, full=True)
+        self.assertEqual(full.returncode, 1, full.stdout + full.stderr)
+        self.assertIn("bad → [sorryAx]", full.stderr)
+
+    def test_empty_scope_audits_no_declarations(self):
+        result = self.fixture({"TauCeti.Orphan": "module\npublic axiom bad : False\n"},
+                              full=True, scope="")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("axioms: audited 0 TauCeti declaration(s)", result.stdout)
+
+    def test_scope_does_not_scope_ownership(self):
+        self.assert_collision(self.fixture({
+            "TauCeti.A": "module\npublic def Collision := 7\n",
+            "TauCeti.B": "module\npublic def Collision := 7\n",
+        }, full=True, scope="TauCeti.Missing\n"))
+
+    def test_scope_does_not_scope_module_flags(self):
         result = self.fixture({"TauCeti.Orphan": "def unique := 1\n"},
                               full=True, scope="TauCeti.Missing\n")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)

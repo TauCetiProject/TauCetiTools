@@ -972,13 +972,12 @@ jobs:
           bash gate/scripts/lint-scope.sh "$out"
           echo "LINT_SCOPE_DIR=$out" >> "$GITHUB_ENV"
 
-      # The axiom audit and the dot-notation lint need see only what an ordinary PR changes: the
-      # library on main already passed both in full (every push to main runs them unscoped, as does
-      # every GitHub merge-queue or bors staging build here), and neither result for an unchanged file can change unless
-      # its dependencies or the Mathlib pin do. So they are scoped to the changed modules exactly
-      # when the environment lint is, and additionally only for a PR build (not a batch,
-      # which re-checks the whole library before anything lands), only when the Lake pins are
-      # unchanged, and only when every changed `.lean` file is a module the list can name.
+      # Ordinary PRs run a fast preflight on declarations in changed modules only.
+      # The axiom audit still follows their proof dependencies, but does not add importers.
+      # Every GitHub merge-queue or bors staging build, and every push to main, audits the
+      # whole library, including unchanged sources rebuilt against changed imports.
+      # Keep full-scope fallbacks for full lint, changed Lake pins, and changed Lean files
+      # that the module list cannot name.
       - name: Decide the audit scope
         if: ${{ env.INFRA != '1' }}
         run: |
