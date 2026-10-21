@@ -21,18 +21,32 @@ export async function scanHostedCapacity(
   }
   const all=await pages('/orgs/'+encodeURIComponent(organization)+'/repos');
   if(all.some(r=>typeof r.name!=='string' || typeof r.archived!=='boolean'))throw new Error('capacity_invalid_repository');
-  let busy=0,runs=0;
-  for(const repo of all.filter(r=>!r.archived)) {
-    const prefix='/repos/'+encodeURIComponent(organization)+'/'+encodeURIComponent(repo.name);
-    const active=await pages(prefix+'/actions/runs?status=in_progress','workflow_runs');
-    for(const run of active) {
-      if(!/^\d+$/.test(String(run.id)))throw new Error('capacity_invalid_run');
-      runs++;
-      for(const job of await pages(prefix+'/actions/runs/'+run.id+'/jobs','jobs')) {
-        if(typeof job.status!=='string' || !Array.isArray(job.labels) || job.labels.some((l:unknown)=>typeof l!=='string'))throw new Error('capacity_invalid_job');
-        if(job.status==='in_progress' && !job.labels.some((l:string)=>l==='self-hosted' || l.startsWith('nscloud-') || l.startsWith('namespace-profile-')))busy++;
+  async function each<T>(values:T[],visit:(value:T)=>Promise<void>):Promise<void> {
+    let next=0,failure:unknown;
+    const worker=async()=>{
+      while(!failure && next<values.length) {
+        const value=values[next++];
+        try {await visit(value);}catch(error) {failure=error;}
       }
-    }
+    };
+    // Finish already-started requests before returning an unavailable snapshot.
+    await Promise.all(Array.from({length:Math.min(3,values.length)},worker));
+    if(failure)throw failure;
   }
-  return {busy,requests,repositories:all.length,runs,observed_at:Date.now()};
+  let busy=0;
+  const activeRuns:{prefix:string;id:string}[]=[];
+  await each(all.filter(r=>!r.archived),async repo=>{
+    const prefix='/repos/'+encodeURIComponent(organization)+'/'+encodeURIComponent(repo.name);
+    for(const run of await pages(prefix+'/actions/runs?status=in_progress','workflow_runs')) {
+      if(!/^\d+$/.test(String(run.id)))throw new Error('capacity_invalid_run');
+      activeRuns.push({prefix,id:String(run.id)});
+    }
+  });
+  await each(activeRuns,async run=>{
+    for(const job of await pages(run.prefix+'/actions/runs/'+run.id+'/jobs','jobs')) {
+      if(typeof job.status!=='string' || !Array.isArray(job.labels) || job.labels.some((l:unknown)=>typeof l!=='string'))throw new Error('capacity_invalid_job');
+      if(job.status==='in_progress' && !job.labels.some((l:string)=>l==='self-hosted' || l.startsWith('nscloud-') || l.startsWith('namespace-profile-')))busy++;
+    }
+  });
+  return {busy,requests,repositories:all.length,runs:activeRuns.length,observed_at:Date.now()};
 }

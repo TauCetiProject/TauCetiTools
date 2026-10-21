@@ -87,3 +87,20 @@ test('brief contention for existing request slots yields and completes instead o
   const v=await result.json();assert.equal(result.status,200);assert.equal(v.busy,1);
  }finally{clearTimeout(timer);globalThis.fetch=original;}
 });
+test('a busy organization inventory uses at most three reads at once and drains in-flight reads on failure',async()=>{
+ let active=0,peak=0;
+ const reader=(fail=false)=>async path=>{
+  active++;peak=Math.max(peak,active);
+  try {
+   await new Promise(resolve=>setTimeout(resolve,2));
+   if(path.startsWith('/orgs/'))return envelope(null,Array.from({length:6},(_,i)=>({name:'repo'+i,archived:false})));
+   if(path.includes('/actions/runs?'))return envelope('workflow_runs',Array.from({length:4},(_,i)=>({id:String(i+1)})));
+   if(fail && path.includes('/runs/1/'))throw Error('fixture request rejected');
+   return envelope('jobs',[hosted]);
+  }finally{active--;}
+ };
+ const value=await scanHostedCapacity('org',reader());assert.equal(value.busy,24);assert.equal(value.requests,31);
+ assert.equal(peak,3);assert.equal(active,0);
+ await assert.rejects(()=>scanHostedCapacity('org',reader(true)),/fixture request rejected/);
+ assert.equal(active,0,'refresh must settle all started requests before releasing the single flight');
+});

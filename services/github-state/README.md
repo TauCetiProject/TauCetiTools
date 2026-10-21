@@ -282,7 +282,7 @@ Refresh uses existing installation quota accounting, honors secondary cooldowns,
 leaves at least 1,500 core requests for repository work, and spends at most 500
 read attempts per rolling hour, including lost network responses on this operation. Brief request-slot
 contention yields within the scan deadline rather than invalidating the snapshot. A scan is bounded to
-80 requests and a 15-second launch window; individual requests retain their
+80 requests, at most three simultaneous reads, and a 15-second launch window; individual requests retain their
 existing timeout. There is no alarm, CI event storage, or new polling task.
 
 Pickers retain bounded direct discovery when this view is unavailable. Visiting
