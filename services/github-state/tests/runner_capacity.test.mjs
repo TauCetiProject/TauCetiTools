@@ -55,3 +55,35 @@ test('a failed refresh is briefly cached and cannot publish partial capacity or 
   const second=await get();assert.equal(second.status,503);assert.equal(reads,1);
  }finally{await mf.dispose();}
 });
+
+// Exercise the real scheduler with in-memory durable storage; no production-only test hooks.
+const shim={name:'capacity-fixture',setup(b){b.onResolve({filter:/^cloudflare:workers$/},()=>({path:'fixture',namespace:'capacity-fixture'}));b.onLoad({filter:/.*/,namespace:'capacity-fixture'},()=>({contents:'export class DurableObject{constructor(ctx,env){this.ctx=ctx;this.env=env}}',loader:'js'}));}};
+const bundle=await build({entryPoints:['src/installation.ts'],bundle:true,format:'esm',platform:'node',write:false,plugins:[shim]});
+const {InstallationScheduler}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
+function schedulerFixture(){
+ const values=new Map();let slots=0;
+ const storage={get:async k=>values.get(k),put:async(k,v)=>values.set(k,structuredClone(v)),sql:{exec(q){return {toArray:()=>[],one:()=>({n:q.includes('COUNT(*)')?slots:0,cost:0})};}}};
+ const scheduler=new InstallationScheduler({storage},{});scheduler.token=async()=> 'token';scheduler.usable=()=>5000;
+ return {scheduler,values,setSlots:n=>{slots=n}};
+}
+test('hourly allowance and lost responses survive refresh and cannot be bypassed by another caller',async()=>{
+ const {scheduler,values}=schedulerFixture();let calls=0;
+ scheduler.http=async()=>{calls++;throw new Error('connection lost')};
+ values.set('runner-capacity-attempts',Array(500).fill(Date.now()));
+ let result=await (await scheduler.runnerCapacity({name:'org/repo',installation:'200'})).json();
+ assert.equal(result.reason,'capacity_hourly_budget');assert.equal(calls,0);
+ values.delete('runner-capacity:org');values.delete('runner-capacity-attempts');
+ result=await (await scheduler.runnerCapacity({name:'org/repo',installation:'200'})).json();
+ assert.equal(result.complete,false);assert.equal(calls,1);
+ assert.equal(values.get('runner-capacity-attempts').length,1);
+ await scheduler.runnerCapacity({name:'org/repo',installation:'200'});assert.equal(calls,1);
+});
+test('brief contention for existing request slots yields and completes instead of caching an internal failure',async()=>{
+ const {scheduler,setSlots}=schedulerFixture();const {read}=readFixture();const original=globalThis.fetch;
+ globalThis.fetch=async url=>{const u=new URL(url);const v=await read(u.pathname+u.search);return Response.json(v.body);};
+ setSlots(4);const timer=setTimeout(()=>setSlots(0),100);
+ try {
+  const result=await scheduler.runnerCapacity({name:'org/repo',installation:'200'});
+  const v=await result.json();assert.equal(result.status,200);assert.equal(v.busy,1);
+ }finally{clearTimeout(timer);globalThis.fetch=original;}
+});
