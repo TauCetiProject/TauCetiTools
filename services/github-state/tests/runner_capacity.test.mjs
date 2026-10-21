@@ -13,11 +13,10 @@ function readFixture(options={}) {
   if(path.startsWith('/orgs/'))return envelope(null,[{name:'code',archived:false},{name:'old',archived:true},{name:'other',archived:false}]);
   if(path.includes('/other/'))return envelope('workflow_runs',[]);
   if(path.includes('/actions/runs?'))return envelope('workflow_runs',[{id:'1'}]);
-  if(options.failed)return {status:403,body:{message:'rate limited'}};
+  if(options.failed || options.failedLater && path.endsWith('page=2'))return {status:403,body:{message:'rate limited'}};
   const jobs=[hosted,{...hosted,status:'queued'},{...hosted,labels:['nscloud-ubuntu-test']},{...hosted,labels:['namespace-profile-foo']},{...hosted,labels:['self-hosted']}];
   if(options.paginate && !path.endsWith('page=2'))return {...envelope('jobs',jobs),body:{jobs,total_count:6},link:'<https://api.github.com/next>; rel="next"'};
   if(options.paginate)return envelope('jobs',[hosted]);
-  if(options.incomplete)return {status:200,body:{jobs,total_count:10}};
   return envelope('jobs',jobs);
  };
  return {read,calls};
@@ -30,7 +29,16 @@ test('counts running hosted jobs across repositories, excluding archived repos a
 });
 test('pagination is complete and a missing later page is unavailable, never an undercount',async()=>{
  const {read}=readFixture({paginate:true});assert.equal((await scanHostedCapacity('org',read)).busy,2);
- for(const opts of [{failed:true},{incomplete:true}])await assert.rejects(()=>scanHostedCapacity('org',readFixture(opts).read),/capacity_/);
+ for(const opts of [{failed:true},{paginate:true,failedLater:true}])await assert.rejects(()=>scanHostedCapacity('org',readFixture(opts).read),/capacity_/);
+});
+test('live Actions count drift does not invent another page or reject a complete Link traversal',async()=>{
+ const {read,calls}=readFixture();
+ const value=await scanHostedCapacity('org',async path=>{
+  const r=await read(path);
+  if(!Array.isArray(r.body))r.body.total_count+=2;
+  return r;
+ });
+ assert.equal(value.busy,1);assert.equal(calls.length,4);
 });
 test('one authenticated refresh is shared by concurrent callers and the prepared cache costs no reads',async()=>{
  let reads=0;

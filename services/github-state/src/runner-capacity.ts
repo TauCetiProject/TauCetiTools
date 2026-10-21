@@ -12,10 +12,10 @@ export async function scanHostedCapacity(
       const values=key?response.body?.[key]:response.body;
       if(response.deferred || response.status!==200 || !Array.isArray(values))throw new Error('capacity_inventory_unavailable');
       rows.push(...values);
-      if(!response.link?.includes('rel="next"')) {
-        if(key && (!Number.isSafeInteger(response.body.total_count) || response.body.total_count>rows.length))throw new Error('capacity_incomplete_inventory');
-        return rows;
-      }
+      // GitHub's live Actions total_count can disagree with the returned rows
+      // even on a single page. Follow Link, as the ordinary picker does; the
+      // count is not a transactionally consistent pagination boundary.
+      if(!response.link?.includes('rel="next"'))return rows;
     }
     throw new Error('capacity_scan_limit');
   }
