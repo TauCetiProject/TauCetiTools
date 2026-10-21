@@ -1233,6 +1233,8 @@ jobs:
         id: report
         if: always()
         env:
+          CI_STATUS_APP_ID: ${{ secrets.CI_STATUS_APP_ID }}
+          CI_STATUS_APP_PRIVATE_KEY: ${{ secrets.CI_STATUS_APP_PRIVATE_KEY }}
           GH_TOKEN: ${{ steps.ci-api.outputs.status-token }}
           GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token }}
           TAUCETI_GITHUB_READ_ROLE: ${{ steps.ci-api.outputs.read-role }}
@@ -1281,6 +1283,14 @@ jobs:
               --context "$ctx" --state "$st" --description "$dsc")
             if [ "$IS_BATCH" != true ]; then
               args+=(--pr '${{ steps.pr.outputs.num }}' --base-ref '${{ steps.pr.outputs.base_ref }}')
+            fi
+            if [ "$ctx" = scope ] && [ "$st" = success ] && [ "${OUT_OF_SCOPE:-}" = 1 ]; then
+              args+=(--scope-approval-base "$TESTED_SCOPE_BASE")
+              if [ "$IS_BATCH" != true ]; then
+                args+=(--scope-approval-pr "$SCOPE_PR")
+              else
+                args+=(--scope-approval-batch "$SCOPE_BATCH" --scope-paths-file "$RUNNER_TEMP/scope-files")
+              fi
             fi
             python3 gate/scripts/ci_status.py "${args[@]}" || post_fail=1
           }
@@ -1394,17 +1404,10 @@ jobs:
             # guard above must pass first. Approval comes from bors's HTTPS state,
             # never the dispatch payload or candidate files. Check at report time
             # so an r- or changed revision during the build is observed.
-            approval_args=(--head "$TESTED_SCOPE_HEAD" --base "$TESTED_SCOPE_BASE")
-            if [ "$IS_BATCH" != "true" ]; then
-              approval_args+=(--pr "$SCOPE_PR")
-            elif [ "$SCOPE_EVENT" = "tauceti-bors-staging" ]; then
-              approval_args+=(--batch-id "$SCOPE_BATCH" --paths-file "$RUNNER_TEMP/scope-files")
-            fi
-            if python3 gate/scripts/bors_scope_approval.py "${approval_args[@]}"; then
-              sc_state=success; sc_desc="restricted paths approved by a repository admin through bors; other scope guards passed"
-            else
-              sc_state=failure; sc_desc="changes outside ${{ inputs.lean_root }}/ — a repository admin can approve with bors r+ or bors merge"
-            fi
+            # This is an intent, not a published verdict. ci_status.py verifies
+            # the current approval immediately before posting and after waits;
+            # a revoked approval publishes scope=failure instead of stale green.
+            sc_state=success; sc_desc="restricted paths approved by a repository admin through bors; other scope guards passed"
           else
             sc_state=success; sc_desc="changes are in scope (${{ inputs.lean_root }}/, the allowed root files, and the bibliography only)"
           fi
@@ -1485,7 +1488,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ci-status-intents-sandbox
+          name: ci-status-intents-sandbox-${{ github.run_attempt }}
           path: ${{ runner.temp }}/tauceti-status-intents/*.json
           if-no-files-found: ignore
           retention-days: 7
@@ -1581,6 +1584,8 @@ jobs:
 
       - name: Post the terminal merge-group build status
         env:
+          CI_STATUS_APP_ID: ${{ secrets.CI_STATUS_APP_ID }}
+          CI_STATUS_APP_PRIVATE_KEY: ${{ secrets.CI_STATUS_APP_PRIVATE_KEY }}
           GH_TOKEN: ${{ steps.ci-api.outputs.status-token }}
           GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token }}
           TAUCETI_GITHUB_READ_ROLE: ${{ steps.ci-api.outputs.read-role }}
@@ -1590,7 +1595,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ci-status-intents-finalizer
+          name: ci-status-intents-finalizer-${{ github.run_attempt }}
           path: ${{ runner.temp }}/tauceti-status-intent.json
           if-no-files-found: ignore
           retention-days: 7

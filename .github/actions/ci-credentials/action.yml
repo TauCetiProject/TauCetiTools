@@ -56,6 +56,7 @@ runs:
         repositories: ${{ inputs.repository }}
         permission-contents: read
         permission-pull-requests: read
+        permission-actions: read
     - uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf
       id: status
       if: ${{ inputs.status-app-id != '' }}
@@ -65,5 +66,5 @@ runs:
         owner: ${{ inputs.owner }}
         repositories: ${{ inputs.repository }}
         permission-statuses: write
-    # Actions run/job reads are public on the TauCeti deployment. A private
-    # deployment must give its workflow token actions:read (as callers do).
+    # A configured read App also needs Actions read permission for run/attempt
+    # fences, including on private deployments.

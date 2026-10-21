@@ -122,12 +122,12 @@ else:
         workflow = ROOT / ".github/workflows/retry-ci-status.yml"
         shell = shell_for("Discover retained intents from this exact original run", workflow)
         for rows, count, expected in (
-            ([{"id": 41, "name": "ci-status-intents-sandbox", "size_in_bytes": 100}], 1, True),
+            ([{"id": 41, "name": "ci-status-intents-sandbox-1", "size_in_bytes": 100}], 1, True),
             ([{"id": 41, "name": "unrelated", "size_in_bytes": 100}], 1, True),
-            ([{"id": 41, "name": "ci-status-intents-sandbox", "size_in_bytes": 2**20 + 1}], 1, False),
-            ([{"id": 41, "name": "ci-status-intents-sandbox", "expired": True}], 1, False),
+            ([{"id": 41, "name": "ci-status-intents-sandbox-1", "size_in_bytes": 2**20 + 1}], 1, False),
+            ([{"id": 41, "name": "ci-status-intents-sandbox-1", "expired": True}], 1, False),
             (
-                [{"id": 41, "name": "ci-status-intents-sandbox"}, {"id": 42, "name": "ci-status-intents-sandbox"}],
+                [{"id": 41, "name": "ci-status-intents-sandbox-1"}, {"id": 42, "name": "ci-status-intents-sandbox-1"}],
                 2,
                 False,
             ),
@@ -156,7 +156,7 @@ else:
                 self.assertEqual(result.returncode == 0, expected, result.stderr)
                 if expected:
                     outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
-                    self.assertEqual(outputs["ids"], "41" if rows[0]["name"] == "ci-status-intents-sandbox" else "")
+                    self.assertEqual(outputs["ids"], "41" if rows[0]["name"] == "ci-status-intents-sandbox-1" else "")
 
     def test_generated_wrapper_exposes_optional_credential_configuration(self):
         wrapper = (ROOT / "tauceti_tools/assets/project/.github/workflows/pr-build.yml").read_text()

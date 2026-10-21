@@ -17,7 +17,7 @@ Configure these repository Actions secrets:
 | --- | --- |
 | `CI_STATUS_APP_ID` | Numeric ID of an installed App with commit statuses write permission |
 | `CI_STATUS_APP_PRIVATE_KEY` | That App's PEM private key |
-| `CI_READ_APP_ID`, `CI_READ_APP_PRIVATE_KEY` | Optional separate read installation, with contents and pull requests read |
+| `CI_READ_APP_ID`, `CI_READ_APP_PRIVATE_KEY` | Optional separate read installation, with contents, pull requests and Actions read |
 
 Without status-App secrets the workflow remains usable with its normal Actions
 token and reports that reads and writes share a pool. A partial ID/key pair is
