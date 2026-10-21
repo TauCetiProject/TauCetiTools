@@ -117,6 +117,21 @@ test('review coordination counts starts even when cached/deleted comments preced
   assert.equal(counts.dual,1);assert.equal(counts.git_held,1);assert.equal(counts.legacy,1);assert.equal(counts.unknown,1);
   assert.equal(counts.upgraded_fraction,0.5);
   assert.equal(result.review_coordination.bucket_seconds,3600);
+  assert.equal(result.as_of,result.review_coordination.as_of);
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM jobs').get()).n,0);
+ }finally{await db.close();}
+});
+
+test('public activity timestamps are sampled after stored PR reads',async()=>{
+ const {db,state}=await fixture();try{
+  const prime=state.primeActivity;
+  state.primeActivity=async function(numbers){
+   await new Promise(r=>setTimeout(r,25));
+   await db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?,0)').run('pr','7','',JSON.stringify({number:7,state:'OPEN'}),'',Date.now(),1);
+   return prime.call(this,numbers);
+  };
+  const result=await (await query(state,[7])).json();
+  assert.equal(result.prs.length,1);
+  assert.ok(result.as_of>=result.prs[0].observed_at);
  }finally{await db.close();}
 });
