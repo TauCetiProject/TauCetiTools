@@ -3,6 +3,7 @@
 import copy
 import io
 import json
+import re
 import subprocess
 import tempfile
 import unittest
@@ -41,6 +42,9 @@ class UpstreamTests(unittest.TestCase):
                     redirect_stdout(io.StringIO()):
                 guard(project, base, base, candidate)
                 resolver.assert_called_once_with(base, [dict(direct, rev="c" * 40)], PIN)
+                reordered = dict(expected, packages=list(reversed(expected["packages"])))
+                (candidate / "lake-manifest.json").write_text(json.dumps(reordered))
+                guard(project, base, base, candidate)
                 for key, value in (("rev", "e" * 40), ("url", "https://github.com/attacker/fork"),
                                    ("configFile", "payload.lean")):
                     tampered = copy.deepcopy(expected)
@@ -89,6 +93,14 @@ class UpstreamTests(unittest.TestCase):
         self.assertLess(release(PIN), release("leanprover/lean4:v4.36.0"))
         with self.assertRaises(ConfigError):
             release("attacker/lean:v4.36.0")
+
+    def test_updater_and_guard_install_the_same_pinned_runtime(self):
+        root = Path(__file__).resolve().parents[1]
+        pins = re.compile(r"^\s*((?:BWRAP|ELAN)_[A-Z0-9_]+):\s*(\S+)\s*$", re.MULTILINE)
+        shared = dict(pins.findall((root / ".github/workflows/pr-build.yml").read_text()))
+        updater = dict(pins.findall((root / "tauceti_tools/assets/project/.github/workflows/update-upstreams.yml").read_text()))
+        self.assertEqual(len(shared), 5)
+        self.assertEqual(updater, shared)
 
 
 if __name__ == "__main__":

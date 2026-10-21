@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import base64
-import io
 import json
 import os
 import re
 import shutil
 import subprocess
-import tarfile
 import tempfile
 from pathlib import Path
 
@@ -60,8 +58,10 @@ def require_toml(checkout):
     if not (checkout / "lakefile.toml").is_file() or (checkout / "lakefile.lean").exists():
         raise ConfigError(
             "Tau Ceti projects require lakefile.toml at the root, without lakefile.lean. "
-            "In your content checkout run lake translate-config toml, review the generated lakefile.toml "
-            "and retained lakefile.lean.bak, then run lake update and lake build and commit the conversion. "
+            "If only the Lean file exists, run lake translate-config toml in your content checkout and review "
+            "the generated lakefile.toml and retained lakefile.lean.bak. If both formats exist, compare them, "
+            "keep the reviewed TOML and move the Lean file to an unused backup name. "
+            "Run lake update and lake build and commit the conversion before installing the guard. "
             "Upstream dependencies can still use lakefile.lean."
         )
 
@@ -82,7 +82,8 @@ def inspect(project, checkout: Path):
         commit = api(f"repos/{repo}/commits/{branch}")["sha"]
         if api(f"repos/{repo}/compare/{old['rev']}...{commit}")["status"] not in ("ahead", "identical"):
             raise ConfigError(f"{repo} is backwards or divergent; no update prepared. Review its nominated branch before retrying")
-        proposed.append({"package": name, "repo": repo, "old": old["rev"], "new": commit})
+        if commit != old["rev"]:
+            proposed.append({"package": name, "repo": repo, "old": old["rev"], "new": commit})
         current[name] = dict(old, rev=commit)
     direct = [row for row in current.values() if not row.get("inherited", False)]
     return proposed, toolchain_for(checkout, direct) if proposed else None
@@ -105,8 +106,7 @@ def sandbox_command(directory, sysroot, driver):
     command += ["--ro-bind", str(sysroot), "/toolchain", "--ro-bind", str(driver), "/resolve.lean",
                 "--bind", str(directory), "/work", "--remount-ro", "/",
                 "--setenv", "PATH", "/toolchain/bin:/usr/bin:/bin:/run/current-system/sw/bin",
-                "--setenv", "HOME", "/tmp", "--setenv", "LEAN_SYSROOT", "/toolchain",
-                "--setenv", "LAKE_HOME", "/toolchain", "--setenv", "GIT_CONFIG_NOSYSTEM", "1",
+                "--setenv", "HOME", "/tmp", "--setenv", "GIT_CONFIG_NOSYSTEM", "1",
                 "--setenv", "GIT_TERMINAL_PROMPT", "0", "--setenv", "LAKE_NO_CACHE", "true",
                 "--chdir", "/work", "--unshare-user", "--unshare-ipc", "--unshare-pid",
                 "--unshare-uts", "--unshare-cgroup", "--disable-userns", "--die-with-parent", "--new-session",
@@ -115,7 +115,7 @@ def sandbox_command(directory, sysroot, driver):
 
 
 def resolve(checkout, direct, toolchain):
-    """Resolve trusted committed source plus authorized direct pins; no PR files or secrets."""
+    """Resolve the committed root TOML plus authorized direct pins; no PR files or secrets."""
     release(toolchain)
     require_toml(checkout)
     if not shutil.which("elan"):
@@ -124,18 +124,10 @@ def resolve(checkout, direct, toolchain):
     compiler = Path(subprocess.check_output(["elan", "which", "lean"], env={**os.environ, "ELAN_TOOLCHAIN": toolchain}, text=True).strip())
     sysroot = compiler.resolve().parent.parent
     driver = Path(__file__).parent / "assets/scripts/ResolveDependencies.lean"
-    archive = subprocess.check_output(["git", "-C", str(checkout), "archive", "HEAD"])
+    configuration = subprocess.check_output(["git", "-C", str(checkout), "show", "HEAD:lakefile.toml"])
     with tempfile.TemporaryDirectory(prefix="tauceti-resolve-") as tmp:
         directory = Path(tmp)
-        with tarfile.open(fileobj=io.BytesIO(archive)) as source:
-            source.extractall(directory, filter="data")
-        for name in (".lake", ".git"):
-            path = directory / name
-            if path.is_symlink() or path.is_file():
-                path.unlink()
-            elif path.exists():
-                shutil.rmtree(path)
-        require_toml(directory)
+        (directory / "lakefile.toml").write_bytes(configuration)
         manifest = json.loads((checkout / "lake-manifest.json").read_text())
         manifest["packages"] = direct
         (directory / "lake-manifest.json").write_text(json.dumps(manifest))
@@ -144,7 +136,7 @@ def resolve(checkout, direct, toolchain):
             # Empty launcher environment also hides secrets from bwrap's PID 1.
             subprocess.run(sandbox_command(directory, sysroot, driver), env={}, check=True, timeout=1200)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-            raise ConfigError("Lake resolution failed; no project pins changed. Read the Lake error above, check the direct requirements with your Lean maintainer, then rerun upstreams update --apply. Resolution uses committed base files and does not run post-update hooks") from error
+            raise ConfigError("Lake resolution failed; no project pins changed. Read the Lake error above, check the direct requirements with your Lean maintainer, then rerun upstreams update --apply. If the log reports missing Lake APIs or driver compilation errors, this Tools resolver may need updating for the selected Lean version. Resolution uses the committed root TOML and does not run post-update hooks") from error
         return json.loads((directory / "lake-manifest.json").read_text())
 
 
@@ -152,7 +144,8 @@ def update(project, checkout, *, apply=False):
     proposed, toolchain = inspect(project, checkout)
     print(json.dumps({"dependencies": proposed, "toolchain": toolchain}, indent=2))
     if not apply or not proposed:
-        print("No pins changed. Add --apply to resolve the update with Lake in isolation.")
+        print("No upstream pins moved; no resolution needed." if not proposed else
+              "No pins changed. Add --apply to resolve the update with Lake in isolation.")
         return
     if subprocess.run(["git", "-C", str(checkout), "diff", "--quiet", "HEAD", "--", "lakefile.toml", "lakefile.lean", "lake-manifest.json", "lean-toolchain"]).returncode:
         raise ConfigError("Commit or restore the Lake configuration, manifest and toolchain before preparing an update; resolution uses committed base source")
@@ -214,6 +207,7 @@ def guard(project, base: Path, merge_base: Path, candidate: Path):
     toolchain = toolchain_for(base, direct)
     if contents(candidate, "lean-toolchain").decode().strip() != toolchain:
         raise ConfigError(f"Expected {toolchain}, chosen from the base and pinned direct dependencies; candidate toolchain differs")
-    if resolve(base, direct, toolchain) != after:
+    expected = resolve(base, direct, toolchain)
+    if {**expected, "packages": packages(expected)} != {**after, "packages": actual}:
         raise ConfigError("Candidate manifest differs from Lake's resolution of the trusted base and authorized direct pins")
     print("BUMP-GUARD: PASS — forward dependency pins resolved by Lake")

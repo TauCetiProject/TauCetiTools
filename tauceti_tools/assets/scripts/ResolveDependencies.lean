@@ -16,7 +16,7 @@ def resolvePins : CliM Unit := do
   let ws ← loadWorkspaceRoot config
   let manifest ← Manifest.load ws.manifestFile
   let pins := manifest.packages.foldl (init := ({} : NameMap PackageEntry)) fun pins entry =>
-    if entry.inherited then pins else pins.insert entry.name entry
+    pins.insert entry.name entry
   let materialize pkg dep ws := do
     let materialized ← updateAndMaterializeDep ws pkg dep
     addDependencyEntries materialized

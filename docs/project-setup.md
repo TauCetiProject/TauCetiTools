@@ -142,7 +142,7 @@ edits take effect on restart or an explicit configuration refresh; they do not i
 ## Lean and upstream dependencies
 
 Initialize the content package with the intended Lean toolchain and Lake dependencies.
-Project roots use `lakefile.toml`; upstream dependencies can use either Lake configuration
+Content roots use `lakefile.toml`; roadmap packages and upstream dependencies can use either Lake configuration
 format. To convert an existing root Lean lakefile, run `lake translate-config toml`. Lake writes
 `lakefile.toml` and renames the original to `lakefile.lean.bak`. Review the conversion, run
 `lake update` and `lake build`, then commit the TOML file and removal of the active Lean file.
@@ -249,15 +249,16 @@ first, then obtains the automation App token and opens a dependency PR. Merge th
 workflow when upgrading an existing project's Tools pin; updating an operator's CLI alone
 does not change installed workflow callers.
 
-Resolution runs in a disposable copy of committed base source under bubblewrap. Only that
-copy is writable; the official toolchain is read-only, credentials and host workspace are not
+Resolution runs with the committed base `lakefile.toml`, a seed manifest containing only the
+authorized direct pins, and the selected toolchain file in a disposable bubblewrap workspace.
+Only that workspace is writable; the official toolchain is read-only, credentials and host workspace are not
 mounted, and the launcher has an empty environment. Network access is enabled for public Git
 fetches. The small trusted Lean driver calls Lake's resolver with direct entries preseeded;
 upstream Lean lakefiles are evaluated inside this boundary. Post-update hooks are not run.
 
 For a pin-changing PR, the guard authorizes each changed direct revision as a forward commit
-on its nominated branch. It then resolves the trusted base with those exact direct revisions
-and compares the complete resulting manifest and selected toolchain with the PR. Candidate
+on its nominated branch. It then resolves the trusted base TOML with those exact direct revisions
+and compares the complete resulting manifest (ignoring package-list order) and selected toolchain with the PR. Candidate
 lakefiles, source, caches and inherited manifest entries are never inputs to resolution.
 The comparison does not require that the PR include the latest default branch. The ordinary
 build and review must pass before autonomous merging.

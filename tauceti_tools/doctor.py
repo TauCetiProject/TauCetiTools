@@ -248,21 +248,24 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
             )
         )
 
-        for path in (
+        required_files = [
             "tauceti.toml",
             ".github/CODEOWNERS",
             ".github/workflows/pr-build.yml",
             ".github/workflows/auto-merge.yml",
             ".github/workflows/pr-status.yml",
-        ):
+        ]
+        if not project.legacy and any(u.get("update") for u in project.raw.get("upstreams", [])):
+            required_files.append(".github/workflows/update-upstreams.yml")
+        for path in required_files:
             value, error = gh.read(f"repos/{repo}/contents/{path}?ref={project.branch}")
             status = "unknown" if error else "ready"
             summary = error or path
             if not error and value.get("encoding") == "base64":
                 text = base64.b64decode(value["content"]).decode("utf-8")
-                pin = project.tool("tools" if path.endswith("pr-build.yml") else "review")
+                pin = project.tool("tools" if path.endswith(("pr-build.yml", "update-upstreams.yml")) else "review")
                 if (
-                    path.endswith(("pr-build.yml", "auto-merge.yml"))
+                    path.endswith(("pr-build.yml", "auto-merge.yml", "update-upstreams.yml"))
                     and pin.get("ref")
                     and "@" + pin["ref"] not in text
                 ):
@@ -604,10 +607,10 @@ def package_findings(project, gh, repo_info, again):
             if error:
                 missing.append(path)
         _, toml_error = gh.read(f"repos/{repo}/contents/lakefile.toml?ref={branch}")
-        if toml_error:
-            missing.append("lakefile.toml")
         _, lean_error = gh.read(f"repos/{repo}/contents/lakefile.lean?ref={branch}")
-        lean_format = not lean_error
+        if toml_error and (role == "content" or lean_error):
+            missing.append("lakefile.toml" if role == "content" else "lakefile.toml or lakefile.lean")
+        lean_format = role == "content" and not lean_error
         root = project.roots[0] if role == "content" else project.roadmap_dir
         if role == "content":
             lakefile = (f'name = "{root}"\ndefaultTargets = ["{root}"]\nplatformIndependent = true\n'
@@ -636,7 +639,7 @@ def package_findings(project, gh, repo_info, again):
         findings.append(Finding(
             "lean." + role, "failed" if lean_format else "unknown" if missing else "ready",
             "Project root uses lakefile.lean; lakefile.toml is required" if lean_format else "Cannot read package files: " + ", ".join(missing) if missing else f"Lean package files are published in {repo}",
-            "Published Lean toolchain, TOML Lake package and resolved dependencies", steps=([
+            "Published Lean toolchain, Lake package and resolved dependencies", steps=([
                 "In the repository checkout, if lakefile.toml is absent run:\n$ lake translate-config toml\nThis writes lakefile.toml and renames the original to lakefile.lean.bak. Review both files, run lake update and lake build, then commit the conversion through human review. If both formats already exist, compare them and retain the reviewed TOML configuration; move the Lean file to an unused backup name so it is no longer active. Only the project root requires TOML: upstream dependencies, including Mathlib, can keep Lean lakefiles.",
             ] if lean_format else setup),
             urls=[f"https://github.com/{repo}"], verify=again, section="lean-and-upstream-dependencies" if role == "content" else "roadmap-lean-package"))
@@ -684,7 +687,10 @@ def dependency_findings(project, gh, again):
                 problems.append(f"{upstream['package']} has inputRev = {package.get('inputRev')!r}, but its configured update branch is {upstream.get('branch', 'main')!r}. Set branch in its [[upstreams]] table to that nominated inputRev; selecting a different Lake requirement is a human-owned change.")
         from .upstreams import release
 
-        release(toolchain)
+        try:
+            release(toolchain)
+        except ValueError as error:
+            problems.append(str(error))
         status = "failed" if problems else "ready"
     except (ValueError, KeyError, TypeError, UnicodeError) as error:
         status = "failed" if problems else "unknown"
