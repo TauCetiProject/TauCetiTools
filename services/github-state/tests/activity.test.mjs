@@ -103,3 +103,21 @@ test('background Bors receipt import is shared and rate limited; activity reads 
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM jobs').get()).n,0);
  }finally{globalThis.fetch=original;await db.close();}
 });
+
+test('review coordination counts created markers once and survives deletion without upstream reads',async()=>{
+ const {db,state}=await fixture();try{
+  const at=Date.now(),base={created_at:new Date(at).toISOString()};
+  const marker=(id,extra)=>({...base,id,body:'<!--tauceti-review-in-progress '+JSON.stringify({schema:'tauceti-review-in-progress/v1',expires_at:Math.floor(at/1000)+1800,...extra})+'-->'});
+  const dual=marker(100,{coordination_protocol:'git+comment/v1',git_claim:true});
+  await state.recordReviewStart(dual,at);
+  await db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?,?)').run('issue_comments','100','7',JSON.stringify(dual),'',at,1,1);
+  await state.recordReviewStart(dual,at); // distinct delivery, same already-retained/deleted comment
+  await state.recordReviewStart(marker(101,{}),at);
+  await state.recordReviewStart(marker(102,{coordination_protocol:'future'}),at);
+  const result=await (await query(state,[])).json(),counts=result.review_coordination.windows['24h'];
+  assert.equal(counts.dual,1);assert.equal(counts.git_held,1);assert.equal(counts.legacy,1);assert.equal(counts.unknown,1);
+  assert.equal(counts.upgraded_fraction,0.5);
+  assert.equal(result.review_coordination.bucket_seconds,3600);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM jobs').get()).n,0);
+ }finally{await db.close();}
+});

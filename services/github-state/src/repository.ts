@@ -739,6 +739,34 @@ export class RepositoryState extends DurableObject<Env> {
     for (const operation of ['repository','refs','open_prs','open_issues','recent_prs','recent_issues','pr_delta','issue_delta']) await this.enqueue({repository:repo.name,operation},operation==='open_prs' || operation.endsWith('_delta')?0:10);
     await this.setAlarm(Date.now()+100);
   }
+  async recordReviewStart(comment:any,received:number):Promise<void> {
+    const marker=String(comment.body || '').match(/<!--tauceti-review-in-progress (.*?)-->/s);
+    if(!marker || !comment.id)return;
+    // Existing resource rows deduplicate repeated creates and survive marker deletion.
+    if((await this.store.exec("SELECT id FROM resources WHERE kind='issue_comments' AND id=?",String(comment.id))).toArray().length)return;
+    let data:any;try{data=JSON.parse(marker[1]);}catch{data={};}
+    const now=Date.now(),hour=3600000,history=await this.meta('review_coordination') || {observed_since:now,buckets:{}};
+    const parsed=Date.parse(comment.created_at || '');const at=Number.isFinite(parsed)?parsed:received;
+    if(at<now-7*86400000 || at>now+300000)return;
+    const key=String(Math.floor(at/hour)*hour),bucket=history.buckets[key] || {dual:0,legacy:0,unknown:0,git_held:0};
+    const kind=data.coordination_protocol==='git+comment/v1'?'dual':data.coordination_protocol===undefined && data.schema==='tauceti-review-in-progress/v1'?'legacy':'unknown';
+    bucket[kind]++;if(kind==='dual' && data.git_claim===true)bucket.git_held++;
+    if(kind==='legacy' && Number.isFinite(data.expires_at))bucket.legacy_until=Math.max(bucket.legacy_until || 0,Math.min(data.expires_at*1000,at+3600000));
+    history.buckets[key]=bucket;
+    for(const k of Object.keys(history.buckets))if(Number(k)<now-7*86400000-hour)delete history.buckets[k];
+    await this.setMeta('review_coordination',history);
+  }
+  async reviewCoordination():Promise<any> {
+    const history=await this.meta('review_coordination');if(!history)return null;
+    const now=Date.now(),windows:any={};
+    for(const [name,days] of [['24h',1],['7d',7]] as const) {
+      const result:any={dual:0,legacy:0,unknown:0,git_held:0};
+      for(const [at,b] of Object.entries(history.buckets) as [string,any][])if(Number(at)>=Math.floor((now-days*86400000)/3600000)*3600000)for(const key of Object.keys(result))result[key]+=b[key] || 0;
+      result.upgraded_fraction=result.dual+result.legacy?result.dual/(result.dual+result.legacy):null;windows[name]=result;
+    }
+    return {observed_since:history.observed_since,as_of:now,source:'observed-created-marker-webhooks',bucket_seconds:3600,windows,
+      legacy_lease_upper_bound:Math.max(0,...Object.values(history.buckets).map((b:any)=>b.legacy_until || 0))};
+  }
   async ingest(pointer:EventPointer,preparedBody?:any): Promise<void> {
     const configured=repository(this.env,pointer.repository);if(!configured)throw Error('repository not allowed');
     if(!this.store.transactional){
@@ -787,6 +815,7 @@ export class RepositoryState extends DurableObject<Env> {
       const known=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length>0;
       await this.enqueue(q,1,Date.now(),!known);
     }
+    if (event==='issue_comment' && body.action==='created' && body.comment) await this.recordReviewStart(body.comment,pointer.received);
     if (['issue_comment','pull_request_review_comment'].includes(event) && body.comment) {
       const operation=event==='issue_comment'?'issue_comments':'review_comments';
       const number=body.issue?.number || body.pull_request?.number;
@@ -2433,6 +2462,7 @@ export class RepositoryState extends DurableObject<Env> {
             landing_source:p.mergedAt?'github-merged':landing?.source || null,lean_loc:await state.activityLOC(number,p,locBudget)});
         }
         return json({version:1,repository:input.repository,revision:(await this.revision()),as_of:Date.now(),coverage:'observed',prs,missing,
+          review_coordination:await this.reviewCoordination(),
           landing_observations:{checked_at:(await this.meta('activity_landings_checked')),last_success_at:(await this.meta('activity_landings_success')),error:(await this.meta('activity_landings_error'))}});
       }
       if (path==='/query') {
