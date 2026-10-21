@@ -138,15 +138,48 @@ def status_intent(env, payload):
                 run_id=int(env["GITHUB_RUN_ID"]), attempt=int(env["GITHUB_RUN_ATTEMPT"]), payload=payload)
 
 
+EVIDENCE_FIELDS = {"BUILD_JOB_RESULT", "BUILD_STATE", "BUILD_DESCRIPTION", "PUBLICATION_REQUIRED",
+                   "BORS_STAGING", "BORS_BATCH_ID", "BORS_BASE_REF", "BORS_BASE_SHA"}
+
+
+def finalization_intent(env):
+    """Persist completed build evidence before publisher observation can exhaust quota."""
+    evidence = {key: env.get(key, "") for key in EVIDENCE_FIELDS}
+    evidence["BUILD_DESCRIPTION"] = evidence["BUILD_DESCRIPTION"][:140]
+    return dict(schema="tauceti-ci.finalization-intent/v1", repo=REPO, revision=env["STATUS_SHA"],
+                run_id=int(env["GITHUB_RUN_ID"]), attempt=int(env["GITHUB_RUN_ATTEMPT"]), evidence=evidence)
+
+
 def validate_intent(intent):
-    if (intent.get("schema") != "tauceti-ci.status-intent/v1" or intent.get("repo") != REPO
-            or not sha(intent.get("revision"))):
+    if (not isinstance(intent, dict) or intent.get("schema") not in {
+            "tauceti-ci.status-intent/v1", "tauceti-ci.finalization-intent/v1"}
+            or intent.get("repo") != REPO or not sha(intent.get("revision"))):
         raise ValueError("invalid status intent identity")
     for key in ("run_id", "attempt"):
         if type(intent.get(key)) is not int or intent[key] <= 0:
             raise ValueError("invalid status intent run identity")
+    if intent["schema"] == "tauceti-ci.finalization-intent/v1":
+        evidence = intent.get("evidence")
+        if (set(intent) != {"schema", "repo", "revision", "run_id", "attempt", "evidence"}
+                or not isinstance(evidence, dict) or set(evidence) != EVIDENCE_FIELDS
+                or not all(isinstance(value, str) for value in evidence.values())
+                or evidence["BUILD_JOB_RESULT"] not in {"success", "failure", "cancelled", "skipped"}
+                or evidence["BUILD_STATE"] not in {"success", "failure", ""}
+                or len(evidence["BUILD_DESCRIPTION"]) > 140
+                or evidence["PUBLICATION_REQUIRED"] not in {"true", "false", ""}
+                or evidence["BORS_STAGING"] not in {"true", "false", ""}):
+            raise ValueError("invalid finalization evidence")
+        if evidence["BORS_STAGING"] == "true":
+            branch = evidence["BORS_BASE_REF"]
+            if (not evidence["BORS_BATCH_ID"].isdigit() or int(evidence["BORS_BATCH_ID"]) <= 0
+                    or not sha(evidence["BORS_BASE_SHA"]) or not 0 < len(branch) <= 200
+                    or any(char.isspace() or ord(char) < 32 for char in branch)):
+                raise ValueError("invalid bors finalization evidence")
+        return intent
     payload = intent.get("payload", {})
-    if (set(payload) != {"state", "context", "description", "target_url"}
+    if (set(intent) != {"schema", "repo", "revision", "run_id", "attempt", "payload"}
+            or not isinstance(payload, dict)
+            or set(payload) != {"state", "context", "description", "target_url"}
             or payload.get("state") not in {"success", "failure"} or payload.get("context") != "build"
             or not isinstance(payload.get("description"), str) or len(payload["description"]) > 140
             or payload.get("target_url") != f"https://github.com/{REPO}/actions/runs/{intent['run_id']}"):
@@ -154,9 +187,36 @@ def validate_intent(intent):
     return intent
 
 
+def save_intent(intent, target):
+    validate_intent(intent)
+    if target:
+        destination = Path(target)
+        temporary = destination.with_suffix(".tmp")
+        temporary.write_text(json.dumps(intent) + "\n")
+        temporary.replace(destination)
+
+
+def finalize(env, target):
+    save_intent(finalization_intent(env), target)
+    try:
+        state, description = terminal_state(env)
+    except Deferred as error:
+        print(f"::error::batch evidence unavailable: {error}; retained finalization intent can be resumed", file=sys.stderr)
+        return 75
+    except (OSError, APIError, ValueError, KeyError, TypeError) as error:
+        state, description = "failure", "batch finalization failed: " + type(error).__name__
+    payload = dict(state=state, context="build", description=description[:140],
+                   target_url=f"https://github.com/{REPO}/actions/runs/{env['GITHUB_RUN_ID']}")
+    intent = status_intent(env, payload)
+    save_intent(intent, target)
+    return publish(intent)
+
+
 def publish(intent):
     """Retry only publication, preserving the completed result and attempt fence."""
     validate_intent(intent)
+    if intent["schema"] != "tauceti-ci.status-intent/v1":
+        raise ValueError("pending finalization evidence must be checked before publication")
     payload = dict(intent["payload"])
     revision = intent["revision"]
     deadline = time.monotonic() + post_retry_seconds()
@@ -206,31 +266,20 @@ def main(argv=()):
             expected = os.environ.get(variable)
             if expected is not None and str(intent[field]) != expected:
                 raise ValueError("status intent does not match trusted source run/attempt")
+        if intent["schema"] == "tauceti-ci.finalization-intent/v1":
+            env = dict(intent["evidence"], STATUS_SHA=intent["revision"],
+                       GITHUB_RUN_ID=str(intent["run_id"]), GITHUB_RUN_ATTEMPT=str(intent["attempt"]))
+            return finalize(env, str(path))
         return publish(intent)
     env = os.environ
     revision = env.get("STATUS_SHA")
     if not sha(revision):
         print("::error::cannot post a batch status without an exact commit SHA", file=sys.stderr)
         return 1
-    try:
-        state, description = terminal_state(env)
-    except Deferred as error:
-        print(f"::error::batch evidence unavailable: {error}; build result was not reclassified", file=sys.stderr)
-        return 75
-    except (OSError, APIError, ValueError, KeyError, TypeError) as error:
-        state, description = "failure", "batch finalization failed: " + type(error).__name__
-    payload = dict(state=state, context="build", description=description[:140],
-                   target_url=f"https://github.com/{REPO}/actions/runs/{env['GITHUB_RUN_ID']}")
-    intent = status_intent(env, payload)
     target = env.get("TAUCETI_STATUS_INTENT")
     if not target and env.get("RUNNER_TEMP"):
         target = str(Path(env["RUNNER_TEMP"]) / "tauceti-status-intent.json")
-    if target:
-        destination = Path(target)
-        temporary = destination.with_suffix(".tmp")
-        temporary.write_text(json.dumps(intent) + "\n")
-        temporary.replace(destination)
-    return publish(intent)
+    return finalize(env, target)
 
 
 if __name__ == "__main__":

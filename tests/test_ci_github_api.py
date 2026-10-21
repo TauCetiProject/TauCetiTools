@@ -79,6 +79,43 @@ class CIAPI(unittest.TestCase):
                 api.GitHub().request("GET", "repos/o/r/items?access_token=super-secret")
         self.assertNotIn("super-secret", output.getvalue() + str(caught.exception))
 
+    def test_quota_during_publisher_observation_retains_resumable_build_evidence(self):
+        env = dict(STATUS_SHA="a" * 40, GITHUB_RUN_ID="12", GITHUB_RUN_ATTEMPT="2",
+                   BUILD_JOB_RESULT="success", BUILD_STATE="success", BUILD_DESCRIPTION="audited",
+                   PUBLICATION_REQUIRED="true", BORS_STAGING="false")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "intent.json"
+            with patch.dict(os.environ, dict(env, TAUCETI_STATUS_INTENT=str(path)), clear=True), \
+                 patch.object(finalizer, "terminal_state", side_effect=api.Deferred("ci-read", 4000)), \
+                 patch.object(finalizer, "publish") as publish, contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(finalizer.main(), 75)
+            publish.assert_not_called()
+            intent = json.loads(path.read_text())
+            self.assertEqual(intent["schema"], "tauceti-ci.finalization-intent/v1")
+            self.assertEqual(intent["evidence"]["BUILD_STATE"], "success")
+            with patch.dict(os.environ, CI_STATUS_SOURCE_RUN_ID="13"), \
+                 patch.object(finalizer, "terminal_state") as evidence, self.assertRaises(ValueError):
+                finalizer.main(["--resume", str(path)])
+            evidence.assert_not_called()
+            with patch.dict(os.environ, CI_STATUS_SOURCE_RUN_ID="12", CI_STATUS_SOURCE_ATTEMPT="2"), \
+                 patch.object(finalizer, "terminal_state", return_value=("success", "publisher confirmed")) as evidence, \
+                 patch.object(finalizer, "api", side_effect=[dict(run_attempt=2), {}]), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(finalizer.main(["--resume", str(path)]), 0)
+            self.assertEqual(evidence.call_args.args[0]["STATUS_SHA"], "a" * 40)
+            self.assertEqual(json.loads(path.read_text())["schema"], "tauceti-ci.status-intent/v1")
+
+    def test_finalization_intents_accept_only_bounded_known_evidence(self):
+        env = dict(STATUS_SHA="a" * 40, GITHUB_RUN_ID="12", GITHUB_RUN_ATTEMPT="2",
+                   BUILD_JOB_RESULT="success", BUILD_STATE="success")
+        original = finalizer.finalization_intent(env)
+        finalizer.validate_intent(original)
+        for key, value in [("BUILD_JOB_RESULT", "arbitrary"), ("BUILD_STATE", "green"),
+                           ("PUBLICATION_REQUIRED", "maybe"), ("EXTRA", "value"),
+                           ("BUILD_DESCRIPTION", "x" * 141), ("BORS_STAGING", "true")]:
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                finalizer.validate_intent(dict(original, evidence=dict(original["evidence"], **{key: value})))
+
     def test_required_status_retries_without_rebuilding(self):
         env = dict(STATUS_SHA="a" * 40, GITHUB_RUN_ID="12", GITHUB_RUN_ATTEMPT="2")
         payload = dict(state="success", context="build", description="ok",
