@@ -11,6 +11,11 @@ def configuration_problem(source, reason, *, fresh=False):
     remote = source.startswith("https://")
     target = checkout_root() / "tauceti.toml" if not source else Path("tauceti.toml") if remote else Path(source).expanduser()
     output = target if fresh and not remote else target.with_name(target.name + ".example")
+    if output != target:
+        index = 2
+        while output.exists():
+            output = target.with_name(target.name + f".example.{index}")
+            index += 1
     quote = shlex.quote
     lines = [f"Configuration needs attention: {reason}", f"Config: {source or target}", ""]
     if not shutil.which("tauceti-tools"):
@@ -22,6 +27,8 @@ def configuration_problem(source, reason, *, fresh=False):
         "From a checkout of the content repository, sign in as the human maintainer:",
         "  gh auth login --hostname github.com --git-protocol https --web",
         "Choose your own GitHub account; it will become the initial human CODEOWNER.",
+        "If this checkout has several remotes, select the upstream content repository once:",
+        "  gh repo set-default",
         "Generate a starter configuration using this checkout's repository and your login:",
         '  tauceti-tools init --repo "$(gh repo view --json nameWithOwner --jq .nameWithOwner)" '
         '--owner-login "$(gh api user --jq .login)" --output ' + quote(str(output)),

@@ -194,6 +194,10 @@ def main(argv=None):
                 subprocess.run(dispatch, check=True)
             findings = diagnose(project, extras=args.extras)
             if args.check:
+                blocked = next((f for f in findings if f.id == "github.auth" and f.status != "ready"), None)
+                if blocked and args.check != "github.auth":
+                    raise ConfigError(f"Cannot inspect {args.check}: {blocked.summary}.\n" +
+                                      "\n".join(blocked.urls + blocked.steps + ["  " + c for c in blocked.commands]))
                 findings = [f for f in findings if f.id == args.check]
                 if not findings:
                     raise ConfigError(f"Unknown check {args.check}; run doctor --json without --check to list check IDs")

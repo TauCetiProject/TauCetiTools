@@ -88,8 +88,8 @@ Commands select configuration in this order: explicit `--conf PATH_OR_HTTPS_URL`
 `TAUCETI_CONF`, `./tauceti.toml`, then `tauceti.toml` at the current Git checkout's root.
 For example, `tauceti doctor` works from the content checkout or any of its subdirectories.
 Git worktrees use their own root. Other parent directories are not searched.
-Inside a Git checkout with no project configuration, `tauceti doctor` reports how to
-create one; outside a checkout it retains the worker-host diagnostics. `tauceti-tools doctor`
+In a Lean checkout with no project configuration, `tauceti doctor` reports how to
+create one; elsewhere it retains the worker-host diagnostics. `tauceti-tools doctor`
 always diagnoses project setup, including a missing configuration.
 
 Use `.github/CODEOWNERS` to assign human ownership, for example:

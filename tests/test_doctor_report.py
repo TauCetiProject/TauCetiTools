@@ -37,6 +37,15 @@ class DoctorReportTests(unittest.TestCase):
                 if contents is not None:
                     self.assertEqual(config.read_bytes(), contents)
             config.write_bytes(b"")
+            example = config.with_name("tauceti.toml.example")
+            example.write_text("preserve this reference")
+            with patch.dict(os.environ, {"TAUCETI_CONF_SNAPSHOT": "/private/snapshot.toml",
+                                         "TAUCETI_CONF_SOURCE": str(config)}):
+                with self.assertRaises(ConfigError) as caught:
+                    parse(b"schema_version=99", "/private/snapshot.toml")
+            self.assertIn(str(config), str(caught.exception))
+            self.assertNotIn("/private/snapshot.toml", str(caught.exception))
+            self.assertIn("tauceti.toml.example.2", str(caught.exception))
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(main(["init", "--repo", "one/Epsilon-Eridani", "--owner-login", "human",
                                        "--output", str(config)]), 0)
@@ -88,6 +97,15 @@ class DoctorReportTests(unittest.TestCase):
         self.assertEqual([f.id for f in findings], ["github.auth"])
         self.assertIn("https://cli.github.com/", findings[0].urls)
         self.assertIn("gh auth login", findings[0].commands[0])
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "tauceti.toml"
+            config.write_text(initial_configuration("one/Project", "human"))
+            with patch("subprocess.run", side_effect=FileNotFoundError), \
+                    patch("sys.stderr", new_callable=io.StringIO) as errors:
+                self.assertEqual(main(["doctor", "--conf", str(config), "--check", "rules.content"]), 2)
+            self.assertIn("Cannot inspect rules.content", errors.getvalue())
+            self.assertIn("gh auth login", errors.getvalue())
+            self.assertNotIn("Unknown check", errors.getvalue())
 
     def test_check_only_filters_and_keeps_operator_procedure(self):
         class GitHub:

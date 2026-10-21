@@ -175,16 +175,18 @@ class Project:
 def parse(data: bytes, source: str = "") -> Project:
     from .onboarding import configuration_problem
 
+    diagnostic_source = (os.environ.get("TAUCETI_CONF_SOURCE", source)
+                         if source == os.environ.get("TAUCETI_CONF_SNAPSHOT") else source)
     try:
         raw = tomllib.loads(data.decode("utf-8"))
     except (ValueError, UnicodeError) as error:
-        raise ConfigError(configuration_problem(source, f"Invalid TOML: {error}")) from None
+        raise ConfigError(configuration_problem(diagnostic_source, f"Invalid TOML: {error}")) from None
     try:
         if not raw:
             raise ConfigError("The file contains no project settings.")
         return _validate(raw, source)
     except ConfigError as error:
-        raise ConfigError(configuration_problem(source, str(error), fresh=not data.strip())) from None
+        raise ConfigError(configuration_problem(diagnostic_source, str(error), fresh=not data.strip())) from None
 
 
 def _validate(raw: dict, source: str) -> Project:

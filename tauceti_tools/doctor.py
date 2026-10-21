@@ -85,7 +85,7 @@ def _cmd(*args):
 def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
     if github is None:
         try:
-            auth = subprocess.run(["gh", "auth", "status", "--hostname", "github.com"], capture_output=True, text=True)
+            auth = subprocess.run(["gh", "api", "user", "--jq", ".login"], capture_output=True, text=True)
             authenticated = auth.returncode == 0
             installed = True
         except FileNotFoundError:
@@ -95,7 +95,7 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
                 "github.auth", "failed", "GitHub CLI is not signed in" if installed else "GitHub CLI is not installed",
                 "Authenticated GitHub CLI with access to administer this project",
                 urls=[] if installed else ["https://cli.github.com/"],
-                commands=["gh auth login --hostname github.com --git-protocol https --web", "gh auth status --hostname github.com"],
+                commands=["gh auth login --hostname github.com --git-protocol https --web", "gh api user --jq .login"],
                 steps=(["Install GitHub CLI using the command for your operating system at the linked page."] if not installed else []) + [
                     "Sign in as the project's human maintainer using the browser login command. Then run the status command to confirm the active account.",
                     "If GH_TOKEN or GITHUB_TOKEN is set, it overrides saved CLI credentials. Unset it in this terminal to use the account you just signed in to.",
@@ -204,7 +204,7 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
                 commands=[_cmd("gh", "api", f"repos/{pin.get('repo', default_repo)}/commits/HEAD", "--jq", ".sha")],
                 urls=[f"https://github.com/{pin.get('repo', default_repo)}/commits"],
                 steps=[
-                    f"Run the gh api command to obtain a full commit SHA. In {conf}, add or edit the following table, replacing PASTE_FULL_SHA with that output:\n[tools.{tool}]\nrepo = \"{pin.get('repo', default_repo)}\"\nref = \"PASTE_FULL_SHA\"",
+                    f"Run the gh api command to obtain a full commit SHA. In {conf}, uncomment and edit the existing [tools.{tool}] table if present; otherwise add it once. Set its fields as follows, replacing PASTE_FULL_SHA with that output:\n[tools.{tool}]\nrepo = \"{pin.get('repo', default_repo)}\"\nref = \"PASTE_FULL_SHA\"",
                     "Select all required tool versions before installing workflows. The generated callers use these exact SHAs; rerun doctor after editing the configuration.",
                     *(["For doc-gen4, select a commit whose lean-toolchain matches this project's lean-toolchain; the latest commit may require a different Lean version."] if tool == "docgen" else []),
                 ],
@@ -214,6 +214,7 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
             )
         )
 
+    findings.extend(package_findings(project, gh, repo_info, again))
     if repo_info.get("content"):
         value, error = gh.read(f"repos/{repo}/actions/permissions")
         status = "unknown" if error else "ready" if value.get("enabled") else "failed"
@@ -353,7 +354,7 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
                 urls=[rules_url],
                 steps=[
                     f"Edit the existing protection rule for {project.branch}." if classic else f"Name: Tau Ceti content. Enforcement status: Active. Target branches → Add target → Include by pattern → {project.branch}.",
-                    "After the setup PR has installed the workflows, enable Require a pull request before merging and Require review from Code Owners. Under Require status checks to pass, Add checks: " + ", ".join(sorted(required_checks)) + ". Select their GitHub Actions producer. If a name is not listed yet, run pr-build on the setup PR before making the check mandatory.",
+                    "After merging setup, open a normal content PR so the newly installed pr-build workflow runs. Then enable Require a pull request before merging and Require review from Code Owners. Under Require status checks to pass, Add checks: " + ", ".join(sorted(required_checks)) + ". Select their GitHub Actions producer. If a name is not listed yet, let that content PR's build finish, then return to the rule editor and add the check.",
                     ("Clear Require branches to be up to date before merging and Require merge queue. Keep the automation App out of the bypass list: it merges reviewed content through the normal PR checks." if direct else
                      "Enable Require merge queue." if project.raw.get("merge", {}).get("backend", "github-queue") == "github-queue" else
                      "Bors is the selected merger. Keep the existing merge authority until its pilot staging build succeeds; then use the Bors branch rules in the manual."),
@@ -401,7 +402,7 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
                     urls=[f"https://github.com/{repo}/settings/variables/actions"],
                     steps=[
                         f"Choose Variables → New repository variable. Name: {name}; Value: {expected or 'the corresponding endpoint in services.cache'}.",
-                        "For MERGE_BACKEND, change only after its normal pilot build succeeds and the corresponding merge rules are configured.",
+                        "For a new project, set MERGE_BACKEND now to the configured value so automation uses the intended merger. When switching an existing merge backend, wait for its pilot build and corresponding merge-rule setup before changing authority.",
                     ],
                     verify=again,
                     section="actions",
@@ -570,7 +571,6 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
                 )
             )
 
-    findings.extend(package_findings(project, gh, repo_info, again))
     if extras:
         optional_findings = auxiliary_findings(project, gh, again) + extra_findings(project, gh, again)
         for finding in optional_findings:
@@ -586,14 +586,15 @@ def package_findings(project, gh, repo_info, again):
         if not repo_info.get(role):
             continue
         repo = project.repos[role]
+        branch = project.branch if role == "content" else repo_info[role].get("default_branch", project.branch)
         missing = []
         for path in ("lean-toolchain", "lake-manifest.json"):
-            _, error = gh.read(f"repos/{repo}/contents/{path}")
+            _, error = gh.read(f"repos/{repo}/contents/{path}?ref={branch}")
             if error:
                 missing.append(path)
-        _, toml_error = gh.read(f"repos/{repo}/contents/lakefile.toml")
+        _, toml_error = gh.read(f"repos/{repo}/contents/lakefile.toml?ref={branch}")
         if toml_error:
-            _, lean_error = gh.read(f"repos/{repo}/contents/lakefile.lean")
+            _, lean_error = gh.read(f"repos/{repo}/contents/lakefile.lean?ref={branch}")
             if lean_error:
                 missing.append("lakefile.toml or lakefile.lean")
         root = project.roots[0] if role == "content" else project.roadmap_dir
@@ -628,7 +629,8 @@ def package_findings(project, gh, repo_info, again):
             urls=[f"https://github.com/{repo}"], verify=again, section="lean-and-upstream-dependencies" if role == "content" else "roadmap-lean-package"))
     if repo_info.get("roadmap"):
         repo = project.repos["roadmap"]
-        _, error = gh.read(f"repos/{repo}/contents/.github/workflows/ci.yml")
+        branch = repo_info["roadmap"].get("default_branch", project.branch)
+        _, error = gh.read(f"repos/{repo}/contents/.github/workflows/ci.yml?ref={branch}")
         findings.append(Finding(
             "roadmap.workflows", "unknown" if error else "ready",
             error or "Roadmap build workflow installed", "Roadmap targets build in their own Lean package",
@@ -689,7 +691,7 @@ def extra_findings(project, gh, again):
             runtime.steps = [
                 f"Select [tools.tools] first. Open https://dash.cloudflare.com/, select your own account, and copy its Account ID from the account/Worker overview. Set services.github_state.url in {project.source} to the public HTTPS domain you control. Replace YOUR_CLOUDFLARE_ACCOUNT_ID and any YOUR_STATE_DOMAIN placeholder in the commands below.",
                 f"In a new deployment directory, check out the selected Tools revision:\n$ gh repo clone {pin.get('repo', 'TauCetiProject/TauCetiTools')} state-deployment\n$ git -C state-deployment checkout --detach {pin.get('ref', 'PASTE_SELECTED_TOOLS_SHA')}\n$ cd state-deployment/services/github-state\n$ npm ci\n$ npx wrangler login",
-                "Prepare the private credentials and App registration form:\n$ python3 scripts/setup.py prepare" + arguments + "\nOpen the local HTML form printed by prepare in a browser signed in as your account's App manager. Click Register dedicated read-only App, confirm the permissions and public installation setting, then Create GitHub App. Follow the printed one-time code-exchange command; the returned App key stays private.",
+                "Prepare the private credentials and App registration form:\n$ python3 scripts/setup.py prepare" + arguments + "\nOpen the local HTML form printed by prepare in a browser signed in as your account's App manager. Click Register dedicated read-only App, confirm the permissions and public installation setting, then Create GitHub App. Copy the code parameter from the resulting redirect URL, then run:\n$ python3 scripts/setup.py exchange" + arguments + "\nPaste that one-use code when the command waits for input and press Enter. The returned App key stays private; do not put the code in a shell argument.",
                 "Install that App on the content repository with Only select repositories. Copy NUMBER from the resulting /settings/installations/NUMBER URL. Run these initial-installation commands with that number:\n$ python3 scripts/setup.py inspect" + arguments + " --installation NUMBER\n$ python3 scripts/setup.py deploy" + arguments + " --installation NUMBER\n$ python3 scripts/setup.py bootstrap" + arguments + " --installation NUMBER\nFor later code updates run npx wrangler deploy; do not rerun initial deploy after adding clients because it resets their grants.",
             ]
         elif mode == "custom" and name == "cache":

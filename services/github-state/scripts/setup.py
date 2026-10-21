@@ -187,6 +187,11 @@ def cli():
     wrangler = ["npx", "wrangler"]
     flags = ["--env", "test" if suffix else ""]
     if a.action == "prepare":
+        account = run("gh", "api", f"users/{owner}", "--jq", ".type", check=False)
+        if account.returncode or account.stdout.strip() not in ("User", "Organization"):
+            raise SystemExit(f"Cannot identify GitHub account {owner}. Run gh auth login, then gh api users/{owner} --jq .type and retry prepare.")
+        registration = (f"https://github.com/organizations/{owner}/settings/apps/new"
+                        if account.stdout.strip() == "Organization" else "https://github.com/settings/apps/new")
         manifest = {
             "name": name,
             "url": url,
@@ -197,7 +202,7 @@ def cli():
             "default_events": EVENTS,
             "description": "Exclusive read-only webhook mirror for TauCeti fleet queries.",
         }
-        form = f'<!doctype html><meta name="referrer" content="no-referrer"><title>Register {name}</title><h1>Register {name}</h1><p>Creates a separate read-only App owned by {html.escape(owner)}. Select the configured repository.</p><form action="https://github.com/organizations/{html.escape(owner)}/settings/apps/new" method="post"><input type="hidden" name="manifest" value="{html.escape(json.dumps(manifest), quote=True)}"><button>Register dedicated read-only App</button></form>'
+        form = f'<!doctype html><meta name="referrer" content="no-referrer"><title>Register {name}</title><h1>Register {name}</h1><p>Creates a separate read-only App owned by {html.escape(owner)}. Select the configured repository.</p><form action="{html.escape(registration, quote=True)}" method="post"><input type="hidden" name="manifest" value="{html.escape(json.dumps(manifest), quote=True)}"><button>Register dedicated read-only App</button></form>'
         private(directory / "register.html", form)
         private(directory / "manifest.json", json.dumps(manifest, indent=2))
         for field in ["client-token", "admin-token"]:
