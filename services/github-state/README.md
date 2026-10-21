@@ -263,3 +263,27 @@ Downstream deployment and credential setup are documented in the
 The [migration source runbook](../../docs/github-state-migration.md) describes
 S2's supervised export/import, exclusive write switch, production gates and recovery protocol.
 Source verification does not select PostgreSQL or constitute a release receipt.
+
+### Shared runner-capacity discovery
+
+`GET /v1/runner-capacity?repository=OWNER/REPO` requires an existing client token
+authorized for that configured repository. Its installation owner performs one
+bounded organization inventory and shares the result for 30 seconds, coalescing
+concurrent requests. It counts running GitHub-hosted jobs, excluding Namespace
+and self-hosted labels, across the repositories visible to the installation.
+The current deployment organization has only public repositories. Adding private
+repositories requires granting the installation visibility to those repositories.
+
+The response includes `complete`, `organization`, `busy`, `observed_at`, `retry_at`,
+and refresh request counts. This is an advisory observation, not a reserved slot
+or an atomic snapshot. Missing pages or quota rejection produce HTTP 503 with
+`complete:false`, never a partial count. Failed refreshes are cached for two minutes (or a longer instructed cooldown).
+Refresh uses existing installation quota accounting, honors secondary cooldowns,
+leaves at least 1,500 core requests for repository work, and spends at most 500
+read attempts per rolling hour, including lost network responses on this operation. Brief request-slot
+contention yields within the scan deadline rather than invalidating the snapshot. A scan is bounded to
+80 requests and a 15-second launch window; individual requests retain their
+existing timeout. There is no alarm, CI event storage, or new polling task.
+
+Pickers retain bounded direct discovery when this view is unavailable. Visiting
+ordinary reports/status does not invoke capacity discovery.

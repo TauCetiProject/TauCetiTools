@@ -1,3 +1,4 @@
+import { scanHostedCapacity } from './runner-capacity';
 import { blocksRepairs, readMigration } from './migration';
 import { DurableObject } from 'cloudflare:workers';
 import { Env, json, Repository, stub, parseGitHub, digest } from './protocol';
@@ -12,6 +13,7 @@ class QuotaDeferred extends Error {
 
 export class InstallationScheduler extends DurableObject<Env> {
   private tokenFlight?:Promise<string>;
+  private capacityFlight?:Promise<any>;
   private repositoryRequests=new Map<string,number>();
   private auditFlight?:Promise<void>;
   private accountingMetrics=new AccountingMetrics();
@@ -406,6 +408,41 @@ export class InstallationScheduler extends DurableObject<Env> {
         recipes:this.ctx.storage.sql.exec('SELECT api,operation,shape,batch_size,COUNT(*) requests,SUM(points) points,AVG(points) mean_points,MAX(points) max_points,AVG(predicted) predicted,AVG(latency) latency,MAX(latency) max_latency FROM '+source+' WHERE at>? GROUP BY api,operation,shape,batch_size',now-3600000).toArray()};
     }catch(error) {log('installation_health_prepare_failed',{reason:classify(error)});}
   }
+  async runnerCapacity(repo:Repository):Promise<Response> {
+    const organization=repo.name.split('/')[0],key='runner-capacity:'+organization;
+    // Install the flight before the first storage await, so a finishing scan
+    // cannot race a caller that already read an expired value.
+    this.capacityFlight ||= (async()=>{
+      const saved=await this.ctx.storage.get<any>(key);
+      if(saved?.retry_at>Date.now())return {...saved,cached:true};
+      const deadline=Date.now()+15000;
+      const attempts=await this.ctx.storage.get<number[]>('runner-capacity-attempts') || [];
+      try {
+        const token=await this.token(repo.installation);
+        const snapshot=await scanHostedCapacity(organization,async path=>{
+          const until=await this.ctx.storage.get<number>('secondary_until') || 0;
+          if(until>Date.now() || this.usable('core')<=1500)throw new Error('capacity_quota_reserve');
+          while(attempts.length && attempts[0]<Date.now()-3600000)attempts.shift();
+          if(attempts.length>=500)throw new Error('capacity_hourly_budget');
+          // Persist before launching: a lost network response still consumes allowance.
+          attempts.push(Date.now());await this.ctx.storage.put('runner-capacity-attempts',attempts);
+          for(;;) {
+            try {return await this.http(path,token,'GET',undefined,'runner_capacity','core');}
+            catch(error) {
+              if(!(error instanceof QuotaDeferred) || error.result.category!=='capacity' || Date.now()+250>deadline)throw error;
+              await new Promise(resolve=>setTimeout(resolve,250));
+            }
+          }
+        });
+        const value={complete:true,organization,...snapshot,retry_at:Date.now()+30000,coverage:'organization_repository_inventory'};
+        await this.ctx.storage.put(key,value);return value;
+      } catch(error) {
+        const value={complete:false,organization,reason:error instanceof QuotaDeferred?'capacity_deferred':error instanceof Error && error.message.startsWith('capacity_')?error.message:classify(error),retry_at:Math.max(Date.now()+120000,error instanceof QuotaDeferred?error.result.retry_at || 0:0)};
+        await this.ctx.storage.put(key,value);return value;
+      }
+    })().finally(()=>{this.capacityFlight=undefined;});
+    const value=await this.capacityFlight;return json({cached:false,...value},value.complete?200:503);
+  }
   async fetch(req: Request): Promise<Response> {
     let tracked:string|undefined;
     try {
@@ -415,6 +452,7 @@ export class InstallationScheduler extends DurableObject<Env> {
         if(typeof repo?.id==='string') {tracked=repo.id;this.repositoryRequests.set(tracked!,1+(this.repositoryRequests.get(tracked!) || 0));}
         if(repo?.id && blocksRepairs(await readMigration(this.env.ARCHIVE,repo.id)))return json({unavailable:true,reason:'migration_frozen',retry_at:Date.now()+60000},503);
       }
+      if (path==='/runner-capacity') return await this.runnerCapacity(await req.json() as Repository);
       if (path==='/read') return await this.read({...await req.json() as object,request_id:requestId(req)});
       if (path==='/batch') return await this.batch({...await req.json() as object,request_id:requestId(req)});
       if (path==='/measure') return await this.measure({...await req.json() as object,request_id:requestId(req)});

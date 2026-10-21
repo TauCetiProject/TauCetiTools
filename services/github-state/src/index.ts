@@ -80,6 +80,12 @@ export default {
         return json({accepted:true},202);
       }
       // Reporting never enters query(), noteDemand(), configure(), or the scheduler.
+      if (url.pathname==='/v1/runner-capacity' && req.method==='GET') {
+        const repo=repository(env,url.searchParams.get('repository') || '');
+        if(!repo || !await authorize(req,env,repo.name))return json({error:'unauthorized'},401);
+        return stub(env.INSTALLATIONS,repo.installation).fetch('https://internal/runner-capacity',{
+          method:'POST',body:JSON.stringify(repo)});
+      }
       if (url.pathname==='/v1/activity' && req.method==='POST') {
         if (!await authorize(req,env)) return json({error:'unauthorized'},401);
         if (Number(req.headers.get('content-length') || 0)>16384) return json({error:'payload_too_large'},413);
