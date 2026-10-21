@@ -350,6 +350,9 @@ test('activity shadows use one clock for nested review windows and reject change
   f.source.repositoryFetch=async function(req){if(this.store.backend==='postgres')await new Promise(r=>setTimeout(r,50));const response=await fetch.call(this,req);const result=await response.clone().json();clocks.push({top:result.as_of,nested:result.review_coordination.as_of});return response;};
   await f.source.shadowMigration(state);assert.equal(state.cutover.shadow.activity_checked,true);
   assert.equal(clocks.length,2);assert.ok(Number.isSafeInteger(clocks[0].top));assert.deepEqual(clocks,[clocks[0],clocks[0]]);assert.equal(clocks[0].top,clocks[0].nested);
+  await new Promise(r=>setTimeout(r,5));
+  const publicResult=await f.source.repositoryFetch(new Request('https://internal/activity',{method:'POST',body:JSON.stringify({repository:custom.name,numbers:[7]})})).then(r=>r.json());
+  assert.ok(publicResult.as_of>clocks[0].top,'the migration clock never leaks onto the live source');
   history.buckets[hour].dual=3;await f.admin.query(`UPDATE ${f.schema}.meta SET value=$1 WHERE key='review_coordination'`,[JSON.stringify(history)]);
   state.cutover.shadow.activity_checked=false;await assert.rejects(f.source.shadowMigration(state),/migration_shadow_mismatch/);
  }finally{await f.close();}

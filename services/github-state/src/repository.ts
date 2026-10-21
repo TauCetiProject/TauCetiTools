@@ -33,6 +33,17 @@ const ACTIVITY_CLOCK=Symbol('activity clock');
 const decimalArgument=(value:string):number|string=>Number.isSafeInteger(Number(value))?Number(value):value;
 const activityFingerprint=(p:any,revision:number|undefined)=>JSON.stringify([p.headRefOid,p.baseRefOid,p.changedFiles,p.additions,p.deletions,revision]);
 const cursorKey=(repo:string,id:string,offset:number)=>`cursors/${repo}/${id}/${offset}.json`;
+function coordinationWindows(history:any,now:number):any {
+  if(!history)return null;
+  const windows:any={};
+  for(const [name,days] of [['24h',1],['7d',7]] as const) {
+    const result:any={dual:0,legacy:0,unknown:0,git_held:0};
+    for(const [at,b] of Object.entries(history.buckets) as [string,any][])if(Number(at)>=Math.floor((now-days*86400000)/3600000)*3600000)for(const key of Object.keys(result))result[key]+=b[key] || 0;
+    result.upgraded_fraction=result.dual+result.legacy?result.dual/(result.dual+result.legacy):null;windows[name]=result;
+  }
+  return {observed_since:history.observed_since,as_of:now,source:'observed-created-marker-webhooks',bucket_seconds:3600,windows,
+    legacy_lease_upper_bound:Math.max(0,...Object.values(history.buckets).map((b:any)=>b.legacy_until || 0))};
+}
 
 export class RepositoryState extends DurableObject<Env> {
   private [ACTIVITY_CLOCK]?:number;
@@ -762,15 +773,8 @@ export class RepositoryState extends DurableObject<Env> {
     await this.setMeta('review_coordination',history);
   }
   async reviewCoordination():Promise<any> {
-    const history=await this.meta('review_coordination');if(!history)return null;
-    const now=this[ACTIVITY_CLOCK] ?? Date.now(),windows:any={};
-    for(const [name,days] of [['24h',1],['7d',7]] as const) {
-      const result:any={dual:0,legacy:0,unknown:0,git_held:0};
-      for(const [at,b] of Object.entries(history.buckets) as [string,any][])if(Number(at)>=Math.floor((now-days*86400000)/3600000)*3600000)for(const key of Object.keys(result))result[key]+=b[key] || 0;
-      result.upgraded_fraction=result.dual+result.legacy?result.dual/(result.dual+result.legacy):null;windows[name]=result;
-    }
-    return {observed_since:history.observed_since,as_of:now,source:'observed-created-marker-webhooks',bucket_seconds:3600,windows,
-      legacy_lease_upper_bound:Math.max(0,...Object.values(history.buckets).map((b:any)=>b.legacy_until || 0))};
+    const history=await this.meta('review_coordination');
+    return coordinationWindows(history,this[ACTIVITY_CLOCK] ?? Date.now());
   }
   async ingest(pointer:EventPointer,preparedBody?:any): Promise<void> {
     const configured=repository(this.env,pointer.repository);if(!configured)throw Error('repository not allowed');
@@ -2195,7 +2199,7 @@ export class RepositoryState extends DurableObject<Env> {
       const [a,b]=await Promise.all([source.repositoryFetch(request()),target.repositoryFetch(request())]);
       if(!a.ok || !b.ok)throw new AdminError('migration_shadow_unavailable');
       const left=await a.json<any>(),right=await b.json<any>();
-      if(canonical({...left,as_of:undefined})!==canonical({...right,as_of:undefined}))throw new AdminError('migration_shadow_mismatch');
+      if(canonical(left)!==canonical(right))throw new AdminError('migration_shadow_mismatch');
       check.activity_checked=true;check.hash=await digest(check.hash+'\n'+canonical({...left,as_of:undefined}));return;
     }
     const [sourceHealth,targetHealth]=await Promise.all([repositoryHealth(this.store),repositoryHealth(target.store)]);
@@ -2472,11 +2476,11 @@ export class RepositoryState extends DurableObject<Env> {
         }
         // Normal responses retain their completion-time clock. A migration
         // shadow supplies the same private clock to both local read scopes.
-        const asOf=this[ACTIVITY_CLOCK] ?? Date.now(),coordination=Object.create(this) as RepositoryState;
-        coordination[ACTIVITY_CLOCK]=asOf;
-        return json({version:1,repository:input.repository,revision:(await this.revision()),as_of:asOf,coverage:'observed',prs,missing,
-          review_coordination:await coordination.reviewCoordination(),
-          landing_observations:{checked_at:(await this.meta('activity_landings_checked')),last_success_at:(await this.meta('activity_landings_success')),error:(await this.meta('activity_landings_error'))}});
+        const revision=await this.revision(),history=await this.meta('review_coordination');
+        const landing_observations={checked_at:await this.meta('activity_landings_checked'),last_success_at:await this.meta('activity_landings_success'),error:await this.meta('activity_landings_error')};
+        const asOf=this[ACTIVITY_CLOCK] ?? Date.now();
+        return json({version:1,repository:input.repository,revision,as_of:asOf,coverage:'observed',prs,missing,
+          review_coordination:coordinationWindows(history,asOf),landing_observations});
       }
       if (path==='/query') {
         const q=parseGitHub(await req.text()) as Query;

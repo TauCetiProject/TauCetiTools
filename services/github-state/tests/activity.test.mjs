@@ -135,3 +135,20 @@ test('public activity timestamps are sampled after stored PR reads',async()=>{
   assert.ok(result.as_of>=result.prs[0].observed_at);
  }finally{await db.close();}
 });
+
+test('public activity timestamps follow delayed coordination metadata',async()=>{
+ const {db,state}=await fixture();try{
+  await state.setMeta('review_coordination',{observed_since:0,buckets:{}});
+  const meta=state.meta;
+  state.meta=async function(key){
+   if(key==='review_coordination'){
+    await new Promise(r=>setTimeout(r,25));
+    await db.prepare('UPDATE meta SET value=? WHERE key=?').run(JSON.stringify({observed_since:Date.now(),buckets:{}}),key);
+   }
+   return meta.call(this,key);
+  };
+  const result=await (await query(state,[])).json();
+  assert.ok(result.as_of>=result.review_coordination.observed_since);
+  assert.equal(result.as_of,result.review_coordination.as_of);
+ }finally{await db.close();}
+});
