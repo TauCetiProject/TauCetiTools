@@ -5,6 +5,7 @@ Executed only from the immutable workflow checkout. The finalizer starts beside
 the publisher after the full sandbox audit; it never consumes candidate files.
 """
 import argparse
+import datetime as dt
 import json
 import os
 import re
@@ -39,9 +40,14 @@ def api(path, payload=None):
     if _client is None:
         # Publication owns waits so it can revalidate the run after sleeping.
         _client = GitHub(max_wait=0, jitter=2)
+    options = {}
+    if re.fullmatch(r"/commits/[0-9a-f]{40}/statuses\?per_page=100", path):
+        # Commit-status evidence shares the renewable status credential; the
+        # read App has a separate quota and may expire during a long reset wait.
+        options["read"] = False
     return _client.request("GET" if payload is None else "POST", "repos/" + REPO + path,
                            payload, conditional=payload is None,
-                           idempotent=path.startswith("/statuses/"))
+                           idempotent=path.startswith("/statuses/"), **options)
 
 
 def publication_job(data):
@@ -236,7 +242,7 @@ def finalize(env, target, *, resume=False):
     return publish(intent, target=target, resume=resume)
 
 
-def newer_build_status(intent):
+def newer_build_status(intent, attempt_started=None):
     """One bounded newest-first read fences verdicts from later workflow runs."""
     rows = api(f"/commits/{intent['revision']}/statuses?per_page=100")
     if not isinstance(rows, list) or len(rows) > 100:
@@ -249,7 +255,16 @@ def newer_build_status(intent):
         match = pattern.fullmatch(target) if isinstance(target, str) else None
         # GitHub orders statuses newest first. Older rows are historical;
         # only the current build verdict can supersede this publication.
-        return bool(match and int(match.group(1)) > intent["run_id"])
+        if not match or int(match.group(1)) <= intent["run_id"]:
+            return False
+        # A rerun keeps its original run ID. A later-numbered run's status is
+        # obsolete if it predates this attempt, even though its ID is greater.
+        try:
+            created = dt.datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
+            started = dt.datetime.fromisoformat(attempt_started.replace("Z", "+00:00"))
+            return created > started
+        except (KeyError, AttributeError, TypeError, ValueError):
+            return False
     return False
 
 
@@ -275,7 +290,7 @@ def publish(intent, *, target=None, resume=False):
                 print("::notice::superseded run attempt will not overwrite its successor's status", flush=True)
                 discard_intent(target)
                 return 0 if resume else 1
-            if newer_build_status(intent):
+            if newer_build_status(intent, latest.get("run_started_at")):
                 print("::notice::newer run already published build status; obsolete intent discarded", flush=True)
                 discard_intent(target)
                 return 0 if resume else 1

@@ -50,8 +50,8 @@ class Recovery(unittest.TestCase):
                 path = Path(directory) / "intent.json"
                 path.write_text(json.dumps(self.intent(state)))
                 status = dict(context="build", state="success",
-                              target_url="https://github.com/TauCetiProject/TauCeti/actions/runs/13")
-                with patch.object(finalizer, "api", side_effect=[dict(run_attempt=2), [status]]) as request, \
+                              target_url="https://github.com/TauCetiProject/TauCeti/actions/runs/13", created_at="2026-10-21T01:00:00Z")
+                with patch.object(finalizer, "api", side_effect=[dict(run_attempt=2, run_started_at="2026-10-21T00:00:00Z"), [status]]) as request, \
                      contextlib.redirect_stdout(io.StringIO()):
                     self.assertEqual(finalizer.main(["--resume", str(path)]), 0)
                 self.assertFalse(path.exists())
@@ -67,21 +67,40 @@ class Recovery(unittest.TestCase):
                 self.assertFalse(finalizer.newer_build_status(self.intent()))
 
     def test_only_newest_build_status_is_authoritative(self):
-        newer_history = dict(context="build", target_url="https://github.com/TauCetiProject/TauCeti/actions/runs/13")
+        newer_history = dict(context="build", target_url="https://github.com/TauCetiProject/TauCeti/actions/runs/13", created_at="2026-10-21T01:00:00Z")
         for current in [dict(context="build", target_url="https://github.com/TauCetiProject/TauCeti/actions/runs/12"),
                         dict(context="build", target_url="https://github.com/TauCetiProject/TauCeti/actions/runs/11"),
                         dict(context="build", target_url="https://other.example/current-verdict")]:
             with self.subTest(current=current), patch.object(finalizer, "api", return_value=[current, newer_history]):
                 self.assertFalse(finalizer.newer_build_status(self.intent()))
         with patch.object(finalizer, "api", return_value=[dict(context="scope"), newer_history]):
-            self.assertTrue(finalizer.newer_build_status(self.intent()))
+            self.assertTrue(finalizer.newer_build_status(self.intent(), "2026-10-21T00:00:00Z"))
+
+    def test_rerun_can_replace_a_higher_run_id_status_created_before_this_attempt(self):
+        intent = self.intent()
+        newer = dict(context="build", target_url="https://github.com/TauCetiProject/TauCeti/actions/runs/13",
+                     created_at="2026-10-21T01:00:00Z")
+        with patch.object(finalizer, "api", side_effect=[dict(run_attempt=2, run_started_at="2026-10-21T02:00:00Z"), [newer], {}]) as request, \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(finalizer.publish(intent, resume=True), 0)
+        self.assertEqual(request.call_args.args[0], "/statuses/" + "a" * 40)
+        with patch.object(finalizer, "api", return_value=[newer]):
+            self.assertTrue(finalizer.newer_build_status(intent, "2026-10-21T00:00:00Z"))
+            self.assertFalse(finalizer.newer_build_status(intent, "2026-10-21T01:00:00Z"))
+
+    def test_status_history_uses_the_renewable_status_credential(self):
+        from unittest.mock import Mock
+        client = Mock()
+        with patch.object(finalizer, "_client", client):
+            finalizer.api("/commits/" + "a" * 40 + "/statuses?per_page=100")
+        self.assertEqual(client.request.call_args.kwargs["read"], False)
 
     def test_newer_status_appearing_during_quota_wait_is_rechecked(self):
         now = [0]
         def sleep(delay): now[0] += delay
-        newer = dict(context="build", target_url="https://github.com/TauCetiProject/TauCeti/actions/runs/13")
+        newer = dict(context="build", target_url="https://github.com/TauCetiProject/TauCeti/actions/runs/13", created_at="2026-10-21T01:00:00Z")
         deferred = finalizer.Deferred("ci-status-app", 1060)
-        with patch.object(finalizer, "api", side_effect=[dict(run_attempt=2), [], deferred, dict(run_attempt=2), [newer]]) as request, \
+        with patch.object(finalizer, "api", side_effect=[dict(run_attempt=2), [], deferred, dict(run_attempt=2, run_started_at="2026-10-21T00:00:00Z"), [newer]]) as request, \
              patch.object(finalizer.time, "monotonic", side_effect=lambda: now[0]), \
              patch.object(finalizer.time, "time", side_effect=lambda: 1000 + now[0]), \
              patch.object(finalizer.time, "sleep", side_effect=sleep), contextlib.redirect_stdout(io.StringIO()):
