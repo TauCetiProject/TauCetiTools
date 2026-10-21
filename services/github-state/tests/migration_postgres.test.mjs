@@ -334,6 +334,27 @@ test('stored shadows reject real target differences and matching unavailable res
  }finally{await f.close();}
 });
 
+test('activity shadows use one clock for nested review windows and reject changed counts',{skip:!enabled},async()=>{
+ const f=await testFixture();try {
+  const custom={id:f.id,name:'org/repo',installation:'200'};await f.source.setMeta('repository',custom);f.env.ALLOWED_REPOSITORIES=JSON.stringify([custom]);
+  const now=Date.now(),hour=Math.floor(now/3600000)*3600000,history={observed_since:now-1000,buckets:{[hour]:{dual:2,legacy:1,unknown:0,git_held:2}}};
+  await f.source.setMeta('review_coordination',history);
+  const key=`control/${f.id}/migration-acceptance.json`,evidence=await f.archive.get(key).then(o=>o.json());evidence.activity_numbers=[7];await f.archive.put(key,JSON.stringify(evidence));
+  await control.preflight(f.env,f.state);await migration.saveMigration(f.archive,f.state);
+  let state=f.state;for(let n=0;n<500;n++){state=await migration.readMigration(f.archive,f.id);if(state.phase==='switching')break;await control.controllerStep(f.env,state,f.hooks);if(n===499)assert.fail('did not verify');}
+  f.source.migrationState=state;
+  // Focus on the activity stage after the query stage. Delay the remote side
+  // so separately sampled clocks cannot accidentally make this test pass.
+  state.cutover.shadow={queries:1,hash:'0'.repeat(64),verified_at:now,complete:false};
+  const fetch=f.source.repositoryFetch,clocks=[];
+  f.source.repositoryFetch=async function(req,at){if(this.store.backend==='postgres')await new Promise(r=>setTimeout(r,50));const response=await fetch.call(this,req,at);const result=await response.clone().json();clocks.push({top:result.as_of,nested:result.review_coordination.as_of});return response;};
+  await f.source.shadowMigration(state);assert.equal(state.cutover.shadow.activity_checked,true);
+  assert.equal(clocks.length,2);assert.ok(Number.isSafeInteger(clocks[0].top));assert.deepEqual(clocks,[clocks[0],clocks[0]]);assert.equal(clocks[0].top,clocks[0].nested);
+  history.buckets[hour].dual=3;await f.admin.query(`UPDATE ${f.schema}.meta SET value=$1 WHERE key='review_coordination'`,[JSON.stringify(history)]);
+  state.cutover.shadow.activity_checked=false;await assert.rejects(f.source.shadowMigration(state),/migration_shadow_mismatch/);
+ }finally{await f.close();}
+});
+
 for(const when of ['before','after'])test(`restart around ${when} local PostgreSQL selection commit preserves exclusive ownership`,{skip:!enabled},async()=>{
  const f=await testFixture();try {
   const custom={id:f.id,name:'org/repo',installation:'200'};await f.source.setMeta('repository',custom);f.env.ALLOWED_REPOSITORIES=JSON.stringify([custom]);

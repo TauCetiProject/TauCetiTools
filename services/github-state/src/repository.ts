@@ -758,9 +758,9 @@ export class RepositoryState extends DurableObject<Env> {
     for(const k of Object.keys(history.buckets))if(Number(k)<now-7*86400000-hour)delete history.buckets[k];
     await this.setMeta('review_coordination',history);
   }
-  async reviewCoordination():Promise<any> {
+  async reviewCoordination(now=Date.now()):Promise<any> {
     const history=await this.meta('review_coordination');if(!history)return null;
-    const now=Date.now(),windows:any={};
+    const windows:any={};
     for(const [name,days] of [['24h',1],['7d',7]] as const) {
       const result:any={dual:0,legacy:0,unknown:0,git_held:0};
       for(const [at,b] of Object.entries(history.buckets) as [string,any][])if(Number(at)>=Math.floor((now-days*86400000)/3600000)*3600000)for(const key of Object.keys(result))result[key]+=b[key] || 0;
@@ -2185,7 +2185,10 @@ export class RepositoryState extends DurableObject<Env> {
       if(numbers.length>20 || numbers.some((n:any)=>!Number.isSafeInteger(n) || n<=0))throw new AdminError('migration_shadow_query_invalid');
       const input={repository:(await this.meta('repository')).name,numbers};
       const request=()=>new Request('https://internal/activity',{method:'POST',body:JSON.stringify(input)});
-      const [a,b]=await Promise.all([this.repositoryFetch(request()),target.repositoryFetch(request())]);
+      // Clock-derived windows and nested response timestamps must describe
+      // the same instant while comparing otherwise frozen stored data.
+      const at=Date.now();
+      const [a,b]=await Promise.all([this.repositoryFetch(request(),at),target.repositoryFetch(request(),at)]);
       if(!a.ok || !b.ok)throw new AdminError('migration_shadow_unavailable');
       const left=await a.json<any>(),right=await b.json<any>();
       if(canonical({...left,as_of:undefined})!==canonical({...right,as_of:undefined}))throw new AdminError('migration_shadow_mismatch');
@@ -2415,7 +2418,7 @@ export class RepositoryState extends DurableObject<Env> {
     if(tracked) this.activeOperations++;
     try {return await this.repositoryFetch(req);} finally {if(tracked) this.activeOperations--;}
   }
-  async repositoryFetch(req:Request): Promise<Response> {
+  async repositoryFetch(req:Request,activityAt?:number): Promise<Response> {
     const url=new URL(req.url),path=url.pathname,request_id=requestId(req),requestStarted=Date.now();
     let requestError=false,requestUnavailable=false,requestOperation='',requestCoverage='complete';
     try {
@@ -2451,7 +2454,7 @@ export class RepositoryState extends DurableObject<Env> {
         return json({retained:true,reason:'recovery_reference_index_required'});
       }
       if (path==='/activity') {
-        const input:any=await req.json();
+        const input:any=await req.json(),asOf=activityAt ?? Date.now();
         const prs=[],missing=[],locBudget={remaining:32},state=await this.primeActivity(input.numbers);
         // Deliberately no configure, demand, collection verification, or repair.
         for (const number of input.numbers) {
@@ -2463,8 +2466,8 @@ export class RepositoryState extends DurableObject<Env> {
             head_sha:p.headRefOid || null,observed_at:row.observed,
             landing_source:p.mergedAt?'github-merged':landing?.source || null,lean_loc:await state.activityLOC(number,p,locBudget)});
         }
-        return json({version:1,repository:input.repository,revision:(await this.revision()),as_of:Date.now(),coverage:'observed',prs,missing,
-          review_coordination:await this.reviewCoordination(),
+        return json({version:1,repository:input.repository,revision:(await this.revision()),as_of:asOf,coverage:'observed',prs,missing,
+          review_coordination:await this.reviewCoordination(asOf),
           landing_observations:{checked_at:(await this.meta('activity_landings_checked')),last_success_at:(await this.meta('activity_landings_success')),error:(await this.meta('activity_landings_error'))}});
       }
       if (path==='/query') {
