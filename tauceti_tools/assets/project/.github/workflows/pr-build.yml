@@ -38,3 +38,7 @@ jobs:
       APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
       FLEET_READ_TOKEN: ${{ secrets.FLEET_READ_TOKEN }}
       LAKE_CACHE_KEY: ${{ secrets.LAKE_CACHE_KEY }}
+      CI_READ_APP_ID: ${{ secrets.CI_READ_APP_ID }}
+      CI_READ_APP_PRIVATE_KEY: ${{ secrets.CI_READ_APP_PRIVATE_KEY }}
+      CI_STATUS_APP_ID: ${{ secrets.CI_STATUS_APP_ID }}
+      CI_STATUS_APP_PRIVATE_KEY: ${{ secrets.CI_STATUS_APP_PRIVATE_KEY }}

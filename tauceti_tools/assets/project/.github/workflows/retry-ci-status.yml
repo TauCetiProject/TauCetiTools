@@ -1,0 +1,26 @@
+name: Retry CI status publication
+
+# Replay retained terminal statuses only; never rerun the source build.
+on:
+  workflow_run:
+    workflows: [pr-build]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  statuses: write
+
+jobs:
+  publish:
+    uses: __TOOLS_REPO__/.github/workflows/retry-ci-status.yml@__TOOLS_REF__
+    with:
+      tools_repository: __TOOLS_REPO__
+      tools_ref: __TOOLS_REF__
+      project_ref: ${{ github.workflow_sha }}
+    secrets:
+      CI_READ_APP_ID: ${{ secrets.CI_READ_APP_ID }}
+      CI_READ_APP_PRIVATE_KEY: ${{ secrets.CI_READ_APP_PRIVATE_KEY }}
+      CI_STATUS_APP_ID: ${{ secrets.CI_STATUS_APP_ID }}
+      CI_STATUS_APP_PRIVATE_KEY: ${{ secrets.CI_STATUS_APP_PRIVATE_KEY }}
