@@ -127,6 +127,91 @@
         "working_tree_check": "This producer version checked tracked changes only",
         "measurement_scope": "Process memory includes the in-memory SQLite database and startup allocations; samples are not a live-set, continuous peak, PostgreSQL cache-group or Worker-isolate measurement"
       }
+    },
+    {
+      "reported": {
+        "at": "2026-10-21T00:47:23.184Z",
+        "backend": "sqlite (node:sqlite in-memory)",
+        "code_commit": "1c0874ff32381a83bc7caae199defe3ca33a02eb",
+        "code_commit_source": "git_head",
+        "github_sha": null,
+        "github_sha_matches_head": null,
+        "github_event_name": null,
+        "working_tree_dirty": false,
+        "node_version": "v24.20.0",
+        "v8_version": "13.6.233.17-node.53",
+        "fixture": {
+          "input_pages": 111,
+          "archived_pages": 110,
+          "input_rows": 11100,
+          "published_rows": 11015,
+          "dependent_jobs": 44060,
+          "body_characters": 3900,
+          "r2_fixture": "disk backed; no in-process retained archive text"
+        },
+        "node_old_space_limit_mib": 96,
+        "heap_size_flags": [
+          "--max-old-space-size=96"
+        ],
+        "forced_gc": false,
+        "samples": [
+          {
+            "stage": "before_refresh",
+            "heap_used": 40704744,
+            "rss": 174518272,
+            "external": 37232349,
+            "array_buffers": 10515678,
+            "total_heap_size": 75878400,
+            "heap_size_limit": 301989888
+          },
+          {
+            "stage": "publication_rows",
+            "rows": 11100,
+            "heap_used": 77831280,
+            "rss": 225837056,
+            "external": 27650878,
+            "array_buffers": 938773,
+            "total_heap_size": 210898944,
+            "heap_size_limit": 301989888
+          },
+          {
+            "stage": "publication_repairs",
+            "repairs": 44060,
+            "heap_used": 135605072,
+            "rss": 535519232,
+            "external": 33473248,
+            "array_buffers": 938773,
+            "total_heap_size": 213614592,
+            "heap_size_limit": 301989888
+          },
+          {
+            "stage": "publication_applied",
+            "heap_used": 66260528,
+            "rss": 544833536,
+            "external": 27650878,
+            "array_buffers": 938773,
+            "total_heap_size": 174415872,
+            "heap_size_limit": 301989888
+          },
+          {
+            "stage": "after_refresh",
+            "heap_used": 66284360,
+            "rss": 544833536,
+            "external": 27650878,
+            "array_buffers": 938773,
+            "total_heap_size": 174415872,
+            "heap_size_limit": 301989888
+          }
+        ],
+        "github_calls": 0,
+        "complete": true
+      },
+      "annotations": {
+        "command": "npm run test:publication-memory",
+        "max_sampled_node_heap_used_bytes": 135605072,
+        "working_tree_check": "Tracked and non-ignored untracked changes",
+        "measurement_scope": "Process memory includes the in-memory SQLite database and startup allocations; snapshots are not a live-set, continuous peak, PostgreSQL cache-group or Worker-isolate measurement"
+      }
     }
   ],
   "native": {
@@ -195,6 +280,33 @@
     {
       "from_commit": "89dc427f0b920d67933e05b1f3f5fd430a054f6c",
       "to_commit": "b74022a7c8b7935ac2d71da708c1b91004654dc8",
+      "selected_paths": [
+        "services/github-state/src/repository.ts",
+        "services/github-state/src/repository_store.ts"
+      ],
+      "changed_selected_paths": [],
+      "all_changed_paths": [
+        "docs/github-state-migration.md",
+        "services/github-state/README.md",
+        "services/github-state/scripts/benchmark-migration-bytes.mjs",
+        "services/github-state/scripts/migrate.py",
+        "services/github-state/src/migration.ts",
+        "services/github-state/src/migration_target.ts",
+        "services/github-state/tests/migration.test.mjs",
+        "services/github-state/tests/migration_fixture.mjs",
+        "services/github-state/tests/migration_postgres.test.mjs",
+        "services/github-state/tests/publication_memory.mjs",
+        "services/github-state/tests/worker_postgres.mjs",
+        "services/github-state/tests/worker_postgres.test.mjs",
+        "services/github-state/validation/migration-byte-sizing-2026-10-20.json",
+        "services/github-state/validation/publication-memory-native-2026-10-20.json",
+        "tests/test_migration.py"
+      ],
+      "basis": "git diff --name-only between the recorded commits; selected paths do not represent all publication dependencies"
+    },
+    {
+      "from_commit": "89dc427f0b920d67933e05b1f3f5fd430a054f6c",
+      "to_commit": "1c0874ff32381a83bc7caae199defe3ca33a02eb",
       "selected_paths": [
         "services/github-state/src/repository.ts",
         "services/github-state/src/repository_store.ts"
