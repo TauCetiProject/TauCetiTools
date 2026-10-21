@@ -315,11 +315,12 @@ test('stored shadows reject real target differences and matching unavailable res
   // storage without changing any archived value, then exercise the real cache
   // priming and shadow comparison against SQLite's original context order.
   await f.admin.query(`CREATE INDEX shadow_resource_order ON ${f.schema}.resources(kind,id); CLUSTER ${f.schema}.resources USING shadow_resource_order`);
+  assert.deepEqual((await f.admin.query(`SELECT id FROM ${f.schema}.resources WHERE kind='status_context' ORDER BY ctid`)).rows.map(r=>r.id),['head-seven:a-first','head-seven:m-middle','head-seven:z-last']);
   f.source.migrationState=state;
   const source=await f.source.query({repository:custom.name,operation:'open_prs'});
   assert.deepEqual(source.data[0].statusCheckRollup.map(s=>s.context),['z-last','m-middle','a-first']);
   await f.source.shadowMigration(state);assert.equal(state.cutover.shadow.queries,1);
-  await f.admin.query(`UPDATE ${f.schema}.resources SET data=$1 WHERE kind='pr' AND id='7'`,[JSON.stringify({number:7,state:'OPEN',title:'different target title'})]);
+  await f.admin.query(`UPDATE ${f.schema}.resources SET data=$1 WHERE kind='pr' AND id='7'`,[JSON.stringify({number:7,state:'OPEN',title:'different target title',headRefOid:'head-seven'})]);
   state.cutover.shadow=undefined;await assert.rejects(f.source.shadowMigration(state),/migration_shadow_mismatch/);
   f.db.prepare('UPDATE collections SET complete=0 WHERE key=?').run('open_prs:{}');
   await f.admin.query(`UPDATE ${f.schema}.collections SET complete=0 WHERE key=$1`,['open_prs:{}']);
