@@ -41,10 +41,9 @@ class DoctorReportTests(unittest.TestCase):
                 return {"content": base64.b64encode(value.encode()).decode()}, ""
 
         finding, = dependency_findings(project, GitHub(), "doctor")
-        self.assertEqual(finding.status, "pending")
-        self.assertIn("c" * 40, finding.summary)
-        self.assertIn("b" * 40, finding.summary)
-        self.assertIn("do not prove", "\n".join(finding.steps))
+        self.assertEqual(finding.status, "ready")
+        self.assertIn("Lake resolves shared pins", finding.summary)
+        self.assertIn("do not prove incompatibility", "\n".join(finding.steps))
         project.raw["upstreams"][0]["branch"] = "other"
         finding, = dependency_findings(project, GitHub(), "doctor")
         self.assertEqual(finding.status, "failed")

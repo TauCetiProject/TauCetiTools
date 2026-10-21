@@ -11,6 +11,10 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-24.04
+    env:
+      BWRAP_VER: 0.9.0-1build1
+      BWRAP_DEB_SHA256: dde30d1f24da50446d647ed504ec8dc5a714f171974d054c70a589b48ba38b48
+      BWRAP_SHA256: 3e33f8255e1411ada346db27028c25ef5ba4fa3327754a2321ea4c8732a3bc10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -19,6 +23,57 @@ jobs:
         with:
           tools-repository: __TOOLS_REPO__
           tools-ref: __TOOLS_REF__
+      - name: Install elan (trusted, pinned + checksum)
+        env:
+          ELAN_SHA256: df0b2b3a439961ffcbb3985214365ffe40f49bc871df04dff268c7d8e21ca8b2
+          ELAN_VER: v4.2.3
+        run: |
+          curl -sSL -H "Accept: application/octet-stream" \
+            "https://github.com/leanprover/elan/releases/download/${ELAN_VER}/elan-x86_64-unknown-linux-gnu.tar.gz" -o elan.tar.gz
+          echo "${ELAN_SHA256}  elan.tar.gz" | sha256sum -c -
+          tar -xzf elan.tar.gz elan-init
+          ./elan-init -y --default-toolchain none
+          rm -f elan.tar.gz elan-init
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Install bubblewrap (pinned + checksum)
+        run: |
+          set -euo pipefail
+          deb="bubblewrap_${BWRAP_VER}_amd64.deb"
+          if ! curl -sSL --fail "https://archive.ubuntu.com/ubuntu/pool/main/b/bubblewrap/${deb}" -o bwrap.deb \
+             && ! curl -sSL --fail "https://security.ubuntu.com/ubuntu/pool/main/b/bubblewrap/${deb}" -o bwrap.deb; then
+            echo "::error::bubblewrap ${BWRAP_VER} is gone from the Ubuntu pool. The sandbox cannot be installed, so no PR can build until the pin is moved."
+            exit 1
+          fi
+          if ! echo "${BWRAP_DEB_SHA256}  bwrap.deb" | sha256sum -c -; then
+            echo "::error::bubblewrap ${BWRAP_VER} downloaded but does not match BWRAP_DEB_SHA256. Ubuntu does not rewrite published packages, so either the pin is wrong or the download was tampered with. Re-derive the hashes rather than relaxing this check."
+            exit 1
+          fi
+          sudo dpkg -i bwrap.deb >/dev/null
+          if ! echo "${BWRAP_SHA256}  /usr/bin/bwrap" | sha256sum -c -; then
+            echo "::error::the installed /usr/bin/bwrap does not match BWRAP_SHA256, so the binary that would run is not the one that was vetted. Re-derive it with: sudo dpkg -i ${deb} && sha256sum /usr/bin/bwrap"
+            exit 1
+          fi
+          rm -f bwrap.deb
+          /usr/bin/bwrap --version
+
+          if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = 1 ]; then
+            printf '%s\n' \
+              'abi <abi/4.0>,' \
+              'include <tunables/global>' \
+              'profile bwrap /usr/bin/bwrap flags=(unconfined) {' \
+              '  userns,' \
+              '  include if exists <local/bwrap>' \
+              '}' | sudo tee /etc/apparmor.d/bwrap >/dev/null
+            sudo apparmor_parser -r /etc/apparmor.d/bwrap
+          else
+            echo "unprivileged user namespaces are not AppArmor-restricted here; no profile needed"
+          fi
+
+      - name: Resolve pins with Lake without credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -m tauceti_tools upstreams update --conf tauceti.toml --apply
       - uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf
         id: app
         with:
@@ -26,10 +81,6 @@ jobs:
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
-      - name: Prepare consistent pins without executing upstream code
-        env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
-        run: python3 -m tauceti_tools upstreams update --conf tauceti.toml --apply
       - name: Open the dependency PR
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
@@ -49,5 +100,5 @@ jobs:
           gh auth setup-git
           git push origin "$branch"
           body="$RUNNER_TEMP/upstream-pr.md"
-          printf 'Update dependency pins from mutually consistent upstream manifests. Source adaptation must preserve the protected build policy.\n\nRoadmap: none\n' > "$body"
+          printf 'Update dependency pins from Lake resolution of the configured direct dependency pins. Source adaptation must preserve the protected build policy.\n\nRoadmap: none\n' > "$body"
           gh pr create --repo "$REPO" --base "$TAUCETI_BASE_BRANCH" --head "$branch" --title "Update upstream dependencies" --body-file "$body"

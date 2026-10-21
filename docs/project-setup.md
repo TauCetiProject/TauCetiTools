@@ -142,6 +142,12 @@ edits take effect on restart or an explicit configuration refresh; they do not i
 ## Lean and upstream dependencies
 
 Initialize the content package with the intended Lean toolchain and Lake dependencies.
+Project roots use `lakefile.toml`; upstream dependencies can use either Lake configuration
+format. To convert an existing root Lean lakefile, run `lake translate-config toml`. Lake writes
+`lakefile.toml` and renames the original to `lakefile.lean.bak`. Review the conversion, run
+`lake update` and `lake build`, then commit the TOML file and removal of the active Lean file.
+If both formats already exist, compare them and retain the reviewed TOML configuration;
+move the Lean file to an unused backup name so it is no longer active.
 Commit both `lean-toolchain` and `lake-manifest.json`. Set the Lean library root to the
 configuration's `lean.roots`. The supplied build harness currently renders one top-level
 Lean library root. Projects with several roots keep their existing custom build workflow. A project following Tau Ceti's empty-root policy uses a glob
@@ -210,29 +216,59 @@ dependencies already present in the manifest. For inherited Mathlib set `update 
 `overlap` and `upstream_destination` remain independent choices. The Mathlib-only starter
 must be adapted to the actual package rather than replacing its existing lakefile.
 
-Lake can give a direct requirement priority over an inherited one. Different upstream Mathlib
-pins therefore do not by themselves prove a combined project is broken. A human can deliberately
-select a shared revision in the lakefile, resolve it with `lake update`, fetch available caches
-with `lake exe cache get`, and run `lake build`. For a new project, establish this integration
-before installing the automated guard. Once installed, the guard rejects deliberate override
-PRs before CI builds them: human review alone does not unblock the required check, and this
-release has no approval-based override path. A working overridden graph can support ordinary
-source PRs but is outside the automatic updater's supported exact-match policy.
+Lake resolves shared dependencies using its normal precedence rules, including direct
+requirements taking priority over inherited ones. Different Mathlib pins in CSLib and Tau Ceti's
+manifests are allowed. They are not proof that a combination is incompatible: the required build
+and review decide that. Choose direct requirements and any overrides deliberately in the
+human-owned lakefile. An existing direct override is preserved by automatic updates.
 
-The automatic updater is deliberately more conservative: the selected upstreams must agree
-on the Lean toolchain and exact shared pins. Inspect nominated branch heads without changing
-the checkout:
+The updater selects forward commits on the configured branches, keeps other direct dependencies
+fixed, and passes those immutable pins to Lake. It chooses the newest official Lean release or
+release candidate declared by the base or any direct dependency; it never downgrades Lean.
+Nightly and custom toolchains require a human decision. The resolver rebuilds the inherited
+closure without running post-update hooks or fetching build caches. It does not edit lakefiles.
+
+Inspect nominated branch heads without executing Lake or changing the checkout:
 
 ```sh
 tauceti-tools upstreams inspect --conf tauceti.toml --checkout .
 ```
 
-If this reports a conflict, wait for compatible upstream branch heads and rerun it. To pause
-automatic bumps, set `update = false` on every enabled upstream entry and merge that
-configuration change. This does not remove dependencies or prevent normal source work.
-It also does not disable the bump guard or permit override PRs.
-An inspection of published pins cannot prove that a newer combination builds; the build
-remains necessary. A pending dependency-policy report is distinct from a failed build.
+On Linux, install elan using <https://lean-lang.org/install/manual/> and bubblewrap using the
+operating system's package manager (`sudo apt-get install bubblewrap` on Ubuntu). Commit the
+project's Lake configuration and pins before preparing an update:
+
+```sh
+tauceti-tools upstreams update --conf tauceti.toml --checkout . --apply
+git diff -- lake-manifest.json lean-toolchain
+```
+
+Alternatively open the content repository's **Actions → Update configured upstreams → Run
+workflow**. The scheduled workflow installs its pinned elan and bubblewrap runtime, resolves
+first, then obtains the automation App token and opens a dependency PR. Merge the regenerated
+workflow when upgrading an existing project's Tools pin; updating an operator's CLI alone
+does not change installed workflow callers.
+
+Resolution runs in a disposable copy of committed base source under bubblewrap. Only that
+copy is writable; the official toolchain is read-only, credentials and host workspace are not
+mounted, and the launcher has an empty environment. Network access is enabled for public Git
+fetches. The small trusted Lean driver calls Lake's resolver with direct entries preseeded;
+upstream Lean lakefiles are evaluated inside this boundary. Post-update hooks are not run.
+
+For a pin-changing PR, the guard authorizes each changed direct revision as a forward commit
+on its nominated branch. It then resolves the trusted base with those exact direct revisions
+and compares the complete resulting manifest and selected toolchain with the PR. Candidate
+lakefiles, source, caches and inherited manifest entries are never inputs to resolution.
+The comparison does not require that the PR include the latest default branch. The ordinary
+build and review must pass before autonomous merging.
+
+If resolution fails, inspect its Lake log and review the existing requirements. If the build
+fails, source adaptation can proceed on the dependency PR while preserving the protected
+requirements. To pause automatic bumps, set `update = false` on every enabled upstream entry
+and merge that configuration change. This does not disable the guard. Lakefile edits still
+require a human and are rejected by the automatic guard; there is no approval-based bypass.
+Upstreams without reproducible dependency pins may need a new update PR if resolving their
+unpinned requirements later produces a different manifest.
 
 Keep forward-only dependency changes separate from source authoring. Protected lakefile
 changes remain human-owned. Configure the build policy rather than removing guards to

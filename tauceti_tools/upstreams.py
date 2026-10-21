@@ -1,11 +1,16 @@
-"""Inspect and prepare consistent dependency updates without changing lakefiles."""
+"""Prepare and verify forward dependency updates using Lake's own resolver."""
 
 from __future__ import annotations
 
 import base64
+import io
 import json
+import os
 import re
+import shutil
 import subprocess
+import tarfile
+import tempfile
 from pathlib import Path
 
 from .project import ConfigError
@@ -20,120 +25,154 @@ def file_at(repo, revision, name):
     return base64.b64decode(value["content"]).decode()
 
 
+def release(value):
+    match = re.fullmatch(r"leanprover/lean4:v(\d+)\.(\d+)\.(\d+)(?:-rc(\d+))?", value)
+    if not match:
+        raise ConfigError(f"{value!r} is not an official Lean release or release candidate; select one in lean-toolchain before enabling automatic dependency updates")
+    major, minor, patch, rc = match.groups()
+    return int(major), int(minor), int(patch), rc is None, int(rc or 0)
+
+
+def packages(manifest):
+    result = {row["name"]: row for row in manifest["packages"]}
+    if len(result) != len(manifest["packages"]):
+        raise ConfigError("Duplicate package names in lake-manifest.json; run lake update and review the manifest")
+    return result
+
+
+def repository(package):
+    url = str(package.get("url", "")).rstrip("/").removesuffix(".git")
+    match = re.fullmatch(r"https://github.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", url)
+    if package.get("type") != "git" or not match or not re.fullmatch(r"[0-9a-f]{40}", package.get("rev", "")):
+        raise ConfigError(f"{package['name']} needs a public GitHub Git dependency pinned to a full SHA for automatic updates; review the human-owned Lake requirements")
+    return match[1]
+
+
+def toolchain_for(checkout, direct):
+    choices = [(checkout / "lean-toolchain").read_text().strip()]
+    for row in direct:
+        choices.append(file_at(repository(row), row["rev"], "lean-toolchain").strip())
+    # Older dependencies can work with a newer Lean. The normal build decides compatibility.
+    return max(choices, key=release)
+
+
+def require_toml(checkout):
+    if not (checkout / "lakefile.toml").is_file() or (checkout / "lakefile.lean").exists():
+        raise ConfigError(
+            "Tau Ceti projects require lakefile.toml at the root, without lakefile.lean. "
+            "In your content checkout run lake translate-config toml, review the generated lakefile.toml "
+            "and retained lakefile.lean.bak, then run lake update and lake build and commit the conversion. "
+            "Upstream dependencies can still use lakefile.lean."
+        )
+
+
 def inspect(project, checkout: Path):
-    current = json.loads((checkout / "lake-manifest.json").read_text())
-    packages = {row["name"]: row for row in current["packages"]}
+    require_toml(checkout)
+    current = packages(json.loads((checkout / "lake-manifest.json").read_text()))
     proposed = []
-    shared = {}
-    sources = {}
-    toolchains = {}
     for upstream in project.raw.get("upstreams", []):
         if not upstream.get("update", False):
             continue
-        package = upstream["package"]
-        if package not in packages:
-            raise ConfigError(
-                f"{package} is not in the pinned manifest; add it to the human-owned Lake dependencies first"
-            )
-        repo = upstream["repo"]
-        branch = upstream.get("branch", "main")
-        old = packages[package]
-        if old.get("inherited", False):
-            raise ConfigError(
-                f"{package} is inherited, not a direct dependency. Set update = false in its [[upstreams]] table "
-                "and enable updates for its direct parent instead; keep the human-owned lakefile unchanged."
-            )
+        name, repo, branch = upstream["package"], upstream["repo"], upstream.get("branch", "main")
+        old = current.get(name)
+        if not old or old.get("inherited", False):
+            raise ConfigError(f"{name} is not a pinned direct dependency. Set update = false in its [[upstreams]] table and enable its direct parent instead; keep the human-owned lakefile unchanged")
+        if repository(old) != repo or old.get("inputRev") != branch:
+            raise ConfigError(f"{name}'s URL or nominated branch differs from [[upstreams]]; set repo and branch to the existing Lake requirement, or have a human review a lakefile change")
         commit = api(f"repos/{repo}/commits/{branch}")["sha"]
-        expected_url = f"https://github.com/{repo}"
-        if old.get("url", "").removesuffix(".git").rstrip("/") != expected_url:
-            raise ConfigError(
-                f"{package}'s existing URL does not match configured {repo}; repository changes require human review"
-            )
-        relation = api(f"repos/{repo}/compare/{old['rev']}...{commit}")["status"]
-        if relation not in ("ahead", "identical"):
-            raise ConfigError(f"{repo} is {relation}; refusing a backwards or divergent update")
-        toolchain = file_at(repo, commit, "lean-toolchain").strip()
-        toolchains.setdefault(toolchain, []).append(f"{repo}@{commit}")
-        manifest = json.loads(file_at(repo, commit, "lake-manifest.json"))
-        for row in manifest["packages"]:
-            binding = (row.get("type"), row.get("url"), row.get("rev"))
-            if row["name"] in shared and shared[row["name"]] != binding:
-                raise ConfigError(
-                    f"Automatic update blocked: {row['name']} differs. "
-                    f"{sources[row['name']]} requires {shared[row['name']][1]}@{shared[row['name']][2]}; "
-                    f"{repo}@{commit} requires {binding[1]}@{binding[2]}. "
-                    "No pins changed. Wait for compatible nominated branch heads and rerun upstreams inspect, "
-                    "or set update = false for all enabled [[upstreams]] entries to pause automatic updates. "
-                    "This exact-match policy does not establish that your existing Lake project is broken; "
-                    "a deliberate dependency override needs human integration and review."
-                )
-            shared[row["name"]] = binding
-            sources[row["name"]] = f"{repo}@{commit}"
-        # A direct dependency can also be inherited through another upstream.
-        binding = ("git", expected_url, commit)
-        if package in shared:
-            previous = shared[package]
-            if (previous[0], str(previous[1]).removesuffix(".git"), previous[2]) != binding:
-                raise ConfigError(
-                    f"{package}'s direct and inherited pins disagree; update its downstream upstream first"
-                )
-        shared[package] = binding
-        sources[package] = f"{repo}@{commit}"
-        proposed.append({"package": package, "repo": repo, "old": old["rev"], "new": commit})
-    if len(toolchains) > 1:
-        versions = "; ".join(f"{', '.join(repos)} requires {version}" for version, repos in toolchains.items())
-        raise ConfigError(
-            "Automatic update blocked: " + versions + ". No pins changed. Wait for upstream branch heads "
-            "with a common Lean toolchain and rerun upstreams inspect, or set update = false for all enabled "
-            "[[upstreams]] entries. A human must choose and build any deliberate integration."
-        )
-    return proposed, next(iter(toolchains), None)
+        if api(f"repos/{repo}/compare/{old['rev']}...{commit}")["status"] not in ("ahead", "identical"):
+            raise ConfigError(f"{repo} is backwards or divergent; no update prepared. Review its nominated branch before retrying")
+        proposed.append({"package": name, "repo": repo, "old": old["rev"], "new": commit})
+        current[name] = dict(old, rev=commit)
+    direct = [row for row in current.values() if not row.get("inherited", False)]
+    return proposed, toolchain_for(checkout, direct) if proposed else None
+
+
+def sandbox_command(directory, sysroot, driver):
+    bwrap = shutil.which("bwrap")
+    if not bwrap:
+        raise ConfigError("Lake resolution requires bubblewrap on Linux. On Ubuntu run sudo apt-get install bubblewrap; alternatively open the project's Actions page → Update configured upstreams → Run workflow")
+    command = [bwrap, "--tmpfs", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
+    for path in ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/nix", "/run/current-system/sw",
+                 "/etc/ssl", "/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf"):
+        if Path(path).exists():
+            command += ["--ro-bind", path, path]
+    certificate = os.environ.get("SSL_CERT_FILE") or os.environ.get("GIT_SSL_CAINFO") or "/etc/ssl/certs/ca-certificates.crt"
+    if certificate and Path(certificate).is_file():
+        command += ["--ro-bind", str(Path(certificate).resolve()), "/ca-certificates.crt",
+                    "--setenv", "SSL_CERT_FILE", "/ca-certificates.crt",
+                    "--setenv", "GIT_SSL_CAINFO", "/ca-certificates.crt"]
+    command += ["--ro-bind", str(sysroot), "/toolchain", "--ro-bind", str(driver), "/resolve.lean",
+                "--bind", str(directory), "/work", "--remount-ro", "/",
+                "--setenv", "PATH", "/toolchain/bin:/usr/bin:/bin:/run/current-system/sw/bin",
+                "--setenv", "HOME", "/tmp", "--setenv", "LEAN_SYSROOT", "/toolchain",
+                "--setenv", "LAKE_HOME", "/toolchain", "--setenv", "GIT_CONFIG_NOSYSTEM", "1",
+                "--setenv", "GIT_TERMINAL_PROMPT", "0", "--setenv", "LAKE_NO_CACHE", "true",
+                "--chdir", "/work", "--unshare-user", "--unshare-ipc", "--unshare-pid",
+                "--unshare-uts", "--unshare-cgroup", "--disable-userns", "--die-with-parent", "--new-session",
+                "--", "/toolchain/bin/lean", "--load-dynlib=/toolchain/lib/lean/libLake_shared.so", "--run", "/resolve.lean"]
+    return command
+
+
+def resolve(checkout, direct, toolchain):
+    """Resolve trusted committed source plus authorized direct pins; no PR files or secrets."""
+    release(toolchain)
+    require_toml(checkout)
+    if not shutil.which("elan"):
+        raise ConfigError("Lake resolution needs elan. Install it using https://lean-lang.org/install/manual/ or run Actions → Update configured upstreams → Run workflow on GitHub")
+    subprocess.run(["elan", "toolchain", "install", toolchain], check=True)
+    compiler = Path(subprocess.check_output(["elan", "which", "lean"], env={**os.environ, "ELAN_TOOLCHAIN": toolchain}, text=True).strip())
+    sysroot = compiler.resolve().parent.parent
+    driver = Path(__file__).parent / "assets/scripts/ResolveDependencies.lean"
+    archive = subprocess.check_output(["git", "-C", str(checkout), "archive", "HEAD"])
+    with tempfile.TemporaryDirectory(prefix="tauceti-resolve-") as tmp:
+        directory = Path(tmp)
+        with tarfile.open(fileobj=io.BytesIO(archive)) as source:
+            source.extractall(directory, filter="data")
+        for name in (".lake", ".git"):
+            path = directory / name
+            if path.is_symlink() or path.is_file():
+                path.unlink()
+            elif path.exists():
+                shutil.rmtree(path)
+        require_toml(directory)
+        manifest = json.loads((checkout / "lake-manifest.json").read_text())
+        manifest["packages"] = direct
+        (directory / "lake-manifest.json").write_text(json.dumps(manifest))
+        (directory / "lean-toolchain").write_text(toolchain + "\n")
+        try:
+            # Empty launcher environment also hides secrets from bwrap's PID 1.
+            subprocess.run(sandbox_command(directory, sysroot, driver), env={}, check=True, timeout=1200)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            raise ConfigError("Lake resolution failed; no project pins changed. Read the Lake error above, check the direct requirements with your Lean maintainer, then rerun upstreams update --apply. Resolution uses committed base files and does not run post-update hooks") from error
+        return json.loads((directory / "lake-manifest.json").read_text())
 
 
 def update(project, checkout, *, apply=False):
     proposed, toolchain = inspect(project, checkout)
     print(json.dumps({"dependencies": proposed, "toolchain": toolchain}, indent=2))
     if not apply or not proposed:
-        print("No pins changed. Add --apply to prepare the update in this checkout.")
+        print("No pins changed. Add --apply to resolve the update with Lake in isolation.")
         return
+    if subprocess.run(["git", "-C", str(checkout), "diff", "--quiet", "HEAD", "--", "lakefile.toml", "lakefile.lean", "lake-manifest.json", "lean-toolchain"]).returncode:
+        raise ConfigError("Commit or restore the Lake configuration, manifest and toolchain before preparing an update; resolution uses committed base source")
+    before = json.loads((checkout / "lake-manifest.json").read_text())
+    targets = {row["package"]: row["new"] for row in proposed}
+    direct = [dict(row, rev=targets.get(row["name"], row["rev"])) for row in before["packages"] if not row.get("inherited", False)]
+    resolved = resolve(checkout, direct, toolchain)
     old_manifest = (checkout / "lake-manifest.json").read_bytes()
     old_toolchain = (checkout / "lean-toolchain").read_bytes()
     try:
-        base = json.loads(old_manifest)
-        targets = {row["package"]: row["new"] for row in proposed}
-        direct = [
-            dict(row, rev=targets.get(row["name"], row.get("rev")))
-            for row in base["packages"]
-            if not row.get("inherited", False)
-        ]
-        resolved = {}
-        for row in direct:
-            repo = row["url"].removeprefix("https://github.com/").removesuffix(".git")
-            inherited_manifest = json.loads(file_at(repo, row["rev"], "lake-manifest.json"))
-            for inherited in inherited_manifest["packages"]:
-                value = dict(inherited, inherited=True)
-                if inherited["name"] in resolved and resolved[inherited["name"]] != value:
-                    raise ConfigError(f"Exact upstream manifests disagree on {inherited['name']}")
-                resolved[inherited["name"]] = value
-        for row in direct:
-            inherited = resolved.get(row["name"])
-            if inherited and any(inherited.get(k) != row.get(k) for k in ("url", "rev", "type")):
-                raise ConfigError(f"Direct and inherited pins disagree on {row['name']}")
-            resolved[row["name"]] = row
-        base["packages"] = sorted(resolved.values(), key=lambda row: row["name"])
-        (checkout / "lake-manifest.json").write_text(json.dumps(base, indent=2) + "\n")
+        (checkout / "lake-manifest.json").write_text(json.dumps(resolved, indent=2) + "\n")
         (checkout / "lean-toolchain").write_text(toolchain + "\n")
     except BaseException:
         (checkout / "lake-manifest.json").write_bytes(old_manifest)
         (checkout / "lean-toolchain").write_bytes(old_toolchain)
         raise
-    print(
-        "Updated only the dependency pins/toolchain. Review the diff and open a dependency PR against the default branch; source adaptation is a separate worker phase."
-    )
+    print("Lake resolved the dependency pins. Open a dependency PR; the required build and reviews decide whether it can merge. Source adaptation remains separate.")
 
 
 def guard(project, base: Path, merge_base: Path, candidate: Path):
-    """Derive candidate pins from exact trusted upstream manifests; execute no candidate code."""
     paths = ("lakefile.toml", "lakefile.lean", "lean-toolchain", "lake-manifest.json")
 
     def contents(root, name):
@@ -142,31 +181,24 @@ def guard(project, base: Path, merge_base: Path, candidate: Path):
     if all(contents(merge_base, name) == contents(candidate, name) for name in paths):
         print("BUMP-GUARD: PASS — no pin or Lake configuration change")
         return
+    require_toml(base)
+    require_toml(candidate)
     for name in paths[:2]:
         if contents(base, name) != contents(candidate, name):
             raise ConfigError(f"{name} changes are human-owned")
     before = json.loads(contents(base, "lake-manifest.json"))
     after = json.loads(contents(candidate, "lake-manifest.json"))
-    if {k: v for k, v in before.items() if k != "packages"} != {k: v for k, v in after.items() if k != "packages"}:
-        raise ConfigError("Root manifest metadata changed")
-    actual = {row["name"]: row for row in after["packages"]}
-    if len(actual) != len(after["packages"]):
-        raise ConfigError("Duplicate package names")
+    actual = packages(after)
     allowed = {u["package"]: u for u in project.raw.get("upstreams", []) if u.get("update")}
-    direct = [row for row in before["packages"] if not row.get("inherited", False)]
-    expected = {}
-    toolchains = set()
-    for package in direct:
-        name = package["name"]
+    direct = []
+    for package in packages(before).values():
+        if package.get("inherited", False):
+            continue
+        name, repo = package["name"], repository(package)
         target = actual.get(name)
-        if not target:
-            raise ConfigError(f"Direct dependency {name} removed")
-        if {k: v for k, v in package.items() if k != "rev"} != {k: v for k, v in target.items() if k != "rev"}:
-            raise ConfigError(f"Direct dependency {name} configuration changed")
-        repo = str(package.get("url", "")).removeprefix("https://github.com/").removesuffix(".git").rstrip("/")
-        revision = target.get("rev", "")
-        if not re.fullmatch(r"[0-9a-f]{40}", revision):
-            raise ConfigError(f"{name} needs an immutable revision")
+        if not target or target.get("inherited", False) or not re.fullmatch(r"[0-9a-f]{40}", target.get("rev", "")):
+            raise ConfigError(f"Direct dependency {name} removed or not pinned to an immutable Git revision")
+        revision = target["rev"]
         if package["rev"] != revision:
             policy = allowed.get(name)
             if not policy or policy["repo"] != repo:
@@ -178,33 +210,10 @@ def guard(project, base: Path, merge_base: Path, candidate: Path):
                 raise ConfigError(f"{name} nominated branch differs from protected policy")
             if api(f"repos/{repo}/compare/{revision}...{branch}")["status"] not in ("ahead", "identical"):
                 raise ConfigError(f"{name} target is outside its nominated branch")
-        upstream = json.loads(file_at(repo, revision, "lake-manifest.json"))
-        toolchains.add(file_at(repo, revision, "lean-toolchain").strip())
-        for row in upstream["packages"]:
-            inherited = dict(row, inherited=True)
-            previous = expected.get(row["name"])
-            if previous and previous != inherited:
-                raise ConfigError(f"Upstream manifests disagree on {row['name']}")
-            expected[row["name"]] = inherited
-    for package in direct:
-        target = actual[package["name"]]
-        inherited = expected.get(package["name"])
-        if inherited and any(inherited.get(k) != target.get(k) for k in ("url", "rev", "type")):
-            raise ConfigError(f"Direct and inherited pins disagree on {package['name']}")
-        expected[package["name"]] = target
-    if expected != actual:
-        raise ConfigError("Candidate manifest is not derived from the exact configured upstreams")
-    candidate_toolchain = contents(candidate, "lean-toolchain").decode().strip()
-    if len(toolchains) != 1 or candidate_toolchain not in toolchains:
-        raise ConfigError("Toolchain differs from the agreed upstream toolchain")
-
-    def version(value):
-        match = re.fullmatch(r"leanprover/lean4:v(\d+)\.(\d+)\.(\d+)", value)
-        return tuple(map(int, match.groups())) if match else None
-
-    previous = contents(base, "lean-toolchain").decode().strip()
-    if previous != candidate_toolchain and (
-        not version(previous) or not version(candidate_toolchain) or version(candidate_toolchain) < version(previous)
-    ):
-        raise ConfigError("Toolchain movement needs human review; only forward stable releases are automatic")
-    print("BUMP-GUARD: PASS — consistent forward dependency pins")
+        direct.append(dict(package, rev=revision))
+    toolchain = toolchain_for(base, direct)
+    if contents(candidate, "lean-toolchain").decode().strip() != toolchain:
+        raise ConfigError(f"Expected {toolchain}, chosen from the base and pinned direct dependencies; candidate toolchain differs")
+    if resolve(base, direct, toolchain) != after:
+        raise ConfigError("Candidate manifest differs from Lake's resolution of the trusted base and authorized direct pins")
+    print("BUMP-GUARD: PASS — forward dependency pins resolved by Lake")

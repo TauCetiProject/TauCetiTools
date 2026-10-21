@@ -79,8 +79,8 @@ for f in lakefile.toml lakefile.lean; do
   fi
 done
 
-# Multi-upstream projects use the same protected configuration and a pure
-# manifest derivation. Keep Tau Ceti's existing Mathlib-only path unchanged.
+# Multi-upstream projects authorize direct revisions, then use Lake's resolver
+# on a disposable trusted-base snapshot in a credential-free sandbox. Keep Tau Ceti's existing Mathlib-only path unchanged.
 if [ -n "${TAUCETI_CONF_SNAPSHOT:-}" ] && [ "${TAUCETI_REPO:-TauCetiProject/TauCeti}" != "TauCetiProject/TauCeti" ]; then
   exec python3 -m tauceti_tools upstreams guard --conf "$TAUCETI_CONF_SNAPSHOT" \
     --base "$BASE" --merge-base "$MERGE_BASE" --checkout "$PR"

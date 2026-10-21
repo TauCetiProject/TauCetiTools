@@ -605,9 +605,9 @@ def package_findings(project, gh, repo_info, again):
                 missing.append(path)
         _, toml_error = gh.read(f"repos/{repo}/contents/lakefile.toml?ref={branch}")
         if toml_error:
-            _, lean_error = gh.read(f"repos/{repo}/contents/lakefile.lean?ref={branch}")
-            if lean_error:
-                missing.append("lakefile.toml or lakefile.lean")
+            missing.append("lakefile.toml")
+        _, lean_error = gh.read(f"repos/{repo}/contents/lakefile.lean?ref={branch}")
+        lean_format = not lean_error
         root = project.roots[0] if role == "content" else project.roadmap_dir
         if role == "content":
             lakefile = (f'name = "{root}"\ndefaultTargets = ["{root}"]\nplatformIndependent = true\n'
@@ -617,7 +617,7 @@ def package_findings(project, gh, repo_info, again):
                         '[[lean_exe]]\nname = "axioms"\nroot = "scripts.Axioms"\n'
                         '[[lean_exe]]\nname = "module-system"\nroot = "scripts.ModuleSystem"')
             setup = [
-                f"In a local checkout of {repo}, keep the existing Lean package if it has one. Commit and publish lean-toolchain, lakefile.toml (or lakefile.lean), and lake-manifest.json. API inaccessibility does not establish that files are absent.",
+                f"In a local checkout of {repo}, keep the existing Lean package if it has one. Commit and publish lean-toolchain, lakefile.toml, and lake-manifest.json. API inaccessibility does not establish that files are absent.",
                 f"Set lean.roots in {project.source} to the package's actual Lean module root ({root} is currently selected). In the checkout run lake update and lake build; commit the resolved lake-manifest.json with the reviewed package configuration.",
                 "Only if starting a new Mathlib-based package, obtain its matching toolchain:\n$ gh api repos/leanprover-community/mathlib4/contents/lean-toolchain?ref=master --jq '.content | @base64d' > lean-toolchain\n$ elan toolchain install \"$(cat lean-toolchain)\"\nFor a different direct dependency use that dependency's selected toolchain; keep its existing package dependencies.",
                 f"For that new package, write lakefile.toml with:\n{lakefile}\nThe axioms and module-system sources arrive with the project workflow setup; install that setup before building these executables.",
@@ -634,9 +634,11 @@ def package_findings(project, gh, repo_info, again):
                 f"For a new package create the empty root modules and source directories:\n$ mkdir -p {shlex.quote(root)} {shlex.quote(project.completed_dir)}\n$ touch {shlex.quote(root + '.lean')} {shlex.quote(project.completed_dir + '.lean')}\n$ lake update\n$ lake build\nCommit the Lake files and root modules through a human-reviewed PR. Add human-written target statements under the configured roadmap directory; they may contain sorry.",
             ]
         findings.append(Finding(
-            "lean." + role, "unknown" if missing else "ready",
-            "Cannot read package files: " + ", ".join(missing) if missing else f"Lean package files are published in {repo}",
-            "Published Lean toolchain, Lake package and resolved dependencies", steps=setup,
+            "lean." + role, "failed" if lean_format else "unknown" if missing else "ready",
+            "Project root uses lakefile.lean; lakefile.toml is required" if lean_format else "Cannot read package files: " + ", ".join(missing) if missing else f"Lean package files are published in {repo}",
+            "Published Lean toolchain, TOML Lake package and resolved dependencies", steps=([
+                "In the repository checkout, if lakefile.toml is absent run:\n$ lake translate-config toml\nThis writes lakefile.toml and renames the original to lakefile.lean.bak. Review both files, run lake update and lake build, then commit the conversion through human review. If both formats already exist, compare them and retain the reviewed TOML configuration; move the Lean file to an unused backup name so it is no longer active. Only the project root requires TOML: upstream dependencies, including Mathlib, can keep Lean lakefiles.",
+            ] if lean_format else setup),
             urls=[f"https://github.com/{repo}"], verify=again, section="lean-and-upstream-dependencies" if role == "content" else "roadmap-lean-package"))
     if repo_info.get("roadmap"):
         repo = project.repos["roadmap"]
@@ -664,7 +666,7 @@ def dependency_findings(project, gh, again):
     policy = project.raw.get("upstreams", [])
     if not any(u.get("update") for u in policy):
         return []
-    problems, mismatches = [], []
+    problems = []
     status = "ready"
     try:
         manifest = json.loads(read(project.content, project.branch, "lake-manifest.json"))
@@ -680,38 +682,25 @@ def dependency_findings(project, gh, again):
                 problems.append(f"{upstream['package']}'s published URL differs from configured {upstream['repo']}.")
             elif package.get("inputRev") != upstream.get("branch", "main"):
                 problems.append(f"{upstream['package']} has inputRev = {package.get('inputRev')!r}, but its configured update branch is {upstream.get('branch', 'main')!r}. Set branch in its [[upstreams]] table to that nominated inputRev; selecting a different Lake requirement is a human-owned change.")
-        for package in packages.values():
-            if package.get("inherited", False):
-                continue
-            url = package.get("url", "").rstrip("/").removesuffix(".git")
-            if package.get("type") != "git" or not url.startswith("https://github.com/"):
-                mismatches.append(f"Cannot inspect {package['name']}: automatic updates require a GitHub Git dependency.")
-                continue
-            repo, revision = url.removeprefix("https://github.com/"), package["rev"]
-            upstream_toolchain = read(repo, revision, "lean-toolchain")
-            if upstream_toolchain != toolchain:
-                mismatches.append(f"{repo}@{revision} declares {upstream_toolchain}; this project uses {toolchain}.")
-            upstream_manifest = json.loads(read(repo, revision, "lake-manifest.json"))
-            for inherited in upstream_manifest["packages"]:
-                actual = packages.get(inherited["name"], {})
-                if any(actual.get(k) != inherited.get(k) for k in ("type", "url", "rev")):
-                    mismatches.append(f"{repo}@{revision} pins {inherited['name']} to {inherited.get('url')}@{inherited.get('rev')}; the project pins {actual.get('url', 'no repository')}@{actual.get('rev', 'no revision')}.")
-        status = "failed" if problems else "pending" if mismatches else "ready"
+        from .upstreams import release
+
+        release(toolchain)
+        status = "failed" if problems else "ready"
     except (ValueError, KeyError, TypeError, UnicodeError) as error:
         status = "failed" if problems else "unknown"
-        mismatches.append(str(error))
+        problems.append(str(error))
     return [Finding(
         "dependencies.updates", status,
-        "\n".join(problems + mismatches) or "Published dependency pins match the conservative automatic-update policy; this does not check newer branch heads or prove a build.",
+        "\n".join(problems) or "Direct dependency update policy is configured. Lake resolves shared pins; the required build decides compatibility. This check does not resolve newer branch heads or prove a build.",
         "Explicit direct-dependency update policy", role="Human Lean maintainer",
         commands=[_cmd("gh", "repo", "clone", project.content),
                   _cmd("tauceti-tools", "upstreams", "inspect", "--conf", project.source,
                        "--checkout", project.content.split("/")[1])],
         steps=[
-            "Use an existing clean content checkout, or clone it with the command below. Compare lakefile.toml (or lakefile.lean), lake-manifest.json and [[upstreams]] in tauceti.toml. Keep the project's existing Lake dependencies; the Mathlib-only starter is not a replacement for a CSLib project.",
+            "Use an existing clean content checkout, or clone it with the command below. Compare lakefile.toml, lake-manifest.json and [[upstreams]] in tauceti.toml. Keep the project's existing Lake dependencies; the Mathlib-only starter is not a replacement for a CSLib project.",
             "For each inherited or absent package reported above, set update = false in its existing [[upstreams]] table. Keep overlap and upstream_destination as desired. To update a direct dependency, add its own table with repo = \"OWNER/REPOSITORY\", package = \"LAKE_PACKAGE_NAME\", branch = \"NOMINATED_BRANCH\", update = true, using the exact URL, package name and inputRev in the manifest. Do not make transitive Mathlib an independent update target.",
-            "Different upstream Mathlib pins do not prove that the current project is broken. Lake can give a direct requirement priority over an inherited one. The automatic updater and bump guard conservatively require exact agreement across upstream manifests; they do not resolve or test overrides. A pending result here means the automatic policy needs attention, not that the current build failed.",
-            "Run the inspect command to check the proposed branch heads without changing files. For a conflict, wait for compatible upstream revisions and rerun it. To pause automatic updates meanwhile, set update = false for every enabled [[upstreams]] entry and merge that configuration change. For a new project, establish and build its combined dependencies before installing the guard. An installed guard rejects deliberate override PRs before CI builds them; this release has no approval-based override path. Pausing updates does not disable that guard.",
+            "Different upstream Mathlib pins do not prove incompatibility. The updater and bump guard use Lake to resolve the project with its direct dependencies pinned to authorized commits. Existing direct overrides are respected; the required build and reviews decide whether the combination works. Lakefiles remain human-owned.",
+            "Run the inspect command to preview the proposed direct pins without executing Lake or changing files. To prepare the resolved manifest, run the same command with update instead of inspect and add --apply, from a clean committed content checkout on Linux with elan and bubblewrap installed. Alternatively open the content repository → Actions → Update configured upstreams → Run workflow. If resolution or the build fails, read its log and adapt the source in the dependency PR while preserving the Lake requirements. To pause bumps, set update = false for every enabled [[upstreams]] entry and merge that configuration change. An installed guard still rejects lakefile edits; there is no approval-based path for changing the dependency policy itself.",
         ], verify=again, section="lean-and-upstream-dependencies")]
 
 
