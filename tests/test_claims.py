@@ -38,3 +38,8 @@ class GitLeaseTest(unittest.TestCase):
                 expired.release()
                 assert second.acquire() == 1
                 first.release()
+
+                hook = remote / "hooks/pre-receive"
+                hook.write_text("#!/bin/sh\necho 'permission denied' >&2\nexit 1\n")
+                hook.chmod(0o700)
+                assert first.acquire() == 2, "a policy/auth push rejection is unavailable, not contention"
