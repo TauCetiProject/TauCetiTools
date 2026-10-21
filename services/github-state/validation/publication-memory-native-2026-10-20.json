@@ -3,111 +3,136 @@
   "scope": "SQLite publication-fixture process memory and separate native recent_prs collection/job status observations",
   "issue": "TauCetiProject/TauCetiWorker#316",
   "historical_ci_fixture": {
-    "at": "2026-10-20T19:53:07.765Z",
-    "fixture": {
-      "staged_pages": 111,
-      "decoded_rows": 11100,
-      "published_rows": 11015,
-      "dependent_jobs": 44060,
-      "body_characters": 3900,
-      "r2_fixture": "disk backed; no in-process retained archive text"
+    "reported": {
+      "at": "2026-10-20T19:53:07.765Z",
+      "fixture": {
+        "staged_pages": 111,
+        "decoded_rows": 11100,
+        "published_rows": 11015,
+        "dependent_jobs": 44060,
+        "body_characters": 3900,
+        "r2_fixture": "disk backed; no in-process retained archive text"
+      },
+      "node_old_space_limit_mib": 96,
+      "samples": [
+        {
+          "stage": "publication_rows",
+          "heap_used": 78255336
+        },
+        {
+          "stage": "publication_repairs",
+          "heap_used": 140267192
+        },
+        {
+          "stage": "publication_applied",
+          "heap_used": 70467792
+        }
+      ],
+      "github_calls": 0,
+      "complete": true
     },
-    "node_old_space_limit_mib": 96,
-    "samples": [
-      {
-        "stage": "publication_rows",
-        "heap_used": 78255336
-      },
-      {
-        "stage": "publication_repairs",
-        "heap_used": 140267192
-      },
-      {
-        "stage": "publication_applied",
-        "heap_used": 70467792
-      }
-    ],
-    "github_calls": 0,
-    "complete": true,
-    "code_commit": "2af88e1de3427c2d4d133e136c780fc50041b8a8",
-    "command": "npm run test:publication-memory",
-    "ci_run": "https://github.com/TauCetiProject/TauCetiTools/actions/runs/39487156998",
-    "forced_gc": false,
-    "max_sampled_node_heap_used_bytes": 140267192,
-    "measurement_scope": "Historical CI report with three process heapUsed samples and no baseline, RSS or runtime metadata; the old-space flag does not cap total process heap or RSS",
-    "backend": "sqlite (node:sqlite in-memory)"
+    "annotations": {
+      "code_commit": "2af88e1de3427c2d4d133e136c780fc50041b8a8",
+      "ci_run": "https://github.com/TauCetiProject/TauCetiTools/actions/runs/39487156998",
+      "command": "npm run test:publication-memory",
+      "backend": "sqlite (node:sqlite in-memory)",
+      "forced_gc": false,
+      "declared_fields": [
+        "fixture.staged_pages",
+        "fixture.decoded_rows",
+        "fixture.published_rows",
+        "fixture.dependent_jobs",
+        "fixture.body_characters",
+        "fixture.r2_fixture",
+        "node_old_space_limit_mib"
+      ],
+      "asserted_fields": [
+        "fixture.published_rows",
+        "fixture.dependent_jobs",
+        "github_calls"
+      ],
+      "staged_pages_semantics": "110 archived pages plus the final page supplied directly to refresh; declared input dimensions in the historical producer",
+      "reported_json_sha256": "8d7a237cb0659ee6442f1a7d0cd162897549a089401ac97bebbd175b8e81d0e7",
+      "max_sampled_node_heap_used_bytes": 140267192,
+      "measurement_scope": "Historical process heapUsed samples; baseline, RSS and runtime metadata were not recorded. Node process samples do not measure Worker-isolate usage."
+    }
   },
-  "instrumented_local_fixture": {
-    "at": "2026-10-21T00:32:37.677Z",
-    "backend": "sqlite (node:sqlite in-memory)",
-    "code_commit": "b74022a7c8b7935ac2d71da708c1b91004654dc8",
-    "code_commit_source": "git_head",
-    "working_tree_dirty": false,
-    "node_version": "v24.20.0",
-    "v8_version": "13.6.233.17-node.53",
-    "fixture": {
-      "input_pages": 111,
-      "archived_pages": 110,
-      "input_rows": 11100,
-      "published_rows": 11015,
-      "dependent_jobs": 44060,
-      "body_characters": 3900,
-      "r2_fixture": "disk backed; no in-process retained archive text"
-    },
-    "node_old_space_limit_mib": 96,
-    "forced_gc": false,
-    "samples": [
-      {
-        "stage": "before_refresh",
-        "heap_used": 40652512,
-        "rss": 169627648,
-        "external": 37238485,
-        "array_buffers": 10552222,
-        "total_heap_size": 75354112,
-        "heap_size_limit": 301989888
+  "instrumented_local_fixtures": [
+    {
+      "reported": {
+        "at": "2026-10-21T00:32:37.677Z",
+        "backend": "sqlite (node:sqlite in-memory)",
+        "code_commit": "b74022a7c8b7935ac2d71da708c1b91004654dc8",
+        "code_commit_source": "git_head",
+        "working_tree_dirty": false,
+        "node_version": "v24.20.0",
+        "v8_version": "13.6.233.17-node.53",
+        "fixture": {
+          "input_pages": 111,
+          "archived_pages": 110,
+          "input_rows": 11100,
+          "published_rows": 11015,
+          "dependent_jobs": 44060,
+          "body_characters": 3900,
+          "r2_fixture": "disk backed; no in-process retained archive text"
+        },
+        "node_old_space_limit_mib": 96,
+        "forced_gc": false,
+        "samples": [
+          {
+            "stage": "before_refresh",
+            "heap_used": 40652512,
+            "rss": 169627648,
+            "external": 37238485,
+            "array_buffers": 10552222,
+            "total_heap_size": 75354112,
+            "heap_size_limit": 301989888
+          },
+          {
+            "stage": "publication_rows",
+            "rows": 11100,
+            "heap_used": 78197712,
+            "rss": 224571392,
+            "external": 27657014,
+            "array_buffers": 975317,
+            "total_heap_size": 210780160,
+            "heap_size_limit": 301989888
+          },
+          {
+            "stage": "publication_repairs",
+            "repairs": 44060,
+            "heap_used": 138622848,
+            "rss": 529444864,
+            "external": 33911343,
+            "array_buffers": 975317,
+            "total_heap_size": 214282240,
+            "heap_size_limit": 301989888
+          },
+          {
+            "stage": "publication_applied",
+            "heap_used": 68834520,
+            "rss": 531132416,
+            "external": 27657014,
+            "array_buffers": 975317,
+            "total_heap_size": 173629440,
+            "heap_size_limit": 301989888
+          }
+        ],
+        "github_calls": 0,
+        "complete": true
       },
-      {
-        "stage": "publication_rows",
-        "rows": 11100,
-        "heap_used": 78197712,
-        "rss": 224571392,
-        "external": 27657014,
-        "array_buffers": 975317,
-        "total_heap_size": 210780160,
-        "heap_size_limit": 301989888
-      },
-      {
-        "stage": "publication_repairs",
-        "repairs": 44060,
-        "heap_used": 138622848,
-        "rss": 529444864,
-        "external": 33911343,
-        "array_buffers": 975317,
-        "total_heap_size": 214282240,
-        "heap_size_limit": 301989888
-      },
-      {
-        "stage": "publication_applied",
-        "heap_used": 68834520,
-        "rss": 531132416,
-        "external": 27657014,
-        "array_buffers": 975317,
-        "total_heap_size": 173629440,
-        "heap_size_limit": 301989888
+      "annotations": {
+        "command": "npm run test:publication-memory",
+        "max_sampled_node_heap_used_bytes": 138622848,
+        "working_tree_check": "This producer version checked tracked changes only",
+        "measurement_scope": "Process memory includes the in-memory SQLite database and startup allocations; samples are not a live-set, continuous peak, PostgreSQL cache-group or Worker-isolate measurement"
       }
-    ],
-    "github_calls": 0,
-    "complete": true,
-    "command": "npm run test:publication-memory",
-    "max_sampled_node_heap_used_bytes": 138622848,
-    "measurement_scope": "SQLite process-memory samples, including startup allocations; no forced collection, publication live-set measurement, PostgreSQL cache-group exercise, or Worker-isolate measurement"
-  },
+    }
+  ],
   "native": {
     "environment": "test",
     "repository": "1256881326",
     "backend": "sqlite",
-    "code_commit": "89dc427f0b920d67933e05b1f3f5fd430a054f6c",
-    "deployment": "19a2d235-1d45-4d3b-8737-0ed43dafb241",
     "measurement_scope": "Recorded native collection/job status only; neither inventory size, a full publication, nor isolate memory usage was measured",
     "observations": [
       {
@@ -121,7 +146,9 @@
         "publication_path": "not captured; full publication and unchanged-response verification are both possible",
         "normal_existing_reconciler": null,
         "operator_forced_due_or_attempt_reset": null,
-        "provenance": "recorded operator observation; null means not recorded"
+        "provenance": "recorded operator observation; null means not recorded",
+        "code_commit": "89dc427f0b920d67933e05b1f3f5fd430a054f6c",
+        "deployment": "19a2d235-1d45-4d3b-8737-0ed43dafb241"
       },
       {
         "observed_at": "2026-10-20T17:38:07.346Z",
@@ -134,19 +161,64 @@
         "publication_path": "not captured; full publication and unchanged-response verification are both possible",
         "normal_existing_reconciler": true,
         "operator_forced_due_or_attempt_reset": false,
-        "provenance": "recorded operator observation; null means not recorded"
+        "provenance": "recorded operator observation; null means not recorded",
+        "code_commit": "89dc427f0b920d67933e05b1f3f5fd430a054f6c",
+        "deployment": "19a2d235-1d45-4d3b-8737-0ed43dafb241"
       }
     ]
   },
-  "publication_implementation_comparison": {
-    "from_commit": "89dc427f0b920d67933e05b1f3f5fd430a054f6c",
-    "to_commit": "2af88e1de3427c2d4d133e136c780fc50041b8a8",
-    "unchanged_paths": [
-      "services/github-state/src/repository.ts",
-      "services/github-state/src/repository_store.ts"
-    ],
-    "basis": "git diff between the two recorded commits",
-    "to_instrumented_local_fixture_commit": "b74022a7c8b7935ac2d71da708c1b91004654dc8"
-  },
+  "selected_source_file_comparisons": [
+    {
+      "from_commit": "89dc427f0b920d67933e05b1f3f5fd430a054f6c",
+      "to_commit": "2af88e1de3427c2d4d133e136c780fc50041b8a8",
+      "selected_paths": [
+        "services/github-state/src/repository.ts",
+        "services/github-state/src/repository_store.ts"
+      ],
+      "changed_selected_paths": [],
+      "all_changed_paths": [
+        "docs/github-state-migration.md",
+        "services/github-state/scripts/benchmark-migration-bytes.mjs",
+        "services/github-state/scripts/migrate.py",
+        "services/github-state/src/migration.ts",
+        "services/github-state/src/migration_target.ts",
+        "services/github-state/tests/migration.test.mjs",
+        "services/github-state/tests/migration_fixture.mjs",
+        "services/github-state/tests/migration_postgres.test.mjs",
+        "services/github-state/tests/worker_postgres.mjs",
+        "services/github-state/tests/worker_postgres.test.mjs",
+        "services/github-state/validation/migration-byte-sizing-2026-10-20.json",
+        "tests/test_migration.py"
+      ],
+      "basis": "git diff --name-only between the recorded commits; selected paths do not represent all publication dependencies"
+    },
+    {
+      "from_commit": "89dc427f0b920d67933e05b1f3f5fd430a054f6c",
+      "to_commit": "b74022a7c8b7935ac2d71da708c1b91004654dc8",
+      "selected_paths": [
+        "services/github-state/src/repository.ts",
+        "services/github-state/src/repository_store.ts"
+      ],
+      "changed_selected_paths": [],
+      "all_changed_paths": [
+        "docs/github-state-migration.md",
+        "services/github-state/README.md",
+        "services/github-state/scripts/benchmark-migration-bytes.mjs",
+        "services/github-state/scripts/migrate.py",
+        "services/github-state/src/migration.ts",
+        "services/github-state/src/migration_target.ts",
+        "services/github-state/tests/migration.test.mjs",
+        "services/github-state/tests/migration_fixture.mjs",
+        "services/github-state/tests/migration_postgres.test.mjs",
+        "services/github-state/tests/publication_memory.mjs",
+        "services/github-state/tests/worker_postgres.mjs",
+        "services/github-state/tests/worker_postgres.test.mjs",
+        "services/github-state/validation/migration-byte-sizing-2026-10-20.json",
+        "services/github-state/validation/publication-memory-native-2026-10-20.json",
+        "tests/test_migration.py"
+      ],
+      "basis": "git diff --name-only between the recorded commits; selected paths do not represent all publication dependencies"
+    }
+  ],
   "migration_release": false
 }
