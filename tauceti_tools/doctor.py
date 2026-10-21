@@ -436,7 +436,6 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
             settings = (f"https://github.com/organizations/{owner}/settings/apps/new"
                         if repo_info["content"]["owner"]["type"] == "Organization"
                         else "https://github.com/settings/apps/new")
-            registration = settings
             permissions = ", ".join(
                 {"statuses": "Commit statuses", "actions_variables": "Variables"}.get(
                     name, name.replace("_", " ").title()
@@ -454,7 +453,7 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
                     commands=[f"{_cmd('gh', 'secret', 'set', name, '--repo', repo)} < {shlex.quote(str(secret_file))}"],
                     urls=[
                         f"https://github.com/{repo}/settings/secrets/actions",
-                        registration,
+                        settings,
                     ],
                     steps=[
                         f"For App credentials, open the registration URL. Name: {manifest['name']}; Homepage: {manifest['url']}; Webhook Active: unchecked; installation: Any account. Repository permissions: {permissions}. Click Create GitHub App. For provider/bot credentials use the source named in the inventory.",
@@ -561,6 +560,8 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
 
 
 def extra_findings(project, gh, again):
+    from .github_state_setup import client_token_file, public_configuration
+
     results = []
     owner = project.content.split("/")[0]
     for name in ("github_state", "bors", "cache"):
@@ -597,16 +598,6 @@ def extra_findings(project, gh, again):
         )
         if mode == "hosted":
             title = f"Infrastructure request: {project.content} ({name})"
-            url = "https://github.com/TauCetiProject/TauCetiTools/issues/new?" + __import__(
-                "urllib.parse", fromlist=["urlencode"]
-            ).urlencode(
-                {
-                    "title": title,
-                    "body": f"Repository: {project.content}\nService: {name}\nConfiguration: {project.source}\nRequested operator: {owner}\n"
-                    + ("App installation ID: PASTE_INSTALLATION_NUMBER\nClient grant JSON (hash and repository scope only): PASTE_GENERATED_GRANT\n" if name == "github_state" else "")
-                    + "Please approve this repository. No raw credentials are included.",
-                }
-            )
             results.append(
                 Finding(
                     f"services.{name}.enrollment",
@@ -614,9 +605,9 @@ def extra_findings(project, gh, again):
                     "Hosted access needs operator approval",
                     "An explicit operator grant for this repository",
                     role="Tau Ceti infrastructure operator",
-                    urls=[url],
+                    urls=["https://github.com/TauCetiProject/TauCetiTools/issues/new"],
                     steps=[
-                        "Open the prefilled infrastructure request, confirm the repository and configuration URL, and submit it.",
+                        f"Open the issue form. Title: {title}. Body: Repository: {project.content}; Service: {name}; Configuration: {public_configuration(project)}; Requested operator: {owner}. Click Submit new issue. Include no credentials.",
                         *(["For Bors, hosted means a separate Neon project only. Operate the Bors runtime in your own account."] if name == "bors" else []),
                         "The operator records approval and supplies scoped credentials privately; do not put credentials in the issue.",
                     ],
@@ -626,6 +617,15 @@ def extra_findings(project, gh, again):
             )
             if name == "bors":
                 enrollment = results[-1]
+                provision = ("tauceti-tools neon provision --conf " + shlex.quote(public_configuration(project)) +
+                             " --registry ~/.config/tauceti/neon-projects.json --token-file ~/.config/tauceti/neon-api-key")
+                output = "~/.config/tauceti/projects/" + project.key + "/bors/database-url"
+                enrollment.steps += [
+                    "Service operator: open https://console.neon.tech, select the paying organization → Settings → General information, and copy its Organization ID. Under Settings → API keys create an organization key and save its value privately at ~/.config/tauceti/neon-api-key; chmod 600 that file.",
+                    'Service operator: edit ~/.config/tauceti/neon-projects.json, preserving existing entries. Add "' + project.content + '": {"approved":true,"org_id":"ORGANIZATION_ID","region":"aws-us-east-1","pg_version":18,"min_cu":0.25,"max_cu":0.25,"suspend_timeout_seconds":-1,"history_retention_seconds":604800} inside its outer object. Replace ORGANIZATION_ID with the copied ID, confirm the paid capacity/region/retention settings, and chmod 600 the file.',
+                    f"Service operator: preview the project, then provision after confirming its settings:\n$ {provision}\n$ {provision} --apply --output {output}\nIf a project is already recorded, use neon inspect with the same arguments. In that project's Neon dashboard choose Connect → Direct connection and retrieve its URI privately; do not create another project.",
+                    "Service operator: send only the database URI to the downstream through a private channel. Keep the management key and registry private. The downstream installs that URI as DATABASE_URL in its own Bors runtime; a database grant does not change merge.backend.",
+                ]
                 registry = Path.home() / ".config/tauceti/neon-projects.json"
                 try:
                     grants = json.loads(registry.read_text())
@@ -656,32 +656,37 @@ def extra_findings(project, gh, again):
                         and project.raw.get("merge", {}).get("backend") != "bors"):
                     runtime.status = "ready"
                     runtime.summary = "Hosted Neon database approved; Bors is not the selected merger"
+            elif name == "cache":
+                results[-1].steps += [
+                    f"Service operator: in https://dash.cloudflare.com/ select the paying account → R2 object storage. Create or select a dedicated bucket for {project.content}. Open its Settings → Custom Domains → Add and enter a domain in that account's Cloudflare zone. Wait for Active; that HTTPS domain serves public reads.",
+                    "Service operator: R2 overview → Manage API Tokens → Create Account API token. Name it for this project's cache writer; choose Object Read & Write → Apply to specific buckets only → this project's bucket → Create. Save the Access Key ID, Secret Access Key and S3 endpoint from the confirmation page privately.",
+                    "Service operator: supply the downstream with artifact_url=PUBLIC_DOMAIN/artifacts, revision_url=PUBLIC_DOMAIN/revisions, artifact_write_url=S3_ENDPOINT/BUCKET/artifacts and revision_write_url=S3_ENDPOINT/BUCKET/revisions, replacing PUBLIC_DOMAIN with its HTTPS URL, S3_ENDPOINT with the confirmation page's HTTPS endpoint and BUCKET with the selected bucket. Send ACCESS_KEY_ID:SECRET_ACCESS_KEY privately; never put it in the issue.",
+                    f"Downstream administrator: enter those four endpoint values under services.cache in {project.source}. In https://github.com/{project.content}/settings/variables/actions, create LAKE_CACHE_ARTIFACT_ENDPOINT_PUBLIC=artifact_url, LAKE_CACHE_REVISION_ENDPOINT_PUBLIC=revision_url, LAKE_CACHE_ARTIFACT_ENDPOINT=artifact_write_url and LAKE_CACHE_REVISION_ENDPOINT=revision_write_url. In Settings → Secrets and variables → Actions → Secrets → New repository secret, Name: LAKE_CACHE_KEY; Secret: the supplied ACCESS_KEY_ID:SECRET_ACCESS_KEY line. Inspect the next post-merge CI run's publish-lake-cache upload and confirmation steps.",
+                ]
         if name == "github_state" and mode != "off":
-            token_file = Path(os.environ.get(
-                "TAUCETI_GITHUB_STATE_TOKEN_FILE",
-                str(Path.home() / ".config/tauceti/projects" / project.key / "github_state/client-token"),
-            )).expanduser()
+            token_file = client_token_file(project)
             service_finding = next(f for f in results if f.id == "services.github_state")
             if mode == "hosted":
                 enrollment = results[-1]
-                from .github_state_setup import public_configuration
-
                 operator = "~/.config/tauceti-github-state/client-tokens.json"
                 request_conf = (project.source if project.source.startswith("https://") else
                                 os.path.relpath(Path(project.source).expanduser()))
                 request_command = _cmd("tauceti-tools", "github-state", "request", "--conf", request_conf,
                                        "--installation", "INSTALLATION_ID")
-                initial = _cmd("tauceti-tools", "github-state", "initial-grants", "--conf", public_configuration(project))
+                initial = _cmd("tauceti-tools", "github-state", "initial-grants")
                 bootstrap = _cmd("tauceti-tools", "github-state", "bootstrap", "--conf", public_configuration(project))
                 info, _ = gh.read(f"repos/{project.content}")
                 repository_id = str((info or {}).get("id", "REPOSITORY_ID"))
                 enrollment.summary = "Install the read-only App and request hosted access."
                 enrollment.urls = []
+                repository_lookup = (f" If REPOSITORY_ID is shown below, obtain it with:\n$ " +
+                                     _cmd("gh", "api", f"repos/{project.content}", "--jq", ".id")
+                                     if repository_id == "REPOSITORY_ID" else "")
                 enrollment.steps = [
                     f"Open https://github.com/apps/tauceti-github-state/installations/new. Choose {owner} → Only select repositories → {project.content.split('/')[1]} → Install. Copy the number from the resulting /settings/installations/NUMBER URL.",
                     f"Create your access request, replacing INSTALLATION_ID with that number:\n$ {request_command}\nReview the saved request, then run the gh issue create command it prints. Only the token hash is shared; the raw token stays on your machine.",
-                    f'Service operator: in https://dash.cloudflare.com/ open Workers & Pages → tauceti-github-state → Settings → Variables and Secrets. Append {{"id":"{repository_id}","name":"{project.content}","installation":"INSTALLATION_ID"}} to ALLOWED_REPOSITORIES, using the installation ID from the request. Keep all existing entries and deploy the change.',
-                    f"Service operator: append the request's grant object to the complete array in {operator}. Preserve its private permissions:\n$ chmod 600 {operator}\nEdit the CLIENT_TOKENS secret in the same panel, paste the entire array, and deploy. Cloudflare cannot recover the old value: restore your private backup first. Only for a service with no clients beyond its original setup, recover that original grant with:\n$ {initial}",
+                    f'Service operator: in https://dash.cloudflare.com/ open Workers & Pages → tauceti-github-state → Settings → Variables and Secrets. Append {{"id":"{repository_id}","name":"{project.content}","installation":"INSTALLATION_ID"}} to ALLOWED_REPOSITORIES, using the installation ID from the request. Keep all existing entries and deploy the change.{repository_lookup}',
+                    f"Service operator: first restore the complete grant array from your private backup at {operator}. Cloudflare cannot recover the old secret. Only if the service has no clients beyond its original setup, recover that original grant into a new file with:\n$ {initial}\nAppend the request's grant object to the complete array. Preserve its private permissions:\n$ chmod 600 {operator}\nEdit the CLIENT_TOKENS secret in the same panel, paste the entire array, and deploy.",
                     f"Service operator: initialize the approved repository:\n$ {bootstrap}\nFor later code updates use npx wrangler deploy. The initial scripts/setup.py deploy command resets the grants and must not be rerun after enrollment.",
                     "Once the operator confirms access, run tauceti doctor again. The token's repository scope is enforced by the service; its raw value stays on your machine.",
                 ]
@@ -1072,7 +1077,7 @@ def render(findings, *, json_output=False, show_ready=False, project=None):
     if core:
         passed = sum(f.status == "ready" for f in core)
         if unresolved(core):
-            print(f"Core setup: {len(unresolved(core))} items need attention; {passed} checks passed.")
+            print(f"Core setup: {len(unresolved(core))} checks need attention; {passed} checks passed.")
         else:
             print(f"Core setup: ready ({passed} checks passed).")
         _render_tasks(core if show_ready else unresolved(core))

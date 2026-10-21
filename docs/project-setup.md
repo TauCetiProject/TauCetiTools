@@ -685,7 +685,7 @@ private file for subsequent enrollments.
 The equivalent local-file helper, for a service with only its original client, is:
 
 ```sh
-tauceti-tools github-state initial-grants --conf https://raw.githubusercontent.com/ExampleOrg/ExampleCeti/main/tauceti.toml
+tauceti-tools github-state initial-grants
 ```
 
 It reads `~/.config/tauceti-github-state/client-token` and writes a new private
@@ -727,8 +727,11 @@ The equivalent operator command is:
 tauceti-tools github-state bootstrap --conf https://raw.githubusercontent.com/ExampleOrg/ExampleCeti/main/tauceti.toml
 ```
 
-It reads the same private admin token and service URL from the project configuration.
-Use `--admin-token-file PATH` if that credential is stored elsewhere.
+It reads the same private admin token. Its destination defaults to the operator's
+`https://github-state.taucetiproject.org` service, independently of the downstream
+configuration; redirects are refused. For another service the operator supplies
+`--url https://THE_OPERATOR_SERVICE`. Use `--admin-token-file PATH` if that credential
+is stored elsewhere.
 
 The expected response is HTTP 200. Initialization continues in the background; authenticated
 `GET /v1/health?repository=ExampleOrg%2FExampleCeti` must eventually show that repository,
@@ -810,7 +813,8 @@ For example, save `~/.config/tauceti/neon-projects.json` with mode 0600:
 
 In the Neon console select the operator organization, open **Settings → API keys**, create
 an organization API key for this administration, and save it privately as
-`~/.config/tauceti/neon-api-key`. The following command previews the resource settings; it
+`~/.config/tauceti/neon-api-key`. Copy `org_id` from **Settings → General information**
+([Neon organization instructions](https://neon.com/docs/manage/orgs-api)). The following command previews the resource settings; it
 creates nothing:
 
 ```sh

@@ -72,6 +72,8 @@ def parser():
     initial.add_argument("--output", type=Path, default=operator / "client-tokens.json")
     boot = state_actions.add_parser("bootstrap", help="Operator: initialize an already approved repository")
     boot.add_argument("--admin-token-file", type=Path, default=operator / "admin-token")
+    boot.add_argument("--url", default="https://github-state.taucetiproject.org",
+                      help="Operator's service URL (default: https://github-state.taucetiproject.org)")
     upstreams = sub.add_parser("upstreams", help="Inspect consistent forward dependency targets")
     upstreams.add_argument("action", choices=("inspect", "update", "guard"))
     upstreams.add_argument("--checkout", type=Path, default=Path.cwd())
@@ -101,6 +103,11 @@ def main(argv=None):
         args = parser().parse_args(argv)
         if args.command == "init":
             return init_config(args)
+        if args.command == "github-state" and args.action == "initial-grants":
+            from .github_state_setup import run
+
+            run(None, args)
+            return 0
         source = configuration_source(conf)
         if args.command == "script" and not source:
             from .templates import run_script

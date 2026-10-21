@@ -13,6 +13,11 @@ from pathlib import Path
 from .project import ConfigError, repository
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def client_token_file(project):
     return Path(os.environ.get(
         "TAUCETI_GITHUB_STATE_TOKEN_FILE",
@@ -75,10 +80,12 @@ def run(project, args):
         _private(args.output, json.dumps([_grant(args.token_file, args.repository)], indent=2) + "\n")
         print(f"Saved the initial grant to {args.output}. Add any other existing grants before uploading the full array.")
     else:
-        url = project.service("github_state").get("url", "")
+        # The operator chooses this endpoint; downstream configuration cannot choose
+        # where the service's admin credential is sent.
+        url = args.url
         parsed = urllib.parse.urlsplit(url)
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-            raise ConfigError("Set services.github_state.url to the service's HTTPS URL without credentials.")
+            raise ConfigError("Pass --url with the operator's HTTPS service URL without credentials.")
         token = args.admin_token_file.read_text().strip()
         if not token:
             raise ConfigError(f"Admin token file is empty: {args.admin_token_file}")
@@ -89,7 +96,7 @@ def run(project, args):
                      "User-Agent": "TauCetiWorker/1.0"},
         )
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with urllib.request.build_opener(_NoRedirect()).open(request, timeout=30) as response:
                 print(f"Initialization started for {project.content} (HTTP {response.status}).")
         except urllib.error.HTTPError as error:
             raise ConfigError(f"Initialization failed (HTTP {error.code}); check the operator credential and repository grant.") from None

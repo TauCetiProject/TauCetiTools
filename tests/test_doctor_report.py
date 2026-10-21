@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from tauceti_tools.cli import main
 from tauceti_tools.doctor import Finding, extra_findings, render
-from tauceti_tools.github_state_setup import run
+from tauceti_tools.github_state_setup import _NoRedirect, run
 from tauceti_tools.project import parse
 from tauceti_tools.scaffold import initial_configuration
 
@@ -97,6 +97,23 @@ class DoctorReportTests(unittest.TestCase):
                 run(project, SimpleNamespace(action="initial-grants", token_file=token_path,
                                              repository="one/Project", output=retained))
             self.assertEqual(retained.read_text(), "existing grants")
+
+    def test_bootstrap_uses_operator_endpoint_and_refuses_redirects(self):
+        project = parse(initial_configuration("one/Project", "human").encode(), "/tmp/tauceti.toml")
+        project.raw["services"]["github_state"]["url"] = "https://downstream-controlled.example.org"
+        with tempfile.TemporaryDirectory() as tmp:
+            token = Path(tmp) / "admin-token"
+            token.write_text("operator-secret")
+            with patch("tauceti_tools.cli.configuration_source", return_value=project.source), \
+                    patch("tauceti_tools.cli.load", return_value=project), \
+                    patch("urllib.request.build_opener") as opener, redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["github-state", "bootstrap", "--admin-token-file", str(token)]), 0)
+                request = opener.return_value.open.call_args.args[0]
+                self.assertEqual(request.full_url, "https://github-state.taucetiproject.org/admin/bootstrap")
+                self.assertEqual(json.loads(request.data), {"repository": "one/Project"})
+                self.assertIsInstance(opener.call_args.args[0], _NoRedirect)
+                self.assertIsNone(opener.call_args.args[0].redirect_request(
+                    request, None, 302, "redirect", {}, "https://another.example.org"))
 
 
 if __name__ == "__main__":
