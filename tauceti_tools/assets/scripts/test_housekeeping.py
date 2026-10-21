@@ -110,6 +110,46 @@ class RedSelection(unittest.TestCase):
         self.assertEqual(hk.CI_FAILED_DAYS, 7)
 
 
+class StaleSelection(unittest.TestCase):
+    def run_case(self, *, labels=("awaiting-author",), draft=False, live_changes=None, updated="2020-01-01T00:00:00Z"):
+        pr = {"number": 8282, "state": "OPEN", "isDraft": draft, "updatedAt": updated,
+              "headRefOid": "a" * 40, "body": "", "labels": [{"name": x} for x in labels]}
+        live = {**pr, **(live_changes or {})}
+        def read(args):
+            return live if args[:2] == ["pr", "view"] else [pr]
+        with patch.object(hk, "gh_json", side_effect=read), \
+             patch.object(hk, "latest_scoreboard_meta", return_value=None) as scoreboard, \
+             patch.object(hk, "close", return_value=True) as close:
+            self.assertEqual(hk.main(), 0)
+        return close, scoreboard
+
+    def test_stale_author_status_does_not_require_an_associated_scoreboard(self):
+        close, scoreboard = self.run_case()
+        close.assert_called_once()
+        # The unchanged budget pass still reads once; stale adds no history read.
+        scoreboard.assert_called_once_with(8282)
+
+    def test_no_author_status_never_closes_on_an_arbitrary_comment(self):
+        close, _ = self.run_case(labels=())
+        close.assert_not_called()
+
+    def test_draft_and_operator_holds_remain_exempt(self):
+        self.run_case(draft=True)[0].assert_not_called()
+        for label in hk.KEEP_LABELS:
+            with self.subTest(label=label):
+                self.run_case(labels=("awaiting-author", label))[0].assert_not_called()
+
+    def test_recent_activity_resets_the_existing_inactivity_clock(self):
+        self.run_case(updated="2099-01-01T00:00:00Z")[0].assert_not_called()
+
+    def test_live_push_hold_or_status_change_prevents_close(self):
+        for changes in ({"updatedAt": "2099-01-01T00:00:00Z"}, {"state": "CLOSED"},
+                        {"isDraft": True}, {"labels": [{"name": "awaiting-author"}, {"name": "keep"}]},
+                        {"labels": [{"name": "awaiting-review"}]}):
+            with self.subTest(changes=changes):
+                self.run_case(live_changes=changes)[0].assert_not_called()
+
+
 class AutomaticBump(unittest.TestCase):
     def test_no_retirement_path_closes_a_canonical_bot_bump(self):
         pr = {"number": 99, "isDraft": False, "headRefOid": "a" * 40,

@@ -17,12 +17,12 @@ either merged or closed — never stranded:
            worker is running. A manual `review-budget-spent` label force-closes a PR early.
   dedup    Close a newer PR that authors the same roadmap target (the `<!--tauceti-target:v1 ...-->`
            body marker) as an older open one. Keep the lowest PR number.
-  stale    Close a PR whose latest review scoreboard still has a blocking rubric and which has had no
-           activity for STALE_DAYS (default 7): a request for changes nobody acted on, under budget.
-  red      Close a PR that has carried `ci-failed` continuously for CI_FAILED_DAYS (default 7). Every
-           job above reads the review scoreboard, so all of them are blind to a PR that never reached
+  stale    Close a PR carrying the repository-managed `awaiting-author` status label which has had
+           no activity for STALE_DAYS (default 7). This includes unresolved merge conflicts.
+  red      Close a PR that has carried `ci-failed` continuously for CI_FAILED_DAYS (default 7). The
+           review-budget decision reads the scoreboard and cannot retire a PR that never reached
            review: failing CI keeps it out of `awaiting-review`, no reviewer ever posts a scoreboard,
-           and `blocking_rubrics` therefore has nothing to report. Such a PR was immortal. #1556 sat
+           and `blocking_rubrics` therefore has nothing to report. #1556 sat
            red for four weeks with zero scoreboards, and nothing in this file could see it.
 
            The clock is the current `ci-failed` spell, not `updatedAt`. `updatedAt` bumps on any
@@ -103,7 +103,7 @@ DEDUP_COMMENT = (
     "The queue housekeeping keeps the earlier PR and closes this duplicate to avoid redundant review. "
     "The branch is kept; add the `keep` label if it is intentionally distinct.")
 STALE_COMMENT = (
-    "Closing automatically: this PR's last review still asks for changes (blocking: {blocking}) and it "
+    "Closing automatically: this PR is awaiting author action and it "
     "has sat untouched for over {days} days, so the queue housekeeping is retiring it to keep things "
     "moving. The branch is kept, so nothing is lost. It is completely fine to open a fresh PR once the "
     "findings are addressed. Add the `keep` label if you would rather it stay open.")
@@ -311,28 +311,32 @@ def main() -> int:
         print(f"dedup: #{p['number']} duplicates #{seen[tid]} (target '{tid}')")
         failures += not close(p["number"], DEDUP_COMMENT.format(tid=tid, kept=seen[tid]))
 
-    # stale: a PR with a blocking rubric (under budget — the budget job takes the spent ones) that has
-    # had no activity for STALE_DAYS. updatedAt bumps on any push/comment/label, so a still-worked PR is
-    # never stale; this catches a blocked PR everyone has walked away from.
+    # The repository-managed status label is the authority, just as it is for red below.
+    # Contributor reviews can legitimately cause awaiting-author, while GitHub's author_association
+    # varies with the reading identity. Requiring an associated scoreboard silently made these PRs
+    # immortal. Reading labels also avoids another comment-history fetch for every stale candidate.
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=STALE_DAYS)
     open_prs = gh_json(["pr", "list", "--repo", REPO, "--state", "open", "--limit", "1000",
                         "--json", "number,isDraft,labels,updatedAt,author,headRefName,headRepositoryOwner,headRepository"]) or []
-    # isDraft must be explicitly False (fail closed: an unknown draft state is never stale-closed).
-    fresh = [p for p in open_prs if p.get("isDraft") is False and not has_keep_label(p) and not core.automatic_bump(p)
-             and parse_ts(p.get("updatedAt", "")) < cutoff]
-    print(f"stale: {len(fresh)} open PR(s) untouched for >{STALE_DAYS}d to check{suffix}")
-    for p in fresh:
-        meta = latest_scoreboard_meta(p["number"])
-        if not meta:
+    old = [p for p in open_prs if parse_ts(p.get("updatedAt", "")) < cutoff]
+    print(f"stale: {len(old)} open PR(s) untouched for >{STALE_DAYS}d to check{suffix}")
+    for p in old:
+        n = p["number"]
+        if p.get("isDraft") is not False or has_keep_label(p) or core.automatic_bump(p):
+            print(f"stale: #{n} skipped (draft, explicit hold, or automatic dependency bump)")
             continue
-        blk = blocking_rubrics(meta)
-        if not blk:
+        if not has_label(p, "awaiting-author"):
+            print(f"stale: #{n} skipped (not awaiting-author)")
             continue
-        if keep_label_live(p["number"]):
-            print(f"stale: #{p['number']} gained a keep label since listing; leaving it")
+        live = gh_json(["pr", "view", str(n), "--repo", REPO,
+                        "--json", "state,isDraft,labels,updatedAt"]) or {}
+        if (live.get("state") != "OPEN" or live.get("isDraft") is not False or has_keep_label(live)
+                or not has_label(live, "awaiting-author") or not live.get("updatedAt")
+                or parse_ts(live["updatedAt"]) >= cutoff):
+            print(f"stale: #{n} skipped (state or activity changed since listing)")
             continue
-        print(f"stale: #{p['number']} (blocking {', '.join(blk)}, untouched >{STALE_DAYS}d)")
-        failures += not close(p["number"], STALE_COMMENT.format(blocking=", ".join(blk), days=STALE_DAYS))
+        print(f"stale: #{n} (awaiting-author, untouched >{STALE_DAYS}d)")
+        failures += not close(n, STALE_COMMENT.format(days=STALE_DAYS))
 
     # red: a PR whose build has been failing, uninterrupted, for CI_FAILED_DAYS. Deliberately does
     # NOT consult the scoreboard: this is the one job that has to work when there is no scoreboard

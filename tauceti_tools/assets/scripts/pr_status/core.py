@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from github_api import response, retry_after
 
 REPO = os.environ.get("GH_REPO", "TauCetiProject/TauCeti")
-KEEP_LABELS = {"keep", "hold", "wip", "human", "do-not-close"}
+KEEP_LABELS = {"keep", "hold", "wip", "human", "on-hold", "do-not-close"}
 
 
 def automatic_bump(pr, *, repo=None):

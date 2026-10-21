@@ -35,10 +35,8 @@ test('compact survey is authenticated, roadmap scoped and does not issue GitHub 
  }finally{await mf.dispose();}
 });
 
-test('head-bound blockers retain their authenticated actor and do not trust quoted markers',()=>{
+test('obsolete pause markers are not projected, including previously stored fragments',()=>{
  const head='a'.repeat(40), marker='<!--tauceti-blocked:v1 '+head+'-->';
- const rows=[{body:marker+'\nEvidence',user:{login:'Author'}},{body:'> '+marker,user:{login:'Author'}},{body:'Quoted\n'+marker,user:{login:'Author'}}];
- assert.deepEqual(facts.summarize(rows,[]).blocked,[{head,author:'author'}]);
- assert.deepEqual(facts.summarize([],[]).blocked,[]);
- assert.deepEqual(facts.summarizeFragments([{meta:null,rebase_heads:[],marker:null}],[]).blocked,[],'old stored fragments require no refetch');
+ assert.equal('blocked' in facts.summarize([{body:marker+'\nEvidence',user:{login:'Author'}}],[]),false);
+ assert.equal('blocked' in facts.summarizeFragments([{meta:null,rebase_heads:[],marker:null,blocked:[{head,author:'author'}]}],[]),false);
 });
