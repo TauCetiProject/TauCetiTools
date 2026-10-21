@@ -151,7 +151,7 @@ def fence(api, record):
         if (not isinstance(pull, dict) or (pull.get("head") or {}).get("sha") != record["sha"]
                 or (pull.get("base") or {}).get("ref") != record["base_ref"]):
             return False
-    return True
+    return current
 
 
 def scope_approved(api, record):
@@ -174,7 +174,7 @@ def scope_approved(api, record):
 
 def status_snapshot(api, record):
     path = f"repos/{record['repo']}/commits/{record['sha']}/statuses?per_page=100"
-    rows = api.request("GET", path, conditional=True)
+    rows = api.request("GET", path, conditional=True, read=False)
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise APIError("GET", path, 503, {"message": "invalid commit status history"})
     latest = {}
@@ -187,7 +187,16 @@ def status_snapshot(api, record):
     return latest, len(rows) < 100
 
 
-def newer_status(record, snapshot):
+def timestamp(value):
+    if not isinstance(value, str):
+        raise ValueError("missing status attempt timestamp")
+    parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp has no timezone")
+    return parsed
+
+
+def newer_status(record, snapshot, started_at):
     latest, complete = snapshot
     row = latest.get(record["payload"]["context"])
     if row is None:
@@ -195,7 +204,14 @@ def newer_status(record, snapshot):
     url = row.get("target_url")
     pattern = rf"https://github\.com/{re.escape(record['repo'])}/actions/runs/([1-9][0-9]*)"
     match = re.fullmatch(pattern, url) if isinstance(url, str) else None
-    return bool(match and int(match[1]) > record["run_id"])
+    if not match or int(match[1]) <= record["run_id"]:
+        return False
+    try:
+        # A lower-numbered run can have a later rerun. Its current attempt is
+        # allowed to replace statuses published before that attempt began.
+        return timestamp(row.get("created_at")) > timestamp(started_at)
+    except ValueError:
+        return None
 
 
 def binding(record):
@@ -207,7 +223,7 @@ def publish(records, *, max_wait=600):
     # or run attempt may have changed. Wait here, then refresh the identity fence.
     api = GitHub(max_wait=0)
     deadline = time.monotonic() + max_wait
-    fenced = set()
+    fenced = {}
     statuses = {}
     failures = 0
     try:
@@ -216,16 +232,17 @@ def publish(records, *, max_wait=600):
             for attempt in range(4):
                 try:
                     if key not in fenced:
-                        if not fence(api, record):
+                        current = fence(api, record)
+                        if not current:
                             print(f"ci-status: obsolete {record['payload']['context']} intent skipped")
                             path.unlink(missing_ok=True)
                             break
-                        fenced.add(key)
+                        fenced[key] = current.get("run_started_at")
                     if key not in statuses:
                         statuses[key] = status_snapshot(api, record)
-                    superseded = newer_status(record, statuses[key])
+                    superseded = newer_status(record, statuses[key], fenced[key])
                     if superseded is None:
-                        print(f"ci-status: recent history does not cover {record['payload']['context']}; retaining intent", file=sys.stderr)
+                        print(f"ci-status: recent history cannot establish {record['payload']['context']} ordering; retaining intent", file=sys.stderr)
                         failures += 1
                         break
                     if superseded:

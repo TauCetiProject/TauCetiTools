@@ -82,6 +82,26 @@ class Renewal(unittest.TestCase):
         for value in ("old-token", "renewed-token", "private-key"):
             self.assertNotIn(value, output.getvalue())
 
+    def test_status_history_uses_and_renews_status_token_not_optional_read_token(self):
+        path = "repos/o/r/commits/" + "a" * 40 + "/statuses?per_page=100"
+        with patch.dict(os.environ, GH_TOKEN="expired-status-token", GH_READ_TOKEN="read-without-statuses",
+                        CI_STATUS_APP_ID="12", CI_STATUS_APP_PRIVATE_KEY="private-key"), \
+             patch.object(app, "status_token", return_value="renewed-status-token") as renew, \
+             patch.object(api.subprocess, "run", side_effect=[reply(401), reply(200, [])]) as request, \
+             patch.object(api.time, "sleep"), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(api.GitHub(max_wait=0).request("GET", path, read=False, conditional=True), [])
+        renew.assert_called_once()
+        self.assertEqual(request.call_args.kwargs["env"]["GH_TOKEN"], "renewed-status-token")
+        self.assertNotIn("CI_STATUS_APP_PRIVATE_KEY", request.call_args.kwargs["env"])
+        with patch.dict(os.environ, GH_TOKEN="status-token", GH_READ_TOKEN="read-without-statuses",
+                        CI_STATUS_APP_ID="12", CI_STATUS_APP_PRIVATE_KEY="private-key"), \
+             patch.object(app, "status_token") as renew, \
+             patch.object(api.subprocess, "run", return_value=reply(401)) as request, \
+             contextlib.redirect_stderr(io.StringIO()), self.assertRaises(api.APIError):
+            api.GitHub(max_wait=0).request("GET", path, read=True)
+        renew.assert_not_called()
+        self.assertEqual(request.call_args.kwargs["env"]["GH_TOKEN"], "read-without-statuses")
+
     def test_no_renewal_on_unrelated_endpoints_or_permissions_failures(self):
         for method, path, status in [("GET", "repos/o/r/pulls/1", 401),
                                      ("POST", "repos/o/r/issues/1/comments", 401),

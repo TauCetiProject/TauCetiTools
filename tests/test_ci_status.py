@@ -45,7 +45,7 @@ class StatusIntentTests(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
         self.sha = 'a' * 40
-        self.run = {'id': 123, 'run_attempt': 2, 'conclusion': None}
+        self.run = {'id': 123, 'run_attempt': 2, 'conclusion': None, 'run_started_at': '2026-10-21T02:00:00Z'}
         self.pull = {'head': {'sha': self.sha}, 'base': {'ref': 'main'}}
 
     def record(self, context='build', **kwargs):
@@ -258,14 +258,14 @@ class StatusIntentTests(unittest.TestCase):
 
     def test_newer_run_skips_only_its_exact_context(self):
         records = [self.record(context) for context in ('build', 'scope', 'bump-guard')]
-        rows = [{'context': 'build', 'target_url': 'https://github.com/Owner/Repo/actions/runs/124'},
+        rows = [{'context': 'build', 'target_url': 'https://github.com/Owner/Repo/actions/runs/124', 'created_at': '2026-10-21T02:10:00Z'},
                 {'context': 'scope', 'target_url': 'https://github.com/Owner/Repo/actions/runs/122'}]
         result, fake = self.publish(records, [self.run, self.pull, rows, {}, {}])
         self.assertTrue(result)
         posts = [call for call in fake.calls if call[0] == 'POST']
         self.assertEqual([call[2]['context'] for call in posts], ['scope', 'bump-guard'])
         self.assertEqual(len([call for call in fake.calls if '/statuses?' in call[1]]), 1)
-        self.assertEqual(fake.calls[2][3], {'conditional': True})
+        self.assertEqual(fake.calls[2][3], {'conditional': True, 'read': False})
         self.assertTrue(all(not path.exists() for path, _ in records))
 
     def test_status_target_must_be_exact_same_repository_run_url(self):
@@ -283,14 +283,14 @@ class StatusIntentTests(unittest.TestCase):
     def test_only_first_matching_context_status_is_current(self):
         record = self.record()
         rows = [{'context': 'build', 'target_url': 'https://github.com/Owner/Repo/actions/runs/122'},
-                {'context': 'build', 'target_url': 'https://github.com/Owner/Repo/actions/runs/124'}]
+                {'context': 'build', 'target_url': 'https://github.com/Owner/Repo/actions/runs/124', 'created_at': '2026-10-21T02:10:00Z'}]
         result, fake = self.publish([record], [self.run, self.pull, rows, {}])
         self.assertTrue(result)
         self.assertEqual(fake.calls[-1][0], 'POST')
 
     def test_status_snapshot_refreshed_after_quota_wait(self):
         record = self.record()
-        newer = [{'context': 'build', 'target_url': 'https://github.com/Owner/Repo/actions/runs/124'}]
+        newer = [{'context': 'build', 'target_url': 'https://github.com/Owner/Repo/actions/runs/124', 'created_at': '2026-10-21T02:10:00Z'}]
         with patch.object(ci_status.time, 'sleep'):
             result, fake = self.publish([record], [self.run, self.pull, [],
                                        ci_status.Deferred('write', ci_status.time.time() + 1), self.run, self.pull, newer], max_wait=10)
@@ -315,6 +315,38 @@ class StatusIntentTests(unittest.TestCase):
         self.assertTrue(first[0].exists())
         self.assertFalse(second[0].exists())
         self.assertEqual(fake.calls[-1][2]['context'], 'scope')
+
+    def test_later_attempt_of_older_run_can_replace_prior_newer_numbered_run(self):
+        with patch.dict(os.environ, {'GITHUB_RUN_ID': '100'}):
+            record = self.record()
+        rerun = dict(self.run, id=100, run_started_at='2026-10-21T03:00:00Z')
+        rows = [{'context': 'build', 'target_url': 'https://github.com/Owner/Repo/actions/runs/101',
+                 'created_at': '2026-10-21T02:30:00Z'}]
+        result, fake = self.publish([record], [rerun, self.pull, rows, {}])
+        self.assertTrue(result)
+        self.assertEqual(fake.calls[-1][0], 'POST')
+        self.assertFalse(record[0].exists())
+
+    def test_older_rerun_does_not_replace_status_posted_after_attempt_start(self):
+        with patch.dict(os.environ, {'GITHUB_RUN_ID': '100'}):
+            record = self.record()
+        rerun = dict(self.run, id=100, run_started_at='2026-10-21T03:00:00Z')
+        rows = [{'context': 'build', 'target_url': 'https://github.com/Owner/Repo/actions/runs/101',
+                 'created_at': '2026-10-21T03:00:01Z'}]
+        result, fake = self.publish([record], [rerun, self.pull, rows])
+        self.assertTrue(result)
+        self.assertTrue(all(call[0] == 'GET' for call in fake.calls))
+        self.assertFalse(record[0].exists())
+
+    def test_newer_run_with_unreadable_timestamp_retains_intent(self):
+        for created in (None, 'not-a-time', '2026-10-21T03:00:00'):
+            with self.subTest(created_at=created):
+                record = self.record()
+                rows = [{'context': 'build', 'target_url': 'https://github.com/Owner/Repo/actions/runs/124', 'created_at': created}]
+                result, fake = self.publish([record], [self.run, self.pull, rows])
+                self.assertFalse(result)
+                self.assertTrue(record[0].exists())
+                self.assertTrue(all(call[0] == 'GET' for call in fake.calls))
 
     def test_asset_copies_match(self):
         self.assertEqual((SCRIPTS / 'ci_status.py').read_bytes(),

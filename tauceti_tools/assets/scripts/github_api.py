@@ -230,8 +230,10 @@ class GitHub:
                 if conditional and method == "GET" and headers.get("etag"):
                     self.cached[cache_key] = (headers["etag"], payload)
                 return payload
-            if (status == 401 and not renewed and method == "POST"
-                    and re.fullmatch(r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/statuses/[0-9a-f]{40}", path)
+            status_request = not read and (
+                method == "POST" and re.fullmatch(r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/statuses/[0-9a-f]{40}", path)
+                or method == "GET" and re.fullmatch(r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/commits/[0-9a-f]{40}/statuses\?per_page=100", path))
+            if (status == 401 and not renewed and status_request
                     and os.environ.get("CI_STATUS_APP_ID") and os.environ.get("CI_STATUS_APP_PRIVATE_KEY")
                     and attempt < 2):
                 # A definite authentication rejection performed no mutation.
