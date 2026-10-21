@@ -152,11 +152,11 @@ class FinalizerTests(unittest.TestCase):
     def test_status_uses_exact_sha_and_retries_boundedly(self):
         for state in ["success", "failure"]:
             with patch.dict(os.environ, ENV, clear=True), patch.object(finalizer, "terminal_state", return_value=(state, "result")), \
-                 patch.object(finalizer, "api", side_effect=[dict(run_attempt=2), OSError(), dict(run_attempt=2), {}]) as post, \
+                 patch.object(finalizer, "api", side_effect=[dict(run_attempt=2), [], OSError(), dict(run_attempt=2), [], {}]) as post, \
                  patch.object(finalizer.time, "sleep"), \
                  contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(finalizer.main(), 0 if state == "success" else 1)
-                self.assertEqual(post.call_count, 4)
+                self.assertEqual(post.call_count, 6)
                 path, payload = post.call_args.args
                 self.assertEqual(path, "/statuses/" + ENV["STATUS_SHA"])
                 self.assertEqual(payload["state"], state)
@@ -169,10 +169,10 @@ class FinalizerTests(unittest.TestCase):
 
     def test_known_superseded_attempt_skips_status_and_canceled_run_cannot_be_green(self):
         for latest, count, posted_state in [(dict(run_attempt=3), 1, None),
-                                            (dict(run_attempt=2, conclusion="cancelled"), 2, "failure")]:
+                                            (dict(run_attempt=2, conclusion="cancelled"), 3, "failure")]:
             with patch.dict(os.environ, ENV, clear=True), \
                  patch.object(finalizer, "terminal_state", return_value=("success", "confirmed")), \
-                 patch.object(finalizer, "api", side_effect=[latest, {}]) as post, \
+                 patch.object(finalizer, "api", side_effect=[latest, [], {}]) as post, \
                  contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(finalizer.main(), 1)
                 self.assertEqual(post.call_count, count)
@@ -200,7 +200,7 @@ class FinalizerTests(unittest.TestCase):
             intent = json.loads(Path(target).read_text())
             self.assertEqual(intent["payload"]["state"], "success")
             with patch.object(finalizer, "terminal_state", side_effect=AssertionError("must not rebuild")), \
-                 patch.object(finalizer, "api", side_effect=[dict(run_attempt=2), {}]) as post, \
+                 patch.object(finalizer, "api", side_effect=[dict(run_attempt=2), [], {}]) as post, \
                  contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(finalizer.main(["--resume", target]), 0)
             self.assertEqual(post.call_args.args[0], "/statuses/" + ENV["STATUS_SHA"])

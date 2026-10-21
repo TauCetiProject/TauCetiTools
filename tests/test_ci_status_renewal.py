@@ -112,13 +112,13 @@ class FinalizerStaleness(unittest.TestCase):
         now = [0]
         def sleep(delay): now[0] += delay
         deferred = api.Deferred("ci-status-app", 1060)
-        with patch.object(finalizer, "api", side_effect=[dict(run_attempt=2), deferred, dict(run_attempt=3)]) as request, \
+        with patch.object(finalizer, "api", side_effect=[dict(run_attempt=2), [], deferred, dict(run_attempt=3)]) as request, \
              patch.object(finalizer.time, "monotonic", side_effect=lambda: now[0]), \
              patch.object(finalizer.time, "time", side_effect=lambda: 1000 + now[0]), \
              patch.object(finalizer.time, "sleep", side_effect=sleep), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(finalizer.publish(self.intent()), 1)
         self.assertEqual(now[0], 60)
-        self.assertEqual(request.call_count, 3)
+        self.assertEqual(request.call_count, 4)
         self.assertEqual(sum(call.args[0].startswith("/statuses/") for call in request.call_args_list), 1)
 
     def test_changed_bors_generation_during_quota_wait_is_revalidated(self):
@@ -126,7 +126,7 @@ class FinalizerStaleness(unittest.TestCase):
         def sleep(delay): now[0] += delay
         deferred = api.Deferred("ci-status-app", 1060)
         intent = dict(self.intent(), bors=dict(batch_id=7, base_ref="main", base_sha="b" * 40))
-        with patch.object(finalizer, "api", side_effect=[dict(run_attempt=2), deferred, dict(run_attempt=2)]) as request, \
+        with patch.object(finalizer, "api", side_effect=[dict(run_attempt=2), [], deferred, dict(run_attempt=2), []]) as request, \
              patch.object(finalizer, "observation", return_value={}), \
              patch.object(finalizer, "candidate_ref", side_effect=["staging-ref", ValueError("obsolete")]) as candidate, \
              patch.object(finalizer.time, "monotonic", side_effect=lambda: now[0]), \
