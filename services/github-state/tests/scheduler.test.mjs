@@ -515,7 +515,11 @@ test('bounded fan-out deduplicates dirty generations across batch boundaries and
 
 test('existing init fragments are rebuilt from cached comments without GitHub reads',async()=>{
  const {state,db}=await fixture(),oldFetch=globalThis.fetch;
- globalThis.fetch=async()=>{throw Error('projection migration must not read GitHub');};
+ globalThis.fetch=async(...args)=>{
+  const url=String(args[0]?.url ?? args[0]);
+  if(new URL(url).hostname==='api.github.com')throw Error('projection migration must not read GitHub');
+  return oldFetch(...args); // PostgreSQL fixtures use fetch for their database transport.
+ };
  try {
   await state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
   await state.put('pr','7',{number:7,state:'OPEN',headRefOid:'new',labels:[]});
