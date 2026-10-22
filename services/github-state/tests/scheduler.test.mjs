@@ -529,8 +529,8 @@ test('existing init fragments are rebuilt from cached comments without GitHub re
    await state.membership('issue_comments:{"number":7}',id,true);
   }
   // Reproduce the old projection, which discarded mode and treated init as completed.
-  await db.prepare('INSERT OR REPLACE INTO survey_fragments VALUES(?,?,?,?)').run('issue_comments','101','7',JSON.stringify({id:'101',updated:'101',meta:{head_sha:'new',states:{reuse:'blocking_request'},runs:[]},marker:null,rebase_heads:[]}));
-  await db.prepare('INSERT OR REPLACE INTO survey_hydrated VALUES(?,?)').run('7','tauceti-survey-facts/v1');
+  await db.prepare('INSERT INTO survey_fragments VALUES(?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET parent=excluded.parent,data=excluded.data').run('issue_comments','101','7',JSON.stringify({id:'101',updated:'101',meta:{head_sha:'new',states:{reuse:'blocking_request'},runs:[]},marker:null,rebase_heads:[]}));
+  await db.prepare('INSERT INTO survey_hydrated VALUES(?,?) ON CONFLICT(number) DO UPDATE SET contract=excluded.contract').run('7','tauceti-survey-facts/v1');
   assert.equal(JSON.parse(await state.projectedSurvey('7')).meta.head_sha,'new');
   await state.maintenance();
   assert.equal(JSON.parse(await state.projectedSurvey('7')).meta.head_sha,'old');
