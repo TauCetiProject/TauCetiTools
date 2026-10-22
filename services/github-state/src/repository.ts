@@ -328,8 +328,7 @@ export class RepositoryState extends DurableObject<Env> {
     if(this.ctx.waitUntil)this.ctx.waitUntil(work);
   }
   async noteReadDemand(q:Query,known?:boolean):Promise<void> {
-    // Existing complete data never waits for optional scheduler bookkeeping.
-    if(known ?? await this.complete(q)){this.backgroundDemand(q);return;}
+    if(this.store.backend==='postgres' && (known ?? await this.complete(q))){this.backgroundDemand(q);return;}
     await this.optionalAsync('demand',()=>this.noteDemand(q));
   }
   async optionalRead(operation:string,write:()=>Promise<unknown>):Promise<void> {
