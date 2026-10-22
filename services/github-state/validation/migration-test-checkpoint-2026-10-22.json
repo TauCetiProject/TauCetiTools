@@ -367,6 +367,51 @@
         "all_seven_pins_present": true,
         "object_expiry_enabled": false,
         "source": "Independent operator reads of R2 migration/retention records and Cloudflare lifecycle settings; not a SQL owner read and not an attestation from the unaccepted Worker."
+      },
+      "application_interval_input_accounting": {
+        "at": "2026-10-22T22:54:37.916Z",
+        "interval": {
+          "start_ms": 1792708080024,
+          "end_ms": 1792709228296,
+          "ingress_barrier": {
+            "mode": "parked",
+            "in_flight": 0,
+            "drained": true
+          }
+        },
+        "listing": {
+          "prefix": "webhooks/2026-10-22/",
+          "pages": 32,
+          "objects": 31842,
+          "complete": true
+        },
+        "new_input_arrivals": 258,
+        "new_arrivals_accounted": 258,
+        "raw_bodies_verified_exact": 258,
+        "metadata_anomalies": 0,
+        "sql_delivery_commits": {
+          "rows": 1616,
+          "canonical_sha256": "1cbb1f15e93fecb79fe5826825672e0732da02b9664087b1f54d99168144325b",
+          "ignored_ci": 1247,
+          "semantic": 369,
+          "time_unit": "Existing deliveries.received is commit-time Unix milliseconds, including inputs originally received before this interval",
+          "scope": "Committed delivery rows re-read from the selected PostgreSQL generation; per-input executing Worker version is not proven; these rows do not prove absence of duplicate change publications"
+        },
+        "passed_for_stated_scope": true,
+        "scope": "All listed new raw inputs whose verified received metadata falls in the external interval have exact retained raw bodies and either a PostgreSQL commit receipt or a durable pointer plus exact body pin. This does not reconstruct cleared CI gap markers, attest the intermediate external bundle, or prove continuous absence of raw deletion; existing independent retention holds and pins plus final full backlog/known-input/client/revision checks remain required."
+      },
+      "merged_candidate_after_initial_inspection": {
+        "pr": 77,
+        "code": "23d542e00bad04471d0bc7a6634850af03cd8578",
+        "reviewed_head": "2374bcc5373930f70245add1e1381331ae419c3a",
+        "artifact_verified_at": "2026-10-22T22:50:28.283Z",
+        "module_sha256": "391c9d569fc7499ba23792ffafbd799f9d32dcc5ec9e5a4435b19771d1eaff2b",
+        "module_bytes": 690914,
+        "exact_clean_build_match": true,
+        "main_ci_run": "https://github.com/TauCetiProject/TauCetiTools/actions/runs/39867494526",
+        "main_ci_passed": true,
+        "accepted_into_release_chain": false,
+        "scope": "Source identity and upstream CI are now established for this candidate. Adoption, actor/configuration convergence and interval accounting still require their own receipts; this checkpoint does not complete them."
       }
     }
   },
@@ -473,7 +518,7 @@
     ],
     "target_acceptance_measured": false,
     "maximum_allowed_p95_ratio": 1.2,
-    "scope": "This deployed cohort used100 repeated public-query samples atconcurrency4 afterfive warmups. POSTGRES.md:201 supports only the warmed DTO-cache interpretation and20% relative criterion; its seeded local harness has different sample counts and concurrency. Separate cache-miss diagnostics are not a20% acceptance claim. No post-target cohort or successful latency claim has been recorded.",
+    "scope": "This deployed cohort used 100 repeated public-query samples at concurrency 4 after five warmups. POSTGRES.md:201 supports only the warmed DTO-cache interpretation and 20% relative criterion; its seeded local harness has different sample counts and concurrency. Separate cache-miss diagnostics are not a 20% acceptance claim. No post-target cohort or successful latency claim has been recorded.",
     "measurement_driver": "Private operator/baseline.mjs; the recorded source cohort JSON is retained with the original deployment evidence. No original driver hash was captured at measurement."
   },
   "local_verification": {
