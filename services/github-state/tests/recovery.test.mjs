@@ -1255,3 +1255,51 @@ test('CI receipt endpoint rejects semantic input, wrong object, paused ingress a
  f.state.migrationState=null;assert.equal((await send(input)).status,200);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,1);
  assert.equal((await send(input)).status,200);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,1);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM changes').get().n,0);
 });
+
+test('CI batches respect SQLite bindings, storage refusal and an in-flight ingress pause',async()=>{
+ const f=repositoryFixture();await f.ready;
+ f.state.env.REPOSITORIES={idFromName:()=>({toString:()=>f.state.ctx.id.toString()})};
+ const events=Array.from({length:100},(_,i)=>({delivery:'bounded-'+i,event:'workflow_run',received:Date.now()}));
+ const send=()=>f.state.fetch(new Request('https://internal/ci-receipts',{method:'POST',body:JSON.stringify({repository:repo.name,events})}));
+ for(const reason of ['storage_full','storage_error']){
+  f.state.degraded={since:Date.now(),reason};const response=await send();
+  assert.equal(response.status,503);assert.equal((await response.json()).parkable,true);
+  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,0);
+ }
+ f.state.degraded=undefined;f.state.inputFailure={at:Date.now(),reason:'old_failure'};
+ const exec=f.state.ctx.storage.sql.exec;let largest=0;
+ f.state.ctx.storage.sql.exec=(sql,...bindings)=>{largest=Math.max(largest,bindings.length);assert.ok(bindings.length<=100);return exec(sql,...bindings);};
+ let release,entered;const gate=new Promise(r=>release=r),syncing=new Promise(r=>entered=r);
+ f.state.ctx.storage.sync=async()=>{entered();await gate;};
+ const batch=send();await syncing;
+ assert.equal(f.state.applying,1);let paused=false;
+ const pause=f.state.fetch(new Request('https://internal/storage/ingress',{method:'POST',body:JSON.stringify({mode:'parked'})})).then(async r=>{paused=true;return r.json();});
+ await new Promise(r=>setTimeout(r,75));assert.equal(paused,false,'pause must wait through durable sync');
+ release();assert.equal((await batch).status,200);
+ assert.deepEqual(await pause,{mode:'parked',in_flight:0,drained:true});
+ assert.equal(f.state.inputFailure,undefined);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,100);
+ assert.equal(largest,99);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM changes').get().n,0);
+});
+
+test('CI replay survives an old actor and a deadline immediately after batch commit',async()=>clock(async advance=>{
+ const f=repositoryFixture();await f.ready;let oldActor=true,expire=false,batches=0,individual=0;
+ const namespace={idFromName:()=>({toString:()=>f.state.ctx.id.toString()}),get:()=>({fetch:async(url,init)=>{
+  const path=new URL(url).pathname;
+  if(path==='/ci-receipts'){batches++;if(oldActor)return new Response(null,{status:404});}else if(path==='/event')individual++;
+  const response=await f.state.fetch(new Request(url,init));
+  if(path==='/ci-receipts' && expire){expire=false;advance(2000);}
+  return response;
+ }})};f.state.env.REPOSITORIES=namespace;
+ const env={ALLOWED_REPOSITORIES:JSON.stringify([repo]),ARCHIVE:f.archive,REPOSITORIES:namespace};
+ const park=async delivery=>{const p={repository:repo.name,delivery,event:'check_run',received:Date.now(),key:'webhooks/'+delivery};await f.archive.put(p.key,'{}');await ingress.park(env,repo,p,'migration');return p;};
+ const old=await park('old-actor');assert.equal((await ingress.drain(env,repo)).replayed,1);
+ assert.equal(individual,1);assert.equal((await(await f.archive.get(ingress.receiptKey(repo.id,old.delivery))).json()).disposition,'not_mirrored');
+ oldActor=false;const pending=await park('deadline-commit');expire=true;
+ const first=await ingress.drain(env,repo,{deadline:Date.now()+1000});assert.equal(first.stopped,'deadline');assert.equal(first.replayed,0);
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries WHERE id=?').get(pending.delivery).n,1);
+ assert.ok(await f.archive.get(ingress.pointerKey(repo.id,pending)));assert.ok(await f.archive.get(ingress.bodyKey(repo.id,pending.delivery)));
+ assert.equal(await f.archive.get(ingress.receiptKey(repo.id,pending.delivery)),null);
+ assert.equal((await ingress.drain(env,repo)).replayed,1);assert.equal(batches,3);assert.equal(individual,1);
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,2);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM changes').get().n,0);
+ assert.equal(await f.archive.get(ingress.pointerKey(repo.id,pending)),null);
+}));

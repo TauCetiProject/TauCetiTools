@@ -100,7 +100,12 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
   for(let i=0;i<page.objects.length && Date.now()<(options.deadline || Infinity);i+=REPLAY_GROUP)await Promise.all(page.objects.slice(i,i+REPLAY_GROUP).map(async object=>{
     try{prepared.set(object.key,await env.ARCHIVE.get(object.key).then(o=>o?.json<Parked>() ?? null));}catch{/* The ordinary per-pointer path records/retries this failure. */}
   }));
-  const ci=[...prepared.values()].filter((p):p is Parked=>Boolean(p && p.repository===repo.name && CI_EVENTS.has(p.event) && (p.retry_at || 0)<=Date.now()));
+  const ciByDelivery=new Map<string,Parked>(),conflicts=new Set<string>();
+  for(const p of prepared.values())if(p && p.repository===repo.name && CI_EVENTS.has(p.event) && /^[a-zA-Z0-9-]{1,100}$/.test(p.delivery) && Number.isSafeInteger(p.received) && p.received>=0 && (p.retry_at || 0)<=Date.now()){
+    if(ciByDelivery.has(p.delivery) && ciByDelivery.get(p.delivery)!.event!==p.event)conflicts.add(p.delivery);
+    else ciByDelivery.set(p.delivery,p);
+  }
+  const ci=[...ciByDelivery.values()].filter(p=>!conflicts.has(p.delivery));
   if(ci.length && Date.now()<(options.deadline || Infinity))try{
     const response=await stub(env.REPOSITORIES,repo.id).fetch('https://internal/ci-receipts',{method:'POST',body:JSON.stringify({repository:repo.name,events:ci.map(({delivery,event,received})=>({delivery,event,received}))})});
     const result:any=response.ok?await response.json():null;
@@ -116,7 +121,7 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
     let reason = 'internal';
     try {
       // A durable receipt also covers SQL receipt expiry and crashes during cleanup.
-      const committed = await env.ARCHIVE.head(receiptKey(repo.id, parked.delivery));
+      const committed = !ciCommitted.has(parked.delivery) && await env.ARCHIVE.head(receiptKey(repo.id, parked.delivery));
       if (!committed) {
         if(!ciCommitted.has(parked.delivery)) {
           const response = await stub(env.REPOSITORIES, repo.id).fetch('https://internal/event', { method: 'POST', body: JSON.stringify({ key: parked.key, delivery: parked.delivery, event: parked.event, repository: parked.repository, received: parked.received }) });
@@ -128,10 +133,9 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
             throw new Error(reason);
           }
         }
-        await env.ARCHIVE.put(receiptKey(repo.id, parked.delivery), JSON.stringify({ delivery: parked.delivery, committed_at: Date.now(),...(ciCommitted.has(parked.delivery)?{disposition:'not_mirrored'}:{}) }));
+        await env.ARCHIVE.put(receiptKey(repo.id, parked.delivery), JSON.stringify({ delivery: parked.delivery, committed_at: Date.now(),...(CI_EVENTS.has(parked.event)?{disposition:'not_mirrored'}:{}) }));
       }
-      await env.ARCHIVE.delete(parked.key);
-      await env.ARCHIVE.delete(object.key);
+      await env.ARCHIVE.delete([parked.key,object.key]);
       replayed++;
       return;
     } catch (error) {

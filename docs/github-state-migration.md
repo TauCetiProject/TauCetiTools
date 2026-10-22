@@ -58,11 +58,14 @@ older repository deployment without the private batch RPC falls back to that pat
 
 If replay needs a post-selection service fix, preserve PostgreSQL ownership,
 the source write fence, the original selection deployment and baseline. Record
-the fix-forward deployment separately in the release version chain, verify the
+the fix-forward deployment separately in the operator's release receipt, verify the
 same target generation and bindings before/after deployment, and run the public
 read/client gates against the resulting service. Do not rewrite the source
 identity or original checksums to make the new deployment appear to have
-performed the export. A deployment change before selection still invalidates
+performed the export. The runtime receipt keeps the original `source.deployment`
+and records the current version in `cutover.release.deployment`; retain the
+original selection version and the forward PR/code/version in the operator's
+receipt as well. A deployment change before selection still invalidates
 the frozen generation and follows the ordinary pre-switch recovery procedure.
 
 Before enabling `MIGRATION_ENVIRONMENT=test|production`, deploy the coordinator,

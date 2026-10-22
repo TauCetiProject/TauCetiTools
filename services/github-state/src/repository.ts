@@ -2490,9 +2490,17 @@ export class RepositoryState extends DurableObject<Env> {
         if(this.storageMarkerUnavailable)return json({error:'storage_control_unavailable',parkable:true,request_id},503);
         if(this.ingress===undefined)this.ingress=(await this.env.ARCHIVE.get(controlKey(repo.id)).then(o=>o?.json<any>()))?.mode ?? 'apply';
         if(this.ingress==='parked')return json({error:'ingress_parked',parkable:true,request_id},503);
-        const now=Date.now(),bindings=[...events.values()].flatMap(p=>[p.delivery,'ignored:'+p.event,now]);
-        await this.atomic(async state=>{await state.store.exec('INSERT OR IGNORE INTO deliveries VALUES '+[...events.values()].map(()=>'(?,?,?)').join(','),...bindings);});
-        if(this.store.backend==='sqlite')await this.ctx.storage.sync();
+        if(this.degraded)return json({error:this.degraded.reason==='storage_full'?'storage_full':'storage_control_unavailable',parkable:true,request_id},503);
+        this.applying++;
+        try {
+          const now=Date.now(),rows=[...events.values()];
+          await this.atomic(async state=>{
+            const size=state.store.backend==='sqlite'?33:100;
+            for(let start=0;start<rows.length;start+=size){const batch=rows.slice(start,start+size);await state.store.exec('INSERT OR IGNORE INTO deliveries VALUES '+batch.map(()=>'(?,?,?)').join(','),...batch.flatMap(p=>[p.delivery,'ignored:'+p.event,now]));}
+          });
+          if(this.store.backend==='sqlite')await this.ctx.storage.sync();
+          this.inputFailure=undefined;
+        }finally{this.applying--;}
         return json({committed:[...events.keys()]});
       }
       if (path==='/event') {
