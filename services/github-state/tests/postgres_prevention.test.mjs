@@ -349,3 +349,22 @@ for(const loseResponse of[false,true])pg('historical CI replay batches fenced Po
   assert.equal((await f.store.exec("SELECT COUNT(*) n FROM deliveries WHERE id='wrong-owner'")).one().n,0);
  }finally{await f.close();}
 });
+
+pg('leased admin replay preserves PostgreSQL commit receipts after a lost cleanup acknowledgement',async()=>{
+ const f=await postgresFixture();try{
+  f.env.ARCHIVE=bucket();f.env.INSTALLATIONS={idFromName(){throw Error('replay must not fetch GitHub');}};
+  f.env.REPOSITORIES={idFromName:id=>({toString:()=>id}),get:()=>({fetch:(url,init)=>f.state.fetch(new Request(url,init))})};
+  const pointer={repository:repo.name,delivery:'pg-cleanup-ack',event:'workflow_job',received:Date.now(),key:'webhooks/pg-cleanup-ack'};
+  await f.env.ARCHIVE.put(pointer.key,'{}');await ingress.park(f.env,repo,pointer,'migration');
+  const key=ingress.pointerKey(repo.id,pointer),remove=f.env.ARCHIVE.delete;let lost=true;
+  f.env.ARCHIVE.delete=async keys=>{await remove(keys);if(lost&&[].concat(keys).includes(key)){lost=false;throw Error('lost cleanup acknowledgement');}};
+  const revision=await f.state.revision(),first=await ingress.replayIngress(f.env,repo);
+  assert.equal(first.failed,1);assert.equal(first.superseded,1);assert.equal(first.failed_deliveries[0].delivery,pointer.delivery);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,1);assert.equal(await f.state.revision(),revision);
+  assert.equal(await f.env.ARCHIVE.get(key),null);assert.equal(await f.env.ARCHIVE.get(ingress.bodyKey(repo.id,pointer.delivery)),null);
+  const receipt=f.env.ARCHIVE.objects.get(ingress.receiptKey(repo.id,pointer.delivery)).bytes.toString();
+  assert.equal((await send(f.state,'/event',pointer)).status,200);
+  assert.equal(f.env.ARCHIVE.objects.get(ingress.receiptKey(repo.id,pointer.delivery)).bytes.toString(),receipt);
+  assert.equal((await ingress.replayIngress(f.env,repo)).replayed,0);assert.equal((await f.store.exec('SELECT COUNT(*) n FROM changes')).one().n,0);
+ }finally{await f.close();}
+});

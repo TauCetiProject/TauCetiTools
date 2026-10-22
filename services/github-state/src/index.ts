@@ -1,7 +1,7 @@
 import { Env, EventPointer, matchesETag, Query, Repository, authorize, digest, json, repositories, repository, stub, validSignature, validateQuery, parseGitHub, CI_EVENTS } from './protocol';
 import { blocksRepairs, holdsRetention, readMigration } from './migration';
 import { classify, log, requestId } from './storage';
-import { PARK_AFTER_ATTEMPTS, backlog, backoff, drain, maintainIngress, maintainRaw, release, ingressMode, noteRepositoryFull, park, reconcile, setIngressMode, storageState } from './ingress';
+import { PARK_AFTER_ATTEMPTS, backlog, backoff, replayIngress, maintainIngress, maintainRaw, release, ingressMode, noteRepositoryFull, park, reconcile, setIngressMode, storageState } from './ingress';
 import { prepareQueueMetrics } from './queue_monitoring';
 import { authorizeCompute, boundedText, prepareProvider, saveCompute } from './provider_monitoring';
 import { R2_CLASSES, policy, retirePrefix } from './retention';
@@ -168,7 +168,7 @@ export default {
             const barrier=await forward('/storage/ingress',{mode:input.mode,repository_id:repo.id});
             return json({...mode,repository:await barrier.json()},barrier.status);
           }
-          if (url.pathname==='/admin/ingress/replay' && req.method==='POST') return json(await drain(env,repo,{limit:input.limit,held:input.held===true}));
+          if (url.pathname==='/admin/ingress/replay' && req.method==='POST') return json(await replayIngress(env,repo,{limit:input.limit,held:input.held===true}));
           if (url.pathname==='/admin/ingress/reconcile' && req.method==='POST') return json(await reconcile(env,repo,input,(payload,event)=>targets(env,payload,event)));
         } catch(error) {return json({error:error instanceof Error?error.message.slice(0,200):'invalid_request',request_id},400);}
         return json({error:'not_found'},404);

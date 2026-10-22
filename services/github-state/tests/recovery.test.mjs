@@ -1319,3 +1319,84 @@ test('CI replay survives an old actor and a deadline immediately after batch com
  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,2);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM changes').get().n,0);
  assert.equal(await f.archive.get(ingress.pointerKey(repo.id,pending)),null);
 }));
+
+test('lost cleanup acknowledgements cannot recreate committed CI pointers or replace receipts',async()=>clock(async advance=>{
+ const f=repositoryFixture();await f.ready;
+ const ns={idFromName:()=>({toString:()=>f.state.ctx.id.toString()}),get:()=>({fetch:(url,init)=>f.state.fetch(new Request(url,init))})};f.state.env.REPOSITORIES=ns;
+ const env={ALLOWED_REPOSITORIES:JSON.stringify([repo]),ARCHIVE:f.archive,REPOSITORIES:ns};
+ const p={repository:repo.name,delivery:'cleanup-ack-lost',event:'check_run',received:Date.now(),key:'webhooks/cleanup-ack-lost'};
+ await f.archive.put(p.key,'{}');await ingress.park(env,repo,p,'migration');
+ const key=ingress.pointerKey(repo.id,p),remove=f.archive.delete;let lost=true;
+ f.archive.delete=async keys=>{await remove(keys);if(lost&&[].concat(keys).includes(key)){lost=false;throw Error('lost cleanup acknowledgement');}};
+ const pass=await ingress.drain(env,repo);
+ assert.equal(pass.failed,1);assert.equal(pass.superseded,1);assert.deepEqual(pass.failed_deliveries,[{delivery:p.delivery,event:p.event,received:p.received,reason:'internal'}]);
+ assert.equal(await f.archive.get(key),null);assert.equal(await f.archive.get(ingress.bodyKey(repo.id,p.delivery)),null);
+ const receipt=f.archive.objects.get(ingress.receiptKey(repo.id,p.delivery)).bytes.toString();
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,1);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM changes').get().n,0);
+ advance(10000);
+ assert.equal((await f.state.fetch(new Request('https://internal/event',{method:'POST',body:JSON.stringify(p)}))).status,200);
+ assert.equal(f.archive.objects.get(ingress.receiptKey(repo.id,p.delivery)).bytes.toString(),receipt,'duplicate application must preserve the first durable receipt');
+ assert.equal((await ingress.drain(env,repo)).replayed,0);
+}));
+
+test('stale replay failures cannot shorten a newer retry deadline',async()=>{
+ const h=harness();h.state.full=true;await deliver(h.env,'newer-cooldown');h.state.full=false;
+ const key=parked(h.archive,'newer-cooldown')[0],p=await(await h.archive.get(key)).json(),future=Date.now()+600000,put=h.archive.put;let once=true;
+ h.archive.put=async(k,...args)=>{
+  if(once&&k===ingress.receiptKey(repo.id,p.delivery)){once=false;await put(key,JSON.stringify({...p,replay_failures:4,retry_at:future}));throw Error('R2 put failed');}
+  return put(k,...args);
+ };
+ const result=await ingress.drain(h.env,repo);assert.equal(result.failed,1);assert.equal(result.superseded,1);
+ const saved=await(await h.archive.get(key)).json();assert.equal(saved.replay_failures,4);assert.equal(saved.retry_at,future);
+ assert.equal((await ingress.drain(h.env,repo)).replayed,0);assert.equal(h.state.applied.get(p.delivery),1);
+});
+
+test('manual and cron replay share one conditional lease in either acquisition order',async()=>{
+ for(const first of ['manual','cron']){
+  const h=harness();h.state.full=true;for(const d of ['lease-a','lease-b'])await deliver(h.env,d);h.state.full=false;
+  await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
+  const original=h.env.REPOSITORIES.get();let release,entered,blocked=true,calls=0;
+  const gate=new Promise(r=>release=r),waiting=new Promise(r=>entered=r);
+  h.env.REPOSITORIES.get=()=>({fetch:async(...args)=>{calls++;if(blocked){blocked=false;entered();await gate;}return original.fetch(...args);}});
+  const pending=first==='manual'?ingress.replayIngress(h.env,repo,{limit:1}):ingress.maintainIngress(h.env,repo);
+  await waiting;const before=calls;
+  assert.equal((await ingress.replayIngress(h.env,repo,{limit:1})).stopped,'leased');
+  await ingress.maintainIngress(h.env,repo);assert.equal(calls,before,'a competing owner must not dispatch another application');
+  release();await pending;
+  if(first==='manual')assert.equal((await ingress.replayIngress(h.env,repo,{limit:1})).replayed,1,'manual work can advance a healthy owner between cron ticks');
+  assert.equal(h.state.applied.size,2);assert.ok([...h.state.applied.values()].every(n=>n===1));
+  assert.equal((await(await h.archive.get(ingress.recoveryKey(repo.id))).json()).lease_until,0);
+ }
+});
+
+test('manual replay recovers an unacknowledged lease claim after expiry',async()=>clock(async advance=>{
+ const h=harness();h.state.full=true;await deliver(h.env,'lease-reset');h.state.full=false;
+ const key=ingress.recoveryKey(repo.id),put=h.archive.put;let lost=true;
+ h.archive.put=async(k,...args)=>{const r=await put(k,...args);if(k===key&&lost){lost=false;throw Error('reset after lease persistence');}return r;};
+ await assert.rejects(ingress.replayIngress(h.env,repo),/reset after lease persistence/);
+ assert.equal(h.state.applied.size,0);assert.equal((await ingress.replayIngress(h.env,repo)).stopped,'leased');
+ advance(61000);assert.equal((await ingress.replayIngress(h.env,repo)).replayed,1);assert.equal(h.state.applied.get('lease-reset'),1);
+}));
+
+test('manual replay checkpoints bounded keyset progress and respects recovery backoff',async()=>clock(async advance=>{
+ const h=harness();h.state.full=true;for(let i=0;i<20;i++)await deliver(h.env,'deadline-'+String(i).padStart(2,'0'));h.state.full=false;
+ const original=h.env.REPOSITORIES.get();h.env.REPOSITORIES.get=()=>({fetch:async(...args)=>{advance(3000);return original.fetch(...args);}});
+ const first=await ingress.replayIngress(h.env,repo,{limit:25});assert.equal(first.replayed,10);assert.equal(first.stopped,'deadline');
+ const key=ingress.recoveryKey(repo.id),state=await(await h.archive.get(key)).json();assert.equal(state.pointers_cursor,first.cursor);assert.equal(state.lease_until,0);
+ const second=await ingress.replayIngress(h.env,repo,{limit:25});assert.equal(second.replayed,10);assert.equal(second.remaining,false);assert.equal(h.state.applied.size,20);
+ await h.archive.put(key,JSON.stringify({...state,lease_until:0,last_error:'transport',next_retry:Date.now()+60000}));
+ const deferred=await ingress.replayIngress(h.env,repo);assert.equal(deferred.stopped,'recovery_backoff');assert.equal(deferred.replayed,0);
+}));
+
+test('a replaced manual lease keeps its newer checkpoint after the old pass commits',async()=>{
+ const h=harness();h.state.full=true;await deliver(h.env,'replaced-lease');h.state.full=false;
+ const key=ingress.recoveryKey(repo.id),remove=h.archive.delete;let replaced=false;
+ h.archive.delete=async keys=>{await remove(keys);if(!replaced){replaced=true;const state=await(await h.archive.get(key)).json();await h.archive.put(key,JSON.stringify({...state,replacement:true,lease_until:Date.now()+60000}));}};
+ const pass=await ingress.replayIngress(h.env,repo);assert.equal(pass.replayed,1);assert.equal(pass.stopped,'lease_replaced');
+ assert.equal((await(await h.archive.get(key)).json()).replacement,true);assert.equal(h.state.applied.get('replaced-lease'),1);
+});
+
+test('invalid manual replay limits cannot acquire or delay the owner',async()=>{
+ const h=harness();for(const limit of[0,-1,1.5,101])await assert.rejects(ingress.replayIngress(h.env,repo,{limit}),/invalid_replay_limit/);
+ assert.equal(await h.archive.get(ingress.recoveryKey(repo.id)),null);
+});

@@ -2516,7 +2516,7 @@ export class RepositoryState extends DurableObject<Env> {
             try {
               await this.ingest(pointer);
               if(this.store.backend==='sqlite')await this.ctx.storage.sync();
-              await this.env.ARCHIVE.put(receiptKey(repo.id,pointer.delivery),JSON.stringify({delivery:pointer.delivery,committed_at:Date.now(),disposition:CI_EVENTS.has(pointer.event)?'not_mirrored':'applied'}));
+              await this.env.ARCHIVE.put(receiptKey(repo.id,pointer.delivery),JSON.stringify({delivery:pointer.delivery,committed_at:Date.now(),disposition:CI_EVENTS.has(pointer.event)?'not_mirrored':'applied'}),{onlyIf:{etagDoesNotMatch:'*'}});
             } finally {this.applying--;}
           })();
           this.deliveryFlights.set(pointer.delivery,flight);

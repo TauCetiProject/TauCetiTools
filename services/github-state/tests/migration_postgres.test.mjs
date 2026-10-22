@@ -162,12 +162,11 @@ test('ordinary supervisor restarts a fenced repository, preserves cursors, and r
   await f.state.ingest({key:parked.key,delivery:parked.delivery,event:parked.event,repository:custom.name,received:parked.received});
   const committedRevision=(await f.admin.query(`SELECT value FROM ${f.schema}.meta WHERE key='revision'`)).rows[0].value;
   f.archive.fail((op,key,at)=>op==='delete' && key.includes('/pointers/') && at==='after');
-  await ingress.drain(f.env,custom);
-  const pending=await f.archive.get(pointer.key).then(o=>o.json());
-  assert.ok(pending.retry_at>Date.now());
-  // Simulate the ordinary owner's next pass after its real retry deadline.
-  await f.archive.put(pointer.key,JSON.stringify({...pending,retry_at:0}));
-  await ingress.drain(f.env,custom);
+  const cleanup=await ingress.drain(f.env,custom);
+  assert.equal(cleanup.failed,1);assert.equal(cleanup.superseded,1);
+  assert.equal(await f.archive.get(pointer.key),null,'a lost cleanup acknowledgement must not recreate the deleted pointer');
+  assert.ok(await f.archive.get(ingress.receiptKey(custom.id,parked.delivery)));
+  assert.equal((await ingress.drain(f.env,custom)).replayed,0);
   const revision=(await f.admin.query(`SELECT value FROM ${f.schema}.meta WHERE key='revision'`)).rows[0].value;
   f.archive.fail((op,key)=>op==='get' && key===`control/${custom.id}/migration.json`);
   const cold=await fixture(f.db,f.archive,{...f.env});

@@ -56,6 +56,17 @@ Lost responses and interrupted cleanup reuse delivery receipts. Semantic events
 use the ordinary application path, held retry deadlines remain in force, and an
 older repository deployment without the private batch RPC falls back to that path.
 
+Explicit admin replay shares cron's conditional R2 lease and stored lane cursor.
+Each pass uses a twenty-second work budget, respects pointer and recovery-error
+backoffs, and returns `leased`, `deadline`, or `lease_replaced` when appropriate.
+An expired owner's completion cannot overwrite a replacement checkpoint.
+Permanent delivery receipts use conditional creation. Failed cleanup updates a
+pointer only if its original ETag still matches, so a stale attempt cannot
+recreate an already deleted pointer or shorten a newer retry deadline.
+`failed_deliveries` contains bounded delivery/event/timestamp/reason metadata for
+receipt inspection; it contains no webhook bodies. Treat a lost response as
+unknown progress and repeat through the same leased interface.
+
 If replay needs a post-selection service fix, preserve PostgreSQL ownership,
 the source write fence, the original selection deployment and baseline. Record
 the fix-forward deployment separately in the operator's release receipt, verify the

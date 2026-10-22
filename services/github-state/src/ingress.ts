@@ -89,11 +89,12 @@ export async function release(env: Env, repo: Repository, pointer: EventPointer)
 // Replay bounded concurrent groups, advancing only past visited keys. A
 // pointer is removed only after a committed receipt, including across resets.
 export async function drain(env: Env, repo: Repository, options: { limit?: number; held?: boolean; cursor?: string; deadline?: number } = {}): Promise<any> {
-  if ((await ingressMode(env, repo)).mode === 'parked') return { replayed: 0, stopped: 'parked' };
-  if (Date.now() >= (options.deadline || Infinity)) return {replayed:0,remaining:true,cursor:options.cursor,stopped:'deadline'};
+  if ((await ingressMode(env, repo)).mode === 'parked') return { replayed: 0, failed:0, stopped: 'parked' };
+  if (Date.now() >= (options.deadline || Infinity)) return {replayed:0,failed:0,remaining:true,cursor:options.cursor,stopped:'deadline'};
   const prefix = `parked/${repo.id}/${options.held ? 'held' : 'pointers'}/`;
   const page = await env.ARCHIVE.list({ prefix, limit: Math.min(Math.max(1, options.limit || 25), 100), startAfter: options.cursor });
   let replayed = 0, failed = 0, stopped: string | undefined, last_error: string | undefined, next_retry: number | undefined;
+  let superseded=0;const failed_deliveries:{delivery:string;event:string;received:number;reason:string}[]=[];
   const prepared=new Map<string,Parked|null>(),ciCommitted=new Set<string>();let batchStatus:number|string|null=null;
   // Compact pointers only: never load their webhook bodies into this batch.
   // A crash after SQL commits leaves the pointers replayable and deduplicated.
@@ -134,7 +135,7 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
             throw new Error(reason);
           }
         }
-        await env.ARCHIVE.put(receiptKey(repo.id, parked.delivery), JSON.stringify({ delivery: parked.delivery, committed_at: Date.now(),...(CI_EVENTS.has(parked.event)?{disposition:'not_mirrored'}:{}) }));
+        await env.ARCHIVE.put(receiptKey(repo.id, parked.delivery), JSON.stringify({ delivery: parked.delivery, committed_at: Date.now(),...(CI_EVENTS.has(parked.event)?{disposition:'not_mirrored'}:{}) }),{onlyIf:{etagDoesNotMatch:'*'}});
       }
       await env.ARCHIVE.delete([parked.key,object.key]);
       replayed++;
@@ -148,12 +149,21 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
       log('parked_replay_failed', { repository: repo.name, delivery: parked.delivery, error: reason });
     }
     failed++; last_error = reason;
+    if(/^[a-zA-Z0-9-]{1,100}$/.test(parked.delivery) && /^[a-z_]{1,100}$/.test(parked.event) && Number.isSafeInteger(parked.received))failed_deliveries.push({delivery:parked.delivery,event:parked.event,received:parked.received,reason});
     const failures = (parked.replay_failures || 0) + 1;
     const updated = { ...parked, replay_failures: failures, last_error: reason, last_attempt: started, retry_at: Date.now() + backoff(failures) * 1000 };
     next_retry = Math.min(next_retry || Infinity, updated.retry_at);
     const hold = !options.held && failures >= HOLD_AFTER_FAILURES, target = hold ? pointerKey(repo.id, parked, true) : object.key;
-    await env.ARCHIVE.put(target, JSON.stringify(updated), { customMetadata: { kind: 'parked-pointer', delivery: parked.delivery } });
-    if (hold) await env.ARCHIVE.delete(object.key);
+    // A competing replay may already have removed this pointer or recorded a
+    // newer cooldown. Never recreate it from this request's stale snapshot.
+    const saved=await env.ARCHIVE.put(object.key, JSON.stringify(updated), { customMetadata: { kind: 'parked-pointer', delivery: parked.delivery },onlyIf:{etagMatches:object.etag} });
+    if(!saved){superseded++;return;}
+    if (hold) {
+      // Publish the held copy before removing its normal-lane predecessor.
+      // An existing held copy retains its newer retry state.
+      await env.ARCHIVE.put(target,JSON.stringify(updated),{customMetadata:{kind:'parked-pointer',delivery:parked.delivery},onlyIf:{etagDoesNotMatch:'*'}});
+      await env.ARCHIVE.delete(object.key);
+    }
   };
   let visited = 0;
   for (let i = 0; i < page.objects.length && Date.now() < (options.deadline || Infinity); i += REPLAY_GROUP) {
@@ -163,7 +173,7 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
     visited += group.length;
   }
   if(!stopped && visited<page.objects.length)stopped='deadline';
-  return { replayed, failed, batched:ciCommitted.size, batch_status:batchStatus, last_error, next_retry, cursor: visited < page.objects.length || page.truncated ? (page.objects[visited-1]?.key || options.cursor) : undefined, remaining: Boolean(stopped) || page.truncated || replayed < page.objects.length, ...(stopped ? { stopped } : {}) };
+  return { replayed, failed, superseded, failed_deliveries, batched:ciCommitted.size, batch_status:batchStatus, last_error, next_retry, cursor: visited < page.objects.length || page.truncated ? (page.objects[visited-1]?.key || options.cursor) : undefined, remaining: Boolean(stopped) || page.truncated || replayed < page.objects.length, ...(stopped ? { stopped } : {}) };
 }
 
 // Status is a fixed number of R2 reads. Counts are bounded observations, not
@@ -286,15 +296,54 @@ export async function maintainRaw(env: Env, targets: (payload: any, event: strin
   if(completed && !state.last_error) await env.ARCHIVE.put('control/retention/raw_webhooks.json',JSON.stringify({at:Date.now(),after:state.after,examined,deleted,bytes,completed:state.last_completed ?? null,recovery_owned:true}));
 }
 
+async function claimReplay(env:Env,repo:Repository,manual=false):Promise<{key:string;state:any;began:number;etag?:string;stopped?:string;next_retry?:number}> {
+  const key = recoveryKey(repo.id), object = await env.ARCHIVE.get(key);
+  const state: any = object ? await object.json() : {};
+  const began=Date.now();
+  if ((state.lease_until || 0)>began)return {key,state,began,stopped:'leased',next_retry:state.lease_until};
+  // Explicit admin work may advance a healthy owner between cron ticks. Real
+  // recovery failures and each pointer's own retry deadline remain binding.
+  if((state.next_retry || 0)>began && (!manual || state.last_error))return {key,state,began,stopped:'recovery_backoff',next_retry:state.next_retry};
+  const claimed = await env.ARCHIVE.put(key, JSON.stringify({ ...state, last_attempt: began, lease_until: began + 60000 }), { onlyIf: object ? { etagMatches: object.etag } : { etagDoesNotMatch: '*' } });
+  return {key,state,began,...(claimed?{etag:claimed.etag}:{stopped:'leased',next_retry:began+5000})};
+}
+async function prepareBacklog(env:Env,repo:Repository,state:any):Promise<void> {
+  const counts:any = {};
+  for (const lane of ['pointers', 'held']) {
+    const prefix = `parked/${repo.id}/${lane}/`, page = await env.ARCHIVE.list({ prefix, limit: 1000 });
+    counts[lane === 'pointers' ? 'parked' : 'held'] = { count: page.objects.length, truncated: page.truncated, oldest_received: page.objects.length ? Number(page.objects[0].key.slice(prefix.length, prefix.length + 15)) : null };
+  }
+  Object.assign(state,counts);state.prepared_at=Date.now();
+}
+
+// Admin replay participates in the same owner and keyset cursor as cron.
+// Crashes leave at most a short lease; SQL/R2 receipts cover an unrecorded pass.
+export async function replayIngress(env:Env,repo:Repository,options:{limit?:number;held?:boolean}={}):Promise<any> {
+  if(options.limit!==undefined && (!Number.isSafeInteger(options.limit) || options.limit<1 || options.limit>100))throw new Error('invalid_replay_limit');
+  const owner=await claimReplay(env,repo,true),{key,state,began}=owner;
+  if(!owner.etag)return {replayed:0,failed:0,remaining:true,stopped:owner.stopped,next_retry:owner.next_retry};
+  const lane=options.held?'held':'pointers';let pass:any;
+  try {
+    pass=await drain(env,repo,{...options,cursor:state[lane+'_cursor'],deadline:began+20000});
+    state[lane+'_cursor']=pass.cursor;state[lane+'_last_pass']=pass;
+    if(!pass.cursor && !pass.stopped)state[lane+'_pass_completed_at']=Date.now();
+    await prepareBacklog(env,repo,state);
+    state.failures=0;state.last_error=null;state.next_retry=began+30000;
+  }catch(error){
+    state.failures=(state.failures || 0)+1;state.last_error=classify(error);
+    state.next_retry=Date.now()+Math.max(60,backoff(state.failures))*1000;
+    pass={replayed:0,failed:0,...pass,remaining:true,stopped:'recovery_error',last_error:state.last_error,next_retry:state.next_retry};
+  }
+  const saved=await env.ARCHIVE.put(key,JSON.stringify({...state,last_attempt:began,lease_until:0}),{onlyIf:{etagMatches:owner.etag}});
+  return saved?pass:{...pass,remaining:true,stopped:'lease_replaced'};
+}
+
 // One durable, renewable-per-pass owner on the existing cron. A crash leaves a
 // short lease and cursor, not a new poller or an abandoned recovery obligation.
 export async function maintainIngress(env: Env, repo: Repository): Promise<void> {
-  const key = recoveryKey(repo.id), object = await env.ARCHIVE.get(key);
-  const state: any = object ? await object.json() : {};
-  if ((state.lease_until || 0) > Date.now() || (state.next_retry || 0) > Date.now()) return;
-  const began = Date.now(), deadline = began + 20000;
-  const claimed = await env.ARCHIVE.put(key, JSON.stringify({ ...state, last_attempt: began, lease_until: began + 60000 }), { onlyIf: object ? { etagMatches: object.etag } : { etagDoesNotMatch: '*' } });
-  if (!claimed) return;
+  const owner=await claimReplay(env,repo);
+  if(!owner.etag)return;
+  const {key,state,began}=owner,deadline=began+20000;
   try {
     const lanes = state.next_lane === 'held' ? ['held','pointers'] : ['pointers','held'];
     state.next_lane = lanes[1];
@@ -310,19 +359,14 @@ export async function maintainIngress(env: Env, repo: Repository): Promise<void>
     }
     // Prepare bounded counts separately from the traversal cursors so newer
     // valid events remain reachable even when many old items are backing off.
-    const counts:any = {};
-    for (const lane of ['pointers', 'held']) {
-      const prefix = `parked/${repo.id}/${lane}/`, page = await env.ARCHIVE.list({ prefix, limit: 1000 });
-      counts[lane === 'pointers' ? 'parked' : 'held'] = { count: page.objects.length, truncated: page.truncated, oldest_received: page.objects.length ? Number(page.objects[0].key.slice(prefix.length, prefix.length + 15)) : null };
-    }
-    Object.assign(state,counts);state.prepared_at = Date.now();
+    await prepareBacklog(env,repo,state);
     state.failures = 0; state.last_error = null; state.next_retry = began + 30000;
   } catch (error) {
     state.failures = (state.failures || 0) + 1; state.last_error = error instanceof Error ? error.message.slice(0, 200) : classify(error);
     state.next_retry = Date.now() + Math.max(60, backoff(state.failures)) * 1000;
   }
   // Conditional completion cannot overwrite a replacement owner after expiry.
-  await env.ARCHIVE.put(key, JSON.stringify({ ...state, last_attempt: began, lease_until: 0 }), { onlyIf: { etagMatches: claimed.etag } });
+  await env.ARCHIVE.put(key, JSON.stringify({ ...state, last_attempt: began, lease_until: 0 }), { onlyIf: { etagMatches: owner.etag } });
 }
 
 // Queue/DLQ reconciliation: retained raw deliveries without a committed
