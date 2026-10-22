@@ -501,11 +501,14 @@ def mathlib_namespaces(root: pathlib.Path, context: ParsingContext | None = None
 def _namespaces_of(paths: list[pathlib.Path]) -> set[str]:
     names: set[str] = set()
     for path in paths:
-        raw = path.read_text(errors="ignore")
-        if "namespace" not in raw:
-            continue
-        text = strip_comments_and_strings(raw)
-        for match in NAMESPACE.finditer(text):
+        names |= _namespaces_in(path.read_text(errors="ignore"))
+    return names
+
+
+def _namespaces_in(raw: str) -> set[str]:
+    names: set[str] = set()
+    if "namespace" in raw:
+        for match in NAMESPACE.finditer(strip_comments_and_strings(raw)):
             names.update(part for part in match.group(1).split(".") if part != "_root_")
     return names
 
@@ -906,11 +909,7 @@ def _parse_context_chunk(job):
         if kind == "ownership":
             result[digest] = sorted(own_declaration_paths({pathlib.Path("source"): text}))
         else:
-            names = set()
-            if "namespace" in text:
-                for match in NAMESPACE.finditer(strip_comments_and_strings(text)):
-                    names.update(part for part in match.group(1).split(".") if part != "_root_")
-            result[digest] = sorted(names)
+            result[digest] = sorted(_namespaces_in(text))
     return result
 
 

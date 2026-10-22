@@ -723,7 +723,8 @@ the complete cache after parser changes. Unknown or damaged formats fall back to
 baseline comparisons, and the full-lint fallback after ownership changes are always recomputed.
 
 The CI template restores the JSON directory (about 2 MB for TauCeti) with GitHub Actions caching and saves it
-only from the default branch. The reusable PR build restores it before candidate execution and
+only from the default branch, before any library code executes. Cache service failures do not
+block the build. The reusable PR build restores it before candidate execution and
 never publishes it. Treat it as trusted derived data, like a build cache: do not restore
 candidate-produced records or save from an untrusted PR run. Older entries remain useful because
 each source's content hash is checked independently. Removing the flag restores uncached behavior.

@@ -200,6 +200,9 @@ class ParsingContextWorkflowTests(unittest.TestCase):
         step = text[start:].split("\n      - name:", 1)[0]
         self.assertIn("if: github.ref_name == github.event.repository.default_branch", step)
         self.assertIn("uses: actions/cache/save@v4", step)
+        self.assertIn("continue-on-error: true", step)
+        self.assertLess(start, text.index("      - name: Build\n"))
+        self.assertLess(start, text.index("      - name: Environment lint"))
         self.assertIn("hashFiles('scripts/lean_source.py')", step)
         self.assertIn('--context-cache "$RUNNER_TEMP/dot-notation-context/context.json"', text)
 

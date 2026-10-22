@@ -270,6 +270,26 @@ jobs:
           path: ${{ steps.mathlib_ltar_restore.outputs.cache-dir }}/*.ltar
           key: ${{ steps.mathlib_ltar_restore.outputs.cache-primary-key }}
 
+      # Publish only parsing data produced before any TauCeti code executes.
+      - name: Restore dot-notation parsing context
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/dot-notation-context
+          key: dot-notation-context-v1-${{ hashFiles('scripts/lean_source.py') }}-${{ github.sha }}
+          restore-keys: dot-notation-context-v1-${{ hashFiles('scripts/lean_source.py') }}-
+
+      - name: Dot-notation namespace lint (Mathlib type namespaces stay at root)
+        run: python3 scripts/lint-dot-notation.py --context-cache "$RUNNER_TEMP/dot-notation-context/context.json"
+
+      - name: Save main's dot-notation parsing context
+        if: github.ref_name == github.event.repository.default_branch
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/dot-notation-context
+          key: dot-notation-context-v1-${{ hashFiles('scripts/lean_source.py') }}-${{ github.sha }}
+
       # --- Lake artifact-cache restore (dormant until configured) --------------------
       # Restore TauCeti's OWN oleans before building, exactly as pr-build.yml does. Without
       # this, the post-merge run recompiled the whole library from scratch on every push,
@@ -382,23 +402,6 @@ jobs:
         env:
           LAKE_NO_CACHE: "true"
         run: bash scripts/lint-env.sh
-
-      - name: Restore dot-notation parsing context
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ runner.temp }}/dot-notation-context
-          key: dot-notation-context-v1-${{ hashFiles('scripts/lean_source.py') }}-${{ github.sha }}
-          restore-keys: dot-notation-context-v1-${{ hashFiles('scripts/lean_source.py') }}-
-
-      - name: Dot-notation namespace lint (Mathlib type namespaces stay at root)
-        run: python3 scripts/lint-dot-notation.py --context-cache "$RUNNER_TEMP/dot-notation-context/context.json"
-
-      - name: Save main's dot-notation parsing context
-        if: github.ref_name == github.event.repository.default_branch
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ runner.temp }}/dot-notation-context
-          key: dot-notation-context-v1-${{ hashFiles('scripts/lean_source.py') }}-${{ github.sha }}
 
       # Source style lint. The wrapper validates one complete TauCeti/** source list, applies
       # Mathlib's copyright/Authors checks directly (the empty TauCeti.lean root is exempt), and
