@@ -6,7 +6,7 @@ const extension=`
  builds=0;
  async query(q){
   const revision=await this.revision();this.builds++;
-  await this.nextRevision('fixture','changing-input');
+  await this.nextRevision(q.operation==='pr'?'pr':'fixture',q.operation==='pr'?'1':'changing-input');
   return {version:1,repository:q.repository,operation:q.operation,status:'ok',revision,complete:true,coverage:'complete',data:[{build:this.builds}]};
  }
  async fetch(req){
@@ -34,12 +34,9 @@ for(const operation of ['survey','open_prs','open_issues'])test(operation+' disc
   assert.equal(refreshed.status,'ok');assert.equal(refreshed.data[0].build,2,'reuse expires after ten seconds');
   const pr={repository:repository.name,operation:'pr',args:{number:1}};
   const direct=await (await send(stub,'/query',pr)).json();
-  // Production's ordinary reads return the query result; main's stableQuery
-  // rejects a deliberately changing input after three attempts. Both must
-  // avoid the stale survey cache lane.
   const next=await (await send(stub,'/query',pr)).json();
-  if(direct.status==='ok')assert.notDeepEqual(next,direct);
-  else assert.equal(next.status,'unavailable');
+  assert.equal(direct.reason,'concurrent_input');
+  assert.equal(next.reason,'concurrent_input','a real PR edit must never borrow stale discovery data');
   assert.equal(network,0);
  }finally{await mf.dispose();}
 });

@@ -918,18 +918,43 @@ export class RepositoryState extends DurableObject<Env> {
   async unavailable(q:Query,reason:string): Promise<Result> {
     return {version:1,repository:q.repository,operation:q.operation,status:'unavailable',revision:(await this.revision()),complete:false,reason};
   }
+  async changedQuery(q:Query,after:number):Promise<boolean> {
+    const number=q.args?.number,sha=q.args?.sha;
+    let relevant:string,keys=[queryKey(q)],bindings:(string|number)[];
+    if(number!==undefined && ['pr','progress','issue_comments','review_comments','files'].includes(q.operation)) {
+      const parent=String(number);
+      const children=q.operation==='progress'?['issue_comments','review_comments']
+        :q.operation==='pr'?[]:[q.operation];
+      if(q.operation==='progress')keys=['pr','issue_comments','review_comments'].map(operation=>queryKey({...q,operation}));
+      const parts:string[]=[];bindings=[];
+      if(['pr','progress'].includes(q.operation)){
+        parts.push("(c.kind='pr' AND c.id IN (?,?))");bindings.push(parent,queryKey({...q,operation:'pr'}));
+      }
+      if(children.length){parts.push('(c.kind IN ('+children.map(()=>'?').join(',')+') AND r.parent=?)');bindings.push(...children,parent);}
+      relevant=parts.join(' OR ');
+    } else if(q.operation==='statuses' && typeof sha==='string') {
+      relevant="(c.kind='statuses' AND c.id=?) OR (c.kind='status_context' AND r.parent=?)";bindings=[queryKey(q),sha];
+    } else return true; // Other query shapes retain the repository-wide retry.
+    // The retained change log identifies the rows/collection read by this PR.
+    // Unrelated webhooks cannot invalidate its snapshot or force full history
+    // decoding again. Real edits, membership changes and tombstones still retry.
+    return (await this.store.exec(
+      "SELECT 1 FROM changes c LEFT JOIN resources r ON r.kind=c.kind AND r.id=c.id WHERE c.revision>? AND ((c.kind='collection' AND c.id IN ("+keys.map(()=>'?').join(',')+')) OR '+relevant+') LIMIT 1',
+      after,...keys,...bindings,
+    )).toArray().length>0;
+  }
   async stableQuery(q:Query):Promise<Result> {
     if(q.cursor)return this.query(q);
     // Inventories discover candidate work. Repeating a full inventory whenever any
     // webhook advances the repository revision makes a busy repository appear
-    // unavailable. Selected-PR reads retain the exact revision checks below.
+    // unavailable. Selected-PR reads check the revisions of their own inputs.
     if(['survey','open_prs','open_issues'].includes(q.operation))return this.query(q);
     for(let attempt=0;attempt<3;attempt++) {
       const result=await this.query(q);
       const row=(await this.store.exec<any>("SELECT value FROM meta WHERE key='revision'")).toArray()[0];
       const revision=row?JSON.parse(row.value):0;
       this.revisionState.value=Math.max(this.revisionState.value ?? 0,revision);
-      if(result.revision===revision)return result;
+      if(result.revision===revision || !await this.changedQuery(q,result.revision))return result;
     }
     return this.unavailable(q,'concurrent_input');
   }
@@ -2511,7 +2536,7 @@ export class RepositoryState extends DurableObject<Env> {
         const key=queryKey(q)+'|observed:'+Boolean(q.allow_observed)+'|'+(q.cursor || '');
         const cached=this.completedQueries.get(key);
         if (!q.cursor && cached && cached.expires>Date.now() &&
-          (cached.result.revision===(await this.revision()) || ['survey','open_prs','open_issues'].includes(q.operation) && Date.now()-cached.built<10000)) {
+          (cached.result.revision===(await this.revision()) || ['survey','open_prs','open_issues'].includes(q.operation) && Date.now()-cached.built<10000 || !await this.changedQuery(q,cached.result.revision))) {
           requestCoverage=cached.result.coverage || 'unknown';
           this.backgroundDemand(q);
           return json(cached.result,200,{ETag:'"'+cached.result.revision+'"',...headers});
@@ -2524,7 +2549,7 @@ export class RepositoryState extends DurableObject<Env> {
         let result:Result;
         try { result=await pending; }
         finally { if (this.inflightQueries.get(key)===pending) this.inflightQueries.delete(key); }
-        if (!q.cursor && result.status==='ok' && (['survey','open_prs','open_issues'].includes(q.operation) || result.revision===await this.revision())) {
+        if (!q.cursor && result.status==='ok') {
           this.completedQueries.delete(key);
           this.completedQueries.set(key,{result,expires:Date.now()+540000,built:Date.now()});
           while (this.completedQueries.size>16) this.completedQueries.delete(this.completedQueries.keys().next().value!);
