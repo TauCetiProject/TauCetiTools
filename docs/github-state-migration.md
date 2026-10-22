@@ -13,7 +13,12 @@ and final client, cursor, latency and request-rate acceptance remain incomplete;
 the checkpoint is not a release receipt and does not authorize production cutover.
 It preserves the original source identity and baseline, records the reviewed code
 updates separately, and records a hold after external test deployments changed
-the running artifact. Runtime recovery continues with PostgreSQL authoritative.
+the running artifact. Stopping the external operator initially left scheduled
+recovery running under unaccepted code against authoritative PostgreSQL. The
+checkpoint records that interval and the later durable ingress pause, which
+blocks webhook application and parked replay while accepting signed input into
+R2. Interval receipts, cleanup and cleared CI gap markers require accounting
+before adoption or final release; a lower raw-gap count is not delivery proof.
 
 ## Preparation and commands
 

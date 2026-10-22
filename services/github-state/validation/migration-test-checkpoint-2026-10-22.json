@@ -1,10 +1,10 @@
 {
   "version": 1,
-  "recorded_at": "2026-10-22T22:43:08.394Z",
+  "recorded_at": "2026-10-22T22:48:28.106067+00:00",
   "issue": "TauCetiProject/TauCetiWorker#316",
   "environment": "test",
   "generation": "80ecf79d-f811-42c8-9fec-ad41c3727567",
-  "scope": "Verified full import and PostgreSQL selection checkpoint; replay and final release acceptance remain incomplete. Operator replay and external measurements are held after unrecorded external test deployments.",
+  "scope": "Verified full import and PostgreSQL selection checkpoint; replay and final release acceptance remain incomplete. Operator replay and external measurements are held after unadopted external test deployments; webhook application and scheduled parked replay were subsequently paused through a durable ingress barrier.",
   "release_complete": false,
   "production_migration_started": false,
   "phase": "replaying",
@@ -257,7 +257,12 @@
       "max_step_ms": 7975,
       "activity_checked": true
     },
-    "scope": "Canonical raw source/import/target table checks completed before documented obsolete execution-lease/staging normalization and target activation. PostgreSQL has accepted later input; no claim that the live writable store still hashes to the frozen source."
+    "scope": "Canonical raw source/import/target table checks completed before documented obsolete execution-lease/staging normalization and target activation. PostgreSQL has accepted later input; no claim that the live writable store still hashes to the frozen source.",
+    "archive_checkpoint_recheck": {
+      "at": "2026-10-22T22:41:16.803Z",
+      "passed": true,
+      "scope": "Rechecked the original frozen source/import/target canonical checkpoint hashes against retained forward evidence; did not rehash the live writable PostgreSQL tables."
+    }
   },
   "deployments": {
     "original_selection": {
@@ -291,37 +296,72 @@
           "version": "9782ed77-aea9-495d-9f6b-80e771a326f2",
           "created_at": "2026-10-22T22:28:00.024523Z",
           "script_etag": "8600a4ab32f58a07c2e1f8cc49df3edba1c6244e64bc9808c9f5a4974055d598",
-          "nonsecret_binding_contract_equal": true
+          "nonsecret_binding_contract_equal": true,
+          "git_commit_attested_at_initial_inspection": true
         },
         {
           "version": "a4fdf157-db33-4c1a-9dab-807df306554f",
           "created_at": "2026-10-22T22:33:36.93632Z",
           "script_etag": "bba19141b8dfc125d1dd5938e92464a1a82e735ae176582da71e06fb315b9784",
-          "nonsecret_binding_contract_equal": true
+          "nonsecret_binding_contract_equal": true,
+          "git_commit_attested_at_initial_inspection": false,
+          "attestation_status": "No module/commit attestation is available for this intermediate version."
         },
         {
           "version": "5240c4d8-1d60-4690-b4c3-299275b35f3d",
           "created_at": "2026-10-22T22:37:54.403687Z",
           "script_etag": "82e9d6556ca87332ea10e632ceb23bea9621b2fe753ab7600ff4d26a9c7c74d2",
-          "nonsecret_binding_contract_equal": true
+          "nonsecret_binding_contract_equal": true,
+          "git_commit_attested_at_initial_inspection": false
         }
       ],
       "first_external_code_attestation": {
         "version": "9782ed77-aea9-495d-9f6b-80e771a326f2",
         "code": "18db9509b9e9d505a5719d69c0e671818b8b2e7f",
         "module_sha256": "6c91ccedf6b9cb5969636879d128f54e7445cde822a73abd6b475b54ab7e9ad9",
-        "exact_isolated_build_match": true
+        "exact_isolated_build_match": true,
+        "pr": 75,
+        "accepted_into_release_chain": false
       },
       "latest_observed_artifact": {
         "version": "5240c4d8-1d60-4690-b4c3-299275b35f3d",
         "module_sha256": "391c9d569fc7499ba23792ffafbd799f9d32dcc5ec9e5a4435b19771d1eaff2b",
-        "git_commit_attested": false,
-        "scope": "The latest artifact contains additional raw-recovery concurrency changes absent from the first verified external commit. It has not been accepted into the migration release chain."
+        "git_commit_attested": true,
+        "scope": "Initial module inspection found additional raw-recovery concurrency changes absent from 18db950. A later isolated build exactly matched open PR77 head2374bcc. The unmerged code has not been accepted into the release chain.",
+        "candidate_pr": 77,
+        "candidate_commit": "2374bcc5373930f70245add1e1381331ae419c3a",
+        "candidate_pr_state_at_verification": "OPEN",
+        "candidate_exact_module_match": true,
+        "accepted_into_release_chain": false
       },
       "release_binding_still_declares": "7c4661f339b418635536a71d88673f8279008b57",
       "measurements_held": true,
       "adoption_receipt_written": false,
-      "scope": "External code changes are not attributed to the original export or silently accepted as the tested release."
+      "scope": "External code changes are not attributed to the original export or silently accepted as the tested release.",
+      "post_selection_runtime_interval": {
+        "external_versions_first_observed_at": "2026-10-22T22:28:00.024523Z",
+        "application_pause_completed_at": "2026-10-22T22:47:08.296Z",
+        "operator_hold_did_not_stop_runtime_cron": true,
+        "scope": "Before the ingress barrier completed, scheduled replay and queue consumers could mutate authoritative PostgreSQL and input receipts/pointers under the external deployment interval. Per-input executing versions are not proven. The three external versions are not accepted into the release chain; interval deliveries and cleanups require accounting before adoption or final release. This checkpoint does not certify that every raw object or CI gap marker survived that interval."
+      },
+      "durable_ingress_hold": {
+        "at": "2026-10-22T22:47:08.296Z",
+        "mode": "parked",
+        "in_flight": 0,
+        "drained": true,
+        "scope": "Pause webhook applications and scheduled parked replay; keep accepting signed input through durable R2 parking and preserve PostgreSQL authority, stored reads, source fence and all archives/pins. This is not a rollback or a claim that all maintenance SQL has stopped."
+      },
+      "owner_and_retention_observation": {
+        "at": "2026-10-22T22:39:36.118Z",
+        "generation": "80ecf79d-f811-42c8-9fec-ad41c3727567",
+        "phase": "replaying",
+        "target_active": true,
+        "source_fenced": true,
+        "failure": null,
+        "all_seven_pins_present": true,
+        "object_expiry_enabled": false
+      },
+      "raw_recovery_evidence_limit": "PR75 changes CI handling to metadata-only disposition and can clear CI raw-gap markers without replaying deliveries or checking bodies. A lower gap count or completed raw traversal is not delivery-recovery proof. Prior checkpoint overwrites and an unattested intermediate version prevent a continuous no-deletion claim; independent pins/holds, known-input hashes and original archives are retained."
     }
   },
   "input_durability": {
@@ -342,12 +382,26 @@
       "minimum_hold_ms": 8495000,
       "configured_max_retries": 20,
       "actual_queue_retry_attempts_observed": "not asserted; input is parked and acknowledged",
-      "scope": "Measured retention exceeded the configured normal retry horizon; this does not claim twenty actual retry attempts or continuously empty queues."
+      "scope": "Measured retention exceeded the configured normal retry horizon; this does not claim twenty actual retry attempts or continuously empty queues.",
+      "delivery": "s2-freeze-probe-80ecf79d-f811-42c8-9fec-ad41c3727567",
+      "received_at_ms": 1792631487089,
+      "observed_at": "2026-10-22T03:35:30.179Z",
+      "retry_configuration": {
+        "code": "2fa9b421d1846bc281151b748553b0ba95d4c788",
+        "function": "services/github-state/src/ingress.ts:backoff",
+        "rule": "min(600, 5 * 2^min(attempt-1,8)) seconds; 20 configured retries from the deployed owned queue consumer",
+        "scope": "Configured delay sum, not observed actual retry attempts"
+      }
     },
     "known_replay_diagnostics": {
       "distinct_inputs": 8,
       "commit_and_pointer_cleanup_gate": "required before final test release",
-      "scope": "Known failed delivery IDs supplement full prefix/queue checks; an unknown transport response is not assigned a guessed delivery count."
+      "scope": "Eight known diagnostic inputs remained in the normal lane under recorded retry state at this observation; none were in the held lane. All eight need commit and pointer-cleanup evidence before final release. An unknown transport response is not assigned a guessed delivery count.",
+      "observed_at": "2026-10-22T20:40:47.245Z",
+      "normal_pointers_present": 8,
+      "held_pointers_present": 0,
+      "sql_receipts_present": 7,
+      "permanent_r2_receipts_present": 5
     }
   },
   "backlog_snapshots": [
@@ -356,21 +410,24 @@
       "ended_at": "2026-10-22T18:37:46.890Z",
       "normal": 160356,
       "held": 0,
-      "scope": "Read-only R2 listing across a live replay scan; counts span this traversal and are not a transaction snapshot"
+      "scope": "Read-only R2 listing across a live replay scan; counts span this traversal and are not a transaction snapshot",
+      "deployed_version_during_scan": "cdad5428-80e7-4747-8f29-aad6805ad508"
     },
     {
       "started_at": "2026-10-22T19:27:18.054Z",
       "ended_at": "2026-10-22T19:29:58.730Z",
       "normal": 153541,
       "held": 0,
-      "scope": "Read-only R2 listing across a live replay scan; counts span this traversal and are not a transaction snapshot"
+      "scope": "Read-only R2 listing across a live replay scan; counts span this traversal and are not a transaction snapshot",
+      "deployed_version_during_scan": "cdad5428-80e7-4747-8f29-aad6805ad508"
     },
     {
       "started_at": "2026-10-22T20:59:09.212Z",
       "ended_at": "2026-10-22T21:01:40.258Z",
       "normal": 136776,
       "held": 0,
-      "scope": "Read-only R2 listing across a live replay scan; counts span this traversal and are not a transaction snapshot"
+      "scope": "Read-only R2 listing across a live replay scan; counts span this traversal and are not a transaction snapshot",
+      "deployed_version_during_scan": "cdad5428-80e7-4747-8f29-aad6805ad508"
     }
   ],
   "source_warm_read_baseline": {
@@ -405,7 +462,7 @@
     ],
     "target_acceptance_measured": false,
     "maximum_allowed_p95_ratio": 1.2,
-    "scope": "The single original source cohort uses the existing warmed DTO cache, matching S1. Separate cache-miss diagnostics are not a 20% acceptance claim. No post-target cohort or successful latency claim has been recorded."
+    "scope": "The single original source cohort uses repeated identical public queries with five warmups and the existing DTO cache (S1 benchmark definition in services/github-state/POSTGRES.md). Separate cache-miss diagnostics are not a 20% acceptance claim. No post-target cohort or successful latency claim has been recorded."
   },
   "local_verification": {
     "reviewed_implementation_code": "7c4661f339b418635536a71d88673f8279008b57",
@@ -429,6 +486,11 @@
     "first_external_postgres": {
       "passed": 120,
       "sqlite_only_skipped": 1
+    },
+    "pr69_ci_runs": {
+      "pull_request": "https://github.com/TauCetiProject/TauCetiTools/actions/runs/39817406997",
+      "push": "https://github.com/TauCetiProject/TauCetiTools/actions/runs/39817394567",
+      "main": "https://github.com/TauCetiProject/TauCetiTools/actions/runs/39824038299"
     }
   },
   "retention": {
