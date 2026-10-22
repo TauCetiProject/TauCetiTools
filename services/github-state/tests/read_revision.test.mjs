@@ -8,7 +8,11 @@ const extension=`
  async query(q){
   const revision=await this.revision();this.builds++;
   const number=this.mode==='unrelated'?8:7;
-  if(this.mode==='other_child')await this.put('issue_comments','other-'+this.builds,{id:'other-'+this.builds},Date.now(),false,'8');
+  if(this.mode==='other_child'){
+   const kind=['issue_comments','review_comments','files'].includes(q.operation)?q.operation:'issue_comments';
+   const id=kind==='files'?'8:outside.lean':'other-'+this.builds;
+   await this.put(kind,id,{id,body:String(this.builds)},Date.now(),false,'8');
+  }
   else if(this.mode==='other_sha')await this.put('status_context','other-sha-'+this.builds,{state:'SUCCESS'},Date.now(),false,'${'b'.repeat(40)}');
   else if(this.mode==='fallback')await this.put('pr','pr:{"number":7}',{headRefOid:String(this.builds).padStart(40,'0')},Date.now(),false,'7');
   else if(this.mode==='membership')await this.membership('issue_comments:{"number":7}','new-'+this.builds,true);
@@ -87,6 +91,10 @@ test('real comment reads remain coherent and reusable across unrelated comment u
    if(path==='/fixture/related'){
     this.mode='related';this.completedQueries.clear();return Response.json({ok:true});
    }
+   if(path==='/fixture/edit'){
+    await this.put('issue_comments','42',{id:42,body:'edited'},Date.now(),false,'7');
+    return Response.json({ok:true});
+   }
    return super.fetch(req);
   }
  `});
@@ -97,6 +105,13 @@ test('real comment reads remain coherent and reusable across unrelated comment u
   const first=await (await send(stub,'/query',q)).json();
   assert.equal(first.status,'ok');assert.deepEqual(first.data,[{id:42,body:'stored'}]);
   assert.deepEqual(await (await send(stub,'/query',q)).json(),first);
+  const url='https://state/v1/query?'+new URLSearchParams({repository:repository.name,operation:q.operation,args:JSON.stringify(q.args)});
+  const headers={Authorization:'Bearer client','If-None-Match':'"'+first.revision+'"'};
+  assert.equal((await mf.dispatchFetch(url,{headers})).status,304,'the public endpoint preserves conditional reads despite unrelated revisions');
+  await send(stub,'/fixture/edit',{}); // Keep the old cache entry in place.
+  const updated=await mf.dispatchFetch(url,{headers});assert.equal(updated.status,200);
+  const fresh=await updated.json();assert.deepEqual(fresh.data,[{id:42,body:'edited'}]);
+  assert.ok(fresh.revision>first.revision,'a real edit invalidates the cached result and its ETag');
   await send(stub,'/fixture/related',{});
   assert.equal((await (await send(stub,'/query',q)).json()).reason,'concurrent_input');
  }finally{await mf.dispose();}
