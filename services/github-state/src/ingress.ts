@@ -171,6 +171,9 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
     if (stopped) break;
     const group = page.objects.slice(i,i+REPLAY_GROUP);
     await Promise.all(group.map(object => replay(object).catch(error => { if(!failedKeys.has(object.key)){failed++;failedKeys.add(object.key);} last_error = classify(error); log('pointer_maintenance_failed', { key: object.key, reason: last_error }); })));
+    // A parkable refusal did not attempt this group against a writable store.
+    // Retry it from the preceding checkpoint; committed peers deduplicate.
+    if(stopped)break;
     visited += group.length;
   }
   if(!stopped && visited<page.objects.length)stopped='deadline';

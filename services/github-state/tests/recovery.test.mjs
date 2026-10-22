@@ -1458,3 +1458,15 @@ test('retry maintenance errors count each pointer once and retain uncertain move
   assert.ok(await h.archive.get(p.key));assert.ok(await h.archive.get(key));
  }
 });
+
+test('a parkable refusal rewinds its group so a resumed sweep cannot skip due input',async()=>{
+ const h=harness();h.state.full=true;for(let i=0;i<20;i++)await deliver(h.env,'rewind-'+String(i).padStart(2,'0'));h.state.full=false;
+ const original=h.env.REPOSITORIES.get();let refuse=true;
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{const p=JSON.parse(init.body);if(refuse&&p.delivery==='rewind-10'){refuse=false;return Response.json({error:'database_unavailable',parkable:true},{status:503});}return original.fetch(url,init);}});
+ const first=await ingress.replayIngress(h.env,repo,{limit:25});assert.equal(first.stopped,'database_unavailable');assert.equal(first.replayed,19);assert.equal(first.failed,0);
+ assert.ok(first.cursor.endsWith('-rewind-09.json'),'checkpoint must precede the refused group');
+ let state=await(await h.archive.get(ingress.recoveryKey(repo.id))).json();assert.equal(state.pointers_pass_completed_at,undefined);
+ const next=await ingress.replayIngress(h.env,repo,{limit:25});assert.equal(next.replayed,1);assert.equal(next.remaining,false);
+ state=await(await h.archive.get(ingress.recoveryKey(repo.id))).json();assert.ok(state.pointers_pass_completed_at>=state.pointers_pass_started_at);
+ assert.equal(h.state.applied.size,20);assert.ok([...h.state.applied.values()].every(n=>n===1));
+});

@@ -70,7 +70,10 @@ timestamp/reason metadata with `retry_scheduled`, `held`, `superseded` or
 separately from failures. These error arrays are excluded from newly stored pass summaries and are
 filtered from health and observation responses, including older summaries. Successful manual work does not postpone cron. A completed held sweep only
 unblocks reconciliation when that sweep started after target selection; a saved
-pre-selection cursor cannot provide that evidence. Treat a lost response as
+pre-selection cursor cannot provide that evidence. A parkable refusal retains
+the checkpoint before its group. Future retry deadlines remain binding; a sweep
+visits deferred input without treating it as applied, and held input still blocks
+final migration completion. Treat a lost response as
 unknown progress and repeat through the same leased interface.
 
 If replay needs a post-selection service fix, preserve PostgreSQL ownership,
