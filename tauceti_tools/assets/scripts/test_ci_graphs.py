@@ -99,6 +99,15 @@ class MergeQueueChartsTest(unittest.TestCase):
                 self.assertIn("leanfro", svg)
                 self.assertNotIn("tauchonki", svg)
 
+    def test_archived_runner_name_identifies_jobs_without_permanent_labels(self):
+        self.build(1, "pr", kind="self-hosted", labels=["self-hosted", "tauceti-fleet"])
+        self.db.execute("ALTER TABLE jobs ADD COLUMN runner_name TEXT")
+        self.db.execute("UPDATE jobs SET runner_name='fleet-11e2756fc110-0123456789abcdef'")
+        m = self.metrics()
+        self.assertEqual(m["picker"]["2026-10-06"], [0, 0, 0, 1, 0])
+        self.assertEqual(m["minutes"]["2026-10-06"]["leanfro"], 10)
+        self.assertEqual(self.db.execute("SELECT runner_kind FROM jobs").fetchone()[0], "self-hosted")
+
     def test_named_fleet_jobs_contribute_to_running_and_queued_series(self):
         self.build(1, "pr", kind="self-hosted", labels=["fleet-4fab2fed9a5145f894d066c7bb28ace4"])
         self.build(2, "bors_staging", kind="self-hosted", labels=["fleet-11e2756fc11042d798f759410573a935"])

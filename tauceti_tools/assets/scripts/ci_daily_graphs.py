@@ -29,7 +29,7 @@ import math
 import sqlite3
 from collections import defaultdict
 
-from ci_runners import RUNNERS, LABELS, reporting_kind
+from ci_runners import RUNNERS, LABELS, reporting_kind, runner_name_sql
 from chart_style import MUTED, PALETTE, TEXT, base_css, card_rect, css_px, svg_unit
 
 UTC = dt.timezone.utc
@@ -105,13 +105,13 @@ def metrics(db: sqlite3.Connection, first: str, last: str, other_jobs_until=None
     # PR builds and both main-branch merge engines, excluding manual dispatches.
     builds = db.execute(f"""
         SELECT substr(j.created_at, 1, 10), r.trigger, j.runner_kind, j.conclusion, j.wait_s, j.run_s,
-               j.failure_class, j.job_id, r.run_id, j.labels
+               j.failure_class, j.job_id, r.run_id, j.labels, {runner_name_sql(db)}
         FROM jobs j JOIN runs r USING (repo, run_id)
         WHERE r.repo = 'TauCeti' AND r.workflow = '{PR_BUILD}' AND j.name = '{BUILD}'
           AND r.trigger IN ('pr', 'merge_queue', 'bors_staging') AND j.runner_kind IN ('github', 'namespace', 'self-hosted', 'eastanglia', 'leanfro')
           AND j.created_at BETWEEN ? AND ?""", (lo, hi)).fetchall()
 
-    builds = [(*row[:2], reporting_kind(row[2], row[-1]), *row[3:-1]) for row in builds]
+    builds = [(*row[:2], reporting_kind(row[2], row[-2], row[-1]), *row[3:-2]) for row in builds]
 
     def where(trigger, kind):
         return "merge validation" if trigger in MERGE_TRIGGERS else f"PR, {LABELS[kind]}"
@@ -195,12 +195,12 @@ def metrics(db: sqlite3.Connection, first: str, last: str, other_jobs_until=None
     # Build minutes (the build jobs of the build workflows, all recorded in full), by the day the
     # job started.
     minutes = defaultdict(lambda: defaultdict(float))
-    for day, kind, trigger, concl, run_s, labels in db.execute("""
-            SELECT substr(j.started_at, 1, 10), j.runner_kind, r.trigger, j.conclusion, j.run_s, j.labels
+    for day, kind, trigger, concl, run_s, labels, runner_name in db.execute(f"""
+            SELECT substr(j.started_at, 1, 10), j.runner_kind, r.trigger, j.conclusion, j.run_s, j.labels, {runner_name_sql(db)}
             FROM jobs j JOIN runs r USING (repo, run_id)
             WHERE r.repo = 'TauCeti' AND j.name IN ('sandboxed-build', 'verify', 'build', 'performance-gate')
               AND j.run_s IS NOT NULL AND j.started_at BETWEEN ? AND ?""", (lo, hi)):
-        kind = reporting_kind(kind, labels)
+        kind = reporting_kind(kind, labels, runner_name)
         if kind in RUNNERS:
             minutes[day]["GitHub-hosted" if kind == "github" else LABELS[kind]] += run_s / 60
         if trigger == "pr" and concl == "cancelled":

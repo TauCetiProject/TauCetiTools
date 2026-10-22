@@ -49,7 +49,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ci_daily_graphs  # noqa: E402
-from ci_runners import RUNNERS, LABELS, reporting_kind  # noqa: E402
+from ci_runners import RUNNERS, LABELS, reporting_kind, runner_name_sql  # noqa: E402
 from chart_style import AXIS, BG, MUTED, PANEL, PALETTE, TEXT, base_css, card_rect, css_px, svg_unit  # noqa: E402
 
 UTC = dt.timezone.utc
@@ -120,15 +120,15 @@ def load_jobs(db: sqlite3.Connection, since: float, until: float) -> list[dict]:
         counts[(workflow, day)] = (total, fetched or 0)
 
     out = []
-    for name, created, started, completed, kind, labels, trigger, workflow, run_created in db.execute("""
-            SELECT j.name, j.created_at, j.started_at, j.completed_at, j.runner_kind, j.labels, r.trigger, r.workflow,
+    for name, created, started, completed, kind, labels, runner_name, trigger, workflow, run_created in db.execute(f"""
+            SELECT j.name, j.created_at, j.started_at, j.completed_at, j.runner_kind, j.labels, {runner_name_sql(db)}, r.trigger, r.workflow,
                    r.created_at
             FROM jobs j JOIN runs r USING (repo, run_id)
             WHERE j.created_at BETWEEN ? AND ? AND j.runner_kind IN ('github', 'namespace', 'self-hosted', 'eastanglia', 'leanfro')
               AND (j.completed_at IS NULL OR j.completed_at >= ?)""", (lo, hi, iso(since))):
         if not created:
             continue
-        kind = reporting_kind(kind, labels)
+        kind = reporting_kind(kind, labels, runner_name)
         key, wait_series = classify(name, kind, trigger)
         total, fetched = counts.get((workflow, run_created[:13]), (1, 1))
         out.append({

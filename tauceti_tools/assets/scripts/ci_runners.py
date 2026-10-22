@@ -27,3 +27,8 @@ def reporting_kind(kind, labels, runner_name=""):
     names |= {alias for identity, alias in FLEET_NAMES.items()
               if re.fullmatch(r"fleet-" + identity[:12] + r"-[a-f0-9]{16}", runner_name or "")}
     return next(iter(names)) if len(names) == 1 else kind
+
+
+def runner_name_sql(db):
+    """Older downloadable archives predate runner-name retention."""
+    return "j.runner_name" if any(row[1] == "runner_name" for row in db.execute("PRAGMA table_info(jobs)")) else "NULL"
