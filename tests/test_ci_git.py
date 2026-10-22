@@ -60,6 +60,36 @@ class CiGitTests(unittest.TestCase):
         self.git("reset", "--hard", self.base)
         self.assertEqual(result["base_sha"], self.tip)
 
+    def test_lint_metadata_uses_the_exact_local_graph(self):
+        result = ci_git.lint_metadata(self.repo, self.tip, self.head)
+        self.assertEqual(result, {"merge_base_commit": {"sha": self.base},
+                                 "total_commits": 1,
+                                 "commits": [{"commit": {"message": "head"}}]})
+        self.git("checkout", "--quiet", "feature")
+        (self.repo / "next").write_text("another change\n")
+        next_head = self.commit("another change (#7)\ncontinued paragraph (#8)\n\nbody")
+        self.assertEqual(ci_git.lint_metadata(self.repo, self.base, next_head)["commits"],
+                         [{"commit": {"message": "another change (#7)"}},
+                          {"commit": {"message": "head"}}])
+
+    def test_lint_metadata_rejects_unavailable_history(self):
+        with self.assertRaises((ValueError, subprocess.CalledProcessError)):
+            ci_git.lint_metadata(self.repo, "f" * 40, self.head)
+        self.git("checkout", "--quiet", "--orphan", "unrelated")
+        unrelated = self.commit("unrelated root")
+        with self.assertRaises(subprocess.CalledProcessError):
+            ci_git.lint_metadata(self.repo, unrelated, self.head)
+
+    def test_lint_metadata_accepts_non_utf8_commit_text(self):
+        command = ["git", "-C", str(self.repo)]
+        commit = subprocess.check_output(command + ["cat-file", "commit", self.head])
+        content = commit.split(b"\n\n", 1)[0] + b"\n\nchange \xff (#7)\n"
+        head = subprocess.check_output(command + ["hash-object", "-t", "commit", "-w", "--stdin"],
+                                       input=content).decode().strip()
+        metadata = ci_git.lint_metadata(self.repo, self.base, head)
+        self.assertEqual(metadata["total_commits"], 1)
+        self.assertTrue(metadata["commits"][0]["commit"]["message"].endswith(" (#7)"))
+
     def test_staging_exact_sha_and_ancestor(self):
         self.assertEqual(self.resolve(base_ref=self.base, staging_ref="staging/ci/batch-1"),
                          dict(base_sha=self.base, mergebase=self.base, staging_sha=self.head))
@@ -104,6 +134,7 @@ class CiGitTests(unittest.TestCase):
 
     def test_tree_entry_ignores_candidate_config_replacements_and_environment(self):
         original = ci_git.tree_entry(self.repo, self.head, "lean-toolchain")
+        metadata = ci_git.lint_metadata(self.repo, self.tip, self.head)
         self.git("replace", self.head, self.tip)
         marker = self.root / "hook-ran"
         hook = self.repo / ".git/hooks/post-checkout"
@@ -116,6 +147,7 @@ class CiGitTests(unittest.TestCase):
                                      "GIT_OBJECT_DIRECTORY": "/bad", "GIT_CONFIG_COUNT": "1",
                                      "GIT_CONFIG_KEY_0": "alias.ls-tree", "GIT_CONFIG_VALUE_0": "!exit 42"}):
             self.assertEqual(ci_git.tree_entry(self.repo, self.head, "lean-toolchain"), original)
+            self.assertEqual(ci_git.lint_metadata(self.repo, self.tip, self.head), metadata)
         self.assertTrue(original.startswith("100644 blob "))
         self.assertFalse(marker.exists())
 

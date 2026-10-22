@@ -107,7 +107,11 @@ class LintScopeTest(unittest.TestCase):
                 if entry["status"] == "renamed":
                     (checkout / entry.get("previous_filename", f"TauCeti/OldName{index}.lean")).unlink()
             git("add", ".")
-            git("commit", "-qm", "head", "--allow-empty")
+            metadata = next((value for key, value in responses.items() if "/compare/" in key), {})
+            messages = [c["commit"]["message"] for c in metadata.get("commits", [])] or ["head"]
+            git("commit", "-qm", messages[0], "--allow-empty")
+            for message in messages[1:]:
+                git("commit", "-qm", message, "--allow-empty")
             head = git("rev-parse", "HEAD")
             # Snapshot endpoints before any simulated force-push/base movement.
             responses = {key.replace(SHA_A, base).replace(SHA_B, head):
@@ -149,6 +153,7 @@ class LintScopeTest(unittest.TestCase):
                           .replace("${{ github.event_name }}", event)
                           .replace("${{ github.event.action }}", "tauceti-bors-staging" if event == "repository_dispatch" else "")
                           .replace("${{ github.repository }}", "o/r")
+                          .replace("${{ inputs.lean_root }}", "TauCeti")
                           .replace("${{ steps.pr.outputs.num }}", "12"))
                 (d / "gate").symlink_to(ROOT, target_is_directory=True)
                 (d / "pr").symlink_to(checkout, target_is_directory=True)
@@ -253,9 +258,14 @@ class LintScopeTest(unittest.TestCase):
                         "total_commits": 1}}))
 
     def test_pull_request_without_commits_lints_everything(self):
-        for missing in ("BASE", "HEAD", "HEAD_REPO"):
+        for missing in ("BASE", "HEAD"):
             with self.subTest(missing=missing):
                 self.assertIsNone(self.run_scope(dict(self.PR_ENV, **{missing: ""}), {}))
+
+    def test_pull_request_needs_no_remote_head_repository_for_local_scope(self):
+        self.assertEqual(self.run_scope(dict(self.PR_ENV, HEAD_REPO=""),
+            {self.PR_COMPARE: {"files": [f("added", "TauCeti/A.lean")]},
+             "repos/o/r/pulls/12": pr()}), ["TauCeti.A"])
 
     def test_more_than_300_files_use_the_complete_local_diff(self):
         files = [f("added", f"TauCeti/M{i}.lean") for i in range(350)]
@@ -307,16 +317,17 @@ class LintScopeTest(unittest.TestCase):
                         {"EVENT": event, "BASE": SHA_A, "HEAD": SHA_B},
                         {f"repos/o/r/compare/{SHA_A}...{SHA_B}": compare}))
 
-    def test_truncated_or_missing_batch_commit_count_lints_everything(self):
+    def test_stale_rest_batch_metadata_cannot_override_local_history(self):
         for event in self.BATCH_EVENTS:
             for count in (None, 251):
                 with self.subTest(event=event, count=count):
                     compare = {"total_commits": count,
                                "commits": [{"commit": {"message": "feat: x (#7)"}}],
                                "files": [f("modified", "TauCeti/X.lean")]}
-                    self.assertIsNone(self.run_scope(
+                    self.assertEqual(self.run_scope(
                         {"EVENT": event, "BASE": SHA_A, "HEAD": SHA_B},
-                        {f"repos/o/r/compare/{SHA_A}...{SHA_B}": compare}))
+                        {f"repos/o/r/compare/{SHA_A}...{SHA_B}": compare,
+                         "repos/o/r/pulls/7": pr()}), ["TauCeti.X"])
 
     def test_batch_compare_cap_does_not_limit_local_files(self):
         compare = {"total_commits": 1, "commits": [{"commit": {"message": "feat: x (#7)"}}],
@@ -330,17 +341,20 @@ class LintScopeTest(unittest.TestCase):
                     files=[f("added", f"TauCeti/M{i}.lean") for i in range(350)]),
                                  sorted(f"TauCeti.M{i}" for i in range(350)))
 
-    def test_compare_api_failure_lints_everything(self):
-        # Reproduce the bors failure: GitHub can reject compare metadata before the
-        # complete local diff is read. An API outage must widen scope, not abort CI.
-        error = {"_error": "gh: too many files changed (HTTP 422)"}
+    def test_compare_quota_failure_keeps_the_complete_local_scope(self):
+        # Production batch 1584 widened to whole-library lint after REST quota
+        # exhaustion, despite already having both exact commits locally.
+        error = {"_error": "gh: API rate limit exceeded (HTTP 403)",
+                 "commits": [{"commit": {"message": "change (#12)"}}]}
         for event in ("pull_request_target", "workflow_dispatch", *self.BATCH_EVENTS):
             with self.subTest(event=event):
                 env = dict(self.PR_ENV, EVENT=event)
                 endpoint = (self.PR_COMPARE if event not in self.BATCH_EVENTS else
                             f"repos/o/r/compare/{SHA_A}...{SHA_B}")
-                self.assertIsNone(self.run_scope(
-                    env, {endpoint: error}, files=[f("added", "TauCeti/A.lean")]))
+                self.assertEqual(self.run_scope(
+                    env, {endpoint: error, "repos/o/r/pulls/12": pr()},
+                    files=[f("added", "TauCeti/A.lean")]), ["TauCeti.A"])
+                self.assertFalse(any("/compare/" in call[1] for call in self.last_calls))
 
     def test_unavailable_pr_lint_policy_lints_everything(self):
         # Without label/branch metadata we cannot rule out a full-lint request.
@@ -425,13 +439,14 @@ class LintScopeTest(unittest.TestCase):
     def test_missing_objects_or_merge_base_fall_back_to_full_lint(self):
         for problem in ("missing-checkout", "missing-object", "missing-merge-base"):
             def break_diff(checkout, git, base, head, env, responses):
-                compare = next(v for k, v in responses.items() if "/compare/" in k)
                 if problem == "missing-checkout":
                     env["SCOPE_REPO"] = str(checkout / "absent")
                 elif problem == "missing-object":
-                    compare["merge_base_commit"]["sha"] = "0" * 40
+                    env["HEAD"] = "0" * 40
                 else:
-                    compare.pop("merge_base_commit")
+                    git("checkout", "--orphan", "unrelated")
+                    git("commit", "-qm", "unrelated root", "--allow-empty")
+                    env["BASE"] = git("rev-parse", "HEAD")
             with self.subTest(problem=problem):
                 self.assertIsNone(self.run_scope(self.PR_ENV,
                     {self.PR_COMPARE: {"files": []}, "repos/o/r/pulls/12": pr()},
