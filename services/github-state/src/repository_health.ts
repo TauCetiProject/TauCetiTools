@@ -1,4 +1,4 @@
-import { RepositoryStore, Statement } from './repository_store';
+import { RepositoryStore, Statement, collectionJoin } from './repository_store';
 import { queryKey } from './protocol';
 import { SURVEY_CONTRACT, SURVEY_INDEX_VERSION } from './survey';
 
@@ -8,7 +8,7 @@ export async function repositoryHealth(store:RepositoryStore):Promise<Record<str
   const now=Date.now();
   const statements:Record<string,Statement>={
     meta:{sql:"SELECT key,value FROM meta WHERE key IN ('repository','revision','bootstrap_inventory','last_webhook','webhook_apply_ms','last_repair','last_upstream_failure','latest_applied_input')"},
-    survey:{sql:"SELECT COUNT(*) open_prs,SUM(h.contract=?) hydrated,SUM(s.number IS NOT NULL) materialized FROM members m JOIN resources r ON r.kind='pr' AND r.id=m.id LEFT JOIN survey_hydrated h ON h.number=r.id LEFT JOIN survey_state s ON s.number=r.id WHERE m.collection=? AND r.tombstone=0",bindings:[SURVEY_INDEX_VERSION,queryKey({operation:'open_prs'})]},
+    survey:{sql:`SELECT COUNT(*) open_prs,SUM(h.contract=?) hydrated,SUM(s.number IS NOT NULL) materialized FROM members m ${collectionJoin(store)} resources r ON r.kind='pr' AND r.id=m.id LEFT JOIN survey_hydrated h ON h.number=r.id LEFT JOIN survey_state s ON s.number=r.id WHERE m.collection=? AND r.tombstone=0`,bindings:[SURVEY_INDEX_VERSION,queryKey({operation:'open_prs'})]},
     failures:{sql:'SELECT COUNT(*) n FROM survey_hydration_failures'},
     coverage:{sql:'SELECT operation,COUNT(*) resources,SUM(complete) complete,MIN(verified) oldest_verified FROM collections GROUP BY operation'},
     jobs:{sql:'SELECT COUNT(*) total,SUM(due<=?) due,MIN(started) oldest_started FROM jobs',bindings:[now]},

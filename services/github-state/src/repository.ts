@@ -1,4 +1,4 @@
-import { RepositoryStore, SQLiteStore, PostgresStore, ReadCacheStore, BufferedStore, SerialLane, columns } from './repository_store';
+import { RepositoryStore, SQLiteStore, PostgresStore, ReadCacheStore, BufferedStore, SerialLane, columns, collectionJoin } from './repository_store';
 import { repositoryHealth } from './repository_health';
 import { DurableObject } from 'cloudflare:workers';
 import { Env, EventPointer, matchesETag, Query, Result, digest, json, queryKey, repository, stub, validateQuery, parseGitHub, CI_EVENTS, NOT_MIRRORED, stagingStateKey, stagedPageKey } from './protocol';
@@ -628,7 +628,7 @@ export class RepositoryState extends DurableObject<Env> {
     if(!inventoryComplete) {await this.optionalAsync('enqueue',async ()=>(await this.enqueue(inventory,5)));return null;}
     // Scan compact local metadata, then add statuses only for the selected
     // roadmap. Descriptions and unrelated comment histories stay in storage.
-    const rows=await this.scanRows(`SELECT COALESCE(s.data,r.data) data FROM members m ${this.collectionJoin()} resources r ON r.kind='pr' AND r.id=m.id LEFT JOIN survey_inventory s ON s.number=r.id WHERE m.collection=? AND r.tombstone=0 ORDER BY CAST(r.id AS INTEGER),r.id`,queryKey(inventory));
+    const rows=await this.scanRows(`SELECT COALESCE(s.data,r.data) data FROM members m ${collectionJoin(this.store)} resources r ON r.kind='pr' AND r.id=m.id LEFT JOIN survey_inventory s ON s.number=r.id WHERE m.collection=? AND r.tombstone=0 ORDER BY CAST(r.id AS INTEGER),r.id`,queryKey(inventory));
     const scope=String(q.args?.roadmap || 'any'),skip=String(q.args?.skip || '').split(',').filter(Boolean),out=[];
     const author_counts:Record<string,number>={},stages=new Set(String(q.args?.stages ?? 'review,fix,rebase').split(','));
     const decoded=[];for(const storedRow of rows)decoded.push(compactPR(await this.decode(storedRow.data)));
@@ -665,7 +665,7 @@ export class RepositoryState extends DurableObject<Env> {
     return {rows:out,author_counts};
   }
   async surveyHealth(): Promise<any> {
-    const counts=(await this.store.exec<any>(`SELECT COUNT(*) open_prs,SUM(h.contract=?) hydrated,SUM(s.number IS NOT NULL) materialized FROM members m ${this.collectionJoin()} resources r ON r.kind='pr' AND r.id=m.id LEFT JOIN survey_hydrated h ON h.number=r.id LEFT JOIN survey_state s ON s.number=r.id WHERE m.collection=? AND r.tombstone=0`,SURVEY_INDEX_VERSION,queryKey({operation:'open_prs'}))).one();
+    const counts=(await this.store.exec<any>(`SELECT COUNT(*) open_prs,SUM(h.contract=?) hydrated,SUM(s.number IS NOT NULL) materialized FROM members m ${collectionJoin(this.store)} resources r ON r.kind='pr' AND r.id=m.id LEFT JOIN survey_hydrated h ON h.number=r.id LEFT JOIN survey_state s ON s.number=r.id WHERE m.collection=? AND r.tombstone=0`,SURVEY_INDEX_VERSION,queryKey({operation:'open_prs'}))).one();
     const failures=(await this.store.exec<any>('SELECT COUNT(*) n FROM survey_hydration_failures')).one().n;
     return {contract:SURVEY_CONTRACT,...counts,failures};
   }
@@ -880,11 +880,6 @@ export class RepositoryState extends DurableObject<Env> {
     ]);
   }
 
-  // SQLite otherwise prefers the kind prefix of resource_parent and walks
-  // every comment/file of that kind before checking collection membership.
-  // Its CROSS JOIN fixes loop order: narrow indexed members first, then PK
-  // resource lookups. Keep ordinary joins for PostgreSQL's statistics planner.
-  collectionJoin():string {return this.store.backend==='sqlite'?'CROSS JOIN':'JOIN';}
   kind(q:Query): string { return ['open_prs','recent_prs','pr','pr_delta'].includes(q.operation)?'pr':['open_issues','recent_issues','issue_delta'].includes(q.operation)?'issue':q.operation; }
   async rows(q:Query): Promise<any[] | any | null> {
     const key=queryKey(q), collection=(await this.store.exec<any>('SELECT * FROM collections WHERE key=? AND complete=1',key)).toArray()[0];
@@ -905,7 +900,7 @@ export class RepositoryState extends DurableObject<Env> {
       }
       return [...contexts.values()];
     }
-    const members=await this.scanRows(`SELECT r.data FROM members m ${this.collectionJoin()} resources r ON r.kind=? AND r.id=m.id WHERE m.collection=? AND r.tombstone=0 ORDER BY CAST(r.id AS INTEGER),r.id`,this.kind(q),key);
+    const members=await this.scanRows(`SELECT r.data FROM members m ${collectionJoin(this.store)} resources r ON r.kind=? AND r.id=m.id WHERE m.collection=? AND r.tombstone=0 ORDER BY CAST(r.id AS INTEGER),r.id`,this.kind(q),key);
     const rows=[];
     if(q.operation==='open_prs')await this.primeRelated([],members.map(r=>JSON.parse(r.data).headRefOid).filter(Boolean));
     for await(const data of this.decodeRows(members)) {
@@ -1036,7 +1031,7 @@ export class RepositoryState extends DurableObject<Env> {
     let observed:number | undefined,verified:number | undefined;
     for (const source of sources as {key:string,kind:string,id?:string}[]) {
       const at=source.id?(await this.store.exec<any>('SELECT observed at FROM resources WHERE kind=? AND id=?',source.kind,source.id)).toArray()[0]?.at
-        :(await this.store.exec<any>(`SELECT MAX(r.observed) at FROM members m ${this.collectionJoin()} resources r ON r.kind=? AND r.id=m.id WHERE m.collection=?`,source.kind,source.key)).one().at;
+        :(await this.store.exec<any>(`SELECT MAX(r.observed) at FROM members m ${collectionJoin(this.store)} resources r ON r.kind=? AND r.id=m.id WHERE m.collection=?`,source.kind,source.key)).one().at;
       const checked=(await this.store.exec<any>('SELECT verified FROM collections WHERE key=?',source.key)).toArray()[0]?.verified;
       if (at) observed=Math.max(observed ?? 0,at);
       if (checked) verified=verified===undefined?checked:Math.min(verified,checked);
@@ -1900,7 +1895,7 @@ export class RepositoryState extends DurableObject<Env> {
       await this.optionalRead('activity_loc_cache',async ()=>(await this.store.exec('INSERT OR REPLACE INTO activity_loc_cache VALUES (?,?,?)',number,fingerprint,JSON.stringify(result))));
       return result;
     };
-    const stored=await this.scanRows(`SELECT r.data FROM members m ${this.collectionJoin()} resources r ON r.kind='files' AND r.id=m.id WHERE m.collection=? AND r.tombstone=0`,key);
+    const stored=await this.scanRows(`SELECT r.data FROM members m ${collectionJoin(this.store)} resources r ON r.kind='files' AND r.id=m.id WHERE m.collection=? AND r.tombstone=0`,key);
     if(stored.length!==p.changedFiles) return remember(null);
     let added=0,deleted=0,totalAdded=0,totalDeleted=0;
     for(const row of stored) {

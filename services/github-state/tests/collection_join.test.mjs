@@ -13,13 +13,15 @@ test('a selected collection reads indexed members before resource payloads and f
    return Response.json({ok:true});
   }
   if(path==='/fixture/plans'){
-   const plans=[],exec=this.store.exec.bind(this.store);
+   const plans=[],exec=this.store.exec.bind(this.store),batch=this.store.batch.bind(this.store);
+   const record=(sql,bindings)=>{if(sql.includes('FROM members m') && sql.includes('JOIN resources r'))plans.push({sql,steps:this.sql.exec('EXPLAIN QUERY PLAN '+sql,...bindings).toArray().map(row=>row.detail)});};
    this.store.exec=async(sql,...bindings)=>{
-    if(sql.includes('FROM members m') && sql.includes('JOIN resources r'))plans.push({sql,steps:this.sql.exec('EXPLAIN QUERY PLAN '+sql,...bindings).toArray().map(row=>row.detail)});
+    record(sql,bindings);
     return exec(sql,...bindings);
    };
-   try{return Response.json({result:await this.query({repository:'org/repo',operation:'issue_comments',args:{number:7}}),plans});}
-   finally{this.store.exec=exec;}
+   this.store.batch=async(statements)=>{for(const s of statements)record(s.sql,s.bindings || []);return batch(statements);};
+   try{const result=await this.query({repository:'org/repo',operation:'issue_comments',args:{number:7}});await this.prepareDiagnostics();return Response.json({result,plans});}
+   finally{this.store.exec=exec;this.store.batch=batch;}
   }
   return super.fetch(req);
  }`});
@@ -29,6 +31,7 @@ test('a selected collection reads indexed members before resource payloads and f
   const {result,plans}=await (await send(stub,'/fixture/plans',{})).json();
   assert.equal(result.status,'ok');assert.equal(result.data.length,1);assert.equal(result.data[0].body,'selected comment');
   assert.ok(plans.some(p=>p.sql.includes('MAX(r.observed)')),'actual freshness query must be measured');
+  assert.ok(plans.some(p=>p.sql.includes('COUNT(*) open_prs')),'prepared health query must use the same collection-first plan');
   assert.ok(plans.some(p=>p.sql.includes('r.data')),'actual payload query must be measured');
   for(const plan of plans){
    const searches=plan.steps.filter(s=>/SEARCH [mr] /.test(s));

@@ -28,6 +28,11 @@ export class SerialLane {
     const pending=this.tail.then(work,work);this.tail=pending.catch(()=>{});return pending;
   }
 }
+// SQLite otherwise prefers the kind prefix of resource_parent and walks
+// every resource of that kind before checking collection membership.
+// Its CROSS JOIN fixes loop order: narrow indexed members first, then PK
+// resource lookups. Keep ordinary joins for PostgreSQL's statistics planner.
+export function collectionJoin(store:RepositoryStore):string {return store.backend==='sqlite'?'CROSS JOIN':'JOIN';}
 export class SQLiteStore implements RepositoryStore {
   readonly backend='sqlite';
   constructor(private storage:DurableObjectStorage,private sql:SqlStorage,readonly transactional=false,private generation='sqlite-v1',private context?:DurableObjectState,private lane=new SerialLane()) {}
