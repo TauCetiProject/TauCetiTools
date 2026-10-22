@@ -1011,6 +1011,14 @@ test('raw maintenance dispositions CI deliveries from listed metadata alone and 
  assert.equal(h.archive.objects.has('control/raw-gaps/ci-0001.json'),false);assert.deepEqual(state.gaps,{count:0,truncated:false});
 }));
 
+test('raw maintenance recovers independent deliveries concurrently and parks every one',async()=>clock(async()=>{
+ const h=cronHarness();for(let i=0;i<25;i++)await h.archive.put('webhooks/2026-10-12/lost-'+String(i).padStart(2,'0')+'.json','{"repository":{"id":100}}',{customMetadata:{event:'issue_comment'}});
+ let inflight=0,peak=0;h.env.REPOSITORIES.get=()=>({fetch:async()=>{inflight++;peak=Math.max(peak,inflight);await new Promise(r=>setImmediate(r));inflight--;return Response.json({known:[]});}});
+ await ingress.maintainRaw(h.env,()=>[repo]);
+ assert.ok(peak>1,'peak '+peak);assert.ok(JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes).last_completed);
+ for(let i=0;i<25;i++)assert.equal(parked(h.archive,'lost-'+String(i).padStart(2,'0')).length,1);
+}));
+
 test('permanent receipts cannot delay expiry sweeps for snapshots and staging',async()=>{
  const h=cronHarness();for(let i=0;i<150;i++)await h.archive.put('receipts/100/'+i+'.json','{}');
  await h.archive.put('snapshots/old','{}',{customMetadata:{expires:'1'}});await h.archive.put('staging/old','{}',{customMetadata:{expires:'1'}});

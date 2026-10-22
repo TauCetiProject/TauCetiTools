@@ -250,6 +250,7 @@ export async function retainRaw(env: Env, object: R2Object, targets: (payload: a
 
 // A dedicated bounded raw prefix pass shares the cron, so a large resource
 // archive cannot delay DLQ reconciliation until the general expiry sweep.
+const RAW_GROUP = 25;
 export async function maintainRaw(env: Env, targets: (payload: any, event: string) => Repository[]): Promise<void> {
   const key = 'control/raw-recovery.json', object = await env.ARCHIVE.get(key);
   const state: any = object ? await object.json() : {};
@@ -263,30 +264,38 @@ export async function maintainRaw(env: Env, targets: (payload: any, event: strin
       const page = await env.ARCHIVE.list({ prefix: 'webhooks/', startAfter: state.after, limit: 1000, include: ['customMetadata'] });
       let processed = 0;
       const expired:R2Object[]=[],ciGaps:string[]=[];
-      for (const raw of page.objects) {
-        if (Date.now() - began >= 20000) break;
-        const gapKey = 'control/raw-gaps/' + raw.key.slice(raw.key.lastIndexOf('/') + 1);
-        const expiredRaw = !protectedObject(raw.key,raw.customMetadata) && Number(raw.customMetadata?.expires)<Date.now();
-        // Unmirrored CI deliveries need no recovery, so the listed metadata
-        // decides without gap, receipt or body reads; any earlier gap is resolved.
-        if (CI_EVENTS.has(raw.customMetadata?.event ?? '')) {
-          ciGaps.push(gapKey);
-          if (expiredRaw) expired.push(raw);
-          processed++; examined++; state.after = raw.key;
-          continue;
-        }
+      const recover = async (raw: R2Object, gapKey: string, expiredRaw: boolean): Promise<void> => {
         const gap: any = await env.ARCHIVE.get(gapKey).then(o=>o?.json());
-        if (!gap || gap.retry_at <= Date.now()) {
-          try {
-            await retainRaw(env, raw, targets);
-            if(expiredRaw)expired.push(raw);
-            if (gap) await env.ARCHIVE.delete(gapKey);
-          } catch (error) {
-            const failures = (gap?.failures || 0) + 1;
-            await env.ARCHIVE.put(gapKey, JSON.stringify({ key: raw.key, failures, last_attempt: Date.now(), retry_at: Date.now() + backoff(failures) * 1000, reason: error instanceof Error ? error.message.slice(0, 200) : classify(error) }));
-          }
+        if (gap && gap.retry_at > Date.now()) return;
+        try {
+          await retainRaw(env, raw, targets);
+          if(expiredRaw)expired.push(raw);
+          if (gap) await env.ARCHIVE.delete(gapKey);
+        } catch (error) {
+          const failures = (gap?.failures || 0) + 1;
+          await env.ARCHIVE.put(gapKey, JSON.stringify({ key: raw.key, failures, last_attempt: Date.now(), retry_at: Date.now() + backoff(failures) * 1000, reason: error instanceof Error ? error.message.slice(0, 200) : classify(error) }));
         }
-        processed++; examined++; state.after = raw.key;
+      };
+      // Independent deliveries are recovered in concurrent groups; the cursor
+      // advances only past a group once every member has finished.
+      for (let i = 0; i < page.objects.length;) {
+        if (Date.now() - began >= 20000) break;
+        const group: Promise<void>[] = [];
+        let last = state.after;
+        for (; i < page.objects.length && group.length < RAW_GROUP; i++) {
+          const raw = page.objects[i];
+          const gapKey = 'control/raw-gaps/' + raw.key.slice(raw.key.lastIndexOf('/') + 1);
+          const expiredRaw = !protectedObject(raw.key,raw.customMetadata) && Number(raw.customMetadata?.expires)<Date.now();
+          // Unmirrored CI deliveries need no recovery, so the listed metadata
+          // decides without gap, receipt or body reads; any earlier gap is resolved.
+          if (CI_EVENTS.has(raw.customMetadata?.event ?? '')) {
+            ciGaps.push(gapKey);
+            if (expiredRaw) expired.push(raw);
+          } else group.push(recover(raw, gapKey, expiredRaw));
+          processed++; examined++; last = raw.key;
+        }
+        await Promise.all(group);
+        state.after = last;
       }
       if(ciGaps.length)await env.ARCHIVE.delete(ciGaps);
       // Read policies/fences once per page immediately before its batch
