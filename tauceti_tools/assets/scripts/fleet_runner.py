@@ -158,7 +158,9 @@ def shared_capacity(repository, token):
     request = urllib.request.Request(
         "https://github-state.taucetiproject.org/v1/runner-capacity?" + urllib.parse.urlencode(dict(repository=repository)),
         headers={"Authorization": "Bearer " + token, "User-Agent": "TauCetiFleetPicker/2.0"})
-    with urllib.request.build_opener(NoRedirect()).open(request, timeout=10) as response:
+    # Cold shared scans have a 15-second discovery deadline and drain their
+    # in-flight requests. Let that single scan finish before direct fallback.
+    with urllib.request.build_opener(NoRedirect()).open(request, timeout=25) as response:
         raw = response.read(4 * 1024 * 1024 + 1)
     if len(raw) > 4 * 1024 * 1024:
         raise ObservationError("capacity observation exceeds bound")
