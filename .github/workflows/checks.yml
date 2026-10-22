@@ -12,6 +12,7 @@ jobs:
           python-version: '3.11'
       - run: python -m pip install .
       - run: python -m unittest discover -s tests -p 'test_*.py'
+      - run: PYTHONPATH=tauceti_tools/assets/scripts python tauceti_tools/assets/scripts/test_lint_dot_notation.py
   github-state:
     runs-on: ubuntu-latest
     steps:
