@@ -370,7 +370,9 @@ def merge_history(db: sqlite3.Connection, since: float, until: float, *, include
     runs holds each run's latest attempt; use its overall conclusion, including
     publication/finalization failures after a successful sandboxed build.
     """
-    bounds = tuple(dt.datetime.fromtimestamp(t, UTC).isoformat() for t in (since, until))
+    # SQLite's date functions round fractional seconds. Widen SQL preselection
+    # by one second, then apply the exact timestamp window below.
+    bounds = tuple(dt.datetime.fromtimestamp(t, UTC).isoformat() for t in (since - 1, until + 1))
     queue = []
     # Snapshot-completeness/count contract: https://github.com/TauCetiProject/TauCetiCI/pull/16
     metadata = db.execute("SELECT 1 FROM sqlite_master WHERE name='queue_observation_metadata'").fetchone()
@@ -382,15 +384,18 @@ def merge_history(db: sqlite3.Connection, since: float, until: float, *, include
     query += """ WHERE julianday(o.observed_at) >= julianday(?)
                   AND julianday(o.observed_at) < julianday(?) ORDER BY o.observed_at"""
     for stamp, eligible, count, complete, snapshot in (db.execute(query, bounds) if include_queue else []):
+        at = ts(stamp)
+        if not since <= at < until:
+            continue
         if complete == 0 and not snapshot:
             # After a bot restart the first scan is only a partial candidate set.
             # A later in-progress scan may safely reuse its completed snapshot.
-            queue.append((ts(stamp), None))
+            queue.append((at, None))
             continue
         if count is None:
             count = len({p['pr'] for p in json.loads(eligible)
                          if type(p.get('pr')) is int and p['pr'] > 0})
-        queue.append((ts(stamp), count))
+        queue.append((at, count))
 
     runs, missing_members = [], 0
     rows = db.execute(f"""
@@ -402,12 +407,15 @@ def merge_history(db: sqlite3.Connection, since: float, until: float, *, include
               AND julianday(r.created_at) >= julianday(?)
               AND julianday(r.created_at) < julianday(?) ORDER BY r.created_at, r.run_id""", bounds) if include_staging else []
     for stamp, run_id, attempt, conclusion, batch, members in rows:
+        at = ts(stamp)
+        if not since <= at < until:
+            continue
         prs = {p["pr"] for p in json.loads(members or "[]")
                if type(p.get("pr")) is int and p["pr"] > 0}
         if not prs:
             missing_members += 1
             continue
-        runs.append({"at": ts(stamp), "run_id": run_id, "attempt": attempt,
+        runs.append({"at": at, "run_id": run_id, "attempt": attempt,
                      "conclusion": conclusion, "batch": batch, "prs": len(prs)})
     return {"queue": queue, "runs": runs, "missing_members": missing_members}
 

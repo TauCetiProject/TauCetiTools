@@ -10,6 +10,9 @@ requires-python = ">=3.10"
 dependencies = ["tomli>=2; python_version < '3.11'"]
 license = "Apache-2.0"
 
+[project.optional-dependencies]
+test = ["PyYAML>=6"]
+
 [project.scripts]
 tauceti-tools = "tauceti_tools.cli:main"
 

@@ -284,12 +284,13 @@ class MergeTimelinesTest(unittest.TestCase):
 
     def test_fractional_timestamps_and_partial_day_respect_window(self):
         for stamp in ("2026-10-05T23:59:59.999999Z", "2026-10-06T00:00:00Z",
-                      "2026-10-08T11:59:59.999000Z", "2026-10-08T12:00:00Z"):
+                      "2026-10-08T11:59:59.999000Z", "2026-10-08T11:59:59.999999Z",
+                      "2026-10-08T12:00:00Z"):
             self.sample(stamp, [42])
             self.staging(len(self.db.execute("SELECT * FROM runs").fetchall()), [42], stamp=stamp)
         m = self.history()
-        self.assertEqual(len(m["queue"]), 2)
-        self.assertEqual(len(m["runs"]), 2)
+        self.assertEqual(len(m["queue"]), 3)
+        self.assertEqual(len(m["runs"]), 3)
         self.assertGreater(m["queue"][-1][0], daily.ts("2026-10-08T00:00:00Z"))
 
     def test_production_runs_use_batch_membership_and_latest_overall_result(self):
