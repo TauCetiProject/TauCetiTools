@@ -72,7 +72,7 @@ test('large inventory filters before statuses and serves compact facts in one pa
   const hydrated=db.prepare('INSERT INTO survey_hydrated VALUES(?,?)');
   for(let i=1;i<=5000;i++) {
    const row={number:i,state:'OPEN',headRefOid:'a'.repeat(40),labels:[{name:'roadmap/'+(i<=20?'PDE':'Topology')}],target_focuses:[]},data=JSON.stringify(row);
-   await resource.run('pr',String(i),'',data,'',Date.now(),0,0);await inventory.run(String(i),data);await member.run('open_prs:{}',String(i));await hydrated.run(String(i),'tauceti-survey-facts/v1');
+   await resource.run('pr',String(i),'',data,'',Date.now(),0,0);await inventory.run(String(i),data);await member.run('open_prs:{}',String(i));await hydrated.run(String(i),'tauceti-survey-facts/v1:completed-scoreboards');
   }
   let statusReads=0;const rows=state.rows.bind(state);state.rows=async q=>{if(q.operation==='statuses')statusReads++;return rows(q);};
   const result=await state.query({repository:'org/repo',operation:'survey',args:{roadmap:'PDE'}});
@@ -511,4 +511,30 @@ test('bounded fan-out deduplicates dirty generations across batch boundaries and
   assert.deepEqual({...row},{generation:18,due:cooldown,attempt:4,wait_reason:'quota',dirty:1,priority:3});
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM jobs').get()).n,513);
  }finally{await db.close();}
+});
+
+test('existing init fragments are rebuilt from cached comments without GitHub reads',async()=>{
+ const {state,db}=await fixture(),oldFetch=globalThis.fetch;
+ globalThis.fetch=async()=>{throw Error('projection migration must not read GitHub');};
+ try {
+  await state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
+  await state.put('pr','7',{number:7,state:'OPEN',headRefOid:'new',labels:[]});
+  await state.membership('open_prs:{}','7',true);
+  for(const [id,meta] of [['100',{head_sha:'old',states:{reuse:'green'},runs:[]}],['101',{head_sha:'new',mode:'init',states:{reuse:'blocking_request'},runs:[]}]]) {
+   await state.put('issue_comments',id,{id,updated_at:id,body:'<!--tauceti-scoreboard--> <!--tauceti-meta:v1 '+JSON.stringify(meta)+'-->'},Date.now(),false,'7');
+   await state.membership('issue_comments:{"number":7}',id,true);
+  }
+  // Reproduce the old projection, which discarded mode and treated init as completed.
+  await db.prepare('INSERT OR REPLACE INTO survey_fragments VALUES(?,?,?,?)').run('issue_comments','101','7',JSON.stringify({id:'101',updated:'101',meta:{head_sha:'new',states:{reuse:'blocking_request'},runs:[]},marker:null,rebase_heads:[]}));
+  await db.prepare('INSERT OR REPLACE INTO survey_hydrated VALUES(?,?)').run('7','tauceti-survey-facts/v1');
+  assert.equal(JSON.parse(await state.projectedSurvey('7')).meta.head_sha,'new');
+  await state.maintenance();
+  assert.equal(JSON.parse(await state.projectedSurvey('7')).meta.head_sha,'old');
+  const marker=(await db.prepare('SELECT contract FROM survey_hydrated WHERE number=?').get('7')).contract;
+  assert.equal(marker,'tauceti-survey-facts/v1:completed-scoreboards');
+  assert.equal((await state.surveyHealth()).contract,'tauceti-survey-facts/v1','public contract remains compatible');
+  await state.prepareDiagnostics();
+  assert.equal(state.diagnostics.survey.hydrated,1,'prepared health uses the internal index marker');
+  assert.equal(state.diagnostics.survey.contract,'tauceti-survey-facts/v1');
+ }finally{globalThis.fetch=oldFetch;await db.close();}
 });

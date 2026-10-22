@@ -1,6 +1,8 @@
 import spec from '../../../tauceti_tools/survey_contract.json';
 
 export const SURVEY_CONTRACT=spec.id;
+// Rebuild derived fragments from cached comments; keep the public wire contract unchanged.
+export const SURVEY_INDEX_VERSION=spec.id+':completed-scoreboards';
 const object=(v:any)=>v!==null && typeof v==='object' && !Array.isArray(v);
 const parse=(text:string)=>{try{return JSON.parse(text);}catch{return null;}};
 const matches=(pattern:string,body:string)=>[...body.matchAll(new RegExp(pattern,'g'))];
@@ -21,7 +23,7 @@ export function inScope(row:any,roadmap='any',skip:string[]=[]): boolean {
   return !['','any','auto'].includes(roadmap)?areas.includes(roadmap):areas.some(a=>!skip.includes(a));
 }
 export function compactMeta(value:any): any {
-  if(!object(value)) return null;
+  if(!object(value) || value.mode==='init') return null;
   const out:any=Object.fromEntries(spec.meta_fields.filter(k=>Object.hasOwn(value,k)).map(k=>[k,value[k]]));
   if(Array.isArray(out.runs)) out.runs=out.runs.filter(object).map((r:any)=>Object.fromEntries(spec.run_fields.filter(k=>Object.hasOwn(r,k)).map(k=>[k,r[k]])));
   return out;

@@ -40,3 +40,15 @@ test('obsolete pause markers are not projected, including previously stored frag
  assert.equal('blocked' in facts.summarize([{body:marker+'\nEvidence',user:{login:'Author'}}],[]),false);
  assert.equal('blocked' in facts.summarizeFragments([{meta:null,rebase_heads:[],marker:null,blocked:[{head,author:'author'}]}],[]),false);
 });
+
+
+test('in-progress scoreboards cannot replace completed verdicts in compact or direct facts',()=>{
+ const head='a'.repeat(40), previous='b'.repeat(40);
+ const board=(id,updated,meta)=>({id,updated_at:updated,body:'<!--tauceti-scoreboard--> <!--tauceti-meta:v1 '+JSON.stringify(meta)+'-->'});
+ const done=board('1','1',{head_sha:previous,states:{reuse:'green'},runs:[]});
+ const init=board('2','2',{head_sha:head,mode:'init',states:{reuse:'blocking_request',scope:'stale'},runs:[]});
+ assert.equal(facts.summarize([done,init],[]).meta.head_sha,previous);
+ assert.equal(facts.summarize([init],[]).meta,null);
+ assert.equal(facts.issueFragment(init).meta,null);
+ assert.notEqual(facts.SURVEY_INDEX_VERSION,facts.SURVEY_CONTRACT);
+});

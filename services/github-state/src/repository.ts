@@ -5,7 +5,7 @@ import { Env, EventPointer, matchesETag, Query, Result, digest, json, queryKey, 
 import { comment, issue, pr, status } from './normalize';
 import { batchLimit } from './catalog';
 import { Lane, LANES, laneAt, settings } from './reconciliation';
-import { SURVEY_CONTRACT, compactPR, issueFragment, reviewFragment, summarizeFragments, inScope, roadmapFocuses } from './survey';
+import { SURVEY_CONTRACT, SURVEY_INDEX_VERSION, compactPR, issueFragment, reviewFragment, summarizeFragments, inScope, roadmapFocuses } from './survey';
 import { readPromotionReceipts } from './activity_landings';
 import { queueMetrics } from './queue_monitoring';
 import { ageProvider, providerObservation, providerAlarms } from './provider_monitoring';
@@ -596,7 +596,7 @@ export class RepositoryState extends DurableObject<Env> {
     }
     await this.rebuildSurvey(number);
     await this.nextRevision('survey',number);
-    await this.store.exec('INSERT INTO survey_hydrated VALUES(?,?) ON CONFLICT(number) DO UPDATE SET contract=excluded.contract',number,SURVEY_CONTRACT);
+    await this.store.exec('INSERT INTO survey_hydrated VALUES(?,?) ON CONFLICT(number) DO UPDATE SET contract=excluded.contract',number,SURVEY_INDEX_VERSION);
     await this.store.exec('DELETE FROM survey_hydration_failures WHERE number=?',number);
   }
   async hydratePostgresSurvey(number:string):Promise<void> {
@@ -617,7 +617,7 @@ export class RepositoryState extends DurableObject<Env> {
     }
     await flush();await this.rebuildSurvey(number);await this.nextRevision('survey',number);
     await this.store.batch([
-      {sql:'INSERT INTO survey_hydrated VALUES(?,?) ON CONFLICT(number) DO UPDATE SET contract=excluded.contract',bindings:[number,SURVEY_CONTRACT]},
+      {sql:'INSERT INTO survey_hydrated VALUES(?,?) ON CONFLICT(number) DO UPDATE SET contract=excluded.contract',bindings:[number,SURVEY_INDEX_VERSION]},
       {sql:'DELETE FROM survey_hydration_failures WHERE number=?',bindings:[number]}
     ]);
   }
@@ -641,7 +641,7 @@ export class RepositoryState extends DurableObject<Env> {
         const author=row.author?.login || '';author_counts[author]=(author_counts[author] || 0)+1;
       }
       if(q.args?.numbers ? !String(q.args.numbers).split(',').includes(String(row.number)) : !inScope(row,scope,skip)) continue;
-      const number=String(row.number);let hydrated=(await this.store.exec<any>('SELECT contract FROM survey_hydrated WHERE number=?',number)).toArray()[0]?.contract===SURVEY_CONTRACT;
+      const number=String(row.number);let hydrated=(await this.store.exec<any>('SELECT contract FROM survey_hydrated WHERE number=?',number)).toArray()[0]?.contract===SURVEY_INDEX_VERSION;
       let projected=(await this.store.exec<any>('SELECT data FROM survey_state WHERE number=?',number)).toArray()[0]?.data;
       if(hydrated && (await this.store.exec('SELECT number FROM survey_dirty WHERE number=?',number)).toArray().length) {
         // The projection is derived: serve it from fragments even when the
@@ -665,7 +665,7 @@ export class RepositoryState extends DurableObject<Env> {
     return {rows:out,author_counts};
   }
   async surveyHealth(): Promise<any> {
-    const counts=(await this.store.exec<any>("SELECT COUNT(*) open_prs,SUM(h.contract=?) hydrated,SUM(s.number IS NOT NULL) materialized FROM members m JOIN resources r ON r.kind='pr' AND r.id=m.id LEFT JOIN survey_hydrated h ON h.number=r.id LEFT JOIN survey_state s ON s.number=r.id WHERE m.collection=? AND r.tombstone=0",SURVEY_CONTRACT,queryKey({operation:'open_prs'}))).one();
+    const counts=(await this.store.exec<any>("SELECT COUNT(*) open_prs,SUM(h.contract=?) hydrated,SUM(s.number IS NOT NULL) materialized FROM members m JOIN resources r ON r.kind='pr' AND r.id=m.id LEFT JOIN survey_hydrated h ON h.number=r.id LEFT JOIN survey_state s ON s.number=r.id WHERE m.collection=? AND r.tombstone=0",SURVEY_INDEX_VERSION,queryKey({operation:'open_prs'}))).one();
     const failures=(await this.store.exec<any>('SELECT COUNT(*) n FROM survey_hydration_failures')).one().n;
     return {contract:SURVEY_CONTRACT,...counts,failures};
   }
@@ -1674,7 +1674,7 @@ export class RepositoryState extends DurableObject<Env> {
   async maintenance(): Promise<void> {
     if(!this.degraded) {
       try {
-        const pending=(await this.store.exec<any>('SELECT m.id FROM members m LEFT JOIN survey_hydrated h ON h.number=m.id LEFT JOIN survey_hydration_failures f ON f.number=m.id WHERE m.collection=? AND (h.contract IS NULL OR h.contract!=?) AND (f.retry_at IS NULL OR f.retry_at<=?) LIMIT 20',queryKey({operation:'open_prs'}),SURVEY_CONTRACT,Date.now())).toArray();
+        const pending=(await this.store.exec<any>('SELECT m.id FROM members m LEFT JOIN survey_hydrated h ON h.number=m.id LEFT JOIN survey_hydration_failures f ON f.number=m.id WHERE m.collection=? AND (h.contract IS NULL OR h.contract!=?) AND (f.retry_at IS NULL OR f.retry_at<=?) LIMIT 20',queryKey({operation:'open_prs'}),SURVEY_INDEX_VERSION,Date.now())).toArray();
         for(const row of pending) {
           try {await this.hydrateSurvey(row.id);}catch {await this.invalidateSurvey(row.id);}
         }

@@ -23,6 +23,12 @@ def cases():
                     {},
                     {
                         "head_sha": str(i),
+                        "mode": "init",
+                        "runs": [],
+                        "states": {"reuse": "blocking_request", "scope": "stale"},
+                    },
+                    {
+                        "head_sha": str(i),
                         "runs": [
                             {
                                 "provider": "claude",

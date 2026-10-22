@@ -72,7 +72,7 @@ def scoreboard(comments):
             parsed = _json(matches[-1]) if matches else None
         except ValueError:
             continue
-        if isinstance(parsed, dict):
+        if isinstance(parsed, dict) and parsed.get("mode") != "init":
             return parsed
     return None
 
