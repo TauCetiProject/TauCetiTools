@@ -15,7 +15,7 @@ MODERN = any(step.get("run") == "python3 scripts/fleet_runner.py --route"
              for job in PICKER["jobs"].values() for step in job.get("steps", []))
 
 
-def expression(source, *, attempt=1, picker_attempt="1", target='"ubuntu-24.04"', event="pull_request_target", action="opened"):
+def expression(source, *, attempt=1, picker_attempt="1", target='"ubuntu-24.04"', event="pull_request_target", action="opened", staging=False):
     """Evaluate the actual YAML expression's boolean/format/JSON subset."""
     source = source.removeprefix("${{").removesuffix("}}").strip()
     source = source.replace("\n", " ").replace("&&", " and ").replace("||", " or ")
@@ -24,9 +24,9 @@ def expression(source, *, attempt=1, picker_attempt="1", target='"ubuntu-24.04"'
         client_payload=SimpleNamespace(pr=7, head_sha="a" * 40, base_sha="b" * 40, base_ref="main", batch_id=12),
         merge_group=SimpleNamespace(head_sha="c" * 40)))
     needs = SimpleNamespace(picker=SimpleNamespace(outputs=SimpleNamespace(attempt=picker_attempt, runner=target)))
-    source = source.replace("needs.pick-runner", "needs.picker")
+    source = source.replace("needs.pick-runner", "needs.picker").replace("inputs.fleet-staging", "inputs.staging")
     return eval(source, {"__builtins__": {}, "github": github, "needs": needs,
-                         "inputs": SimpleNamespace(pr="7"), "fromJSON": json.loads,
+                         "inputs": SimpleNamespace(pr="7", staging=staging), "fromJSON": json.loads,
                          "format": lambda s, *args: s.format(*args)})
 
 
@@ -55,12 +55,18 @@ class PickerWorkflow(unittest.TestCase):
 
     def test_picker_is_small_control_job_and_calls_the_existing_selector(self):
         pick = PICKER["jobs"]["pick"]
-        self.assertEqual(pick["runs-on"], "ubuntu-latest")
+        self.assertEqual(expression(pick["runs-on"]), "ubuntu-latest")
+        self.assertEqual(expression(pick["runs-on"], staging=True), [
+            "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=0",
+            "namespace-features:github.run-id=42",
+        ])
+        self.assertFalse(any("create-github-app-token" in step.get("uses", "") for step in pick["steps"]))
         self.assertTrue(pick["continue-on-error"])
         step = next(s for s in pick["steps"] if s.get("id") == "pick")
         self.assertEqual(step["run"], "python3 scripts/fleet_runner.py --route")
         self.assertEqual(step["env"]["NAMESPACE_BUILD_CAP"], "${{ vars.NAMESPACE_BUILD_CAP }}")
-        self.assertIn("'1500'", step["env"]["API_RESERVE"])
+        self.assertEqual(step["env"]["GH_TOKEN"], "${{ github.token }}")
+        self.assertIn("'250'", step["env"]["API_RESERVE"])
         self.assertIn("'250'", step["env"]["REPOSITORY_API_RESERVE"])
 
 

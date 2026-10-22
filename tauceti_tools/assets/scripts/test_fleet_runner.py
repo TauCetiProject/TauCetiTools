@@ -192,7 +192,7 @@ class RoutingEntrypoint(unittest.TestCase):
             "repos/Test/code/actions/runs/3/jobs?per_page=100&page=1": dict(total_count=busy, jobs=[dict(name="sandboxed-build", status="in_progress", labels=["ubuntu-24.04"]) for _ in range(busy)]),
         }
 
-    def pick(self, fixtures, **overrides):
+    def pick(self, fixtures, *, config=None, **overrides):
         calls = []
         class Response(io.BytesIO):
             headers = {}
@@ -212,7 +212,7 @@ class RoutingEntrypoint(unittest.TestCase):
                 return response
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            (root / "tauceti.toml").write_text('[services.fleet]\nnamespace_build_cap=20\npr_order=["github","namespace"]\nstaging_order=["namespace","github"]\n')
+            (root / "tauceti.toml").write_text(config or '[services.fleet]\nnamespace_build_cap=20\npr_order=["github","namespace"]\nstaging_order=["namespace","github"]\n')
             output = root / "output"
             environment = dict(GITHUB_REPOSITORY="Test/code", GITHUB_RUN_ID="5", GITHUB_RUN_ATTEMPT="1",
                                GITHUB_OUTPUT=str(output), FLEET_JOB_KIND="pr", GH_TOKEN="app", FALLBACK_TOKEN="repository")
@@ -225,6 +225,42 @@ class RoutingEntrypoint(unittest.TestCase):
             finally:
                 os.chdir(before)
             return dict(line.split("=", 1) for line in output.read_text().splitlines()), calls
+
+    def staging_fixture(self):
+        machines, inventory = Selection().ranked_fixture()
+        config = '[services.fleet]\nstaging_order=["tauchonki","chris","namespace","github"]\n'
+        for machine in machines:
+            config += f'[services.fleet.machines.{machine["name"]}]\nmachine_id="{machine["machine_id"]}"\nmax_jobs={machine["max_jobs"]}\nkinds={json.dumps(machine["kinds"])}\n'
+        return config, inventory[0]
+
+    def test_staging_v1_and_missing_shared_state_choose_fleet_without_cloud_scans(self):
+        config, inventory = self.staging_fixture()
+        for state in (self.shared(), OSError("shared server offline")):
+            fixtures = dict(fleet={"orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1": inventory}, state=dict(shared=state))
+            output, calls = self.pick(fixtures, config=config, FLEET_JOB_KIND="staging", FLEET_CI_ENABLED="true", FLEET_READ_TOKEN="fleet", FLEET_RUNNER_GROUP_ID="3", GITHUB_STATE_TOKEN="state")
+            self.assertEqual(output["pool"], "tauchonki")
+            self.assertEqual(output["namespace_busy"], "")
+            self.assertFalse(any(token in ("app", "repository") for token, _ in calls), calls)
+            self.assertTrue(any(label.startswith("fleet-instance-") for label in json.loads(output["runner"])["labels"]))
+
+    def test_staging_known_reservations_still_select_next_eligible_machine(self):
+        config, inventory = self.staging_fixture()
+        queued = [[v["name"] for v in inventory["runners"][1]["labels"]]]
+        output, calls = self.pick(dict(fleet={"orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1": inventory}, state=dict(shared=self.shared(routing_version=2, namespace_busy=0, queued_fleet=queued))), config=config, FLEET_JOB_KIND="staging", FLEET_CI_ENABLED="true", FLEET_READ_TOKEN="fleet", FLEET_RUNNER_GROUP_ID="3", GITHUB_STATE_TOKEN="state")
+        self.assertEqual(output["pool"], "chris")
+        self.assertEqual(len(calls), 2)
+
+    def test_staging_busy_offline_mislabeled_or_unavailable_inventory_retains_cloud_fallback(self):
+        config, inventory = self.staging_fixture()
+        for failure in ("busy", "offline", "labels", "unavailable"):
+            current = json.loads(json.dumps(inventory))
+            for guest in current["runners"]:
+                if failure == "busy": guest["busy"] = True
+                if failure == "offline": guest["status"] = "offline"
+                if failure == "labels": guest["labels"] = []
+            if failure == "unavailable": current = OSError("inventory offline")
+            output, calls = self.pick(dict(fleet={"orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1": current}, state=dict(shared=self.shared(routing_version=2, namespace_busy=0, queued_fleet=[]))), config=config, FLEET_JOB_KIND="staging", FLEET_CI_ENABLED="true", FLEET_READ_TOKEN="fleet", FLEET_RUNNER_GROUP_ID="3", GITHUB_STATE_TOKEN="state")
+            self.assertEqual(output["pool"], "namespace", failure)
 
     def shared(self, **changes):
         now = time.time() * 1000
