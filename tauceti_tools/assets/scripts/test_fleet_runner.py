@@ -202,6 +202,8 @@ class RoutingEntrypoint(unittest.TestCase):
                 path = "shared" if request.full_url.startswith("https://github-state.taucetiproject.org/") else request.full_url.removeprefix("https://api.github.com/")
                 calls.append((token, path))
                 value = fixtures[token][path]
+                if callable(value):
+                    value = value()
                 if isinstance(value, Exception):
                     raise value
                 headers = {}
@@ -249,6 +251,23 @@ class RoutingEntrypoint(unittest.TestCase):
         output, calls = self.pick(dict(fleet={"orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1": inventory}, state=dict(shared=self.shared(routing_version=2, namespace_busy=0, queued_fleet=queued))), config=config, FLEET_JOB_KIND="staging", FLEET_CI_ENABLED="true", FLEET_READ_TOKEN="fleet", FLEET_RUNNER_GROUP_ID="3", GITHUB_STATE_TOKEN="state")
         self.assertEqual(output["pool"], "chris")
         self.assertEqual(len(calls), 2)
+
+    def test_direct_scan_finishes_before_pr_runner_availability_is_read(self):
+        config, inventory = self.staging_fixture()
+        config = config.replace('[services.fleet]\n', '[services.fleet]\npr_order=[\"github\",\"chris\",\"tauchonki\",\"namespace\"]\n')
+        fixtures = self.fixture(busy=19)
+        output, calls = self.pick(dict(app=fixtures, fleet={"orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1": inventory}), config=config, FLEET_CI_ENABLED="true", FLEET_READ_TOKEN="fleet", FLEET_RUNNER_GROUP_ID="3", PR_HEAD="a"*40)
+        self.assertEqual(output["pool"], "chris")
+        self.assertGreater(calls.index(("fleet", "orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1")), calls.index(("app", "repos/Test/code/actions/runs/3/jobs?per_page=100&page=1")))
+
+    def test_staging_fallthrough_refreshes_runner_availability_after_cloud_scan(self):
+        config, inventory = self.staging_fixture()
+        busy = json.loads(json.dumps(inventory))
+        for guest in busy["runners"]: guest["busy"] = True
+        snapshots = [busy, inventory]
+        output, calls = self.pick(dict(app=self.fixture(), fleet={"orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1": lambda: snapshots.pop(0)}), config=config, FLEET_JOB_KIND="staging", FLEET_CI_ENABLED="true", FLEET_READ_TOKEN="fleet", FLEET_RUNNER_GROUP_ID="3")
+        self.assertEqual(output["pool"], "tauchonki")
+        self.assertEqual([token for token, _ in calls if token=="fleet"], ["fleet", "fleet"])
 
     def test_staging_retry_checks_prior_unassigned_placement_before_reusing_fleet(self):
         config, inventory = self.staging_fixture()

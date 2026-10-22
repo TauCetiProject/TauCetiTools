@@ -67,7 +67,8 @@ class PickerWorkflow(unittest.TestCase):
         self.assertEqual(step["env"]["NAMESPACE_BUILD_CAP"], "${{ vars.NAMESPACE_BUILD_CAP }}")
         self.assertEqual(step["env"]["GH_TOKEN"], "${{ github.token }}")
         self.assertIn("'250'", step["env"]["API_RESERVE"])
-        self.assertIn("'250'", step["env"]["REPOSITORY_API_RESERVE"])
+        self.assertNotIn("FALLBACK_TOKEN", step["env"])
+        self.assertNotIn("REPOSITORY_API_RESERVE", step["env"])
 
 
 if __name__ == "__main__":
