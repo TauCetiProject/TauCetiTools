@@ -261,7 +261,8 @@
     "archive_checkpoint_recheck": {
       "at": "2026-10-22T22:41:16.803Z",
       "passed": true,
-      "scope": "Rechecked the original frozen source/import/target canonical checkpoint hashes against retained forward evidence; did not rehash the live writable PostgreSQL tables."
+      "scope": "Rechecked the original frozen source/import/target canonical checkpoint hashes against retained forward evidence; did not rehash the live writable PostgreSQL tables.",
+      "source": "Independent operator comparison of the authenticated migration-status checkpoint against retained source/import/target checkpoint hashes; not a live-table SQL rehash."
     }
   },
   "deployments": {
@@ -327,31 +328,36 @@
         "version": "5240c4d8-1d60-4690-b4c3-299275b35f3d",
         "module_sha256": "391c9d569fc7499ba23792ffafbd799f9d32dcc5ec9e5a4435b19771d1eaff2b",
         "git_commit_attested": true,
-        "scope": "Initial module inspection found additional raw-recovery concurrency changes absent from 18db950. A later isolated build exactly matched open PR77 head2374bcc. The unmerged code has not been accepted into the release chain.",
+        "scope": "Initial module inspection found additional raw-recovery concurrency changes absent from 18db950. A later isolated build exactly matched open PR77 head 2374bcc. The unmerged code has not been accepted into the release chain.",
         "candidate_pr": 77,
         "candidate_commit": "2374bcc5373930f70245add1e1381331ae419c3a",
         "candidate_pr_state_at_verification": "OPEN",
         "candidate_exact_module_match": true,
-        "accepted_into_release_chain": false
+        "accepted_into_release_chain": false,
+        "candidate_verified_at": "2026-10-22T22:45:10.046Z"
       },
       "release_binding_still_declares": "7c4661f339b418635536a71d88673f8279008b57",
       "measurements_held": true,
       "adoption_receipt_written": false,
       "scope": "External code changes are not attributed to the original export or silently accepted as the tested release.",
       "post_selection_runtime_interval": {
-        "external_versions_first_observed_at": "2026-10-22T22:28:00.024523Z",
         "application_pause_completed_at": "2026-10-22T22:47:08.296Z",
         "operator_hold_did_not_stop_runtime_cron": true,
-        "scope": "Before the ingress barrier completed, scheduled replay and queue consumers could mutate authoritative PostgreSQL and input receipts/pointers under the external deployment interval. Per-input executing versions are not proven. The three external versions are not accepted into the release chain; interval deliveries and cleanups require accounting before adoption or final release. This checkpoint does not certify that every raw object or CI gap marker survived that interval."
+        "scope": "The ingress barrier ends webhook application and parked replay, not raw recovery. Raw recovery continues to mutate R2 cursors and CI/non-CI gap markers under the unaccepted artifact after the pause. The raw-recovery interval remains open until accepted code is recorded or raw recovery is separately stopped. Per-input executing versions and continuous no-deletion are not proven; delivery/cleanup and gap-disposition accounting remain required before adoption or final release.",
+        "earliest_external_version_created_at": "2026-10-22T22:28:00.024523Z",
+        "start_bound_source": "Cloudflare version creation time is a conservative start bound; it is not an observation time or proof of request activation.",
+        "raw_recovery_mutation_interval_end": null,
+        "raw_recovery_continues_after_ingress_pause": true
       },
       "durable_ingress_hold": {
         "at": "2026-10-22T22:47:08.296Z",
         "mode": "parked",
         "in_flight": 0,
         "drained": true,
-        "scope": "Pause webhook applications and scheduled parked replay; keep accepting signed input through durable R2 parking and preserve PostgreSQL authority, stored reads, source fence and all archives/pins. This is not a rollback or a claim that all maintenance SQL has stopped."
+        "scope": "Pause webhook applications and scheduled parked replay; keep accepting signed input through durable R2 parking and preserve PostgreSQL authority, stored reads, source fence and all archives/pins. This is not a rollback or a claim that all maintenance SQL has stopped. Raw recovery and R2 gap-marker/cursor mutation continue; the pause is not a global maintenance freeze."
       },
-      "owner_and_retention_observation": {
+      "raw_recovery_evidence_limit": "PR75 changes CI handling to metadata-only disposition and can clear CI raw-gap markers without replaying deliveries or checking bodies. A lower gap count or completed raw traversal is not delivery-recovery proof. Prior checkpoint overwrites and an unattested intermediate version prevent a continuous no-deletion claim; independent pins/holds, known-input hashes and original archives are retained.",
+      "control_and_retention_observation": {
         "at": "2026-10-22T22:39:36.118Z",
         "generation": "80ecf79d-f811-42c8-9fec-ad41c3727567",
         "phase": "replaying",
@@ -359,9 +365,9 @@
         "source_fenced": true,
         "failure": null,
         "all_seven_pins_present": true,
-        "object_expiry_enabled": false
-      },
-      "raw_recovery_evidence_limit": "PR75 changes CI handling to metadata-only disposition and can clear CI raw-gap markers without replaying deliveries or checking bodies. A lower gap count or completed raw traversal is not delivery-recovery proof. Prior checkpoint overwrites and an unattested intermediate version prevent a continuous no-deletion claim; independent pins/holds, known-input hashes and original archives are retained."
+        "object_expiry_enabled": false,
+        "source": "Independent operator reads of R2 migration/retention records and Cloudflare lifecycle settings; not a SQL owner read and not an attestation from the unaccepted Worker."
+      }
     }
   },
   "input_durability": {
@@ -374,7 +380,8 @@
       "raw_original_timestamp_preserved": true,
       "pin_exact": true,
       "pointer_present": true,
-      "permanent_receipt_present": false
+      "permanent_receipt_present": false,
+      "source": "Independent operator GETs of R2 raw/pinned bodies and pointers, digest comparison and original received metadata check; no raw body is included in this public checkpoint."
     },
     "long_freeze": {
       "held_ms": 8653270,
@@ -385,13 +392,14 @@
       "scope": "Measured retention exceeded the configured normal retry horizon; this does not claim twenty actual retry attempts or continuously empty queues.",
       "delivery": "s2-freeze-probe-80ecf79d-f811-42c8-9fec-ad41c3727567",
       "received_at_ms": 1792631487089,
-      "observed_at": "2026-10-22T03:35:30.179Z",
+      "observed_at": "2026-10-22T03:35:40.359Z",
       "retry_configuration": {
         "code": "2fa9b421d1846bc281151b748553b0ba95d4c788",
         "function": "services/github-state/src/ingress.ts:backoff",
         "rule": "min(600, 5 * 2^min(attempt-1,8)) seconds; 20 configured retries from the deployed owned queue consumer",
         "scope": "Configured delay sum, not observed actual retry attempts"
-      }
+      },
+      "body_pointer_checked_at": "2026-10-22T03:35:30.179Z"
     },
     "known_replay_diagnostics": {
       "distinct_inputs": 8,
@@ -411,7 +419,8 @@
       "normal": 160356,
       "held": 0,
       "scope": "Read-only R2 listing across a live replay scan; counts span this traversal and are not a transaction snapshot",
-      "deployed_version_during_scan": "cdad5428-80e7-4747-8f29-aad6805ad508"
+      "deployed_version_during_scan": "cdad5428-80e7-4747-8f29-aad6805ad508",
+      "version_evidence": "Cloudflare deployment history bounds (cdad at18:16, next external deployment22:28) and contemporaneous operator release/version records. The scan itself uses the independent R2 API."
     },
     {
       "started_at": "2026-10-22T19:27:18.054Z",
@@ -419,7 +428,8 @@
       "normal": 153541,
       "held": 0,
       "scope": "Read-only R2 listing across a live replay scan; counts span this traversal and are not a transaction snapshot",
-      "deployed_version_during_scan": "cdad5428-80e7-4747-8f29-aad6805ad508"
+      "deployed_version_during_scan": "cdad5428-80e7-4747-8f29-aad6805ad508",
+      "version_evidence": "Cloudflare deployment history bounds (cdad at18:16, next external deployment22:28) and contemporaneous operator release/version records. The scan itself uses the independent R2 API."
     },
     {
       "started_at": "2026-10-22T20:59:09.212Z",
@@ -427,7 +437,8 @@
       "normal": 136776,
       "held": 0,
       "scope": "Read-only R2 listing across a live replay scan; counts span this traversal and are not a transaction snapshot",
-      "deployed_version_during_scan": "cdad5428-80e7-4747-8f29-aad6805ad508"
+      "deployed_version_during_scan": "cdad5428-80e7-4747-8f29-aad6805ad508",
+      "version_evidence": "Cloudflare deployment history bounds (cdad at18:16, next external deployment22:28) and contemporaneous operator release/version records. The scan itself uses the independent R2 API."
     }
   ],
   "source_warm_read_baseline": {
@@ -462,7 +473,8 @@
     ],
     "target_acceptance_measured": false,
     "maximum_allowed_p95_ratio": 1.2,
-    "scope": "The single original source cohort uses repeated identical public queries with five warmups and the existing DTO cache (S1 benchmark definition in services/github-state/POSTGRES.md). Separate cache-miss diagnostics are not a 20% acceptance claim. No post-target cohort or successful latency claim has been recorded."
+    "scope": "This deployed cohort used100 repeated public-query samples atconcurrency4 afterfive warmups. POSTGRES.md:201 supports only the warmed DTO-cache interpretation and20% relative criterion; its seeded local harness has different sample counts and concurrency. Separate cache-miss diagnostics are not a20% acceptance claim. No post-target cohort or successful latency claim has been recorded.",
+    "measurement_driver": "Private operator/baseline.mjs; the recorded source cohort JSON is retained with the original deployment evidence. No original driver hash was captured at measurement."
   },
   "local_verification": {
     "reviewed_implementation_code": "7c4661f339b418635536a71d88673f8279008b57",
@@ -511,6 +523,8 @@
   },
   "pending_release_acceptance": [
     "Stable reviewed upstream code identity and explicit adoption/deployment receipt for the active test version",
+    "Account for the external runtime interval, including retained/committed inputs, cleanup and CI gap disposition; raw recovery continues after the ingress pause, and a completed traversal or lower gap count is not delivery recovery proof",
+    "Explicitly resume test ingress only after the accepted live version and single PostgreSQL owner have been reverified; preserve all pins and source/archive evidence",
     "Actual normal/held/DLQ/queue backlog drain and signed freeze probe receipt/cleanup",
     "All known failed input receipts and pointer cleanup",
     "Final unchanged-client and old/new cursor workflows on the released version",

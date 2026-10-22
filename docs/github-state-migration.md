@@ -17,8 +17,11 @@ the running artifact. Stopping the external operator initially left scheduled
 recovery running under unaccepted code against authoritative PostgreSQL. The
 checkpoint records that interval and the later durable ingress pause, which
 blocks webhook application and parked replay while accepting signed input into
-R2. Interval receipts, cleanup and cleared CI gap markers require accounting
-before adoption or final release; a lower raw-gap count is not delivery proof.
+R2. Raw recovery continues after this pause, including R2 cursor and CI/non-CI
+gap-marker changes; its unaccepted-code interval remains open. Interval receipts,
+cleanup and CI gap disposition require accounting before adoption or final
+release; a lower raw-gap count is not delivery proof. Test ingress resumes only
+after the accepted live version and single PostgreSQL owner are reverified.
 
 ## Preparation and commands
 
