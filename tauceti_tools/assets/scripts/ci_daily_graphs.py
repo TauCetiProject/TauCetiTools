@@ -29,7 +29,7 @@ import math
 import sqlite3
 from collections import defaultdict
 
-from ci_runners import RUNNERS, LABELS, reporting_kind, runner_name_sql
+from ci_runners import RUNNERS, LABELS, reporting_kind, runner_name_sql, assigned_fleet_sql
 from chart_style import MUTED, PALETTE, TEXT, base_css, card_rect, css_px, svg_unit
 
 UTC = dt.timezone.utc
@@ -104,7 +104,7 @@ def metrics(db: sqlite3.Connection, first: str, last: str, other_jobs_until=None
     # Every attempt's build job (jobs keeps all attempts; runs only the latest):
     # PR builds and both main-branch merge engines, excluding manual dispatches.
     builds = db.execute(f"""
-        SELECT substr(j.created_at, 1, 10), r.trigger, j.runner_kind, j.conclusion, j.wait_s, j.run_s,
+        SELECT substr(j.created_at, 1, 10), r.trigger, j.runner_kind, j.conclusion, CASE WHEN {assigned_fleet_sql(db)} THEN j.wait_s END, j.run_s,
                j.failure_class, j.job_id, r.run_id, j.labels, {runner_name_sql(db)}
         FROM jobs j JOIN runs r USING (repo, run_id)
         WHERE r.repo = 'TauCeti' AND r.workflow = '{PR_BUILD}' AND j.name = '{BUILD}'
@@ -199,7 +199,7 @@ def metrics(db: sqlite3.Connection, first: str, last: str, other_jobs_until=None
             SELECT substr(j.started_at, 1, 10), j.runner_kind, r.trigger, j.conclusion, j.run_s, j.labels, {runner_name_sql(db)}
             FROM jobs j JOIN runs r USING (repo, run_id)
             WHERE r.repo = 'TauCeti' AND j.name IN ('sandboxed-build', 'verify', 'build', 'performance-gate')
-              AND j.run_s IS NOT NULL AND j.started_at BETWEEN ? AND ?""", (lo, hi)):
+              AND j.run_s IS NOT NULL AND {assigned_fleet_sql(db)} AND j.started_at BETWEEN ? AND ?""", (lo, hi)):
         kind = reporting_kind(kind, labels, runner_name)
         if kind in RUNNERS:
             minutes[day]["GitHub-hosted" if kind == "github" else LABELS[kind]] += run_s / 60

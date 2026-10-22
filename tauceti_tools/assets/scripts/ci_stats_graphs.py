@@ -49,7 +49,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ci_daily_graphs  # noqa: E402
-from ci_runners import RUNNERS, LABELS, reporting_kind, runner_name_sql  # noqa: E402
+from ci_runners import RUNNERS, LABELS, reporting_kind, runner_name_sql, assigned_fleet_sql  # noqa: E402
 from chart_style import AXIS, BG, MUTED, PANEL, PALETTE, TEXT, base_css, card_rect, css_px, svg_unit  # noqa: E402
 
 UTC = dt.timezone.utc
@@ -125,7 +125,7 @@ def load_jobs(db: sqlite3.Connection, since: float, until: float) -> list[dict]:
                    r.created_at
             FROM jobs j JOIN runs r USING (repo, run_id)
             WHERE j.created_at BETWEEN ? AND ? AND j.runner_kind IN ('github', 'namespace', 'self-hosted', 'eastanglia', 'leanfro')
-              AND (j.completed_at IS NULL OR j.completed_at >= ?)""", (lo, hi, iso(since))):
+              AND {assigned_fleet_sql(db)} AND (j.completed_at IS NULL OR j.completed_at >= ?)""", (lo, hi, iso(since))):
         if not created:
             continue
         kind = reporting_kind(kind, labels, runner_name)

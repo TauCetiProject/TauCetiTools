@@ -125,6 +125,26 @@ class MergeQueueChartsTest(unittest.TestCase):
         self.assertEqual(data["running"]["gh-build-pr"], [0, 0])
         ET.fromstring(fleet.render(data, "Fleet", "Fixture", []))
 
+    def test_cancelled_fleet_jobs_need_assignment_evidence_for_minutes_and_waits(self):
+        self.build(1, "pr", "cancelled", kind="self-hosted", labels=["fleet-4fab2fed9a5145f894d066c7bb28ace4"])
+        self.build(2, "pr", "cancelled", kind="self-hosted", labels=["fleet-4fab2fed9a5145f894d066c7bb28ace4"])
+        self.db.execute("INSERT INTO steps VALUES (20,'Build',0)")
+        m = self.metrics()
+        self.assertEqual(m["minutes"]["2026-10-06"]["eastanglia"], 10)
+        self.assertEqual(m["minutes"]["2026-10-06"]["cancelled PR builds"], 10)
+        self.assertEqual(m["wait"][("2026-10-06", "PR, eastanglia")], [2])
+        self.assertEqual(m["picker"]["2026-10-06"], [0, 0, 2, 0, 0])
+
+    def test_unassigned_fleet_cancellation_is_not_drawn_as_running(self):
+        self.build(1, "pr", "cancelled", kind="self-hosted", labels=["fleet-4fab2fed9a5145f894d066c7bb28ace4"])
+        self.db.execute("ALTER TABLE jobs ADD COLUMN completed_at TEXT")
+        self.db.execute("UPDATE jobs SET completed_at='2026-10-06T10:12:00Z'")
+        self.db.execute("ALTER TABLE runs ADD COLUMN conclusion TEXT DEFAULT 'cancelled'")
+        self.db.execute("ALTER TABLE runs ADD COLUMN jobs_fetched INTEGER DEFAULT 1")
+        self.db.execute("ALTER TABLE runs ADD COLUMN updated_at TEXT DEFAULT '2026-10-06T10:12:00Z'")
+        since = daily.ts("2026-10-06T10:00:00Z")
+        self.assertEqual(fleet.load_jobs(self.db, since, since + 1200), [])
+
     def test_landing_time_is_main_arrival_not_staging_creation(self):
         self.arrival("a", 42, "2026-10-05T10:00:00Z", "2026-10-06T01:00:00Z")
         self.arrival("b", 43, "2026-10-05T11:00:00Z", "2026-10-06T01:00:00Z")

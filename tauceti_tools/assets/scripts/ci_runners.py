@@ -32,3 +32,13 @@ def reporting_kind(kind, labels, runner_name=""):
 def runner_name_sql(db):
     """Older downloadable archives predate runner-name retention."""
     return "j.runner_name" if any(row[1] == "runner_name" for row in db.execute("PRAGMA table_info(jobs)")) else "NULL"
+
+
+def assigned_fleet_sql(db):
+    """Synthetic cancellation timestamps do not establish fleet assignment."""
+    step_columns = {row[1] for row in db.execute("PRAGMA table_info(steps)")}
+    started = "s.started_at IS NOT NULL" if "started_at" in step_columns else "s.run_s IS NOT NULL"
+    return ("(j.runner_kind NOT IN ('self-hosted','eastanglia','leanfro') "
+            "OR j.conclusion IS NULL OR j.conclusion <> 'cancelled' "
+            f"OR COALESCE({runner_name_sql(db)},'') <> '' "
+            f"OR EXISTS(SELECT 1 FROM steps s WHERE s.job_id=j.job_id AND {started}))")
