@@ -7,7 +7,8 @@ export async function scanHostedCapacity(
   async function pages(path:string,key?:string):Promise<any[]> {
     const rows:any[]=[];
     for(let page=1;page<=20;page++) {
-      if(++requests>80 || Date.now()>deadline)throw new Error('capacity_scan_limit');
+      if(requests>=80 || Date.now()>deadline)throw new Error('capacity_scan_limit');
+      requests++;
       const response=await read(path+(path.includes('?')?'&':'?')+'per_page=100&page='+page);
       const values=key?response.body?.[key]:response.body;
       if(response.deferred || response.status!==200 || !Array.isArray(values))throw new Error('capacity_inventory_unavailable');
@@ -74,7 +75,7 @@ export async function scanHostedCapacity(
     if(queued.length>80-requests)throw new Error('capacity_scan_limit');
     await jobs(queued);
   } catch(error) {
-    return {routing_version:1,busy:running,requests,repositories:all.length,runs:runningRuns,observed_at:Date.now(),placement_unavailable:error instanceof Error?error.message:'capacity_inventory_unavailable'};
+    return {routing_version:1,busy:running,requests,repositories:all.length,runs:runningRuns,observed_at:Date.now(),placement_unavailable:error instanceof Error && error.message.startsWith('capacity_')?error.message:'capacity_inventory_unavailable'};
   }
   return {routing_version:2,busy,namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:Date.now()};
 }
