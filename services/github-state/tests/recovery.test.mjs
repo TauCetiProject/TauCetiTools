@@ -997,6 +997,18 @@ test('raw maintenance uses metadata without downloading committed bodies, promot
  advance(60000);await ingress.maintainRaw(h.env,()=>[repo]);assert.ok(h.archive.objects.has(ingress.receiptKey(repo.id,'legacy-known')));assert.equal(parked(h.archive,'legacy-known').length,0);
 }));
 
+test('raw maintenance dispositions CI deliveries from listed metadata alone and expires them in large pages',async()=>clock(async()=>{
+ const h=cronHarness();for(let i=0;i<1500;i++)await h.archive.put('webhooks/2026-10-12/ci-'+String(i).padStart(4,'0')+'.json','{}',{customMetadata:{event:i%2?'workflow_job':'check_run',sha256:'x',targets:'["100"]',received:'1',expires:i<1200?'1':String(Date.now()+86400000)}});
+ const get=h.archive.get,head=h.archive.head;
+ h.archive.get=async key=>{assert.ok(!key.startsWith('webhooks/') && !key.startsWith('control/raw-gaps/'),key);return get(key);};
+ h.archive.head=async key=>{assert.fail('unexpected head '+key);};
+ await ingress.maintainRaw(h.env,()=>[repo]);h.archive.get=get;h.archive.head=head;
+ const state=JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes);assert.ok(state.last_completed);
+ assert.equal([...h.archive.objects.keys()].filter(k=>k.startsWith('webhooks/')).length,300);
+ assert.equal([...h.archive.objects.keys()].filter(k=>k.startsWith('invalid/') || k.startsWith('parked/')).length,0);
+ assert.equal(JSON.parse(h.archive.objects.get('control/retention/raw_webhooks.json').bytes).deleted,1200);
+}));
+
 test('permanent receipts cannot delay expiry sweeps for snapshots and staging',async()=>{
  const h=cronHarness();for(let i=0;i<150;i++)await h.archive.put('receipts/100/'+i+'.json','{}');
  await h.archive.put('snapshots/old','{}',{customMetadata:{expires:'1'}});await h.archive.put('staging/old','{}',{customMetadata:{expires:'1'}});

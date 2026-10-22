@@ -15,14 +15,16 @@ starve held input. Five failures move an item to held without ending scheduled
 ownership. Per-item retry delays grow from 5 seconds to 10 minutes. One bad
 body, pointer, or R2 operation does not cancel other items in the group.
 
-A separate bounded pass on the same cron visits raw deliveries in pages of 50
+A separate bounded pass on the same cron visits raw deliveries in pages of 1000
 (up to 20 pages), with a durable keyset cursor and 20-second dispatch budget.
 Accepted raw objects carry target/digest metadata so already-durable input
-needs only HEAD checks. Legacy committed SQL receipts are promoted without
+needs only HEAD checks. Raw objects whose listed event metadata names an
+unmirrored CI event are dispositioned from the listing alone, with no gap,
+receipt or body read and no `invalid/` record. Legacy committed SQL receipts are promoted without
 replaying them. Only visited keys advance either recovery cursor. It reconciles queue/DLQ
 loss using stored bytes, delivery IDs, and application receipts. Raw expiry
-belongs to this pass and happens only after pinning or a durable explicit
-invalid-event disposition. Invalid JSON and intentionally unmirrored or
+belongs to this pass and happens only after pinning, a durable explicit
+invalid-event disposition, or a listed CI event. Invalid JSON and other unmirrored or
 out-of-scope events get digest-bearing dispositions under `invalid/`. Missing
 bodies, digest mismatches, or absent event metadata remain precise gaps under
 `control/raw-gaps/`; their source is retained. No GitHub refetch repairs a gap.
