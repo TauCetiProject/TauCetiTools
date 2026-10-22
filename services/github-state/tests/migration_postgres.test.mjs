@@ -163,7 +163,7 @@ test('ordinary supervisor restarts a fenced repository, preserves cursors, and r
   const committedRevision=(await f.admin.query(`SELECT value FROM ${f.schema}.meta WHERE key='revision'`)).rows[0].value;
   f.archive.fail((op,key,at)=>op==='delete' && key.includes('/pointers/') && at==='after');
   const cleanup=await ingress.drain(f.env,custom);
-  assert.equal(cleanup.failed,1);assert.equal(cleanup.superseded,1);
+  assert.equal(cleanup.failed,0);assert.equal(cleanup.superseded,1);
   assert.equal(await f.archive.get(pointer.key),null,'a lost cleanup acknowledgement must not recreate the deleted pointer');
   assert.ok(await f.archive.get(ingress.receiptKey(custom.id,parked.delivery)));
   assert.equal((await ingress.drain(f.env,custom)).replayed,0);

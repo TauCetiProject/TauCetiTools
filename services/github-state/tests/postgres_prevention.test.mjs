@@ -359,7 +359,7 @@ pg('leased admin replay preserves PostgreSQL commit receipts after a lost cleanu
   const key=ingress.pointerKey(repo.id,pointer),remove=f.env.ARCHIVE.delete;let lost=true;
   f.env.ARCHIVE.delete=async keys=>{await remove(keys);if(lost&&[].concat(keys).includes(key)){lost=false;throw Error('lost cleanup acknowledgement');}};
   const revision=await f.state.revision(),first=await ingress.replayIngress(f.env,repo);
-  assert.equal(first.failed,1);assert.equal(first.superseded,1);assert.equal(first.failed_deliveries[0].delivery,pointer.delivery);
+  assert.equal(first.failed,0);assert.equal(first.superseded,1);assert.equal(first.delivery_errors[0].delivery,pointer.delivery);
   assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,1);assert.equal(await f.state.revision(),revision);
   assert.equal(await f.env.ARCHIVE.get(key),null);assert.equal(await f.env.ARCHIVE.get(ingress.bodyKey(repo.id,pointer.delivery)),null);
   const receipt=f.env.ARCHIVE.objects.get(ingress.receiptKey(repo.id,pointer.delivery)).bytes.toString();

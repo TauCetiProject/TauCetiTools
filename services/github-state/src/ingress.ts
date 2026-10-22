@@ -89,17 +89,17 @@ export async function release(env: Env, repo: Repository, pointer: EventPointer)
 // Replay bounded concurrent groups, advancing only past visited keys. A
 // pointer is removed only after a committed receipt, including across resets.
 export async function drain(env: Env, repo: Repository, options: { limit?: number; held?: boolean; cursor?: string; deadline?: number } = {}): Promise<any> {
-  if ((await ingressMode(env, repo)).mode === 'parked') return { replayed: 0, failed:0, stopped: 'parked' };
+  if ((await ingressMode(env, repo)).mode === 'parked') return { replayed: 0, failed:0, remaining:true,cursor:options.cursor,stopped: 'parked' };
   if (Date.now() >= (options.deadline || Infinity)) return {replayed:0,failed:0,remaining:true,cursor:options.cursor,stopped:'deadline'};
   const prefix = `parked/${repo.id}/${options.held ? 'held' : 'pointers'}/`;
   const page = await env.ARCHIVE.list({ prefix, limit: Math.min(Math.max(1, options.limit || 25), 100), startAfter: options.cursor });
   let replayed = 0, failed = 0, stopped: string | undefined, last_error: string | undefined, next_retry: number | undefined;
-  let superseded=0;const failed_deliveries:{delivery:string;event:string;received:number;reason:string}[]=[];
-  const prepared=new Map<string,Parked|null>(),ciCommitted=new Set<string>();let batchStatus:number|string|null=null;
+  let superseded=0;const delivery_errors:{delivery:string;event:string;received:number;reason:string;outcome:'unconfirmed'|'superseded'|'retry_scheduled'|'held'}[]=[];
+  const prepared=new Map<string,Parked|null>(),snapshotEtags=new Map<string,string>(),ciCommitted=new Set<string>();let batchStatus:number|string|null=null;
   // Compact pointers only: never load their webhook bodies into this batch.
   // A crash after SQL commits leaves the pointers replayable and deduplicated.
   for(let i=0;i<page.objects.length && Date.now()<(options.deadline || Infinity);i+=REPLAY_GROUP)await Promise.all(page.objects.slice(i,i+REPLAY_GROUP).map(async object=>{
-    try{prepared.set(object.key,await env.ARCHIVE.get(object.key).then(o=>o?.json<Parked>() ?? null));}catch{/* The ordinary per-pointer path records/retries this failure. */}
+    try{const snapshot=await env.ARCHIVE.get(object.key);if(snapshot)snapshotEtags.set(object.key,snapshot.etag);prepared.set(object.key,snapshot?await snapshot.json<Parked>():null);}catch{/* The ordinary per-pointer path records/retries this failure. */}
   }));
   const ciByDelivery=new Map<string,Parked>(),conflicts=new Set<string>();
   for(const p of prepared.values())if(p && p.repository===repo.name && CI_EVENTS.has(p.event) && /^[a-zA-Z0-9-]{1,100}$/.test(p.delivery) && Number.isSafeInteger(p.received) && p.received>=0 && (p.retry_at || 0)<=Date.now()){
@@ -114,7 +114,8 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
     if(Array.isArray(result?.committed) && ci.every(p=>result.committed.includes(p.delivery)))for(const p of ci)ciCommitted.add(p.delivery);
   }catch{batchStatus='transport_error';/* A lost batch response safely falls back to ordinary delivery deduplication. */}
   const replay = async (object: R2Object): Promise<void> => {
-    const parked = prepared.has(object.key)?prepared.get(object.key):await env.ARCHIVE.get(object.key).then(o => o?.json<Parked>());
+    if(!prepared.has(object.key)){const snapshot=await env.ARCHIVE.get(object.key);if(snapshot)snapshotEtags.set(object.key,snapshot.etag);prepared.set(object.key,snapshot?await snapshot.json<Parked>():null);}
+    const parked=prepared.get(object.key);
     if (!parked) return;
     last_error ||= parked.last_error;
     if (parked.retry_at) next_retry = Math.min(next_retry || Infinity, parked.retry_at);
@@ -149,20 +150,22 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
       log('parked_replay_failed', { repository: repo.name, delivery: parked.delivery, error: reason });
     }
     failed++; last_error = reason;
-    if(/^[a-zA-Z0-9-]{1,100}$/.test(parked.delivery) && /^[a-z_]{1,100}$/.test(parked.event) && Number.isSafeInteger(parked.received))failed_deliveries.push({delivery:parked.delivery,event:parked.event,received:parked.received,reason});
+    const detail:typeof delivery_errors[number]={delivery:parked.delivery,event:parked.event,received:parked.received,reason,outcome:'unconfirmed'};
+    if(/^[a-zA-Z0-9-]{1,100}$/.test(parked.delivery) && /^[a-z_]{1,100}$/.test(parked.event) && Number.isSafeInteger(parked.received))delivery_errors.push(detail);
     const failures = (parked.replay_failures || 0) + 1;
     const updated = { ...parked, replay_failures: failures, last_error: reason, last_attempt: started, retry_at: Date.now() + backoff(failures) * 1000 };
     next_retry = Math.min(next_retry || Infinity, updated.retry_at);
     const hold = !options.held && failures >= HOLD_AFTER_FAILURES, target = hold ? pointerKey(repo.id, parked, true) : object.key;
     // A competing replay may already have removed this pointer or recorded a
     // newer cooldown. Never recreate it from this request's stale snapshot.
-    const saved=await env.ARCHIVE.put(object.key, JSON.stringify(updated), { customMetadata: { kind: 'parked-pointer', delivery: parked.delivery },onlyIf:{etagMatches:object.etag} });
-    if(!saved){superseded++;return;}
+    const saved=await env.ARCHIVE.put(object.key, JSON.stringify(updated), { customMetadata: { kind: 'parked-pointer', delivery: parked.delivery },onlyIf:{etagMatches:snapshotEtags.get(object.key)!} });
+    if(!saved){failed--;superseded++;detail.outcome='superseded';return;}
+    detail.outcome='retry_scheduled';
     if (hold) {
       // Publish the held copy before removing its normal-lane predecessor.
       // An existing held copy retains its newer retry state.
       await env.ARCHIVE.put(target,JSON.stringify(updated),{customMetadata:{kind:'parked-pointer',delivery:parked.delivery},onlyIf:{etagDoesNotMatch:'*'}});
-      await env.ARCHIVE.delete(object.key);
+      await env.ARCHIVE.delete(object.key);detail.outcome='held';
     }
   };
   let visited = 0;
@@ -173,7 +176,13 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
     visited += group.length;
   }
   if(!stopped && visited<page.objects.length)stopped='deadline';
-  return { replayed, failed, superseded, failed_deliveries, batched:ciCommitted.size, batch_status:batchStatus, last_error, next_retry, cursor: visited < page.objects.length || page.truncated ? (page.objects[visited-1]?.key || options.cursor) : undefined, remaining: Boolean(stopped) || page.truncated || replayed < page.objects.length, ...(stopped ? { stopped } : {}) };
+  return { replayed, failed, superseded, delivery_errors, batched:ciCommitted.size, batch_status:batchStatus, last_error, next_retry, cursor: visited < page.objects.length || page.truncated ? (page.objects[visited-1]?.key || options.cursor) : undefined, remaining: Boolean(stopped) || page.truncated || replayed < page.objects.length, ...(stopped ? { stopped } : {}) };
+}
+
+// Delivery diagnostics belong only to the immediate administrative reply.
+function passSummary(pass:any):any {
+  if(!pass || typeof pass!=='object')return pass;
+  const {delivery_errors,failed_deliveries,...summary}=pass;return summary;
 }
 
 // Status is a fixed number of R2 reads. Counts are bounded observations, not
@@ -181,6 +190,7 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
 export async function backlog(env: Env, repo: Repository, publicStatus = false): Promise<any> {
   const object = await env.ARCHIVE.get(recoveryKey(repo.id));
   const state:any = object ? await object.json() : {};
+  for(const lane of ['pointers','held'])if(state[lane+'_last_pass'])state[lane+'_last_pass']=passSummary(state[lane+'_last_pass']);
   const raw:any = await env.ARCHIVE.get('control/raw-recovery.json').then(o=>o?.json() ?? null);
   return { ...await ingressMode(env, repo), prepared_at:null, parked:{count:null}, held:{count:null}, ...state, storage: await storageState(env,repo), raw: publicStatus && raw ? {prepared_at:raw.prepared_at,last_attempt:raw.last_attempt,next_retry:raw.next_retry} : raw };
 }
@@ -229,7 +239,7 @@ export async function retainRaw(env: Env, object: R2Object, targets: (payload: a
       const response = await stub(env.REPOSITORIES,repo.id).fetch('https://internal/storage/deliveries',{method:'POST',body:JSON.stringify({ids:[delivery],repository_id:repo.id})});
       if(response.ok) known = ((await response.json() as any).known || []).includes(delivery);
     } catch {}
-    if(known) {await env.ARCHIVE.put(receiptKey(repo.id,delivery),JSON.stringify({delivery,committed_at:Date.now(),source:'sql_receipt'}));continue;}
+    if(known) {await env.ARCHIVE.put(receiptKey(repo.id,delivery),JSON.stringify({delivery,committed_at:Date.now(),source:'sql_receipt'}),{onlyIf:{etagDoesNotMatch:'*'}});continue;}
     const pointer = { key: object.key, delivery, event, repository: repo.name, received: Number(body.customMetadata?.received) || object.uploaded.getTime() };
     // Do not overwrite retry state or resurrect an already held item.
     if (!await env.ARCHIVE.head(bodyKey(repo.id, delivery)) || !await env.ARCHIVE.head(pointerKey(repo.id, pointer)) && !await env.ARCHIVE.head(pointerKey(repo.id, pointer, true))) await park(env, repo, pointer, 'raw_reconciliation');
@@ -325,10 +335,10 @@ export async function replayIngress(env:Env,repo:Repository,options:{limit?:numb
   const lane=options.held?'held':'pointers';let pass:any;
   try {
     pass=await drain(env,repo,{...options,cursor:state[lane+'_cursor'],deadline:began+20000});
-    state[lane+'_cursor']=pass.cursor;state[lane+'_last_pass']=pass;
+    state[lane+'_cursor']=pass.cursor;state[lane+'_last_pass']=passSummary(pass);
     if(!pass.cursor && !pass.stopped)state[lane+'_pass_completed_at']=Date.now();
     await prepareBacklog(env,repo,state);
-    state.failures=0;state.last_error=null;state.next_retry=began+30000;
+    state.failures=0;state.last_error=null; // Manual work must not postpone the next scheduled pass.
   }catch(error){
     state.failures=(state.failures || 0)+1;state.last_error=classify(error);
     state.next_retry=Date.now()+Math.max(60,backoff(state.failures))*1000;
@@ -352,7 +362,7 @@ export async function maintainIngress(env: Env, repo: Repository): Promise<void>
       for(let pages=0;pages<20 && Date.now()<deadline;pages++) {
         const pass = await drain(env, repo, { limit: 50, held: lane === 'held', cursor: state[lane + '_cursor'], deadline });
         state[lane + '_cursor'] = pass.cursor;
-        state[lane + '_last_pass'] = pass;
+        state[lane + '_last_pass'] = passSummary(pass);
         if(!pass.cursor && !pass.stopped)state[lane + '_pass_completed_at']=Date.now();
         if(pass.stopped || !pass.cursor) break;
       }

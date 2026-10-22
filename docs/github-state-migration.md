@@ -57,14 +57,18 @@ use the ordinary application path, held retry deadlines remain in force, and an
 older repository deployment without the private batch RPC falls back to that path.
 
 Explicit admin replay shares cron's conditional R2 lease and stored lane cursor.
-Each pass uses a twenty-second work budget, respects pointer and recovery-error
-backoffs, and returns `leased`, `deadline`, or `lease_replaced` when appropriate.
+The optional `limit` must be an integer from 1 to 100 (default 25); invalid
+values return HTTP 400 before acquiring the lease. Each pass uses a twenty-second
+work budget, respects pointer and recovery-error backoffs, and returns `leased`, `deadline`, or `lease_replaced` when appropriate.
 An expired owner's completion cannot overwrite a replacement checkpoint.
 Permanent delivery receipts use conditional creation. Failed cleanup updates a
-pointer only if its original ETag still matches, so a stale attempt cannot
+pointer only if the ETag of its loaded snapshot still matches, so a stale attempt cannot
 recreate an already deleted pointer or shorten a newer retry deadline.
-`failed_deliveries` contains bounded delivery/event/timestamp/reason metadata for
-receipt inspection; it contains no webhook bodies. Treat a lost response as
+`delivery_errors` in the immediate admin response contains bounded delivery/event/
+timestamp/reason metadata with `retry_scheduled`, `held`, `superseded` or
+`unconfirmed` outcomes for receipt inspection. Superseded updates are counted
+separately from failures. These details are excluded from stored pass summaries,
+health and observation responses. Successful manual work does not postpone cron. Treat a lost response as
 unknown progress and repeat through the same leased interface.
 
 If replay needs a post-selection service fix, preserve PostgreSQL ownership,
