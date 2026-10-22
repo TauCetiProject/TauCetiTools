@@ -94,7 +94,7 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
   const prefix = `parked/${repo.id}/${options.held ? 'held' : 'pointers'}/`;
   const page = await env.ARCHIVE.list({ prefix, limit: Math.min(Math.max(1, options.limit || 25), 100), startAfter: options.cursor });
   let replayed = 0, failed = 0, stopped: string | undefined, last_error: string | undefined, next_retry: number | undefined;
-  const prepared=new Map<string,Parked|null>(),ciCommitted=new Set<string>();
+  const prepared=new Map<string,Parked|null>(),ciCommitted=new Set<string>();let batchStatus:number|string|null=null;
   // Compact pointers only: never load their webhook bodies into this batch.
   // A crash after SQL commits leaves the pointers replayable and deduplicated.
   for(let i=0;i<page.objects.length && Date.now()<(options.deadline || Infinity);i+=REPLAY_GROUP)await Promise.all(page.objects.slice(i,i+REPLAY_GROUP).map(async object=>{
@@ -108,9 +108,10 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
   const ci=[...ciByDelivery.values()].filter(p=>!conflicts.has(p.delivery));
   if(ci.length && Date.now()<(options.deadline || Infinity))try{
     const response=await stub(env.REPOSITORIES,repo.id).fetch('https://internal/ci-receipts',{method:'POST',body:JSON.stringify({repository:repo.name,events:ci.map(({delivery,event,received})=>({delivery,event,received}))})});
+    batchStatus=response.status;
     const result:any=response.ok?await response.json():null;
     if(Array.isArray(result?.committed) && ci.every(p=>result.committed.includes(p.delivery)))for(const p of ci)ciCommitted.add(p.delivery);
-  }catch{/* A lost batch response safely falls back to ordinary delivery deduplication. */}
+  }catch{batchStatus='transport_error';/* A lost batch response safely falls back to ordinary delivery deduplication. */}
   const replay = async (object: R2Object): Promise<void> => {
     const parked = prepared.has(object.key)?prepared.get(object.key):await env.ARCHIVE.get(object.key).then(o => o?.json<Parked>());
     if (!parked) return;
@@ -162,7 +163,7 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
     visited += group.length;
   }
   if(!stopped && visited<page.objects.length)stopped='deadline';
-  return { replayed, failed, last_error, next_retry, cursor: visited < page.objects.length || page.truncated ? (page.objects[visited-1]?.key || options.cursor) : undefined, remaining: Boolean(stopped) || page.truncated || replayed < page.objects.length, ...(stopped ? { stopped } : {}) };
+  return { replayed, failed, batched:ciCommitted.size, batch_status:batchStatus, last_error, next_retry, cursor: visited < page.objects.length || page.truncated ? (page.objects[visited-1]?.key || options.cursor) : undefined, remaining: Boolean(stopped) || page.truncated || replayed < page.objects.length, ...(stopped ? { stopped } : {}) };
 }
 
 // Status is a fixed number of R2 reads. Counts are bounded observations, not

@@ -2488,7 +2488,7 @@ export class RepositoryState extends DurableObject<Env> {
         const events=new Map<string,any>();
         for(const p of input.events){if(events.has(p.delivery) && events.get(p.delivery).event!==p.event)return json({error:'invalid_ci_receipts'},400);events.set(p.delivery,p);}
         if(this.storageMarkerUnavailable)return json({error:'storage_control_unavailable',parkable:true,request_id},503);
-        if(this.ingress===undefined)this.ingress=(await this.env.ARCHIVE.get(controlKey(repo.id)).then(o=>o?.json<any>()))?.mode ?? 'apply';
+        if(this.ingress===undefined){const mode=(await this.env.ARCHIVE.get(controlKey(repo.id)).then(o=>o?.json<any>()))?.mode ?? 'apply';this.ingress ??= mode;}
         if(this.ingress==='parked')return json({error:'ingress_parked',parkable:true,request_id},503);
         if(this.degraded)return json({error:this.degraded.reason==='storage_full'?'storage_full':'storage_control_unavailable',parkable:true,request_id},503);
         this.applying++;
@@ -2506,7 +2506,7 @@ export class RepositoryState extends DurableObject<Env> {
       if (path==='/event') {
         const pointer=await req.json() as EventPointer,repo=repository(this.env,pointer.repository);
         if(this.storageMarkerUnavailable)return json({error:'storage_control_unavailable',parkable:true,request_id},503);
-        if (this.ingress===undefined && repo) this.ingress=(await this.env.ARCHIVE.get(controlKey(repo.id)).then(o=>o?.json<any>()))?.mode ?? 'apply';
+        if (this.ingress===undefined && repo) {const mode=(await this.env.ARCHIVE.get(controlKey(repo.id)).then(o=>o?.json<any>()))?.mode ?? 'apply';this.ingress ??= mode;}
         if (this.ingress==='parked') return json({error:'ingress_parked',parkable:true,request_id},503);
         if(!repo) throw new Error('repository not allowed');
         let flight=this.deliveryFlights.get(pointer.delivery);

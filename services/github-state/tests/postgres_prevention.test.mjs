@@ -321,9 +321,9 @@ pg('repeated PostgreSQL resource refreshes reuse immutable spill contents across
  }finally {await f.close();}
 });
 
-pg('historical CI replay batches fenced PostgreSQL receipts before R2 cleanup without GitHub',async()=>{
+for(const loseResponse of[false,true])pg('historical CI replay batches fenced PostgreSQL receipts before R2 cleanup without GitHub; lost response='+loseResponse,async()=>{
  const f=await postgresFixture();try{
-  f.env.ARCHIVE=bucket();let batches=0,individual=0,lost=true;
+  f.env.ARCHIVE=bucket();let batches=0,individual=0,lost=loseResponse;
   f.env.INSTALLATIONS={idFromName(){throw Error('CI receipt replay must not fetch GitHub');}};
   f.env.REPOSITORIES={idFromName:id=>({toString:()=>id}),get:()=>({fetch:async(url,init)=>{
    const path=new URL(url).pathname;if(path==='/ci-receipts')batches++;else if(path==='/event')individual++;
@@ -335,7 +335,7 @@ pg('historical CI replay batches fenced PostgreSQL receipts before R2 cleanup wi
   await f.env.ARCHIVE.put(semantic.key,JSON.stringify({issue:{number:7},comment:{id:'mixed-comment',body:'must apply normally',created_at:'2026-10-19T00:00:00Z'}}));
   await ingress.park(f.env,repo,semantic,'migration');
   f.env.ARCHIVE.failures.push((op,key)=>op==='put'&&key===ingress.receiptKey(repo.id,'pg-ci-0'));
-  const first=await ingress.drain(f.env,repo,{limit:100});assert.equal(batches,1);assert.ok(individual>0);assert.equal(first.failed,1);
+  const first=await ingress.drain(f.env,repo,{limit:100});assert.equal(batches,1);assert.equal(first.batched,loseResponse?0:30);assert.equal(first.batch_status,loseResponse?'transport_error':200);assert.equal(individual,loseResponse?31:1);assert.equal(first.failed,1);
   assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,31);
   assert.deepEqual((await f.store.exec('SELECT kind,id FROM changes ORDER BY revision')).toArray(),[{kind:'issue_comments',id:'mixed-comment'},{kind:'collection',id:'issue_comments:{"number":7}'}],'only the semantic comment and its membership publish changes');
   assert.equal(await f.state.revision(),originalRevision+2);

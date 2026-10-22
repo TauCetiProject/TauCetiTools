@@ -1281,6 +1281,22 @@ test('CI batches respect SQLite bindings, storage refusal and an in-flight ingre
  assert.equal(largest,99);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM changes').get().n,0);
 });
 
+test('a late ingress-control read cannot undo a completed pause',async()=>{
+ for(const path of ['/ci-receipts','/event']){
+  const f=repositoryFixture();await f.ready;f.state.ingress=undefined;
+  f.state.env.REPOSITORIES={idFromName:()=>({toString:()=>f.state.ctx.id.toString()})};
+  let release,entered;const gate=new Promise(r=>release=r),reading=new Promise(r=>entered=r),get=f.archive.get;
+  f.archive.get=async key=>{if(key==='control/100/ingress.json'){entered();await gate;return{json:async()=>({mode:'apply'})};}return get(key);};
+  const event={delivery:'late-control',event:'check_run',received:Date.now()},body=path==='/event'?{...event,repository:repo.name,key:'unused'}:{repository:repo.name,events:[event]};
+  const pending=f.state.fetch(new Request('https://internal'+path,{method:'POST',body:JSON.stringify(body)}));
+  await reading;
+  const pause=await f.state.fetch(new Request('https://internal/storage/ingress',{method:'POST',body:JSON.stringify({mode:'parked'})}));
+  assert.equal((await pause.json()).drained,true);release();
+  assert.equal((await pending).status,503);assert.equal(f.state.ingress,'parked');
+  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,0);
+ }
+});
+
 test('CI replay survives an old actor and a deadline immediately after batch commit',async()=>clock(async advance=>{
  const f=repositoryFixture();await f.ready;let oldActor=true,expire=false,batches=0,individual=0;
  const namespace={idFromName:()=>({toString:()=>f.state.ctx.id.toString()}),get:()=>({fetch:async(url,init)=>{
