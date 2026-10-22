@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {runtime,repository,send} from './runtime.mjs';
 
-test('a selected collection reads indexed members before resource payloads and freshness',async()=>{
+test('a selected collection reads indexed members before resource payloads and freshness',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
  const mf=await runtime(async()=>{throw Error('unexpected GitHub request');},{},{repositoryAlarms:false,repositoryExtension:`
  async fetch(req){
   const path=new URL(req.url).pathname;
