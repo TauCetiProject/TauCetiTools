@@ -2,7 +2,7 @@
 export async function scanHostedCapacity(
   organization:string,
   read:(path:string)=>Promise<{status:number;body:any;link?:string;deferred?:boolean}>,
-):Promise<{routing_version:number;busy:number;namespace_busy:number;queued_fleet:string[][];requests:number;repositories:number;runs:number;observed_at:number}> {
+):Promise<{routing_version:number;busy:number;namespace_busy?:number;queued_fleet?:string[][];placement_unavailable?:string;requests:number;repositories:number;runs:number;observed_at:number}> {
   let requests=0;const deadline=Date.now()+15000;
   async function pages(path:string,key?:string):Promise<any[]> {
     const rows:any[]=[];
@@ -38,22 +38,43 @@ export async function scanHostedCapacity(
   const controls=new Set(['pick','recover','retry-status','publish','finalize-merge-group-build','finalize-batch']);
   const seenRuns=new Set<string>();
   const activeRuns:{prefix:string;id:string}[]=[];
-  await each(all.filter(r=>!r.archived),async repo=>{
-    const prefix='/repos/'+encodeURIComponent(organization)+'/'+encodeURIComponent(repo.name);
-    for(const status of ['in_progress','queued'])for(const run of await pages(prefix+'/actions/runs?status='+status,'workflow_runs')) {
-      if(!/^\d+$/.test(String(run.id)))throw new Error('capacity_invalid_run');
-      const key=prefix+'/'+run.id;
-      if(!seenRuns.has(key)){seenRuns.add(key);activeRuns.push({prefix,id:String(run.id)});}
-    }
-  });
-  await each(activeRuns,async run=>{
-    for(const job of await pages(run.prefix+'/actions/runs/'+run.id+'/jobs','jobs')) {
-      if(typeof job.status!=='string' || !Array.isArray(job.labels) || job.labels.some((l:unknown)=>typeof l!=='string'))throw new Error('capacity_invalid_job');
-      const namespace=job.labels.some((l:string)=>l.startsWith('nscloud-') || l.startsWith('namespace-profile-'));
-      if(['queued','in_progress'].includes(job.status) && namespace && !controls.has(String(job.name || '').split(' / ').at(-1)!) && !job.labels.some((l:string)=>l.includes('-2x4-')))namespace_busy++;
-      if(job.status==='queued' && job.labels.includes('self-hosted'))queued_fleet.push(job.labels);
-      if(job.status==='in_progress' && !job.labels.some((l:string)=>l==='self-hosted' || l.startsWith('nscloud-') || l.startsWith('namespace-profile-')))busy++;
-    }
-  });
+  const repos=all.filter(r=>!r.archived);
+  async function discover(status:string):Promise<void> {
+    await each(repos,async repo=>{
+      const prefix='/repos/'+encodeURIComponent(organization)+'/'+encodeURIComponent(repo.name);
+      for(const run of await pages(prefix+'/actions/runs?status='+status,'workflow_runs')) {
+        if(!/^\d+$/.test(String(run.id)))throw new Error('capacity_invalid_run');
+        const key=prefix+'/'+run.id;
+        if(!seenRuns.has(key)){seenRuns.add(key);activeRuns.push({prefix,id:String(run.id)});}
+      }
+    });
+  }
+  async function jobs(runs:typeof activeRuns):Promise<void> {
+    await each(runs,async run=>{
+      for(const job of await pages(run.prefix+'/actions/runs/'+run.id+'/jobs','jobs')) {
+        if(typeof job.status!=='string' || !Array.isArray(job.labels) || job.labels.some((l:unknown)=>typeof l!=='string'))throw new Error('capacity_invalid_job');
+        const namespace=job.labels.some((l:string)=>l.startsWith('nscloud-') || l.startsWith('namespace-profile-'));
+        if(['queued','in_progress'].includes(job.status) && namespace && !controls.has(String(job.name || '').split(' / ').at(-1)!) && !job.labels.some((l:string)=>l.includes('-2x4-')))namespace_busy++;
+        if(job.status==='queued' && job.labels.includes('self-hosted'))queued_fleet.push(job.labels);
+        if(job.status==='in_progress' && !job.labels.some((l:string)=>l==='self-hosted' || l.startsWith('nscloud-') || l.startsWith('namespace-profile-')))busy++;
+      }
+    });
+  }
+  // The ordinary picker needs the complete running GitHub inventory. Queued
+  // workflow discovery is extra placement data: old empty queued runs must not
+  // discard that useful answer or force every caller to repeat the scan.
+  await discover('in_progress');
+  await jobs(activeRuns);
+  const running=busy,runningRuns=activeRuns.length;
+  try {
+    await discover('queued');
+    const queued=activeRuns.slice(runningRuns);
+    // Every additional run needs at least one jobs request. Avoid spending the
+    // remaining allowance on an extension which already cannot be completed.
+    if(queued.length>80-requests)throw new Error('capacity_scan_limit');
+    await jobs(queued);
+  } catch(error) {
+    return {routing_version:1,busy:running,requests,repositories:all.length,runs:runningRuns,observed_at:Date.now(),placement_unavailable:error instanceof Error?error.message:'capacity_inventory_unavailable'};
+  }
   return {routing_version:2,busy,namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:Date.now()};
 }

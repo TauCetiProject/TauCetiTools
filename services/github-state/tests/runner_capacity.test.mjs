@@ -150,3 +150,24 @@ test('a busy organization inventory uses at most three reads at once and drains 
  await assert.rejects(()=>scanHostedCapacity('org',reader(true)),/fixture request rejected/);
  assert.equal(active,0,'refresh must settle all started requests before releasing the single flight');
 });
+
+test('many empty queued workflows cannot discard complete running GitHub capacity',async()=>{
+ const calls=[];
+ const value=await scanHostedCapacity('org',async path=>{
+  calls.push(path);
+  if(path.startsWith('/orgs/'))return envelope(null,[{name:'code',archived:false}]);
+  if(path.includes('status=in_progress'))return envelope('workflow_runs',[{id:1}]);
+  if(path.includes('status=queued'))return envelope('workflow_runs',Array.from({length:100},(_,i)=>({id:i+2})));
+  assert.ok(path.includes('/runs/1/jobs'),'must not begin a queued-job extension that cannot fit');
+  return envelope('jobs',[hosted]);
+ });
+ assert.equal(value.routing_version,1);assert.equal(value.busy,1);assert.equal(value.requests,4);
+ assert.equal(value.namespace_busy,undefined);assert.equal(value.queued_fleet,undefined);
+ assert.equal(value.placement_unavailable,'capacity_scan_limit');assert.equal(calls.length,4);
+});
+test('missing queued placement data preserves running capacity; missing running data still fails',async()=>{
+ const {read}=readFixture();
+ const value=await scanHostedCapacity('org',path=>path.includes('status=queued')?Promise.resolve({status:403,body:{}}):read(path));
+ assert.equal(value.routing_version,1);assert.equal(value.busy,1);assert.equal(value.namespace_busy,undefined);
+ await assert.rejects(()=>scanHostedCapacity('org',path=>path.includes('/jobs?')?Promise.resolve({status:403,body:{}}):read(path)),/capacity_inventory_unavailable/);
+});
