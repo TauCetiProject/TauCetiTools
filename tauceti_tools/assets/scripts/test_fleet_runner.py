@@ -250,6 +250,14 @@ class RoutingEntrypoint(unittest.TestCase):
         self.assertEqual(output["pool"], "chris")
         self.assertEqual(len(calls), 2)
 
+    def test_staging_retry_checks_prior_unassigned_placement_before_reusing_fleet(self):
+        config, inventory = self.staging_fixture()
+        fixtures = self.fixture()
+        fixtures["repos/Test/code/actions/runs/5/attempts/1/jobs?per_page=100&page=1"] = dict(total_count=1, jobs=[dict(name="sandboxed-build", status="completed", conclusion="cancelled", runner_id=0, runner_name="", labels=["self-hosted", "fleet-" + "a" * 32])])
+        output, calls = self.pick(dict(app=fixtures, fleet={"orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1": inventory}, state=dict(shared=self.shared(routing_version=2, namespace_busy=0, queued_fleet=[]))), config=config, FLEET_JOB_KIND="staging", FLEET_CI_ENABLED="true", FLEET_READ_TOKEN="fleet", FLEET_RUNNER_GROUP_ID="3", GITHUB_STATE_TOKEN="state", GITHUB_RUN_ATTEMPT="2")
+        self.assertEqual(output["pool"], "chris")
+        self.assertIn(("app", "repos/Test/code/actions/runs/5/attempts/1/jobs?per_page=100&page=1"), calls)
+
     def test_staging_busy_offline_mislabeled_or_unavailable_inventory_retains_cloud_fallback(self):
         config, inventory = self.staging_fixture()
         for failure in ("busy", "offline", "labels", "unavailable"):
