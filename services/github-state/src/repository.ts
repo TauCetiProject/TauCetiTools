@@ -1065,10 +1065,14 @@ export class RepositoryState extends DurableObject<Env> {
     return 20;
   }
   async noteDemand(q:Query): Promise<void> {
-    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.noteDemand.call(state,q));
     if (q.allow_observed || q.operation==='survey') return;
     const key=queryKey(q),now=Date.now();
     const prior=(await this.store.exec<any>('SELECT at FROM demand WHERE key=?',key)).toArray()[0];
+    // Demand stays hot for five minutes. Repeated cached reads need at most
+    // one refresh per minute, not a write transaction (and SQLite input gate)
+    // per reader. Check again inside the transaction to coalesce racing reads.
+    if(prior?.at>now-60000 && await this.complete(q))return;
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.noteDemand.call(state,q));
     await this.store.exec('INSERT INTO demand VALUES(?,?) ON CONFLICT(key) DO UPDATE SET at=excluded.at',key,now);
     const complete=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',key)).toArray().length>0;
     if (!complete && q.operation!=='progress') {
