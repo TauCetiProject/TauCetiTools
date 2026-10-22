@@ -58,3 +58,28 @@ test('a standalone store batch rolls back earlier statements when a later statem
  }`});
  try{const ns=await mf.getDurableObjectNamespace('REPOSITORIES'),stub=ns.get(ns.idFromName(repository.id));assert.equal((await stub.fetch('https://internal/test-failed-batch')).status,409);assert.deepEqual(await (await stub.fetch('https://internal/test-batch-result')).json(),[]);}finally{await mf.dispose();}
 });
+
+test('complete cached data does not wait for slow demand bookkeeping',async()=>{
+ let release,entered;const gate=new Promise(r=>release=r),ready=new Promise(r=>entered=r);
+ const mf=await runtime(async(req,url)=>{assert.equal(url.hostname,'demand.test');entered();await gate;return Response.json({ok:true});},{},{repositoryAlarms:false,repositoryExtension:`
+ async noteDemand(q){await fetch('https://demand.test/hold');return super.noteDemand(q);}
+ async fetch(req){
+  if(new URL(req.url).pathname==='/fixture/complete'){
+   await this.put('pr','7',{number:7,state:'OPEN',headRefOid:'a'.repeat(40)},Date.now(),false,'7');
+   await this.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?)','pr:{"number":7}','pr','{"number":7}',1,Date.now(),await this.revision(),null);
+   return Response.json({ok:true});
+  }
+  return super.fetch(req);
+ }`});
+ let timer;
+ try{
+  const ns=await mf.getDurableObjectNamespace('REPOSITORIES'),stub=ns.get(ns.idFromName(repository.id));
+  await send(stub,'/fixture/complete',{});
+  const read=stub.fetch('https://internal/query',{method:'POST',headers:{'x-query-dispatched-at':String(Date.now()-100)},body:JSON.stringify({repository:repository.name,operation:'pr',args:{number:7}})});
+  await ready;
+  const result=await Promise.race([read,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('complete read waited for optional demand')),2000);})]);
+  clearTimeout(timer);assert.equal((await result.json()).data.number,7);
+  assert.ok(Number(result.headers.get('X-TauCeti-Query-Ms'))>=0);
+  assert.ok(Number(result.headers.get('X-TauCeti-Input-Wait-Ms'))>=100);
+ }finally{clearTimeout(timer);release();await mf.dispose();}
+});

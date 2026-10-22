@@ -328,7 +328,8 @@ export class RepositoryState extends DurableObject<Env> {
     if(this.ctx.waitUntil)this.ctx.waitUntil(work);
   }
   async noteReadDemand(q:Query,known?:boolean):Promise<void> {
-    if(this.store.backend==='postgres' && (known ?? await this.complete(q))){this.backgroundDemand(q);return;}
+    // Existing complete data never waits for optional scheduler bookkeeping.
+    if(known ?? await this.complete(q)){this.backgroundDemand(q);return;}
     await this.optionalAsync('demand',()=>this.noteDemand(q));
   }
   async optionalRead(operation:string,write:()=>Promise<unknown>):Promise<void> {
@@ -2459,7 +2460,16 @@ export class RepositoryState extends DurableObject<Env> {
     }
     const tracked=!this.migrationHeld();
     if(tracked) this.activeOperations++;
-    try {return await this.repositoryFetch(req);} finally {if(tracked) this.activeOperations--;}
+    const started=Date.now();
+    try {
+      const response=await this.repositoryFetch(req);
+      if(path==='/query') {
+        const dispatched=Number(req.headers.get('x-query-dispatched-at'));
+        response.headers.set('X-TauCeti-Query-Ms',String(Date.now()-started));
+        if(dispatched>0)response.headers.set('X-TauCeti-Input-Wait-Ms',String(Math.max(0,started-dispatched)));
+      }
+      return response;
+    } finally {if(tracked) this.activeOperations--;}
   }
   async repositoryFetch(req:Request): Promise<Response> {
     const url=new URL(req.url),path=url.pathname,request_id=requestId(req),requestStarted=Date.now();
