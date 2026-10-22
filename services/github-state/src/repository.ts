@@ -2255,7 +2255,7 @@ export class RepositoryState extends DurableObject<Env> {
     // parking/receipt handler owns normal and dead-letter inputs. Historical
     // bucket scans remain visible, but are independent recovery work.
     if(['queue','dlq'].some(name=>queues[name].stale || queues[name].count!==0 || queues[name].at<state.cutover!.selected_at!))return;
-    if(!state.cutover!.replay_complete && (heldEmpty || recovery.held_pass_completed_at>=state.cutover!.selected_at!)){state.cutover!.replay_complete=Date.now();await saveMigration(this.env.ARCHIVE,state);}
+    if(!state.cutover!.replay_complete && (heldEmpty || recovery.held_pass_started_at>=state.cutover!.selected_at! && recovery.held_pass_completed_at>=recovery.held_pass_started_at)){state.cutover!.replay_complete=Date.now();await saveMigration(this.env.ARCHIVE,state);}
     if(!heldEmpty){log('migration_held_input_pending',{repository:state.repository,held:recovery.held?.count ?? null,next_retry:recovery.next_retry ?? null,reconciliation_resumed:Boolean(state.cutover!.replay_complete)});return;}
     await this.prepareDiagnostics();
     const evidence=await this.env.ARCHIVE.get(`control/${state.repository}/migration-acceptance.json`);

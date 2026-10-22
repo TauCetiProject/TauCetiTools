@@ -67,8 +67,10 @@ recreate an already deleted pointer or shorten a newer retry deadline.
 `delivery_errors` in the immediate admin response contains bounded delivery/event/
 timestamp/reason metadata with `retry_scheduled`, `held`, `superseded` or
 `unconfirmed` outcomes for receipt inspection. Superseded updates are counted
-separately from failures. These details are excluded from stored pass summaries,
-health and observation responses. Successful manual work does not postpone cron. Treat a lost response as
+separately from failures. These error arrays are excluded from newly stored pass summaries and are
+filtered from health and observation responses, including older summaries. Successful manual work does not postpone cron. A completed held sweep only
+unblocks reconciliation when that sweep started after target selection; a saved
+pre-selection cursor cannot provide that evidence. Treat a lost response as
 unknown progress and repeat through the same leased interface.
 
 If replay needs a post-selection service fix, preserve PostgreSQL ownership,

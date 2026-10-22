@@ -94,7 +94,7 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
   const prefix = `parked/${repo.id}/${options.held ? 'held' : 'pointers'}/`;
   const page = await env.ARCHIVE.list({ prefix, limit: Math.min(Math.max(1, options.limit || 25), 100), startAfter: options.cursor });
   let replayed = 0, failed = 0, stopped: string | undefined, last_error: string | undefined, next_retry: number | undefined;
-  let superseded=0;const delivery_errors:{delivery:string;event:string;received:number;reason:string;outcome:'unconfirmed'|'superseded'|'retry_scheduled'|'held'}[]=[];
+  let superseded=0;const failedKeys=new Set<string>();const delivery_errors:{delivery:string;event:string;received:number;reason:string;outcome:'unconfirmed'|'superseded'|'retry_scheduled'|'held'}[]=[];
   const prepared=new Map<string,Parked|null>(),snapshotEtags=new Map<string,string>(),ciCommitted=new Set<string>();let batchStatus:number|string|null=null;
   // Compact pointers only: never load their webhook bodies into this batch.
   // A crash after SQL commits leaves the pointers replayable and deduplicated.
@@ -117,9 +117,7 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
     if(!prepared.has(object.key)){const snapshot=await env.ARCHIVE.get(object.key);if(snapshot)snapshotEtags.set(object.key,snapshot.etag);prepared.set(object.key,snapshot?await snapshot.json<Parked>():null);}
     const parked=prepared.get(object.key);
     if (!parked) return;
-    last_error ||= parked.last_error;
-    if (parked.retry_at) next_retry = Math.min(next_retry || Infinity, parked.retry_at);
-    if ((parked.retry_at || 0) > Date.now()) return;
+    if ((parked.retry_at || 0) > Date.now()){last_error ||= parked.last_error;next_retry=Math.min(next_retry || Infinity,parked.retry_at!);return;}
     const started = Date.now();
     let reason = 'internal';
     try {
@@ -149,19 +147,19 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
       }
       log('parked_replay_failed', { repository: repo.name, delivery: parked.delivery, error: reason });
     }
-    failed++; last_error = reason;
+    failed++;failedKeys.add(object.key);
     const detail:typeof delivery_errors[number]={delivery:parked.delivery,event:parked.event,received:parked.received,reason,outcome:'unconfirmed'};
     if(/^[a-zA-Z0-9-]{1,100}$/.test(parked.delivery) && /^[a-z_]{1,100}$/.test(parked.event) && Number.isSafeInteger(parked.received))delivery_errors.push(detail);
     const failures = (parked.replay_failures || 0) + 1;
     const updated = { ...parked, replay_failures: failures, last_error: reason, last_attempt: started, retry_at: Date.now() + backoff(failures) * 1000 };
-    next_retry = Math.min(next_retry || Infinity, updated.retry_at);
     const hold = !options.held && failures >= HOLD_AFTER_FAILURES, target = hold ? pointerKey(repo.id, parked, true) : object.key;
     // A competing replay may already have removed this pointer or recorded a
     // newer cooldown. Never recreate it from this request's stale snapshot.
     const saved=await env.ARCHIVE.put(object.key, JSON.stringify(updated), { customMetadata: { kind: 'parked-pointer', delivery: parked.delivery },onlyIf:{etagMatches:snapshotEtags.get(object.key)!} });
-    if(!saved){failed--;superseded++;detail.outcome='superseded';return;}
-    detail.outcome='retry_scheduled';
+    if(!saved){failed--;failedKeys.delete(object.key);superseded++;detail.outcome='superseded';return;}
+    last_error=reason;next_retry=Math.min(next_retry || Infinity,updated.retry_at);detail.outcome='retry_scheduled';
     if (hold) {
+      detail.outcome='unconfirmed';
       // Publish the held copy before removing its normal-lane predecessor.
       // An existing held copy retains its newer retry state.
       await env.ARCHIVE.put(target,JSON.stringify(updated),{customMetadata:{kind:'parked-pointer',delivery:parked.delivery},onlyIf:{etagDoesNotMatch:'*'}});
@@ -172,7 +170,7 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
   for (let i = 0; i < page.objects.length && Date.now() < (options.deadline || Infinity); i += REPLAY_GROUP) {
     if (stopped) break;
     const group = page.objects.slice(i,i+REPLAY_GROUP);
-    await Promise.all(group.map(object => replay(object).catch(error => { failed++; last_error = classify(error); log('pointer_maintenance_failed', { key: object.key, reason: last_error }); })));
+    await Promise.all(group.map(object => replay(object).catch(error => { if(!failedKeys.has(object.key)){failed++;failedKeys.add(object.key);} last_error = classify(error); log('pointer_maintenance_failed', { key: object.key, reason: last_error }); })));
     visited += group.length;
   }
   if(!stopped && visited<page.objects.length)stopped='deadline';
@@ -334,6 +332,7 @@ export async function replayIngress(env:Env,repo:Repository,options:{limit?:numb
   if(!owner.etag)return {replayed:0,failed:0,remaining:true,stopped:owner.stopped,next_retry:owner.next_retry};
   const lane=options.held?'held':'pointers';let pass:any;
   try {
+    if(!state[lane+'_cursor'])state[lane+'_pass_started_at']=Date.now();
     pass=await drain(env,repo,{...options,cursor:state[lane+'_cursor'],deadline:began+20000});
     state[lane+'_cursor']=pass.cursor;state[lane+'_last_pass']=passSummary(pass);
     if(!pass.cursor && !pass.stopped)state[lane+'_pass_completed_at']=Date.now();
@@ -360,6 +359,7 @@ export async function maintainIngress(env: Env, repo: Repository): Promise<void>
     const full = (await storageState(env,repo))?.state === 'full';
     for (const lane of full ? [] : lanes) {
       for(let pages=0;pages<20 && Date.now()<deadline;pages++) {
+        if(!state[lane+'_cursor'])state[lane+'_pass_started_at']=Date.now();
         const pass = await drain(env, repo, { limit: 50, held: lane === 'held', cursor: state[lane + '_cursor'], deadline });
         state[lane + '_cursor'] = pass.cursor;
         state[lane + '_last_pass'] = passSummary(pass);

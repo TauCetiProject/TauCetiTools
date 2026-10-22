@@ -1329,7 +1329,7 @@ test('lost cleanup acknowledgements cannot recreate committed CI pointers or rep
  const key=ingress.pointerKey(repo.id,p),remove=f.archive.delete;let lost=true;
  f.archive.delete=async keys=>{await remove(keys);if(lost&&[].concat(keys).includes(key)){lost=false;throw Error('lost cleanup acknowledgement');}};
  const pass=await ingress.drain(env,repo);
- assert.equal(pass.failed,0);assert.equal(pass.superseded,1);assert.deepEqual(pass.delivery_errors,[{delivery:p.delivery,event:p.event,received:p.received,reason:'internal',outcome:'superseded'}]);
+ assert.equal(pass.failed,0);assert.equal(pass.superseded,1);assert.equal(pass.last_error,undefined);assert.equal(pass.next_retry,undefined);assert.deepEqual(pass.delivery_errors,[{delivery:p.delivery,event:p.event,received:p.received,reason:'internal',outcome:'superseded'}]);
  assert.equal(await f.archive.get(key),null);assert.equal(await f.archive.get(ingress.bodyKey(repo.id,p.delivery)),null);
  const receipt=f.archive.objects.get(ingress.receiptKey(repo.id,p.delivery)).bytes.toString();
  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,1);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM changes').get().n,0);
@@ -1446,4 +1446,15 @@ test('manual held replay resumes its own cursor and retains it across a pause',a
  assert.equal((await(await h.archive.get(ingress.recoveryKey(repo.id))).json()).held_cursor,keys[0]);
  await ingress.setIngressMode(h.env,repo,'apply');assert.equal((await ingress.replayIngress(h.env,repo,{held:true,limit:1})).replayed,1);assert.equal(h.state.applied.size,2);
  const state=await(await h.archive.get(ingress.recoveryKey(repo.id))).json();assert.equal(state.held_cursor,undefined);assert.ok(state.held_pass_completed_at);
+});
+
+test('retry maintenance errors count each pointer once and retain uncertain move outcomes',async()=>{
+ for(const failure of ['retry','held','delete']){
+  const h=harness();h.state.full=true;await deliver(h.env,'maintenance-'+failure);h.state.full=false;h.state.error='internal';
+  const key=parked(h.archive,'maintenance-'+failure)[0],p=await(await h.archive.get(key)).json();await h.archive.put(key,JSON.stringify({...p,replay_failures:4}));
+  const held=ingress.pointerKey(repo.id,p,true);
+  h.archive.failures.push((op,k)=>failure==='retry'?op==='put'&&k===key:failure==='held'?op==='put'&&k===held:op==='delete'&&k===key);
+  const result=await ingress.drain(h.env,repo);assert.equal(result.failed,1);assert.equal(result.delivery_errors.length,1);assert.equal(result.delivery_errors[0].outcome,'unconfirmed');
+  assert.ok(await h.archive.get(p.key));assert.ok(await h.archive.get(key));
+ }
 });

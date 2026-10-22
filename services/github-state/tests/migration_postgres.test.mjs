@@ -203,9 +203,16 @@ test('ordinary supervisor restarts a fenced repository, preserves cursors, and r
   const pinned=await ingress.park(f.env,custom,poison,'fixture_failure');
   const normalKey=ingress.pointerKey(custom.id,poison),heldKey=ingress.pointerKey(custom.id,poison,true);
   await f.archive.put(heldKey,JSON.stringify({...pinned,retry_at:Date.now()+86400000}));await f.archive.delete(normalKey);
+  const selectedAt=(await migration.readMigration(f.archive,custom.id)).cutover.selected_at;
+  await f.archive.put(ingress.recoveryKey(custom.id),JSON.stringify({held_cursor:heldKey,held_pass_started_at:selectedAt-1000}));
+  await ingress.replayIngress(f.env,custom,{held:true});
+  const oldSweep=await f.archive.get(ingress.recoveryKey(custom.id)).then(o=>o.json());
+  assert.ok(oldSweep.held_pass_completed_at>=selectedAt,'completion after selection alone is insufficient');
+  await f.request('/migration-supervise',{});
+  assert.equal(migration.blocksRepairs(await migration.readMigration(f.archive,custom.id)),true,'a pre-selection sweep must not release target repair dispatch');
   await ingress.maintainIngress(f.env,custom);
   const visited=await f.archive.get(ingress.recoveryKey(custom.id)).then(o=>o.json());
-  assert.equal(typeof visited.held_last_pass,'object');assert.ok(visited.held_pass_completed_at>=(await migration.readMigration(f.archive,custom.id)).cutover.selected_at);
+  assert.ok(visited.held_pass_started_at>=selectedAt);assert.equal(typeof visited.held_last_pass,'object');assert.ok(visited.held_pass_completed_at>=(await migration.readMigration(f.archive,custom.id)).cutover.selected_at);
 
   assert.equal((await (await f.request('/migration-supervise',{})).json()).phase,'replaying');
   assert.equal(migration.blocksRepairs(await migration.readMigration(f.archive,custom.id)),false,'a deferred poison item cannot indefinitely stop bounded reconciliation');
