@@ -94,8 +94,20 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
   const prefix = `parked/${repo.id}/${options.held ? 'held' : 'pointers'}/`;
   const page = await env.ARCHIVE.list({ prefix, limit: Math.min(Math.max(1, options.limit || 25), 100), startAfter: options.cursor });
   let replayed = 0, failed = 0, stopped: string | undefined, last_error: string | undefined, next_retry: number | undefined;
+  const prepared=new Map<string,Parked|null>(),ciCommitted=new Set<string>();
+  // Compact pointers only: never load their webhook bodies into this batch.
+  // A crash after SQL commits leaves the pointers replayable and deduplicated.
+  for(let i=0;i<page.objects.length && Date.now()<(options.deadline || Infinity);i+=REPLAY_GROUP)await Promise.all(page.objects.slice(i,i+REPLAY_GROUP).map(async object=>{
+    try{prepared.set(object.key,await env.ARCHIVE.get(object.key).then(o=>o?.json<Parked>() ?? null));}catch{/* The ordinary per-pointer path records/retries this failure. */}
+  }));
+  const ci=[...prepared.values()].filter((p):p is Parked=>Boolean(p && p.repository===repo.name && CI_EVENTS.has(p.event) && (p.retry_at || 0)<=Date.now()));
+  if(ci.length && Date.now()<(options.deadline || Infinity))try{
+    const response=await stub(env.REPOSITORIES,repo.id).fetch('https://internal/ci-receipts',{method:'POST',body:JSON.stringify({repository:repo.name,events:ci.map(({delivery,event,received})=>({delivery,event,received}))})});
+    const result:any=response.ok?await response.json():null;
+    if(Array.isArray(result?.committed) && ci.every(p=>result.committed.includes(p.delivery)))for(const p of ci)ciCommitted.add(p.delivery);
+  }catch{/* A lost batch response safely falls back to ordinary delivery deduplication. */}
   const replay = async (object: R2Object): Promise<void> => {
-    const parked = await env.ARCHIVE.get(object.key).then(o => o?.json<Parked>());
+    const parked = prepared.has(object.key)?prepared.get(object.key):await env.ARCHIVE.get(object.key).then(o => o?.json<Parked>());
     if (!parked) return;
     last_error ||= parked.last_error;
     if (parked.retry_at) next_retry = Math.min(next_retry || Infinity, parked.retry_at);
@@ -106,15 +118,17 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
       // A durable receipt also covers SQL receipt expiry and crashes during cleanup.
       const committed = await env.ARCHIVE.head(receiptKey(repo.id, parked.delivery));
       if (!committed) {
-        const response = await stub(env.REPOSITORIES, repo.id).fetch('https://internal/event', { method: 'POST', body: JSON.stringify({ key: parked.key, delivery: parked.delivery, event: parked.event, repository: parked.repository, received: parked.received }) });
-        if (!response.ok) {
-          const error: any = await response.json().catch(() => ({}));
-          reason = String(error.message === 'event body unavailable' ? 'event_body_unavailable' : error.error || response.status);
-          if (reason === 'storage_full') await noteRepositoryFull(env, repo.id, 'replay', started);
-          if (error.parkable) {stopped = reason; return;}
-          throw new Error(reason);
+        if(!ciCommitted.has(parked.delivery)) {
+          const response = await stub(env.REPOSITORIES, repo.id).fetch('https://internal/event', { method: 'POST', body: JSON.stringify({ key: parked.key, delivery: parked.delivery, event: parked.event, repository: parked.repository, received: parked.received }) });
+          if (!response.ok) {
+            const error: any = await response.json().catch(() => ({}));
+            reason = String(error.message === 'event body unavailable' ? 'event_body_unavailable' : error.error || response.status);
+            if (reason === 'storage_full') await noteRepositoryFull(env, repo.id, 'replay', started);
+            if (error.parkable) {stopped = reason; return;}
+            throw new Error(reason);
+          }
         }
-        await env.ARCHIVE.put(receiptKey(repo.id, parked.delivery), JSON.stringify({ delivery: parked.delivery, committed_at: Date.now() }));
+        await env.ARCHIVE.put(receiptKey(repo.id, parked.delivery), JSON.stringify({ delivery: parked.delivery, committed_at: Date.now(),...(ciCommitted.has(parked.delivery)?{disposition:'not_mirrored'}:{}) }));
       }
       await env.ARCHIVE.delete(parked.key);
       await env.ARCHIVE.delete(object.key);

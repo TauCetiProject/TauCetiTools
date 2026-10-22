@@ -320,3 +320,32 @@ pg('repeated PostgreSQL resource refreshes reuse immutable spill contents across
   assert.equal([...f.env.ARCHIVE.objects.keys()].filter(k=>k.startsWith('resources/')).length,2);
  }finally {await f.close();}
 });
+
+pg('historical CI replay batches fenced PostgreSQL receipts before R2 cleanup without GitHub',async()=>{
+ const f=await postgresFixture();try{
+  f.env.ARCHIVE=bucket();let batches=0,individual=0,lost=true;
+  f.env.INSTALLATIONS={idFromName(){throw Error('CI receipt replay must not fetch GitHub');}};
+  f.env.REPOSITORIES={idFromName:id=>({toString:()=>id}),get:()=>({fetch:async(url,init)=>{
+   const path=new URL(url).pathname;if(path==='/ci-receipts')batches++;else if(path==='/event')individual++;
+   const r=await f.state.fetch(new Request(url,init));if(path==='/ci-receipts'&&r.ok&&lost){lost=false;throw Error('lost commit response');}return r;
+  }})};
+  const originalRevision=await f.state.revision(),items=[];
+  for(let i=0;i<30;i++){const p={key:'webhooks/ci/'+i,repository:repo.name,delivery:'pg-ci-'+i,event:i%2?'check_run':'workflow_run',received:Date.now()-10000+i};await f.env.ARCHIVE.put(p.key,'{}');await ingress.park(f.env,repo,p,'migration');items.push(p);}
+  const semantic={key:'webhooks/ci/semantic',repository:repo.name,delivery:'mixed-semantic',event:'issue_comment',received:Date.now()};
+  await f.env.ARCHIVE.put(semantic.key,JSON.stringify({issue:{number:7},comment:{id:'mixed-comment',body:'must apply normally',created_at:'2026-10-19T00:00:00Z'}}));
+  await ingress.park(f.env,repo,semantic,'migration');
+  f.env.ARCHIVE.failures.push((op,key)=>op==='put'&&key===ingress.receiptKey(repo.id,'pg-ci-0'));
+  const first=await ingress.drain(f.env,repo,{limit:100});assert.equal(batches,1);assert.ok(individual>0);assert.equal(first.failed,1);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,31);
+  assert.deepEqual((await f.store.exec('SELECT kind,id FROM changes ORDER BY revision')).toArray(),[{kind:'issue_comments',id:'mixed-comment'},{kind:'collection',id:'issue_comments:{"number":7}'}],'only the semantic comment and its membership publish changes');
+  assert.equal(await f.state.revision(),originalRevision+2);
+  assert.ok((await f.store.exec("SELECT data FROM resources WHERE kind='issue_comments' AND id='mixed-comment'")).one().data.includes('must apply normally'));
+  const key=ingress.pointerKey(repo.id,items[0]),p=await(await f.env.ARCHIVE.get(key)).json();await f.env.ARCHIVE.put(key,JSON.stringify({...p,retry_at:0}));
+  assert.equal((await ingress.drain(f.env,repo,{limit:100})).failed,0);assert.equal((await f.env.ARCHIVE.list({prefix:'parked/100/'})).objects.length,0);
+  assert.equal(await f.state.revision(),originalRevision+2);
+  const r=await send(f.state,'/ci-receipts',{repository:repo.name,events:[{delivery:'semantic-not-allowed',event:'issue_comment',received:Date.now()}]});assert.equal(r.status,400);
+  await f.admin.query(`UPDATE ${f.schema}.backend_control SET backend='migration' WHERE singleton=1`);
+  assert.equal((await send(f.state,'/ci-receipts',{repository:repo.name,events:[{delivery:'wrong-owner',event:'workflow_job',received:Date.now()}]})).status,503);
+  assert.equal((await f.store.exec("SELECT COUNT(*) n FROM deliveries WHERE id='wrong-owner'")).one().n,0);
+ }finally{await f.close();}
+});

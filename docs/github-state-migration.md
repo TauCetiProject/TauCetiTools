@@ -47,6 +47,24 @@ Cron publishes the completion receipt when its release gates pass. An HTTP or
 transport failure also exits the command: inspect the reason and rerun the same
 generation for a transient failure.
 
+Historical parked CI input can dominate the replay backlog even though new CI
+webhooks are acknowledged as not mirrored. The existing replay owner batches at
+most 100 due CI delivery IDs into one fenced ignored-receipt transaction, without
+loading their webhook bodies or creating resources, jobs or change-feed entries.
+It still publishes each permanent R2 receipt before deleting that pointer/body.
+Lost responses and interrupted cleanup reuse delivery receipts. Semantic events
+use the ordinary application path, held retry deadlines remain in force, and an
+older repository deployment without the private batch RPC falls back to that path.
+
+If replay needs a post-selection service fix, preserve PostgreSQL ownership,
+the source write fence, the original selection deployment and baseline. Record
+the fix-forward deployment separately in the release version chain, verify the
+same target generation and bindings before/after deployment, and run the public
+read/client gates against the resulting service. Do not rewrite the source
+identity or original checksums to make the new deployment appear to have
+performed the export. A deployment change before selection still invalidates
+the frozen generation and follows the ordinary pre-switch recovery procedure.
+
 Before enabling `MIGRATION_ENVIRONMENT=test|production`, deploy the coordinator,
 queue consumers, installation quota owner and retention guards everywhere. Fence
 old deployments and drain pre-existing GitHub dispatches and R2 deletion batches.

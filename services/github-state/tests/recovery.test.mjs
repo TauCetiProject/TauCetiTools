@@ -1209,3 +1209,49 @@ test('test-migration constructor waits for a full marker before attempting a leg
   assert.equal(reset.state.schema,'migration_pending');assert.ok(reset.state.degraded);
  }finally{db.close();}
 });
+
+test('parked CI receipts batch without semantic changes and survive response/cleanup crashes',async()=>{
+ const f=repositoryFixture();await f.ready;
+ let batches=0,individual=0,lost=true;
+ const namespace={idFromName:()=>({toString:()=>f.state.ctx.id.toString()}),get:()=>({fetch:async(url,init)=>{
+  const path=new URL(url).pathname;
+  if(path==='/ci-receipts')batches++;else if(path==='/event')individual++;
+  const response=await f.state.fetch(new Request(url,init));
+  if(path==='/ci-receipts'&&response.ok&&lost){lost=false;throw Error('response lost after committed batch');}
+  return response;
+ }})};
+ f.state.env.REPOSITORIES=namespace;
+ const env={ALLOWED_REPOSITORIES:JSON.stringify([repo]),ARCHIVE:f.archive,REPOSITORIES:namespace},now=Date.now(),items=[];
+ for(let i=0;i<25;i++){
+  const p={repository:repo.name,delivery:'old-ci-'+i,event:i%2?'check_run':'workflow_job',received:now-10000+i,key:'webhooks/ci/'+i};
+  await f.archive.put(p.key,'{}');await ingress.park(env,repo,p,'migration');items.push(p);
+ }
+ const waiting=items.at(-1),waitingKey=ingress.pointerKey(repo.id,waiting),value=await(await f.archive.get(waitingKey)).json();
+ await f.archive.put(waitingKey,JSON.stringify({...value,retry_at:now+600000}));
+ f.archive.failures.push((op,key)=>op==='put'&&key===ingress.receiptKey(repo.id,'old-ci-0'));
+ f.archive.failures.push((op,key)=>op==='delete'&&key===ingress.bodyKey(repo.id,'old-ci-1'));
+ const revision=await f.state.revision(),first=await ingress.drain(env,repo,{limit:100});
+ assert.equal(batches,1);assert.ok(individual>0,'response loss uses existing deduplication');
+ assert.equal(first.failed,2);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,24);
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM changes').get().n,0);assert.equal(await f.state.revision(),revision);
+ for(const p of items.slice(0,-1))assert.equal(f.db.prepare('SELECT event FROM deliveries WHERE id=?').get(p.delivery).event,'ignored:'+p.event);
+ assert.ok(await f.archive.get(ingress.bodyKey(repo.id,'old-ci-0')),'SQL commit alone cannot release the body before R2 receipt publication');
+ assert.ok(await f.archive.get(ingress.pointerKey(repo.id,items[1])),'cleanup interruption retains the pointer');
+ assert.equal(await f.archive.get(ingress.receiptKey(repo.id,waiting.delivery)),null);
+ for(const p of items.slice(0,-1)){const key=ingress.pointerKey(repo.id,p),o=await f.archive.get(key);if(o){const v=await o.json();await f.archive.put(key,JSON.stringify({...v,retry_at:0}));}}
+ const second=await ingress.drain(env,repo,{limit:100});assert.equal(second.failed,0);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,24);
+ for(const p of items.slice(0,-1)){assert.ok(await f.archive.get(ingress.receiptKey(repo.id,p.delivery)));assert.equal(await f.archive.get(ingress.pointerKey(repo.id,p)),null);assert.equal(await f.archive.get(ingress.bodyKey(repo.id,p.delivery)),null);}
+ assert.ok(await f.archive.get(waitingKey));assert.equal(await f.state.revision(),revision);
+});
+
+test('CI receipt endpoint rejects semantic input, wrong object, paused ingress and source fence',async()=>{
+ const f=repositoryFixture();await f.ready;f.state.env.REPOSITORIES={idFromName:()=>({toString:()=>f.state.ctx.id.toString()})};
+ const send=body=>f.state.fetch(new Request('https://internal/ci-receipts',{method:'POST',body:JSON.stringify(body)})),event={delivery:'bounded-ci',event:'workflow_run',received:Date.now()},input={repository:repo.name,events:[event]};
+ for(const events of[[],Array(101).fill(event),[{...event,event:'issue_comment'}],[{...event,received:1.5}],[{...event,delivery:'bad/id'}],[event,{...event,event:'check_run'}]])assert.equal((await send({...input,events})).status,400);
+ f.state.env.REPOSITORIES={idFromName:()=>({toString:()=>'other-object'})};assert.equal((await send(input)).status,400);
+ f.state.env.REPOSITORIES={idFromName:()=>({toString:()=>f.state.ctx.id.toString()})};
+ f.state.ingress='parked';assert.equal((await send(input)).status,503);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,0);
+ f.state.ingress='apply';f.state.migrationState={phase:'exporting'};assert.equal((await send(input)).status,503);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,0);
+ f.state.migrationState=null;assert.equal((await send(input)).status,200);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,1);
+ assert.equal((await send(input)).status,200);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,1);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM changes').get().n,0);
+});
