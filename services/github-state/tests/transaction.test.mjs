@@ -37,15 +37,17 @@ test('an interrupted publication cannot acknowledge or expose an overlapping SQL
 test('slow Bors receipt reads do not hold the repository transaction or input gate',async()=>{
  let release,entered;const gate=new Promise(r=>release=r),ready=new Promise(r=>entered=r);
  const mf=await runtime(async(req,url)=>{assert.equal(url.hostname,'bors.test');entered();await gate;return Response.json({schema:'tauceti-bors.candidates/v1',repo:repository.name,base:'main',timestamp_unit:'unix_microseconds',candidates:[]});},{ALLOWED_REPOSITORIES:JSON.stringify([{...repository,bors_receipts_url:'https://bors.test/receipts'}])},{repositoryAlarms:false});
- let timer;
+ let timer,refreshing,event;
  try{
   const ns=await mf.getDurableObjectNamespace('REPOSITORIES'),stub=ns.get(ns.idFromName(repository.id)),archive=await mf.getR2Bucket('ARCHIVE');
   await send(stub,'/configure',{repository:repository.name});await archive.put('fixture/during-bors',JSON.stringify({issue:{number:7},comment:{id:42,body:'applied while Bors waits',created_at:'2026-10-19T00:00:00Z'}}));
-  const refreshing=send(stub,'/activity-refresh',{});await ready;
-  const event=send(stub,'/event',{repository:repository.name,event:'issue_comment',delivery:'during-bors',key:'fixture/during-bors',received:Date.now()});
-  const applied=await Promise.race([event,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('Bors I/O held the repository writer')),2000);})]);
+  refreshing=send(stub,'/activity-refresh',{});await ready;
+  event=send(stub,'/event',{repository:repository.name,event:'issue_comment',delivery:'during-bors',key:'fixture/during-bors',received:Date.now()});
+  // Remote PostgreSQL can take seconds even with an unblocked writer. Keep Bors
+  // I/O gated until the event commits; the deadline detects a deadlock, not speed.
+  const applied=await Promise.race([event,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('Bors I/O held the repository writer')),30000);})]);
   clearTimeout(timer);assert.equal(applied.status,200);release();assert.equal((await refreshing).status,200);
- }finally{clearTimeout(timer);release();await mf.dispose();}
+ }finally{clearTimeout(timer);release();await Promise.allSettled([refreshing,event]);await mf.dispose();}
 });
 
 test('a standalone store batch rolls back earlier statements when a later statement fails',async()=>{
