@@ -11,6 +11,8 @@ Tables
        derive_queue_chains. (group_prs/group_position from the records are superseded: they list
        only the entry's own PR.)
        jobs_fetched: 0 when a backfill recorded the run without its jobs)
+  Fleet reporting aliases are derived from archived labels and runner names;
+  raw job records retain their original runner kind and machine identity.
   Failure labels are recomputed from archived excerpts with the current classifier.
   Raw records retain their original label/version; records without excerpts keep that label.
   process-killed establishes neither a timeout nor an OOM cause.
@@ -50,6 +52,7 @@ import sqlite3
 from itertools import chain as record_chain
 from pathlib import Path
 from . import classify
+from ..assets.scripts.ci_runners import reporting_kind
 from .merge_identity import identity, apply_dispatch_title
 from .resources import cohort, phase, verified_observation
 
@@ -312,7 +315,8 @@ def build(out: Path):
                 j.get("created_at"), j.get("started_at"), j.get("completed_at"),
                 seconds(j.get("created_at"), j.get("started_at")) if j.get("status") != "queued" else None,
                 seconds(j.get("started_at"), j.get("completed_at")) if j.get("status") != "queued" else None,
-                j.get("runner_kind"), runner_size(j.get("labels") or []), json.dumps(j.get("labels") or []),
+                reporting_kind(j.get("runner_kind"), j.get("labels"), j.get("runner_name")),
+                runner_size(j.get("labels") or []), json.dumps(j.get("labels") or []),
                 failure_class, f.get("failed_step"),
                 "\n".join(f["excerpt"]) if f.get("excerpt") else None, j.get("status"),
             ))

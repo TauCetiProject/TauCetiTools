@@ -49,6 +49,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ci_daily_graphs  # noqa: E402
+from ci_runners import RUNNERS, LABELS, reporting_kind  # noqa: E402
 from chart_style import AXIS, BG, MUTED, PANEL, PALETTE, TEXT, base_css, card_rect, css_px, svg_unit  # noqa: E402
 
 UTC = dt.timezone.utc
@@ -70,6 +71,9 @@ SERIES = [
     ("ns-pr", "PR builds on Namespace", PALETTE[1]),
     ("ns-mq", "merge validation on Namespace", PALETTE[3]),
     ("ns-other", "other Namespace jobs", PALETTE[4]),
+    ("eastanglia", "jobs on eastanglia", PALETTE[6]),
+    ("leanfro", "jobs on leanfro", PALETTE[7]),
+    ("self-hosted", "other self-hosted jobs", PALETTE[8]),
 ]
 WAIT_SERIES = [("build", "builds", PALETTE[1]), ("other", "other jobs", PALETTE[0])]
 
@@ -85,7 +89,9 @@ def iso(t: float) -> str:
 
 def classify(name: str, kind: str, trigger: str) -> tuple[str, str]:
     build = name in BUILD_JOBS
-    if kind == "namespace":
+    if kind in ("eastanglia", "leanfro", "self-hosted"):
+        key = kind
+    elif kind == "namespace":
         key = ("ns-mq" if trigger in ci_daily_graphs.MERGE_TRIGGERS
                else "ns-pr" if trigger == "pr" else "ns-other")
     elif build:
@@ -114,14 +120,15 @@ def load_jobs(db: sqlite3.Connection, since: float, until: float) -> list[dict]:
         counts[(workflow, day)] = (total, fetched or 0)
 
     out = []
-    for name, created, started, completed, kind, trigger, workflow, run_created in db.execute("""
-            SELECT j.name, j.created_at, j.started_at, j.completed_at, j.runner_kind, r.trigger, r.workflow,
+    for name, created, started, completed, kind, labels, trigger, workflow, run_created in db.execute("""
+            SELECT j.name, j.created_at, j.started_at, j.completed_at, j.runner_kind, j.labels, r.trigger, r.workflow,
                    r.created_at
             FROM jobs j JOIN runs r USING (repo, run_id)
-            WHERE j.created_at BETWEEN ? AND ? AND j.runner_kind IN ('github', 'namespace')
+            WHERE j.created_at BETWEEN ? AND ? AND j.runner_kind IN ('github', 'namespace', 'self-hosted', 'eastanglia', 'leanfro')
               AND (j.completed_at IS NULL OR j.completed_at >= ?)""", (lo, hi, iso(since))):
         if not created:
             continue
+        kind = reporting_kind(kind, labels)
         key, wait_series = classify(name, kind, trigger)
         total, fetched = counts.get((workflow, run_created[:13]), (1, 1))
         out.append({
@@ -169,7 +176,7 @@ def bin_series(jobs: list[dict], since: float, until: float, step: float) -> dic
     # Peak (weighted) number waiting for a runner in each bin. A job waits over [created, started);
     # at equal times the start is applied before a creation, so a job starting exactly on a bin edge
     # is not counted in the bin it has already left.
-    queued = {"github": [0.0] * n, "namespace": [0.0] * n}
+    queued = {kind: [0.0] * n for kind in RUNNERS}
     for kind in queued:
         events = []
         for j in jobs:
@@ -220,7 +227,7 @@ def fmt_time(t: float, with_day: bool) -> str:
 def render(data: dict, title: str, subtitle: str, annotations: list[tuple[float, str]]) -> str:
     W, H = 980, 760
     L, R = 64, 20
-    panels = [(120, 370), (430, 540), (590, 700)]   # (top, bottom) for running, queued, wait
+    panels = [(142, 370), (430, 540), (590, 700)]   # (top, bottom) for running, queued, wait
     since, until, step = data["since"], data["until"], data["step"]
     n = len(data["running"][SERIES[0][0]])
     x = lambda t: L + (t - since) / (until - since) * (W - L - R)
@@ -297,23 +304,20 @@ def render(data: dict, title: str, subtitle: str, annotations: list[tuple[float,
 
     # Panel 2: peak queued.
     top, bottom = panels[1]
-    qmax = max(max(data["queued"]["github"], default=0), max(data["queued"]["namespace"], default=0), 1)
-    s2, vmax2 = nice(qmax * 1.1, 3)
+    queue_colours = dict(zip(RUNNERS, (PALETTE[0], PALETTE[3], PALETTE[6], PALETTE[7], PALETTE[8])))
+    qmax = max((max(values, default=0) for values in data["queued"].values()), default=1)
+    s2, vmax2 = nice(max(qmax, 1) * 1.1, 3)
     y2 = grid(top, bottom, vmax2, s2, "peak queued")
     bw = (W - L - R) / n
-    for i in range(n):
-        g, ns = data["queued"]["github"][i], data["queued"]["namespace"][i]
-        t0 = x(since + i * step)
-        if g:
-            out.append(f'<rect x="{t0:.1f}" y="{y2(g):.1f}" width="{max(bw*0.45, 0.8):.1f}" '
-                       f'height="{bottom-y2(g):.1f}" fill="{PALETTE[0]}"/>')
-        if ns:
-            out.append(f'<rect x="{t0+bw*0.5:.1f}" y="{y2(ns):.1f}" width="{max(bw*0.45, 0.8):.1f}" '
-                       f'height="{bottom-y2(ns):.1f}" fill="{PALETTE[3]}"/>')
-    out.append(f'<rect x="{L}" y="{top-18}" width="12" height="12" rx="2" fill="{PALETTE[0]}"/>'
-               f'<text class="legend" x="{L+17}" y="{top-8}">waiting for GitHub</text>'
-               f'<rect x="{L+180}" y="{top-18}" width="12" height="12" rx="2" fill="{PALETTE[3]}"/>'
-               f'<text class="legend" x="{L+197}" y="{top-8}">waiting for Namespace</text>')
+    for k, kind in enumerate(RUNNERS):
+        for i, value in enumerate(data["queued"].get(kind, [0.0] * n)):
+            if value:
+                t0 = x(since + i * step) + bw * k / len(RUNNERS)
+                out.append(f'<rect x="{t0:.1f}" y="{y2(value):.1f}" width="{max(bw*0.9/len(RUNNERS), 0.5):.1f}" '
+                           f'height="{bottom-y2(value):.1f}" fill="{queue_colours[kind]}"/>')
+        lx = L + k * 180
+        out.append(f'<rect x="{lx}" y="{top-18}" width="12" height="12" rx="2" fill="{queue_colours[kind]}"/>'
+                   f'<text class="legend" x="{lx+17}" y="{top-8}">{LABELS[kind]}</text>')
 
     # Panel 3: trailing max wait.
     top, bottom = panels[2]

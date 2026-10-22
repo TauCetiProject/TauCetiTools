@@ -29,6 +29,7 @@ import math
 import sqlite3
 from collections import defaultdict
 
+from ci_runners import RUNNERS, LABELS, reporting_kind
 from chart_style import MUTED, PALETTE, TEXT, base_css, card_rect, css_px, svg_unit
 
 UTC = dt.timezone.utc
@@ -104,20 +105,22 @@ def metrics(db: sqlite3.Connection, first: str, last: str, other_jobs_until=None
     # PR builds and both main-branch merge engines, excluding manual dispatches.
     builds = db.execute(f"""
         SELECT substr(j.created_at, 1, 10), r.trigger, j.runner_kind, j.conclusion, j.wait_s, j.run_s,
-               j.failure_class, j.job_id, r.run_id
+               j.failure_class, j.job_id, r.run_id, j.labels
         FROM jobs j JOIN runs r USING (repo, run_id)
         WHERE r.repo = 'TauCeti' AND r.workflow = '{PR_BUILD}' AND j.name = '{BUILD}'
-          AND r.trigger IN ('pr', 'merge_queue', 'bors_staging') AND j.runner_kind IN ('github', 'namespace')
+          AND r.trigger IN ('pr', 'merge_queue', 'bors_staging') AND j.runner_kind IN ('github', 'namespace', 'self-hosted', 'eastanglia', 'leanfro')
           AND j.created_at BETWEEN ? AND ?""", (lo, hi)).fetchall()
 
+    builds = [(*row[:2], reporting_kind(row[2], row[-1]), *row[3:-1]) for row in builds]
+
     def where(trigger, kind):
-        return "merge validation" if trigger in MERGE_TRIGGERS else f"PR, {'GitHub' if kind == 'github' else 'Namespace'}"
+        return "merge validation" if trigger in MERGE_TRIGGERS else f"PR, {LABELS[kind]}"
 
     dur = defaultdict(list)
     wait = defaultdict(list)
     fails = defaultdict(lambda: defaultdict(int))
     pr_total = defaultdict(int)
-    picker = defaultdict(lambda: [0, 0])
+    picker = defaultdict(lambda: [0] * len(RUNNERS))
     job_ids = []
     for day, trigger, kind, concl, wait_s, run_s, fclass, job_id, run_id in builds:
         w = where(trigger, kind)
@@ -130,7 +133,7 @@ def metrics(db: sqlite3.Connection, first: str, last: str, other_jobs_until=None
             if concl != "success":
                 fails[day][fclass or ("timeout" if concl == "timed_out" else "build-unknown")] += 1
         if trigger == "pr":
-            picker[day][0 if kind == "github" else 1] += 1  # runner_kind is github or namespace here
+            picker[day][RUNNERS.index(kind)] += 1
         if trigger == "pr" and concl == "success":
             job_ids.append(job_id)
 
@@ -192,15 +195,14 @@ def metrics(db: sqlite3.Connection, first: str, last: str, other_jobs_until=None
     # Build minutes (the build jobs of the build workflows, all recorded in full), by the day the
     # job started.
     minutes = defaultdict(lambda: defaultdict(float))
-    for day, kind, trigger, concl, run_s in db.execute("""
-            SELECT substr(j.started_at, 1, 10), j.runner_kind, r.trigger, j.conclusion, j.run_s
+    for day, kind, trigger, concl, run_s, labels in db.execute("""
+            SELECT substr(j.started_at, 1, 10), j.runner_kind, r.trigger, j.conclusion, j.run_s, j.labels
             FROM jobs j JOIN runs r USING (repo, run_id)
             WHERE r.repo = 'TauCeti' AND j.name IN ('sandboxed-build', 'verify', 'build', 'performance-gate')
               AND j.run_s IS NOT NULL AND j.started_at BETWEEN ? AND ?""", (lo, hi)):
-        if kind == "namespace":
-            minutes[day]["Namespace"] += run_s / 60
-        elif kind == "github":
-            minutes[day]["GitHub-hosted"] += run_s / 60
+        kind = reporting_kind(kind, labels)
+        if kind in RUNNERS:
+            minutes[day]["GitHub-hosted" if kind == "github" else LABELS[kind]] += run_s / 60
         if trigger == "pr" and concl == "cancelled":
             minutes[day]["cancelled PR builds"] += run_s / 60
 
@@ -312,7 +314,7 @@ def lines_chart(title, subtitle, days, series, ylabel, fmt=lambda v: f"{v:g}", d
             else:
                 out.append(f'<polyline fill="none" stroke="{colour}" stroke-width="{svg_unit(W, 2)}"{dash} '
                            f'points="' + " ".join(f"{a:.1f},{b:.1f}" for a, b in seg) + '"/>')
-    legend(out, [(l, c) for l, c, _ in series], dashed)
+    legend(out, [(l, c) for l, c, _ in series if l not in dashed], dashed)
     out.append("</svg>")
     return "\n".join(out)
 
@@ -573,7 +575,9 @@ def charts(db: sqlite3.Connection, until: float, other_jobs_until=None, assets=N
     m = metrics(db, first.isoformat(), last.isoformat(), other_jobs_until)
     days = m["days"]
     span = f"UTC days {dt.date.fromisoformat(days[0]):%d %b} to {dt.date.fromisoformat(days[-1]):%d %b}"
-    places = [("PR, GitHub", PALETTE[2]), ("PR, Namespace", PALETTE[1]), ("merge validation", PALETTE[3])]
+    places = [("PR, GitHub", PALETTE[2]), ("PR, Namespace", PALETTE[1]),
+              ("PR, eastanglia", PALETTE[6]), ("PR, leanfro", PALETTE[7]),
+              ("PR, Other self-hosted", PALETTE[8]), ("merge validation", PALETTE[3])]
     out = {}
 
     series = []
@@ -616,7 +620,9 @@ def charts(db: sqlite3.Connection, until: float, other_jobs_until=None, assets=N
         line=("failure rate", TEXT, rate, max([r for r in rate if r is not None] + [0.1])),
         line_fmt=lambda v: f"{v:.0%}")
 
-    kinds = [("Namespace", PALETTE[1]), ("GitHub-hosted", PALETTE[2]), ("cancelled PR builds", PALETTE[3])]
+    kinds = [("Namespace", PALETTE[1]), ("GitHub-hosted", PALETTE[2]),
+             ("eastanglia", PALETTE[6]), ("leanfro", PALETTE[7]),
+             ("Other self-hosted", PALETTE[8]), ("cancelled PR builds", PALETTE[3])]
     series = [(k, c, [m["minutes"][d].get(k, 0) for d in days]) for k, c in kinds]
     out["ci-runner-minutes.svg"] = lines_chart(
         "Build minutes per day", f"Build jobs by runner (Namespace is billed; GitHub-hosted is free), and "
@@ -632,7 +638,6 @@ def charts(db: sqlite3.Connection, until: float, other_jobs_until=None, assets=N
 
     share = [m["picker"][d][0] / sum(m["picker"][d]) if sum(m["picker"][d]) else None for d in days]
     out["ci-picker.svg"] = lines_chart(
-        "PR builds on GitHub-hosted runners", f"Share of PR builds the runner picker sent to GitHub rather "
-        f"than Namespace; {span}", days, [("share on GitHub", PALETTE[2], share)], "share",
+        "PR builds on GitHub-hosted runners", f"Share of all PR builds sent to GitHub; {span}", days, [("share on GitHub", PALETTE[2], share)], "share",
         fmt=lambda v: f"{v:.0%}")
     return {name: svg for name, svg in out.items() if assets is None or name in assets}
