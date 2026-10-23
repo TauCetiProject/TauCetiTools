@@ -209,3 +209,12 @@ test('health reports expiry before another writer and retains the cleanup handle
   const health=await f.store.health();assert.equal(health.connected,true);assert.equal(health.session_cleanup_pending,true);assert.equal(health.session_cleanup_state,'expired');assert.equal(health.session_cleanup_age_ms,45000);assert.equal(health.session_cleanup_count,1);
  }finally{t.mock.timers.reset();}
 });
+
+
+for(const url of [
+ 'postgresql://unused@ep-fixture.us-east-2.aws.neon.tech/fixture?host=ep-fixture-pooler.us-east-2.aws.neon.tech',
+ String.raw`postgresql://unused@ep-fixture-pooler.us-east-2.aws.neon.tech\@ep-fixture.us-east-2.aws.neon.tech/fixture`
+])test('endpoint overrides or ambiguous separators cannot enable termination: '+url,async()=>{
+ const f=fixture([{phase:'apply',stalled:true}],url);await assert.rejects(f.store.transaction(write),StoreUnavailable);
+ assert.equal(f.clients[0].serverTerminated,undefined);assert.ok(f.cleanupCalls[0].sql.startsWith('SELECT false'));
+});

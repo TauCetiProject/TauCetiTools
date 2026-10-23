@@ -159,9 +159,9 @@ export class PostgresStore implements RepositoryStore {
   private directEndpoint=false;
   constructor(private url:string,repository:string,private generation:string,private client?:Client,private diagnostics:{connections:number,queries:number,lastConnection?:number}={connections:0,queries:0},private connectionState?:ConnectionState,private onQuery?:()=>void) {
     this.schema=schemaName(repository);
-    // Canonicalize the host as the driver does: PostgreSQL URLs themselves
-    // retain escapes/case that an HTTPS/WebSocket URL resolves.
-    try{const host=new URL('https://'+new URL(url).host).hostname.toLowerCase().replace(/\.$/,'');this.directEndpoint=host.endsWith('.neon.tech')&&!host.split('.')[0].endsWith('-pooler');}catch{}
+    // Match the driver host parser. Endpoint overrides or ambiguous URL
+    // separators never permit session termination, even on a Neon hostname.
+    try{const parsed=new URL(url),host=new URL('http:'+url.slice(parsed.protocol.length)).hostname.toLowerCase().replace(/\.$/,'');this.directEndpoint=!parsed.searchParams.has('host')&&!url.includes('\\')&&host.endsWith('.neon.tech')&&!host.split('.')[0].endsWith('-pooler');}catch{}
     try{this.http=neon(url);}catch{throw new StoreUnavailable();}
   }
   get transactional():boolean {return Boolean(this.client);}
