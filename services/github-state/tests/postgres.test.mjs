@@ -491,8 +491,10 @@ pg('a client timeout during a running server statement preserves the database wr
    await tx.exec('SELECT pg_sleep(2)');
   }),/Repository database unavailable/);
   assert.equal(calls,1);assert.equal(rollbacks,0,'a client timeout must not submit ROLLBACK');
-  // This must acquire the same backend_control row lock. Closing the local
-  // queue does not bypass it while the old server statement is unwinding.
+  // Socket closure can end the backend between the identity lookup and
+  // termination, returning false. Respect the cleanup retry cooldown before
+  // checking that the next writer acquires the same database ownership lock.
+  await new Promise(resolve=>setTimeout(resolve,1100));
   await f.store.transaction(tx=>tx.exec('INSERT INTO demand VALUES(?,?)','after-mid-statement',Date.now()));
   assert.deepEqual((await f.store.exec('SELECT key FROM demand ORDER BY key')).toArray(),[{key:'after-mid-statement'}]);
  }finally{globalThis.WebSocket=NativeSocket;try{socket?.close();}catch{}await f.close();}
