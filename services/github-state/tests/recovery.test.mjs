@@ -1056,7 +1056,7 @@ test('successful maintenance runs on consecutive cron minutes despite variable R
 test('deadline exhaustion never advances an unvisited lane or skips the rest of a partial page',async()=>clock(async advance=>{
  const h=harness();h.state.full=true;for(let i=0;i<60;i++)await deliver(h.env,'deadline-'+String(i).padStart(2,'0'));h.state.full=false;
  const original=h.env.REPOSITORIES.get().fetch;
- h.env.REPOSITORIES.get=()=>({fetch:async(...args)=>{advance(1000);return original(...args);}});
+ h.env.REPOSITORIES.get=()=>({fetch:async(...args)=>{if(new URL(args[0]).pathname==='/storage/deliveries')return Response.json({known:[]});advance(1000);return original(...args);}});
  const pass=await ingress.drain(h.env,repo,{limit:50,deadline:Date.now()+1});
  assert.equal(pass.replayed,10);assert.ok(pass.cursor.endsWith('-deadline-09.json'));
  const unvisited=await ingress.drain(h.env,repo,{limit:50,cursor:pass.cursor,deadline:Date.now()-1});assert.equal(unvisited.cursor,pass.cursor);assert.equal(unvisited.replayed,0);
@@ -1538,7 +1538,7 @@ test('learned limits grow only with fast full pages at the cap and respect calle
  await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
  await h.archive.put(key,JSON.stringify({pointers_page_limit:2,held_page_limit:1}));
  const list=h.archive.list;h.archive.list=async options=>{if(options.prefix==='parked/100/pointers/'&&options.startAfter!==undefined)sizes.push(options.limit);return list(options);};
- const original=h.env.REPOSITORIES.get();h.env.REPOSITORIES.get=()=>({fetch:async(...args)=>{advance(500);return original.fetch(...args);}});
+ const original=h.env.REPOSITORIES.get();h.env.REPOSITORIES.get=()=>({fetch:async(...args)=>{if(new URL(args[0]).pathname==='/storage/deliveries')return Response.json({known:[]});advance(500);return original.fetch(...args);}});
  for(let n=0;n<3;n++){assert.equal((await ingress.replayIngress(h.env,repo,{limit:1})).replayed,1);}
  assert.equal((await(await h.archive.get(key)).json()).pointers_page_limit,2,'smaller explicit requests cannot grow the cap');
  await ingress.maintainIngress(h.env,repo);advance(31000);await ingress.maintainIngress(h.env,repo);
@@ -1901,4 +1901,53 @@ test('lost gap-delete acknowledgement cannot resurrect a resolved gap',async()=>
 test('a malformed gap cannot hold up a later due entry in the same retry page',async()=>clock(async()=>{
  const h=cronHarness(),raw='webhooks/2026-10-14/b-valid-gap.json';await h.archive.put('control/raw-gaps/a-broken-gap.json','{');await h.archive.put(raw,'{}',{customMetadata:{event:'ping'}});await h.archive.put('control/raw-gaps/b-valid-gap.json',JSON.stringify({key:raw,failures:1,retry_at:0}));await h.archive.put('control/raw-recovery.json',JSON.stringify({after:'webhooks/2026-10-23/z.json'}));
  await ingress.maintainRaw(h.env,()=>[repo]);const state=JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes);assert.equal(state.gap_last_pass.examined,2);assert.equal(state.gap_last_pass.resolved,1);assert.equal(state.gap_last_pass.errors,1);assert.ok(h.archive.objects.has('control/raw-gaps/a-broken-gap.json'));assert.equal(parked(h.archive,'b-valid-gap').length,1);assert.equal(state.gaps.count,1);
+}));
+
+test('parked semantic deliveries promote committed SQL receipts in one read without entering the writer',async()=>{
+ const h=harness(),{drain,receiptKey,bodyKey}=await load('src/ingress.ts');h.state.full=true;
+ for(const id of ['known-a','known-b','new-c'])await deliver(h.env,id);
+ h.state.applied.set('known-a',1);h.state.applied.set('known-b',1);h.state.full=false;
+ const original=h.env.REPOSITORIES.get,lookups=[],events=[];
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{if(new URL(url).pathname==='/storage/deliveries'){lookups.push(JSON.parse(init.body).ids);return Response.json({known:['known-a','known-b','unrequested']});}events.push(JSON.parse(init.body).delivery);return original().fetch(url,init);}});
+ // A SQL receipt proves the old input even if a prior cleanup removed its body.
+ await h.archive.delete(bodyKey(repo.id,'known-a'));
+ const result=await drain(h.env,repo,{limit:100});assert.equal(result.replayed,3);assert.equal(result.failed,0);assert.equal(result.known_receipts,2);assert.equal(result.receipt_lookup_status,200);
+ assert.deepEqual(lookups,[['known-a','known-b','new-c']]);assert.deepEqual(events,['new-c']);assert.deepEqual([...h.state.applied.values()],[1,1,1]);
+ for(const id of ['known-a','known-b'])assert.equal((await(await h.archive.get(receiptKey(repo.id,id))).json()).source,'sql_receipt');
+ assert.equal(await h.archive.get(receiptKey(repo.id,'unrequested')),null);assert.equal((await drain(h.env,repo)).replayed,0);
+});
+
+test('SQL receipt promotion survives failed receipt writes and lost pointer cleanup without reapplication',async()=>{
+ const h=harness(),{drain,receiptKey,bodyKey}=await load('src/ingress.ts');h.state.full=true;
+ for(const id of ['receipt-put','cleanup-lost'])await deliver(h.env,id);
+ h.state.full=false;for(const id of ['receipt-put','cleanup-lost'])h.state.applied.set(id,1);
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{assert.equal(new URL(url).pathname,'/storage/deliveries');return Response.json({known:JSON.parse(init.body).ids});}});
+ h.archive.failures.push((op,key)=>op==='put'&&key===receiptKey(repo.id,'receipt-put'));
+ const remove=h.archive.delete;let lost=true;h.archive.delete=async keys=>{await remove(keys);if(lost&&[].concat(keys).some(k=>k.endsWith('-cleanup-lost.json'))){lost=false;throw Error('lost cleanup acknowledgement');}};
+ const first=await drain(h.env,repo);assert.equal(first.failed,1);assert.equal(first.superseded,1);assert.ok(await h.archive.get(bodyKey(repo.id,'receipt-put')));assert.equal(parked(h.archive,'receipt-put').length,1);assert.ok(await h.archive.get(receiptKey(repo.id,'cleanup-lost')));assert.equal(parked(h.archive,'cleanup-lost').length,0);
+ const key=parked(h.archive,'receipt-put')[0],p=await(await h.archive.get(key)).json();await h.archive.put(key,JSON.stringify({...p,retry_at:0}));
+ assert.equal((await drain(h.env,repo)).failed,0);assert.equal(parked(h.archive,'receipt-put').length,0);assert.deepEqual([...h.state.applied.values()],[1,1]);
+});
+
+for(const response of ['lost','malformed','unavailable'])test('uncertain SQL receipt lookup falls back to ordinary deduplicated replay: '+response,async()=>{
+ const h=harness(),{drain}=await load('src/ingress.ts');h.state.full=true;await deliver(h.env,'fallback-'+response);h.state.full=false;
+ const original=h.env.REPOSITORIES.get;let events=0;
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{if(new URL(url).pathname==='/storage/deliveries'){if(response==='lost')throw Error('lost read response');return response==='malformed'?Response.json({known:'invalid'}):Response.json({error:'unavailable'},{status:503});}events++;return original().fetch(url,init);}});
+ const result=await drain(h.env,repo);assert.equal(result.known_receipts,0);assert.equal(result.replayed,1);assert.equal(result.failed,0);assert.equal(events,1);assert.equal(h.state.applied.get('fallback-'+response),1);
+});
+
+test('SQL receipt batch preserves retry cooldowns and excludes other repositories',async()=>{
+ const h=harness(),{drain,receiptKey}=await load('src/ingress.ts');h.state.full=true;
+ for(const id of ['deferred-known','foreign-known'])await deliver(h.env,id);
+ for(const id of ['deferred-known','foreign-known']){const key=parked(h.archive,id)[0],p=await(await h.archive.get(key)).json();await h.archive.put(key,JSON.stringify({...p,...(id==='deferred-known'?{retry_at:Date.now()+600000,last_error:'quota'}:{repository:'other/repo'})}));}
+ h.env.REPOSITORIES.get=()=>({fetch:async(url)=>{assert.equal(new URL(url).pathname,'/event');return Response.json({error:'wrong_repository',parkable:true},{status:503});}});
+ const before=h.archive.objects.get(parked(h.archive,'deferred-known')[0]).bytes.toString(),result=await drain(h.env,repo);assert.equal(result.known_receipts,0);assert.equal(result.receipt_lookup_status,null);assert.equal(result.replayed,0);assert.equal(h.archive.objects.get(parked(h.archive,'deferred-known')[0]).bytes.toString(),before);
+ for(const id of ['deferred-known','foreign-known'])assert.equal(await h.archive.get(receiptKey(repo.id,id)),null);
+});
+
+test('a slow committed-receipt lookup cannot advance an unvisited replay cursor',async()=>clock(async advance=>{
+ const h=harness();h.state.full=true;for(let i=0;i<12;i++)await deliver(h.env,'lookup-deadline-'+i);h.state.full=false;
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{assert.equal(new URL(url).pathname,'/storage/deliveries');advance(21000);return Response.json({known:JSON.parse(init.body).ids});}});
+ const pass=await ingress.drain(h.env,repo,{limit:50,deadline:Date.now()+20000});assert.equal(pass.replayed,0);assert.equal(pass.failed,0);assert.equal(pass.cursor,undefined);assert.equal(pass.stopped,'deadline');assert.equal(pass.known_receipts,12);
+ assert.equal([...h.archive.objects.keys()].filter(k=>k.startsWith('parked/100/pointers/')).length,12);assert.equal([...h.archive.objects.keys()].filter(k=>k.startsWith('parked/100/bodies/')).length,12);assert.equal([...h.archive.objects.keys()].filter(k=>k.startsWith('receipts/')).length,0);
 }));

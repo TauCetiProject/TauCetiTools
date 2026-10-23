@@ -369,6 +369,16 @@ complete migration receipt. Stored PostgreSQL reads and bounded reconciliation
 continue, while final completion and the broad retention hold intentionally wait
 for recovery. An irrecoverable data gap is not a successful migration.
 
+Parked replay checks a page of eligible non-CI deliveries against the existing
+read-only SQL receipt endpoint, with at most 100 IDs in one request. A confirmed
+receipt is promoted to permanent R2 before its pointer/body is removed, without
+re-entering the event writer or fetching its payload. Unknown, malformed or
+unconfirmed lookups use ordinary per-event deduplication. Future retry deadlines
+remain in force, and a lookup that consumes the pass budget leaves the cursor
+and inputs in place. `known_receipts`, `receipt_lookup_status` and
+`timing.receipt_lookup_ms` describe this read; these counts are not semantic
+changes or completed cleanups. The separate bounded CI receipt path is unchanged.
+
 The ordinary raw-input recovery owner retries an independent keyset page of at
 most five recorded gaps before advancing the raw prefix scan. It honors each
 retry deadline and yields after a five-second cooperative budget within the

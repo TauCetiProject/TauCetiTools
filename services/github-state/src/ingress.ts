@@ -110,6 +110,20 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
     else ciByDelivery.set(p.delivery,p);
   }
   const ci=[...ciByDelivery.values()].filter(p=>!conflicts.has(p.delivery));
+  // Legacy SQL receipts already prove application. Resolve a bounded page
+  // with one read-only request instead of entering one writer per duplicate.
+  // Unknown deliveries still take the ordinary event path; this never creates
+  // a SQL receipt or seeds upstream work. Preserve real retry deadlines.
+  const receiptCandidates=new Set<string>(),receiptEligible=new Set<Parked>();
+  for(const p of prepared.values())if(p && p.repository===repo.name && !CI_EVENTS.has(p.event) && /^[a-z_]{1,100}$/.test(p.event) && /^[a-zA-Z0-9-]{1,100}$/.test(p.delivery) && Number.isSafeInteger(p.received) && p.received>=0 && (p.retry_at || 0)<=Date.now()){receiptCandidates.add(p.delivery);receiptEligible.add(p);}
+  const sqlCommitted=new Set<string>(),receiptLookupStarted=Date.now();let receiptLookupStatus:number|string|null=null;
+  if(receiptCandidates.size && Date.now()<(options.deadline || Infinity))try{
+    const response=await stub(env.REPOSITORIES,repo.id).fetch('https://internal/storage/deliveries',{method:'POST',body:JSON.stringify({ids:[...receiptCandidates],repository_id:repo.id})});
+    receiptLookupStatus=response.status;
+    const result:any=response.ok?await response.json():null;
+    if(Array.isArray(result?.known))for(const id of result.known)if(typeof id==='string'&&receiptCandidates.has(id))sqlCommitted.add(id);
+  }catch{receiptLookupStatus='transport_error';/* Existing per-event deduplication remains the safe fallback. */}
+  const receiptLookupMs=Date.now()-receiptLookupStarted;
   const readySize=[...prepared.values()].filter(p=>p && (p.retry_at || 0)<=Date.now()).length;
   const batchStarted=Date.now();let batchLookupMs:number|undefined,batchWriteMs:number|undefined;
   if(ci.length && Date.now()<(options.deadline || Infinity))try{
@@ -129,10 +143,11 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
     const started = Date.now();
     let reason = 'internal';
     try {
+      const knownSQL=receiptEligible.has(parked)&&sqlCommitted.has(parked.delivery);
       // A durable receipt also covers SQL receipt expiry and crashes during cleanup.
-      const committed = !ciCommitted.has(parked.delivery) && await env.ARCHIVE.head(receiptKey(repo.id, parked.delivery));
+      const committed = !ciCommitted.has(parked.delivery) && !knownSQL && await env.ARCHIVE.head(receiptKey(repo.id, parked.delivery));
       if (!committed) {
-        if(!ciCommitted.has(parked.delivery)) {
+        if(!ciCommitted.has(parked.delivery)&&!knownSQL) {
           const response = await stub(env.REPOSITORIES, repo.id).fetch('https://internal/event', { method: 'POST', body: JSON.stringify({ key: parked.key, delivery: parked.delivery, event: parked.event, repository: parked.repository, received: parked.received }) });
           if (!response.ok) {
             const error: any = await response.json().catch(() => ({}));
@@ -142,7 +157,7 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
             throw new Error(reason);
           }
         }
-        await env.ARCHIVE.put(receiptKey(repo.id, parked.delivery), JSON.stringify({ delivery: parked.delivery, committed_at: Date.now(),...(CI_EVENTS.has(parked.event)?{disposition:'not_mirrored'}:{}) }),{onlyIf:{etagDoesNotMatch:'*'}});
+        await env.ARCHIVE.put(receiptKey(repo.id, parked.delivery), JSON.stringify({ delivery: parked.delivery, committed_at: Date.now(),...(CI_EVENTS.has(parked.event)?{disposition:'not_mirrored'}:knownSQL?{source:'sql_receipt'}:{}) }),{onlyIf:{etagDoesNotMatch:'*'}});
       }
       await env.ARCHIVE.delete([parked.key,object.key]);
       replayed++;
@@ -185,7 +200,7 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
     visited += group.length;
   }
   if(!stopped && visited<page.objects.length)stopped='deadline';
-  return { replayed, failed, superseded, delivery_errors, timing:{listing_ms:listingMs,preparing_ms:preparingMs,batch_ms:batchMs,batch_lookup_ms:batchLookupMs,batch_write_ms:batchWriteMs,cleanup_ms:Date.now()-cleanupStarted}, page_size:page.objects.length, ready_size:readySize, batched:ciCommitted.size, batch_status:batchStatus, last_error, next_retry, cursor: visited < page.objects.length || page.truncated ? (page.objects[visited-1]?.key || options.cursor) : undefined, remaining: Boolean(stopped) || page.truncated || replayed < page.objects.length, ...(stopped ? { stopped } : {}) };
+  return { replayed, failed, superseded, delivery_errors, timing:{listing_ms:listingMs,preparing_ms:preparingMs,receipt_lookup_ms:receiptLookupMs,batch_ms:batchMs,batch_lookup_ms:batchLookupMs,batch_write_ms:batchWriteMs,cleanup_ms:Date.now()-cleanupStarted}, page_size:page.objects.length, ready_size:readySize, batched:ciCommitted.size, batch_status:batchStatus, known_receipts:sqlCommitted.size, receipt_lookup_status:receiptLookupStatus, last_error, next_retry, cursor: visited < page.objects.length || page.truncated ? (page.objects[visited-1]?.key || options.cursor) : undefined, remaining: Boolean(stopped) || page.truncated || replayed < page.objects.length, ...(stopped ? { stopped } : {}) };
 }
 
 // Delivery diagnostics belong only to the immediate administrative reply.

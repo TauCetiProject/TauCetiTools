@@ -392,3 +392,21 @@ pg('ordinary PostgreSQL replay adapts after receipt commits exhaust the cleanup 
   for(const p of items){assert.ok(await f.env.ARCHIVE.get(ingress.receiptKey(repo.id,p.delivery)));assert.equal(await f.env.ARCHIVE.get(ingress.bodyKey(repo.id,p.delivery)),null);}
  }finally{Date.now=realNow;await f.close();}
 });
+
+pg('committed semantic PostgreSQL receipts clean parked input in one read without a writer or duplicate change',async()=>{
+ const f=await postgresFixture();try{
+  f.env.ARCHIVE=bucket();f.env.INSTALLATIONS={idFromName(){throw Error('receipt promotion must not fetch GitHub');}};
+  const originalRevision=await f.state.revision(),pointers=[];let lookups=0,individual=0;
+  for(let i=0;i<12;i++){const p={key:'webhooks/known/'+i,repository:repo.name,delivery:'known-semantic-'+i,event:'issue_comment',received:Date.now()+i};await f.env.ARCHIVE.put(p.key,'{}');await ingress.park(f.env,repo,p,'migration');pointers.push(p);}
+  await f.admin.query(`INSERT INTO ${f.schema}.deliveries(id,event,received) SELECT 'known-semantic-'||i,'issue_comment',$1 FROM generate_series(0,11) i`,[Date.now()]);
+  f.env.REPOSITORIES={idFromName:id=>({toString:()=>id}),get:()=>({fetch:async(url,init)=>{if(new URL(url).pathname==='/storage/deliveries')lookups++;else{individual++;throw Error('known receipt must not enter event writer');}return f.state.fetch(new Request(url,init));}})};
+  // Reject every repository write: promotion must be read-only in PostgreSQL.
+  const batch=f.store.batch.bind(f.store),transaction=f.store.transaction.bind(f.store);f.store.batch=statements=>{assert.ok(statements.every(s=>/^SELECT\b/i.test(s.sql)));return batch(statements);};f.store.transaction=()=>{throw Error('receipt lookup acquired writer');};
+  f.env.ARCHIVE.failures.push((op,key)=>op==='put'&&key===ingress.receiptKey(repo.id,pointers[0].delivery));
+  const first=await ingress.drain(f.env,repo,{limit:100});assert.equal(first.known_receipts,12);assert.equal(first.replayed,11);assert.equal(first.failed,1);assert.equal(individual,0);assert.equal(lookups,1);
+  f.store.transaction=transaction;const key=ingress.pointerKey(repo.id,pointers[0]),p=await(await f.env.ARCHIVE.get(key)).json();await f.env.ARCHIVE.put(key,JSON.stringify({...p,retry_at:0}));
+  const second=await ingress.drain(f.env,repo,{limit:100});assert.equal(second.replayed,1);assert.equal(second.failed,0);assert.equal(individual,0);assert.equal(lookups,2);
+  assert.equal(await f.state.revision(),originalRevision);assert.equal((await f.store.exec('SELECT COUNT(*) n FROM changes')).one().n,0);assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,12);
+  for(const p of pointers){assert.equal((await(await f.env.ARCHIVE.get(ingress.receiptKey(repo.id,p.delivery))).json()).source,'sql_receipt');assert.equal(await f.env.ARCHIVE.get(ingress.bodyKey(repo.id,p.delivery)),null);assert.equal(await f.env.ARCHIVE.get(ingress.pointerKey(repo.id,p)),null);}
+ }finally{await f.close();}
+});
