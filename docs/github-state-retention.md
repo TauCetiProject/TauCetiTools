@@ -186,9 +186,15 @@ aggregates; detailed minute rows are only archived in telemetry receipts. Dimens
 caps evict the oldest data and report dropped sample/request counts.
 Counters/latency distributions are bounded to sixty minute intervals per instance.
 Installation maintenance prepares the retained accounting hour across restarts from
-a bounded 10,000-row suffix; `window_complete: false` means a lower bound. Before
-the first preparation, provisional in-memory counters explicitly use
-`installation_instance_since_restart`. Health never scans raw accounting. Seven-day
+a bounded 10,000-row suffix; `window_complete: false` means a lower bound. The
+prepared report survives object eviction and keeps its original `at` and
+`window_complete`; `stale` describes the age of that observation. Before the first
+successful preparation, or when its saved report cannot be loaded, provisional
+in-memory counters explicitly use `installation_instance_since_restart`.
+`accounting_preparation_failure` reports failed snapshot loads or writes and clears
+after a successful preparation. Migration receipts retain accounting observation
+time, scope, freshness and completeness alongside their request counts.
+Health never scans raw accounting. Seven-day
 R2 interval receipts retain repository diagnostics across restarts. Optional
 telemetry persistence does not determine repository transaction success.
 

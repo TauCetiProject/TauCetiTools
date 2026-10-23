@@ -191,7 +191,8 @@ test('ordinary supervisor restarts a fenced repository, preserves cursors, and r
   assert.equal((await f.admin.query(`SELECT COUNT(*)::text n FROM ${f.schema}.deliveries WHERE id='freeze-event'`)).rows[0].n,'1');
   assert.ok(f.archive.objects.has(`receipts/${custom.id}/freeze-event.json`));
   assert.ok(!(await f.archive.list({prefix:`parked/${custom.id}/pointers/`})).objects.length);
-  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json({deployment_id:'test-deployment',repository_inflight:[],hour:[]})})};
+  const accounting={at:Date.now()-3600000,scope:'retained_accounting_hour',stale:true,window_complete:false};
+  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json({deployment_id:'test-deployment',repository_inflight:[],hour:[],...accounting})})};
   // An unrelated historical raw gap does not own this migration's queues.
   await f.archive.put('control/raw-recovery.json',JSON.stringify({last_completed:1,gaps:{count:1,truncated:false}}));
   const queueSample=async(at,count)=>f.archive.put('control/queue-metrics.json',JSON.stringify({queue:{at,count:0,error:null},dlq:{at,count,error:null}}));
@@ -221,6 +222,7 @@ test('ordinary supervisor restarts a fenced repository, preserves cursors, and r
   await ingress.release(f.env,custom,poison);assert.ok(!await f.archive.head(heldKey));
   const done=await (await f.request('/migration-supervise',{})).json();
   assert.equal(done.phase,'complete');assert.equal(done.cutover.release.backend_write_owner,'postgres');
+  assert.deepEqual(done.cutover.release.github_hour_observation,accounting,'retained request counts keep their actual stale and incomplete observation context');
   const receiptKey=migration.archiveKey(custom.id,generation)+'/receipt.json';
   const immutable=f.archive.objects.get(receiptKey).text;await f.request('/migration-supervise',{});assert.equal(f.archive.objects.get(receiptKey).text,immutable);
   await f.archive.delete(receiptKey); // crash at release receipt publication

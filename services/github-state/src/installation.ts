@@ -18,13 +18,13 @@ export class InstallationScheduler extends DurableObject<Env> {
   private auditFlight?:Promise<void>;
   private accountingMetrics=new AccountingMetrics();
   private accountingFailure:any;
+  private accountingPreparationFailure:any;
   private preparedAccounting:any;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS budgets(resource TEXT PRIMARY KEY,remaining INTEGER,lim INTEGER,reset INTEGER,blocked INTEGER DEFAULT 0);
       CREATE TABLE IF NOT EXISTS accounting(id INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGER,operation TEXT,api TEXT,method TEXT,endpoint TEXT,status INTEGER,points INTEGER,latency INTEGER,bytes INTEGER);
-      CREATE TABLE IF NOT EXISTS quota_types(category TEXT PRIMARY KEY,first_seen INTEGER,last_seen INTEGER,count INTEGER,evidence TEXT);
-      CREATE TABLE IF NOT EXISTS prepared_accounting(singleton INTEGER PRIMARY KEY CHECK(singleton=1),data TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS quota_types(category TEXT PRIMARY KEY,first_seen INTEGER,last_seen INTEGER,count INTEGER,evidence TEXT);`);
     this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS reservations(id TEXT PRIMARY KEY,resource TEXT,cost INTEGER,expires INTEGER);');
     this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS redelivery_retries(id TEXT PRIMARY KEY,due INTEGER,attempt INTEGER);');
     const columns=new Set(this.ctx.storage.sql.exec<any>('PRAGMA table_info(accounting)').toArray().map(c=>c.name));
@@ -32,9 +32,14 @@ export class InstallationScheduler extends DurableObject<Env> {
     // Health must survive ordinary object eviction without rescanning the
     // accounting log or resetting the report's original observation time.
     try {
+      this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS prepared_accounting(singleton INTEGER PRIMARY KEY CHECK(singleton=1),data TEXT NOT NULL)');
       const saved=this.ctx.storage.sql.exec<{data:string}>('SELECT data FROM prepared_accounting WHERE singleton=1').toArray()[0];
-      if(saved)this.preparedAccounting=JSON.parse(saved.data);
-    }catch(error) {log('installation_health_load_failed',{reason:classify(error)});}
+      if(saved) {
+        const report=JSON.parse(saved.data);
+        if(report?.version!==1 || !Number.isSafeInteger(report.at) || report.at<0 || report.at>Date.now() || report.scope!=='retained_accounting_hour' || typeof report.window_complete!=='boolean' || report.scanned_limit!==10000 || !Array.isArray(report.hour) || !Array.isArray(report.recipes))throw new Error('invalid accounting snapshot');
+        this.preparedAccounting=report;
+      }
+    }catch(error) {this.accountingPreparationFailure={at:Date.now(),reason:classify(error)};log('installation_health_load_failed',this.accountingPreparationFailure);}
   }
   async jwt(): Promise<string> {
     const b64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_');
@@ -408,14 +413,16 @@ export class InstallationScheduler extends DurableObject<Env> {
   prepareAccounting():void {
     const now=Date.now();if(this.preparedAccounting && now-this.preparedAccounting.at<60000)return;
     try {
+      this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS prepared_accounting(singleton INTEGER PRIMARY KEY CHECK(singleton=1),data TEXT NOT NULL)');
       const source='(SELECT api,operation,shape,batch_size,at,points,bytes,latency,predicted FROM accounting ORDER BY id DESC LIMIT 10000)';
       const bounds=this.ctx.storage.sql.exec<any>('SELECT COUNT(*) n,MIN(at) oldest FROM '+source).one();
-      const prepared={at:now,scope:'retained_accounting_hour',window_complete:bounds.n<10000 || bounds.oldest<now-3600000,scanned_limit:10000,
+      const prepared={version:1,at:now,scope:'retained_accounting_hour',window_complete:bounds.n<10000 || bounds.oldest<now-3600000,scanned_limit:10000,
         hour:this.ctx.storage.sql.exec('SELECT api,operation,COUNT(*) requests,SUM(points) points,SUM(points IS NULL) unmeasured,SUM(bytes) bytes,AVG(latency) latency FROM '+source+' WHERE at>? GROUP BY api,operation',now-3600000).toArray(),
         recipes:this.ctx.storage.sql.exec('SELECT api,operation,shape,batch_size,COUNT(*) requests,SUM(points) points,AVG(points) mean_points,MAX(points) max_points,AVG(predicted) predicted,AVG(latency) latency,MAX(latency) max_latency FROM '+source+' WHERE at>? GROUP BY api,operation,shape,batch_size',now-3600000).toArray()};
       this.ctx.storage.sql.exec('INSERT INTO prepared_accounting(singleton,data) VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET data=excluded.data',JSON.stringify(prepared));
       this.preparedAccounting=prepared;
-    }catch(error) {log('installation_health_prepare_failed',{reason:classify(error)});}
+      this.accountingPreparationFailure=null;
+    }catch(error) {this.accountingPreparationFailure={at:Date.now(),reason:classify(error)};log('installation_health_prepare_failed',this.accountingPreparationFailure);}
   }
   async runnerCapacity(repo:Repository):Promise<Response> {
     const organization=repo.name.split('/')[0],key='runner-capacity:'+organization;
@@ -468,7 +475,7 @@ export class InstallationScheduler extends DurableObject<Env> {
       if (path==='/batch') return await this.batch({...await req.json() as object,request_id:requestId(req)});
       if (path==='/measure') return await this.measure({...await req.json() as object,request_id:requestId(req)});
       if (path==='/maintenance') {
-        this.expireAccounting();this.prepareAccounting();return json({ok:true,telemetry_failure:this.accountingFailure});
+        this.expireAccounting();this.prepareAccounting();return json({ok:true,telemetry_failure:this.accountingFailure,accounting_preparation_failure:this.accountingPreparationFailure ?? null});
       }
       if (path==='/audit') {
         this.expireAccounting();
@@ -476,7 +483,7 @@ export class InstallationScheduler extends DurableObject<Env> {
         this.auditFlight ||= this.audit(repo).finally(()=>{this.auditFlight=undefined;});
         await this.auditFlight;return json({ok:true});
       }
-      if (path==='/health') return json({repository_inflight:[...this.repositoryRequests].map(([repository,requests])=>({repository,requests})),redelivery_failure:await this.ctx.storage.get('last_redelivery_failure') || null,reconciliation_version:2,deployment_id:this.env.CF_VERSION?.id,settings:settings(this.env),inflight:this.ctx.storage.sql.exec('SELECT resource,COUNT(*) requests,SUM(cost) reserved_points FROM reservations WHERE expires>? GROUP BY resource',Date.now()).toArray(),budgets:this.ctx.storage.sql.exec('SELECT * FROM budgets').toArray(),quota_types:this.ctx.storage.sql.exec('SELECT * FROM quota_types').toArray(),...(this.preparedAccounting?{...this.preparedAccounting,stale:Date.now()-this.preparedAccounting.at>180000}:this.accountingMetrics.snapshot()),telemetry_failure:this.accountingFailure});
+      if (path==='/health') return json({repository_inflight:[...this.repositoryRequests].map(([repository,requests])=>({repository,requests})),redelivery_failure:await this.ctx.storage.get('last_redelivery_failure') || null,reconciliation_version:2,deployment_id:this.env.CF_VERSION?.id,settings:settings(this.env),inflight:this.ctx.storage.sql.exec('SELECT resource,COUNT(*) requests,SUM(cost) reserved_points FROM reservations WHERE expires>? GROUP BY resource',Date.now()).toArray(),budgets:this.ctx.storage.sql.exec('SELECT * FROM budgets').toArray(),quota_types:this.ctx.storage.sql.exec('SELECT * FROM quota_types').toArray(),...(this.preparedAccounting?{...this.preparedAccounting,stale:Date.now()-this.preparedAccounting.at>180000}:this.accountingMetrics.snapshot()),telemetry_failure:this.accountingFailure,accounting_preparation_failure:this.accountingPreparationFailure ?? null});
       return json({error:'not_found'},404);
     } catch (error) {
       if (error instanceof QuotaDeferred) return json(error.result);
