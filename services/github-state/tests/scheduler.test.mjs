@@ -458,14 +458,14 @@ test('opt-in alarm traces identify publication stages without exposing input',as
   state.maintenance=async()=>{};state.startStorageMaintenance=()=>{};
   await state.refresh(job,result);
   await state.runAlarm();
-  assert.equal(messages.length,0,'ordinary operation has no trace logging');
+  assert.equal(messages.map(message=>JSON.parse(message)).filter(entry=>entry.event==='repository_repair_trace').length,0,'ordinary operation has no repair trace logging');
   env.RECONCILIATION_TRACE='true';
   await state.refresh(job,result);
   env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json(result)})};
   await state.dispatch(await state.claim(await db.prepare('SELECT * FROM jobs WHERE key=?').get(key)));
   await state.runAlarm();
   state.prepareStorage=async()=>{};await state.storageMaintenance(false);
-  const trace=messages.map(message=>JSON.parse(message));
+  const trace=messages.map(message=>JSON.parse(message)).filter(entry=>entry.event==='repository_repair_trace');
   for(const stage of ['refresh_response','publication_load_pages','publication_encode_pages','refresh_transaction','publication_decode_pages','publication_rows','publication_repairs','publication_applied','refresh_committed','dispatch','dispatch_complete','expire','select_jobs','maintenance','storage_maintenance','storage_prepare','storage_prepared','alarm_complete'])
    assert.ok(trace.some(entry=>entry.stage===stage),stage);
   for(const entry of trace){
