@@ -134,7 +134,8 @@ export function postgresSQL(input:string,schema:string):string {
 export class StoreUnavailable extends Error {constructor(code?:string){super('Repository database unavailable'+(code && /^[0-9A-Z]{5}$/.test(code)?' ('+code+')':''));}}
 export class StoreFenced extends Error {constructor(){super('Repository backend generation fenced');}}
 type TransactionPhase='connect'|'begin'|'owner'|'apply'|'commit';
-interface ConnectionState {closed:boolean;ending:boolean;error?:StoreUnavailable;phase:TransactionPhase;code?:string}
+type ConnectionFailure='client_timeout'|'server_error'|'driver_error'|'connection_lost'|'connect_timeout'|'rollback_timeout';
+interface ConnectionState {closed:boolean;ending:boolean;error?:StoreUnavailable;phase:TransactionPhase;code?:string;reason?:ConnectionFailure;abort?:(error:StoreUnavailable)=>void}
 const sqlState=(code:unknown):string|undefined=>typeof code==='string' && /^[0-9A-Z]{5}$/.test(code)?code:undefined;
 // A client-side timeout does not cancel the active PostgreSQL query. Queuing
 // ROLLBACK behind it can consume another full query timeout. Close that
@@ -159,12 +160,18 @@ export class PostgresStore implements RepositoryStore {
       if(connection?.error)throw connection.error;
       if(error instanceof StoreFenced || error instanceof StoreUnavailable)throw error;
       const code=sqlState((error as any)?.code);
-      if(connection){connection.code=code;if(unusableConnection(code))connection.error=new StoreUnavailable(code);}
-      else storeLog('repository_database_failure',{phase:'http',code:code ?? null});
-      if(code!=='P0308'){this.diagnostics.queries++;if(!code || /^(08|28)/.test(code) || ['57P01','57P02','57P03'].includes(code)){this.diagnostics.connections++;this.diagnostics.lastConnection=Date.now();}}
+      const serverError=(error as any)?.severity==='ERROR';
+      const reason=(error as any)?.message==='Query read timeout'?'client_timeout':['ERROR','FATAL','PANIC'].includes((error as any)?.severity)?'server_error':'driver_error';
+      if(connection){
+        connection.code=code;connection.reason=reason;
+        if(connection.phase==='connect' || !serverError || unusableConnection(code)){
+          connection.error=new StoreUnavailable(code);connection.abort?.(connection.error);
+        }
+      }else storeLog('repository_database_failure',{phase:'http',code:code ?? null,reason});
+      if(code!=='P0308'){this.diagnostics.queries++;if(unusableConnection(code) || code?.startsWith('28') || !serverError){this.diagnostics.connections++;this.diagnostics.lastConnection=Date.now();}}
       // Driver errors can contain connection strings or parameter data.
-      if((error as any)?.code==='P0308')throw new StoreFenced();
-      throw new StoreUnavailable((error as any)?.code);
+      if(code==='P0308')throw new StoreFenced();
+      throw new StoreUnavailable(code);
     }
   }
   async exec<T=any>(sql:string,...bindings:Bind[]):Promise<Rows<T>> {
@@ -216,15 +223,21 @@ export class PostgresStore implements RepositoryStore {
     return this.writer.run(()=>this.transact(apply,Date.now()-queued));
   }
   private async transact<T>(apply:(store:RepositoryStore)=>Promise<T>,wait_ms:number):Promise<T> {
-    let client:Client;try{client=new Client({connectionString:this.url,connectionTimeoutMillis:10000,query_timeout:15000});}catch{throw new StoreUnavailable();}
+    // Leave time for the server's 15s statement timeout to return its SQLSTATE.
+    let client:Client;try{client=new Client({connectionString:this.url,connectionTimeoutMillis:10000,query_timeout:20000});}catch{throw new StoreUnavailable();}
     const started=Date.now();let failed=true;
     const connection:ConnectionState={closed:false,ending:false,phase:'connect'};let disconnected!:(error:StoreUnavailable)=>void;
     const lost=new Promise<never>((_,reject)=>{disconnected=reject;});void lost.catch(()=>{});
-    const fail=(code?:string)=>{if(connection.ending || connection.error)return;connection.code=sqlState(code) || '08006';connection.error=new StoreUnavailable(connection.code);this.diagnostics.connections++;this.diagnostics.queries++;this.diagnostics.lastConnection=Date.now();disconnected(connection.error);};
+    connection.abort=disconnected;
+    const fail=(code?:string,reason:ConnectionFailure='connection_lost')=>{if(connection.ending || connection.error)return;connection.code=sqlState(code) || '08006';connection.reason=reason;connection.error=new StoreUnavailable(connection.code);this.diagnostics.connections++;this.diagnostics.queries++;this.diagnostics.lastConnection=Date.now();disconnected(connection.error);};
     client.on('error',error=>fail((error as any)?.code));client.on('end',()=>{connection.closed=true;fail();});
     try {
       await this.run(async()=>{
-        await client.connect();connection.phase='begin';await client.query("BEGIN; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='15s'; SET LOCAL idle_in_transaction_session_timeout='30s'");
+        // The driver's connect deadline initiates close, but a missing close
+        // event must not keep this promise and the local writer pending.
+        const timer=setTimeout(()=>fail('08001','connect_timeout'),10000);
+        try{await Promise.race([client.connect(),lost]);}finally{clearTimeout(timer);}
+        connection.phase='begin';await client.query("BEGIN; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='15s'; SET LOCAL idle_in_transaction_session_timeout='30s'");
         connection.phase='owner';
         const control=await client.query(`SELECT generation,backend,schema_version FROM "${this.schema}".backend_control WHERE singleton=1 FOR UPDATE`);
         const row=control.rows[0];
@@ -239,7 +252,9 @@ export class PostgresStore implements RepositoryStore {
       const committed=await this.run(()=>client.query('COMMIT'),connection);
       if(committed.command!=='COMMIT')throw new StoreUnavailable('25P02');failed=false;return result;
     }catch(error){
-      if(!connection.closed && !connection.error)try{await client.query('ROLLBACK');}catch{}
+      if(!connection.closed && !connection.error){let timer:ReturnType<typeof setTimeout>|undefined;try{
+        await Promise.race([client.query('ROLLBACK'),new Promise<void>(resolve=>{timer=setTimeout(()=>{fail('08006','rollback_timeout');resolve();},2000);})]);
+      }catch{fail();}finally{if(timer)clearTimeout(timer);}}
       throw error;
     }finally{
       connection.ending=true;
@@ -248,7 +263,7 @@ export class PostgresStore implements RepositoryStore {
         await Promise.race([client.end(),new Promise<void>(resolve=>{timer=setTimeout(()=>{try{client.neonConfig.destroy();}catch{}finally{resolve();}},2000);})]);
       }catch{}finally{if(timer)clearTimeout(timer);}}
       const transaction_ms=Date.now()-started;
-      if(failed || wait_ms+transaction_ms>=250)storeLog('repository_postgres_transaction',{phase:connection.phase,code:connection.code ?? null,wait_ms,transaction_ms,failed,connection_discarded:Boolean(connection.error)});
+      if(failed || wait_ms+transaction_ms>=250)storeLog('repository_postgres_transaction',{phase:connection.phase,code:connection.code ?? null,reason:connection.reason ?? (failed?'application':null),outcome:failed?(connection.phase==='commit' && connection.error?'unknown':'failed'):'committed',wait_ms,transaction_ms,failed,connection_discarded:Boolean(connection.error)});
     }
   }
   async prepareMonitoring(analyzeTables:boolean,attemptToken=Date.now()):Promise<any> {
