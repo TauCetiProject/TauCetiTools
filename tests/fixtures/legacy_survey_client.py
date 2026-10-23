@@ -105,7 +105,8 @@ def read_survey(repo, roadmap="any", skip=(), *, numbers=(), stages=None):
 source = Path(__file__).read_text()
 function = next(node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef) and node.name == "read_survey")
 body = "\n".join(source.splitlines()[function.lineno - 1:function.end_lineno]) + "\n"
-assert hashlib.sha256(body.encode()).hexdigest() == "dd99a748f7a8cee19b55e565e54f16af379db06046233abe39b358941ab54d5c"
+if hashlib.sha256(body.encode()).hexdigest() != "dd99a748f7a8cee19b55e565e54f16af379db06046233abe39b358941ab54d5c":
+    raise SystemExit("frozen read_survey changed")
 
 available, rows = read_survey("org/repo")
 if not available:

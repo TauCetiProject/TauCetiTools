@@ -61,6 +61,8 @@ test('compact roadmap snapshot updates on comment edit/delete without reading fu
   const representationTag=fresh.headers.get('etag');assert.equal(representationTag,'"survey-v1-empty-markers:'+result.revision+'"');
   assert.equal(legacy(await fresh.json()).status,0);
   const cachedWire=await wire(oldTag);assert.equal(cachedWire.status,200);assert.equal(cachedWire.headers.get('etag'),representationTag);
+  // Exercise the defensive early-304 branch with a legacy collection row.
+  // Ordinary survey 304s come from the public edge, covered in recovery.test.
   await complete('survey',Object.fromEntries(Object.entries(q.args).sort(([a],[b])=>a.localeCompare(b))));
   assert.equal((await wire('W/'+representationTag)).status,304,'the repaired representation retains weak-validator 304 behavior');
   const incompatible=structuredClone(result);delete incompatible.data[0].review.markers;

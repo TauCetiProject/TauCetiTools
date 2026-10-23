@@ -28,6 +28,8 @@ const FULL_DATABASE=10*1024**3-16*1024**2;
 // clients use their direct GitHub fallback instead of acting on frozen state.
 const FROZEN_AFTER=10*60000;
 const CURSOR_UPLOADS=4;
+// Change when the survey wire representation changes without a data revision.
+const SURVEY_ETAG_PREFIX='survey-v1-empty-markers:';
 // Private to local read scopes; request bodies and RPC arguments cannot set it.
 const ACTIVITY_CLOCK=Symbol('activity clock');
 const decimalArgument=(value:string):number|string=>Number.isSafeInteger(Number(value))?Number(value):value;
@@ -2586,7 +2588,7 @@ export class RepositoryState extends DurableObject<Env> {
         if(changed!==null && !planned){requestUnavailable=true;return json({...await this.unavailable(q,'mirror_frozen'),frozen_since:changed},200,{'X-TauCeti-Storage':'degraded'});}
         // Replace a cached markerless survey even when stored data has not
         // changed. Clients treat validators as opaque; revisions stay numeric.
-        const tag=(revision:number)=>'"'+(q.operation==='survey'?'survey-v1-empty-markers:':'')+revision+'"';
+        const tag=(revision:number)=>'"'+(q.operation==='survey'?SURVEY_ETAG_PREFIX:'')+revision+'"';
         const etag=tag(await this.revision()),headers:Record<string,string>=this.degraded?{'X-TauCeti-Storage':'degraded'}:{};
         if(this.migrationUnavailable && this.store.backend==='sqlite') {headers['X-TauCeti-Read-Fallback']='last-known-source';const frozen=this.localMeta('backend_owner')?.frozen_at;if(frozen)headers['X-TauCeti-Source-Frozen-At']=String(frozen);}
         if (!q.cursor && matchesETag(req.headers.get('if-none-match'),etag) && q.operation!=='progress' && (await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length) {
