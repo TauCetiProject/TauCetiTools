@@ -8,6 +8,9 @@ Only its read/cache/import scaffolding is stubbed; the function below is unchang
 import json
 import sys
 import types
+import ast
+import hashlib
+from pathlib import Path
 
 payload = json.load(sys.stdin)
 package = types.ModuleType("legacy_survey_fixture")
@@ -97,6 +100,12 @@ def read_survey(repo, roadmap="any", skip=(), *, numbers=(), stages=None):
         return True, SurveyRows(rows, counts)
     except (ValueError, KeyError, TypeError, AttributeError) as error:
         return _unavailable(repo, "survey", "incompatible_protocol", _sanitize(error))
+
+# Keep the frozen parser separate from the mutable fixture scaffolding.
+source = Path(__file__).read_text()
+function = next(node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef) and node.name == "read_survey")
+body = "\n".join(source.splitlines()[function.lineno - 1:function.end_lineno]) + "\n"
+assert hashlib.sha256(body.encode()).hexdigest() == "dd99a748f7a8cee19b55e565e54f16af379db06046233abe39b358941ab54d5c"
 
 available, rows = read_survey("org/repo")
 if not available:

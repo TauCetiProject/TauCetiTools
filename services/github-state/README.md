@@ -174,6 +174,8 @@ for scope rules, per-history coverage, migration, telemetry, and cross-language
 contract tests.
 The v1 response keeps `review.markers` as an empty array for existing clients.
 Coordination comments and claims in older cached projections do not populate it.
+Survey ETags include a representation tag so an older markerless cached response
+is replaced once, after which ordinary conditional reads return 304 again.
 
 ```toml
 max_open_prs = 128

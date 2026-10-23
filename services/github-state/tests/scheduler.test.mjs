@@ -55,6 +55,14 @@ test('compact roadmap snapshot updates on comment edit/delete without reading fu
   assert.deepEqual(result.data[0].review.markers,[],'unchanged v1 clients keep their required empty compatibility array');
   const legacy=payload=>spawnSync('python3',['../../tests/fixtures/legacy_survey_client.py'],{input:JSON.stringify(payload),encoding:'utf8'});
   const accepted=legacy(result);assert.equal(accepted.status,0,accepted.stderr);assert.equal(JSON.parse(accepted.stdout).accepted,true);
+  const wire=validator=>state.fetch(new Request('https://internal/query',{method:'POST',headers:{'If-None-Match':validator},body:JSON.stringify(q)}));
+  const oldTag='"'+result.revision+'"',fresh=await wire(oldTag);
+  assert.equal(fresh.status,200,'a cached markerless representation must be replaced without a revision mutation');
+  const representationTag=fresh.headers.get('etag');assert.equal(representationTag,'"survey-v1-empty-markers:'+result.revision+'"');
+  assert.equal(legacy(await fresh.json()).status,0);
+  const cachedWire=await wire(oldTag);assert.equal(cachedWire.status,200);assert.equal(cachedWire.headers.get('etag'),representationTag);
+  await complete('survey',Object.fromEntries(Object.entries(q.args).sort(([a],[b])=>a.localeCompare(b))));
+  assert.equal((await wire('W/'+representationTag)).status,304,'the repaired representation retains weak-validator 304 behavior');
   const incompatible=structuredClone(result);delete incompatible.data[0].review.markers;
   assert.notEqual(legacy(incompatible).status,0,'the frozen client must detect the original missing-field regression');
   const cached=JSON.parse((await db.prepare('SELECT data FROM survey_state WHERE number=?').get('7')).data);

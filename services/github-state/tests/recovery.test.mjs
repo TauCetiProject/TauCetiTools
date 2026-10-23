@@ -39,6 +39,14 @@ async function deliver(env,delivery,attempts=1){
  return message;
 }
 const parked=(archive,delivery)=>[...archive.objects.keys()].filter(k=>k.startsWith('parked/100/pointers/') && k.endsWith('-'+delivery+'.json'));
+test('the public survey edge replaces numeric validators and revalidates the repaired representation',async()=>{
+ const h=harness(),etag='"survey-v1-empty-markers:17"';
+ h.env.CLIENT_TOKENS=JSON.stringify([{hash:sha('client'),repositories:[repo.name]}]);
+ h.env.REPOSITORIES.get=()=>({fetch:async()=>Response.json({version:1,repository:repo.name,operation:'survey',status:'ok',complete:true,revision:17,data:[]},{headers:{ETag:etag}})});
+ const read=validator=>worker.fetch(new Request('https://public/v1/query?repository=org%2Frepo&operation=survey',{headers:{Authorization:'Bearer client','If-None-Match':validator}}),h.env,{});
+ const repaired=await read('"17"');assert.equal(repaired.status,200);assert.equal(repaired.headers.get('etag'),etag);
+ for(const validator of [etag,'W/'+etag,'"other", W/'+etag])assert.equal((await read(validator)).status,304);
+});
 // Every acknowledged event has a committed receipt or a durable pointer and pinned body.
 function durable({archive,state},delivery){
  if(state.applied.has(delivery)) return true;

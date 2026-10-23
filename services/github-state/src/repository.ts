@@ -2584,7 +2584,10 @@ export class RepositoryState extends DurableObject<Env> {
         const changed=await this.frozenSince();
         const planned=this.migrationHeld() || this.migrationState?.phase==='replaying';
         if(changed!==null && !planned){requestUnavailable=true;return json({...await this.unavailable(q,'mirror_frozen'),frozen_since:changed},200,{'X-TauCeti-Storage':'degraded'});}
-        const etag='"'+(await this.revision())+'"',headers:Record<string,string>=this.degraded?{'X-TauCeti-Storage':'degraded'}:{};
+        // Replace a cached markerless survey even when stored data has not
+        // changed. Clients treat validators as opaque; revisions stay numeric.
+        const tag=(revision:number)=>'"'+(q.operation==='survey'?'survey-v1-empty-markers:':'')+revision+'"';
+        const etag=tag(await this.revision()),headers:Record<string,string>=this.degraded?{'X-TauCeti-Storage':'degraded'}:{};
         if(this.migrationUnavailable && this.store.backend==='sqlite') {headers['X-TauCeti-Read-Fallback']='last-known-source';const frozen=this.localMeta('backend_owner')?.frozen_at;if(frozen)headers['X-TauCeti-Source-Frozen-At']=String(frozen);}
         if (!q.cursor && matchesETag(req.headers.get('if-none-match'),etag) && q.operation!=='progress' && (await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length) {
           this.backgroundDemand(q);
@@ -2596,7 +2599,7 @@ export class RepositoryState extends DurableObject<Env> {
           (cached.result.revision===(await this.revision()) || ['survey','open_prs','open_issues'].includes(q.operation) && Date.now()-cached.built<10000 || !await this.changedQuery(q,cached.result.revision))) {
           requestCoverage=cached.result.coverage || 'unknown';
           this.backgroundDemand(q);
-          return json(cached.result,200,{ETag:'"'+cached.result.revision+'"',...headers});
+          return json(cached.result,200,{ETag:tag(cached.result.revision),...headers});
         }
         let pending=this.inflightQueries.get(key);
         if (!pending) {
@@ -2613,7 +2616,7 @@ export class RepositoryState extends DurableObject<Env> {
         }
         requestUnavailable=result.status==='unavailable';
         requestCoverage=result.coverage || 'unknown';
-        return json(result,200,{ETag:'"'+result.revision+'"',...headers});
+        return json(result,200,{ETag:tag(result.revision),...headers});
       }
       if (path==='/health' && this.store.backend==='postgres') {
         const monitoring=await this.preparedObservation(),storage=monitoring.storage || {backend:'postgres',schema_version:null,expected_schema_version:1,expected_generation:this.backendGeneration(),connected:null,stale:true};
