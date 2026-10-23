@@ -1505,6 +1505,7 @@ test('both lanes retain their cadence and a lost handoff response preserves the 
  advance(61000);await ingress.maintainIngress(h.env,repo);
  assert.equal(h.state.applied.size,2);assert.ok([...h.state.applied.values()].every(n=>n===1));
  const state=await(await h.archive.get(key)).json();assert.equal(state.pointers_page_limit,undefined);assert.equal(state.pointers_page_ceiling,undefined);assert.ok(state.held_pass_completed_at);
+ assert.equal(state.held_page_limit,25,'a lost handoff acknowledgement is uncertain evidence for only its named lane');
  // An all-cooldown held lane still leaves time for normal input in this tick.
  h.state.full=true;await deliver(h.env,'next-normal');await deliver(h.env,'cooldown-held');h.state.full=false;
  await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
@@ -1513,6 +1514,16 @@ test('both lanes retain their cadence and a lost handoff response preserves the 
  advance(31000);await ingress.maintainIngress(h.env,repo);
  assert.equal(h.state.applied.get('next-normal'),1);assert.equal(h.state.applied.has('cooldown-held'),false);
  assert.equal((await(await h.archive.get(ingress.pointerKey(repo.id,p,true))).json()).retry_at,retry);
+}));
+
+test('sustained fast backlog cannot extend a learned limit beyond its original expiry',async()=>clock(async advance=>{
+ const h=harness(),key=ingress.recoveryKey(repo.id),until=Date.now()+15*60000;
+ h.state.full=true;for(let i=0;i<160;i++)await deliver(h.env,'busy-expiry-'+i);h.state.full=false;
+ await h.archive.put(key,JSON.stringify({pointers_page_limit:2,pointers_page_limit_until:until,pointers_page_ceiling:2,pointers_page_ceiling_until:until}));
+ for(let i=0;i<8;i++)await ingress.replayIngress(h.env,repo,{limit:100});
+ let state=await(await h.archive.get(key)).json();assert.equal(state.pointers_page_limit,2);assert.equal(state.pointers_page_limit_until,until);
+ advance(15*60000+1);const pass=await ingress.replayIngress(h.env,repo,{limit:100});assert.equal(pass.page_limit,100);assert.equal(pass.replayed,100);
+ state=await(await h.archive.get(key)).json();assert.equal(state.pointers_page_ceiling,undefined);assert.equal(state.pointers_page_limit,undefined);
 }));
 
 test('quiet held limits expire without successful full pages and optional selection failures do not delay input',async()=>clock(async advance=>{

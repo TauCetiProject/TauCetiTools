@@ -82,12 +82,13 @@ initial budget halves the observed page size, down to one pointer. Limits are
 persisted in the R2 lease claim before work starts. Cron keeps a fixed page limit
 within each lane, alternates lane preference, and checkpoints once between lanes
 when budget remains. That conditional handoff preserves the first lane's progress
-and records only the second lane as active, so expiry cannot penalize a lane that
-never started. No checkpoint write is added per page.
+and names only the second lane in the new claim. A lost claim or handoff response
+may conservatively reduce that named lane even if it never started; this uncertain
+evidence expires within fifteen minutes. No checkpoint write is added per page.
 
 An expired owner can reduce only its named lane, and a cancelled smaller admin
 probe cannot reduce the automatic limit. Four fast full pages allow cautious
-growth. Both working limits and failed-size ceilings expire after fifteen minutes;
+growth without extending an existing recovery expiry. Both working limits and failed-size ceilings expire after fifteen minutes;
 quiet repositories and held input do not need successful full pages to recover
 the default size. Expiry and legacy CI-count evidence can reduce the working limit
 but never install a ceiling. Legacy CI counts establish an attempted batch, not

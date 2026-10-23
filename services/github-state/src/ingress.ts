@@ -366,7 +366,7 @@ function recordReplayPass(state:any,lane:ReplayLane,pass:any,limit:number,budget
   const previous=Number.isSafeInteger(state[lane+'_fast_passes'])?Math.max(0,Math.min(3,state[lane+'_fast_passes'])):0;
   const successes=budget<10000 || limit<cap?previous:fast?Math.min(4,previous+1):0;
   state[lane+'_fast_passes']=successes;
-  if(successes===4 && cap<100){state[lane+'_page_limit']=Math.min(pageCeiling(state,lane),cap+Math.max(1,Math.floor(cap/4)));state[lane+'_page_limit_until']=Date.now()+REPLAY_CEILING_MS;state[lane+'_fast_passes']=0;}
+  if(successes===4 && cap<100){state[lane+'_page_limit']=Math.min(pageCeiling(state,lane),cap+Math.max(1,Math.floor(cap/4)));state[lane+'_page_limit_until'] ??= Date.now()+REPLAY_CEILING_MS;state[lane+'_fast_passes']=0;}
 }
 async function claimReplay(env:Env,repo:Repository,manual?:{lane:ReplayLane;limit:number},canReplay=true):Promise<{key:string;state:any;began:number;lane:ReplayLane;etag?:string;stopped?:string;next_retry?:number}> {
   const key = recoveryKey(repo.id), object = await env.ARCHIVE.get(key);
