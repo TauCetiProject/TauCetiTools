@@ -11,7 +11,7 @@ const bundle=await build({entryPoints:['src/repository_store.ts'],bundle:true,pl
  export class Client {constructor(){return globalThis.${key}.client();}}
  `,loader:'js'}));
 }}]});
-const {PostgresStore,StoreFenced}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
+const {PostgresStore,StoreFenced,StoreUnavailable}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
 function fixture(scenarios=[]){
  const clients=[],committed=[],logs=[];
  const driver={log:(event,fields)=>logs.push({event,...fields}),client(){
@@ -27,7 +27,7 @@ function fixture(scenarios=[]){
     // cannot finish. Cleanup must discard the socket without awaiting it.
     if(phase==='rollback'){if(scenario.stalled)return new Promise(()=>{});pending.length=0;return {rows:[]};}
     if(phase==='owner')return {rows:[{backend:scenario.fenced?'sqlite':'postgres',generation:'test-v1',schema_version:1}]};
-    if(phase==='commit'){committed.push(...pending.splice(0));return {command:'COMMIT',rows:[]};}
+    if(phase==='commit'){if(scenario.commitTag==='ROLLBACK')pending.length=0;else committed.push(...pending.splice(0));return {command:scenario.commitTag ?? 'COMMIT',rows:[]};}
     if(phase==='apply')pending.push('write');return {rows:[]};
    },async end(){client.ended=true;handlers.end?.();}
   };clients.push(client);return client;
@@ -48,9 +48,9 @@ for(const phase of ['connect','begin','owner','apply','commit'])test(`uncoded ${
  assert.ok(!JSON.stringify(f.logs).includes('private'));
 });
 for(const code of ['08006','57P01','57P02','57P03','ECONNRESET','INVALID','EPIPE','EPERM','EBADF'])test(`${code} transport failure discards its connection`,async()=>{
- const f=fixture([{phase:'apply',code,stalled:true}]);await promptly(assert.rejects(f.store.transaction(write),/Repository database unavailable/));
+ const severity=/^(08|57)/.test(code)?'FATAL':undefined;const f=fixture([{phase:'apply',code,severity,stalled:true}]);await promptly(assert.rejects(f.store.transaction(write),/Repository database unavailable/));
  assert.equal(f.clients[0].destroyed,true);assert.ok(!f.clients[0].commands.includes('rollback'));
- assert.equal(f.logs[0].code,/^[0-9A-Z]{5}$/.test(code)?code:null);
+ assert.equal(f.logs[0].code,severity?code:null);
 });
 for(const code of ['23505','57014','55P03'])test(`${code} server error retains normal rollback`,async()=>{
  const f=fixture([{phase:'apply',code,severity:'ERROR'}]);await assert.rejects(f.store.transaction(write),new RegExp(code));
@@ -59,7 +59,7 @@ for(const code of ['23505','57014','55P03'])test(`${code} server error retains n
 test('application exceptions and fencing retain their meaning and roll back',async()=>{
  const f=fixture();const error=new Error('private application error');await assert.rejects(f.store.transaction(async tx=>{await write(tx);throw error;}),e=>e===error);
  assert.equal(f.clients[0].commands.at(-1),'rollback');assert.deepEqual(f.committed,[]);assert.ok(!JSON.stringify(f.logs).includes('private'));
- const fenced=fixture([{fenced:true}]);await assert.rejects(fenced.store.transaction(write),StoreFenced);assert.equal(fenced.clients[0].commands.at(-1),'rollback');
+ const fenced=fixture([{fenced:true}]);await assert.rejects(fenced.store.transaction(write),StoreFenced);assert.equal(fenced.clients[0].commands.at(-1),'rollback');assert.equal(fenced.logs[0].reason,'fenced');
 });
 test('swallowed timeouts cannot commit; an uncertain commit never retries the callback',async()=>{
  const f=fixture([{phase:'apply',stalled:true}]);await promptly(assert.rejects(f.store.transaction(async tx=>{try{await write(tx);}catch{}return 'swallowed';}),/Repository database unavailable/));
@@ -74,17 +74,23 @@ test('logging failure cannot change a committed result; HTTP diagnostics withhol
  const http=fixture();await assert.rejects(http.store.exec('SELECT 1'),/^Error: Repository database unavailable$/);assert.deepEqual(http.logs,[{event:'repository_database_failure',phase:'http',code:null,reason:'driver_error'}]);
 });
 
-for(const [phase,code,severity] of [['connect','53300','FATAL'],['connect','28P01','FATAL'],['connect','3D000','FATAL'],['apply','25P03','FATAL'],['apply','08006','ERROR']])test(`${phase} ${severity} ${code} cannot queue rollback`,async()=>{const f=fixture([{phase,code,severity,stalled:true}]);await promptly(assert.rejects(f.store.transaction(write),/Repository database unavailable/));assert.equal(f.clients[0].destroyed,true);assert.ok(!f.clients[0].commands.includes('rollback'));});
+for(const [phase,code,severity] of [['connect','53300','FATAL'],['connect','28P01','FATAL'],['connect','3D000','FATAL'],['begin','53300','FATAL'],['begin','28P01','FATAL'],['begin','3D000','FATAL'],['apply','25P03','FATAL'],['apply','08006','ERROR']])test(`${phase} ${severity} ${code} cannot queue rollback`,async()=>{const f=fixture([{phase,code,severity,stalled:true}]);await promptly(assert.rejects(f.store.transaction(write),/Repository database unavailable/));assert.equal(f.clients[0].destroyed,true);assert.ok(!f.clients[0].commands.includes('rollback'));});
 
 test('a callback swallowing a timeout cannot hold the local queue with non-database work',async()=>{const f=fixture([{phase:'apply',stalled:true}]);let release;const gate=new Promise(r=>release=r);try{const first=assert.rejects(f.store.transaction(async tx=>{try{await write(tx);}catch{}await gate;await write(tx);}),/Repository database unavailable/);await promptly(Promise.all([first,f.store.transaction(write)]));assert.equal(f.clients.length,2);assert.deepEqual(f.committed,['write']);}finally{release();}});
 
 test('a stalled rollback preserves the application error and closes the connection within its cleanup deadline',async()=>{
  const f=fixture([{stalled:true}]),error=Error('private application error'),start=performance.now();
  await assert.rejects(f.store.transaction(async tx=>{await write(tx);throw error;}),e=>e===error);
- assert.ok(performance.now()-start<3500);assert.equal(f.clients[0].destroyed,true);assert.equal(f.logs[0].reason,'rollback_timeout');
+ assert.ok(performance.now()-start<3500);assert.equal(f.clients[0].destroyed,true);assert.equal(f.logs[0].reason,'application');assert.equal(f.logs[0].cleanup,'rollback_timeout');
  assert.deepEqual(f.committed,[]);await f.store.transaction(write);assert.deepEqual(f.committed,['write']);
 });
 
 test('a missing connect close event cannot hold the writer after its own deadline',async t=>{const f=fixture([{connectPending:true}]);t.mock.timers.enable({apis:['setTimeout']});try{const failed=assert.rejects(f.store.transaction(write),/08001/);await new Promise(setImmediate);t.mock.timers.tick(10000);await failed;assert.equal(f.clients[0].destroyed,true);assert.ok(!f.clients[0].commands.includes('rollback'));assert.equal(f.logs[0].reason,'connect_timeout');await f.store.transaction(write);assert.deepEqual(f.committed,['write']);}finally{t.mock.timers.reset();}});
 
 test('client timeout diagnostics use a fixed reason without logging driver text',async()=>{const f=fixture([{phase:'apply',message:'Query read timeout',stalled:true}]);await promptly(assert.rejects(f.store.transaction(write),/Repository database unavailable/));assert.equal(f.logs[0].reason,'client_timeout');assert.ok(!JSON.stringify(f.logs).includes('Query read timeout'));});
+
+test('a confirmed server COMMIT error retains its cause when rollback cleanup times out',async()=>{const f=fixture([{phase:'commit',code:'57014',severity:'ERROR',stalled:true}]);await assert.rejects(f.store.transaction(write),/57014/);assert.equal(f.logs[0].outcome,'failed');assert.equal(f.logs[0].code,'57014');assert.equal(f.logs[0].reason,'server_error');assert.equal(f.logs[0].cleanup,'rollback_timeout');assert.equal(f.clients[0].destroyed,true);assert.deepEqual(f.committed,[]);});
+
+test('a ROLLBACK commit tag is a definite failure even if subsequent cleanup stalls',async()=>{const f=fixture([{commitTag:'ROLLBACK',stalled:true}]);await assert.rejects(f.store.transaction(write),/25P02/);assert.equal(f.logs[0].outcome,'failed');assert.equal(f.logs[0].reason,'commit_rejected');assert.equal(f.logs[0].cleanup,'rollback_timeout');assert.deepEqual(f.committed,[]);});
+
+test('connection loss before COMMIT is sent is a definite failure',async()=>{const f=fixture();await assert.rejects(f.store.transaction(async tx=>{await write(tx);tx.connectionState.error=new StoreUnavailable('08006');tx.connectionState.reason='connection_lost';}),/08006/);assert.ok(!f.clients[0].commands.includes('commit'));assert.equal(f.logs[0].outcome,'failed');assert.deepEqual(f.committed,[]);assert.ok(!JSON.stringify(f.logs).includes('private'));});

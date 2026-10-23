@@ -450,7 +450,7 @@ pg('CI acknowledgement survives receipt archival between its lookup and reply',a
 });
 
 pg('a client read timeout closes the real transport without a second rollback timeout or callback replay',async()=>{
- const f=await postgresFixture(),NativeSocket=globalThis.WebSocket,sockets=[];let calls=0;
+ const f=await postgresFixture(),NativeSocket=globalThis.WebSocket,sockets=[];let calls=0,rollbacks=0;
  try{
   globalThis.WebSocket=class extends NativeSocket {
    drop=false;closeCalled=false;
@@ -460,19 +460,19 @@ pg('a client read timeout closes the real transport without a second rollback ti
   };
   const start=performance.now();
   await assert.rejects(f.store.transaction(async tx=>{
-   calls++;await tx.exec('INSERT INTO demand VALUES(?,?)','timed-out-write',Date.now());
+   calls++;const query=tx.client.query.bind(tx.client);tx.client.query=(sql,...args)=>{if(sql==='ROLLBACK')rollbacks++;return query(sql,...args);};await tx.exec('INSERT INTO demand VALUES(?,?)','timed-out-write',Date.now());
    assert.equal(sockets.length,1);sockets[0].drop=true;
    await tx.exec('SELECT pg_sleep(0.05)');
   }),/Repository database unavailable/);
   assert.ok(performance.now()-start<28000,'cleanup must not wait another full query timeout');
-  assert.equal(calls,1);assert.equal(sockets[0].closeCalled,true);
+  assert.equal(calls,1);assert.equal(rollbacks,0,'a client timeout must not submit ROLLBACK');assert.equal(sockets[0].closeCalled,true);
   await f.store.transaction(write=>write.exec('INSERT INTO demand VALUES(?,?)','next-writer',Date.now()));
   assert.deepEqual((await f.store.exec('SELECT key FROM demand ORDER BY key')).toArray(),[{key:'next-writer'}]);
  }finally{globalThis.WebSocket=NativeSocket;for(const socket of sockets)try{socket.close();}catch{}await f.close();}
 });
 
 pg('a client timeout during a running server statement preserves the database writer fence and rolls back',async()=>{
- const f=await postgresFixture(),NativeSocket=globalThis.WebSocket;let socket,calls=0;
+ const f=await postgresFixture(),NativeSocket=globalThis.WebSocket;let socket,calls=0,rollbacks=0;
  try{
   globalThis.WebSocket=class extends NativeSocket {
    drop=false;
@@ -480,13 +480,13 @@ pg('a client timeout during a running server statement preserves the database wr
    addEventListener(type,listener,...args){return super.addEventListener(type,type==='message'?event=>{if(!this.drop)listener.call(this,event);}:listener,...args);}
   };
   await assert.rejects(f.store.transaction(async tx=>{
-   calls++;await tx.exec('INSERT INTO demand VALUES(?,?)','mid-statement',Date.now());
+   calls++;const query=tx.client.query.bind(tx.client);tx.client.query=(sql,...args)=>{if(sql==='ROLLBACK')rollbacks++;return query(sql,...args);};await tx.exec('INSERT INTO demand VALUES(?,?)','mid-statement',Date.now());
    // Test-only shorter client timeout: the real server is still sleeping
    // when the client loses its response. Keep the production server settings.
    tx.client.connectionParameters.query_timeout=100;socket.drop=true;
    await tx.exec('SELECT pg_sleep(2)');
   }),/Repository database unavailable/);
-  assert.equal(calls,1);
+  assert.equal(calls,1);assert.equal(rollbacks,0,'a client timeout must not submit ROLLBACK');
   // This must acquire the same backend_control row lock. Closing the local
   // queue does not bypass it while the old server statement is unwinding.
   await f.store.transaction(tx=>tx.exec('INSERT INTO demand VALUES(?,?)','after-mid-statement',Date.now()));
