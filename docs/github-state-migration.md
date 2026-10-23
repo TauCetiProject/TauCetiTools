@@ -321,6 +321,12 @@ python3 services/github-state/scripts/migrate.py --environment production \
 ```
 
 Held-input recovery is a fix-forward operation, not permission to discard input.
+When a PostgreSQL client times out or loses its transport, the adapter closes
+that connection instead of queuing rollback behind the stalled query. Ordinary
+SQL and application errors still roll back a healthy connection. A failed or
+uncertain commit never retries the application callback; input replay checks the
+committed delivery receipt. Sanitized transaction diagnostics report the failing
+phase, writer wait and transaction duration without SQL or driver error bodies.
 Inspect the pointer/body and their digest privately; never paste payloads or secrets
 into logs or issue comments. Recover an exact missing body from retained raw/pinned
 input or migration archives, or fix the parser/target error on PostgreSQL. Preserve

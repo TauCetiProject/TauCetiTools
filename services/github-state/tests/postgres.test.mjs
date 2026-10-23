@@ -448,3 +448,25 @@ pg('CI acknowledgement survives receipt archival between its lookup and reply',a
   assert.equal((await f.store.exec('SELECT COUNT(*) n FROM changes')).one().n,0);
  }finally{await f.close();}
 });
+
+pg('a client read timeout closes the real transport without a second rollback timeout or callback replay',async()=>{
+ const f=await postgresFixture(),NativeSocket=globalThis.WebSocket,sockets=[];let calls=0;
+ try{
+  globalThis.WebSocket=class extends NativeSocket {
+   drop=false;closeCalled=false;
+   constructor(...args){super(...args);sockets.push(this);}
+   addEventListener(type,listener,...args){return super.addEventListener(type,type==='message'?event=>{if(!this.drop)listener.call(this,event);}:listener,...args);}
+   close(...args){this.closeCalled=true;return super.close(...args);}
+  };
+  const start=performance.now();
+  await assert.rejects(f.store.transaction(async tx=>{
+   calls++;await tx.exec('INSERT INTO demand VALUES(?,?)','timed-out-write',Date.now());
+   assert.equal(sockets.length,1);sockets[0].drop=true;
+   await tx.exec('SELECT pg_sleep(0.05)');
+  }),/Repository database unavailable/);
+  assert.ok(performance.now()-start<23000,'cleanup must not wait another 15-second query timeout');
+  assert.equal(calls,1);assert.equal(sockets[0].closeCalled,true);
+  await f.store.transaction(write=>write.exec('INSERT INTO demand VALUES(?,?)','next-writer',Date.now()));
+  assert.deepEqual((await f.store.exec('SELECT key FROM demand ORDER BY key')).toArray(),[{key:'next-writer'}]);
+ }finally{globalThis.WebSocket=NativeSocket;for(const socket of sockets)try{socket.close();}catch{}await f.close();}
+});
