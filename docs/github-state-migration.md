@@ -379,8 +379,9 @@ repair work. CI gaps can clear from their stored event metadata; that clearance
 creates no application receipt. Failed attempts retain the gap with backoff, and
 a conditional update protects a newer retry state from a stale owner. The
 checkpoint records `gap_cursor` and `gap_last_pass` separately from the raw cursor.
-Gap-record read/parse/write errors remain counted and retained; they do not stop
-the independent prefix scan or postpone other due gap entries. The time budget
+Errors in this independent gap-retry page remain counted and retained; they do
+not stop the prefix scan or postpone other due gap entries. The main prefix scan
+still stops if it cannot preserve a failure as a durable gap. The time budget
 is cooperative between attempts; a single pending I/O operation may exceed it.
 
 Abandonment is valid only before target activation. It retains archives, fences the

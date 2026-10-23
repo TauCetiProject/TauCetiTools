@@ -1883,3 +1883,22 @@ test('a CI-labelled gap with no raw metadata cannot be cleared as unmirrored',as
  await ingress.maintainRaw(h.env,()=>assert.fail('missing raw input cannot be targeted'));
  const retained=JSON.parse(h.archive.objects.get(gap).bytes);assert.equal(retained.failures,2);assert.match(retained.reason,/raw_body_unavailable/);assert.ok(retained.retry_at>Date.now());assert.equal(h.archive.objects.has(ingress.receiptKey(repo.id,'missing-ci-gap')),false);assert.equal(parked(h.archive,'missing-ci-gap').length,0);
 }));
+
+test('failed gap cleanup keeps an expired main-scan raw object until a later recovery',async()=>clock(async advance=>{
+ const h=cronHarness(),raw='webhooks/2026-10-14/main-expired.json',gap='control/raw-gaps/main-expired.json';await h.archive.put(raw,'{}',{customMetadata:{event:'ping',expires:'1'}});await h.archive.put(gap,JSON.stringify({key:raw,failures:1,retry_at:0}));
+ // This gap lies before the independent gap page; the main scan reaches it.
+ await h.archive.put('control/raw-recovery.json',JSON.stringify({gap_cursor:'control/raw-gaps/z.json'}));h.archive.failures.push((op,key)=>op==='delete'&&key===gap);
+ await ingress.maintainRaw(h.env,()=>[repo]);assert.ok(h.archive.objects.has(raw),'failed gap deletion must not expire its only raw lookup');assert.ok(h.archive.objects.has(gap));assert.equal(parked(h.archive,'main-expired').length,1);
+ advance(61000);await ingress.maintainRaw(h.env,()=>[repo]);assert.equal(h.archive.objects.has(gap),false);assert.equal(parked(h.archive,'main-expired').length,1);assert.ok(h.archive.objects.has(ingress.bodyKey(repo.id,'main-expired')));
+}));
+
+test('lost gap-delete acknowledgement cannot resurrect a resolved gap',async()=>clock(async()=>{
+ const h=cronHarness(),raw='webhooks/2026-10-14/lost-gap-ack.json',gap='control/raw-gaps/lost-gap-ack.json';await h.archive.put(raw,'{}',{customMetadata:{event:'ping'}});await h.archive.put(gap,JSON.stringify({key:raw,failures:1,retry_at:0}));await h.archive.put('control/raw-recovery.json',JSON.stringify({after:'webhooks/2026-10-23/z.json'}));
+ const remove=h.archive.delete;let lost=false;h.archive.delete=async keys=>{await remove(keys);if(keys===gap&&!lost){lost=true;throw Error('lost gap delete acknowledgement');}};
+ await ingress.maintainRaw(h.env,()=>[repo]);assert.equal(lost,true);assert.equal(h.archive.objects.has(gap),false);assert.ok(h.archive.objects.has(raw));assert.equal(parked(h.archive,'lost-gap-ack').length,1);assert.equal(h.state.applied.size,0);assert.equal(JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes).gaps.count,0);
+}));
+
+test('a malformed gap cannot hold up a later due entry in the same retry page',async()=>clock(async()=>{
+ const h=cronHarness(),raw='webhooks/2026-10-14/b-valid-gap.json';await h.archive.put('control/raw-gaps/a-broken-gap.json','{');await h.archive.put(raw,'{}',{customMetadata:{event:'ping'}});await h.archive.put('control/raw-gaps/b-valid-gap.json',JSON.stringify({key:raw,failures:1,retry_at:0}));await h.archive.put('control/raw-recovery.json',JSON.stringify({after:'webhooks/2026-10-23/z.json'}));
+ await ingress.maintainRaw(h.env,()=>[repo]);const state=JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes);assert.equal(state.gap_last_pass.examined,2);assert.equal(state.gap_last_pass.resolved,1);assert.equal(state.gap_last_pass.errors,1);assert.ok(h.archive.objects.has('control/raw-gaps/a-broken-gap.json'));assert.equal(parked(h.archive,'b-valid-gap').length,1);assert.equal(state.gaps.count,1);
+}));

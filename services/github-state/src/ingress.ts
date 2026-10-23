@@ -281,8 +281,8 @@ export async function maintainRaw(env: Env, targets: (payload: any, event: strin
       const source=typeof raw==='string'?await env.ARCHIVE.head(raw):raw;
       if(!source)throw new Error('raw_body_unavailable:'+rawKey);
       if(!CI_EVENTS.has(source.customMetadata?.event ?? ''))await retainRaw(env,source,targets);
-      if(typeof raw!=='string')expired.push(raw);
       if(gap)await env.ARCHIVE.delete(gapKey);
+      if(typeof raw!=='string')expired.push(raw);
       return true;
     }catch(error) {
       const failures=(gap?.failures || 0)+1;
