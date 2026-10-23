@@ -76,6 +76,18 @@ Explicit admin replay shares cron's conditional R2 lease and stored lane cursor.
 The optional `limit` must be an integer from 1 to 100 (default 25); invalid
 values return HTTP 400 before acquiring the lease. Each pass uses a twenty-second
 work budget, respects pointer and recovery-error backoffs, and returns `leased`, `deadline`, or `lease_replaced` when appropriate.
+The requested limit is an upper bound. If a page repeatedly uses its budget
+without cleaning up any pointer, the next owner halves the observed page size,
+down to one pointer. Independent normal/held limits are persisted in the R2
+lease claim before work starts, so process death or a replaced completion cannot
+erase the decision. Four fast full pages at the learned limit allow a cautious
+increase below previously unsuccessful sizes; explicit smaller admin requests and a lane's short remaining cron
+budget do not provide evidence for an increase. Prepared recovery metadata
+records learned limits/ceilings and each pass's page size, initial budget and
+duration. An expired owner also reduces the limits recorded in its lease claim:
+recovery does not depend on its slow response successfully saving a checkpoint.
+This changes page sizing only; ownership, receipts, cursor checkpoints and retry
+deadlines still govern application and cleanup.
 An expired owner's completion cannot overwrite a replacement checkpoint.
 Permanent delivery receipts use conditional creation. Failed cleanup updates a
 pointer only if the ETag of its loaded snapshot still matches, so a stale attempt cannot

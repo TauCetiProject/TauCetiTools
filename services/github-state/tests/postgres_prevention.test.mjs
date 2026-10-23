@@ -368,3 +368,27 @@ pg('leased admin replay preserves PostgreSQL commit receipts after a lost cleanu
   assert.equal((await ingress.replayIngress(f.env,repo)).replayed,0);assert.equal((await f.store.exec('SELECT COUNT(*) n FROM changes')).one().n,0);
  }finally{await f.close();}
 });
+
+pg('ordinary PostgreSQL replay adapts after receipt commits exhaust the cleanup budget',async()=>{
+ const f=await postgresFixture(),realNow=Date.now;let now=realNow();
+ try{
+  Date.now=()=>now;f.env.ARCHIVE=bucket();let batches=0;
+  f.env.INSTALLATIONS={idFromName(){throw Error('adaptive replay must not fetch GitHub');}};
+  f.env.REPOSITORIES={idFromName:id=>({toString:()=>id}),get:()=>({fetch:async(url,init)=>{
+   assert.equal(new URL(url).pathname,'/ci-receipts');batches++;
+   const response=await f.state.fetch(new Request(url,init));
+   if(response.ok&&JSON.parse(init.body).events.length>2)now+=21000;
+   return response;
+  }})};
+  const revision=await f.state.revision(),items=[];
+  for(let i=0;i<8;i++){const p={repository:repo.name,delivery:'adaptive-pg-'+i,event:'workflow_job',received:now+i,key:'webhooks/adaptive-pg-'+i};await f.env.ARCHIVE.put(p.key,'{}');await ingress.park(f.env,repo,p,'migration');items.push(p);}
+  await ingress.maintainIngress(f.env,repo);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,8);
+  for(const p of items){assert.ok(await f.env.ARCHIVE.get(ingress.pointerKey(repo.id,p)));assert.ok(await f.env.ARCHIVE.get(ingress.bodyKey(repo.id,p.delivery)));assert.equal(await f.env.ARCHIVE.get(ingress.receiptKey(repo.id,p.delivery)),null);}
+  for(let n=0;n<12 && (await f.env.ARCHIVE.list({prefix:'parked/100/pointers/'})).objects.length;n++){now+=31000;await ingress.maintainIngress(f.env,repo);}
+  assert.equal((await f.env.ARCHIVE.list({prefix:'parked/100/pointers/'})).objects.length,0);assert.ok(batches>1);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,8);assert.equal(await f.state.revision(),revision);
+  for(const table of ['resources','changes','jobs'])assert.equal((await f.store.exec('SELECT COUNT(*) n FROM '+table)).one().n,0);
+  for(const p of items){assert.ok(await f.env.ARCHIVE.get(ingress.receiptKey(repo.id,p.delivery)));assert.equal(await f.env.ARCHIVE.get(ingress.bodyKey(repo.id,p.delivery)),null);}
+ }finally{Date.now=realNow;await f.close();}
+});

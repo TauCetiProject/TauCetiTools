@@ -1342,6 +1342,113 @@ test('CI replay survives an old actor and a deadline immediately after batch com
  assert.equal(await f.archive.get(ingress.pointerKey(repo.id,pending)),null);
 }));
 
+test('ordinary replay learns a smaller durable page after repeated zero-progress deadlines',async()=>clock(async advance=>{
+ const h=harness(),committed=new Map(),sizes=[],cleanup=[];
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{
+  assert.equal(new URL(url).pathname,'/ci-receipts');
+  const rows=JSON.parse(init.body).events;sizes.push(rows.length);
+  for(const p of rows)if(!committed.has(p.delivery))committed.set(p.delivery,1);
+  if(rows.length>2)advance(21000);else advance(1000);
+  return Response.json({committed:rows.map(p=>p.delivery)});
+ }});
+ for(let i=0;i<12;i++){
+  const p={repository:repo.name,delivery:'adaptive-'+String(i).padStart(2,'0'),event:'check_run',received:Date.now(),key:'webhooks/adaptive-'+i};
+  await h.archive.put(p.key,'{}');await ingress.park(h.env,repo,p,'migration');
+ }
+ const remove=h.archive.delete;
+ h.archive.delete=async keys=>{for(const key of Array.isArray(keys)?keys:[keys])if(key.includes('/bodies/')){
+  const delivery=key.slice(key.lastIndexOf('/')+1).replace(/\.json$/,'');
+  assert.ok(committed.has(delivery));assert.ok(await h.archive.get(ingress.receiptKey(repo.id,delivery)));cleanup.push(delivery);
+ }return remove(keys);};
+ // A held cooldown is independent of the normal lane's learned page size.
+ const delayed={repository:repo.name,delivery:'adaptive-held',event:'check_run',received:Date.now(),key:'webhooks/adaptive-held'};
+ await h.archive.put(delayed.key,'{}');await ingress.park(h.env,repo,delayed,'migration');
+ const original=await(await h.archive.get(ingress.pointerKey(repo.id,delayed))).json(),retry=Date.now()+3600000;
+ await h.archive.put(ingress.pointerKey(repo.id,delayed,true),JSON.stringify({...original,retry_at:retry,replay_failures:5}));
+ await remove(ingress.pointerKey(repo.id,delayed));
+ await ingress.maintainIngress(h.env,repo);
+ let state=await(await h.archive.get(ingress.recoveryKey(repo.id))).json();
+ assert.equal(state.pointers_last_pass.replayed,0);assert.equal(state.pointers_last_pass.stopped,'deadline');
+ assert.equal(state.pointers_last_pass.page_size,12);assert.equal(cleanup.length,0);
+ // Each call loads a fresh module/process, and only the ordinary supervisor
+ // resumes work. No explicit admin replay, cursor reset or cooldown bypass.
+ for(let n=0;n<20 && [...h.archive.objects.keys()].some(k=>k.startsWith('parked/100/pointers/'));n++){
+  advance(31000);await(await load('src/ingress.ts')).maintainIngress(h.env,repo);
+ }
+ state=await(await h.archive.get(ingress.recoveryKey(repo.id))).json();
+ assert.equal([...h.archive.objects.keys()].filter(k=>k.startsWith('parked/100/pointers/')).length,0);
+ assert.equal(committed.size,12);assert.ok([...committed.values()].every(n=>n===1));
+ assert.equal(cleanup.length,12);assert.ok(sizes.includes(1) || sizes.includes(2));
+ assert.equal((await(await h.archive.get(ingress.pointerKey(repo.id,delayed,true))).json()).retry_at,retry);
+ assert.ok(await h.archive.get(ingress.bodyKey(repo.id,delayed.delivery)));assert.equal(committed.has(delayed.delivery),false);
+ assert.equal(state.lease_until,0);
+}));
+
+test('a reset after the learned lease claim preserves its limit and cursor',async()=>clock(async advance=>{
+ const h=harness();h.state.full=true;for(const d of ['learned-a','learned-b','learned-c','learned-d'])await deliver(h.env,d);h.state.full=false;
+ await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
+ const key=ingress.recoveryKey(repo.id),cursor='parked/100/pointers/000000000000000-before.json';
+ await h.archive.put(key,JSON.stringify({pointers_cursor:cursor,pointers_last_pass:{replayed:0,failed:0,stopped:'deadline',page_size:4,page_limit:50,budget_ms:20000}}));
+ const put=h.archive.put;let lost=true;
+ h.archive.put=async(k,...args)=>{const result=await put(k,...args);if(k===key&&lost){lost=false;throw Error('reset after learned lease');}return result;};
+ await assert.rejects(ingress.maintainIngress(h.env,repo),/reset after learned lease/);
+ const claim=await(await h.archive.get(key)).json();assert.equal(claim.pointers_page_limit,2);assert.equal(claim.pointers_cursor,cursor);assert.equal(h.state.applied.size,0);
+ advance(61000);await(await load('src/ingress.ts')).maintainIngress(h.env,repo);
+ assert.equal(h.state.applied.size,4);assert.ok([...h.state.applied.values()].every(n=>n===1));
+ assert.equal((await(await h.archive.get(key)).json()).lease_until,0);
+}));
+
+test('expired owners that lose every slow completion still converge without an admin retry',async()=>clock(async advance=>{
+ const h=harness(),key=ingress.recoveryKey(repo.id),committed=new Set(),sizes=[];
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{
+  assert.equal(new URL(url).pathname,'/ci-receipts');const rows=JSON.parse(init.body).events;sizes.push(rows.length);
+  for(const p of rows)committed.add(p.delivery);
+  if(rows.length>2){
+   advance(61000);const owner=await(await h.archive.get(key)).json();
+   // Another controller has fenced this completion. No slow pass gets to
+   // publish its observed size/deadline, only its original lease claim survives.
+   await h.archive.put(key,JSON.stringify({...owner,replaced:true,lease_until:Date.now()}));
+  }else advance(1000);
+  return Response.json({committed:rows.map(p=>p.delivery)});
+ }});
+ for(let i=0;i<16;i++){const p={repository:repo.name,delivery:'expired-page-'+String(i).padStart(2,'0'),event:'check_run',received:Date.now(),key:'webhooks/expired-page-'+i};await h.archive.put(p.key,'{}');await ingress.park(h.env,repo,p,'migration');}
+ await ingress.maintainIngress(h.env,repo);
+ const first=await(await h.archive.get(key)).json();assert.equal(first.pointers_last_pass,undefined);assert.equal(first.lease_limits.pointers,50);
+ for(let n=0;n<20 && [...h.archive.objects.keys()].some(k=>k.startsWith('parked/100/pointers/'));n++){
+  advance(31000);await(await load('src/ingress.ts')).maintainIngress(h.env,repo);
+ }
+ assert.equal([...h.archive.objects.keys()].filter(k=>k.startsWith('parked/100/pointers/')).length,0);assert.equal(committed.size,16);
+ const state=await(await h.archive.get(key)).json();assert.ok(state.pointers_page_limit<=2);assert.ok(state.pointers_page_ceiling<=2);
+ assert.ok(sizes.includes(1)||sizes.includes(2));assert.equal(state.lease_until,0);
+ for(let i=0;i<16;i++){const delivery='expired-page-'+String(i).padStart(2,'0');assert.ok(await h.archive.get(ingress.receiptKey(repo.id,delivery)));assert.equal(await h.archive.get(ingress.bodyKey(repo.id,delivery)),null);}
+}));
+
+test('learned limits grow only with fast full pages at the cap and respect caller limits',async()=>clock(async advance=>{
+ const h=harness(),key=ingress.recoveryKey(repo.id),sizes=[];h.state.full=true;
+ for(let i=0;i<24;i++)await deliver(h.env,'growth-'+String(i).padStart(2,'0'));h.state.full=false;
+ await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
+ await h.archive.put(key,JSON.stringify({pointers_page_limit:2,held_page_limit:1}));
+ const list=h.archive.list;h.archive.list=async options=>{if(options.prefix==='parked/100/pointers/'&&options.startAfter!==undefined)sizes.push(options.limit);return list(options);};
+ const original=h.env.REPOSITORIES.get();h.env.REPOSITORIES.get=()=>({fetch:async(...args)=>{advance(500);return original.fetch(...args);}});
+ for(let n=0;n<3;n++){assert.equal((await ingress.replayIngress(h.env,repo,{limit:1})).replayed,1);}
+ assert.equal((await(await h.archive.get(key)).json()).pointers_page_limit,2,'smaller explicit requests cannot grow the cap');
+ await ingress.maintainIngress(h.env,repo);advance(31000);await ingress.maintainIngress(h.env,repo);
+ const state=await(await h.archive.get(key)).json();assert.ok(state.pointers_page_limit>2);assert.equal(state.held_page_limit,1);
+ assert.ok(sizes.some(n=>n>2));assert.ok(sizes.every(n=>n<=50));assert.equal(h.state.applied.size,24);
+}));
+
+test('legacy CI deadline evidence is usable without penalizing a starved shared-budget lane',async()=>{
+ const h=harness(),key=ingress.recoveryKey(repo.id);
+ await h.archive.put(key,JSON.stringify({
+  pointers_last_pass:{replayed:0,failed:0,stopped:'deadline',batched:8},
+  held_last_pass:{replayed:0,failed:0,stopped:'deadline',page_size:10,page_limit:50,budget_ms:1000},
+ }));
+ const result=await ingress.replayIngress(h.env,repo,{limit:1});assert.equal(result.replayed,0);assert.equal(result.remaining,false);
+ const state=await(await h.archive.get(key)).json();assert.equal(state.pointers_page_limit,4);assert.equal(state.pointers_page_ceiling,7);
+ assert.equal(state.held_page_limit,undefined);assert.equal(state.held_page_ceiling,undefined);
+ assert.equal(state.lease_limits.pointers,1);assert.equal(state.lease_limits.held,undefined);
+});
+
 test('lost cleanup acknowledgements cannot recreate committed CI pointers or replace receipts',async()=>clock(async advance=>{
  const f=repositoryFixture();await f.ready;
  const ns={idFromName:()=>({toString:()=>f.state.ctx.id.toString()}),get:()=>({fetch:(url,init)=>f.state.fetch(new Request(url,init))})};f.state.env.REPOSITORIES=ns;
