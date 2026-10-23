@@ -973,13 +973,7 @@ export class RepositoryState extends DurableObject<Env> {
       catch(error) {return (await this.unavailable(q,this.noteFailure('configure',error)));}
     }
     const key=queryKey(q);
-    if (q.cursor) {
-      const result=await this.continuation(q,key);
-      // Retained pages can predate this compatibility field or contain old
-      // claims. Keep their timestamps/revision and normalize only the wire DTO.
-      if(q.operation==='survey' && Array.isArray(result.data))result.data=result.data.map(row=>({...row,review:{...row.review,markers:[]}}));
-      return result;
-    }
+    if (q.cursor) return this.continuation(q,key);
     if (!q.allow_observed && !['survey','progress'].includes(q.operation))await this.noteReadDemand(q);
     let rows:any;
     let author_counts:Record<string,number> | undefined;
@@ -1064,12 +1058,16 @@ export class RepositoryState extends DurableObject<Env> {
     }
     if (payload.key!==key) return (await this.unavailable(q,'cursor_query_mismatch'));
     if (Boolean(payload.allow_observed)!==Boolean(q.allow_observed)) return (await this.unavailable(q,'cursor_coverage_mismatch'));
-    if (payload.result?.data!==undefined) return payload.result;
+    // HTTP cursors and migration shadow reads share this path. Retained pages
+    // keep their original revision/timestamps; only the wire DTO is normalized.
+    const compatible=(result:Result):Result=>q.operation==='survey' && Array.isArray(result.data)
+      ? {...result,data:result.data.map(row=>({...row,review:{...row.review,markers:[]}}))}:result;
+    if (payload.result?.data!==undefined) return compatible(payload.result);
     // Existing ten-minute cursors survive a rolling deployment. Only an offset
     // inside the stored snapshot can continue it; never fabricate an empty page.
     const legacy=cursor.match(/^([^:]+):([1-9][0-9]{0,8})$/),offset=Number(legacy?.[2]),id=legacy?.[1] || '';
     if (!legacy || !Array.isArray(payload.rows) || offset>=payload.rows.length) return (await this.unavailable(q,'cursor_invalid'));
-    return this.page(payload.result,payload.rows,id,offset);
+    return compatible(this.page(payload.result,payload.rows,id,offset));
   }
   page(result:Result,rows:any[],id:string,offset:number): Result {
     // Keep the number of client round trips bounded as inventories grow.

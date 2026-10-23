@@ -62,10 +62,14 @@ test('compact roadmap snapshot updates on comment edit/delete without reading fu
   assert.deepEqual((await state.surveyRows(q)).rows[0].review.markers,[],'cached claims cannot reappear through the compatibility field');
   const cursor='0b6c2f0e-1f7a-4b4c-9a1e-5b8d3c2a1f00',pageKey='cursors/100/'+cursor+'/100.json';
   const queryKey='survey:'+JSON.stringify(Object.fromEntries(Object.entries(q.args).sort(([a],[b])=>a.localeCompare(b))));
+  const continueHttp=async cursor=>{
+   const response=await state.fetch(new Request('https://internal/query',{method:'POST',body:JSON.stringify({...q,cursor})}));
+   assert.equal(response.status,200);return response.json();
+  };
   for(const markers of [undefined,[{head:'old',expires_at:9999999999,providers:['obsolete']}]]) {
    const page=structuredClone(result);page.data[0].review.markers=markers;
    const stored=JSON.stringify({repository:'100',key:queryKey,expires:Date.now()+600000,result:page});await env.ARCHIVE.put(pageKey,stored);
-   const continued=await state.query({...q,cursor:cursor+':100'});
+   const continued=await continueHttp(cursor+':100');
    assert.deepEqual(continued.data[0].review.markers,[]);assert.equal(legacy(continued).status,0);
    assert.equal(continued.revision,result.revision);assert.equal(continued.observed_at,result.observed_at);assert.equal(continued.verified_at,result.verified_at);
    assert.equal(await(await env.ARCHIVE.get(pageKey)).text(),stored,'compatible reads do not rewrite the retained page');
@@ -74,7 +78,7 @@ test('compact roadmap snapshot updates on comment edit/delete without reading fu
    const row=structuredClone(result.data[0]);delete row.review.markers;
    const header={...result};delete header.data;
    await db.prepare('INSERT INTO cursors VALUES(?,?,?)').run('legacy-survey',Date.now()+600000,JSON.stringify({key:queryKey,rows:[row,row],result:header}));
-   const continued=await state.query({...q,cursor:'legacy-survey:1'});
+   const continued=await continueHttp('legacy-survey:1');
    assert.equal(legacy(continued).status,0);assert.deepEqual(continued.data[0].review.markers,[]);assert.equal(continued.revision,result.revision);
   }
   assert.equal(JSON.stringify(result).includes('"tok"'),false);
