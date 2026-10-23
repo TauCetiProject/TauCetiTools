@@ -369,6 +369,18 @@ complete migration receipt. Stored PostgreSQL reads and bounded reconciliation
 continue, while final completion and the broad retention hold intentionally wait
 for recovery. An irrecoverable data gap is not a successful migration.
 
+The ordinary raw-input recovery owner retries an independent keyset page of at
+most five recorded gaps before advancing the raw prefix scan. It honors each
+retry deadline and yields after a five-second cooperative budget within the
+existing pass. A gap behind the main cursor therefore need not wait for a full
+history rescan. Successful recovery uses the existing committed-receipt or durable
+parking proof, preserves the original raw object, and never dispatches GitHub
+repair work. CI gaps can clear from their stored event metadata; that clearance
+creates no application receipt. Failed attempts retain the gap with backoff, and
+a conditional update protects a newer retry state from a stale owner. The
+checkpoint records `gap_cursor` and `gap_last_pass` separately from the raw cursor.
+
+
 Abandonment is valid only before target activation. It retains archives, fences the
 target and releases a writable source. A separately selected operator ingress pause
 remains in effect. After PostgreSQL accepts writes, abandonment cannot reactivate

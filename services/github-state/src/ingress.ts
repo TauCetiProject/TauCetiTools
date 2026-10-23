@@ -259,6 +259,7 @@ export async function retainRaw(env: Env, object: R2Object, targets: (payload: a
 // A dedicated bounded raw prefix pass shares the cron, so a large resource
 // archive cannot delay DLQ reconciliation until the general expiry sweep.
 const RAW_GROUP = 25;
+const RAW_GAP_PAGE = 5;
 export async function maintainRaw(env: Env, targets: (payload: any, event: string) => Repository[]): Promise<void> {
   const key = 'control/raw-recovery.json', object = await env.ARCHIVE.get(key);
   const state: any = object ? await object.json() : {};
@@ -267,23 +268,47 @@ export async function maintainRaw(env: Env, targets: (payload: any, event: strin
   const claim = await env.ARCHIVE.put(key, JSON.stringify({ ...state, last_attempt: began, lease_until: began + 60000 }), { onlyIf: object ? { etagMatches: object.etag } : { etagDoesNotMatch: '*' } });
   if (!claim) return;
   let examined=0,deleted=0,bytes=0;
+  // A failed raw object lies behind the main cursor. Retry a small independent
+  // keyset page before scanning more history, under the same durable lease.
+  // Success establishes the existing receipt/parking proof; it never applies
+  // input directly or expires the original raw body.
+  const recover = async (raw: R2Object|string, gapKey: string, expired: R2Object[], snapshot?:{object:R2ObjectBody|null;gap:any}): Promise<boolean> => {
+    const previous=snapshot?snapshot.object:await env.ARCHIVE.get(gapKey);
+    const gap:any=snapshot?snapshot.gap:previous?await previous.json():null;
+    if(gap && gap.retry_at>Date.now())return false;
+    const rawKey=typeof raw==='string'?raw:raw.key;
+    try {
+      const source=typeof raw==='string'?await env.ARCHIVE.head(raw):raw;
+      if(!source)throw new Error('raw_body_unavailable:'+rawKey);
+      if(!CI_EVENTS.has(source.customMetadata?.event ?? ''))await retainRaw(env,source,targets);
+      if(typeof raw!=='string')expired.push(raw);
+      if(gap)await env.ARCHIVE.delete(gapKey);
+      return true;
+    }catch(error) {
+      const failures=(gap?.failures || 0)+1;
+      // A late failure must not resurrect a resolved gap or shorten a newer
+      // retry deadline after this lease was replaced.
+      await env.ARCHIVE.put(gapKey,JSON.stringify({key:rawKey,failures,last_attempt:Date.now(),retry_at:Date.now()+backoff(failures)*1000,reason:error instanceof Error?error.message.slice(0,200):classify(error)}),{onlyIf:previous?{etagMatches:previous.etag}:{etagDoesNotMatch:'*'}});
+      return false;
+    }
+  };
   try {
+    const gapPage=await env.ARCHIVE.list({prefix:'control/raw-gaps/',startAfter:state.gap_cursor,limit:RAW_GAP_PAGE});
+    let visited=0,resolved=0;
+    for(const entry of gapPage.objects){
+      if(Date.now()-began>=5000)break;
+      const snapshot=await env.ARCHIVE.get(entry.key),gap:any=snapshot?await snapshot.json():null;
+      if(gap && typeof gap.key==='string' && /^webhooks\/\d{4}-\d{2}-\d{2}\/[a-zA-Z0-9-]{1,100}\.json$/.test(gap.key) && entry.key==='control/raw-gaps/'+gap.key.slice(gap.key.lastIndexOf('/')+1) && !(gap.retry_at>Date.now())) {
+        if(await recover(gap.key,entry.key,[],{object:snapshot,gap}))resolved++;
+      }
+      visited++;state.gap_cursor=entry.key;
+    }
+    if(visited===gapPage.objects.length&&!gapPage.truncated)delete state.gap_cursor;
+    state.gap_last_pass={at:Date.now(),examined:visited,resolved};
     for(let pages=0;pages<20 && Date.now()-began<20000;pages++) {
       const page = await env.ARCHIVE.list({ prefix: 'webhooks/', startAfter: state.after, limit: 1000, include: ['customMetadata'] });
       let processed = 0;
       const expired:R2Object[]=[],ciGaps:string[]=[];
-      const recover = async (raw: R2Object, gapKey: string, expiredRaw: boolean): Promise<void> => {
-        const gap: any = await env.ARCHIVE.get(gapKey).then(o=>o?.json());
-        if (gap && gap.retry_at > Date.now()) return;
-        try {
-          await retainRaw(env, raw, targets);
-          if(expiredRaw)expired.push(raw);
-          if (gap) await env.ARCHIVE.delete(gapKey);
-        } catch (error) {
-          const failures = (gap?.failures || 0) + 1;
-          await env.ARCHIVE.put(gapKey, JSON.stringify({ key: raw.key, failures, last_attempt: Date.now(), retry_at: Date.now() + backoff(failures) * 1000, reason: error instanceof Error ? error.message.slice(0, 200) : classify(error) }));
-        }
-      };
       // Independent deliveries are recovered in concurrent groups; the cursor
       // advances only past a group once every member has finished.
       for (let i = 0; i < page.objects.length;) {
@@ -299,7 +324,7 @@ export async function maintainRaw(env: Env, targets: (payload: any, event: strin
           if (CI_EVENTS.has(raw.customMetadata?.event ?? '')) {
             ciGaps.push(gapKey);
             if (expiredRaw) expired.push(raw);
-          } else group.push(recover(raw, gapKey, expiredRaw));
+          } else group.push(recover(raw,gapKey,expiredRaw?expired:[]).then(()=>{}));
           processed++; examined++; last = raw.key;
         }
         await Promise.all(group);

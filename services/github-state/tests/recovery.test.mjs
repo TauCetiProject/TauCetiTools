@@ -1100,7 +1100,7 @@ test('raw maintenance dispositions CI deliveries from listed metadata alone and 
  const h=cronHarness();for(let i=0;i<1500;i++)await h.archive.put('webhooks/2026-10-12/ci-'+String(i).padStart(4,'0')+'.json','{}',{customMetadata:{event:i%2?'workflow_job':'check_run',sha256:'x',targets:'["100"]',received:'1',expires:i<1200?'1':String(Date.now()+86400000)}});
  await h.archive.put('control/raw-gaps/ci-0001.json',JSON.stringify({failures:1,retry_at:0}));
  const get=h.archive.get,head=h.archive.head;
- h.archive.get=async key=>{assert.ok(!key.startsWith('webhooks/') && !key.startsWith('control/raw-gaps/'),key);return get(key);};
+ h.archive.get=async key=>{assert.ok(!key.startsWith('webhooks/'),key);if(key.startsWith('control/raw-gaps/'))assert.equal(key,'control/raw-gaps/ci-0001.json','only the bounded existing gap record is read');return get(key);};
  h.archive.head=async key=>{assert.fail('unexpected head '+key);};
  await ingress.maintainRaw(h.env,()=>[repo]);h.archive.get=get;h.archive.head=head;
  const state=JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes);assert.ok(state.last_completed);
@@ -1787,3 +1787,67 @@ test('a parkable refusal rewinds its group so a resumed sweep cannot skip due in
  state=await(await h.archive.get(ingress.recoveryKey(repo.id))).json();assert.ok(state.pointers_pass_completed_at>=state.pointers_pass_started_at);
  assert.equal(h.state.applied.size,20);assert.ok([...h.state.applied.values()].every(n=>n===1));
 });
+
+test('due raw gaps retry behind the scan cursor without a full history pass',async()=>clock(async()=>{
+ const h=cronHarness(),raw='webhooks/2026-10-14/passed-gap.json',gap='control/raw-gaps/passed-gap.json',after='webhooks/2026-10-23/already-scanned.json';
+ const body=JSON.stringify({repository:{id:100}});await h.archive.put(raw,body,{customMetadata:{event:'ping',sha256:sha(body),expires:'1'}});
+ await h.archive.put(gap,JSON.stringify({key:raw,failures:1,retry_at:Date.now()-1,reason:'R2 get failed'}));
+ await h.archive.put('control/raw-recovery.json',JSON.stringify({after}));
+ const list=h.archive.list,starts=[];h.archive.list=async options=>{if(options.prefix==='webhooks/')starts.push(options.startAfter);return list(options);};
+ await ingress.maintainRaw(h.env,()=>[repo]);
+ assert.equal(h.archive.objects.has(gap),false,'an overdue gap must not wait for the raw cursor to wrap');
+ assert.deepEqual(starts,[after]);assert.ok(h.archive.objects.has(raw),'gap recovery does not expire the original');
+ const [key]=parked(h.archive,'passed-gap'),p=JSON.parse(h.archive.objects.get(key).bytes);
+ assert.equal(p.original_key,raw);assert.equal(p.sha256,sha(body));assert.equal(sha(h.archive.objects.get(p.key).bytes),sha(body));assert.equal(h.state.applied.size,0,'raw recovery only parks input');assert.equal(h.githubReads(),0);
+}));
+
+test('raw gap retries preserve cooldowns and do not read deferred bodies',async()=>clock(async()=>{
+ const h=cronHarness(),raw='webhooks/2026-10-14/deferred-gap.json',gap='control/raw-gaps/deferred-gap.json',retry_at=Date.now()+600000;
+ await h.archive.put(raw,'{}',{customMetadata:{event:'ping'}});await h.archive.put(gap,JSON.stringify({key:raw,failures:3,retry_at}));await h.archive.put('control/raw-recovery.json',JSON.stringify({after:'webhooks/2026-10-23/z.json'}));
+ const head=h.archive.head;h.archive.head=async key=>{assert.notEqual(key,raw,'a future retry must not probe its body');return head(key);};
+ await ingress.maintainRaw(h.env,()=>[repo]);assert.equal(JSON.parse(h.archive.objects.get(gap).bytes).retry_at,retry_at);assert.equal(parked(h.archive,'deferred-gap').length,0);
+}));
+
+test('raw gap retry pages advance past deferred gaps and never rewind the raw cursor',async()=>clock(async advance=>{
+ const h=cronHarness(),after='webhooks/2026-10-23/z.json';for(let i=0;i<8;i++){
+  const id='gap-'+i,raw='webhooks/2026-10-14/'+id+'.json';await h.archive.put(raw,'{}',{customMetadata:{event:'ping'}});await h.archive.put('control/raw-gaps/'+id+'.json',JSON.stringify({key:raw,failures:1,retry_at:i<5?Date.now()+86400000:0}));
+ }
+ await h.archive.put('control/raw-recovery.json',JSON.stringify({after}));const list=h.archive.list;
+ h.archive.list=async options=>options.prefix==='webhooks/'?{objects:[],truncated:true}:list(options);
+ await ingress.maintainRaw(h.env,()=>[repo]);let state=JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes);assert.equal(state.after,after);assert.equal(state.gap_last_pass.examined,5);assert.equal(state.gap_last_pass.resolved,0);assert.ok(state.gap_cursor.endsWith('gap-4.json'));
+ advance(61000);await ingress.maintainRaw(h.env,()=>[repo]);state=JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes);assert.equal(state.after,after);assert.equal(state.gap_last_pass.examined,3);assert.equal(state.gap_last_pass.resolved,3);assert.equal(state.gap_cursor,undefined);
+ for(let i=0;i<8;i++)assert.equal(parked(h.archive,'gap-'+i).length,i<5?0:1);
+}));
+
+test('raw gap retry retains missing input and records a real backoff',async()=>clock(async()=>{
+ const h=cronHarness(),raw='webhooks/2026-10-14/missing-gap.json',gap='control/raw-gaps/missing-gap.json';await h.archive.put(gap,JSON.stringify({key:raw,failures:1,retry_at:0}));await h.archive.put('control/raw-recovery.json',JSON.stringify({after:'webhooks/2026-10-23/z.json'}));
+ await ingress.maintainRaw(h.env,()=>[repo]);const failed=JSON.parse(h.archive.objects.get(gap).bytes);assert.equal(failed.failures,2);assert.ok(failed.retry_at>Date.now());assert.match(failed.reason,/raw_body_unavailable/);assert.equal(parked(h.archive,'missing-gap').length,0);assert.deepEqual(JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes).gaps,{count:1,truncated:false});
+}));
+
+test('raw gap cleanup can crash after durable parking and restart without duplicate application',async()=>clock(async advance=>{
+ const h=cronHarness(),raw='webhooks/2026-10-14/crash-gap.json',gap='control/raw-gaps/crash-gap.json';await h.archive.put(raw,'{}',{customMetadata:{event:'ping',expires:'1'}});await h.archive.put(gap,JSON.stringify({key:raw,failures:1,retry_at:0}));await h.archive.put('control/raw-recovery.json',JSON.stringify({after:'webhooks/2026-10-23/z.json'}));await h.archive.put('control/100/retention-policy.json',JSON.stringify({mode:'enforce',disabled:[],pinned:['raw_webhooks']}));
+ const get=h.archive.get;h.archive.get=async key=>{const value=await get(key);if(value&&key===gap){const json=value.json;let read=false;value.json=async()=>{assert.equal(read,false,'R2 response body must be consumed once');read=true;return json();};}return value;};
+ h.archive.failures.push((op,key)=>op==='delete'&&key===gap);await ingress.maintainRaw(h.env,()=>[repo]);assert.ok(h.archive.objects.has(gap));assert.equal(parked(h.archive,'crash-gap').length,1);assert.ok(h.archive.objects.has(ingress.bodyKey(repo.id,'crash-gap')));
+ advance(61000);await ingress.maintainRaw(h.env,()=>[repo]);assert.equal(h.archive.objects.has(gap),false);assert.equal(parked(h.archive,'crash-gap').length,1);assert.ok(h.archive.objects.has(raw));
+ assert.equal((await ingress.drain(h.env,repo)).replayed,1);assert.equal((await ingress.drain(h.env,repo)).replayed,0);assert.equal(h.state.applied.get('crash-gap'),1);assert.equal(h.githubReads(),0);
+}));
+
+test('a stale raw gap retry failure cannot overwrite a newer cooldown',async()=>clock(async()=>{
+ const h=cronHarness(),raw='webhooks/2026-10-14/newer-gap.json',gap='control/raw-gaps/newer-gap.json';await h.archive.put(raw,'{}',{customMetadata:{event:'ping'}});await h.archive.put(gap,JSON.stringify({key:raw,failures:1,retry_at:0}));await h.archive.put('control/raw-recovery.json',JSON.stringify({after:'webhooks/2026-10-23/z.json'}));
+ const put=h.archive.put,newer={key:raw,failures:8,retry_at:Date.now()+600000,reason:'newer_failure'};h.archive.put=async(key,...args)=>{if(key===ingress.bodyKey(repo.id,'newer-gap')){await put(gap,JSON.stringify(newer));throw Error('older parking failure');}return put(key,...args);};
+ await ingress.maintainRaw(h.env,()=>[repo]);assert.deepEqual(JSON.parse(h.archive.objects.get(gap).bytes),newer);assert.ok(h.archive.objects.has(raw));assert.equal(parked(h.archive,'newer-gap').length,0);
+}));
+
+test('raw gap retry yields after its cooperative budget and retains its next key',async()=>clock(async advance=>{
+ const h=cronHarness();for(let i=0;i<3;i++){const raw='webhooks/2026-10-14/budget-'+i+'.json';await h.archive.put(raw,'{}',{customMetadata:{event:'ping'}});await h.archive.put('control/raw-gaps/budget-'+i+'.json',JSON.stringify({key:raw,failures:1,retry_at:0}));}
+ await h.archive.put('control/raw-recovery.json',JSON.stringify({after:'webhooks/2026-10-23/z.json'}));const head=h.archive.head;h.archive.head=async key=>{if(key.startsWith('webhooks/'))advance(6000);return head(key);};
+ await ingress.maintainRaw(h.env,()=>[repo]);const state=JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes);assert.equal(state.gap_last_pass.examined,1);assert.equal(state.gap_last_pass.resolved,1);assert.ok(state.gap_cursor.endsWith('budget-0.json'));assert.equal(parked(h.archive,'budget-1').length,0);assert.equal(parked(h.archive,'budget-2').length,0);
+}));
+
+
+test('due CI raw gaps resolve from metadata without reading or replaying their body',async()=>clock(async()=>{
+ const h=cronHarness(),raw='webhooks/2026-10-14/ci-gap.json',gap='control/raw-gaps/ci-gap.json';await h.archive.put(raw,'private CI body',{customMetadata:{event:'check_run'}});await h.archive.put(gap,JSON.stringify({key:raw,failures:1,retry_at:0}));await h.archive.put('control/raw-recovery.json',JSON.stringify({after:'webhooks/2026-10-23/z.json'}));
+ const get=h.archive.get;h.archive.get=async key=>{assert.notEqual(key,raw,'listed CI metadata needs no body read');return get(key);};
+ await ingress.maintainRaw(h.env,()=>assert.fail('CI input needs no inventory or targeting query'));
+ assert.equal(h.archive.objects.has(gap),false);assert.ok(h.archive.objects.has(raw));assert.equal(parked(h.archive,'ci-gap').length,0);assert.equal(h.archive.objects.has(ingress.receiptKey(repo.id,'ci-gap')),false,'gap clearance is not an application receipt');
+}));
