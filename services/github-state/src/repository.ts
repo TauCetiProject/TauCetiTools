@@ -973,7 +973,13 @@ export class RepositoryState extends DurableObject<Env> {
       catch(error) {return (await this.unavailable(q,this.noteFailure('configure',error)));}
     }
     const key=queryKey(q);
-    if (q.cursor) return this.continuation(q,key);
+    if (q.cursor) {
+      const result=await this.continuation(q,key);
+      // Retained pages can predate this compatibility field or contain old
+      // claims. Keep their timestamps/revision and normalize only the wire DTO.
+      if(q.operation==='survey' && Array.isArray(result.data))result.data=result.data.map(row=>({...row,review:{...row.review,markers:[]}}));
+      return result;
+    }
     if (!q.allow_observed && !['survey','progress'].includes(q.operation))await this.noteReadDemand(q);
     let rows:any;
     let author_counts:Record<string,number> | undefined;

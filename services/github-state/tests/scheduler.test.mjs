@@ -35,7 +35,7 @@ async function fixture(){
 }
 
 test('compact roadmap snapshot updates on comment edit/delete without reading full histories',async()=>{
- const {state,db}=(await fixture());try {
+ const {state,db,env}=(await fixture());try {
   const repo='org/repo';await state.setMeta('repository',{id:'100',name:repo,installation:'200'});
   const complete=async (operation,args={})=>{const key=operation+':'+JSON.stringify(args);await db.prepare('INSERT OR REPLACE INTO collections VALUES(?,?,?,?,?,?,?)').run(key,operation,JSON.stringify(args),1,Date.now(),(await state.revision()),null);};
   await complete('open_prs');
@@ -60,6 +60,23 @@ test('compact roadmap snapshot updates on comment edit/delete without reading fu
   const cached=JSON.parse((await db.prepare('SELECT data FROM survey_state WHERE number=?').get('7')).data);
   await db.prepare('UPDATE survey_state SET data=? WHERE number=?').run(JSON.stringify({...cached,markers:[{head:'old',expires_at:9999999999,providers:['obsolete']}]}),'7');
   assert.deepEqual((await state.surveyRows(q)).rows[0].review.markers,[],'cached claims cannot reappear through the compatibility field');
+  const cursor='0b6c2f0e-1f7a-4b4c-9a1e-5b8d3c2a1f00',pageKey='cursors/100/'+cursor+'/100.json';
+  const queryKey='survey:'+JSON.stringify(Object.fromEntries(Object.entries(q.args).sort(([a],[b])=>a.localeCompare(b))));
+  for(const markers of [undefined,[{head:'old',expires_at:9999999999,providers:['obsolete']}]]) {
+   const page=structuredClone(result);page.data[0].review.markers=markers;
+   const stored=JSON.stringify({repository:'100',key:queryKey,expires:Date.now()+600000,result:page});await env.ARCHIVE.put(pageKey,stored);
+   const continued=await state.query({...q,cursor:cursor+':100'});
+   assert.deepEqual(continued.data[0].review.markers,[]);assert.equal(legacy(continued).status,0);
+   assert.equal(continued.revision,result.revision);assert.equal(continued.observed_at,result.observed_at);assert.equal(continued.verified_at,result.verified_at);
+   assert.equal(await(await env.ARCHIVE.get(pageKey)).text(),stored,'compatible reads do not rewrite the retained page');
+  }
+  if(state.store.backend==='postgres') {
+   const row=structuredClone(result.data[0]);delete row.review.markers;
+   const header={...result};delete header.data;
+   await db.prepare('INSERT INTO cursors VALUES(?,?,?)').run('legacy-survey',Date.now()+600000,JSON.stringify({key:queryKey,rows:[row,row],result:header}));
+   const continued=await state.query({...q,cursor:'legacy-survey:1'});
+   assert.equal(legacy(continued).status,0);assert.deepEqual(continued.data[0].review.markers,[]);assert.equal(continued.revision,result.revision);
+  }
   assert.equal(JSON.stringify(result).includes('"tok"'),false);
   assert.equal((await db.prepare("SELECT COUNT(*) n FROM demand WHERE key LIKE '%comments:%'").get()).n,0,'complete projections must not promote every history to frequent verification');
   assert.equal(result.author_counts[''],2,'automatic caps count all known roadmap PRs');
