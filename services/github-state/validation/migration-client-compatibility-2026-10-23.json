@@ -36,7 +36,8 @@
       "code": "48b137a3fad8f84b7045d2667eb49c2d0c3c7fb4",
       "cloudflare_script_etag": "25fce7fcd088f306f81b07d748f94ad39c856319eadd112e21c0abb74c76802b"
     },
-    "verification": "Frozen isolated build matched the tested module; version-specific module download, exact length/SHA256 and full bindings/runtime verified while inactive, followed by selected-module byte verification."
+    "verification": "Frozen isolated build matched the exact module SHA256 and byte count of the recorded tested version; version-specific module download, exact length/SHA256 and full bindings/runtime verified while inactive, followed by selected-module byte verification.",
+    "tested_version": "ac58f185-b8c0-40db-84a8-aff162dd6884"
   },
   "preserved": {
     "repository_and_installation_namespaces": true,
@@ -140,9 +141,11 @@
       "before_missing_markers": 399,
       "after_missing_markers": 0,
       "copy_exact": true,
-      "original_cache_preserved": true
+      "original_cache_preserved": true,
+      "missing_marker_count_unit": "Survey rows missing the required marker-list field; this repair does not reconstruct review claims."
     },
-    "counter_scope": "Direct requests attempted by the original client. These smoke checks are not a server-wide GitHub request audit, migration release, or latency cohort. Production ordinary maintenance remains active."
+    "counter_scope": "Direct requests attempted by the original client. These workflow checks are not a server-wide GitHub request audit, migration release, or latency cohort. Production ordinary maintenance remains active.",
+    "clean_checked_at": "2026-10-23T09:53:14.641919+00:00"
   },
   "test_rehearsal": {
     "generation": "80ecf79d-f811-42c8-9fec-ad41c3727567",
@@ -164,8 +167,17 @@
       "Single comparable target warm-read p95 cohort, unchanged client and cursor release workflows",
       "Full current-version accounting hour wholly after replay completion",
       "Immutable completed test release, published upstream before production data migration"
-    ]
+    ],
+    "phase_observed_at": "2026-10-23T09:38:34.638Z"
   },
-  "private_receipt_sha256": "e822bb9bbe1a92ac80bd65a854e316c64c3f33394dc26673c94c8883f595d799",
-  "retained_material": "Original stores, archives and all seven R2 retention pins remain retained. Retirement and deletion are separate operations."
+  "retained_material": "Original stores, archives and all seven R2 retention pins remain retained. Retirement and deletion are separate operations.",
+  "private_deployment_receipt": {
+    "file": "production-compatibility-v3-deployment.json",
+    "sha256": "e822bb9bbe1a92ac80bd65a854e316c64c3f33394dc26673c94c8883f595d799"
+  },
+  "health_snapshot_limits": {
+    "monitoring_stale": true,
+    "diagnostics_stale": true,
+    "scope": "Backend/schema/write-fence and actor-version verification only. Prepared monitoring/diagnostic freshness is not accepted by this code-only receipt."
+  }
 }

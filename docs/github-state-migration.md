@@ -24,10 +24,12 @@ release; a lower raw-gap count is not delivery proof. Test ingress resumes only
 after the accepted live version and single PostgreSQL owner are reverified.
 
 The [2026-10-23 client compatibility deployment](../services/github-state/validation/migration-client-compatibility-2026-10-23.json)
-records the production deployment of PR #90 while SQLite remains authoritative.
+records the production deployment of [PR #90](https://github.com/TauCetiProject/TauCetiTools/pull/90)
+while SQLite remains authoritative.
 The original Worker client passed fresh-cache and retained-cache survey,
-inventory, history, pagination and 304 checks. The retained markerless survey
-cache was repaired without changing the client. This is a code-only deployment
+inventory, history, pagination and 304 checks. Rereading a byte-exact copy of the retained survey
+cache added the required marker-list field to all 399 rows that lacked it.
+The unchanged client performed the refresh; the original cache was left intact. This is a code-only deployment
 receipt: test replay and its final release gates remain outstanding, and no
 production data migration has started. It does not replace the completed test
 release or fresh deployed S0/S1 acceptance required before production cutover.
