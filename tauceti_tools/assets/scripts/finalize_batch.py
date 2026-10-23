@@ -125,7 +125,9 @@ def confirmed_withdrawal(data, *, batch_id, branch):
 
 def terminal_state(env, *, wait=wait_publication, observe=observation):
     """Keep failed/canceled audits red and revalidate bors before a green status."""
-    if env.get("BUILD_JOB_RESULT") != "success" or env.get("BUILD_STATE") != "success":
+    # Reporting can fail after the trusted audit verdict has been recorded.
+    # Canceled/skipped jobs and absent or failed audits still cannot pass.
+    if env.get("BUILD_JOB_RESULT") not in {"success", "failure"} or env.get("BUILD_STATE") != "success":
         return "failure", env.get("BUILD_DESCRIPTION") or "sandboxed merge-group build did not complete"
     if env.get("PUBLICATION_REQUIRED") == "true":
         state, description = wait(int(env["GITHUB_RUN_ID"]), int(env["GITHUB_RUN_ATTEMPT"]))

@@ -195,8 +195,11 @@ class Withdrawn(unittest.TestCase):
 
     def test_real_build_and_publisher_failures_remain_failures(self):
         observe = unittest.mock.Mock(side_effect=AssertionError("failed audits must remain failures"))
-        for result in ("failure", "cancelled", "skipped"):
+        for result in ("cancelled", "skipped"):
             env = dict(self.env, BUILD_JOB_RESULT=result)
+            self.assertEqual(finalizer.terminal_state(env, observe=observe)[0], "failure")
+        for result in ("success", "failure"):
+            env = dict(self.env, BUILD_JOB_RESULT=result, BUILD_STATE="failure")
             self.assertEqual(finalizer.terminal_state(env, observe=observe)[0], "failure")
         env = dict(self.env, PUBLICATION_REQUIRED="true")
         wait = unittest.mock.Mock(return_value=("failure", "publication failed"))
