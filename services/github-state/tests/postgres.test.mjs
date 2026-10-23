@@ -381,3 +381,36 @@ pg('state projections tolerate payload Unicode escapes without changing the stor
   }
  }finally{await f.close();}
 });
+
+pg('committed CI batches finish without entering the PostgreSQL writer again',async()=>{
+ const f=await postgresFixture();try{
+  const events=Array.from({length:100},(_,i)=>({delivery:'ci-known-'+i,event:'workflow_run',received:Date.now()}));
+  const request=()=>send(f.state,'/ci-receipts',{repository:repo.name,events});
+  assert.equal((await request()).status,200);
+  const atomic=f.state.atomic;let writes=0;
+  f.state.atomic=async()=>{writes++;throw Error('writer is unavailable');};
+  const response=await request();assert.equal(response.status,200);
+  const report=await response.json();assert.deepEqual(report.committed,events.map(p=>p.delivery));assert.ok(report.timing.write_ms>=0);assert.equal(writes,0);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,100);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM changes')).one().n,0);
+  f.state.ingress='parked';assert.equal((await request()).status,503);
+  f.state.ingress='apply';f.state.migrationState={phase:'exporting'};assert.equal((await request()).status,503);
+  f.state.migrationState=null;f.state.atomic=atomic;
+ }finally{await f.close();}
+});
+
+pg('partially committed CI batches retain the ordinary PostgreSQL writer fence',async()=>{
+ const f=await postgresFixture();try{
+  const event={delivery:'ci-prior',event:'check_run',received:Date.now()},fresh={...event,delivery:'ci-fresh'};
+  const request=events=>send(f.state,'/ci-receipts',{repository:repo.name,events});
+  assert.equal((await request([event])).status,200);
+  const prior=(await f.store.exec('SELECT received FROM deliveries WHERE id=?',event.delivery)).one().received;
+  assert.equal((await request([event,fresh])).status,200);
+  assert.equal((await f.store.exec('SELECT received FROM deliveries WHERE id=?',event.delivery)).one().received,prior,'prior commit timestamp is preserved');
+  const missing={...event,delivery:'ci-missing'};
+  await f.admin.query(`UPDATE ${f.schema}.backend_control SET generation='another-generation' WHERE singleton=1`);
+  assert.equal((await request([event])).status,200,'acknowledging a prior receipt adds no write');
+  assert.equal((await request([event,fresh,missing])).status,503,'new receipts still require the writer generation');
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,2);
+ }finally{await f.close();}
+});

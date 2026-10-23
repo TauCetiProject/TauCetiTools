@@ -2491,17 +2491,26 @@ export class RepositoryState extends DurableObject<Env> {
         if(this.ingress===undefined){const mode=(await this.env.ARCHIVE.get(controlKey(repo.id)).then(o=>o?.json<any>()))?.mode ?? 'apply';this.ingress ??= mode;}
         if(this.ingress==='parked')return json({error:'ingress_parked',parkable:true,request_id},503);
         if(this.degraded)return json({error:this.degraded.reason==='storage_full'?'storage_full':'storage_control_unavailable',parkable:true,request_id},503);
-        this.applying++;
+        this.applying++;let timing:{lookup_ms:number;write_ms:number}|undefined;
         try {
-          const now=Date.now(),rows=[...events.values()];
-          await this.atomic(async state=>{
+          const now=Date.now(),rows=[...events.values()];let pending=rows;
+          // Lost batch replies and cleanup failures leave durable SQL receipts.
+          // Discover those with a read before joining the serialized writer.
+          // New deliveries still commit under the ordinary generation fence.
+          if(this.store.backend==='postgres') {
+            const known=new Set((await this.store.exec<any>('SELECT id FROM deliveries WHERE id IN ('+rows.map(()=>'?').join(',')+')',...rows.map(p=>p.delivery))).toArray().map(r=>r.id));
+            pending=rows.filter(p=>!known.has(p.delivery));
+          }
+          const lookupFinished=Date.now();
+          if(pending.length)await this.atomic(async state=>{
             const size=state.store.backend==='sqlite'?33:100;
-            for(let start=0;start<rows.length;start+=size){const batch=rows.slice(start,start+size);await state.store.exec('INSERT OR IGNORE INTO deliveries VALUES '+batch.map(()=>'(?,?,?)').join(','),...batch.flatMap(p=>[p.delivery,'ignored:'+p.event,now]));}
+            for(let start=0;start<pending.length;start+=size){const batch=pending.slice(start,start+size);await state.store.exec('INSERT OR IGNORE INTO deliveries VALUES '+batch.map(()=>'(?,?,?)').join(','),...batch.flatMap(p=>[p.delivery,'ignored:'+p.event,now]));}
           });
+          timing={lookup_ms:lookupFinished-now,write_ms:Date.now()-lookupFinished};
           if(this.store.backend==='sqlite')await this.ctx.storage.sync();
           this.inputFailure=undefined;
         }finally{this.applying--;}
-        return json({committed:[...events.keys()]});
+        return json({committed:[...events.keys()],timing});
       }
       if (path==='/event') {
         const pointer=await req.json() as EventPointer,repo=repository(this.env,pointer.repository);
