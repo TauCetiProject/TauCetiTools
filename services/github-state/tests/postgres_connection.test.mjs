@@ -184,7 +184,7 @@ test('HTTP cleanup outage cannot fence healthy WebSocket writes indefinitely',as
 });
 
 
-for(const host of ['ep-fixture-POOLER.us-east-2.aws.neon.tech','ep-fixture-PoOlEr.US-EAST-2.AWS.NEON.TECH.'])test('mixed-case pooler endpoint is never signaled: '+host,async()=>{
+for(const host of ['ep-fixture-POOLER.us-east-2.aws.neon.tech','ep-fixture-PoOlEr.US-EAST-2.AWS.NEON.TECH.','ep-fixture%2Dpooler.us-east-2.aws.neon.tech','ep-fixture%2dPOOLER.US-EAST-2.AWS.NEON.TECH.'])test('canonical pooler endpoint is never signaled: '+host,async()=>{
  const f=fixture([{phase:'apply',stalled:true}],'postgresql://unused@'+host+'/fixture');await assert.rejects(f.store.transaction(write),StoreUnavailable);
  assert.equal(f.clients[0].serverTerminated,undefined);assert.ok(f.cleanupCalls[0].sql.startsWith('SELECT false'));
 });

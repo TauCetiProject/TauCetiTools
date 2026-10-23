@@ -322,9 +322,9 @@ python3 services/github-state/scripts/migrate.py --environment production \
 
 Held-input recovery is a fix-forward operation, not permission to discard input.
 
-Repository data writes use the serialized interactive transaction boundary and its
-Read Committed isolation level; standalone write batches previously used HTTP
-Repeatable Read. Every data writer must acquire the database ownership lock. Before
+Repository data writes use serialized interactive transactions at Read Committed
+isolation, including standalone write batches. Every data writer must acquire the
+database ownership lock. Before
 acquiring the ownership lock, it records the session PID, exact backend start time
 and a unique transaction-local application name. When a client times out or loses
 its transport, the adapter closes that connection instead of queuing rollback
