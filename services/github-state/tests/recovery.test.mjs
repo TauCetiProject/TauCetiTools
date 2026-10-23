@@ -1851,3 +1851,35 @@ test('due CI raw gaps resolve from metadata without reading or replaying their b
  await ingress.maintainRaw(h.env,()=>assert.fail('CI input needs no inventory or targeting query'));
  assert.equal(h.archive.objects.has(gap),false);assert.ok(h.archive.objects.has(raw));assert.equal(parked(h.archive,'ci-gap').length,0);assert.equal(h.archive.objects.has(ingress.receiptKey(repo.id,'ci-gap')),false,'gap clearance is not an application receipt');
 }));
+
+test('raw gap entry errors do not abort the independent prefix scan',async()=>clock(async()=>{
+ for(const fault of ['get','json','put']){
+  const h=cronHarness(),raw='webhooks/2026-10-14/broken-gap.json',gap='control/raw-gaps/broken-gap.json',after='webhooks/2026-10-23/a.json',later='webhooks/2026-10-23/z.json';
+  await h.archive.put(raw,'{}',{customMetadata:{event:'ping'}});await h.archive.put(gap,fault==='json'?'{':JSON.stringify({key:raw,failures:1,retry_at:0}));await h.archive.put('control/raw-recovery.json',JSON.stringify({after}));await h.archive.put(later,'{}',{customMetadata:{event:'check_run'}});
+  const list=h.archive.list;let prefixCalls=0;h.archive.list=async options=>{if(options.prefix==='webhooks/'){prefixCalls++;assert.equal(options.startAfter,after);}return list(options);};
+  if(fault==='get')h.archive.failures.push((op,key)=>op==='get'&&key===gap);
+  if(fault==='put'){h.archive.failures.push((op,key)=>op==='put'&&key===ingress.bodyKey(repo.id,'broken-gap'));h.archive.failures.push((op,key)=>op==='put'&&key===gap);}
+  await ingress.maintainRaw(h.env,()=>[repo]);const state=JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes);
+  assert.equal(prefixCalls,1,fault);assert.equal(state.after,undefined,fault);assert.ok(state.last_completed,fault);assert.equal(state.last_error,null,fault);assert.equal(state.gap_last_pass.errors,1,fault);assert.ok(h.archive.objects.has(gap),fault);assert.ok(h.archive.objects.has(raw),fault);assert.equal(state.gaps.count,1,fault);
+ }
+}));
+
+test('raw gap listing failure does not suppress raw prefix recovery',async()=>clock(async()=>{
+ const h=cronHarness(),after='webhooks/2026-10-23/a.json',later='webhooks/2026-10-23/z.json';await h.archive.put('control/raw-recovery.json',JSON.stringify({after}));await h.archive.put(later,'{}',{customMetadata:{event:'ping'}});h.archive.failures.push((op,key)=>op==='list'&&key==='control/raw-gaps/');
+ await ingress.maintainRaw(h.env,()=>[repo]);const state=JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes);assert.equal(state.gap_last_pass.errors,1);assert.equal(state.last_error,null);assert.ok(state.last_completed);assert.equal(parked(h.archive,'z').length,1);
+}));
+
+test('a replaced raw gap lease repeats parking safely without overwriting the new checkpoint',async()=>clock(async advance=>{
+ const h=cronHarness(),raw='webhooks/2026-10-14/lease-gap.json',gap='control/raw-gaps/lease-gap.json',key='control/raw-recovery.json';await h.archive.put(raw,'{}',{customMetadata:{event:'ping'}});await h.archive.put(gap,JSON.stringify({key:raw,failures:1,retry_at:0}));await h.archive.put(key,JSON.stringify({after:'webhooks/2026-10-23/a.json'}));
+ const put=h.archive.put;let replaced=false;const newer={after:'webhooks/2026-10-23/z.json',lease_until:Date.now()+60000,owner:'replacement'};
+ h.archive.put=async(name,...args)=>{if(name.includes('/pointers/')&&!replaced){replaced=true;await put(key,JSON.stringify(newer));}return put(name,...args);};
+ await ingress.maintainRaw(h.env,()=>[repo]);assert.deepEqual(JSON.parse(h.archive.objects.get(key).bytes),newer);assert.equal(parked(h.archive,'lease-gap').length,1);assert.ok(h.archive.objects.has(raw));
+ // A lost completion can leave an earlier marker for the next owner to retry.
+ await put(gap,JSON.stringify({key:raw,failures:1,retry_at:0}));advance(61000);await ingress.maintainRaw(h.env,()=>[repo]);assert.equal(h.archive.objects.has(gap),false);assert.equal(parked(h.archive,'lease-gap').length,1);assert.equal((await ingress.drain(h.env,repo)).replayed,1);assert.equal(h.state.applied.get('lease-gap'),1);
+}));
+
+test('a CI-labelled gap with no raw metadata cannot be cleared as unmirrored',async()=>clock(async()=>{
+ const h=cronHarness(),raw='webhooks/2026-10-14/missing-ci-gap.json',gap='control/raw-gaps/missing-ci-gap.json';await h.archive.put(gap,JSON.stringify({key:raw,failures:1,retry_at:0,reason:'check_run'}));await h.archive.put('control/raw-recovery.json',JSON.stringify({after:'webhooks/2026-10-23/z.json'}));
+ await ingress.maintainRaw(h.env,()=>assert.fail('missing raw input cannot be targeted'));
+ const retained=JSON.parse(h.archive.objects.get(gap).bytes);assert.equal(retained.failures,2);assert.match(retained.reason,/raw_body_unavailable/);assert.ok(retained.retry_at>Date.now());assert.equal(h.archive.objects.has(ingress.receiptKey(repo.id,'missing-ci-gap')),false);assert.equal(parked(h.archive,'missing-ci-gap').length,0);
+}));

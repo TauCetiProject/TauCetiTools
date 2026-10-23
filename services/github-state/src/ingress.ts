@@ -293,18 +293,25 @@ export async function maintainRaw(env: Env, targets: (payload: any, event: strin
     }
   };
   try {
-    const gapPage=await env.ARCHIVE.list({prefix:'control/raw-gaps/',startAfter:state.gap_cursor,limit:RAW_GAP_PAGE});
-    let visited=0,resolved=0;
-    for(const entry of gapPage.objects){
-      if(Date.now()-began>=5000)break;
-      const snapshot=await env.ARCHIVE.get(entry.key),gap:any=snapshot?await snapshot.json():null;
-      if(gap && typeof gap.key==='string' && /^webhooks\/\d{4}-\d{2}-\d{2}\/[a-zA-Z0-9-]{1,100}\.json$/.test(gap.key) && entry.key==='control/raw-gaps/'+gap.key.slice(gap.key.lastIndexOf('/')+1) && !(gap.retry_at>Date.now())) {
-        if(await recover(gap.key,entry.key,[],{object:snapshot,gap}))resolved++;
+    let visited=0,resolved=0,errors=0;
+    const gapError=(stage:'entry'|'listing',error:unknown)=>{errors++;try{log('raw_gap_retry_failed',{stage,reason:classify(error)});}catch{}};
+    try {
+      const gapPage=await env.ARCHIVE.list({prefix:'control/raw-gaps/',startAfter:state.gap_cursor,limit:RAW_GAP_PAGE});
+      for(const entry of gapPage.objects){
+        if(Date.now()-began>=5000)break;
+        try {
+          const snapshot=await env.ARCHIVE.get(entry.key),gap:any=snapshot?await snapshot.json():null;
+          if(gap && typeof gap.key==='string' && /^webhooks\/\d{4}-\d{2}-\d{2}\/[a-zA-Z0-9-]{1,100}\.json$/.test(gap.key) && entry.key==='control/raw-gaps/'+gap.key.slice(gap.key.lastIndexOf('/')+1) && !(gap.retry_at>Date.now())) {
+            if(await recover(gap.key,entry.key,[],{object:snapshot,gap}))resolved++;
+          }
+        }catch(error){gapError('entry',error);}
+        // Preserve an unreadable gap but do not let it starve later retries
+        // or the main raw-prefix scan. It is revisited after this cursor wraps.
+        visited++;state.gap_cursor=entry.key;
       }
-      visited++;state.gap_cursor=entry.key;
-    }
-    if(visited===gapPage.objects.length&&!gapPage.truncated)delete state.gap_cursor;
-    state.gap_last_pass={at:Date.now(),examined:visited,resolved};
+      if(visited===gapPage.objects.length&&!gapPage.truncated)delete state.gap_cursor;
+    }catch(error){gapError('listing',error);}
+    state.gap_last_pass={at:Date.now(),examined:visited,resolved,errors};
     for(let pages=0;pages<20 && Date.now()-began<20000;pages++) {
       const page = await env.ARCHIVE.list({ prefix: 'webhooks/', startAfter: state.after, limit: 1000, include: ['customMetadata'] });
       let processed = 0;
