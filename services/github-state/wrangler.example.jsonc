@@ -42,16 +42,27 @@
       {
         "binding": "EVENTS",
         "queue": "tauceti-github-state-events"
+      },
+      {
+        "binding": "EVENTS_DLQ",
+        "queue": "tauceti-github-state-events-dlq"
       }
     ],
     "consumers": [
       {
         "queue": "tauceti-github-state-events",
-        "max_batch_size": 20,
+        "max_batch_size": 1,
         "max_batch_timeout": 1,
         "max_concurrency": 4,
         "max_retries": 20,
         "dead_letter_queue": "tauceti-github-state-events-dlq"
+      },
+      {
+        "queue": "tauceti-github-state-events-dlq",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1,
+        "max_concurrency": 1,
+        "max_retries": 20
       }
     ]
   },
