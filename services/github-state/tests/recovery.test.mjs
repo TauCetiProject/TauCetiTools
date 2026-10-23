@@ -676,6 +676,49 @@ test('installation accounting prepares retained hourly projections with a bounde
  owner.prepareAccounting();
  assert.equal(owner.preparedAccounting.hour[0].requests,10000);
  assert.equal(owner.preparedAccounting.scope,'retained_accounting_hour');assert.equal(owner.preparedAccounting.window_complete,false,'bound reached must not masquerade as a complete hour');
+ const restarted=new InstallationScheduler(state.ctx,{});
+ assert.deepEqual(restarted.preparedAccounting,JSON.parse(JSON.stringify(owner.preparedAccounting)),'restart preserves the scan-completeness limit');
+});
+
+test('cold installation health restores retained accounting without refreshing its timestamp or scanning the log',async()=>{
+ const {InstallationScheduler}=await load('src/installation.ts'),{state,db}=repositoryFixture();await state.fixtureReady;
+ state.ctx.storage.get=async()=>undefined;
+ const originalNow=Date.now,originalFetch=globalThis.fetch;let now=originalNow(),externalCalls=0;
+ Date.now=()=>now;globalThis.fetch=async()=>{externalCalls++;assert.fail('accounting health must not query GitHub');};
+ try {
+  const owner=new InstallationScheduler(state.ctx,{});
+  db.prepare('INSERT INTO accounting(at,operation,api,status,points,latency,bytes) VALUES(?,?,?,?,?,?,?)').run(now,'pr','core',200,1,10,20);
+  owner.prepareAccounting();
+  const first=owner.preparedAccounting;
+  assert.equal(first.window_complete,true);assert.equal(first.hour[0].requests,1);
+  const queries=[],exec=state.ctx.storage.sql.exec.bind(state.ctx.storage.sql);
+  state.ctx.storage.sql.exec=(sql,...bindings)=>{queries.push(sql);return exec(sql,...bindings);};
+  now+=90000;
+  const restarted=new InstallationScheduler(state.ctx,{}),health=await(await restarted.fetch(new Request('https://internal/health'))).json();
+  assert.equal(health.scope,'retained_accounting_hour');assert.equal(health.at,first.at);assert.equal(health.stale,false);assert.deepEqual(health.hour,JSON.parse(JSON.stringify(first.hour)));
+  now+=100000;
+  const stale=await(await new InstallationScheduler(state.ctx,{}).fetch(new Request('https://internal/health'))).json();
+  assert.equal(stale.at,first.at);assert.equal(stale.stale,true,'eviction must not make an old report fresh');
+  assert.ok(!queries.some(sql=>/FROM accounting\b/.test(sql)),'cold reads use the single prepared row');
+  assert.equal(externalCalls,0);
+  restarted.prepareAccounting();
+  const refreshed=new InstallationScheduler(state.ctx,{}).preparedAccounting;
+  assert.equal(refreshed.at,now);assert.equal(scalar(db,'SELECT COUNT(*) FROM prepared_accounting'),1);
+ }finally {Date.now=originalNow;globalThis.fetch=originalFetch;}
+});
+
+test('a failed accounting snapshot write preserves the last durable report',async()=>{
+ const {InstallationScheduler}=await load('src/installation.ts'),{state}=repositoryFixture();await state.fixtureReady;
+ const originalNow=Date.now;let now=originalNow();Date.now=()=>now;
+ try {
+  const owner=new InstallationScheduler(state.ctx,{});owner.prepareAccounting();const first=owner.preparedAccounting;
+  now+=190000;
+  const exec=state.ctx.storage.sql.exec.bind(state.ctx.storage.sql);
+  state.ctx.storage.sql.exec=(sql,...bindings)=>{if(sql.startsWith('INSERT INTO prepared_accounting'))throw new Error('storage unavailable');return exec(sql,...bindings);};
+  owner.prepareAccounting();
+  assert.deepEqual(owner.preparedAccounting,first);
+  assert.deepEqual(new InstallationScheduler(state.ctx,{}).preparedAccounting,first,'restart cannot publish the failed update');
+ }finally {Date.now=originalNow;}
 });
 
 

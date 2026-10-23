@@ -23,11 +23,18 @@ export class InstallationScheduler extends DurableObject<Env> {
     super(ctx, env);
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS budgets(resource TEXT PRIMARY KEY,remaining INTEGER,lim INTEGER,reset INTEGER,blocked INTEGER DEFAULT 0);
       CREATE TABLE IF NOT EXISTS accounting(id INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGER,operation TEXT,api TEXT,method TEXT,endpoint TEXT,status INTEGER,points INTEGER,latency INTEGER,bytes INTEGER);
-      CREATE TABLE IF NOT EXISTS quota_types(category TEXT PRIMARY KEY,first_seen INTEGER,last_seen INTEGER,count INTEGER,evidence TEXT);`);
+      CREATE TABLE IF NOT EXISTS quota_types(category TEXT PRIMARY KEY,first_seen INTEGER,last_seen INTEGER,count INTEGER,evidence TEXT);
+      CREATE TABLE IF NOT EXISTS prepared_accounting(singleton INTEGER PRIMARY KEY CHECK(singleton=1),data TEXT NOT NULL);`);
     this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS reservations(id TEXT PRIMARY KEY,resource TEXT,cost INTEGER,expires INTEGER);');
     this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS redelivery_retries(id TEXT PRIMARY KEY,due INTEGER,attempt INTEGER);');
     const columns=new Set(this.ctx.storage.sql.exec<any>('PRAGMA table_info(accounting)').toArray().map(c=>c.name));
     for(const [name,type] of Object.entries({shape:'TEXT',batch_size:'INTEGER DEFAULT 1',predicted:'INTEGER'})) if(!columns.has(name)) this.ctx.storage.sql.exec('ALTER TABLE accounting ADD COLUMN '+name+' '+type);
+    // Health must survive ordinary object eviction without rescanning the
+    // accounting log or resetting the report's original observation time.
+    try {
+      const saved=this.ctx.storage.sql.exec<{data:string}>('SELECT data FROM prepared_accounting WHERE singleton=1').toArray()[0];
+      if(saved)this.preparedAccounting=JSON.parse(saved.data);
+    }catch(error) {log('installation_health_load_failed',{reason:classify(error)});}
   }
   async jwt(): Promise<string> {
     const b64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_');
@@ -403,9 +410,11 @@ export class InstallationScheduler extends DurableObject<Env> {
     try {
       const source='(SELECT api,operation,shape,batch_size,at,points,bytes,latency,predicted FROM accounting ORDER BY id DESC LIMIT 10000)';
       const bounds=this.ctx.storage.sql.exec<any>('SELECT COUNT(*) n,MIN(at) oldest FROM '+source).one();
-      this.preparedAccounting={at:now,scope:'retained_accounting_hour',window_complete:bounds.n<10000 || bounds.oldest<now-3600000,scanned_limit:10000,
+      const prepared={at:now,scope:'retained_accounting_hour',window_complete:bounds.n<10000 || bounds.oldest<now-3600000,scanned_limit:10000,
         hour:this.ctx.storage.sql.exec('SELECT api,operation,COUNT(*) requests,SUM(points) points,SUM(points IS NULL) unmeasured,SUM(bytes) bytes,AVG(latency) latency FROM '+source+' WHERE at>? GROUP BY api,operation',now-3600000).toArray(),
         recipes:this.ctx.storage.sql.exec('SELECT api,operation,shape,batch_size,COUNT(*) requests,SUM(points) points,AVG(points) mean_points,MAX(points) max_points,AVG(predicted) predicted,AVG(latency) latency,MAX(latency) max_latency FROM '+source+' WHERE at>? GROUP BY api,operation,shape,batch_size',now-3600000).toArray()};
+      this.ctx.storage.sql.exec('INSERT INTO prepared_accounting(singleton,data) VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET data=excluded.data',JSON.stringify(prepared));
+      this.preparedAccounting=prepared;
     }catch(error) {log('installation_health_prepare_failed',{reason:classify(error)});}
   }
   async runnerCapacity(repo:Repository):Promise<Response> {
