@@ -135,7 +135,8 @@ export class StoreUnavailable extends Error {constructor(code?:string){super('Re
 export class StoreFenced extends Error {constructor(){super('Repository backend generation fenced');}}
 type TransactionPhase='connect'|'begin'|'session'|'owner'|'apply'|'commit';
 interface SessionIdentity {pid:number;started_us:string;token:string}
-type SessionCleanup='terminated'|'already_ended'|'unconfirmed';
+type SessionCleanup='terminated'|'already_ended'|'unconfirmed'|'expired';
+interface DiscardedSession extends SessionIdentity {discardedAt:number;nextAttemptAt:number}
 type ConnectionFailure='client_timeout'|'server_error'|'driver_error'|'connection_lost'|'connect_timeout'|'rollback_timeout'|'application'|'fenced'|'commit_rejected';
 interface ConnectionState {closed:boolean;ending:boolean;error?:StoreUnavailable;phase:TransactionPhase;code?:string;reason?:ConnectionFailure;commitUncertain?:boolean;cleanup?:'rollback_timeout'|'rollback_error';session?:SessionIdentity;ownerAttempted?:boolean;abort?:(error:StoreUnavailable)=>void}
 const sqlState=(code:unknown):string|undefined=>typeof code==='string' && /^[0-9A-Z]{5}$/.test(code)?code:undefined;
@@ -152,7 +153,7 @@ export class PostgresStore implements RepositoryStore {
 
   private http;
   private writer=new SerialLane();
-  private discarded?:SessionIdentity;
+  private discarded?:DiscardedSession;
   constructor(private url:string,repository:string,private generation:string,private client?:Client,private diagnostics:{connections:number,queries:number,lastConnection?:number}={connections:0,queries:0},private connectionState?:ConnectionState,private onQuery?:()=>void) {
     this.schema=schemaName(repository);
     try{this.http=neon(url);}catch{throw new StoreUnavailable();}
@@ -214,12 +215,12 @@ export class PostgresStore implements RepositoryStore {
       }
       return Promise.all(statements.map(s=>this.exec(s.sql,...(s.bindings || []))));
     }
-    const write=statements.some(s=>!/^\s*SELECT\b/i.test(s.sql));
+    // Standalone mutations enter transaction() above. HTTP batches are stored
+    // reads only; assert_writer remains part of the migration schema contract.
     return this.run(async()=>{
       const queries=statements.map(s=>this.http.query(postgresSQL(s.sql,this.schema),s.bindings || []));
-      if(write)queries.unshift(this.http.query(`SELECT \"${this.schema}\".assert_writer($1)`,[this.generation]));
-      const results=await this.http.transaction(queries,{readOnly:!write,isolationLevel:'RepeatableRead',fetchOptions:{signal:AbortSignal.timeout(15000)}});
-      return results.slice(write?1:0).map(rows=>new Rows(rows));
+      const results=await this.http.transaction(queries,{readOnly:true,isolationLevel:'RepeatableRead',fetchOptions:{signal:AbortSignal.timeout(15000)}});
+      return results.map(rows=>new Rows(rows));
     });
   }
   async transaction<T>(apply:(store:RepositoryStore)=>Promise<T>):Promise<T> {
@@ -228,11 +229,19 @@ export class PostgresStore implements RepositoryStore {
     return this.writer.run(()=>this.transact(apply,Date.now()-queued));
   }
   // WebSocket close is asynchronous: the server may retain the transaction
-  // after the client times out. Keep the writer lane fenced until this exact
-  // session is gone. LOCAL application_name also distinguishes a completed
-  // transaction from an uncertain COMMIT; it never establishes commit outcome.
+  // after the client times out. Prefer confirmed session cleanup before the
+  // next writer, but never make HTTP recovery a permanent write dependency.
+  // The database ownership lock protects every writer, including after this
+  // bounded local gate expires or the isolate restarts. LOCAL application_name
+  // distinguishes a completed transaction from an uncertain COMMIT; it never
+  // establishes commit outcome.
   private async cleanupDiscarded():Promise<SessionCleanup|undefined> {
     const session=this.discarded;if(!session)return;
+    // Server statements have a 15s deadline and idle transactions a 30s one.
+    // After this grace period, retry the database fence even if HTTP is down;
+    // expiry is not evidence that the old session or uncertain COMMIT ended.
+    if(Date.now()-session.discardedAt>=45000){this.discarded=undefined;storeLog('repository_postgres_cleanup',{result:'expired'});return 'expired';}
+    if(Date.now()<session.nextAttemptAt)return 'unconfirmed';
     let timer:ReturnType<typeof setTimeout>|undefined;
     const abort=new AbortController();let result:SessionCleanup='unconfirmed';
     try {
@@ -248,13 +257,18 @@ export class PostgresStore implements RepositoryStore {
       else if(direct && rows.length===1 && rows[0].terminated===true)result='terminated';
       if(result!=='unconfirmed')this.discarded=undefined;
     }catch{}finally{if(timer)clearTimeout(timer);}
+    if(result==='unconfirmed')session.nextAttemptAt=Date.now()+1000;
     storeLog('repository_postgres_cleanup',{result});return result;
   }
   private async transact<T>(apply:(store:RepositoryStore)=>Promise<T>,wait_ms:number):Promise<T> {
-    if(await this.cleanupDiscarded()==='unconfirmed')throw new StoreUnavailable();
+    const pendingCleanup=await this.cleanupDiscarded();
+    if(pendingCleanup==='unconfirmed'){
+      storeLog('repository_postgres_transaction',{phase:'cleanup',code:null,reason:'cleanup_pending',session_cleanup:pendingCleanup,outcome:'failed',wait_ms,transaction_ms:0,failed:true,connection_discarded:false});
+      throw new StoreUnavailable();
+    }
     // Leave time for the server's 15s statement timeout to return its SQLSTATE.
     let client:Client;try{client=new Client({connectionString:this.url,connectionTimeoutMillis:10000,query_timeout:20000});}catch{throw new StoreUnavailable();}
-    const started=Date.now();let failed=true;
+    const started=Date.now();let failed=true,session_cleanup:SessionCleanup|undefined=pendingCleanup;
     const connection:ConnectionState={closed:false,ending:false,phase:'connect'};let disconnected!:(error:StoreUnavailable)=>void;
     const lost=new Promise<never>((_,reject)=>{disconnected=reject;});void lost.catch(()=>{});
     connection.abort=disconnected;
@@ -302,10 +316,10 @@ export class PostgresStore implements RepositoryStore {
         await Promise.race([client.end(),new Promise<void>(resolve=>{timer=setTimeout(()=>{try{client.neonConfig.destroy();}catch{}finally{resolve();}},2000);})]);
       }catch{}finally{if(timer)clearTimeout(timer);}}
       if(connection.error && connection.ownerAttempted && connection.session){
-        this.discarded=connection.session;await this.cleanupDiscarded();
+        this.discarded={...connection.session,discardedAt:Date.now(),nextAttemptAt:0};session_cleanup=await this.cleanupDiscarded();
       }
       const transaction_ms=Date.now()-started;
-      if(failed || wait_ms+transaction_ms>=250)storeLog('repository_postgres_transaction',{phase:connection.phase,code:connection.code ?? null,reason:connection.reason ?? null,cleanup:connection.cleanup ?? null,outcome:failed?(connection.commitUncertain?'unknown':'failed'):'committed',wait_ms,transaction_ms,failed,connection_discarded:Boolean(connection.error)});
+      if(failed || session_cleanup || wait_ms+transaction_ms>=250)storeLog('repository_postgres_transaction',{phase:connection.phase,code:connection.code ?? null,reason:connection.reason ?? null,cleanup:connection.cleanup ?? null,session_cleanup:session_cleanup ?? null,outcome:failed?(connection.commitUncertain?'unknown':'failed'):'committed',wait_ms,transaction_ms,failed,connection_discarded:Boolean(connection.error)});
     }
   }
   async prepareMonitoring(analyzeTables:boolean,attemptToken=Date.now()):Promise<any> {
@@ -326,7 +340,7 @@ export class PostgresStore implements RepositoryStore {
       ]);
       metadata={...control.toArray()[0],connected:true,capacity:capacity.toArray()[0] ?? null};
     }catch {metadata={connected:false,capacity:null};}
-    return {backend:this.backend,expected_generation:this.generation,...metadata,connection_failures:this.diagnostics.connections,query_failures:this.diagnostics.queries,last_connection_failure:this.diagnostics.lastConnection ?? null};
+    return {backend:this.backend,expected_generation:this.generation,...metadata,session_cleanup_pending:Boolean(this.discarded),session_cleanup_age_ms:this.discarded?Math.max(0,Date.now()-this.discarded.discardedAt):null,connection_failures:this.diagnostics.connections,query_failures:this.diagnostics.queries,last_connection_failure:this.diagnostics.lastConnection ?? null};
   }
 }
 
