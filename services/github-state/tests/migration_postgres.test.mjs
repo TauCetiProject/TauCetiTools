@@ -222,7 +222,7 @@ test('ordinary supervisor restarts a fenced repository, preserves cursors, and r
   await ingress.release(f.env,custom,poison);assert.ok(!await f.archive.head(heldKey));
   const done=await (await f.request('/migration-supervise',{})).json();
   assert.equal(done.phase,'complete');assert.equal(done.cutover.release.backend_write_owner,'postgres');
-  assert.deepEqual(done.cutover.release.github_hour_observation,accounting,'retained request counts keep their actual stale and incomplete observation context');
+  assert.deepEqual(done.cutover.release.github_hour_observation,{...accounting,window_start:accounting.at-3600000,prepared_deployment:null,telemetry_failure:null},'retained request counts keep their actual stale and incomplete observation context');
   const receiptKey=migration.archiveKey(custom.id,generation)+'/receipt.json';
   const immutable=f.archive.objects.get(receiptKey).text;await f.request('/migration-supervise',{});assert.equal(f.archive.objects.get(receiptKey).text,immutable);
   await f.archive.delete(receiptKey); // crash at release receipt publication

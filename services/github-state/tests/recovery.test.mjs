@@ -744,6 +744,16 @@ test('invalid saved accounting falls back to provisional health and the next pre
  }
 });
 
+test('saved accounting cannot replace live scheduler identity or quota settings',async()=>{
+ const {InstallationScheduler}=await load('src/installation.ts'),{state,db}=repositoryFixture();await state.fixtureReady;
+ state.ctx.storage.get=async()=>undefined;
+ const owner=new InstallationScheduler(state.ctx,{CF_VERSION:{id:'preparing-version'}});owner.prepareAccounting();
+ db.prepare('UPDATE prepared_accounting SET data=? WHERE singleton=1').run(JSON.stringify({...owner.preparedAccounting,deployment_id:'wrong-version',settings:{concurrency:1000},stale:false,window_start:0}));
+ const restarted=new InstallationScheduler(state.ctx,{CF_VERSION:{id:'current-version'}}),health=await(await restarted.fetch(new Request('https://internal/health'))).json();
+ assert.equal(health.deployment_id,'current-version');assert.equal(health.prepared_deployment,'preparing-version');
+ assert.equal(health.window_start,owner.preparedAccounting.at-3600000);assert.notEqual(health.settings.concurrency,1000);
+});
+
 test('optional accounting snapshot creation failure does not disable the scheduler and can recover',async()=>{
  const {InstallationScheduler}=await load('src/installation.ts'),{state}=repositoryFixture();await state.fixtureReady;
  state.ctx.storage.get=async()=>undefined;

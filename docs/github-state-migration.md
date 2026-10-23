@@ -338,6 +338,15 @@ identities, bookmark/revision, counts/checksums, shadow proof, staging transform
 cursor/latency evidence, parked/held/raw recovery state, latest applied input,
 GitHub request accounting, health and backend write owner. Confirm unchanged external
 clients and backlog drain against live telemetry before declaring release accepted.
+The terminal receipt's `github_hour` and `github_hour_observation` describe retained
+accounting at replay completion, including its original observation time, scan
+completeness and known telemetry failure. They are context, not a post-completion
+release measurement. Observe a separate fresh full window starting after both
+replay completion and the released deployment; a restored report's current
+deployment ID does not establish that window. Retained accounting counts logged
+requests and cannot prove that interrupted or failed accounting attempts never
+occurred. Check migration's GitHub dispatch fence and test its zero-bootstrap
+behavior separately.
 
 Keep the original DO and referenced archives read-only through observation. It can
 only be an explicitly timestamped emergency last-known-data read fallback after

@@ -2267,7 +2267,7 @@ export class RepositoryState extends DurableObject<Env> {
       revision:await this.meta('revision'),latest_applied_input:await this.meta('latest_applied_input'),latest_webhook:await this.meta('last_webhook'),latest_repair:await this.meta('last_repair'),
       backlog:{parked:0,held:0,queue:0,dlq:0,queue_observed_at:queues.queue.at,dlq_observed_at:queues.dlq.at,raw_completed:recovery.raw?.last_completed ?? null,raw_gaps:recovery.raw?.gaps ?? null},backend_write_owner:'postgres',
       latency:{baseline_p95_ms:acceptance.latency.baseline_p95_ms,target_p95_ms:acceptance.latency.target_p95_ms},cursor_coverage:{versions:['r2-v1'],active_checked:state.cutover!.shadow?.cursor_checks || 0,expired_checked:state.cutover!.shadow?.expired_cursor_checks || 0},github_hour:rate.hour ?? null,
-      github_hour_observation:{at:rate.at ?? null,scope:rate.scope ?? null,stale:rate.stale ?? true,window_complete:rate.window_complete ?? null},health};
+      github_hour_observation:{at:rate.at ?? null,window_start:Number.isSafeInteger(rate.at)?rate.at-3600000:null,prepared_deployment:rate.prepared_deployment ?? null,scope:rate.scope ?? null,stale:rate.stale ?? true,window_complete:rate.window_complete ?? null,telemetry_failure:rate.telemetry_failure ?? null},health};
     state.cutover!.completed_at=Date.now();state.phase='complete';await saveMigration(this.env.ARCHIVE,state);
     await terminalReceipt(this.env.ARCHIVE,state);
   }

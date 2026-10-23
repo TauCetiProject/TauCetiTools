@@ -37,7 +37,7 @@ export class InstallationScheduler extends DurableObject<Env> {
       if(saved) {
         const report=JSON.parse(saved.data);
         if(report?.version!==1 || !Number.isSafeInteger(report.at) || report.at<0 || report.at>Date.now() || report.scope!=='retained_accounting_hour' || typeof report.window_complete!=='boolean' || report.scanned_limit!==10000 || !Array.isArray(report.hour) || !Array.isArray(report.recipes))throw new Error('invalid accounting snapshot');
-        this.preparedAccounting=report;
+        this.preparedAccounting={version:1,at:report.at,window_start:report.at-3600000,scope:report.scope,window_complete:report.window_complete,scanned_limit:report.scanned_limit,hour:report.hour,recipes:report.recipes,prepared_deployment:typeof report.prepared_deployment==='string'?report.prepared_deployment:null};
       }
     }catch(error) {this.accountingPreparationFailure={at:Date.now(),reason:classify(error)};log('installation_health_load_failed',this.accountingPreparationFailure);}
   }
@@ -416,7 +416,7 @@ export class InstallationScheduler extends DurableObject<Env> {
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS prepared_accounting(singleton INTEGER PRIMARY KEY CHECK(singleton=1),data TEXT NOT NULL)');
       const source='(SELECT api,operation,shape,batch_size,at,points,bytes,latency,predicted FROM accounting ORDER BY id DESC LIMIT 10000)';
       const bounds=this.ctx.storage.sql.exec<any>('SELECT COUNT(*) n,MIN(at) oldest FROM '+source).one();
-      const prepared={version:1,at:now,scope:'retained_accounting_hour',window_complete:bounds.n<10000 || bounds.oldest<now-3600000,scanned_limit:10000,
+      const prepared={version:1,at:now,window_start:now-3600000,prepared_deployment:this.env.CF_VERSION?.id ?? null,scope:'retained_accounting_hour',window_complete:bounds.n<10000 || bounds.oldest<now-3600000,scanned_limit:10000,
         hour:this.ctx.storage.sql.exec('SELECT api,operation,COUNT(*) requests,SUM(points) points,SUM(points IS NULL) unmeasured,SUM(bytes) bytes,AVG(latency) latency FROM '+source+' WHERE at>? GROUP BY api,operation',now-3600000).toArray(),
         recipes:this.ctx.storage.sql.exec('SELECT api,operation,shape,batch_size,COUNT(*) requests,SUM(points) points,AVG(points) mean_points,MAX(points) max_points,AVG(predicted) predicted,AVG(latency) latency,MAX(latency) max_latency FROM '+source+' WHERE at>? GROUP BY api,operation,shape,batch_size',now-3600000).toArray()};
       this.ctx.storage.sql.exec('INSERT INTO prepared_accounting(singleton,data) VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET data=excluded.data',JSON.stringify(prepared));
