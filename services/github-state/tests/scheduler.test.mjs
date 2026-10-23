@@ -2,6 +2,7 @@ import {postgresContractFixture} from './postgres_runtime.mjs';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
+import {spawnSync} from 'node:child_process';
 import {build} from 'esbuild';
 
 const bundle=await build({entryPoints:['src/repository.ts'],bundle:true,platform:'node',format:'esm',write:false,plugins:[{
@@ -51,6 +52,14 @@ test('compact roadmap snapshot updates on comment edit/delete without reading fu
   let result=await state.query(q);assert.equal(result.data.length,1);assert.equal(result.data[0].pr.number,7);
   assert.equal(result.data[0].review.meta.head_sha,'a'.repeat(40));assert.equal(result.data[0].review.contest.id,'102');
   assert.equal(result.data[0].review.issue_complete,true);assert.equal(JSON.stringify(result).includes('private description'),false);
+  assert.deepEqual(result.data[0].review.markers,[],'unchanged v1 clients keep their required empty compatibility array');
+  const legacy=payload=>spawnSync('python3',['../../tests/fixtures/legacy_survey_client.py'],{input:JSON.stringify(payload),encoding:'utf8'});
+  const accepted=legacy(result);assert.equal(accepted.status,0,accepted.stderr);assert.equal(JSON.parse(accepted.stdout).accepted,true);
+  const incompatible=structuredClone(result);delete incompatible.data[0].review.markers;
+  assert.notEqual(legacy(incompatible).status,0,'the frozen client must detect the original missing-field regression');
+  const cached=JSON.parse((await db.prepare('SELECT data FROM survey_state WHERE number=?').get('7')).data);
+  await db.prepare('UPDATE survey_state SET data=? WHERE number=?').run(JSON.stringify({...cached,markers:[{head:'old',expires_at:9999999999,providers:['obsolete']}]}),'7');
+  assert.deepEqual((await state.surveyRows(q)).rows[0].review.markers,[],'cached claims cannot reappear through the compatibility field');
   assert.equal(JSON.stringify(result).includes('"tok"'),false);
   assert.equal((await db.prepare("SELECT COUNT(*) n FROM demand WHERE key LIKE '%comments:%'").get()).n,0,'complete projections must not promote every history to frequent verification');
   assert.equal(result.author_counts[''],2,'automatic caps count all known roadmap PRs');

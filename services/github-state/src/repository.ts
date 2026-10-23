@@ -649,7 +649,9 @@ export class RepositoryState extends DurableObject<Env> {
         try {projected=(await this.projectedSurvey(number));}catch {hydrated=false;await this.optionalRead('survey_invalidate',async ()=>(await this.invalidateSurvey(number)));}
         if(hydrated) {const data=projected;await this.optionalRead('survey_projection',async ()=>(await this.rebuildSurvey(number,data)));}
       }
-      const review={...(hydrated && projected?JSON.parse(projected):summarizeFragments([],[])),issue_complete:false,review_complete:false};
+      // Existing v1 clients require this array. Coordination comments are no
+      // longer interpreted, including claims in older cached projections.
+      const review={...(hydrated && projected?JSON.parse(projected):summarizeFragments([],[])),markers:[],issue_complete:false,review_complete:false};
       const statuses=await this.rows({repository:q.repository,operation:'statuses',args:{sha:row.headRefOid}});
       const green=Array.isArray(statuses) && statuses.some(c=>c.context==='build' && c.state==='SUCCESS') && !statuses.some(c=>c.context==='build' && c.state!=='SUCCESS');
       for(const [operation,field] of [['issue_comments','issue_complete'],['review_comments','review_complete']]) {

@@ -172,6 +172,8 @@ fetching every PR's full comment histories. The scheduling cascade remains in
 the worker for full service-outage fallback. See [compact surveys](../../docs/compact-surveys.md)
 for scope rules, per-history coverage, migration, telemetry, and cross-language
 contract tests.
+The v1 response keeps `review.markers` as an empty array for existing clients.
+Coordination comments and claims in older cached projections do not populate it.
 
 ```toml
 max_open_prs = 128
