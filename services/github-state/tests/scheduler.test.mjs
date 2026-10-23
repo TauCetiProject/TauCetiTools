@@ -81,6 +81,7 @@ test('compact roadmap snapshot updates on comment edit/delete without reading fu
   assert.equal((await db.prepare("SELECT COUNT(*) n FROM demand WHERE key LIKE '%comments:%'").get()).n,0,'complete projections must not promote every history to frequent verification');
   assert.equal(result.author_counts[''],2,'automatic caps count all known roadmap PRs');
   const explicit=await state.query({...q,args:{roadmap:'PDE',skip:'Topology',numbers:'8'}});assert.equal(explicit.data[0].pr.number,8,'explicit PR overrides roadmap and skips');
+  assert.equal(legacy(explicit).status,0,'an unhydrated survey row remains accepted by the unchanged client');
   const prior=result.revision;
   await state.put('issue_comments','100',{...board,updated_at:'2026-10-13T01:00:00Z',body:'edited; scoreboard removed'},Date.now(),false,'7');
   await state.put('review_comments','101',{id:'101',body:'<!--tauceti-rubric:reuse -->'},Date.now(),true,'7');

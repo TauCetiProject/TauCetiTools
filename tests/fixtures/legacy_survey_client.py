@@ -1,5 +1,7 @@
 """Frozen read_survey from TauCetiWorker 4972ab3722606a8ca9e442a110393a7662513068.
 
+Source: tauceti_worker/github_state.py, function read_survey (including final LF).
+SHA256: dd99a748f7a8cee19b55e565e54f16af379db06046233abe39b358941ab54d5c
 Exercise the unchanged v1 parser against the service response without network I/O.
 Only its read/cache/import scaffolding is stubbed; the function below is unchanged.
 """
