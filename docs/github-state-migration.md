@@ -322,9 +322,9 @@ python3 services/github-state/scripts/migrate.py --environment production \
 
 Held-input recovery is a fix-forward operation, not permission to discard input.
 
-All repository writes use the serialized interactive transaction boundary and its
+Repository data writes use the serialized interactive transaction boundary and its
 Read Committed isolation level; standalone write batches previously used HTTP
-Repeatable Read. Every writer must acquire the database ownership lock. Before
+Repeatable Read. Every data writer must acquire the database ownership lock. Before
 acquiring the ownership lock, it records the session PID, exact backend start time
 and a unique transaction-local application name. When a client times out or loses
 its transport, the adapter closes that connection instead of queuing rollback
@@ -337,9 +337,13 @@ confirmation. Pooler and other endpoints only check whether the identified
 transaction has ended; they never signal a reusable backend. Unconfirmed cleanup
 blocks local writers for up to 45 seconds, with a one-second cleanup retry cooldown.
 After that grace period, writers retry the database ownership lock even if HTTP
-remains unavailable. Gate expiry does not confirm session completion; a still-held
-lock causes a bounded lock timeout and leaves input parked. Stored reads remain
-available. Health reports pending cleanup and its age. This local gate does not
+remains unavailable. This is an availability grace period, not a bound on server
+COMMIT or socket waits. Expired identities remain available for bounded cleanup
+attempts in rotation; only confirmed termination or an ended transaction removes
+an identity. A still-held ownership lock causes a bounded lock timeout and leaves
+input parked. Stored reads remain available. Health reports cleanup count, age,
+blocking/expired state and HTTP cleanup failures. Prepared capacity monitoring
+uses its separate generation-checked HTTP function. This local gate does not
 survive an isolate restart or store replacement; the database ownership lock and
 server timeouts still apply.
 

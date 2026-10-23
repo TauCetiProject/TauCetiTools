@@ -525,30 +525,33 @@ pg('cleanup identity guards cannot terminate a different session or a reused tra
   const token='unrelated-fixture-'+crypto.randomUUID();
   const identity=(await other.query("SELECT pg_backend_pid() AS pid,(EXTRACT(EPOCH FROM backend_start)*1000000)::bigint::text AS started_us,set_config('application_name',$1,true) AS token FROM pg_stat_activity WHERE pid=pg_backend_pid()",[token])).rows[0];
   for(const wrong of [{...identity,pid:0},{...identity,started_us:'1'},{...identity,token:'different-transaction'}]){
-   f.store.discarded={...wrong,discardedAt:Date.now(),nextAttemptAt:0};assert.equal(await f.store.cleanupDiscarded(),'already_ended');assert.equal((await other.query('SELECT 1 AS alive')).rows[0].alive,1);
+   f.store.discarded=[{...wrong,discardedAt:Date.now()}];f.store.nextCleanupAt=0;assert.equal(await f.store.cleanupDiscarded(),'already_ended');assert.equal((await other.query('SELECT 1 AS alive')).rows[0].alive,1);
   }
   // COMMIT resets the LOCAL token, even if the caller missed its response.
-  await other.query('COMMIT');f.store.discarded={...identity,discardedAt:Date.now(),nextAttemptAt:0};
+  await other.query('COMMIT');f.store.discarded=[{...identity,discardedAt:Date.now()}];f.store.nextCleanupAt=0;
   assert.equal(await f.store.cleanupDiscarded(),'already_ended');assert.equal((await other.query('SELECT 1 AS alive')).rows[0].alive,1);
   // The privileged fixture session is a different role and must never match.
   const adminToken='fixture-admin-'+crypto.randomUUID();
   const adminIdentity=(await f.admin.query("SELECT pg_backend_pid() AS pid,(EXTRACT(EPOCH FROM backend_start)*1000000)::bigint::text AS started_us,set_config('application_name',$1,false) AS token FROM pg_stat_activity WHERE pid=pg_backend_pid()",[adminToken])).rows[0];
-  f.store.discarded={...adminIdentity,discardedAt:Date.now(),nextAttemptAt:0};assert.equal(await f.store.cleanupDiscarded(),'already_ended');assert.equal((await f.admin.query('SELECT 1 AS alive')).rows[0].alive,1);
+  f.store.discarded=[{...adminIdentity,discardedAt:Date.now()}];f.store.nextCleanupAt=0;assert.equal(await f.store.cleanupDiscarded(),'already_ended');assert.equal((await f.admin.query('SELECT 1 AS alive')).rows[0].alive,1);
  }finally{await other.end();await f.close();}
 });
 
 
-pg('cleanup grace expiry cannot bypass a still-held database ownership lock',async()=>{
- const f=await postgresFixture();const {Client}=await import('@neondatabase/serverless');const holder=new Client(process.env.TEST_POSTGRES_URL);await holder.connect();let released=false;
+pg('expired cleanup retains its session handle and cannot bypass the database ownership lock',async()=>{
+ requireDirectCleanup();
+ const f=await postgresFixture();const {Client}=await import('@neondatabase/serverless');const holder=new Client(process.env.TEST_POSTGRES_URL);holder.on('error',()=>{});await holder.connect();let released=false;
  try{
   await holder.query('BEGIN');
   const token='fixture-holder-'+crypto.randomUUID();
   const identity=(await holder.query("SELECT pg_backend_pid() AS pid,(EXTRACT(EPOCH FROM backend_start)*1000000)::bigint::text AS started_us,set_config('application_name',$1,true) AS token FROM pg_stat_activity WHERE pid=pg_backend_pid()",[token])).rows[0];
   await holder.query(`SELECT generation FROM ${f.schema}.backend_control WHERE singleton=1 FOR UPDATE`);
-  f.store.discarded={...identity,discardedAt:Date.now()-45001,nextAttemptAt:0};let callbacks=0;
+  f.store.discarded=[{...identity,discardedAt:Date.now()-45001}];let callbacks=0;
+  const query=f.store.http.query.bind(f.store.http);f.store.http.query=async(...args)=>{if(args[0].includes('AS terminated FROM pg_stat_activity'))throw Error('HTTP-only cleanup outage');return query(...args);};
   await assert.rejects(f.store.transaction(async()=>callbacks++),/55P03/);assert.equal(callbacks,0);
-  await holder.query('ROLLBACK');released=true;
-  await f.store.transaction(tx=>tx.exec('INSERT INTO demand VALUES(?,?)','after-cleanup-grace',Date.now()));
+  f.store.http.query=query;
+  await f.store.transaction(tx=>tx.exec('INSERT INTO demand VALUES(?,?)','after-cleanup-grace',Date.now()));released=true;
+  assert.equal(f.store.discarded.length,0);assert.equal((await f.admin.query('SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE pid=$1',[identity.pid])).rows[0].n,0);
   assert.deepEqual((await f.store.exec('SELECT key FROM demand')).toArray(),[{key:'after-cleanup-grace'}]);
- }finally{if(!released)await holder.query('ROLLBACK');await holder.end();await f.close();}
+ }finally{if(!released)try{await holder.query('ROLLBACK');}catch{}holder.neonConfig.destroy();await f.close();}
 });

@@ -12,7 +12,7 @@ const bundle=await build({entryPoints:['src/repository_store.ts'],bundle:true,pl
  `,loader:'js'}));
 }}]});
 const {PostgresStore,StoreFenced,StoreUnavailable}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
-function fixture(scenarios=[]){
+function fixture(scenarios=[],url='postgresql://unused@ep-fixture.us-east-2.aws.neon.tech/fixture'){
  const clients=[],committed=[],logs=[],cleanupLogs=[],cleanupCalls=[],cleanupResponses=[];
  const driver={log:(event,fields)=>(event==='repository_postgres_cleanup'?cleanupLogs:logs).push({event,...fields}),async http(sql,bindings){
   if(!sql.includes('AS terminated FROM pg_stat_activity'))throw Error('private HTTP transport diagnostic');
@@ -43,7 +43,7 @@ function fixture(scenarios=[]){
   };clients.push(client);return client;
  }};
  globalThis[key]=driver;
- return {clients,committed,logs,cleanupLogs,cleanupCalls,cleanupResponses,store:new PostgresStore('postgresql://unused@ep-fixture.us-east-2.aws.neon.tech/fixture','100','test-v1')};
+ return {clients,committed,logs,cleanupLogs,cleanupCalls,cleanupResponses,store:new PostgresStore(url,'100','test-v1')};
 }
 const write=tx=>tx.exec('INSERT INTO demand VALUES(?,?)','private-input',1);
 async function promptly(promise){let timer;try{return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('writer blocked behind stalled cleanup')),1000);})]);}finally{clearTimeout(timer);}}
@@ -137,7 +137,7 @@ test('cleanup has an independent deadline even when HTTP ignores abort',async t=
 
 test('pooler connections are observed without signaling a reusable backend',async t=>{
  t.mock.timers.enable({apis:['Date'],now:Date.now()});try{
- const f=fixture([{phase:'apply',stalled:true}]);f.store.url='postgresql://unused@ep-fixture-pooler.us-east-2.aws.neon.tech/fixture';
+ const f=fixture([{phase:'apply',stalled:true}],'postgresql://unused@ep-fixture-pooler.us-east-2.aws.neon.tech/fixture');
  await assert.rejects(f.store.transaction(write),StoreUnavailable);assert.equal(f.clients[0].serverTerminated,undefined);
  await assert.rejects(f.store.transaction(write),StoreUnavailable);assert.equal(f.clients.length,1);assert.equal(f.cleanupLogs[0].result,'unconfirmed');
  f.clients[0].sessionActive=false;t.mock.timers.tick(1000);await f.store.transaction(write);assert.equal(f.clients.length,2);assert.equal(f.cleanupLogs.at(-1).result,'already_ended');
@@ -166,7 +166,7 @@ test('invalid session identity refuses ownership and never calls application cod
 
 
 test('HTTP cleanup outage cannot fence healthy WebSocket writes indefinitely',async t=>{
- const f=fixture([{phase:'apply',stalled:true}]);globalThis[key].http=async()=>{throw Error('private HTTP-only outage');};
+ const f=fixture([{phase:'apply',stalled:true}]),http=globalThis[key].http;globalThis[key].http=async()=>{throw Error('private HTTP-only outage');};
  t.mock.timers.enable({apis:['Date'],now:Date.now()});
  try{
   await assert.rejects(f.store.transaction(write),StoreUnavailable);assert.equal(f.clients.length,1);
@@ -175,8 +175,37 @@ test('HTTP cleanup outage cannot fence healthy WebSocket writes indefinitely',as
   // The real server has expired its old transaction, while HTTP stays down.
   f.clients[0].sessionActive=false;t.mock.timers.tick(45000);
   await f.store.transaction(async tx=>{callbacks++;await write(tx);});assert.equal(callbacks,1);
-  assert.deepEqual(f.committed,['write']);assert.equal(f.cleanupLogs.at(-1).result,'expired');assert.equal(f.store.discarded,undefined);
+  assert.deepEqual(f.committed,['write']);assert.equal(f.cleanupLogs.at(-1).result,'expired');assert.equal(f.store.discarded.length,1);
+  const health=await f.store.health();assert.equal(health.session_cleanup_pending,true);assert.equal(health.session_cleanup_state,'expired');assert.ok(health.session_cleanup_failures>0);
+  globalThis[key].http=http;t.mock.timers.tick(1000);await f.store.transaction(async()=>42);assert.equal(f.store.discarded.length,0);assert.equal(f.cleanupLogs.at(-1).result,'already_ended');
   assert.equal(f.clients[0].commands.filter(v=>v==='apply').length,1,'the failed callback was never retried');
   assert.ok(!JSON.stringify([...f.logs,...f.cleanupLogs]).includes('private HTTP-only'));
+ }finally{t.mock.timers.reset();}
+});
+
+
+for(const host of ['ep-fixture-POOLER.us-east-2.aws.neon.tech','ep-fixture-PoOlEr.US-EAST-2.AWS.NEON.TECH.'])test('mixed-case pooler endpoint is never signaled: '+host,async()=>{
+ const f=fixture([{phase:'apply',stalled:true}],'postgresql://unused@'+host+'/fixture');await assert.rejects(f.store.transaction(write),StoreUnavailable);
+ assert.equal(f.clients[0].serverTerminated,undefined);assert.ok(f.cleanupCalls[0].sql.startsWith('SELECT false'));
+});
+
+test('cleanup retains and fairly retries multiple expired and recent session identities',async t=>{
+ const f=fixture([{phase:'apply',stalled:true},{phase:'apply',stalled:true}]),http=globalThis[key].http;
+ globalThis[key].http=async()=>{throw Error('HTTP-only fixture outage');};t.mock.timers.enable({apis:['Date'],now:Date.now()});
+ try{
+  await assert.rejects(f.store.transaction(write),StoreUnavailable);const original=f.store.discarded[0];t.mock.timers.tick(45000);
+  await assert.rejects(f.store.transaction(write),StoreUnavailable);assert.equal(f.clients.length,2);assert.equal(f.store.discarded.length,2);assert.ok(f.store.discarded.includes(original));
+  globalThis[key].http=http;t.mock.timers.tick(1000);await assert.rejects(f.store.transaction(write),StoreUnavailable);
+  assert.equal(f.store.discarded.length,1);assert.equal(f.clients.length,2);t.mock.timers.tick(1000);
+  await f.store.transaction(write);assert.equal(f.store.discarded.length,0);assert.ok(f.clients.slice(0,2).every(c=>c.serverTerminated));assert.deepEqual(f.committed,['write']);
+ }finally{t.mock.timers.reset();}
+});
+
+test('health reports expiry before another writer and retains the cleanup handle',async t=>{
+ const f=fixture([{phase:'apply',stalled:true}]);f.cleanupResponses.push(async()=>[{terminated:false}]);t.mock.timers.enable({apis:['Date'],now:Date.now()});
+ try{
+  await assert.rejects(f.store.transaction(write),StoreUnavailable);t.mock.timers.tick(45000);
+  globalThis[key].http=async sql=>sql.includes('capacity_statistics')?[]:[{backend:'postgres',generation:'test-v1',schema_version:1}];
+  const health=await f.store.health();assert.equal(health.connected,true);assert.equal(health.session_cleanup_pending,true);assert.equal(health.session_cleanup_state,'expired');assert.equal(health.session_cleanup_age_ms,45000);assert.equal(health.session_cleanup_count,1);
  }finally{t.mock.timers.reset();}
 });
