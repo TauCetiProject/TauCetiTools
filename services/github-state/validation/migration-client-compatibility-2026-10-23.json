@@ -1,0 +1,171 @@
+{
+  "version": 1,
+  "issue": "https://github.com/TauCetiProject/TauCetiWorker/issues/316",
+  "recorded_at": "2026-10-23T09:59:16.638Z",
+  "kind": "production_client_compatibility_code_deployment",
+  "is_data_migration_release": false,
+  "environment": "production",
+  "repository": "TauCetiProject/TauCeti",
+  "production_data_migration": {
+    "started": false,
+    "generation": null,
+    "backend": "sqlite",
+    "schema_version": 5,
+    "mode": "writable",
+    "mutation_fence": null,
+    "target_selected": false,
+    "gate": "Completed test migration release and fresh deployed S0/S1 acceptance remain required before production freeze/cutover."
+  },
+  "deployment": {
+    "pr": "https://github.com/TauCetiProject/TauCetiTools/pull/90",
+    "code": "48b137a3fad8f84b7045d2667eb49c2d0c3c7fb4",
+    "previous_code": "e79f6a36b6bf2a4507195bab0b2f7c5e342e02ac",
+    "version": "139c555d-aa6b-4fd2-9509-637567070f6d",
+    "previous_version": "1873c734-6628-4b97-8208-8d4fac25e537",
+    "rollout": "11e0db6b-d918-44ce-8f65-8b5dc769b91f",
+    "percentage": 100,
+    "durable_object_update_strategy": {
+      "mode": "deferred",
+      "max_delay": 300
+    },
+    "both_actors_converged": true,
+    "module": {
+      "sha256": "14a8a15d1c44e0c53e0f8c7a69b09a92c292598a174bda55e86f3823e25a863c",
+      "bytes": 701124,
+      "exact_clean_build": true,
+      "code": "48b137a3fad8f84b7045d2667eb49c2d0c3c7fb4",
+      "cloudflare_script_etag": "25fce7fcd088f306f81b07d748f94ad39c856319eadd112e21c0abb74c76802b"
+    },
+    "verification": "Frozen isolated build matched the tested module; version-specific module download, exact length/SHA256 and full bindings/runtime verified while inactive, followed by selected-module byte verification."
+  },
+  "preserved": {
+    "repository_and_installation_namespaces": true,
+    "all_binding_names_and_nonsecret_values": true,
+    "secret_binding_values": "Inherited by version upload; credentials were neither fetched nor printed. Original client authentication passed.",
+    "worker_global_settings": true,
+    "subdomain_settings": true,
+    "custom_domain": true,
+    "queue_and_dlq_consumers_and_retry_settings": true,
+    "cron_schedules": true,
+    "bucket_lifecycle": true,
+    "durable_retention_policy_sha256": "a340638aa2da3dff7d5309a5311c1c59849a3d8137b5d76cb54dc757dbe020d9",
+    "pinned_r2_classes": [
+      "r2_cursors",
+      "raw_webhooks",
+      "daily_archives",
+      "staging_pages",
+      "telemetry_intervals",
+      "staging_spills",
+      "legacy_staging_spills"
+    ],
+    "ingress_operation_performed": false,
+    "migration_operation_performed": "status only; no freeze, import, backend selection, retirement or credential installation"
+  },
+  "unchanged_client": {
+    "commit": "4972ab3722606a8ca9e442a110393a7662513068",
+    "checkout_tracked_and_untracked_files_clean": true,
+    "fresh_cache": {
+      "at": "2026-10-23T09:59:11.896Z",
+      "workflows": [
+        {
+          "workflow": "open_prs",
+          "rows": 642,
+          "reads": 2,
+          "http_statuses": [
+            200,
+            200,
+            200,
+            304
+          ]
+        },
+        {
+          "workflow": "survey",
+          "rows": 642,
+          "reads": 2,
+          "http_statuses": [
+            200,
+            200,
+            304
+          ]
+        },
+        {
+          "workflow": "history",
+          "rows": 2,
+          "reads": 2,
+          "http_statuses": [
+            200,
+            304
+          ]
+        }
+      ],
+      "github_reference_calls": 0
+    },
+    "retained_cache": {
+      "at": "2026-10-23T09:59:13.631Z",
+      "workflows": [
+        {
+          "workflow": "open_prs",
+          "rows": 642,
+          "reads": 2,
+          "http_statuses": [
+            200,
+            200,
+            200,
+            304
+          ]
+        },
+        {
+          "workflow": "survey",
+          "rows": 642,
+          "reads": 2,
+          "http_statuses": [
+            200,
+            200,
+            304
+          ]
+        },
+        {
+          "workflow": "history",
+          "rows": 2,
+          "reads": 2,
+          "http_statuses": [
+            200,
+            304
+          ]
+        }
+      ],
+      "github_reference_calls": 0,
+      "before_etag": "\"7140964\"",
+      "after_etag": "\"survey-v1-empty-markers:7162149\"",
+      "before_missing_markers": 399,
+      "after_missing_markers": 0,
+      "copy_exact": true,
+      "original_cache_preserved": true
+    },
+    "counter_scope": "Direct requests attempted by the original client. These smoke checks are not a server-wide GitHub request audit, migration release, or latency cohort. Production ordinary maintenance remains active."
+  },
+  "test_rehearsal": {
+    "generation": "80ecf79d-f811-42c8-9fec-ad41c3727567",
+    "version": "ac58f185-b8c0-40db-84a8-aff162dd6884",
+    "phase": "replaying",
+    "final_release_complete": false,
+    "logged_request_observation": {
+      "started_at": "2026-10-23T08:33:24.117Z",
+      "finished_at": "2026-10-23T09:38:34.639Z",
+      "samples": 14,
+      "repository_requests": 0,
+      "passed": true,
+      "scope": "Fresh retained accounting hours wholly after the released deployment and while migration still fenced repair dispatch. Zero refers to repository repair/bootstrap/reference operations; independent capacity reporting and authentication are classified separately. This supplements the final phase-complete request-rate release gate. Counts describe logged requests, not a complete audit of every external attempt. The separately validated migration dispatch fence and zero-bootstrap tests establish migration behavior.",
+      "qualified_fenced_hour_samples": 2,
+      "qualifying_hour_windows_overlap": true
+    },
+    "remaining_gates": [
+      "All parked/held/queue/DLQ input drained and captured inputs verified committed",
+      "Single comparable target warm-read p95 cohort, unchanged client and cursor release workflows",
+      "Full current-version accounting hour wholly after replay completion",
+      "Immutable completed test release, published upstream before production data migration"
+    ]
+  },
+  "private_receipt_sha256": "e822bb9bbe1a92ac80bd65a854e316c64c3f33394dc26673c94c8883f595d799",
+  "retained_material": "Original stores, archives and all seven R2 retention pins remain retained. Retirement and deletion are separate operations."
+}
