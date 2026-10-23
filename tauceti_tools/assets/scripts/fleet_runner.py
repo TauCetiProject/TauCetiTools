@@ -417,11 +417,15 @@ def route_main():
     cloud_counts = dict(github=observed["github_busy"], namespace=observed["namespace_busy"])
     cloud_limits = dict(github=budget + 1, namespace=namespace_cap)
     ready_order = []
+    needs_cloud_capacity = False
     for name in order:
+        if name in excluded:
+            continue
         if name in cloud_counts and cloud_counts[name] is None:
+            needs_cloud_capacity = True
             break
         ready_order.append(name)
-        if name in cloud_counts and name not in excluded and cloud_counts[name] < cloud_limits[name]:
+        if name in cloud_counts and cloud_counts[name] < cloud_limits[name]:
             break
     inventory_read = any(name not in cloud_counts for name in ready_order)
     runner_pages = fleet_inventory(environment, repository) if inventory_read else []
@@ -430,7 +434,7 @@ def route_main():
                       selection_key=environment["GITHUB_RUN_ID"])
     selected = None if candidate.get("waiting") else candidate
     scanned = False
-    if selected is None and observed["namespace_busy"] is None:
+    if selected is None and needs_cloud_capacity:
         for credential, reserve in readers:
             try:
                 reader = GitHubRead(credential, reserve)

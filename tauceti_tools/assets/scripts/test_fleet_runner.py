@@ -290,6 +290,32 @@ class RoutingEntrypoint(unittest.TestCase):
         self.assertEqual(output["pool"], "github")
         self.assertEqual(calls, [("state", "shared")])
 
+    def test_excluded_unknown_cloud_does_not_delay_next_machine(self):
+        config, inventory = self.staging_fixture()
+        config = config.replace('[services.fleet]\n', '[services.fleet]\npr_order=["namespace","chris","github"]\n')
+        app = self.fixture(busy=19)
+        app["repos/Test/code/actions/runs/5/attempts/1/jobs?per_page=100&page=1"] = dict(total_count=1, jobs=[
+            dict(name="sandboxed-build", status="completed", conclusion="cancelled", runner_id=0,
+                 runner_name="", labels=["nscloud-ubuntu-24.04-amd64-8x16-with-features"])])
+        output, calls = self.pick(dict(app=app, state=dict(shared=self.shared(busy=19)),
+            fleet={"orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1": inventory}),
+            config=config, FLEET_CI_ENABLED="true", FLEET_READ_TOKEN="fleet", FLEET_RUNNER_GROUP_ID="3",
+            GITHUB_STATE_TOKEN="state", GITHUB_RUN_ATTEMPT="2")
+        self.assertEqual(output["pool"], "chris")
+        self.assertFalse(any("orgs/Test/repos" in path for _, path in calls))
+
+    def test_cloud_absent_from_order_does_not_trigger_discovery_when_everything_is_full(self):
+        config, inventory = self.staging_fixture()
+        config = config.replace('[services.fleet]\n', '[services.fleet]\npr_order=["github","chris"]\n')
+        for guest in inventory["runners"]:
+            guest["busy"] = True
+        output, calls = self.pick(dict(state=dict(shared=self.shared(busy=19)),
+            fleet={"orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1": inventory}),
+            config=config, FLEET_CI_ENABLED="true", FLEET_READ_TOKEN="fleet", FLEET_RUNNER_GROUP_ID="3",
+            GITHUB_STATE_TOKEN="state")
+        self.assertEqual(output["pool"], "github")
+        self.assertEqual([token for token, _ in calls], ["state", "fleet"])
+
     def test_staging_fallthrough_refreshes_runner_availability_after_cloud_scan(self):
         config, inventory = self.staging_fixture()
         busy = json.loads(json.dumps(inventory))
