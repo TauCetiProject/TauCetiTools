@@ -378,6 +378,9 @@ remain in force, and a lookup that consumes the pass budget leaves the cursor
 and inputs in place. `known_receipts`, `receipt_lookup_status` and
 `timing.receipt_lookup_ms` describe this read; these counts are not semantic
 changes or completed cleanups. The separate bounded CI receipt path is unchanged.
+This read may confirm an already committed delivery while the repository writer
+is held or parked; promoting that proof applies no new input and leaves the
+committed SQL state available to the frozen export.
 
 The ordinary raw-input recovery owner retries an independent keyset page of at
 most five recorded gaps before advancing the raw prefix scan. It honors each

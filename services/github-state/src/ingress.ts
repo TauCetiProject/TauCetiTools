@@ -120,6 +120,7 @@ export async function drain(env: Env, repo: Repository, options: { limit?: numbe
   if(receiptCandidates.size && Date.now()<(options.deadline || Infinity))try{
     const response=await stub(env.REPOSITORIES,repo.id).fetch('https://internal/storage/deliveries',{method:'POST',body:JSON.stringify({ids:[...receiptCandidates],repository_id:repo.id})});
     receiptLookupStatus=response.status;
+    if(!response.ok)await response.body?.cancel();
     const result:any=response.ok?await response.json():null;
     if(Array.isArray(result?.known))for(const id of result.known)if(typeof id==='string'&&receiptCandidates.has(id))sqlCommitted.add(id);
   }catch{receiptLookupStatus='transport_error';/* Existing per-event deduplication remains the safe fallback. */}

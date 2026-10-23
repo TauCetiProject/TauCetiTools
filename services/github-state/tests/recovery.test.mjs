@@ -18,6 +18,7 @@ const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
 function harness(){
  const archive=bucket(),state={full:false,applied:new Map(),error:null,throws:false};
  const repository={async fetch(url,init){
+  if(new URL(url).pathname==='/storage/deliveries'){const {ids}=JSON.parse(init.body);return Response.json({known:ids.filter(id=>state.applied.has(id))});}
   if(state.throws) throw new Error('network connection lost');
   const pointer=JSON.parse(init.body);
   if(state.applied.has(pointer.delivery)) return Response.json({ok:true});
@@ -1950,4 +1951,20 @@ test('a slow committed-receipt lookup cannot advance an unvisited replay cursor'
  h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{assert.equal(new URL(url).pathname,'/storage/deliveries');advance(21000);return Response.json({known:JSON.parse(init.body).ids});}});
  const pass=await ingress.drain(h.env,repo,{limit:50,deadline:Date.now()+20000});assert.equal(pass.replayed,0);assert.equal(pass.failed,0);assert.equal(pass.cursor,undefined);assert.equal(pass.stopped,'deadline');assert.equal(pass.known_receipts,12);
  assert.equal([...h.archive.objects.keys()].filter(k=>k.startsWith('parked/100/pointers/')).length,12);assert.equal([...h.archive.objects.keys()].filter(k=>k.startsWith('parked/100/bodies/')).length,12);assert.equal([...h.archive.objects.keys()].filter(k=>k.startsWith('receipts/')).length,0);
+}));
+
+test('a mixed replay page keeps CI commit batching separate from known semantic receipt promotion',async()=>{
+ const h=harness(),{drain,pointerKey}=await load('src/ingress.ts');h.state.full=true;for(const id of ['mixed-known','mixed-ci','mixed-new'])await deliver(h.env,id);h.state.full=false;h.state.applied.set('mixed-known',1);
+ const ciKey=parked(h.archive,'mixed-ci')[0],ci=await(await h.archive.get(ciKey)).json();await h.archive.put(ciKey,JSON.stringify({...ci,event:'workflow_job'}));
+ const original=h.env.REPOSITORIES.get,lookups=[],ciBatches=[],events=[];
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{const input=JSON.parse(init.body),path=new URL(url).pathname;if(path==='/storage/deliveries'){lookups.push(input.ids);return Response.json({known:['mixed-known']});}if(path==='/ci-receipts'){ciBatches.push(input.events);for(const p of input.events)h.state.applied.set(p.delivery,1);return Response.json({committed:input.events.map(p=>p.delivery)});}events.push(input.delivery);return original().fetch(url,init);}});
+ const result=await drain(h.env,repo);assert.equal(result.replayed,3);assert.equal(result.failed,0);assert.equal(result.known_receipts,1);assert.equal(result.batched,1);assert.deepEqual(lookups,[['mixed-known','mixed-new']]);assert.deepEqual(ciBatches.map(v=>v.map(p=>p.delivery)),[['mixed-ci']]);assert.deepEqual(events,['mixed-new']);assert.deepEqual([...h.state.applied.values()],[1,1,1]);assert.equal(await h.archive.get(pointerKey(repo.id,ci)),null);
+});
+
+test('held-lane known receipt promotion honors the original retry deadline',async()=>clock(async advance=>{
+ const h=harness(),{drain,pointerKey,receiptKey}=await load('src/ingress.ts');h.state.full=true;await deliver(h.env,'held-known');h.state.full=false;h.state.applied.set('held-known',1);
+ const normal=parked(h.archive,'held-known')[0],p=await(await h.archive.get(normal)).json(),held=pointerKey(repo.id,p,true);await h.archive.put(held,JSON.stringify({...p,retry_at:Date.now()+10000,replay_failures:7}));await h.archive.delete(normal);
+ const original=h.env.REPOSITORIES.get;let events=0;h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{if(new URL(url).pathname!=='/storage/deliveries')events++;return original().fetch(url,init);}});
+ assert.equal((await drain(h.env,repo,{held:true})).replayed,0);assert.ok(await h.archive.get(held));assert.equal(await h.archive.get(receiptKey(repo.id,p.delivery)),null);
+ advance(10001);const done=await drain(h.env,repo,{held:true});assert.equal(done.known_receipts,1);assert.equal(done.replayed,1);assert.equal(done.failed,0);assert.equal(events,0);assert.equal(h.state.applied.get(p.delivery),1);assert.equal(await h.archive.get(held),null);
 }));
