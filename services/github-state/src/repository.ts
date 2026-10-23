@@ -2491,7 +2491,7 @@ export class RepositoryState extends DurableObject<Env> {
         if(this.ingress===undefined){const mode=(await this.env.ARCHIVE.get(controlKey(repo.id)).then(o=>o?.json<any>()))?.mode ?? 'apply';this.ingress ??= mode;}
         if(this.ingress==='parked')return json({error:'ingress_parked',parkable:true,request_id},503);
         if(this.degraded)return json({error:this.degraded.reason==='storage_full'?'storage_full':'storage_control_unavailable',parkable:true,request_id},503);
-        this.applying++;let timing:{lookup_ms:number;write_ms:number}|undefined;
+        this.applying++;let timing:{lookup_ms?:number;write_ms:number}|undefined;
         try {
           const now=Date.now(),rows=[...events.values()];let pending=rows;
           // Lost batch replies and cleanup failures leave durable SQL receipts.
@@ -2502,12 +2502,19 @@ export class RepositoryState extends DurableObject<Env> {
             pending=rows.filter(p=>!known.has(p.delivery));
           }
           const lookupFinished=Date.now();
+          if(pending.length) {
+            if((this.ingress as string|undefined)==='parked')return json({error:'ingress_parked',parkable:true,request_id},503);
+            if(this.storageMarkerUnavailable)return json({error:'storage_control_unavailable',parkable:true,request_id},503);
+            const degraded=this.degraded as {reason:string}|undefined;
+            if(degraded)return json({error:degraded.reason==='storage_full'?'storage_full':'storage_control_unavailable',parkable:true,request_id},503);
+            if(this.mutationState.blocked)return json({error:'backend_fenced',parkable:true,request_id},503);
+          }
           if(pending.length)await this.atomic(async state=>{
             const size=state.store.backend==='sqlite'?33:100;
             for(let start=0;start<pending.length;start+=size){const batch=pending.slice(start,start+size);await state.store.exec('INSERT OR IGNORE INTO deliveries VALUES '+batch.map(()=>'(?,?,?)').join(','),...batch.flatMap(p=>[p.delivery,'ignored:'+p.event,now]));}
           });
-          timing={lookup_ms:lookupFinished-now,write_ms:Date.now()-lookupFinished};
           if(this.store.backend==='sqlite')await this.ctx.storage.sync();
+          timing={...(this.store.backend==='postgres'?{lookup_ms:lookupFinished-now}:{}),write_ms:Date.now()-lookupFinished};
           this.inputFailure=undefined;
         }finally{this.applying--;}
         return json({committed:[...events.keys()],timing});

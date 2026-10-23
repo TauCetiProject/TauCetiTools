@@ -1334,9 +1334,9 @@ test('CI replay survives an old actor and a deadline immediately after batch com
  const park=async delivery=>{const p={repository:repo.name,delivery,event:'check_run',received:Date.now(),key:'webhooks/'+delivery};await f.archive.put(p.key,'{}');await ingress.park(env,repo,p,'migration');return p;};
  const old=await park('old-actor');assert.equal((await ingress.drain(env,repo)).replayed,1);
  assert.equal(individual,1);assert.equal((await(await f.archive.get(ingress.receiptKey(repo.id,old.delivery))).json()).disposition,'not_mirrored');
- oldActor=false;const pending=await park('deadline-commit');expire=true;
+ oldActor=false;f.state.ctx.storage.sync=async()=>advance(7);const pending=await park('deadline-commit');expire=true;
  const first=await ingress.drain(env,repo,{deadline:Date.now()+1000});assert.equal(first.stopped,'deadline');assert.equal(first.replayed,0);
- assert.equal(first.timing.batch_ms,2000);assert.equal(first.timing.batch_lookup_ms,0);assert.equal(first.timing.batch_write_ms,0);assert.equal(first.timing.cleanup_ms,0);
+ assert.equal(first.timing.batch_ms,2007);assert.equal(first.timing.batch_lookup_ms,undefined);assert.equal(first.timing.batch_write_ms,7);assert.equal(first.timing.cleanup_ms,0);
  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries WHERE id=?').get(pending.delivery).n,1);
  assert.ok(await f.archive.get(ingress.pointerKey(repo.id,pending)));assert.ok(await f.archive.get(ingress.bodyKey(repo.id,pending.delivery)));
  assert.equal(await f.archive.get(ingress.receiptKey(repo.id,pending.delivery)),null);

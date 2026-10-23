@@ -414,3 +414,37 @@ pg('partially committed CI batches retain the ordinary PostgreSQL writer fence',
   assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,2);
  }finally{await f.close();}
 });
+
+pg('an ingress pause during CI receipt lookup drains without starting a write',async()=>{
+ const f=await postgresFixture();let release;try{
+  let entered;const gate=new Promise(r=>release=r),reading=new Promise(r=>entered=r),raw=f.state.store;
+  f.state.store=new Proxy(raw,{get(target,key){
+   if(key==='exec')return async(sql,...args)=>{const rows=await target.exec(sql,...args);if(sql.startsWith('SELECT id FROM deliveries WHERE id IN')){entered();await gate;}return rows;};
+   const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;
+  }});
+  let writes=0;f.state.atomic=async()=>{writes++;throw Error('unexpected writer');};
+  const batch=send(f.state,'/ci-receipts',{repository:repo.name,events:[{delivery:'ci-paused-lookup',event:'check_run',received:Date.now()}]});
+  await reading;assert.equal(f.state.applying,1);
+  const pause=send(f.state,'/storage/ingress',{mode:'parked'});for(let n=0;n<100&&f.state.ingress!=='parked';n++)await new Promise(r=>setTimeout(r,20));
+  assert.equal(f.state.ingress,'parked');release();
+  assert.equal((await batch).status,503);assert.equal(writes,0);assert.equal((await(await pause).json()).drained,true);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,0);
+ }finally{release?.();await f.close();}
+});
+
+pg('CI acknowledgement survives receipt archival between its lookup and reply',async()=>{
+ const f=await postgresFixture();try{
+  const delivery='ci-archived-during-lookup';await f.store.exec('INSERT INTO deliveries VALUES(?,?,?)',delivery,'ignored:check_run',Date.now()-15*86400000);
+  f.state.storageLoaded=true;const raw=f.state.store;
+  f.state.store=new Proxy(raw,{get(target,key){
+   if(key==='exec')return async(sql,...args)=>{const rows=await target.exec(sql,...args);if(sql.startsWith('SELECT id FROM deliveries WHERE id IN'))await f.state.archiveDeliveryReceipts();return rows;};
+   const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;
+  }});
+  f.state.atomic=async()=>{throw Error('acknowledgement must not acquire the writer');};
+  const response=await send(f.state,'/ci-receipts',{repository:repo.name,events:[{delivery,event:'check_run',received:Date.now()}]});
+  assert.equal(response.status,200);assert.deepEqual((await response.json()).committed,[delivery]);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,0);
+  const receipt=await(await f.env.ARCHIVE.get('receipts/100/'+delivery+'.json')).json();assert.equal(receipt.delivery,delivery);assert.equal(receipt.disposition,'not_mirrored');
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM changes')).one().n,0);
+ }finally{await f.close();}
+});
