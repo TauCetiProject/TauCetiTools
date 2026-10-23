@@ -322,15 +322,26 @@ python3 services/github-state/scripts/migrate.py --environment production \
 
 Held-input recovery is a fix-forward operation, not permission to discard input.
 
-When a PostgreSQL client times out or loses its transport, the adapter closes
-that connection instead of queuing rollback behind the stalled query. Ordinary
-SQL and application errors still roll back a healthy connection. A failed or
-uncertain commit never retries the application callback; input replay checks the
-committed delivery receipt. Sanitized transaction diagnostics report the failing
-phase, writer wait and transaction duration without SQL or driver error bodies.
-This releases the local queue; the database lock remains until PostgreSQL notices
-the disconnect or ends the statement/session. A later writer can still receive a
-lock timeout and leave its input parked for retry.
+All repository writes use the serialized interactive transaction boundary. Before
+acquiring the ownership lock, it records the session PID, exact backend start time
+and a unique transaction-local application name. When a client times out or loses
+its transport, the adapter closes that connection instead of queuing rollback
+behind the stalled query. Ordinary SQL and application errors still roll back a
+healthy connection.
+
+For a direct Neon endpoint, a separate bounded HTTP query terminates only that
+identified session in the same database and application role, and waits for server
+confirmation. Pooler and other endpoints only check whether the identified
+transaction has ended; they never signal a reusable backend. Unconfirmed cleanup
+keeps the local writer lane fenced for later cleanup attempts. Stored reads remain
+available and input remains parked. The in-memory cleanup gate does not survive an
+isolate restart; the database ownership lock and server timeouts still apply.
+
+A failed or uncertain commit never retries the application callback; termination
+or an absent session does not prove rollback. Input replay checks the committed
+delivery receipt. Sanitized diagnostics report cleanup result, failing phase,
+writer wait and transaction duration without session tokens, SQL or driver error
+bodies.
 
 Inspect the pointer/body and their digest privately; never paste payloads or secrets
 into logs or issue comments. Recover an exact missing body from retained raw/pinned

@@ -449,26 +449,27 @@ pg('CI acknowledgement survives receipt archival between its lookup and reply',a
  }finally{await f.close();}
 });
 
-pg('a client read timeout closes the real transport without a second rollback timeout or callback replay',async()=>{
- const f=await postgresFixture(),NativeSocket=globalThis.WebSocket,sockets=[];let calls=0,rollbacks=0;
+pg('a blackholed close cannot retain the server lock after a client timeout',async()=>{
+ const f=await postgresFixture(),NativeSocket=globalThis.WebSocket,sockets=[];let calls=0,rollbacks=0,abandoned;
  try{
   globalThis.WebSocket=class extends NativeSocket {
    drop=false;closeCalled=false;
    constructor(...args){super(...args);sockets.push(this);}
    addEventListener(type,listener,...args){return super.addEventListener(type,type==='message'?event=>{if(!this.drop)listener.call(this,event);}:listener,...args);}
-   close(...args){this.closeCalled=true;return super.close(...args);}
+   close(...args){this.closeCalled=true;if(!this.drop)return super.close(...args);}
   };
   const start=performance.now();
   await assert.rejects(f.store.transaction(async tx=>{
    calls++;const query=tx.client.query.bind(tx.client);tx.client.query=(sql,...args)=>{if(sql==='ROLLBACK')rollbacks++;return query(sql,...args);};await tx.exec('INSERT INTO demand VALUES(?,?)','timed-out-write',Date.now());
-   assert.equal(sockets.length,1);sockets[0].drop=true;
+   assert.equal(sockets.length,1);abandoned=tx.connectionState.session;tx.client.connectionParameters.query_timeout=100;sockets[0].drop=true;
    await tx.exec('SELECT pg_sleep(0.05)');
   }),/Repository database unavailable/);
-  assert.ok(performance.now()-start<28000,'cleanup must not wait another full query timeout');
+  assert.ok(performance.now()-start<8000,'cleanup must confirm termination without waiting for the idle timeout');
+  assert.equal((await f.admin.query('SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE pid=$1',[abandoned.pid])).rows[0].n,0);
   assert.equal(calls,1);assert.equal(rollbacks,0,'a client timeout must not submit ROLLBACK');assert.equal(sockets[0].closeCalled,true);
   await f.store.transaction(write=>write.exec('INSERT INTO demand VALUES(?,?)','next-writer',Date.now()));
   assert.deepEqual((await f.store.exec('SELECT key FROM demand ORDER BY key')).toArray(),[{key:'next-writer'}]);
- }finally{globalThis.WebSocket=NativeSocket;for(const socket of sockets)try{socket.close();}catch{}await f.close();}
+ }finally{globalThis.WebSocket=NativeSocket;for(const socket of sockets)try{NativeSocket.prototype.close.call(socket);}catch{}await f.close();}
 });
 
 pg('a client timeout during a running server statement preserves the database writer fence and rolls back',async()=>{
@@ -492,4 +493,42 @@ pg('a client timeout during a running server statement preserves the database wr
   await f.store.transaction(tx=>tx.exec('INSERT INTO demand VALUES(?,?)','after-mid-statement',Date.now()));
   assert.deepEqual((await f.store.exec('SELECT key FROM demand ORDER BY key')).toArray(),[{key:'after-mid-statement'}]);
  }finally{globalThis.WebSocket=NativeSocket;try{socket?.close();}catch{}await f.close();}
+});
+
+
+pg('lost ownership response is cleaned up before another transaction acquires the fence',async()=>{
+ const f=await postgresFixture(),NativeSocket=globalThis.WebSocket,sockets=[];let callbacks=0;
+ try{
+  globalThis.WebSocket=class extends NativeSocket {
+   drop=false;
+   constructor(...args){super(...args);sockets.push(this);}
+   send(data){if(Buffer.from(data).includes(Buffer.from('backend_control')))this.drop=true;return super.send(data);}
+   addEventListener(type,listener,...args){return super.addEventListener(type,type==='message'?event=>{if(!this.drop)listener.call(this,event);}:listener,...args);}
+   close(...args){if(!this.drop)return super.close(...args);}
+  };
+  const start=performance.now();await assert.rejects(f.store.transaction(async()=>callbacks++),/Repository database unavailable/);
+  assert.ok(performance.now()-start<28000);assert.equal(callbacks,0);
+  globalThis.WebSocket=NativeSocket;
+  await f.store.transaction(tx=>tx.exec('INSERT INTO demand VALUES(?,?)','owner-response-recovered',Date.now()));
+  assert.deepEqual((await f.store.exec('SELECT key FROM demand')).toArray(),[{key:'owner-response-recovered'}]);
+ }finally{globalThis.WebSocket=NativeSocket;for(const socket of sockets)try{NativeSocket.prototype.close.call(socket);}catch{}await f.close();}
+});
+
+pg('cleanup identity guards cannot terminate a different session or a reused transaction',async()=>{
+ const f=await postgresFixture();const {Client}=await import('@neondatabase/serverless');const other=new Client(process.env.TEST_POSTGRES_URL);await other.connect();
+ try{
+  await other.query('BEGIN');
+  const token='unrelated-fixture-'+crypto.randomUUID();
+  const identity=(await other.query("SELECT pg_backend_pid() AS pid,(EXTRACT(EPOCH FROM backend_start)*1000000)::bigint::text AS started_us,set_config('application_name',$1,true) AS token FROM pg_stat_activity WHERE pid=pg_backend_pid()",[token])).rows[0];
+  for(const wrong of [{...identity,pid:0},{...identity,started_us:'1'},{...identity,token:'different-transaction'}]){
+   f.store.discarded=wrong;assert.equal(await f.store.cleanupDiscarded(),'already_ended');assert.equal((await other.query('SELECT 1 AS alive')).rows[0].alive,1);
+  }
+  // COMMIT resets the LOCAL token, even if the caller missed its response.
+  await other.query('COMMIT');f.store.discarded=identity;
+  assert.equal(await f.store.cleanupDiscarded(),'already_ended');assert.equal((await other.query('SELECT 1 AS alive')).rows[0].alive,1);
+  // The privileged fixture session is a different role and must never match.
+  const adminToken='fixture-admin-'+crypto.randomUUID();
+  const adminIdentity=(await f.admin.query("SELECT pg_backend_pid() AS pid,(EXTRACT(EPOCH FROM backend_start)*1000000)::bigint::text AS started_us,set_config('application_name',$1,false) AS token FROM pg_stat_activity WHERE pid=pg_backend_pid()",[adminToken])).rows[0];
+  f.store.discarded=adminIdentity;assert.equal(await f.store.cleanupDiscarded(),'already_ended');assert.equal((await f.admin.query('SELECT 1 AS alive')).rows[0].alive,1);
+ }finally{await other.end();await f.close();}
 });

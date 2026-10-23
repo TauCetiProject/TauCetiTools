@@ -133,14 +133,17 @@ export function postgresSQL(input:string,schema:string):string {
 }
 export class StoreUnavailable extends Error {constructor(code?:string){super('Repository database unavailable'+(code && /^[0-9A-Z]{5}$/.test(code)?' ('+code+')':''));}}
 export class StoreFenced extends Error {constructor(){super('Repository backend generation fenced');}}
-type TransactionPhase='connect'|'begin'|'owner'|'apply'|'commit';
+type TransactionPhase='connect'|'begin'|'session'|'owner'|'apply'|'commit';
+interface SessionIdentity {pid:number;started_us:string;token:string}
+type SessionCleanup='terminated'|'already_ended'|'unconfirmed';
 type ConnectionFailure='client_timeout'|'server_error'|'driver_error'|'connection_lost'|'connect_timeout'|'rollback_timeout'|'application'|'fenced'|'commit_rejected';
-interface ConnectionState {closed:boolean;ending:boolean;error?:StoreUnavailable;phase:TransactionPhase;code?:string;reason?:ConnectionFailure;commitUncertain?:boolean;cleanup?:'rollback_timeout'|'rollback_error';abort?:(error:StoreUnavailable)=>void}
+interface ConnectionState {closed:boolean;ending:boolean;error?:StoreUnavailable;phase:TransactionPhase;code?:string;reason?:ConnectionFailure;commitUncertain?:boolean;cleanup?:'rollback_timeout'|'rollback_error';session?:SessionIdentity;ownerAttempted?:boolean;abort?:(error:StoreUnavailable)=>void}
 const sqlState=(code:unknown):string|undefined=>typeof code==='string' && /^[0-9A-Z]{5}$/.test(code)?code:undefined;
 const serverCode=(error:any):string|undefined=>['ERROR','FATAL','PANIC'].includes(error?.severity)?sqlState(error?.code):undefined;
 // A client-side timeout does not cancel the active PostgreSQL query. Queuing
 // ROLLBACK behind it can consume another full query timeout. Close that
-// transport instead; a healthy connection still rolls back ordinary errors.
+// transport and confirm its server session has ended before another writer;
+// a healthy connection still rolls back ordinary errors.
 const unusableConnection=(code:string|undefined)=>!code || code.startsWith('08') || ['57P01','57P02','57P03'].includes(code);
 const storeLog=(event:string,fields:Record<string,unknown>)=>{try{log(event,fields);}catch{}};
 export class PostgresStore implements RepositoryStore {
@@ -149,6 +152,7 @@ export class PostgresStore implements RepositoryStore {
 
   private http;
   private writer=new SerialLane();
+  private discarded?:SessionIdentity;
   constructor(private url:string,repository:string,private generation:string,private client?:Client,private diagnostics:{connections:number,queries:number,lastConnection?:number}={connections:0,queries:0},private connectionState?:ConnectionState,private onQuery?:()=>void) {
     this.schema=schemaName(repository);
     try{this.http=neon(url);}catch{throw new StoreUnavailable();}
@@ -183,7 +187,7 @@ export class PostgresStore implements RepositoryStore {
     return this.run(async()=>new Rows<T>(this.client?(await this.client.query(query,bindings)).rows:await this.http.query(query,bindings,{fetchOptions:{signal:AbortSignal.timeout(15000)}}) as T[]));
   }
   async batch(statements:Statement[]):Promise<Rows<any>[]> {
-    if(!this.client && statements.some(s=>!/^\s*SELECT\b/i.test(s.sql)))return this.writer.run(()=>this.executeBatch(statements));
+    if(!this.client && statements.some(s=>!/^\s*SELECT\b/i.test(s.sql)))return this.transaction(tx=>tx.batch(statements));
     return this.executeBatch(statements);
   }
   private async executeBatch(statements:Statement[]):Promise<Rows<any>[]> {
@@ -223,7 +227,31 @@ export class PostgresStore implements RepositoryStore {
     const queued=Date.now();
     return this.writer.run(()=>this.transact(apply,Date.now()-queued));
   }
+  // WebSocket close is asynchronous: the server may retain the transaction
+  // after the client times out. Keep the writer lane fenced until this exact
+  // session is gone. LOCAL application_name also distinguishes a completed
+  // transaction from an uncertain COMMIT; it never establishes commit outcome.
+  private async cleanupDiscarded():Promise<SessionCleanup|undefined> {
+    const session=this.discarded;if(!session)return;
+    let timer:ReturnType<typeof setTimeout>|undefined;
+    const abort=new AbortController();let result:SessionCleanup='unconfirmed';
+    try {
+      // Only a direct Neon connection has exclusive ownership of its physical
+      // backend. Never signal a pooler backend which could have been reused.
+      const host=new URL(this.url).hostname;
+      const direct=host.endsWith('.neon.tech') && !host.split('.')[0].endsWith('-pooler');
+      const rows=await Promise.race([
+        this.http.query(`SELECT ${direct?'pg_terminate_backend(pid,1000)':'false'} AS terminated FROM pg_stat_activity WHERE pid=$1 AND (EXTRACT(EPOCH FROM backend_start)*1000000)::bigint::text=$2 AND application_name=$3 AND usename=current_user AND datname=current_database()`,[session.pid,session.started_us,session.token],{fetchOptions:{signal:abort.signal}}),
+        new Promise<never>((_,reject)=>{timer=setTimeout(()=>{abort.abort();reject(new StoreUnavailable());},3000);})
+      ]);
+      if(rows.length===0)result='already_ended';
+      else if(direct && rows.length===1 && rows[0].terminated===true)result='terminated';
+      if(result!=='unconfirmed')this.discarded=undefined;
+    }catch{}finally{if(timer)clearTimeout(timer);}
+    storeLog('repository_postgres_cleanup',{result});return result;
+  }
   private async transact<T>(apply:(store:RepositoryStore)=>Promise<T>,wait_ms:number):Promise<T> {
+    if(await this.cleanupDiscarded()==='unconfirmed')throw new StoreUnavailable();
     // Leave time for the server's 15s statement timeout to return its SQLSTATE.
     let client:Client;try{client=new Client({connectionString:this.url,connectionTimeoutMillis:10000,query_timeout:20000});}catch{throw new StoreUnavailable();}
     const started=Date.now();let failed=true;
@@ -239,7 +267,12 @@ export class PostgresStore implements RepositoryStore {
         const timer=setTimeout(()=>fail('08001','connect_timeout'),10000);
         try{await Promise.race([client.connect(),lost]);}finally{clearTimeout(timer);}
         connection.phase='begin';await client.query("BEGIN; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='15s'; SET LOCAL idle_in_transaction_session_timeout='30s'");
-        connection.phase='owner';
+        connection.phase='session';
+        const token='tauceti-ghstate-'+crypto.randomUUID();
+        const identity=(await client.query("SELECT pg_backend_pid() AS pid,(EXTRACT(EPOCH FROM backend_start)*1000000)::bigint::text AS started_us,set_config('application_name',$1,true) AS token FROM pg_stat_activity WHERE pid=pg_backend_pid()",[token])).rows[0];
+        if(!identity || !Number.isSafeInteger(identity.pid) || identity.pid<=0 || typeof identity.started_us!=='string' || !/^[0-9]+$/.test(identity.started_us) || identity.token!==token)throw new StoreUnavailable();
+        connection.session={pid:identity.pid,started_us:identity.started_us,token};
+        connection.phase='owner';connection.ownerAttempted=true;
         const control=await client.query(`SELECT generation,backend,schema_version FROM "${this.schema}".backend_control WHERE singleton=1 FOR UPDATE`);
         const row=control.rows[0];
         if(!row || row.backend!=='postgres' || row.generation!==this.generation || row.schema_version!==1)throw new StoreFenced();
@@ -268,6 +301,9 @@ export class PostgresStore implements RepositoryStore {
       else if(!connection.closed){let timer:ReturnType<typeof setTimeout>|undefined;try{
         await Promise.race([client.end(),new Promise<void>(resolve=>{timer=setTimeout(()=>{try{client.neonConfig.destroy();}catch{}finally{resolve();}},2000);})]);
       }catch{}finally{if(timer)clearTimeout(timer);}}
+      if(connection.error && connection.ownerAttempted && connection.session){
+        this.discarded=connection.session;await this.cleanupDiscarded();
+      }
       const transaction_ms=Date.now()-started;
       if(failed || wait_ms+transaction_ms>=250)storeLog('repository_postgres_transaction',{phase:connection.phase,code:connection.code ?? null,reason:connection.reason ?? null,cleanup:connection.cleanup ?? null,outcome:failed?(connection.commitUncertain?'unknown':'failed'):'committed',wait_ms,transaction_ms,failed,connection_discarded:Boolean(connection.error)});
     }
