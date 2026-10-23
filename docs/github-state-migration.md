@@ -369,6 +369,13 @@ complete migration receipt. Stored PostgreSQL reads and bounded reconciliation
 continue, while final completion and the broad retention hold intentionally wait
 for recovery. An irrecoverable data gap is not a successful migration.
 
+Queue consumers use one message per batch and one concurrent invocation for
+each of the primary and dead-letter queues. Repository writes are serialized,
+so a large parallel queue batch adds waiting requests rather than write
+capacity. These bounds keep new queue input from building an unbounded writer
+wait behind replay. Each message still commits or parks durably before its own
+acknowledgement; the 20-retry limit and existing retry delays remain unchanged.
+
 Parked replay checks a page of eligible non-CI deliveries against the existing
 read-only SQL receipt endpoint, with at most 100 IDs in one request. A confirmed
 receipt is promoted to permanent R2 before its pointer/body is removed, without
