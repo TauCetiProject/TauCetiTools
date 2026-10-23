@@ -277,6 +277,28 @@ class RoutingEntrypoint(unittest.TestCase):
         self.assertEqual(output["pool"], "chris")
         self.assertIn(("app", "repos/Test/code/actions/runs/5/attempts/1/jobs?per_page=100&page=1"), calls)
 
+    def test_missing_retry_history_does_not_veto_available_machines_or_change_order(self):
+        config, inventory = self.staging_fixture()
+        for first_busy, expected in ((False, "tauchonki"), (True, "chris")):
+            with self.subTest(first_busy=first_busy):
+                current = json.loads(json.dumps(inventory))
+                current["runners"][1]["busy"] = first_busy
+                fixtures = dict(
+                    app=self.fixture(remaining=1500),
+                    repository=self.fixture(remaining=250),
+                    fleet={"orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1": current},
+                    state=dict(shared=self.shared(routing_version=2, namespace_busy=0, queued_fleet=[])),
+                )
+                output, calls = self.pick(
+                    fixtures, config=config, FLEET_JOB_KIND="staging", FLEET_CI_ENABLED="true",
+                    FLEET_READ_TOKEN="fleet", FLEET_RUNNER_GROUP_ID="3", GITHUB_STATE_TOKEN="state",
+                    GITHUB_RUN_ATTEMPT="2",
+                )
+                self.assertEqual(output["pool"], expected)
+                self.assertEqual(output["attempt"], "2")
+                self.assertIn(("fleet", "orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1"), calls)
+                self.assertFalse(any("orgs/Test/repos" in path for _, path in calls))
+
     def test_staging_busy_offline_mislabeled_or_unavailable_inventory_retains_cloud_fallback(self):
         config, inventory = self.staging_fixture()
         for failure in ("busy", "offline", "labels", "unavailable"):

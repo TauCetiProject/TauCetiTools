@@ -412,14 +412,13 @@ def route_main():
                     raise ObservationError("retry placement history unavailable")
             excluded = failed_placements(capacity_reader.read, repository, environment["GITHUB_RUN_ID"], attempt)
         except (OSError, ValueError, KeyError, TypeError):
-            excluded = None
-            print("::notice::Retry placement history unavailable; retaining cloud choices")
-    runner_pages = fleet_inventory(environment, repository) if kind == "staging" and excluded is not None else []
+            print("::notice::Retry placement history unavailable; using current runner availability")
+    runner_pages = fleet_inventory(environment, repository) if kind == "staging" else []
     selected = None
     # Staging can use its own complete idle-runner inventory even when unrelated
     # global queue coverage is unavailable. Honor known reservations and only
-    # consider machines preceding the first cloud preference. Retry exclusions
-    # have already been checked, so recovery can also avoid global scans.
+    # consider machines preceding the first cloud preference. Known retry
+    # exclusions apply, but missing history does not veto current availability.
     if kind == "staging":
         fleet_order = []
         for name in order:
@@ -451,8 +450,6 @@ def route_main():
     if kind != "staging" or scanned:
         runner_pages = fleet_inventory(environment, repository)
     if kind == "pr" and not re.fullmatch(r"[a-f0-9]{40}", environment.get("PR_HEAD", "")):
-        runner_pages = []
-    if attempt > 1 and excluded is None:
         runner_pages = []
     selected = selected or route(kind=kind, order=order, machines=config.get("machines", {}), runner_pages=runner_pages,
                      observed=observed, github_budget=budget, namespace_cap=namespace_cap, excluded=excluded or (),
