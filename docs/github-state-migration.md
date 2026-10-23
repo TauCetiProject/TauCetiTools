@@ -76,16 +76,25 @@ Explicit admin replay shares cron's conditional R2 lease and stored lane cursor.
 The optional `limit` must be an integer from 1 to 100 (default 25); invalid
 values return HTTP 400 before acquiring the lease. Each pass uses a twenty-second
 work budget, respects pointer and recovery-error backoffs, and returns `leased`, `deadline`, or `lease_replaced` when appropriate.
-The requested limit is an upper bound. If a page repeatedly uses its budget
-without cleaning up any pointer, the next owner halves the observed page size,
-down to one pointer. Independent normal/held limits are persisted in the R2
-lease claim before work starts, so process death or a replaced completion cannot
-erase the decision. Four fast full pages at the learned limit allow a cautious
-increase below previously unsuccessful sizes; explicit smaller admin requests and a lane's short remaining cron
-budget do not provide evidence for an increase. Prepared recovery metadata
-records learned limits/ceilings and each pass's page size, initial budget and
-duration. An expired owner also reduces the limits recorded in its lease claim:
-recovery does not depend on its slow response successfully saving a checkpoint.
+The requested limit is an upper bound; successful admin replies report the
+effective `page_limit`. A zero-progress deadline with due input and an adequate
+initial budget halves the observed page size, down to one pointer. Limits are
+persisted in the R2 lease claim before work starts. Cron keeps a fixed page limit
+within each lane, alternates lane preference, and checkpoints once between lanes
+when budget remains. That conditional handoff preserves the first lane's progress
+and records only the second lane as active, so expiry cannot penalize a lane that
+never started. No checkpoint write is added per page.
+
+An expired owner can reduce only its named lane, and a cancelled smaller admin
+probe cannot reduce the automatic limit. Four fast full pages allow cautious
+growth. Both working limits and failed-size ceilings expire after fifteen minutes;
+quiet repositories and held input do not need successful full pages to recover
+the default size. Expiry and legacy CI-count evidence can reduce the working limit
+but never install a ceiling. Legacy CI counts establish an attempted batch, not
+its complete page size, so they select a conservative 25-pointer working limit.
+Optional lane-selection read failures fall back to normal replay; actual drain
+errors still retain the usual recovery backoff. Prepared recovery metadata records
+learned limits/expiry and each pass's page size, due-input count, budget and duration.
 This changes page sizing only; ownership, receipts, cursor checkpoints and retry
 deadlines still govern application and cleanup.
 An expired owner's completion cannot overwrite a replacement checkpoint.

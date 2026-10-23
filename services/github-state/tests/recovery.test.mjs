@@ -867,9 +867,11 @@ test('durable leases coordinate overlapping cron passes and recover after owner 
  await h.archive.put(ingress.recoveryKey(repo.id),JSON.stringify({lease_until:Date.now()+60000}));
  await ingress.maintainIngress(h.env,repo);assert.equal((await ingress.backlog(h.env,repo)).prepared_at,null);
  advance(61000);
- let lists=0;const list=h.archive.list;h.archive.list=async options=>{lists++;return list(options);};
+ const lists=[];const list=h.archive.list;h.archive.list=async options=>{lists.push(options.limit);return list(options);};
  await Promise.all([ingress.maintainIngress(h.env,repo),ingress.maintainIngress(h.env,repo)]);
- assert.equal(lists,4,'only one pass owns the two replay and count lists');
+ assert.equal(lists.filter(n=>n===50).length,2,'only the lease owner scans both replay lanes');
+ assert.equal(lists.filter(n=>n===1000).length,2,'only the lease owner prepares both counts');
+ assert.ok(lists.filter(n=>n===1).length<=4,'contenders only perform bounded lane-selection reads');
  assert.equal((await ingress.backlog(h.env,repo)).lease_until,0);
 }));
 
@@ -966,7 +968,7 @@ test('deadline exhaustion never advances an unvisited lane or skips the rest of 
 
 test('failed count preparation keeps the last observation timestamp and defaults survive first-owner crash',async()=>clock(async advance=>{
  const h=cronHarness();await ingress.maintainIngress(h.env,repo);const before=await ingress.backlog(h.env,repo);
- advance(61000);h.archive.failures.push((op,k)=>op==='list' && k.includes('/pointers/'));await ingress.maintainIngress(h.env,repo);
+ advance(61000);const list=h.archive.list;let fail=true;h.archive.list=options=>{if(fail&&options.limit===1000&&options.prefix.includes('/pointers/')){fail=false;throw Error('count list failed');}return list(options);};await ingress.maintainIngress(h.env,repo);
  const after=await ingress.backlog(h.env,repo);assert.equal(after.prepared_at,before.prepared_at);assert.ok(after.last_attempt>before.last_attempt);assert.ok(after.last_error);
  await h.archive.put(ingress.recoveryKey(repo.id),JSON.stringify({lease_until:Date.now()+60000,last_attempt:Date.now()}));
  const fresh=await ingress.backlog(h.env,repo);assert.equal(fresh.parked.count,null);assert.equal(fresh.held.count,null);
@@ -1343,12 +1345,12 @@ test('CI replay survives an old actor and a deadline immediately after batch com
 }));
 
 test('ordinary replay learns a smaller durable page after repeated zero-progress deadlines',async()=>clock(async advance=>{
- const h=harness(),committed=new Map(),sizes=[],cleanup=[];
+ const h=harness(),committed=new Map(),sizes=[],cleanup=[];let slow=true;
  h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{
   assert.equal(new URL(url).pathname,'/ci-receipts');
   const rows=JSON.parse(init.body).events;sizes.push(rows.length);
   for(const p of rows)if(!committed.has(p.delivery))committed.set(p.delivery,1);
-  if(rows.length>2)advance(21000);else advance(1000);
+  if(slow && rows.length>2)advance(21000);else advance(1000);
   return Response.json({committed:rows.map(p=>p.delivery)});
  }});
  for(let i=0;i<12;i++){
@@ -1378,10 +1380,18 @@ test('ordinary replay learns a smaller durable page after repeated zero-progress
  state=await(await h.archive.get(ingress.recoveryKey(repo.id))).json();
  assert.equal([...h.archive.objects.keys()].filter(k=>k.startsWith('parked/100/pointers/')).length,0);
  assert.equal(committed.size,12);assert.ok([...committed.values()].every(n=>n===1));
- assert.equal(cleanup.length,12);assert.ok(sizes.includes(1) || sizes.includes(2));
+ assert.equal(cleanup.length,12);assert.deepEqual(sizes.slice(0,3),[12,6,3]);assert.ok(sizes.slice(3).every(n=>n===1));
+ assert.equal(state.pointers_page_limit,2);assert.equal(state.pointers_page_ceiling,2);assert.ok(state.pointers_page_ceiling_until>Date.now());
+ assert.equal(state.held_page_limit,undefined);assert.equal(state.held_page_ceiling,undefined);
  assert.equal((await(await h.archive.get(ingress.pointerKey(repo.id,delayed,true))).json()).retry_at,retry);
  assert.ok(await h.archive.get(ingress.bodyKey(repo.id,delayed.delivery)));assert.equal(committed.has(delayed.delivery),false);
  assert.equal(state.lease_until,0);
+ // A temporary slowdown must not impose a permanent throughput ceiling.
+ slow=false;advance(15*60000+1);
+ for(let i=0;i<24;i++){const p={repository:repo.name,delivery:'healthy-'+String(i).padStart(2,'0'),event:'check_run',received:Date.now(),key:'webhooks/healthy-'+i};await h.archive.put(p.key,'{}');await ingress.park(h.env,repo,p,'migration');}
+ for(let n=0;n<5 && [...h.archive.objects.keys()].some(k=>k.startsWith('parked/100/pointers/'));n++){advance(31000);await ingress.maintainIngress(h.env,repo);}
+ state=await(await h.archive.get(ingress.recoveryKey(repo.id))).json();assert.ok((state.pointers_page_limit ?? 100)>2);assert.equal(state.pointers_page_ceiling,undefined);
+ assert.equal(cleanup.length,36);assert.equal(committed.size,36);
 }));
 
 test('a reset after the learned lease claim preserves its limit and cursor',async()=>clock(async advance=>{
@@ -1413,19 +1423,20 @@ test('expired owners that lose every slow completion still converge without an a
  }});
  for(let i=0;i<16;i++){const p={repository:repo.name,delivery:'expired-page-'+String(i).padStart(2,'0'),event:'check_run',received:Date.now(),key:'webhooks/expired-page-'+i};await h.archive.put(p.key,'{}');await ingress.park(h.env,repo,p,'migration');}
  await ingress.maintainIngress(h.env,repo);
- const first=await(await h.archive.get(key)).json();assert.equal(first.pointers_last_pass,undefined);assert.equal(first.lease_limits.pointers,50);
+ const first=await(await h.archive.get(key)).json();assert.equal(first.pointers_last_pass,undefined);assert.equal(first.replay_inflight.limit,50);assert.equal(first.replay_inflight.lane,'pointers');
  for(let n=0;n<20 && [...h.archive.objects.keys()].some(k=>k.startsWith('parked/100/pointers/'));n++){
   advance(31000);await(await load('src/ingress.ts')).maintainIngress(h.env,repo);
  }
  assert.equal([...h.archive.objects.keys()].filter(k=>k.startsWith('parked/100/pointers/')).length,0);assert.equal(committed.size,16);
- const state=await(await h.archive.get(key)).json();assert.ok(state.pointers_page_limit<=2);assert.ok(state.pointers_page_ceiling<=2);
- assert.ok(sizes.includes(1)||sizes.includes(2));assert.equal(state.lease_until,0);
+ const state=await(await h.archive.get(key)).json();assert.equal(state.pointers_page_limit,2);assert.equal(state.pointers_page_ceiling,undefined);
+ assert.deepEqual(sizes.slice(0,6),[16,16,12,6,3,1]);assert.ok(sizes.slice(6).every(n=>n===1));assert.equal(state.lease_until,0);
+ assert.equal(state.held_page_limit,undefined);assert.equal(state.held_page_ceiling,undefined);
  for(let i=0;i<16;i++){const delivery='expired-page-'+String(i).padStart(2,'0');assert.ok(await h.archive.get(ingress.receiptKey(repo.id,delivery)));assert.equal(await h.archive.get(ingress.bodyKey(repo.id,delivery)),null);}
 }));
 
 test('learned limits grow only with fast full pages at the cap and respect caller limits',async()=>clock(async advance=>{
  const h=harness(),key=ingress.recoveryKey(repo.id),sizes=[];h.state.full=true;
- for(let i=0;i<24;i++)await deliver(h.env,'growth-'+String(i).padStart(2,'0'));h.state.full=false;
+ for(let i=0;i<80;i++)await deliver(h.env,'growth-'+String(i).padStart(2,'0'));h.state.full=false;
  await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
  await h.archive.put(key,JSON.stringify({pointers_page_limit:2,held_page_limit:1}));
  const list=h.archive.list;h.archive.list=async options=>{if(options.prefix==='parked/100/pointers/'&&options.startAfter!==undefined)sizes.push(options.limit);return list(options);};
@@ -1433,8 +1444,8 @@ test('learned limits grow only with fast full pages at the cap and respect calle
  for(let n=0;n<3;n++){assert.equal((await ingress.replayIngress(h.env,repo,{limit:1})).replayed,1);}
  assert.equal((await(await h.archive.get(key)).json()).pointers_page_limit,2,'smaller explicit requests cannot grow the cap');
  await ingress.maintainIngress(h.env,repo);advance(31000);await ingress.maintainIngress(h.env,repo);
- const state=await(await h.archive.get(key)).json();assert.ok(state.pointers_page_limit>2);assert.equal(state.held_page_limit,1);
- assert.ok(sizes.some(n=>n>2));assert.ok(sizes.every(n=>n<=50));assert.equal(h.state.applied.size,24);
+ const state=await(await h.archive.get(key)).json();assert.ok((state.pointers_page_limit ?? 100)>2);assert.equal(state.held_page_limit,1);
+ assert.ok(sizes.some(n=>n>2));assert.ok(sizes.every(n=>n<=50));assert.equal(h.state.applied.size,80);
 }));
 
 test('legacy CI deadline evidence is usable without penalizing a starved shared-budget lane',async()=>{
@@ -1444,10 +1455,78 @@ test('legacy CI deadline evidence is usable without penalizing a starved shared-
   held_last_pass:{replayed:0,failed:0,stopped:'deadline',page_size:10,page_limit:50,budget_ms:1000},
  }));
  const result=await ingress.replayIngress(h.env,repo,{limit:1});assert.equal(result.replayed,0);assert.equal(result.remaining,false);
- const state=await(await h.archive.get(key)).json();assert.equal(state.pointers_page_limit,4);assert.equal(state.pointers_page_ceiling,7);
+ const state=await(await h.archive.get(key)).json();assert.equal(state.pointers_page_limit,25);assert.equal(state.pointers_page_ceiling,undefined);
  assert.equal(state.held_page_limit,undefined);assert.equal(state.held_page_ceiling,undefined);
- assert.equal(state.lease_limits.pointers,1);assert.equal(state.lease_limits.held,undefined);
+ assert.equal(result.page_limit,1);assert.equal(state.replay_inflight,undefined);
 });
+
+test('an expired one-pointer admin probe does not reduce automatic replay or its other lane',async()=>clock(async advance=>{
+ const h=harness(),key=ingress.recoveryKey(repo.id);h.state.full=true;
+ for(let i=0;i<80;i++)await deliver(h.env,'cancelled-probe-'+i);h.state.full=false;
+ await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
+ const put=h.archive.put;let lost=true;h.archive.put=async(k,...args)=>{const value=await put(k,...args);if(k===key&&lost){lost=false;throw Error('cancelled admin claim');}return value;};
+ await assert.rejects(ingress.replayIngress(h.env,repo,{limit:1}),/cancelled admin claim/);assert.equal(h.state.applied.size,0);
+ const list=h.archive.list,sizes=[];h.archive.list=async options=>{if(options.prefix==='parked/100/pointers/'&&options.limit>1&&options.limit<=100)sizes.push(options.limit);return list(options);};
+ advance(61000);await ingress.maintainIngress(h.env,repo);
+ assert.deepEqual(sizes,[50,50]);assert.equal(h.state.applied.size,80);
+ const state=await(await h.archive.get(key)).json();for(const lane of ['pointers','held']){assert.equal(state[lane+'_page_limit'],undefined);assert.equal(state[lane+'_page_ceiling'],undefined);}
+}));
+
+test('an expired completion after progress recovers throughput without a ceiling or duplicate input',async()=>clock(async advance=>{
+ const h=harness(),key=ingress.recoveryKey(repo.id);h.state.full=true;for(let i=0;i<4;i++)await deliver(h.env,'completed-before-reset-'+i);h.state.full=false;
+ await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
+ const put=h.archive.put;let lost=true;h.archive.put=async(k,body,...args)=>{if(k===key&&lost&&JSON.parse(body).lease_until===0){lost=false;throw Error('lost final checkpoint');}return put(k,body,...args);};
+ await assert.rejects(ingress.maintainIngress(h.env,repo),/lost final checkpoint/);assert.equal(h.state.applied.size,4);
+ h.state.full=true;for(let i=0;i<200;i++)await deliver(h.env,'after-progress-'+i);h.state.full=false;
+ await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
+ advance(61000);await ingress.maintainIngress(h.env,repo);
+ const state=await(await h.archive.get(key)).json();assert.equal(h.state.applied.size,204);assert.ok([...h.state.applied.values()].every(n=>n===1));
+ assert.ok((state.pointers_page_limit ?? 100)>25);assert.equal(state.pointers_page_ceiling,undefined);assert.equal(state.held_page_limit,undefined);
+}));
+
+test('a full source does not attribute an expired claim to either unattempted lane',async()=>clock(async advance=>{
+ const h=harness(),key=ingress.recoveryKey(repo.id);h.state.full=true;await deliver(h.env,'still-full-adaptive');
+ await h.archive.put(key,JSON.stringify({lease_until:Date.now()-1,replay_inflight:{lane:'pointers',limit:50,kind:'cron'},pointers_page_limit:50,held_page_limit:50}));
+ advance(1000);await ingress.maintainIngress(h.env,repo);
+ const state=await(await h.archive.get(key)).json();assert.equal(state.pointers_page_limit,50);assert.equal(state.held_page_limit,50);assert.equal(state.replay_inflight,undefined);assert.equal(h.state.applied.size,0);
+}));
+
+test('both lanes retain their cadence and a lost handoff response preserves the completed lane',async()=>clock(async advance=>{
+ const h=harness(),key=ingress.recoveryKey(repo.id);h.state.full=true;
+ for(const d of ['handoff-normal','handoff-held'])await deliver(h.env,d);h.state.full=false;
+ await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
+ const held=(await(await h.archive.get(parked(h.archive,'handoff-held')[0])).json());
+ await h.archive.put(ingress.pointerKey(repo.id,held,true),JSON.stringify(held));await h.archive.delete(ingress.pointerKey(repo.id,held));
+ const put=h.archive.put;let lost=true;
+ h.archive.put=async(k,body,...args)=>{const value=await put(k,body,...args);if(k===key&&lost&&JSON.parse(body).replay_inflight?.lane==='held'){lost=false;throw Error('lost lane handoff acknowledgement');}return value;};
+ await ingress.maintainIngress(h.env,repo);
+ const pending=await(await h.archive.get(key)).json();assert.equal(pending.replay_inflight.lane,'held');assert.ok(pending.pointers_pass_completed_at);
+ assert.equal(h.state.applied.get('handoff-normal'),1);assert.equal(h.state.applied.has('handoff-held'),false);assert.ok(await h.archive.get(ingress.receiptKey(repo.id,'handoff-normal')));
+ advance(61000);await ingress.maintainIngress(h.env,repo);
+ assert.equal(h.state.applied.size,2);assert.ok([...h.state.applied.values()].every(n=>n===1));
+ const state=await(await h.archive.get(key)).json();assert.equal(state.pointers_page_limit,undefined);assert.equal(state.pointers_page_ceiling,undefined);assert.ok(state.held_pass_completed_at);
+ // An all-cooldown held lane still leaves time for normal input in this tick.
+ h.state.full=true;await deliver(h.env,'next-normal');await deliver(h.env,'cooldown-held');h.state.full=false;
+ await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
+ const p=await(await h.archive.get(parked(h.archive,'cooldown-held')[0])).json(),retry=Date.now()+3600000;
+ await h.archive.put(ingress.pointerKey(repo.id,p,true),JSON.stringify({...p,retry_at:retry}));await h.archive.delete(ingress.pointerKey(repo.id,p));
+ advance(31000);await ingress.maintainIngress(h.env,repo);
+ assert.equal(h.state.applied.get('next-normal'),1);assert.equal(h.state.applied.has('cooldown-held'),false);
+ assert.equal((await(await h.archive.get(ingress.pointerKey(repo.id,p,true))).json()).retry_at,retry);
+}));
+
+test('quiet held limits expire without successful full pages and optional selection failures do not delay input',async()=>clock(async advance=>{
+ const h=harness(),key=ingress.recoveryKey(repo.id);h.state.full=true;await deliver(h.env,'quiet-held');await deliver(h.env,'selection-fallback');h.state.full=false;
+ await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
+ const p=await(await h.archive.get(parked(h.archive,'quiet-held')[0])).json(),retry=Date.now()+3600000;
+ await h.archive.put(ingress.pointerKey(repo.id,p,true),JSON.stringify({...p,retry_at:retry}));await h.archive.delete(ingress.pointerKey(repo.id,p));
+ await h.archive.put(key,JSON.stringify({next_lane:'held',held_page_limit:1,held_page_limit_until:Date.now()+15*60000,held_page_ceiling:1,held_page_ceiling_until:Date.now()+15*60000}));
+ advance(16*60000);const list=h.archive.list;let failed=false;
+ h.archive.list=options=>{if(!failed&&options.limit===1){failed=true;throw Error('optional lane availability unavailable');}return list(options);};
+ await ingress.maintainIngress(h.env,repo);
+ const state=await(await h.archive.get(key)).json();assert.equal(failed,true);assert.equal(state.last_error,null);assert.equal(state.held_page_limit,undefined);assert.equal(state.held_page_ceiling,undefined);
+ assert.equal(h.state.applied.get('selection-fallback'),1);assert.equal(h.state.applied.has('quiet-held'),false);assert.equal((await(await h.archive.get(ingress.pointerKey(repo.id,p,true))).json()).retry_at,retry);
+}));
 
 test('lost cleanup acknowledgements cannot recreate committed CI pointers or replace receipts',async()=>clock(async advance=>{
  const f=repositoryFixture();await f.ready;
