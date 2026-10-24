@@ -2093,3 +2093,24 @@ test('raw-group drain rechecks a receipt lookup chained from an unawaited result
  h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{requests++;if(requests===2){entered();return secondResponse;}return Response.json({known:JSON.parse(init.body).ids});}});
  const group=lookup.runGroup([async()=>{void lookup.known(repo,'first').then(()=>lookup.known(repo,'second'));return 'member-returned';}]).then(v=>{finished=true;return v;});await secondEntered;await new Promise(r=>setImmediate(r));assert.equal(finished,false,'chained lookup must finish before the group releases ownership');answerSecond(Response.json({known:['second']}));assert.deepEqual(await group,['member-returned']);assert.equal(lookup.summary().known_lookups,2);assert.equal(lookup.summary().requests,2);assert.deepEqual(await lookup.runGroup([]),[]);
 });
+
+
+test('saturated repository maintenance cannot reject same-bucket transactional spill reads',async t=>{
+ const f=repositoryFixture();await f.ready;
+ await f.archive.put('resources/spill',JSON.stringify({id:'exact-large-id',observed:123,verified:456}));
+ const original=f.archive.put,stalled=[];f.archive.put=async(key,...args)=>{if(key!=='maintenance-stall')return original(key,...args);return new Promise(resolve=>stalled.push(resolve));};
+ t.mock.timers.enable({apis:['setTimeout']});
+ try{
+  const archive=f.state.maintenanceArchive;assert.equal(f.state.maintenanceArchive,archive);
+  const calls=Array.from({length:16},()=>assert.rejects(archive.put('maintenance-stall','body'),/timeout/));
+  await new Promise(setImmediate);t.mock.timers.tick(1500);await Promise.all(calls);
+  await assert.rejects(f.state.maintenanceArchive.get('resources/spill'),/busy/);
+  const scoped=Object.create(f.state);scoped.store={backend:'postgres',transactional:true};
+  assert.notEqual(scoped.transactionArchive,archive);assert.equal(scoped.transactionArchive,f.state.transactionArchive);
+  const rows=Array.from({length:8},()=>({data:JSON.stringify({$r2:'resources/spill'})})),values=[];
+  for await(const value of scoped.decodeRows(rows))values.push(value);
+  assert.equal(values.length,8);assert.ok(values.every(value=>value.id==='exact-large-id'&&value.observed===123&&value.verified===456));
+  for(const release of stalled)release(null);await new Promise(setImmediate);
+  assert.ok(await f.state.maintenanceArchive.get('resources/spill'));
+ }finally{t.mock.timers.reset();}
+});

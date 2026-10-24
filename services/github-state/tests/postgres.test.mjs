@@ -574,3 +574,21 @@ pg('concurrent raw receipt checks use one PostgreSQL read batch without entering
   assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,known.length);for(const table of['changes','jobs','resources'])assert.equal((await f.store.exec('SELECT COUNT(*) n FROM '+table)).one().n,0);
  }finally{await f.close();}
 });
+
+pg('transactional spill decoding and commit survive a saturated maintenance budget on the same bucket',async()=>{
+ const f=await postgresFixture(),release=[];
+ try{
+  const archive=f.env.ARCHIVE,put=archive.put;
+  f.objects.set('resources/spill',JSON.stringify({id:'90071992547409931234',observed:123,verified:456}));
+  archive.put=async(key,...args)=>key==='maintenance-stall'?new Promise(resolve=>release.push(resolve)):put(key,...args);
+  await Promise.all(Array.from({length:16},()=>assert.rejects(f.state.maintenanceArchive.put('maintenance-stall','body'),/monitoring I\/O timeout/)));
+  await assert.rejects(f.state.maintenanceArchive.get('resources/spill'),/monitoring I\/O busy/);
+  const decoded=await f.state.atomic(async state=>{
+   const values=[];for await(const value of state.decodeRows(Array.from({length:8},()=>({data:JSON.stringify({$r2:'resources/spill'})}))))values.push(value);
+   await state.store.exec('INSERT INTO demand VALUES(?,?)','independent-spill-read',123);
+   return values;
+  });
+  assert.equal(decoded.length,8);assert.ok(decoded.every(v=>v.id==='90071992547409931234'&&v.observed===123&&v.verified===456));
+  assert.equal((await f.store.exec('SELECT at FROM demand WHERE key=?','independent-spill-read')).one().at,123);
+ }finally{for(const done of release)done();await f.close();}
+});

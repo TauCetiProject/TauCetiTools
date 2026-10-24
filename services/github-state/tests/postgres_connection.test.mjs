@@ -244,3 +244,15 @@ test('connect timeout timings show no BEGIN, owner or application work and never
   assert.equal(row.transaction_ms,10000);assert.equal(row.outcome,'failed');assert.equal(row.reason,'connect_timeout');
  }finally{t.mock.timers.reset();}
 });
+
+
+test('cleanup logs correlate with the admission and transaction that performed them',async t=>{
+ t.mock.timers.enable({apis:['Date','setTimeout'],now:4000});
+ const f=fixture([{phase:'apply',stalled:true}]);
+ try{
+  await assert.rejects(f.store.transaction(write),StoreUnavailable);
+  assert.equal(f.cleanupLogs[0].transaction_id,f.logs[0].transaction_id);
+  assert.equal(f.logs[0].admission_cleanup_ms,0);
+  assert.equal(f.logs[0].admission_started_at,4000);
+ }finally{t.mock.timers.reset();}
+});

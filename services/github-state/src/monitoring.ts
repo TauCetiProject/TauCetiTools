@@ -156,17 +156,20 @@ export async function within<T>(work:Promise<T>,ms:number):Promise<T> {
   finally {if(timer!==undefined)clearTimeout(timer);}
 }
 // A timeout bounds the caller's wait, not the R2 operation. Keep timed-out
-// work in the same per-bucket budget until it actually settles. This ceiling
-// allows the existing ten-receipt group plus other maintenance; it never adds
-// concurrency or retries. A saturated budget fails closed before more I/O.
-const timedBuckets=new WeakMap<R2Bucket,R2Bucket>();
-const MAX_MAINTENANCE_IO=16;
-export function timedBucket(bucket:R2Bucket):R2Bucket {
-  const cached=timedBuckets.get(bucket);if(cached)return cached;
+// work in its owner's budget until it actually settles. Repository maintenance
+// and transactional reads have separate owners. Stateless callers omit an owner
+// to keep the budget invocation-local instead of retaining canceled request I/O.
+const timedBuckets=new WeakMap<object,WeakMap<R2Bucket,R2Bucket>>();
+const MAX_TIMED_BUCKET_IO=16;
+const BODY_READS=new Set<PropertyKey>(['text','json','arrayBuffer','blob','bytes']);
+export function timedBucket(bucket:R2Bucket,owner?:object):R2Bucket {
+  let cache=owner?timedBuckets.get(owner):undefined;
+  if(owner&&!cache){cache=new WeakMap();timedBuckets.set(owner,cache);}
+  const cached=cache?.get(bucket);if(cached)return cached;
   let pending=0;
   const cancelBody=async(object:any):Promise<void>=>{try{await object?.body?.cancel();}catch{/* A reader can own the stream; its pending operation retains its slot. */}};
-  const tracked=async<T>(work:()=>Promise<T>,late?:(value:T)=>Promise<void>):Promise<T>=>{
-    if(pending>=MAX_MAINTENANCE_IO)throw new Error('monitoring I/O busy');
+  const tracked=async<T>(work:()=>Promise<T>,late?:(value:T)=>Promise<void>,refused?:()=>void):Promise<T>=>{
+    if(pending>=MAX_TIMED_BUCKET_IO){refused?.();throw new Error('monitoring I/O busy');}
     pending++;
     let expired=false;
     const completion=Promise.resolve().then(work).then(async result=>{if(expired&&late)await late(result);return result;}).finally(()=>{pending--;});
@@ -180,9 +183,11 @@ export function timedBucket(bucket:R2Bucket):R2Bucket {
       if(key!=='get' || !result)return result;
       return new Proxy(result,{get(object,property){
         const member=Reflect.get(object,property,object);
-        return typeof member==='function'?(...params:any[])=>tracked(()=>Promise.resolve(member.apply(object,params))):member;
+        if(typeof member!=='function')return member;
+        if(!BODY_READS.has(property))return member.bind(object);
+        return (...params:any[])=>tracked(()=>Promise.resolve(member.apply(object,params)),undefined,()=>{void cancelBody(object);});
       }});
     };
   }});
-  timedBuckets.set(bucket,proxy);timedBuckets.set(proxy,proxy);return proxy;
+  cache?.set(bucket,proxy);cache?.set(proxy,proxy);return proxy;
 }

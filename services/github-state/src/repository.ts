@@ -55,6 +55,8 @@ export class RepositoryState extends DurableObject<Env> {
   private revisionState:{value?:number}={};
   private readRevision?:number;
   private owner:RepositoryState=this;
+  private maintenanceIOScope={};
+  private transactionIOScope={};
   private mutationState={active:0,blocked:false};
   private pendingChanges?:{revision:number,at:number,kind:string,id:string,tombstone:number}[];
   private repositoryMemo?:any;
@@ -478,7 +480,7 @@ export class RepositoryState extends DurableObject<Env> {
   }
   async decode(text: string): Promise<any> {
     const data = JSON.parse(text);
-    if (data?.$r2) { const object = await (this.store.transactional && this.store.backend==='postgres'?this.maintenanceArchive:this.env.ARCHIVE).get(data.$r2); if (!object) throw new Error('resource unavailable'); return object.json(); }
+    if (data?.$r2) { const object = await (this.store.transactional && this.store.backend==='postgres'?this.transactionArchive:this.env.ARCHIVE).get(data.$r2); if (!object) throw new Error('resource unavailable'); return object.json(); }
     if(data && typeof data==='object' && !Array.isArray(data))delete data.__tauceti_received_at;
     return data;
   }
@@ -1469,7 +1471,8 @@ export class RepositoryState extends DurableObject<Env> {
     const flight=this.prepareStorage(runExpiry);this.storageFlight=flight;
     try {await flight;this.traceRepair('storage_prepared');}finally {this.activeOperations--;if(this.storageFlight===flight)this.storageFlight=undefined;}
   }
-  get maintenanceArchive():R2Bucket {return timedBucket(this.env.ARCHIVE);}
+  get maintenanceArchive():R2Bucket {return timedBucket(this.env.ARCHIVE,this.owner.maintenanceIOScope);}
+  get transactionArchive():R2Bucket {return timedBucket(this.env.ARCHIVE,this.owner.transactionIOScope);}
   startStorageMaintenance():void {
     if(this.migrationHeld() || this.mutationState.blocked)return;
     const task=this.storageMaintenance(false).catch(error=>this.noteFailure('storage_maintenance',error));
