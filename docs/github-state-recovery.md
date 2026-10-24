@@ -36,8 +36,10 @@ every member is waiting for a receipt or has completed. Varied body-read times
 therefore do not split a single-target group into small timed batches. Members
 that need no receipt or fail before lookup still release their group slot.
 Multi-target members can require another lookup round for a later repository.
+Due gaps remain sequential one-member groups and flush their lookup immediately;
+only direct helper calls outside a group retain the 20ms fallback window.
 This reduces database requests without applying events
-or make GitHub requests. Failed or malformed lookups leave deliveries unknown,
+or making GitHub requests. Failed or malformed lookups leave deliveries unknown,
 so they take the existing durable-parking path. A failed request can park every
 member of that batch, adding bounded pointer work for already-committed input.
 The raw state records timestamped `receipt_lookup` counters for lookups,
@@ -46,6 +48,12 @@ failed requests, largest batch, and cumulative request time. They describe the
 last recorded invocation; earlier counters can remain visible during an active
 lease. Request time sums overlapping requests and is not wall-clock latency.
 These are read-operation counters, not semantic change counts.
+`groups` and `group_tasks` count dispatched recovery groups and their non-CI
+members; `rounds` counts group-triggered flushes. `group_ms` sums their elapsed
+time, including body reads and receipt/parking work. `barrier_wait_ms` sums
+each lookup's wait before its flush, so it can exceed group wall time. The
+barrier puts a slow body before other members' post-lookup work; compare these
+counters and raw objects examined per pass before claiming improved throughput.
 The existing lease, gap cooldowns and cooperative
 dispatch budget remain in force; batching provides no hard completion deadline.
 

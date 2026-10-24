@@ -22,16 +22,18 @@ export const controlKey = (repo: string) => `control/${repo}/ingress.json`;
 // each original body. A group flushes once every member is waiting or done,
 // independent of body-read latency; unknown results still park durably.
 export function rawReceiptLookup(env: Env) {
-  type Waiting = { delivery: string; resolve: (known: boolean) => void };
+  type Waiting = { delivery: string; queuedAt?: number; resolve: (known: boolean) => void };
   type Pending = { repo: Repository; waiting: Waiting[]; timer?: ReturnType<typeof setTimeout> };
   const pending = new Map<string, Pending>();
   let grouped = false, active = 0, waiting = 0, outstanding = 0;
-  const stats = { lookups: 0, requests: 0, requested_ids: 0, known_lookups: 0, failures: 0, largest_batch: 0, request_ms: 0 };
+  let groupLookupsDone: (() => void) | undefined;
+  const stats = { lookups: 0, requests: 0, requested_ids: 0, known_lookups: 0, failures: 0, largest_batch: 0, request_ms: 0, groups: 0, group_tasks: 0, rounds: 0, group_ms: 0, barrier_wait_ms: 0 };
   const flush = async (batch: Pending): Promise<void> => {
     if (pending.get(batch.repo.id) !== batch) return;
     pending.delete(batch.repo.id);
     if (batch.timer !== undefined) clearTimeout(batch.timer);
     const ids = [...new Set(batch.waiting.map(v => v.delivery))], requested = new Set(ids), known = new Set<string>(), began = Date.now();
+    for (const item of batch.waiting) if (item.queuedAt !== undefined) stats.barrier_wait_ms += Math.max(0, began - item.queuedAt);
     stats.requests++; stats.requested_ids += ids.length; stats.largest_batch = Math.max(stats.largest_batch, ids.length);
     try {
       const response = await stub(env.REPOSITORIES, batch.repo.id).fetch('https://internal/storage/deliveries', { method: 'POST', body: JSON.stringify({ ids, repository_id: batch.repo.id }) });
@@ -44,7 +46,7 @@ export function rawReceiptLookup(env: Env) {
     for (const item of batch.waiting) { const found = known.has(item.delivery); if (found) stats.known_lookups++; item.resolve(found); }
   };
   const flushWaiting = (): void => {
-    if (grouped && active > 0 && waiting === active) for (const batch of [...pending.values()]) void flush(batch);
+    if (grouped && waiting >= active && pending.size) { stats.rounds++; for (const batch of [...pending.values()]) void flush(batch); }
   };
   return {
     known(repo: Repository, delivery: string): Promise<boolean> {
@@ -55,22 +57,25 @@ export function rawReceiptLookup(env: Env) {
         if (inGroup) waiting++;
         let batch = pending.get(repo.id);
         if (!batch) { batch = { repo, waiting: [] }; pending.set(repo.id, batch); if (!inGroup) { const scheduled = batch; batch.timer = setTimeout(() => { void flush(scheduled); }, 20); } }
-        batch.waiting.push({ delivery, resolve: known => { outstanding--; if (inGroup) waiting--; resolve(known); } });
-        if (batch.waiting.length >= 100) void flush(batch);
+        batch.waiting.push({ delivery, queuedAt: inGroup ? Date.now() : undefined, resolve: known => { outstanding--; if (inGroup) waiting--; resolve(known); flushWaiting(); if (outstanding === 0) groupLookupsDone?.(); } });
+        if (batch.waiting.length >= 100) { if (inGroup) stats.rounds++; void flush(batch); }
         else flushWaiting();
       });
     },
     async runGroup<T>(tasks: (() => Promise<T>)[]): Promise<T[]> {
       if (grouped || outstanding || tasks.length > 100) throw new Error('raw_receipt_group_invalid');
-      grouped = true; active = tasks.length;
+      grouped = true; active = tasks.length; stats.groups++; stats.group_tasks += tasks.length; const began = Date.now();
       try {
         const results = await Promise.allSettled(tasks.map(async task => {
           try { return await task(); } finally { active--; flushWaiting(); }
         }));
+        // A caller that deliberately starts a lookup without awaiting it must
+        // not leave I/O running after this group releases its owner.
+        if (outstanding) await new Promise<void>(resolve => { groupLookupsDone = resolve; flushWaiting(); });
         const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
         if (failed) throw failed.reason;
         return results.map(result => (result as PromiseFulfilledResult<T>).value);
-      } finally { grouped = false; }
+      } finally { stats.group_ms += Date.now() - began; groupLookupsDone = undefined; grouped = false; }
     },
     summary() { return { ...stats }; },
   };
