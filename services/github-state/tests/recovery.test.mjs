@@ -1113,9 +1113,11 @@ test('raw maintenance dispositions CI deliveries from listed metadata alone and 
 
 test('raw maintenance recovers independent deliveries concurrently and parks every one',async()=>clock(async()=>{
  const h=cronHarness();for(let i=0;i<25;i++)await h.archive.put('webhooks/2026-10-12/lost-'+String(i).padStart(2,'0')+'.json','{"repository":{"id":100}}',{customMetadata:{event:'issue_comment'}});
- let inflight=0,peak=0;h.env.REPOSITORIES.get=()=>({fetch:async()=>{inflight++;peak=Math.max(peak,inflight);await new Promise(r=>setImmediate(r));inflight--;return Response.json({known:[]});}});
+ let inflight=0,peak=0;const batches=[],get=h.archive.get;h.archive.get=async key=>{if(!key.startsWith('webhooks/'))return get(key);inflight++;peak=Math.max(peak,inflight);await new Promise(r=>setImmediate(r));inflight--;return get(key);};
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{assert.equal(new URL(url).pathname,'/storage/deliveries');batches.push(JSON.parse(init.body).ids);return Response.json({known:[]});}});
  await ingress.maintainRaw(h.env,()=>[repo]);
  assert.ok(peak>1,'peak '+peak);assert.ok(JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes).last_completed);
+ assert.ok(batches.length<25);assert.equal(batches.flat().length,25);
  for(let i=0;i<25;i++)assert.equal(parked(h.archive,'lost-'+String(i).padStart(2,'0')).length,1);
 }));
 
@@ -1967,4 +1969,53 @@ test('held-lane known receipt promotion honors the original retry deadline',asyn
  const original=h.env.REPOSITORIES.get;let events=0;h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{if(new URL(url).pathname!=='/storage/deliveries')events++;return original().fetch(url,init);}});
  assert.equal((await drain(h.env,repo,{held:true})).replayed,0);assert.ok(await h.archive.get(held));assert.equal(await h.archive.get(receiptKey(repo.id,p.delivery)),null);
  advance(10001);const done=await drain(h.env,repo,{held:true});assert.equal(done.known_receipts,1);assert.equal(done.replayed,1);assert.equal(done.failed,0);assert.equal(events,0);assert.equal(h.state.applied.get(p.delivery),1);assert.equal(await h.archive.get(held),null);
+}));
+
+test('raw receipt lookups coalesce concurrent reads without applying input',async()=>{
+ const h=harness(),batches=[];h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{assert.equal(new URL(url).pathname,'/storage/deliveries');const input=JSON.parse(init.body);assert.equal(input.repository_id,repo.id);batches.push(input.ids);return Response.json({known:input.ids.filter(id=>id.endsWith('0'))});}});
+ const lookup=ingress.rawReceiptLookup(h.env),ids=Array.from({length:25},(_,i)=>'legacy-'+i),results=await Promise.all(ids.map(id=>lookup.known(repo,id)));
+ assert.deepEqual(batches,[ids]);assert.deepEqual(results,ids.map(id=>id.endsWith('0')));assert.equal(h.state.applied.size,0);assert.equal(h.archive.objects.size,0);assert.deepEqual({...lookup.summary(),request_ms:0},{lookups:25,requests:1,requested_ids:25,known_lookups:3,failures:0,largest_batch:25,request_ms:0});
+});
+
+test('raw receipt batches stay bounded and deduplicate only within the same repository',async()=>{
+ const h=harness(),other={...repo,id:'101',name:'org/other'},batches=[];h.env.REPOSITORIES.get=id=>({fetch:async(url,init)=>{assert.equal(new URL(url).pathname,'/storage/deliveries');const input=JSON.parse(init.body);assert.equal(input.repository_id,id);assert.ok(input.ids.length<=100);assert.equal(new Set(input.ids).size,input.ids.length);batches.push({id,ids:input.ids});return Response.json({known:id===repo.id?input.ids:[]});}});
+ const lookup=ingress.rawReceiptLookup(h.env),calls=Array.from({length:215},(_,i)=>lookup.known(repo,'id-'+i));calls.push(lookup.known(repo,'same'),lookup.known(repo,'same'),lookup.known(other,'same'));
+ const result=await Promise.all(calls);assert.ok(result.slice(0,-1).every(Boolean));assert.equal(result.at(-1),false);assert.equal(batches.filter(b=>b.id===repo.id).length,3);assert.equal(batches.filter(b=>b.id===other.id).length,1);assert.equal(lookup.summary().largest_batch,100);assert.equal(lookup.summary().requested_ids,217);assert.equal(lookup.summary().lookups,218);
+});
+
+for(const kind of['transport','http','malformed'])test('raw receipt '+kind+' failure stays unknown and completes every waiting caller',async()=>{
+ const h=harness();let cancelled=false;h.env.REPOSITORIES.get=()=>({fetch:async()=>{if(kind==='transport')throw Error('fixture transport failure');if(kind==='http')return new Response(new ReadableStream({cancel(){cancelled=true;}}),{status:503});return Response.json({other:[]});}});
+ const lookup=ingress.rawReceiptLookup(h.env);assert.deepEqual(await Promise.all(['a','b','c'].map(id=>lookup.known(repo,id))),[false,false,false]);assert.equal(lookup.summary().failures,1);assert.equal(lookup.summary().known_lookups,0);assert.equal(cancelled,kind==='http');assert.equal(h.state.applied.size,0);
+});
+
+test('raw receipt response cannot acknowledge a different or malformed delivery',async()=>{
+ const h=harness();h.env.REPOSITORIES.get=()=>({fetch:async()=>Response.json({known:['other',null,1,'valid']})});const lookup=ingress.rawReceiptLookup(h.env);assert.deepEqual(await Promise.all(['valid','unknown'].map(id=>lookup.known(repo,id))),[true,false]);assert.equal(lookup.summary().known_lookups,1);
+});
+
+test('raw receipt coalescer flushes later groups independently and keeps only bounded counters',async()=>{
+ const h=harness();let calls=0;h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{calls++;return Response.json({known:JSON.parse(init.body).ids});}});const lookup=ingress.rawReceiptLookup(h.env);
+ assert.deepEqual(await Promise.all(['a','b'].map(id=>lookup.known(repo,id))),[true,true]);assert.equal(await lookup.known(repo,'c'),true);assert.equal(calls,2);const summary=lookup.summary();summary.lookups=999;assert.equal(lookup.summary().lookups,3);assert.ok(Object.values(lookup.summary()).every(Number.isFinite));
+});
+
+test('legacy raw recovery batches committed receipts, parks unknown input, and retains original body hashes',async()=>clock(async()=>{
+ const h=cronHarness(),batches=[];for(let i=0;i<25;i++){const id='legacy-batch-'+String(i).padStart(2,'0'),text=JSON.stringify({repository:{id:100},value:i});await h.archive.put('webhooks/2026-10-20/'+id+'.json',text,{customMetadata:{event:'issue_comment',sha256:sha(Buffer.from(text)),received:'1792000000123'}});if(i%2===0)h.state.applied.set(id,1);}
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{assert.equal(new URL(url).pathname,'/storage/deliveries','raw maintenance never applies events or dispatches inventory');const ids=JSON.parse(init.body).ids;batches.push(ids);return Response.json({known:ids.filter(id=>h.state.applied.has(id))});}});
+ await ingress.maintainRaw(h.env,()=>[repo]);assert.ok(batches.length<25);assert.equal(batches.flat().length,25);
+ for(let i=0;i<25;i++){const id='legacy-batch-'+String(i).padStart(2,'0'),raw=h.archive.objects.get('webhooks/2026-10-20/'+id+'.json');assert.ok(raw);if(i%2===0){const receipt=JSON.parse(h.archive.objects.get(ingress.receiptKey(repo.id,id)).bytes);assert.equal(receipt.source,'sql_receipt');assert.equal(parked(h.archive,id).length,0);assert.equal(h.state.applied.get(id),1);}else{const p=JSON.parse(h.archive.objects.get(parked(h.archive,id)[0]).bytes);assert.equal(p.received,1792000000123);assert.equal(p.sha256,raw.customMetadata.sha256);assert.equal(sha(h.archive.objects.get(p.key).bytes),p.sha256);assert.equal(h.state.applied.has(id),false);}}
+ const s=JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes);assert.equal(s.receipt_lookup.lookups,25);assert.equal(s.receipt_lookup.known_lookups,13);assert.ok(s.last_completed);assert.deepEqual(s.gaps,{count:0,truncated:false});
+}));
+
+test('lost raw receipt lookup safely parks input and a later committed lookup promotes without replay',async()=>clock(async advance=>{
+ const h=cronHarness(),id='lost-raw-batch';await h.archive.put('webhooks/2026-10-20/'+id+'.json','{"repository":{"id":100}}',{customMetadata:{event:'issue_comment'}});h.env.REPOSITORIES.get=()=>({fetch:async()=>{throw Error('lost read response');}});
+ await ingress.maintainRaw(h.env,()=>[repo]);assert.equal(parked(h.archive,id).length,1);assert.equal(h.archive.objects.has(ingress.receiptKey(repo.id,id)),false);assert.equal(h.state.applied.size,0);assert.equal(JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes).receipt_lookup.failures,1);
+ // The first pass only parked. Simulate an independently committed application;
+ // the second pass resolves its existing proof without entering /event.
+ h.state.applied.set(id,1);h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{assert.equal(new URL(url).pathname,'/storage/deliveries');return Response.json({known:JSON.parse(init.body).ids});}});advance(61000);await ingress.maintainRaw(h.env,()=>[repo]);assert.ok(h.archive.objects.has(ingress.receiptKey(repo.id,id)));assert.equal(h.state.applied.get(id),1);
+}));
+
+test('partial raw receipt publication retains a retry gap and restarts without publishing semantic changes',async()=>clock(async advance=>{
+ const h=cronHarness();for(const id of['publish-a','publish-b','publish-c']){await h.archive.put('webhooks/2026-10-20/'+id+'.json','{"repository":{"id":100}}',{customMetadata:{event:'issue_comment'}});h.state.applied.set(id,1);}
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{assert.equal(new URL(url).pathname,'/storage/deliveries');return Response.json({known:JSON.parse(init.body).ids});}});h.archive.failures.push((op,key)=>op==='put'&&key===ingress.receiptKey(repo.id,'publish-b'));
+ await ingress.maintainRaw(h.env,()=>[repo]);assert.ok(h.archive.objects.has(ingress.receiptKey(repo.id,'publish-a')));assert.ok(h.archive.objects.has(ingress.receiptKey(repo.id,'publish-c')));assert.equal(h.archive.objects.has(ingress.receiptKey(repo.id,'publish-b')),false);const gap='control/raw-gaps/publish-b.json',before=JSON.parse(h.archive.objects.get(gap).bytes);assert.equal(before.failures,1);assert.ok(before.retry_at>Date.now());
+ advance(61000);await ingress.maintainRaw(h.env,()=>[repo]);assert.ok(h.archive.objects.has(ingress.receiptKey(repo.id,'publish-b')));assert.equal(h.archive.objects.has(gap),false);for(const id of h.state.applied.keys()){assert.equal(h.state.applied.get(id),1);assert.equal(parked(h.archive,id).length,0);assert.ok(h.archive.objects.has('webhooks/2026-10-20/'+id+'.json'));}
 }));

@@ -17,6 +17,44 @@ const pad = (n: number) => String(Math.max(0, Math.floor(n))).padStart(15, '0');
 export const pointerKey = (repo: string, p: EventPointer, held = false) => `parked/${repo}/${held ? 'held' : 'pointers'}/${pad(p.received)}-${p.delivery}.json`;
 export const bodyKey = (repo: string, delivery: string) => `parked/${repo}/bodies/${delivery}.json`;
 export const controlKey = (repo: string) => `control/${repo}/ingress.json`;
+
+// Legacy raw objects lack target metadata, so targeting still reads and hashes
+// each original body. Coalesce the concurrent group's receipt checks only;
+// unknown results keep the existing durable-parking path.
+export function rawReceiptLookup(env: Env) {
+  type Waiting = { delivery: string; resolve: (known: boolean) => void };
+  type Pending = { repo: Repository; waiting: Waiting[]; timer?: ReturnType<typeof setTimeout> };
+  const pending = new Map<string, Pending>();
+  const stats = { lookups: 0, requests: 0, requested_ids: 0, known_lookups: 0, failures: 0, largest_batch: 0, request_ms: 0 };
+  const flush = async (batch: Pending): Promise<void> => {
+    if (pending.get(batch.repo.id) !== batch) return;
+    pending.delete(batch.repo.id);
+    if (batch.timer !== undefined) clearTimeout(batch.timer);
+    const ids = [...new Set(batch.waiting.map(v => v.delivery))], requested = new Set(ids), known = new Set<string>(), began = Date.now();
+    stats.requests++; stats.requested_ids += ids.length; stats.largest_batch = Math.max(stats.largest_batch, ids.length);
+    try {
+      const response = await stub(env.REPOSITORIES, batch.repo.id).fetch('https://internal/storage/deliveries', { method: 'POST', body: JSON.stringify({ ids, repository_id: batch.repo.id }) });
+      if (!response.ok) { await response.body?.cancel(); throw new Error('raw_receipt_lookup_unavailable'); }
+      const result: any = await response.json();
+      if (!Array.isArray(result?.known)) throw new Error('raw_receipt_lookup_invalid');
+      for (const id of result.known) if (typeof id === 'string' && requested.has(id)) known.add(id);
+    } catch { stats.failures++; /* An unavailable read never becomes an application receipt. */ }
+    stats.request_ms += Date.now() - began;
+    for (const item of batch.waiting) { const found = known.has(item.delivery); if (found) stats.known_lookups++; item.resolve(found); }
+  };
+  return {
+    known(repo: Repository, delivery: string): Promise<boolean> {
+      stats.lookups++;
+      return new Promise(resolve => {
+        let batch = pending.get(repo.id);
+        if (!batch) { batch = { repo, waiting: [] }; pending.set(repo.id, batch); const scheduled = batch; batch.timer = setTimeout(() => { void flush(scheduled); }, 20); }
+        batch.waiting.push({ delivery, resolve });
+        if (batch.waiting.length >= 100) void flush(batch);
+      });
+    },
+    summary() { return { ...stats }; },
+  };
+}
 // Durable storage state. At the size limit Cloudflare rejects the commit after
 // the handler returns and resets the object, so the object cannot record that
 // it is full; whoever observes the failure records it here instead.
@@ -223,7 +261,7 @@ export async function backlog(env: Env, repo: Repository, publicStatus = false):
 // Reconcile one retained raw object before allowing its expiry. This also
 // recovers deliveries whose queue message reached the DLQ or was never sent.
 // Unavailable data is a gap, never an application receipt.
-export async function retainRaw(env: Env, object: R2Object, targets: (payload: any, event: string) => Repository[]): Promise<boolean> {
+export async function retainRaw(env: Env, object: R2Object, targets: (payload: any, event: string) => Repository[], receiptLookup?: (repo: Repository, delivery: string) => Promise<boolean>): Promise<boolean> {
   const delivery = object.key.slice(object.key.lastIndexOf('/') + 1).replace(/\.json$/, '');
   if (object.customMetadata?.targets && object.customMetadata.sha256) {
     const ids:unknown = JSON.parse(object.customMetadata.targets);
@@ -261,8 +299,11 @@ export async function retainRaw(env: Env, object: R2Object, targets: (payload: a
     // A store outage cannot prevent pinning the still-unapplied input.
     let known = false;
     try {
-      const response = await stub(env.REPOSITORIES,repo.id).fetch('https://internal/storage/deliveries',{method:'POST',body:JSON.stringify({ids:[delivery],repository_id:repo.id})});
-      if(response.ok) known = ((await response.json() as any).known || []).includes(delivery);
+      if (receiptLookup) known = await receiptLookup(repo, delivery);
+      else {
+        const response = await stub(env.REPOSITORIES,repo.id).fetch('https://internal/storage/deliveries',{method:'POST',body:JSON.stringify({ids:[delivery],repository_id:repo.id})});
+        if(response.ok) known = ((await response.json() as any).known || []).includes(delivery);
+      }
     } catch {}
     if(known) {await env.ARCHIVE.put(receiptKey(repo.id,delivery),JSON.stringify({delivery,committed_at:Date.now(),source:'sql_receipt'}),{onlyIf:{etagDoesNotMatch:'*'}});continue;}
     const pointer = { key: object.key, delivery, event, repository: repo.name, received: Number(body.customMetadata?.received) || object.uploaded.getTime() };
@@ -283,6 +324,7 @@ export async function maintainRaw(env: Env, targets: (payload: any, event: strin
   if (state.lease_until > began || state.next_retry > began) return;
   const claim = await env.ARCHIVE.put(key, JSON.stringify({ ...state, last_attempt: began, lease_until: began + 60000 }), { onlyIf: object ? { etagMatches: object.etag } : { etagDoesNotMatch: '*' } });
   if (!claim) return;
+  const receipts = rawReceiptLookup(env);
   let examined=0,deleted=0,bytes=0;
   // A failed raw object lies behind the main cursor. Retry a small independent
   // keyset page before scanning more history, under the same durable lease.
@@ -296,7 +338,7 @@ export async function maintainRaw(env: Env, targets: (payload: any, event: strin
     try {
       const source=typeof raw==='string'?await env.ARCHIVE.head(raw):raw;
       if(!source)throw new Error('raw_body_unavailable:'+rawKey);
-      if(!CI_EVENTS.has(source.customMetadata?.event ?? ''))await retainRaw(env,source,targets);
+      if(!CI_EVENTS.has(source.customMetadata?.event ?? ''))await retainRaw(env,source,targets,receipts.known);
       if(gap)await env.ARCHIVE.delete(gapKey);
       if(typeof raw!=='string')expired.push(raw);
       return true;
@@ -378,6 +420,7 @@ export async function maintainRaw(env: Env, targets: (payload: any, event: strin
     state.last_error = error instanceof Error ? error.message.slice(0, 200) : classify(error);
     state.next_retry = began + 60000;
   }
+  state.receipt_lookup = receipts.summary();
   const completed=await env.ARCHIVE.put(key, JSON.stringify({ ...state, last_attempt: began, lease_until: 0 }), { onlyIf: { etagMatches: claim.etag } });
   if(completed && !state.last_error) await env.ARCHIVE.put('control/retention/raw_webhooks.json',JSON.stringify({at:Date.now(),after:state.after,examined,deleted,bytes,completed:state.last_completed ?? null,recovery_owned:true}));
 }

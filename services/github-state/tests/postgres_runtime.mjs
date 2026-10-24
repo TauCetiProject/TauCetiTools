@@ -5,12 +5,13 @@ import {initializeSchema} from '../scripts/postgres-schema.mjs';
 import {neon,Client,types} from '@neondatabase/serverless';
 types.setTypeParser(20,value=>Number(value));
 types.setTypeParser(1700,value=>Number(value));
-const bundle=await build({entryPoints:['src/repository.ts','src/repository_store.ts'],bundle:true,platform:'node',format:'esm',write:false,outdir:'virtual',plugins:[{
+const bundle=await build({entryPoints:['src/repository.ts','src/repository_store.ts','src/ingress.ts'],bundle:true,platform:'node',format:'esm',write:false,outdir:'virtual',plugins:[{
  name:'context',setup(b){b.onResolve({filter:/^cloudflare:workers$/},()=>({path:'context',namespace:'fixture'}));b.onLoad({filter:/.*/,namespace:'fixture'},()=>({contents:'export class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}}',loader:'js'}));}
 }]});
 const imported=await Promise.all(bundle.outputFiles.map(file=>import('data:text/javascript;base64,'+Buffer.from(file.text+'\n//# sourceURL=postgres-repository-fixture.mjs').toString('base64'))));
 export const {RepositoryState}=imported.find(m=>m.RepositoryState);
 export const {PostgresStore,SQLiteStore,postgresSQL,Rows,columns}=imported.find(m=>m.PostgresStore);
+export const {rawReceiptLookup}=imported.find(m=>m.rawReceiptLookup);
 export async function postgresFixture({configured=true}={}) {
  const credentials=testCredentials();
  const admin=new Client(credentials.migration.toString());await admin.connect();

@@ -29,6 +29,17 @@ out-of-scope events get digest-bearing dispositions under `invalid/`. Missing
 bodies, digest mismatches, or absent event metadata remain precise gaps under
 `control/raw-gaps/`; their source is retained. No GitHub refetch repairs a gap.
 
+Legacy raw recovery coalesces receipt lookups arriving within 20 milliseconds
+into repository-specific, read-only requests of at most 100 distinct delivery
+IDs. Body verification and targeting still precede the lookup. This reduces
+database requests within the existing groups of 25; it does not apply events
+or make GitHub requests. Failed or malformed lookups leave deliveries unknown,
+so they take the existing durable-parking path. The prepared raw state records
+`receipt_lookup` counters for lookups, requests, known results, failed requests,
+largest batch, and cumulative request time. These are read-operation counters,
+not semantic change counts. The existing lease, gap cooldowns and cooperative
+dispatch budget remain in force; batching provides no hard completion deadline.
+
 An event response waits for SQL durability and then records a durable R2
 application receipt under `receipts/<repository>/<delivery>.json`. Replay checks
 that receipt before reading a body or applying again. SQL receipt expiry first
