@@ -261,7 +261,7 @@ export async function backlog(env: Env, repo: Repository, publicStatus = false):
 // Reconcile one retained raw object before allowing its expiry. This also
 // recovers deliveries whose queue message reached the DLQ or was never sent.
 // Unavailable data is a gap, never an application receipt.
-export async function retainRaw(env: Env, object: R2Object, targets: (payload: any, event: string) => Repository[], receiptLookup?: (repo: Repository, delivery: string) => Promise<boolean>): Promise<boolean> {
+export async function retainRaw(env: Env, object: R2Object, targets: (payload: any, event: string) => Repository[], receiptLookup: (repo: Repository, delivery: string) => Promise<boolean>): Promise<boolean> {
   const delivery = object.key.slice(object.key.lastIndexOf('/') + 1).replace(/\.json$/, '');
   if (object.customMetadata?.targets && object.customMetadata.sha256) {
     const ids:unknown = JSON.parse(object.customMetadata.targets);
@@ -298,13 +298,7 @@ export async function retainRaw(env: Env, object: R2Object, targets: (payload: a
     // Promote a legacy committed SQL receipt without re-parking or replay.
     // A store outage cannot prevent pinning the still-unapplied input.
     let known = false;
-    try {
-      if (receiptLookup) known = await receiptLookup(repo, delivery);
-      else {
-        const response = await stub(env.REPOSITORIES,repo.id).fetch('https://internal/storage/deliveries',{method:'POST',body:JSON.stringify({ids:[delivery],repository_id:repo.id})});
-        if(response.ok) known = ((await response.json() as any).known || []).includes(delivery);
-      }
-    } catch {}
+    try { known = await receiptLookup(repo, delivery); } catch {}
     if(known) {await env.ARCHIVE.put(receiptKey(repo.id,delivery),JSON.stringify({delivery,committed_at:Date.now(),source:'sql_receipt'}),{onlyIf:{etagDoesNotMatch:'*'}});continue;}
     const pointer = { key: object.key, delivery, event, repository: repo.name, received: Number(body.customMetadata?.received) || object.uploaded.getTime() };
     // Do not overwrite retry state or resurrect an already held item.
@@ -420,7 +414,7 @@ export async function maintainRaw(env: Env, targets: (payload: any, event: strin
     state.last_error = error instanceof Error ? error.message.slice(0, 200) : classify(error);
     state.next_retry = began + 60000;
   }
-  state.receipt_lookup = receipts.summary();
+  state.receipt_lookup = { at: Date.now(), ...receipts.summary() };
   const completed=await env.ARCHIVE.put(key, JSON.stringify({ ...state, last_attempt: began, lease_until: 0 }), { onlyIf: { etagMatches: claim.etag } });
   if(completed && !state.last_error) await env.ARCHIVE.put('control/retention/raw_webhooks.json',JSON.stringify({at:Date.now(),after:state.after,examined,deleted,bytes,completed:state.last_completed ?? null,recovery_owned:true}));
 }

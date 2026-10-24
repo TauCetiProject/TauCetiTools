@@ -562,10 +562,12 @@ pg('concurrent raw receipt checks use one PostgreSQL read batch without entering
  const f=await postgresFixture();try{
   const ids=Array.from({length:25},(_,i)=>'raw-known-'+i),known=ids.filter((_,i)=>i%2===0);
   await f.store.batch(known.map(id=>({sql:'INSERT INTO deliveries(id,event,received) VALUES(?,?,?)',bindings:[id,'issue_comment',Date.now()]})));
-  f.state.atomic=async()=>assert.fail('receipt lookup must not enter an application writer');
+  f.store.transaction=async()=>assert.fail('receipt lookup must not enter a writer transaction');
+  const transaction=f.store.http.transaction.bind(f.store.http);let readBatches=0;
+  f.store.http.transaction=async(queries,options)=>{assert.equal(options.readOnly,true);assert.equal(queries.length,ids.length);readBatches++;return transaction(queries,options);};
   f.state.store=intercept(f.store,sql=>assert.match(sql,/^SELECT\b/,'raw lookup is stored reads only'));
   let requests=0;const env={...f.env,REPOSITORIES:{idFromName:id=>id,get:id=>({fetch:async(url,init)=>{assert.equal(id,repo.id);assert.equal(new URL(url).pathname,'/storage/deliveries');requests++;return f.state.fetch(new Request(url,init));}})}};
-  const lookup=rawReceiptLookup(env),results=await Promise.all(ids.map(id=>lookup.known(repo,id)));assert.deepEqual(results,ids.map(id=>known.includes(id)));assert.equal(requests,1);assert.equal(lookup.summary().known_lookups,known.length);
+  const lookup=rawReceiptLookup(env),results=await Promise.all(ids.map(id=>lookup.known(repo,id)));assert.deepEqual(results,ids.map(id=>known.includes(id)));assert.equal(requests,1);assert.equal(readBatches,1);assert.equal(lookup.summary().known_lookups,known.length);
   assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,known.length);for(const table of['changes','jobs','resources'])assert.equal((await f.store.exec('SELECT COUNT(*) n FROM '+table)).one().n,0);
  }finally{await f.close();}
 });

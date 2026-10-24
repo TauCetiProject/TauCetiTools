@@ -34,10 +34,15 @@ into repository-specific, read-only requests of at most 100 distinct delivery
 IDs. Body verification and targeting still precede the lookup. This reduces
 database requests within the existing groups of 25; it does not apply events
 or make GitHub requests. Failed or malformed lookups leave deliveries unknown,
-so they take the existing durable-parking path. The prepared raw state records
-`receipt_lookup` counters for lookups, requests, known results, failed requests,
-largest batch, and cumulative request time. These are read-operation counters,
-not semantic change counts. The existing lease, gap cooldowns and cooperative
+so they take the existing durable-parking path. A failed request can park every
+member of that batch, adding bounded pointer work for already-committed input.
+The raw state records timestamped `receipt_lookup` counters for lookups,
+receipt-endpoint requests, the sum of distinct IDs requested across batches, known results,
+failed requests, largest batch, and cumulative request time. They describe the
+last recorded invocation; earlier counters can remain visible during an active
+lease. Request time sums overlapping requests and is not wall-clock latency.
+These are read-operation counters, not semantic change counts.
+The existing lease, gap cooldowns and cooperative
 dispatch budget remain in force; batching provides no hard completion deadline.
 
 An event response waits for SQL durability and then records a durable R2
