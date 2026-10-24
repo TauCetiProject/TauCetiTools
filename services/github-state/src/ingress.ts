@@ -19,8 +19,9 @@ export const bodyKey = (repo: string, delivery: string) => `parked/${repo}/bodie
 export const controlKey = (repo: string) => `control/${repo}/ingress.json`;
 
 // Legacy raw objects lack target metadata, so targeting still reads and hashes
-// each original body. A group flushes once every member is waiting or done,
-// independent of body-read latency; unknown results still park durably.
+// each original body. Maintenance awaits one lookup per member at a time, so
+// its group flushes once every member is waiting or done, independent of body
+// latency. Do not share this per-maintenance instance with external callers.
 export function rawReceiptLookup(env: Env) {
   type Waiting = { delivery: string; queuedAt?: number; resolve: (known: boolean) => void };
   type Pending = { repo: Repository; waiting: Waiting[]; timer?: ReturnType<typeof setTimeout> };
@@ -71,7 +72,9 @@ export function rawReceiptLookup(env: Env) {
         }));
         // A caller that deliberately starts a lookup without awaiting it must
         // not leave I/O running after this group releases its owner.
-        if (outstanding) await new Promise<void>(resolve => { groupLookupsDone = resolve; flushWaiting(); });
+        // Register before flushing: a synchronous stub failure can complete
+        // all waiters immediately. Recheck after chained lookup continuations.
+        while (outstanding) await new Promise<void>(resolve => { groupLookupsDone = resolve; flushWaiting(); });
         const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
         if (failed) throw failed.reason;
         return results.map(result => (result as PromiseFulfilledResult<T>).value);
