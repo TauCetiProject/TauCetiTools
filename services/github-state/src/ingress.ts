@@ -19,12 +19,13 @@ export const bodyKey = (repo: string, delivery: string) => `parked/${repo}/bodie
 export const controlKey = (repo: string) => `control/${repo}/ingress.json`;
 
 // Legacy raw objects lack target metadata, so targeting still reads and hashes
-// each original body. Coalesce the concurrent group's receipt checks only;
-// unknown results keep the existing durable-parking path.
+// each original body. A group flushes once every member is waiting or done,
+// independent of body-read latency; unknown results still park durably.
 export function rawReceiptLookup(env: Env) {
   type Waiting = { delivery: string; resolve: (known: boolean) => void };
   type Pending = { repo: Repository; waiting: Waiting[]; timer?: ReturnType<typeof setTimeout> };
   const pending = new Map<string, Pending>();
+  let grouped = false, active = 0, waiting = 0, outstanding = 0;
   const stats = { lookups: 0, requests: 0, requested_ids: 0, known_lookups: 0, failures: 0, largest_batch: 0, request_ms: 0 };
   const flush = async (batch: Pending): Promise<void> => {
     if (pending.get(batch.repo.id) !== batch) return;
@@ -42,15 +43,34 @@ export function rawReceiptLookup(env: Env) {
     stats.request_ms += Date.now() - began;
     for (const item of batch.waiting) { const found = known.has(item.delivery); if (found) stats.known_lookups++; item.resolve(found); }
   };
+  const flushWaiting = (): void => {
+    if (grouped && active > 0 && waiting === active) for (const batch of [...pending.values()]) void flush(batch);
+  };
   return {
     known(repo: Repository, delivery: string): Promise<boolean> {
       stats.lookups++;
+      outstanding++;
       return new Promise(resolve => {
+        const inGroup = grouped;
+        if (inGroup) waiting++;
         let batch = pending.get(repo.id);
-        if (!batch) { batch = { repo, waiting: [] }; pending.set(repo.id, batch); const scheduled = batch; batch.timer = setTimeout(() => { void flush(scheduled); }, 20); }
-        batch.waiting.push({ delivery, resolve });
+        if (!batch) { batch = { repo, waiting: [] }; pending.set(repo.id, batch); if (!inGroup) { const scheduled = batch; batch.timer = setTimeout(() => { void flush(scheduled); }, 20); } }
+        batch.waiting.push({ delivery, resolve: known => { outstanding--; if (inGroup) waiting--; resolve(known); } });
         if (batch.waiting.length >= 100) void flush(batch);
+        else flushWaiting();
       });
+    },
+    async runGroup<T>(tasks: (() => Promise<T>)[]): Promise<T[]> {
+      if (grouped || outstanding || tasks.length > 100) throw new Error('raw_receipt_group_invalid');
+      grouped = true; active = tasks.length;
+      try {
+        const results = await Promise.allSettled(tasks.map(async task => {
+          try { return await task(); } finally { active--; flushWaiting(); }
+        }));
+        const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+        if (failed) throw failed.reason;
+        return results.map(result => (result as PromiseFulfilledResult<T>).value);
+      } finally { grouped = false; }
     },
     summary() { return { ...stats }; },
   };
@@ -354,7 +374,7 @@ export async function maintainRaw(env: Env, targets: (payload: any, event: strin
         try {
           const snapshot=await env.ARCHIVE.get(entry.key),gap:any=snapshot?await snapshot.json():null;
           if(gap && typeof gap.key==='string' && /^webhooks\/\d{4}-\d{2}-\d{2}\/[a-zA-Z0-9-]{1,100}\.json$/.test(gap.key) && entry.key==='control/raw-gaps/'+gap.key.slice(gap.key.lastIndexOf('/')+1) && !(gap.retry_at>Date.now())) {
-            if(await recover(gap.key,entry.key,[],{object:snapshot,gap}))resolved++;
+            if((await receipts.runGroup([()=>recover(gap.key,entry.key,[],{object:snapshot,gap})]))[0])resolved++;
           }
         }catch(error){gapError('entry',error);}
         // Preserve an unreadable gap but do not let it starve later retries
@@ -372,7 +392,7 @@ export async function maintainRaw(env: Env, targets: (payload: any, event: strin
       // advances only past a group once every member has finished.
       for (let i = 0; i < page.objects.length;) {
         if (Date.now() - began >= 20000) break;
-        const group: Promise<void>[] = [];
+        const group: (() => Promise<void>)[] = [];
         let last = state.after;
         for (; i < page.objects.length && group.length < RAW_GROUP; i++) {
           const raw = page.objects[i];
@@ -383,10 +403,10 @@ export async function maintainRaw(env: Env, targets: (payload: any, event: strin
           if (CI_EVENTS.has(raw.customMetadata?.event ?? '')) {
             ciGaps.push(gapKey);
             if (expiredRaw) expired.push(raw);
-          } else group.push(recover(raw,gapKey,expiredRaw?expired:[]).then(()=>{}));
+          } else group.push(()=>recover(raw,gapKey,expiredRaw?expired:[]).then(()=>{}));
           processed++; examined++; last = raw.key;
         }
-        await Promise.all(group);
+        await receipts.runGroup(group);
         state.after = last;
       }
       if(ciGaps.length)await env.ARCHIVE.delete(ciGaps);

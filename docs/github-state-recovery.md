@@ -29,10 +29,14 @@ out-of-scope events get digest-bearing dispositions under `invalid/`. Missing
 bodies, digest mismatches, or absent event metadata remain precise gaps under
 `control/raw-gaps/`; their source is retained. No GitHub refetch repairs a gap.
 
-Legacy raw recovery coalesces receipt lookups arriving within 20 milliseconds
-into repository-specific, read-only requests of at most 100 distinct delivery
-IDs. Body verification and targeting still precede the lookup. This reduces
-database requests within the existing groups of 25; it does not apply events
+Legacy raw recovery groups receipt lookups into repository-specific, read-only
+requests of at most 100 distinct delivery IDs. Body verification and targeting
+still precede each lookup. The existing group of 25 flushes pending lookups when
+every member is waiting for a receipt or has completed. Varied body-read times
+therefore do not split a single-target group into small timed batches. Members
+that need no receipt or fail before lookup still release their group slot.
+Multi-target members can require another lookup round for a later repository.
+This reduces database requests without applying events
 or make GitHub requests. Failed or malformed lookups leave deliveries unknown,
 so they take the existing durable-parking path. A failed request can park every
 member of that batch, adding bounded pointer work for already-committed input.

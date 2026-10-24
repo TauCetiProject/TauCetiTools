@@ -2032,3 +2032,38 @@ test('a receipt lookup completing after raw lease replacement cannot overwrite t
  h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{assert.equal(new URL(url).pathname,'/storage/deliveries');const ids=JSON.parse(init.body).ids;assert.equal(ids.length,3);advance(61000);newer={owner:'replacement',after:'webhooks/2026-10-24/z.json',lease_until:Date.now()+60000,receipt_lookup:{requests:999}};await h.archive.put(key,JSON.stringify(newer));return Response.json({known:ids});}});
  await ingress.maintainRaw(h.env,()=>[repo]);assert.deepEqual(JSON.parse(h.archive.objects.get(key).bytes),newer);assert.deepEqual(JSON.parse(h.archive.objects.get(retention).bytes),{owner:'previous'});for(const id of['late-a','late-b','late-c']){assert.ok(h.archive.objects.has(ingress.receiptKey(repo.id,id)));assert.ok(h.archive.objects.has('webhooks/2026-10-20/'+id+'.json'));assert.equal(parked(h.archive,id).length,0);}assert.equal(h.state.applied.size,0);
 }));
+
+test('a raw group batches staggered body completion without any coalescing timer',async()=>{
+ const h=harness(),batches=[],lookup=ingress.rawReceiptLookup(h.env);let release;const lateBody=new Promise(r=>release=r);h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{batches.push(JSON.parse(init.body).ids);return Response.json({known:JSON.parse(init.body).ids});}});
+ const group=lookup.runGroup([()=>lookup.known(repo,'early'),async()=>{await lateBody;return lookup.known(repo,'late');},async()=> 'no_receipt_needed']);
+ await new Promise(r=>setImmediate(r));assert.equal(batches.length,0,'waiting for the other original body, not a time window');release();assert.deepEqual(await group,[true,true,'no_receipt_needed']);assert.deepEqual(batches,[['early','late']]);assert.equal(lookup.summary().requests,1);
+});
+
+test('a raw group flushes when the last body needs no SQL lookup',async()=>{
+ const h=harness(),lookup=ingress.rawReceiptLookup(h.env);let release;const body=new Promise(r=>release=r);let requests=0;h.env.REPOSITORIES.get=()=>({fetch:async()=>{requests++;return Response.json({known:['only']});}});
+ const group=lookup.runGroup([()=>lookup.known(repo,'only'),async()=>{await body;return 'already_durable';}]);await new Promise(r=>setImmediate(r));assert.equal(requests,0);release();assert.deepEqual(await group,[true,'already_durable']);assert.equal(requests,1);
+});
+
+test('a failing raw group member cannot strand the other receipt waiters',async()=>{
+ const h=harness(),lookup=ingress.rawReceiptLookup(h.env);h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>Response.json({known:JSON.parse(init.body).ids})});let done=false;
+ await assert.rejects(lookup.runGroup([async()=>{await lookup.known(repo,'safe');done=true;},async()=>{throw Error('original body unavailable');}]),/original body unavailable/);assert.equal(done,true);assert.equal(lookup.summary().known_lookups,1);assert.deepEqual(await lookup.runGroup([()=>lookup.known(repo,'next')]),[true]);
+});
+
+test('raw groups handle sequential targets without mixing repository receipt identities',async()=>{
+ const h=harness(),lookup=ingress.rawReceiptLookup(h.env),other={...repo,id:'101',name:'org/other'},requests=[];h.env.REPOSITORIES.get=id=>({fetch:async(url,init)=>{const p=JSON.parse(init.body);assert.equal(id,p.repository_id);requests.push(p);return Response.json({known:id===repo.id?p.ids:[]});}});
+ const result=await lookup.runGroup([async()=>[await lookup.known(repo,'shared'),await lookup.known(other,'shared')],()=>lookup.known(other,'other-only'),()=>lookup.known(repo,'same-repo')]);assert.deepEqual(result,[[true,false],false,true]);assert.equal(requests.filter(p=>p.repository_id===repo.id).length,1);assert.deepEqual(requests.find(p=>p.repository_id===repo.id).ids,['shared','same-repo']);assert.equal(lookup.summary().failures,0);
+});
+
+test('empty raw groups and single due-gap lookups complete without a timer',async()=>{
+ const h=harness(),lookup=ingress.rawReceiptLookup(h.env);h.env.REPOSITORIES.get=()=>({fetch:async()=>Response.json({known:[]})});assert.deepEqual(await lookup.runGroup([]),[]);assert.deepEqual(await lookup.runGroup([()=>lookup.known(repo,'one-gap')]),[false]);assert.equal(lookup.summary().requests,1);
+});
+
+test('a failed group lookup completes and a later group can resolve its own receipts',async()=>{
+ const h=harness(),lookup=ingress.rawReceiptLookup(h.env);let failed=true;h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{if(failed)throw Error('read unavailable');return Response.json({known:JSON.parse(init.body).ids});}});
+ assert.deepEqual(await lookup.runGroup(['a','b','c'].map(id=>()=>lookup.known(repo,id))),[false,false,false]);assert.equal(lookup.summary().failures,1);failed=false;assert.deepEqual(await lookup.runGroup(['a','b','c'].map(id=>()=>lookup.known(repo,id))),[true,true,true]);assert.equal(lookup.summary().requests,2);
+});
+
+test('raw groups reject overlapping ownership, overlarge groups and an outstanding standalone lookup',async()=>{
+ const h=harness(),lookup=ingress.rawReceiptLookup(h.env);h.env.REPOSITORIES.get=()=>({fetch:async()=>Response.json({known:[]})});let release;const gate=new Promise(r=>release=r),group=lookup.runGroup([async()=>{await gate;return true;}]);await assert.rejects(lookup.runGroup([]),/raw_receipt_group_invalid/);release();assert.deepEqual(await group,[true]);await assert.rejects(lookup.runGroup(Array.from({length:101},()=>async()=>true)),/raw_receipt_group_invalid/);
+ let respond,entered;const response=new Promise(r=>respond=r),ready=new Promise(r=>entered=r);h.env.REPOSITORIES.get=()=>({fetch:async()=>{entered();return response;}});const pending=lookup.known(repo,'in-flight');await ready;await assert.rejects(lookup.runGroup([]),/raw_receipt_group_invalid/);respond(Response.json({known:[]}));assert.equal(await pending,false);assert.deepEqual(await lookup.runGroup([]),[]);
+});
