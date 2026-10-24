@@ -256,3 +256,16 @@ test('cleanup logs correlate with the admission and transaction that performed t
   assert.equal(f.logs[0].admission_started_at,4000);
  }finally{t.mock.timers.reset();}
 });
+
+
+test('admission cleanup identifies both the current admission and the prior failed transaction',async t=>{
+ t.mock.timers.enable({apis:['Date','setTimeout'],now:7000});
+ const f=fixture([{phase:'apply',stalled:true}]);f.cleanupResponses.push(async()=>[{terminated:false}]);
+ try{
+  await assert.rejects(f.store.transaction(write),StoreUnavailable);const failed=f.logs[0].transaction_id;
+  assert.equal(f.cleanupLogs[0].discarded_transaction_id,failed);
+  f.clients[0].sessionActive=false;t.mock.timers.tick(1000);await f.store.transaction(write);
+  const cleanup=f.cleanupLogs.at(-1),admitted=f.logs.at(-1);assert.notEqual(admitted.transaction_id,failed);
+  assert.equal(cleanup.transaction_id,admitted.transaction_id);assert.equal(cleanup.discarded_transaction_id,failed);
+ }finally{t.mock.timers.reset();}
+});

@@ -136,7 +136,7 @@ export class StoreFenced extends Error {constructor(){super('Repository backend 
 type TransactionPhase='connect'|'begin'|'session'|'owner'|'apply'|'commit';
 interface SessionIdentity {pid:number;started_us:string;token:string}
 type SessionCleanup='terminated'|'already_ended'|'unconfirmed'|'expired';
-interface DiscardedSession extends SessionIdentity {discardedAt:number}
+interface DiscardedSession extends SessionIdentity {discardedAt:number;transaction_id:string}
 type ConnectionFailure='client_timeout'|'server_error'|'driver_error'|'connection_lost'|'connect_timeout'|'rollback_timeout'|'application'|'fenced'|'commit_rejected';
 interface ConnectionState {closed:boolean;ending:boolean;error?:StoreUnavailable;phase:TransactionPhase;code?:string;reason?:ConnectionFailure;commitUncertain?:boolean;cleanup?:'rollback_timeout'|'rollback_error';session?:SessionIdentity;ownerAttempted?:boolean;abort?:(error:StoreUnavailable)=>void}
 const sqlState=(code:unknown):string|undefined=>typeof code==='string' && /^[0-9A-Z]{5}$/.test(code)?code:undefined;
@@ -265,7 +265,7 @@ export class PostgresStore implements RepositoryStore {
     this.discarded.shift();if(result==='unconfirmed')this.discarded.push(session);
     this.nextCleanupAt=Date.now()+1000;
     if(result==='unconfirmed'&&!this.cleanupBlocked())result='expired';
-    storeLog('repository_postgres_cleanup',{result,transaction_id});return result;
+    storeLog('repository_postgres_cleanup',{result,transaction_id,discarded_transaction_id:session.transaction_id});return result;
   }
   private cleanupBlocked():boolean {return this.discarded.some(s=>Date.now()-s.discardedAt<45000);}
   private async transact<T>(apply:(store:RepositoryStore)=>Promise<T>,wait_ms:number):Promise<T> {
@@ -333,7 +333,7 @@ export class PostgresStore implements RepositoryStore {
       close_ms=Date.now()-closing;
       const cleaning=Date.now();
       if(connection.error && connection.ownerAttempted && connection.session){
-        this.discarded.push({...connection.session,discardedAt:Date.now()});session_cleanup=await this.cleanupDiscarded(transaction_id);
+        this.discarded.push({...connection.session,discardedAt:Date.now(),transaction_id});session_cleanup=await this.cleanupDiscarded(transaction_id);
       }
       cleanup_ms=Date.now()-cleaning;
       const transaction_ms=Date.now()-started;

@@ -122,3 +122,17 @@ test('a refused body read cancels the unconsumed body and synchronous metadata m
   for(const d of stalled)d.resolve(null);await flush();
  }finally{t.mock.timers.reset();}
 });
+
+
+test('one owner retains its budget across new publication-style views of the same bucket',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});const stalled=[];let starts=0;
+ const archive={get(){starts++;const d=deferred();stalled.push(d);return d.promise;}},owner={};
+ try{
+  const first=monitoring.timedBucket(new Proxy(archive,{}),owner),calls=Array.from({length:16},()=>assert.rejects(first.get('spill'),/timeout/));
+  await flush();t.mock.timers.tick(1500);await Promise.all(calls);
+  const next=monitoring.timedBucket(new Proxy(archive,{}),owner);assert.notEqual(next,first);
+  await assert.rejects(next.get('spill'),/busy/);assert.equal(starts,16);
+  stalled[0].resolve(null);await flush();const resumed=next.get('spill');await flush();assert.equal(starts,17);stalled.at(-1).resolve(null);assert.equal(await resumed,null);
+  for(const d of stalled)d.resolve(null);await flush();
+ }finally{t.mock.timers.reset();}
+});
