@@ -21,6 +21,7 @@ import os
 import pathlib
 import re
 import sys
+import tempfile
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from collections.abc import Callable, Iterable
@@ -481,7 +482,7 @@ def _include_commands(text: str) -> list[tuple[int, str, set[str], bool]]:
     return commands
 
 
-def mathlib_namespaces(root: pathlib.Path) -> set[str]:
+def mathlib_namespaces(root: pathlib.Path, context: ParsingContext | None = None) -> set[str]:
     """Collect individual namespace components occurring in Mathlib ``*.lean`` sources.
 
     The result is a conservative name set rather than a declaration-aware namespace hierarchy.
@@ -489,6 +490,8 @@ def mathlib_namespaces(root: pathlib.Path) -> set[str]:
     if not root.is_dir():
         raise FileNotFoundError(f"Mathlib source directory not found: {root}")
     paths = sorted(root.rglob("*.lean"))
+    if context is not None:
+        return context.collect("namespaces", (path.read_text(errors="ignore") for path in paths))
     names: set[str] = set()
     for part in _parallel(_namespaces_of, _chunks(paths)):
         names |= part
@@ -498,11 +501,14 @@ def mathlib_namespaces(root: pathlib.Path) -> set[str]:
 def _namespaces_of(paths: list[pathlib.Path]) -> set[str]:
     names: set[str] = set()
     for path in paths:
-        raw = path.read_text(errors="ignore")
-        if "namespace" not in raw:
-            continue
-        text = strip_comments_and_strings(raw)
-        for match in NAMESPACE.finditer(text):
+        names |= _namespaces_in(path.read_text(errors="ignore"))
+    return names
+
+
+def _namespaces_in(raw: str) -> set[str]:
+    names: set[str] = set()
+    if "namespace" in raw:
+        for match in NAMESPACE.finditer(strip_comments_and_strings(raw)):
             names.update(part for part in match.group(1).split(".") if part != "_root_")
     return names
 
@@ -622,8 +628,12 @@ def _own_declaration_paths_of(texts: list[str]) -> set[tuple[str, ...]]:
     return own_declaration_paths({pathlib.Path(str(i)): text for i, text in enumerate(texts)})
 
 
-def own_declaration_paths_parallel(sources: dict[pathlib.Path, str]) -> set[tuple[str, ...]]:
+def own_declaration_paths_parallel(
+    sources: dict[pathlib.Path, str], context: ParsingContext | None = None,
+) -> set[tuple[str, ...]]:
     """`own_declaration_paths` over all sources, split across worker processes."""
+    if context is not None:
+        return context.collect("ownership", sources.values())
     owned: set[tuple[str, ...]] = set()
     for part in _parallel(_own_declaration_paths_of, _chunks(list(sources.values()))):
         owned |= part
@@ -892,6 +902,88 @@ def _find_violations_parallel(sources, namespace_names, owned) -> list[Finding]:
     return found
 
 
+def _parse_context_chunk(job):
+    kind, items = job
+    result = {}
+    for digest, text in items:
+        if kind == "ownership":
+            result[digest] = sorted(own_declaration_paths({pathlib.Path("source"): text}))
+        else:
+            result[digest] = sorted(_namespaces_in(text))
+    return result
+
+
+class ParsingContext:
+    """Trusted, content-addressed parsing results, invalidated by the parser's own bytes.
+
+    A warm run still inventories and hashes the source bytes. Only changed content
+    needs parsing, including when comparing ownership against the base tree. CI
+    should restore this data before candidate execution and save it only from main.
+    This caches context, never findings or a successful lint result.
+    """
+
+    def __init__(self, path: pathlib.Path):
+        self.path = path
+        self.parser = hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest()
+        self.entries = {"namespaces": {}, "ownership": {}}
+        self.used = {"namespaces": {}, "ownership": {}}
+        self.parsed = {"namespaces": 0, "ownership": 0}
+        try:
+            saved = json.loads(path.read_text())
+            if saved.get("version") != 1 or saved.get("parser") != self.parser:
+                return
+            entries = saved["entries"]
+            for kind in self.entries:
+                if not isinstance(entries[kind], dict):
+                    return
+                for digest, value in entries[kind].items():
+                    if not re.fullmatch(r"[0-9a-f]{64}", digest) or not isinstance(value, list):
+                        return
+                    if kind == "namespaces":
+                        if any(not isinstance(name, str) for name in value):
+                            return
+                    elif any(not isinstance(parts, list) or not parts
+                             or any(not isinstance(part, str) for part in parts) for parts in value):
+                        return
+            self.entries = entries
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            pass
+
+    def collect(self, kind: str, texts: Iterable[str]) -> set:
+        missing = {}
+        selected = {}
+        for text in texts:
+            digest = hashlib.sha256(text.encode()).hexdigest()
+            if digest in self.entries[kind]:
+                selected[digest] = self.entries[kind][digest]
+            else:
+                missing[digest] = text
+        if missing:
+            jobs = [(kind, chunk) for chunk in _chunks(list(missing.items()))]
+            for part in _parallel(_parse_context_chunk, jobs):
+                selected.update(part)
+            self.parsed[kind] += len(missing)
+            self.entries[kind].update(selected)
+        self.used[kind].update(selected)
+        if kind == "ownership":
+            return {tuple(parts) for values in selected.values() for parts in values}
+        return {name for values in selected.values() for name in values}
+
+    def save(self) -> None:
+        data = {"version": 1, "parser": self.parser, "entries": self.used}
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(mode="w", dir=self.path.parent, delete=False) as output:
+                temporary = pathlib.Path(output.name)
+                json.dump(data, output, separators=(",", ":"))
+            temporary.replace(self.path)
+        except OSError as error:
+            print(f"lint-dot-notation: could not save parsing context: {error}", file=sys.stderr)
+        print("lint-dot-notation: parsed context for "
+              f"{self.parsed['namespaces']} Mathlib and {self.parsed['ownership']} TauCeti "
+              "new source contents")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--baseline", type=pathlib.Path, default=pathlib.Path(
@@ -900,6 +992,9 @@ def main(argv: list[str] | None = None) -> int:
         ".lake/packages/mathlib/Mathlib"))
     parser.add_argument("--source-root", type=pathlib.Path, default=pathlib.Path("TauCeti"))
     parser.add_argument("--write-baseline", action="store_true")
+    parser.add_argument("--context-cache", type=pathlib.Path, default=None,
+                        help="trusted cache of per-content namespace and ownership parsing; "
+                             "findings and ownership-change fallbacks are always recomputed")
     parser.add_argument("--only-modules", type=pathlib.Path, default=None,
                         help="a file of module names (one per line): report findings only in "
                              "those modules' files. A PR can add a violation only where it changes "
@@ -911,9 +1006,10 @@ def main(argv: list[str] | None = None) -> int:
                              "checked, because ownership decided in one file changes the findings "
                              "of others")
     args = parser.parse_args(argv)
+    context = ParsingContext(args.context_cache) if args.context_cache is not None else None
 
     try:
-        namespace_names = mathlib_namespaces(args.mathlib_root)
+        namespace_names = mathlib_namespaces(args.mathlib_root, context)
     except FileNotFoundError as error:
         print(f"lint-dot-notation: error: {error}", file=sys.stderr)
         return 2
@@ -930,7 +1026,7 @@ def main(argv: list[str] | None = None) -> int:
         only = {root / (name.strip().replace(".", "/") + ".lean")
                 for name in args.only_modules.read_text().splitlines() if name.strip()}
         print(f"lint-dot-notation: checking the {len(only)} changed module(s) only")
-    owned = own_declaration_paths_parallel(sources)
+    owned = own_declaration_paths_parallel(sources, context)
     if only is not None:
         base = args.base_source_root
         if base is None or not base.is_dir():
@@ -939,10 +1035,12 @@ def main(argv: list[str] | None = None) -> int:
             only = None
         else:
             base_sources = {path: path.read_text(errors="ignore") for path in base.rglob("*.lean")}
-            if own_declaration_paths_parallel(base_sources) != owned:
+            if own_declaration_paths_parallel(base_sources, context) != owned:
                 print("lint-dot-notation: this change alters which namespaces Tau Ceti owns; "
                       "checking every file")
                 only = None
+    if context is not None:
+        context.save()
     if only is not None:
         found = find_violations(sources, namespace_names, only=only, owned=owned)
     else:
