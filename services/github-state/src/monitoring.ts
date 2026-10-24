@@ -155,17 +155,34 @@ export async function within<T>(work:Promise<T>,ms:number):Promise<T> {
   try {return await Promise.race([work,new Promise<T>((_,reject)=>{timer=setTimeout(()=>reject(new Error('monitoring I/O timeout')),ms);})]);}
   finally {if(timer!==undefined)clearTimeout(timer);}
 }
+// A timeout bounds the caller's wait, not the R2 operation. Keep timed-out
+// work in the same per-bucket budget until it actually settles. This ceiling
+// allows the existing ten-receipt group plus other maintenance; it never adds
+// concurrency or retries. A saturated budget fails closed before more I/O.
+const timedBuckets=new WeakMap<R2Bucket,R2Bucket>();
+const MAX_MAINTENANCE_IO=16;
 export function timedBucket(bucket:R2Bucket):R2Bucket {
-  return new Proxy(bucket,{get(target,key){
+  const cached=timedBuckets.get(bucket);if(cached)return cached;
+  let pending=0;
+  const cancelBody=async(object:any):Promise<void>=>{try{await object?.body?.cancel();}catch{/* A reader can own the stream; its pending operation retains its slot. */}};
+  const tracked=async<T>(work:()=>Promise<T>,late?:(value:T)=>Promise<void>):Promise<T>=>{
+    if(pending>=MAX_MAINTENANCE_IO)throw new Error('monitoring I/O busy');
+    pending++;
+    let expired=false;
+    const completion=Promise.resolve().then(work).then(async result=>{if(expired&&late)await late(result);return result;}).finally(()=>{pending--;});
+    try{return await within(completion,1500);}catch(error){expired=true;throw error;}
+  };
+  const proxy=new Proxy(bucket,{get(target,key){
     const value=Reflect.get(target,key,target);
     if(typeof value!=='function')return value;
     return async(...args:any[])=>{
-      const result=await within(Promise.resolve(value.apply(target,args)),1500);
+      const result=await tracked(()=>Promise.resolve(value.apply(target,args)),key==='get'?cancelBody:undefined);
       if(key!=='get' || !result)return result;
       return new Proxy(result,{get(object,property){
         const member=Reflect.get(object,property,object);
-        return typeof member==='function'?(...params:any[])=>within(Promise.resolve(member.apply(object,params)),1500):member;
+        return typeof member==='function'?(...params:any[])=>tracked(()=>Promise.resolve(member.apply(object,params))):member;
       }});
     };
   }});
+  timedBuckets.set(bucket,proxy);timedBuckets.set(proxy,proxy);return proxy;
 }

@@ -28,9 +28,9 @@ function fixture(scenarios=[],url='postgresql://unused@ep-fixture.us-east-2.aws.
   const client={commands:[],destroyed:false,ended:false,on(event,fn){handlers[event]=fn;},
    neonConfig:{destroy(){client.destroyed=true;handlers.end?.();}},
    rollbackPending(){pending.length=0;},
-   async connect(){if(scenario.connectPending)return new Promise(()=>{});if(scenario.phase==='connect')fail();},
+   async connect(){scenario.onPhase?.('connect');if(scenario.connectPending)return new Promise(()=>{});if(scenario.phase==='connect')fail();},
    async query(sql,bindings){
-    const phase=sql.startsWith('BEGIN')?'begin':sql.includes("set_config('application_name'")?'session':sql.includes('backend_control')?'owner':sql==='COMMIT'?'commit':sql==='ROLLBACK'?'rollback':'apply';client.commands.push(phase);
+    const phase=sql.startsWith('BEGIN')?'begin':sql.includes("set_config('application_name'")?'session':sql.includes('backend_control')?'owner':sql==='COMMIT'?'commit':sql==='ROLLBACK'?'rollback':'apply';client.commands.push(phase);scenario.onPhase?.(phase);
     if(phase===scenario.phase){if(scenario.acceptCommit){committed.push(...pending.splice(0));client.sessionActive=false;}fail();}
     // A client timeout leaves an active query; a rollback queued behind it
     // cannot finish. Cleanup must discard the socket without awaiting it.
@@ -39,7 +39,7 @@ function fixture(scenarios=[],url='postgresql://unused@ep-fixture.us-east-2.aws.
     if(phase==='owner')return {rows:[{backend:scenario.fenced?'sqlite':'postgres',generation:'test-v1',schema_version:1}]};
     if(phase==='commit'){client.sessionActive=false;if(scenario.commitTag==='ROLLBACK')pending.length=0;else committed.push(...pending.splice(0));return {command:scenario.commitTag ?? 'COMMIT',rows:[]};}
     if(phase==='apply')pending.push('write');return {rows:[]};
-   },async end(){client.ended=true;handlers.end?.();}
+   },async end(){scenario.onPhase?.('close');client.ended=true;handlers.end?.();}
   };clients.push(client);return client;
  }};
  globalThis[key]=driver;
@@ -217,4 +217,30 @@ for(const url of [
 ])test('endpoint overrides or ambiguous separators cannot enable termination: '+url,async()=>{
  const f=fixture([{phase:'apply',stalled:true}],url);await assert.rejects(f.store.transaction(write),StoreUnavailable);
  assert.equal(f.clients[0].serverTerminated,undefined);assert.ok(f.cleanupCalls[0].sql.startsWith('SELECT false'));
+});
+
+
+test('transaction phase timings separate setup, application, commit and socket close without SQL or session tokens',async t=>{
+ t.mock.timers.enable({apis:['Date','setTimeout'],now:1000});
+ const elapsed={connect:7,begin:11,session:13,owner:17,apply:219,commit:23,close:29};
+ const f=fixture([{onPhase:phase=>t.mock.timers.tick(elapsed[phase]||0)}]);
+ try{
+  await f.store.transaction(write);const row=f.logs[0];
+  assert.equal(row.transaction_started_at,1000);assert.match(row.transaction_id,/^[a-f0-9-]{36}$/);
+  assert.deepEqual(row.phase_ms,{connect:7,begin:11,session:13,owner:17,apply:219,commit:23});
+  assert.equal(row.close_ms,29);assert.equal(row.rollback_ms,0);assert.equal(row.cleanup_ms,0);
+  assert.equal(row.transaction_ms,319);assert.equal(row.phase,'commit');assert.equal(row.outcome,'committed');
+  const encoded=JSON.stringify(row);assert.ok(!encoded.includes('private-input'));assert.ok(!encoded.includes(f.clients[0].identity.token));
+ }finally{t.mock.timers.reset();}
+});
+
+test('connect timeout timings show no BEGIN, owner or application work and never retry the callback',async t=>{
+ t.mock.timers.enable({apis:['Date','setTimeout'],now:2000});
+ const f=fixture([{connectPending:true}]);let applied=0;
+ try{
+  const pending=assert.rejects(f.store.transaction(async()=>{applied++;}),/08001/);
+  await new Promise(setImmediate);t.mock.timers.tick(10000);await pending;
+  const row=f.logs[0];assert.equal(applied,0);assert.deepEqual(row.phase_ms,{connect:10000,begin:0,session:0,owner:0,apply:0,commit:0});
+  assert.equal(row.transaction_ms,10000);assert.equal(row.outcome,'failed');assert.equal(row.reason,'connect_timeout');
+ }finally{t.mock.timers.reset();}
 });
