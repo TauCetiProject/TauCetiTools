@@ -9,7 +9,8 @@ start. Merging code or closing an issue does not prove deployed acceptance.
 
 The [2026-10-25 test release](../services/github-state/validation/migration-test-release-2026-10-25.json)
 records accepted TEST migration: twenty tables, 17,921,250 rows, canonical
-source/import/readback checks, full raw-input recovery, all 221 captured failed
+source/import/readback checks, a completed retained raw-input pass with zero
+reported gaps, all 221 captured failed
 inputs and the signed freeze-time webhook verified, unchanged clients and cursors,
 and a complete request-accounting hour after replay finished. PostgreSQL is the
 single TEST writer; the original Durable Object, archives and all seven retention
@@ -31,10 +32,13 @@ The [2026-10-22 test checkpoint](../services/github-state/validation/migration-t
 remains the earlier incomplete import/selection checkpoint. It records the hold
 after external test deployments changed the running artifact, including the
 interval before a durable ingress pause. The accepted release retains that
-accounting and its limitations: one intermediate deployment is not mapped to a
+application-interval accounting and its limitations: one intermediate deployment is not mapped to a
 Git commit, and sampled receipt/resource checks are not a full independent
 replay of every materialization or an audit of every semantic publication.
-Clearing an unmirrored CI diagnostic is not application delivery recovery.
+Raw recovery continued after the 22:47 ingress pause until verified adoption at
+23:09. The public receipt records that acceptance bound; it does not reconstruct
+a complete mutation audit for the intervening period or prove continuous absence
+of deletion. Clearing an unmirrored CI diagnostic is not application delivery recovery.
 
 A local cursor-verifier discovery error stopped final acceptance after the
 successful latency cohort: an empty singleton lock was parsed as JSON. The

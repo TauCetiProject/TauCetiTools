@@ -32,131 +32,149 @@
     "fix_forwards": [
       {
         "pr": 68,
-        "at": "2026-10-22T14:17:46.629Z",
-        "previous_version": "508912d9-9e3f-4e5f-ba4e-037afac92b27",
         "version": "d2e48201-1ccd-4737-bbc0-baecbbac9a87",
         "code": "fc0e7734b6ad5c95da441eeac2fd465aaa5b856b",
         "source_fence_retained": true,
-        "archive_verification_state_unchanged": true
+        "archive_verification_state_unchanged": true,
+        "previous_accepted_version": "508912d9-9e3f-4e5f-ba4e-037afac92b27",
+        "receipt_recorded_at": "2026-10-22T14:17:46.629Z",
+        "event": "verified_fix_forward_receipt"
       },
       {
         "pr": 69,
-        "at": "2026-10-22T18:21:22.864Z",
-        "previous_version": "d2e48201-1ccd-4737-bbc0-baecbbac9a87",
         "version": "cdad5428-80e7-4747-8f29-aad6805ad508",
         "code": "7c4661f339b418635536a71d88673f8279008b57",
         "source_fence_retained": true,
-        "archive_verification_state_unchanged": true
+        "archive_verification_state_unchanged": true,
+        "previous_accepted_version": "d2e48201-1ccd-4737-bbc0-baecbbac9a87",
+        "receipt_recorded_at": "2026-10-22T18:21:22.864Z",
+        "event": "verified_fix_forward_receipt"
       },
       {
         "pr": 77,
-        "at": "2026-10-22T23:09:07.351Z",
-        "previous_version": "cdad5428-80e7-4747-8f29-aad6805ad508",
         "version": "5240c4d8-1d60-4690-b4c3-299275b35f3d",
         "code": "23d542e00bad04471d0bc7a6634850af03cd8578",
         "source_fence_retained": true,
-        "archive_verification_state_unchanged": true
+        "archive_verification_state_unchanged": true,
+        "previous_accepted_version": "cdad5428-80e7-4747-8f29-aad6805ad508",
+        "receipt_recorded_at": "2026-10-22T23:09:07.351Z",
+        "event": "adoption_of_already_present_external_version",
+        "adopted_at": "2026-10-22T23:09:07.351Z",
+        "version_created_at": "2026-10-22T22:37:54.403687Z",
+        "serving_start_time_proven": false
       },
       {
         "pr": 80,
-        "at": "2026-10-23T02:37:38.740Z",
-        "previous_version": "5240c4d8-1d60-4690-b4c3-299275b35f3d",
         "version": "19995833-b4c2-4539-90a4-965632f93141",
         "code": "e53a2a3c4328bbae1be5d00bf8adf325bba9f84f",
         "source_fence_retained": true,
-        "archive_verification_state_unchanged": true
+        "archive_verification_state_unchanged": true,
+        "previous_accepted_version": "5240c4d8-1d60-4690-b4c3-299275b35f3d",
+        "receipt_recorded_at": "2026-10-23T02:37:38.740Z",
+        "event": "verified_fix_forward_receipt"
       },
       {
         "pr": 85,
-        "at": "2026-10-23T05:08:50.813Z",
-        "previous_version": "19995833-b4c2-4539-90a4-965632f93141",
         "version": "a94f8cc1-baf7-4051-98af-f63f739f7352",
         "code": "0fd85b38a0c568b52c3882e14816c8f7621044c4",
         "source_fence_retained": true,
-        "archive_verification_state_unchanged": true
+        "archive_verification_state_unchanged": true,
+        "previous_accepted_version": "19995833-b4c2-4539-90a4-965632f93141",
+        "receipt_recorded_at": "2026-10-23T05:08:50.813Z",
+        "event": "verified_fix_forward_receipt"
       },
       {
         "pr": 89,
-        "at": "2026-10-23T07:36:12.140Z",
-        "previous_version": "a94f8cc1-baf7-4051-98af-f63f739f7352",
         "version": "7df2f767-73d3-462a-bc29-f56aea7a73d0",
         "code": "e79f6a36b6bf2a4507195bab0b2f7c5e342e02ac",
         "source_fence_retained": true,
-        "archive_verification_state_unchanged": true
+        "archive_verification_state_unchanged": true,
+        "previous_accepted_version": "a94f8cc1-baf7-4051-98af-f63f739f7352",
+        "receipt_recorded_at": "2026-10-23T07:36:12.140Z",
+        "event": "verified_fix_forward_receipt"
       },
       {
         "pr": 90,
-        "at": "2026-10-23T08:31:10.342Z",
-        "previous_version": "7df2f767-73d3-462a-bc29-f56aea7a73d0",
         "version": "ac58f185-b8c0-40db-84a8-aff162dd6884",
         "code": "48b137a3fad8f84b7045d2667eb49c2d0c3c7fb4",
         "source_fence_retained": true,
-        "archive_verification_state_unchanged": true
+        "archive_verification_state_unchanged": true,
+        "previous_accepted_version": "7df2f767-73d3-462a-bc29-f56aea7a73d0",
+        "receipt_recorded_at": "2026-10-23T08:31:10.342Z",
+        "event": "verified_fix_forward_receipt"
       },
       {
         "pr": 92,
-        "at": "2026-10-23T16:54:04.259Z",
-        "previous_version": "ac58f185-b8c0-40db-84a8-aff162dd6884",
         "version": "236a1d30-1c68-49dd-adb8-e0591f6b684f",
         "code": "a9cf140f6fa5f35d4cd3da1254c923723dd4f536",
         "source_fence_retained": true,
-        "archive_verification_state_unchanged": true
+        "archive_verification_state_unchanged": true,
+        "previous_accepted_version": "ac58f185-b8c0-40db-84a8-aff162dd6884",
+        "receipt_recorded_at": "2026-10-23T16:54:04.259Z",
+        "event": "verified_fix_forward_receipt"
       },
       {
         "pr": 93,
-        "at": "2026-10-23T20:03:16.224Z",
-        "previous_version": "236a1d30-1c68-49dd-adb8-e0591f6b684f",
         "version": "3878f869-95d9-411a-b55e-8758ba7c48ce",
         "code": "a08f6cb564748e62a0f84de99f7d06afd4f83352",
         "source_fence_retained": true,
-        "archive_verification_state_unchanged": true
+        "archive_verification_state_unchanged": true,
+        "previous_accepted_version": "236a1d30-1c68-49dd-adb8-e0591f6b684f",
+        "receipt_recorded_at": "2026-10-23T20:03:16.224Z",
+        "event": "verified_fix_forward_receipt"
       },
       {
         "pr": 94,
-        "at": "2026-10-23T21:48:03.010Z",
-        "previous_version": "3878f869-95d9-411a-b55e-8758ba7c48ce",
         "version": "1f0d22be-89a2-4a48-b72f-b5b1bfa4f3c9",
         "code": "9f44585da19d2c7563d2802a70a82a226d085e49",
         "source_fence_retained": true,
-        "archive_verification_state_unchanged": true
+        "archive_verification_state_unchanged": true,
+        "previous_accepted_version": "3878f869-95d9-411a-b55e-8758ba7c48ce",
+        "receipt_recorded_at": "2026-10-23T21:48:03.010Z",
+        "event": "verified_fix_forward_receipt"
       },
       {
         "pr": 95,
-        "at": "2026-10-23T22:38:40.919Z",
-        "previous_version": "1f0d22be-89a2-4a48-b72f-b5b1bfa4f3c9",
         "version": "6d226e9c-8f7c-4abd-b3a1-dfe1b7909933",
         "code": "f7a51c5666ae9a0b07742e3a4e35688a5a4b3312",
         "source_fence_retained": true,
-        "archive_verification_state_unchanged": true
+        "archive_verification_state_unchanged": true,
+        "previous_accepted_version": "1f0d22be-89a2-4a48-b72f-b5b1bfa4f3c9",
+        "receipt_recorded_at": "2026-10-23T22:38:40.919Z",
+        "event": "verified_fix_forward_receipt"
       },
       {
         "pr": 97,
-        "at": "2026-10-24T01:53:17.232Z",
-        "previous_version": "6d226e9c-8f7c-4abd-b3a1-dfe1b7909933",
         "version": "29372aa4-7993-41d1-a91c-3c257ce84d7b",
         "code": "56483f5f5d277fcf484cf191f4bea443c079490b",
         "source_fence_retained": true,
-        "archive_verification_state_unchanged": true
+        "archive_verification_state_unchanged": true,
+        "previous_accepted_version": "6d226e9c-8f7c-4abd-b3a1-dfe1b7909933",
+        "receipt_recorded_at": "2026-10-24T01:53:17.232Z",
+        "event": "verified_fix_forward_receipt"
       },
       {
         "pr": 98,
-        "at": "2026-10-24T02:45:18.751Z",
-        "previous_version": "29372aa4-7993-41d1-a91c-3c257ce84d7b",
         "version": "4122eca6-5e67-48f1-a289-2672237af338",
         "code": "ed2fed75993d56177119b81a69c64e2794661017",
         "source_fence_retained": true,
-        "archive_verification_state_unchanged": true
+        "archive_verification_state_unchanged": true,
+        "previous_accepted_version": "29372aa4-7993-41d1-a91c-3c257ce84d7b",
+        "receipt_recorded_at": "2026-10-24T02:45:18.751Z",
+        "event": "verified_fix_forward_receipt"
       },
       {
         "pr": 99,
-        "at": "2026-10-24T10:18:01.358Z",
-        "previous_version": "4122eca6-5e67-48f1-a289-2672237af338",
         "version": "5252c69d-9ebf-4e5b-84c4-171062363e95",
         "code": "166866fd25cdcd433e7fad8bfb70aa770de54554",
         "source_fence_retained": true,
-        "archive_verification_state_unchanged": true
+        "archive_verification_state_unchanged": true,
+        "previous_accepted_version": "4122eca6-5e67-48f1-a289-2672237af338",
+        "receipt_recorded_at": "2026-10-24T10:18:01.358Z",
+        "event": "verified_fix_forward_receipt"
       }
-    ]
+    ],
+    "fix_forward_chain_scope": "Verified accepted-version receipt chain. previous_accepted_version is not necessarily the immediately preceding running version; external versions and PR77 adoption are recorded separately below. Receipt time is not a general deployment activation timestamp."
   },
   "source": {
     "object": "23f902806a4c8c7ee732d42035bb9f15223bb9421dde59063ecda03025122b46",
@@ -165,7 +183,8 @@
     "frozen_at": 1792631442509,
     "freeze_duration_ms": 41720344,
     "revision": "6344042",
-    "authoritative_bookmark_sha256": "97c364ff0e100dbaeab2d873e6fb923792ec6daf14593d0c314d8cde62fa3512"
+    "authoritative_bookmark_sha256": "97c364ff0e100dbaeab2d873e6fb923792ec6daf14593d0c314d8cde62fa3512",
+    "revision_encoding": "decimal string; repository revision"
   },
   "target": {
     "identity": "neon-test-br-billowing-brook-b5atwf17",
@@ -415,7 +434,8 @@
     "completed_at": 1792908638699,
     "backend_write_owner": "postgres",
     "source_fenced": true,
-    "target_active": true
+    "target_active": true,
+    "completed_at_scope": "Migration replay and terminal receipt completion, distinct from initial PostgreSQL selection."
   },
   "input_recovery": {
     "parked": 0,
@@ -477,6 +497,22 @@
         "sha256": "eee6fd4bcfa618aa47dff7f1a7e734931581b174c19a4359d114859abfe0d790"
       },
       "scope": "Serial calls to the existing leased replay at unchanged limits. Acknowledgements are not a count of unique semantic publications; earlier failures remain retained."
+    },
+    "ingress_resume": {
+      "mode": "apply",
+      "at": "2026-10-24T10:20:35.305Z",
+      "repository": {
+        "mode": "apply",
+        "in_flight": 0,
+        "drained": true
+      },
+      "generation": "80ecf79d-f811-42c8-9fec-ad41c3727567",
+      "deployment": "5252c69d-9ebf-4e5b-84c4-171062363e95",
+      "receipt": {
+        "file": "test-ingress-resumed-after-forward-14.json",
+        "sha256": "8047cb1d20a429f9714ae8fc45de14f80b9eafb1dce18bd32f03e849e8272696"
+      },
+      "scope": "Apply resumed after the exact accepted runtime, PostgreSQL owner, retained source fence and original fresh/retained client workflows were verified."
     }
   },
   "latest_applied_input": {
@@ -627,7 +663,11 @@
         ]
       }
     ],
-    "scope": "Actual repeated warm public API gate includes the existing DTO cache, matching S1. Separate cycled cache-miss diagnostic latencies are reported without a 20% claim. Original same-generation SQLite cohort is retained with accelerator paused and any cron checkpoint overlap recorded; post-cutover data/revisions may include replayed inputs. Failed cohorts retained."
+    "scope": "Actual repeated warm public API gate includes the existing DTO cache, matching S1. Separate cycled cache-miss diagnostic latencies are reported without a 20% claim. Original same-generation SQLite cohort is retained with accelerator paused and any cron checkpoint overlap recorded; post-cutover data/revisions may include replayed inputs. Failed cohorts retained.",
+    "failed_target_cohorts": 0,
+    "performance_cohort_reruns": 0,
+    "data_equality_asserted": false,
+    "comparison_conditions": "Same public queries and configured sampler, with replayed target data and different deployed code. Survey first-page rows changed from 465 to 500 with a continuation; no same-data or same-code causal latency claim is made."
   },
   "unchanged_client": {
     "at": "2026-10-25T07:34:50.387Z",
@@ -682,16 +722,30 @@
   },
   "github_request_rate": {
     "owner_concurrency": 4,
-    "max_sampled_repository_requests": 0,
     "samples": 12,
     "full_post_selection_hour_observation": {
       "at": 1792913446253,
       "window_start": 1792909846253,
       "prepared_deployment": "5252c69d-9ebf-4e5b-84c4-171062363e95",
       "telemetry_failure": null,
-      "accounting_preparation_failure": null
+      "accounting_preparation_failure": null,
+      "observed_at": 1792913447072,
+      "scope": "retained_accounting_hour",
+      "window_complete": true,
+      "stale": false,
+      "repository_requests_in_this_hour": 418,
+      "passed": true,
+      "criteria": {
+        "window_wholly_after_migration_completion_and_last_deployment": true,
+        "prepared_on_released_deployment": true,
+        "telemetry_failure_absent": true,
+        "accounting_preparation_failure_absent": true,
+        "minimum_discrete_samples": 12,
+        "owner_concurrency_max": 4,
+        "sampled_repository_inflight_max_allowed": 4
+      },
+      "request_count_scope": "418 is the retained observed hour total, not a cumulative count since PostgreSQL selection. No arbitrary hourly-request threshold is asserted; bounded ownership/quota and sampled concurrency are the acceptance checks."
     },
-    "post_selection_repository_requests": 418,
     "frozen_source": {
       "fully_observed_hour_available": true,
       "samples": 176,
@@ -699,11 +753,14 @@
       "scope": "Fresh retained complete one-hour windows wholly inside the source fence for repository repair/bootstrap/reference operations; runner-capacity and token authentication are classified separately, and discrete observations do not cover unobserved gaps"
     },
     "scope": "Discrete ten-second health samples after replay completion on the released deployment; full retained accounting window starts after both replay completion and the last recorded deployment. Sampled concurrency is not continuous peak proof. Accounting describes logged requests and bounded retained scan coverage, not an audit of every external attempt; missing telemetry cannot be excluded solely by a null failure field",
-    "accounting_limitations": "Retained rows count logged requests; window_complete describes suffix coverage, not proof that every external attempt was logged. Known telemetry/preparation failures reject the final observation; null failure fields do not exclude historical unrecorded attempts. Migration dispatch-fence and zero-bootstrap behavior are separately tested."
+    "accounting_limitations": "Retained rows count logged requests; window_complete describes suffix coverage, not proof that every external attempt was logged. Known telemetry/preparation failures reject the final observation; null failure fields do not exclude historical unrecorded attempts. Migration dispatch-fence and zero-bootstrap behavior are separately tested.",
+    "repository_requests_in_observed_hour": 418,
+    "max_sampled_repository_inflight": 0,
+    "sampled_inflight_scope": "Instantaneous sampled in-flight repository request count, distinct from the retained-hour total."
   },
   "operator_cursor_verifier_recovery": {
     "cause": "Local baseline report discovery admitted an empty singleton lock as JSON; the original observer stopped before cursor requests.",
-    "correction": "A separately reviewed verifier admits timestamped baseline JSON reports. Cursor assertions are unchanged; malformed and duplicate numeric reports still fail. All108 original operator files remain byte exact.",
+    "correction": "A separately reviewed verifier admits timestamped baseline JSON reports. Cursor assertions are unchanged; malformed and duplicate same-generation baselines still fail. All 108 original operator files remain byte exact.",
     "local_tests": 11,
     "actual_entry_fixtures": 7,
     "live_corrected_cursor_runs": 1,
@@ -720,7 +777,16 @@
       "file": "operator/forward-14-cursor-recovery-release-link-test.json",
       "sha256": "21eb5b27acccffeba1c0e415501aa439ec4c0c938dcd894f2e9bfe0cc463bca1"
     },
-    "scope": "The release embeds the exact corrected cursor-proof object. Its verifier provenance is bound in an external sidecar; the original release has no embedded verifier-hash field."
+    "scope": "The release embeds the exact corrected cursor-proof object. Its verifier provenance is bound in an external sidecar; the original release has no embedded verifier-hash field.",
+    "verifier": {
+      "file": "verify-cursors-json-reports.mjs",
+      "sha256": "1e0d1e52de6e21b5324b1b98547a7d326f2db85ebeacd80934a853104e66d715"
+    },
+    "discovery_predicate": {
+      "file": "baseline-report-files.mjs",
+      "sha256": "10021e4548624fe6c1707b7f7e570556c255075abef7941a8af665991250bd62"
+    },
+    "production_requirement": "The future concrete production operator manifest must include the corrected verifier and discovery predicate with these reviewed hashes before its observer is admitted."
   },
   "recoverability": {
     "source_receipt_sha256": "108f72c2e1a205b613a3bbfb6c517f0a2a2445e75da9cbb4906d6860c16437e3",
@@ -731,7 +797,18 @@
     "all_r2_retention_classes_pinned": true,
     "lifecycle_object_expiry_disabled": true,
     "observation_finished": false,
-    "post_write_recovery": "preserve PostgreSQL and parked inputs; fix forward; no lossless flipback to stale DO"
+    "post_write_recovery": "preserve PostgreSQL and parked inputs; fix forward; no lossless flipback to stale DO",
+    "observation": {
+      "at": "2026-10-25T08:07:42.943Z",
+      "release_recorded_at": "2026-10-25T08:07:48.801Z",
+      "policy_sha256": "a340638aa2da3dff7d5309a5311c1c59849a3d8137b5d76cb54dc757dbe020d9",
+      "source_fenced": true,
+      "backend_write_owner": "postgres",
+      "generation": "80ecf79d-f811-42c8-9fec-ad41c3727567",
+      "all_seven_pins_present": true,
+      "lifecycle_object_expiry_disabled": true,
+      "scope": "Reviewed pre-resume selected-version/module, target SQL owner, R2 retention-policy/lifecycle and immutable export-receipt checks, followed by release-time pin/lifecycle checks. No post-write source checksum recomputation is claimed."
+    }
   },
   "limitations": [
     "Intermediate a4 deployment is not mapped to a Git commit; executing version per input is not proven. Receipt commits and sampled resource metadata are not a full independent replay of all materializations or proof against every duplicate semantic publication. Clearing an unmirrored CI diagnostic is not application delivery recovery. Original archive checksums predate target writes and remain immutable.",
@@ -739,6 +816,210 @@
     "The long-freeze fixture exceeded the configured twenty-retry horizon; this does not claim twenty observed queue failures.",
     "The original frozen SQLite cohort and the final PostgreSQL cohort use different deployed code and live data revisions. Warm repeated public reads include the existing DTO cache; cache-miss diagnostics are reported without a 20% acceptance claim.",
     "Raw full-pass completion does not prove the traversal began after freeze. Queue counts are approximate fresh provider snapshots; empty R2 lanes are direct observations rather than a continuous-empty claim.",
-    "The source Durable Object, archives and all seven R2 retention pins remain retained. PostgreSQL is the sole writer; no lossless write flipback, finish-observation, unpinning or retirement has occurred."
-  ]
+    "The source Durable Object, archives and all seven R2 retention pins remain retained. PostgreSQL is the sole writer; no lossless write flipback, finish-observation, unpinning or retirement has occurred.",
+    "Application accounting for the external deployment interval ends at the 2026-10-22T22:47 ingress pause. Raw recovery continued until accepted-code adoption at 23:09; this later period is not a complete per-mutation audit, and continuous no-deletion is not proven."
+  ],
+  "external_runtime_interval": {
+    "checkpoint": {
+      "file": "services/github-state/validation/migration-test-checkpoint-2026-10-22.json",
+      "sha256": "9e6bc69f8a8eb0d1deb894d49e664266c3b345d16ea877b7b13be05b5bfb19c8"
+    },
+    "external_versions": [
+      {
+        "version": "9782ed77-aea9-495d-9f6b-80e771a326f2",
+        "created_at": "2026-10-22T22:28:00.024523Z",
+        "script_etag": "8600a4ab32f58a07c2e1f8cc49df3edba1c6244e64bc9808c9f5a4974055d598",
+        "nonsecret_binding_contract_equal": true,
+        "git_attestation": "18db9509b9e9d505a5719d69c0e671818b8b2e7f"
+      },
+      {
+        "version": "a4fdf157-db33-4c1a-9dab-807df306554f",
+        "created_at": "2026-10-22T22:33:36.93632Z",
+        "script_etag": "bba19141b8dfc125d1dd5938e92464a1a82e735ae176582da71e06fb315b9784",
+        "nonsecret_binding_contract_equal": true,
+        "git_attestation": null
+      },
+      {
+        "version": "5240c4d8-1d60-4690-b4c3-299275b35f3d",
+        "created_at": "2026-10-22T22:37:54.403687Z",
+        "script_etag": "82e9d6556ca87332ea10e632ceb23bea9621b2fe753ab7600ff4d26a9c7c74d2",
+        "nonsecret_binding_contract_equal": true,
+        "git_attestation": "23d542e00bad04471d0bc7a6634850af03cd8578"
+      }
+    ],
+    "first_external_version_attestation": {
+      "version": "9782ed77-aea9-495d-9f6b-80e771a326f2",
+      "code": "18db9509b9e9d505a5719d69c0e671818b8b2e7f",
+      "module_sha256": "6c91ccedf6b9cb5969636879d128f54e7445cde822a73abd6b475b54ab7e9ad9",
+      "exact_isolated_build_match": true,
+      "pr": 75,
+      "accepted_into_release_chain": false
+    },
+    "application_interval": {
+      "start_ms": 1792708080024,
+      "end_ms": 1792709228296,
+      "ingress_barrier": {
+        "mode": "parked",
+        "in_flight": 0,
+        "drained": true
+      }
+    },
+    "application_interval_input_accounting": {
+      "at": "2026-10-22T22:54:37.916Z",
+      "passed_for_stated_scope": true,
+      "new_input_arrivals": 258,
+      "new_arrivals_accounted": 258,
+      "raw_bodies_verified_exact": 258,
+      "sql_delivery_commits": {
+        "rows": 1616,
+        "canonical_sha256": "1cbb1f15e93fecb79fe5826825672e0732da02b9664087b1f54d99168144325b",
+        "ignored_ci": 1247,
+        "semantic": 369,
+        "time_unit": "Existing deliveries.received is commit-time Unix milliseconds, including inputs originally received before this interval",
+        "scope": "Committed delivery rows re-read from the selected PostgreSQL generation; per-input executing Worker version is not proven; these rows do not prove absence of duplicate change publications"
+      },
+      "metadata_anomalies": 0,
+      "scope": "All listed new raw inputs whose verified received metadata falls in the external interval have exact retained raw bodies and either a PostgreSQL commit receipt or a durable pointer plus exact body pin. This does not reconstruct cleared CI gap markers, attest the intermediate external bundle, or prove continuous absence of raw deletion; existing independent retention holds and pins plus final full backlog/known-input/client/revision checks remain required.",
+      "receipt": {
+        "file": "external-interval-input-accounting-test.json",
+        "sha256": "7471a51a3003c92d8d67ceb5de7a1c93090561716a6d2c9487e91456135280b9"
+      }
+    },
+    "stored_resource_verification": {
+      "at": "2026-10-22T23:25:35.162Z",
+      "passed": true,
+      "semantic_delivery_receipts": 369,
+      "raw_events_verified": 369,
+      "resource_checks": 224,
+      "scope": "Retained raw bodies for semantic delivery receipts committed during the external interval are hash-checked. Resource kinds match the runtime ingest mapping, including refs (plural). Top-level PR/issue parents are not asserted because ordinary inventory refreshes use an empty parent; comment/status parents are checked. Directly event-written resource metadata must exist with update timestamp at least as new as the latest relevant raw event; later valid events/tombstones may supersede it. Events that enqueue histories are included in the final public stored-read entity set, not forced into fake complete coverage. This is not a full replay of every materialization or proof of absence of all duplicate semantic publications; no GitHub reference requests are made."
+    },
+    "diagnostic_disposition": {
+      "at": "2026-10-22T23:27:49.617Z",
+      "event": "workflow_run",
+      "disposition": "not_mirrored",
+      "raw_sha256": "d7e475704e76796c4e8363e76fa7ed9e8cf54acf3cf33d832dc5aee70c09a78b",
+      "gap_sha256": "6ccfcc2f740dd7b0cc0c4f40c17dcb3f13bafb9d598217dd56066c47e2714ce1",
+      "diagnostic_absent": true,
+      "raw_retained": true,
+      "application_replayed": false,
+      "delivery_receipt_created": false,
+      "scope": "Explicit disposition of one historical diagnostic for a CI event excluded by the deployed CI_EVENTS policy. This is not evidence of application delivery recovery or a completed historical raw scan. The original signed raw input and every existing pin, pointer, and SQL/R2 delivery receipt are retained."
+    },
+    "adoption": {
+      "at": "2026-10-22T23:09:07.351Z",
+      "version": "5240c4d8-1d60-4690-b4c3-299275b35f3d",
+      "code": "23d542e00bad04471d0bc7a6634850af03cd8578",
+      "version_created_at": "2026-10-22T22:37:54.403687Z",
+      "artifact": {
+        "sha256": "391c9d569fc7499ba23792ffafbd799f9d32dcc5ec9e5a4435b19771d1eaff2b",
+        "bytes": 690914,
+        "exact_clean_build": true,
+        "code": "23d542e00bad04471d0bc7a6634850af03cd8578",
+        "cloudflare_script_etag": "82e9d6556ca87332ea10e632ceb23bea9621b2fe753ab7600ff4d26a9c7c74d2"
+      },
+      "runtime_release_binding_stale": true,
+      "code_identity_evidence": "Exact deployed JS module matches isolated build of the recorded upstream commit; MIGRATION_RELEASE remains its predecessor and is not used as the code attestation",
+      "receipt": {
+        "file": "fix-forward-3-test.json",
+        "sha256": "afb2246fcc2c98d7d4273ff1f007d074b10686eb53ced11cf7cb31485c15ec74"
+      },
+      "scope": "This is verified adoption of the already-present external artifact, not a new upload or proof of its exact serving start."
+    },
+    "raw_recovery_after_application_pause": {
+      "application_pause_completed_at": "2026-10-22T22:47:08.296Z",
+      "raw_recovery_continued": true,
+      "accepted_code_recorded_at": "2026-10-22T23:09:07.351Z",
+      "acceptance_interval_end_basis": "Verified adoption receipt; it bounds acceptance state, not the exact execution time of every raw-recovery mutation.",
+      "post_pause_to_adoption_complete_mutation_audit": false,
+      "exact_per_input_executing_versions_proven": false,
+      "continuous_no_deletion_proven": false,
+      "scope": "Application-input accounting ends at the ingress pause. The later raw-recovery period up to adoption is not reconstructed as a complete per-mutation audit. The final raw pass and known-input checks do not retrospectively establish continuous absence of deletion."
+    },
+    "limitations": "Intermediate a4 deployment is not mapped to a Git commit; executing version per input is not proven. Receipt commits and sampled resource metadata are not a full independent replay of all materializations or proof against every duplicate semantic publication. Clearing an unmirrored CI diagnostic is not application delivery recovery. Original archive checksums predate target writes and remain immutable."
+  },
+  "client_compatibility_before_replay": {
+    "at": "2026-10-24T10:20:16.886Z",
+    "deployment": "5252c69d-9ebf-4e5b-84c4-171062363e95",
+    "backend": "postgres",
+    "client_commit": "4972ab3722606a8ca9e442a110393a7662513068",
+    "source_fenced": true,
+    "passed": true,
+    "runs": [
+      {
+        "environment": "test",
+        "fresh_cache": true,
+        "client": "unchanged tauceti_worker.github_state from the original Worker checkout",
+        "workflows": [
+          {
+            "workflow": "open_prs",
+            "rows": 594,
+            "reads": 2
+          },
+          {
+            "workflow": "survey",
+            "rows": 594,
+            "reads": 2
+          },
+          {
+            "workflow": "history",
+            "rows": 2,
+            "reads": 2
+          }
+        ],
+        "http_statuses": [
+          200,
+          200,
+          304,
+          200,
+          200,
+          304,
+          200,
+          304
+        ],
+        "github_reference_calls": 0,
+        "client_commit": "4972ab3722606a8ca9e442a110393a7662513068",
+        "provider_counter_scope": "Direct requests attempted by the original client; server-side accounting is separate"
+      },
+      {
+        "environment": "test",
+        "fresh_cache": false,
+        "client": "unchanged tauceti_worker.github_state from the original Worker checkout",
+        "workflows": [
+          {
+            "workflow": "open_prs",
+            "rows": 594,
+            "reads": 2
+          },
+          {
+            "workflow": "survey",
+            "rows": 594,
+            "reads": 2
+          },
+          {
+            "workflow": "history",
+            "rows": 2,
+            "reads": 2
+          }
+        ],
+        "http_statuses": [
+          200,
+          200,
+          304,
+          200,
+          200,
+          304,
+          200,
+          304
+        ],
+        "github_reference_calls": 0,
+        "client_commit": "4972ab3722606a8ca9e442a110393a7662513068",
+        "provider_counter_scope": "Direct requests attempted by the original client; server-side accounting is separate"
+      }
+    ],
+    "receipt": {
+      "file": "forward-14-live-unchanged-client-smoke-test.json",
+      "sha256": "b8140cce391ddae0a22c6b80b0689b971ceb3720087759a5e39257ab1cdc9d4f"
+    },
+    "scope": "Both fresh and retained original-client cache runs used this exact final TEST PostgreSQL deployment before ingress resumed. The later release client proof is a separate fresh-cache run. HTTP statuses are aggregate wire observations across pagination/cache validation, not a per-workflow timing trace."
+  }
 }
