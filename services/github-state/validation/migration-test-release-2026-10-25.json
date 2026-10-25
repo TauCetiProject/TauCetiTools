@@ -174,7 +174,14 @@
         "event": "verified_fix_forward_receipt"
       }
     ],
-    "fix_forward_chain_scope": "Verified accepted-version receipt chain. previous_accepted_version is not necessarily the immediately preceding running version; external versions and PR77 adoption are recorded separately below. Receipt time is not a general deployment activation timestamp."
+    "fix_forward_chain_scope": "Verified accepted-version receipt chain. previous_accepted_version is not necessarily the immediately preceding running version; external versions and PR77 adoption are recorded separately below. Receipt time is not a general deployment activation timestamp.",
+    "history_completeness": {
+      "all_provider_version_uploads_enumerated": false,
+      "exact_executing_version_per_request_proven": false,
+      "current_selected_rollout": "867a24f4-2f01-448b-8bf8-edc19fdc97e9",
+      "selected_rollout_verified_at": "2026-10-25T08:07:42.943Z",
+      "scope": "The accepted receipt chain and known external versions are listed. The final selected rollout/module was reverified unchanged before release, and the accounting report identifies its prepared deployment. This does not claim an exhaustive upload history or continuous per-request version attestation."
+    }
   },
   "source": {
     "object": "23f902806a4c8c7ee732d42035bb9f15223bb9421dde59063ecda03025122b46",
@@ -663,11 +670,11 @@
         ]
       }
     ],
-    "scope": "Actual repeated warm public API gate includes the existing DTO cache, matching S1. Separate cycled cache-miss diagnostic latencies are reported without a 20% claim. Original same-generation SQLite cohort is retained with accelerator paused and any cron checkpoint overlap recorded; post-cutover data/revisions may include replayed inputs. Failed cohorts retained.",
+    "scope": "Actual repeated warm public API gate includes the existing DTO cache, matching S1. Separate cycled cache-miss diagnostic latencies are reported without a 20% claim. Original same-generation SQLite cohort is retained with accelerator paused and any cron checkpoint overlap recorded; post-cutover data/revisions may include replayed inputs. No failed target cohort or performance rerun occurred for this generation.",
     "failed_target_cohorts": 0,
     "performance_cohort_reruns": 0,
     "data_equality_asserted": false,
-    "comparison_conditions": "Same public queries and configured sampler, with replayed target data and different deployed code. Survey first-page rows changed from 465 to 500 with a continuation; no same-data or same-code causal latency claim is made."
+    "comparison_conditions": "Same public queries and configured sampler, with replayed target data and different deployed code. Open-PR first-page rows changed from 346 to 321; survey first-page rows changed from 465 to 500 with a continuation. No same-data or same-code causal latency claim is made."
   },
   "unchanged_client": {
     "at": "2026-10-25T07:34:50.387Z",
@@ -736,15 +743,27 @@
       "repository_requests_in_this_hour": 418,
       "passed": true,
       "criteria": {
-        "window_wholly_after_migration_completion_and_last_deployment": true,
         "prepared_on_released_deployment": true,
         "telemetry_failure_absent": true,
         "accounting_preparation_failure_absent": true,
         "minimum_discrete_samples": 12,
         "owner_concurrency_max": 4,
-        "sampled_repository_inflight_max_allowed": 4
+        "sampled_repository_inflight_max_allowed": 4,
+        "window_wholly_after_migration_completion_and_latest_recorded_verified_deployment": true
       },
-      "request_count_scope": "418 is the retained observed hour total, not a cumulative count since PostgreSQL selection. No arbitrary hourly-request threshold is asserted; bounded ownership/quota and sampled concurrency are the acceptance checks."
+      "request_count_scope": "418 is the retained observed-hour total, not a cumulative count since PostgreSQL selection. No arbitrary hourly-request threshold is asserted. Acceptance checks the configured owner/quota settings and sampled in-flight concurrency; it is not a continuous audit of every dispatch.",
+      "quota_settings": {
+        "concurrency": 4,
+        "dispatches": 16,
+        "launch_ms": 10000,
+        "lease_ms": 60000,
+        "weights": [
+          8,
+          4,
+          2,
+          1
+        ]
+      }
     },
     "frozen_source": {
       "fully_observed_hour_available": true,
@@ -754,7 +773,6 @@
     },
     "scope": "Discrete ten-second health samples after replay completion on the released deployment; full retained accounting window starts after both replay completion and the last recorded deployment. Sampled concurrency is not continuous peak proof. Accounting describes logged requests and bounded retained scan coverage, not an audit of every external attempt; missing telemetry cannot be excluded solely by a null failure field",
     "accounting_limitations": "Retained rows count logged requests; window_complete describes suffix coverage, not proof that every external attempt was logged. Known telemetry/preparation failures reject the final observation; null failure fields do not exclude historical unrecorded attempts. Migration dispatch-fence and zero-bootstrap behavior are separately tested.",
-    "repository_requests_in_observed_hour": 418,
     "max_sampled_repository_inflight": 0,
     "sampled_inflight_scope": "Instantaneous sampled in-flight repository request count, distinct from the retained-hour total."
   },
@@ -777,7 +795,7 @@
       "file": "operator/forward-14-cursor-recovery-release-link-test.json",
       "sha256": "21eb5b27acccffeba1c0e415501aa439ec4c0c938dcd894f2e9bfe0cc463bca1"
     },
-    "scope": "The release embeds the exact corrected cursor-proof object. Its verifier provenance is bound in an external sidecar; the original release has no embedded verifier-hash field.",
+    "scope": "The immutable private release receipt0827e3e6 embeds the exact corrected cursor-proof object but has no verifier-hash field. Its external sidecar binds that provenance; this public summary additionally publishes the verifier and predicate hashes. These are commitments to retained private operator files, not a claim those files are present in this repository.",
     "verifier": {
       "file": "verify-cursors-json-reports.mjs",
       "sha256": "1e0d1e52de6e21b5324b1b98547a7d326f2db85ebeacd80934a853104e66d715"
@@ -799,15 +817,15 @@
     "observation_finished": false,
     "post_write_recovery": "preserve PostgreSQL and parked inputs; fix forward; no lossless flipback to stale DO",
     "observation": {
-      "at": "2026-10-25T08:07:42.943Z",
-      "release_recorded_at": "2026-10-25T08:07:48.801Z",
       "policy_sha256": "a340638aa2da3dff7d5309a5311c1c59849a3d8137b5d76cb54dc757dbe020d9",
       "source_fenced": true,
       "backend_write_owner": "postgres",
       "generation": "80ecf79d-f811-42c8-9fec-ad41c3727567",
       "all_seven_pins_present": true,
       "lifecycle_object_expiry_disabled": true,
-      "scope": "Reviewed pre-resume selected-version/module, target SQL owner, R2 retention-policy/lifecycle and immutable export-receipt checks, followed by release-time pin/lifecycle checks. No post-write source checksum recomputation is claimed."
+      "scope": "Reviewed pre-resume selected-version/module, target SQL owner, R2 retention-policy/lifecycle and immutable export-receipt checks, followed by release-time pin/lifecycle checks. No post-write source checksum recomputation is claimed.",
+      "pre_resume_verified_at": "2026-10-25T08:07:42.943Z",
+      "release_checks_recorded_at": "2026-10-25T08:07:48.801Z"
     }
   },
   "limitations": [
@@ -817,7 +835,7 @@
     "The original frozen SQLite cohort and the final PostgreSQL cohort use different deployed code and live data revisions. Warm repeated public reads include the existing DTO cache; cache-miss diagnostics are reported without a 20% acceptance claim.",
     "Raw full-pass completion does not prove the traversal began after freeze. Queue counts are approximate fresh provider snapshots; empty R2 lanes are direct observations rather than a continuous-empty claim.",
     "The source Durable Object, archives and all seven R2 retention pins remain retained. PostgreSQL is the sole writer; no lossless write flipback, finish-observation, unpinning or retirement has occurred.",
-    "Application accounting for the external deployment interval ends at the 2026-10-22T22:47 ingress pause. Raw recovery continued until accepted-code adoption at 23:09; this later period is not a complete per-mutation audit, and continuous no-deletion is not proven."
+    "Application accounting for the external deployment interval ends at the 2026-10-22 22:47 UTC ingress pause. Raw recovery continued after that pause; the already-present artifact was verified and adopted at 2026-10-22 23:09 UTC. The intervening period is not a complete per-mutation audit, and continuous no-deletion is not proven."
   ],
   "external_runtime_interval": {
     "checkpoint": {
@@ -935,7 +953,8 @@
       "continuous_no_deletion_proven": false,
       "scope": "Application-input accounting ends at the ingress pause. The later raw-recovery period up to adoption is not reconstructed as a complete per-mutation audit. The final raw pass and known-input checks do not retrospectively establish continuous absence of deletion."
     },
-    "limitations": "Intermediate a4 deployment is not mapped to a Git commit; executing version per input is not proven. Receipt commits and sampled resource metadata are not a full independent replay of all materializations or proof against every duplicate semantic publication. Clearing an unmirrored CI diagnostic is not application delivery recovery. Original archive checksums predate target writes and remain immutable."
+    "limitations": "Intermediate a4 deployment is not mapped to a Git commit; executing version per input is not proven. Receipt commits and sampled resource metadata are not a full independent replay of all materializations or proof against every duplicate semantic publication. Clearing an unmirrored CI diagnostic is not application delivery recovery. Original archive checksums predate target writes and remain immutable.",
+    "checkpoint_timestamp_scope": "The checkpoint recorded_at predates some embedded evidence timestamps. It is not treated as a final observation time or coverage cutoff; individual verification timestamps remain explicit."
   },
   "client_compatibility_before_replay": {
     "at": "2026-10-24T10:20:16.886Z",
@@ -1020,6 +1039,15 @@
       "file": "forward-14-live-unchanged-client-smoke-test.json",
       "sha256": "b8140cce391ddae0a22c6b80b0689b971ceb3720087759a5e39257ab1cdc9d4f"
     },
-    "scope": "Both fresh and retained original-client cache runs used this exact final TEST PostgreSQL deployment before ingress resumed. The later release client proof is a separate fresh-cache run. HTTP statuses are aggregate wire observations across pagination/cache validation, not a per-workflow timing trace."
-  }
+    "scope": "Both fresh and retained original-client cache runs used this exact final TEST PostgreSQL deployment before ingress resumed. The later release client proof is a separate fresh-cache run. HTTP statuses are aggregate wire observations across pagination/cache validation, not a per-workflow timing trace.",
+    "cache_evidence": {
+      "directory_policy": "Fresh runs use a unique cache directory; the nonfresh run reuses the persistent per-environment TEST cache directory.",
+      "harness_file": "client.py",
+      "harness_sha256": "31544e93356c8a0c53934e5371b79d94371fc818c894881cd142edce7811c665",
+      "retained_cache_pre_run_hash": null,
+      "retained_cache_pre_run_age_recorded": false,
+      "scope": "The run records the reuse path and successful refresh/304 behavior. No pre-run cache content hash or age was captured; it does not attest a specific unchanged warm-cache snapshot."
+    }
+  },
+  "public_metadata_compiled_at": "2026-10-25T08:23:58.423114+00:00"
 }

@@ -35,8 +35,10 @@ interval before a durable ingress pause. The accepted release retains that
 application-interval accounting and its limitations: one intermediate deployment is not mapped to a
 Git commit, and sampled receipt/resource checks are not a full independent
 replay of every materialization or an audit of every semantic publication.
-Raw recovery continued after the 22:47 ingress pause until verified adoption at
-23:09. The public receipt records that acceptance bound; it does not reconstruct
+Raw recovery continued after the 2026-10-22 22:47 UTC ingress pause. The
+already-present artifact was verified and adopted at 23:09 UTC that day; this
+changed its acceptance status, not its proven serving start or whether raw
+recovery continued. The public receipt records that bound; it does not reconstruct
 a complete mutation audit for the intervening period or prove continuous absence
 of deletion. Clearing an unmirrored CI diagnostic is not application delivery recovery.
 
