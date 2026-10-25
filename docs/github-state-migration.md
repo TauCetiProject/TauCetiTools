@@ -7,32 +7,55 @@ is stored-read compatibility and durable parked ingress. S1
 Neon PostgreSQL backend. Both must be deployed and accepted before production
 start. Merging code or closing an issue does not prove deployed acceptance.
 
+The [2026-10-25 test release](../services/github-state/validation/migration-test-release-2026-10-25.json)
+records accepted TEST migration: twenty tables, 17,921,250 rows, canonical
+source/import/readback checks, full raw-input recovery, all 221 captured failed
+inputs and the signed freeze-time webhook verified, unchanged clients and cursors,
+and a complete request-accounting hour after replay finished. PostgreSQL is the
+single TEST writer; the original Durable Object, archives and all seven retention
+pins remain retained. At this receipt, production still uses SQLite and its data
+migration has not started. Production requires its own fresh deployed S0/S1
+acceptance, reviewed migration plan and release receipt.
+
+Exactly one target warm-read cohort was compared with the original frozen source
+cohort: open-PR, survey and issue-comment p95 were 286, 119 and 115 ms, versus
+557, 145 and 147 ms. Each workload used 100 samples, concurrency four and five
+warmups. The repeated-read gate includes the existing DTO cache; separate
+cache-miss diagnostics carry no 20% acceptance claim. Source and target used
+different deployed code and live data revisions; both identities and row counts
+are explicit in the receipt. Queue counts are approximate fresh snapshots, and
+empty R2 lanes are direct observations rather than a continuous-empty claim.
+The historical raw-pass completion timestamp does not establish traversal start.
+
 The [2026-10-22 test checkpoint](../services/github-state/validation/migration-test-checkpoint-2026-10-22.json)
-records a verified import of all twenty tables and PostgreSQL selection. Replay
-and final client, cursor, latency and request-rate acceptance remain incomplete;
-the checkpoint is not a release receipt and does not authorize production cutover.
-It preserves the original source identity and baseline, records the reviewed code
-updates separately, and records a hold after external test deployments changed
-the running artifact. Stopping the external operator initially left scheduled
-recovery running under unaccepted code against authoritative PostgreSQL. The
-checkpoint records that interval and the later durable ingress pause, which
-blocks webhook application and parked replay while accepting signed input into
-R2. Raw recovery continues after this pause, including R2 cursor and CI/non-CI
-gap-marker changes; its unaccepted-code interval remains open. Interval receipts,
-cleanup and CI gap disposition require accounting before adoption or final
-release; a lower raw-gap count is not delivery proof. Test ingress resumes only
-after the accepted live version and single PostgreSQL owner are reverified.
+remains the earlier incomplete import/selection checkpoint. It records the hold
+after external test deployments changed the running artifact, including the
+interval before a durable ingress pause. The accepted release retains that
+accounting and its limitations: one intermediate deployment is not mapped to a
+Git commit, and sampled receipt/resource checks are not a full independent
+replay of every materialization or an audit of every semantic publication.
+Clearing an unmirrored CI diagnostic is not application delivery recovery.
+
+A local cursor-verifier discovery error stopped final acceptance after the
+successful latency cohort: an empty singleton lock was parsed as JSON. The
+separately verified correction admits only timestamped baseline JSON reports;
+malformed reports and duplicate same-generation baselines still fail. The
+corrected cursor check passed once. The original 108 operator files, empty locks,
+stop evidence and successful cohort were preserved, and the observer resumed
+using retained proofs without another performance measurement. The release
+embeds the cursor proof; an external hash-bound sidecar records its corrected
+verifier provenance. Any production operator plan must include this discovery
+correction before starting its observer.
 
 The [2026-10-23 client compatibility deployment](../services/github-state/validation/migration-client-compatibility-2026-10-23.json)
 records the production deployment of [PR #90](https://github.com/TauCetiProject/TauCetiTools/pull/90)
-while SQLite remains authoritative.
-The original Worker client passed fresh-cache and retained-cache survey,
-inventory, history, pagination and 304 checks. Rereading a byte-exact copy of the retained survey
-cache added the required marker-list field to all 399 rows that lacked it.
-The unchanged client performed the refresh; the original cache was left intact. This is a code-only deployment
-receipt: test replay and its final release gates remain outstanding, and no
-production data migration has started. It does not replace the completed test
-release or fresh deployed S0/S1 acceptance required before production cutover.
+while SQLite remains authoritative. The original Worker client passed fresh-cache
+and retained-cache survey, inventory, history, pagination and 304 checks.
+Rereading a byte-exact copy of the retained survey cache added the required
+marker-list field to all 399 rows that lacked it. The unchanged client performed
+the refresh; the original cache was left intact. This code-only receipt predates
+the accepted TEST release and does not constitute a production data migration or
+replace fresh deployed S0/S1 acceptance for the final production module.
 
 ## Preparation and commands
 
