@@ -1,0 +1,1111 @@
+{
+  "version": 1,
+  "recorded_at": "2026-10-26T07:18:50.517Z",
+  "public_metadata_compiled_at": "2026-10-26T07:20:08.174289+00:00",
+  "issue": "https://github.com/TauCetiProject/TauCetiWorker/issues/316",
+  "environment": "production",
+  "generation": "9f418a72-05d1-44f1-afcc-395a7dbaf1cf",
+  "release_complete": true,
+  "phase": "complete",
+  "private_release_receipt": {
+    "file": "release-production.json",
+    "sha256": "811b559fbfc50ce41749cdcdd872214c4f16fad7155ca03faf3fb55c2d1d90c3"
+  },
+  "schema_versions": {
+    "source": 5,
+    "target": 1,
+    "postgres": 18
+  },
+  "deployment": {
+    "code": "166866fd25cdcd433e7fad8bfb70aa770de54554",
+    "cloudflare_version": "758ce56f-3830-4813-b139-8c0d0cf59096",
+    "artifact": {
+      "sha256": "0162f055303b20cdcb95a790f5b3e1edbcc01bb8b32766ecac8267fd5f762be6",
+      "bytes": 719898,
+      "code": "166866fd25cdcd433e7fad8bfb70aa770de54554",
+      "exact_clean_build": true,
+      "verified_by_version_specific_module_download": true
+    },
+    "rollout": 100,
+    "selection_code": "166866fd25cdcd433e7fad8bfb70aa770de54554",
+    "selection_version": "758ce56f-3830-4813-b139-8c0d0cf59096",
+    "runtime_receipt_version": "758ce56f-3830-4813-b139-8c0d0cf59096",
+    "fix_forwards": []
+  },
+  "source": {
+    "object": "2a1331894b591e54de243b3ff3ff5cf372ea85eb612c5b3e4dffe7d3b95cb308",
+    "deployment": "758ce56f-3830-4813-b139-8c0d0cf59096",
+    "schema": 5,
+    "frozen_at": 1792935213657,
+    "freeze_duration_ms": 37807461,
+    "revision": "7875389",
+    "authoritative_bookmark_sha256": "0d87d7328bfc75c4e79231fa314d4cf5b9afd8d2c1529e4182f29b8b7a6ae5bb"
+  },
+  "target": {
+    "identity": "neon-production-br-wispy-unit-b5i6xalz",
+    "database": "github_state",
+    "project": "tauceti-github-state",
+    "region": "aws-us-east-2",
+    "postgres_major": 18,
+    "backend_write_owner": "postgres"
+  },
+  "deployed_prerequisites": {
+    "s0": "https://github.com/TauCetiProject/TauCetiWorker/issues/303",
+    "s1": "https://github.com/TauCetiProject/TauCetiWorker/issues/308",
+    "checks": {
+      "s0_compatibility": true,
+      "parked_ingress": true,
+      "queue_dlq_ownership": true,
+      "r2_retention_drained": true,
+      "s1_schema_roles": true,
+      "capacity": true,
+      "restore": true,
+      "unchanged_clients": true,
+      "stored_shadow": true,
+      "no_github_refetch": true,
+      "warm_read_p95": true
+    },
+    "restore_verified_at": "2026-10-20T08:54:07.613Z",
+    "capacity_observed_at": "2026-10-25T11:46:11.642Z",
+    "evidence": {
+      "actual_test_release": {
+        "file": "release-test.json",
+        "sha256": "0827e3e6461f52b33052f2fb590f1fecfd1417b6146c3a746fe7525840bc387b"
+      },
+      "released_artifact_s0": {
+        "file": "s0-released-artifact-compatibility.json",
+        "sha256": "a17c82be1ba4b2dc83ee7fa190de22b4a34213de9d6cd457b2df60aa6dacdd56"
+      },
+      "released_artifact_s0_log": {
+        "file": "operator/s0-released-artifact-v4-1792925355980.tap",
+        "sha256": "1d0a40568bb29c03ab24e8c533937dcea6b7da2ddd83773b19b03374f597c5b0"
+      },
+      "current_original_client": {
+        "file": "production-enrollment-v2-317abd526420ca7c-a776c11d-c50f-469b-b676-35331b6f7759-client-758ce56f-3830-4813-b139-8c0d0cf59096-1792929431061.json",
+        "sha256": "f58b978262fe49d29cabdb66e9c8f08a34481b021be603e48a2d962267933a2c"
+      },
+      "live_neon_capacity": {
+        "file": "neon-capacity-production.json",
+        "sha256": "97c7b77b041ddf40fec74323b2ce3d3bc15cf5c7aab9078392dcb46c872e1eca"
+      },
+      "restore_reference": {
+        "file": "restore-evidence-production-ref.json",
+        "sha256": "b3e03a179dcffa3210d1bc3af03479a7f5c26352a6688ae3dd6fa966d7af4e61"
+      },
+      "actual_restore": {
+        "file": "restore-proof-2026-10-20-from-48b.json",
+        "sha256": "34e884ebe64710bd344a2f348193f8d5cfeda9efd2e6d04066d39a57c7bc0c16"
+      },
+      "retention_lane_barrier": {
+        "file": "retention-barrier-production.json",
+        "sha256": "ac6e56138ab0de17d82e04da7b7075b171a8f8f3cb156ff180a245aa0efc8511"
+      },
+      "live_sql_target": {
+        "file": "sql-preflight-production.json",
+        "sha256": "91d872cf041b54433ab5a2cf6d22eae8ee813644c428d80d33063d49f0b25388"
+      },
+      "s0_full_repository": {
+        "file": "s0-deployed-full-test.json",
+        "sha256": "a2457704f7f0a9e325c5b918486513a26cf896e3b776275d15adee50942b407d"
+      },
+      "legacy_client_under_full": {
+        "file": "unchanged-client-under-full-test.json",
+        "sha256": "baefca7ca54d693cd1f48a5679659cff0afced7461bd8bd01a94225c30a6edd0"
+      },
+      "current_scope": {
+        "file": "scope-proof-production.json",
+        "sha256": "6fd34217a3a8f94695fb8ae92dd48995fe4796bd60c140af5b1f350aea5ff608"
+      },
+      "enrollment_deployment": {
+        "file": "deployment-production.json",
+        "sha256": "89425e5b6e9bfe2cbd6a10d6c6555a8f5008ce9d68d90c1af9982618fb6da501"
+      },
+      "original_live_latency": {
+        "file": "live-read-latency-test.json",
+        "sha256": "467211c6cea8b9ad0ebc13735001bdd2d9b8f012c1046b3514fb08927ba78f45"
+      },
+      "test_freeze_probe": {
+        "file": "frozen-input-replayed-test.json",
+        "sha256": "6d5bc48b0b0cd59e1cece18d44d85c67f46ef4cb5eb2d1e1c53705d976c63a99"
+      }
+    },
+    "scope": "Production deployed checks passed before start and freeze; issue closure alone was not used as deployment acceptance. Private evidence references are commitments, not files published in this repository."
+  },
+  "import_verification": {
+    "tables": {
+      "activity_landings": {
+        "rows": 2560,
+        "pages": 1,
+        "canonical_sha256": "88ed74963c950a4e2ee4150f6257f043968fe1d34e2646f184dad8eadfe6c870",
+        "source_verified": true,
+        "import_verified": true,
+        "target_readback_verified": true
+      },
+      "activity_loc_cache": {
+        "rows": 1662,
+        "pages": 1,
+        "canonical_sha256": "5554ad8266c546fe5bf58e7fcc26a16c5949e62645c2a03a3909cc9ea8f9791c",
+        "source_verified": true,
+        "import_verified": true,
+        "target_readback_verified": true
+      },
+      "changes": {
+        "rows": 2824087,
+        "pages": 565,
+        "canonical_sha256": "8d4ff809779d7bac8aea5e15b692fb7191fe4cc60c53ef96ce8a118e056742e3",
+        "source_verified": true,
+        "import_verified": true,
+        "target_readback_verified": true
+      },
+      "collections": {
+        "rows": 180714,
+        "pages": 38,
+        "canonical_sha256": "1e72c70f4e7e9269d7953ced33219d3420716471982a3ecf36ba2ea1c19cf94e",
+        "source_verified": true,
+        "import_verified": true,
+        "target_readback_verified": true
+      },
+      "deliveries": {
+        "rows": 3320604,
+        "pages": 665,
+        "canonical_sha256": "4766b6007d2fe344fe7b41b649319ec56168028b1051d4c684f8b163d72c6f49",
+        "source_verified": true,
+        "import_verified": true,
+        "target_readback_verified": true
+      },
+      "demand": {
+        "rows": 11201,
+        "pages": 3,
+        "canonical_sha256": "7cb1e4166f190f5b2374f1b57d4bb85c166d6375ce30f62c26a9c65ed1c1d930",
+        "source_verified": true,
+        "import_verified": true,
+        "target_readback_verified": true
+      },
+      "head_prs": {
+        "rows": 27619,
+        "pages": 6,
+        "canonical_sha256": "d7343b311068425bc2e131b57061e987af6cdeb80188327f1ff6b7084a6f9c2b",
+        "source_verified": true,
+        "import_verified": true,
+        "target_readback_verified": true
+      },
+      "jobs": {
+        "rows": 17776,
+        "pages": 7,
+        "canonical_sha256": "9cc1fb12a04600805b0c27cdd46e725ce1560b36942f7cbe02a6731dfc7ad06a",
+        "source_verified": true,
+        "import_verified": true,
+        "target_readback_verified": true
+      },
+      "members": {
+        "rows": 320491,
+        "pages": 65,
+        "canonical_sha256": "ae26a8ec18fa46f5f56355cbaa8f7dd2300c8f08a51c21fc12eb0753b3996642",
+        "source_verified": true,
+        "import_verified": true,
+        "target_readback_verified": true
+      },
+      "meta": {
+        "rows": 25,
+        "pages": 1,
+        "canonical_sha256": "9e8fc1109840072982b5de20c15ecd14f23874ef7abbedebc90a23482b0c0634",
+        "source_verified": true,
+        "import_verified": true,
+        "target_readback_verified": true
+      },
+      "query_metrics": {
+        "rows": 21,
+        "pages": 1,
+        "canonical_sha256": "0327598824b53caa5fb99bac885cf7a42949d5331695f29d6e290ae7f6ebc6e8",
+        "source_verified": true,
+        "import_verified": true,
+        "target_readback_verified": true
+      },
+      "repair_metrics": {
+        "rows": 765509,
+        "pages": 154,
+        "canonical_sha256": "c06f2601ac5b18d18c9fc54e596ce3b53b50fe206b8fec5fcb65ac8042a5df86",
+        "source_verified": true,
+        "import_verified": true,
+        "target_readback_verified": true
+      },
+      "resources": {
+        "rows": 444885,
+        "pages": 2343,
+        "canonical_sha256": "e66ae1b5e0007bfd68b5bb4556bd7918a1e055e44bdef3d042fc55814ced6f26",
+        "source_verified": true,
+        "import_verified": true,
+        "target_readback_verified": true
+      },
+      "retired_objects": {
+        "rows": 0,
+        "pages": 0,
+        "canonical_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "source_verified": true,
+        "import_verified": true,
+        "target_readback_verified": true
+      },
+      "survey_dirty": {
+        "rows": 2,
+        "pages": 1,
+        "canonical_sha256": "80ee957e508a942f74353141a92b584089fec64ebcb26bd731cc1b586edb6f33",
+        "source_verified": true,
+        "import_verified": true,
+        "target_readback_verified": true
+      },
+      "survey_fragments": {
+        "rows": 84942,
+        "pages": 66,
+        "canonical_sha256": "15a55bc935f8aeabed6540a333d74551a0cbd938ebab05e260ca46a0c98c2829",
+        "source_verified": true,
+        "import_verified": true,
+        "target_readback_verified": true
+      },
+      "survey_hydrated": {
+        "rows": 5689,
+        "pages": 2,
+        "canonical_sha256": "857a8b0a214222f9254fb0c41bd353b752083329b4360b0294e56f872d927ddb",
+        "source_verified": true,
+        "import_verified": true,
+        "target_readback_verified": true
+      },
+      "survey_hydration_failures": {
+        "rows": 0,
+        "pages": 0,
+        "canonical_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "source_verified": true,
+        "import_verified": true,
+        "target_readback_verified": true
+      },
+      "survey_inventory": {
+        "rows": 13682,
+        "pages": 24,
+        "canonical_sha256": "f2598ee8aa4509d434046a1e7ae4d1f07ba281fa396b4de576d050435c565b74",
+        "source_verified": true,
+        "import_verified": true,
+        "target_readback_verified": true
+      },
+      "survey_state": {
+        "rows": 13989,
+        "pages": 29,
+        "canonical_sha256": "a1f4d615b252ea30522c69b5f6990c420df00778528badc8a4dc2f65459fa597",
+        "source_verified": true,
+        "import_verified": true,
+        "target_readback_verified": true
+      }
+    },
+    "total_rows": 8035458,
+    "pages": 3972,
+    "r2_inventory": {
+      "prefix": 4,
+      "pages": 4086,
+      "objects": 1721084,
+      "hash": "cb087a7a196f186536532d41120ae232b49e810173ec946b17a07b8f3e02ebd6",
+      "complete": true
+    },
+    "staging_reference_count": 101,
+    "staging_complete": true,
+    "obsolete_partial_jobs": 0,
+    "scope": "All raw canonical table checks completed before documented obsolete lease/staging execution normalization and target activation.",
+    "source_archive_receipt": {
+      "file": "production-source-archive-verified-9f418a72.json",
+      "sha256": "b385c1118e8e8216a9445921cfd09d09384bf1fca0fcfe87f34389eef2c7c3cb"
+    },
+    "raw_target_selection_receipt": {
+      "file": "production-target-raw-verified-and-selected-9f418a72.json",
+      "sha256": "3e891157c16c806616ac55f4bcd5237d963748e7957bc4f617c1e469e0979efd"
+    }
+  },
+  "shadow": {
+    "queries": 3,
+    "hash": "14ebcb983f419746021f4edc70d859ef3739e3028b7840b1a024b53c11a3c025",
+    "verified_at": 1792973017573,
+    "complete": true,
+    "cursor_checks": 3,
+    "expired_cursor_checks": 1,
+    "max_subrequests": 29,
+    "max_step_ms": 8377,
+    "activity_checked": true
+  },
+  "cursor_coverage": {
+    "versions": [
+      "r2-v1"
+    ],
+    "active_checked": 3,
+    "expired_checked": 1,
+    "public": {
+      "at": "2026-10-26T06:22:12.955Z",
+      "environment": "production",
+      "generation": "9f418a72-05d1-44f1-afcc-395a7dbaf1cf",
+      "deployment": "758ce56f-3830-4813-b139-8c0d0cf59096",
+      "backend": "postgres",
+      "scope": "Natural public baseline cursors retain normal ten-minute expiry and are checked as expired after the long freeze when present. Active cursor continuation across adapters is proved by the server-side stored R2 shadow snapshots before selection; public new continuations are checked when responses require pagination.",
+      "natural_old_cursor_present": true,
+      "new_public_continuation_present": true,
+      "checks": [
+        {
+          "operation": "open_prs",
+          "old": {
+            "normal_expiry": 1792935883596,
+            "expired": true,
+            "reason": "cursor_expired"
+          },
+          "new": {
+            "continuation": true,
+            "revision": 7883412
+          }
+        },
+        {
+          "operation": "survey",
+          "old": {
+            "normal_expiry": 1792935889738,
+            "expired": true,
+            "reason": "cursor_expired"
+          },
+          "new": {
+            "continuation": true,
+            "revision": 7883412
+          }
+        },
+        {
+          "operation": "issue_comments",
+          "old": null,
+          "new": null
+        }
+      ],
+      "shadow_active_checks": 3,
+      "shadow_expired_checks": 1,
+      "passed": true
+    }
+  },
+  "selection": {
+    "selected_at": 1792973021118,
+    "completed_at": 1792995357914,
+    "backend_write_owner": "postgres",
+    "source_fenced": true,
+    "target_active": true
+  },
+  "input_recovery": {
+    "parked": 0,
+    "held": 0,
+    "queue": 0,
+    "dlq": 0,
+    "queue_observed_at": 1792999074466,
+    "dlq_observed_at": 1792999074466,
+    "queue_approximate": true,
+    "dlq_approximate": true,
+    "scope": "Provider queue counts are fresh approximate snapshots; parked/held zero is a direct R2 prefix observation, not a continuous empty-queue claim",
+    "readiness": {
+      "at": "2026-10-26T07:18:48.145Z",
+      "environment": "production",
+      "generation": "9f418a72-05d1-44f1-afcc-395a7dbaf1cf",
+      "deployment": "758ce56f-3830-4813-b139-8c0d0cf59096",
+      "passed": true,
+      "checks": {
+        "ingress_apply": true,
+        "raw_full_pass": true,
+        "raw_error_absent": true,
+        "raw_gaps_empty": true,
+        "pointers_empty": true,
+        "held_empty": true,
+        "queue_empty": true,
+        "dlq_empty": true
+      },
+      "raw_completed": 1792959236717,
+      "scope": "Historical raw-input full pass completed after the same-generation original freeze, no current gaps/errors, and fresh empty pointer/held/provider snapshots after replay completion/latest deployment. Completion timestamp does not prove traversal start or cover never-acknowledged later raw writes. S0 park-before202 protects acknowledged new input."
+    },
+    "historical_raw_scope": "Full-pass completion after the original same-generation freeze is observed; completion does not establish traversal start or audit never-acknowledged future writes. Signed new input durability is protected separately by S0 parking before acknowledgement."
+  },
+  "latest_applied_input": {
+    "delivery": "57a7bf7e-d10d-11f1-95ae-031b5e5d73e1",
+    "event": "status",
+    "received": 1792999066453,
+    "applied_at": 1792999074909
+  },
+  "real_freeze_input": {
+    "at": "2026-10-26T06:22:38.808Z",
+    "delivery": "b6c2f900-d078-11f1-988a-a099556567dd",
+    "event": "pull_request",
+    "frozen_at": 1792935213657,
+    "original_received": 1792935233017,
+    "input_arrived_after_authoritative_freeze": true,
+    "body_sha256": "517778ef9b495e509b8bc2ef87adcad1fe4734475f95a889c838fe70bb87c87e",
+    "body_bytes": 26696,
+    "standby_delivery_receipts": 0,
+    "target_delivery_receipts": 1,
+    "target_delivery": {
+      "id": "b6c2f900-d078-11f1-988a-a099556567dd",
+      "event": "pull_request",
+      "received": "1792973223121"
+    },
+    "sql_delivery_time_unit": "unix milliseconds at commit; not original ingress arrival",
+    "original_received_preserved": true,
+    "original_raw_body_matches_initial_hash": true,
+    "permanent_r2_receipt_sha256": "ff0cac0fb098d19b2f588212c071ab4c8c048ecd79663417826fb0b01c63ffdc",
+    "permanent_r2_receipt": {
+      "delivery": "b6c2f900-d078-11f1-988a-a099556567dd",
+      "committed_at": 1792973223302,
+      "source": null,
+      "disposition": "applied"
+    },
+    "normal_pointer_absent": true,
+    "held_pointer_absent": true,
+    "pinned_body_absent": true,
+    "observation_started_at": 1792995750401,
+    "sql_receipt_observed_at": 1792995751255,
+    "r2_observed_at": 1792995758465,
+    "closing_status_observed_at": 1792995758808,
+    "scope": "Read-only observations after ordinary replay: one SQL delivery receipt and the permanent R2 receipt identify this delivery; the retained original raw body and its ingress timestamp match the pre-replay proof. Pointers and pin were absent when checked after observing the committed SQL receipt. The permanent R2 receipt does not contain a body digest. This is not an independent replay/materialization audit or a trace of every cleanup operation.",
+    "receipt": {
+      "file": "production-frozen-real-input-replayed-b6c2f900-d078-11f1-988a-a099556567dd.json",
+      "sha256": "b1d42ffc9dbcae264ffc3cbc672e3701f535df5475458c540a1e2f69e69af0e8"
+    },
+    "initial_proof": {
+      "file": "production-frozen-real-input-durability-b6c2f900-d078-11f1-988a-a099556567dd.json",
+      "sha256": "377466656d0de19484f7bdae7c19b745d5cb241791fc38fbea04e88fc30e52e5"
+    },
+    "standby_absence_proof": {
+      "file": "production-frozen-real-input-standby-absence-b6c2f900-d078-11f1-988a-a099556567dd.json",
+      "sha256": "135d1df1cb5e56a673c9970479464a4ddc3df1140657e4d96adee25ace62f1ce"
+    },
+    "long_hold_proof": {
+      "file": "production-frozen-real-input-long-hold-b6c2f900-d078-11f1-988a-a099556567dd.json",
+      "sha256": "a7ec96e2df532326c9dac23fa3b990b5efb40bc7bc71be590014c06b66594640"
+    },
+    "held_ms": 8572883,
+    "configured_twenty_retry_horizon_ms": 8435000,
+    "minimum_hold_ms": 8495000,
+    "long_hold_scope": "Exceeded the configured twenty-retry backoff horizon plus sixty seconds; this is not twenty observed queue failures. Handler signature acceptance is separately tested; the original HTTPS signature was not reverified offline."
+  },
+  "latency": {
+    "version": 2,
+    "at": "2026-10-26T06:22:00.922Z",
+    "environment": "production",
+    "generation": "9f418a72-05d1-44f1-afcc-395a7dbaf1cf",
+    "deployment": "758ce56f-3830-4813-b139-8c0d0cf59096",
+    "version_comparison": {
+      "same_deployment": true,
+      "source_code": "166866fd25cdcd433e7fad8bfb70aa770de54554",
+      "source_version": "758ce56f-3830-4813-b139-8c0d0cf59096",
+      "target_code": "166866fd25cdcd433e7fad8bfb70aa770de54554",
+      "target_version": "758ce56f-3830-4813-b139-8c0d0cf59096",
+      "fix_forward_pr": null,
+      "fix_forwards": [],
+      "scope": "Same deployment source/target comparison"
+    },
+    "baseline_file": "baseline-production-1792935450043.json",
+    "target_file": "post-cutover-production-1792995720667.json",
+    "baseline_conditions": {
+      "mutation_fence": "migration",
+      "source_backend": "sqlite",
+      "phase": "exporting",
+      "source_fenced": true,
+      "target_active": false,
+      "accelerator_paused": true,
+      "cron_supervision_continues": true,
+      "start_checkpoint": {
+        "phase": "exporting",
+        "epoch": 4026,
+        "export_pages": 18
+      },
+      "end_checkpoint": {
+        "phase": "exporting",
+        "epoch": 4041,
+        "export_pages": 33
+      }
+    },
+    "target_conditions": {
+      "mutation_fence": null,
+      "source_backend": "postgres",
+      "phase": "complete",
+      "source_fenced": true,
+      "target_active": true,
+      "end_checkpoint": {
+        "phase": "complete",
+        "epoch": 24438,
+        "export_pages": 3972
+      }
+    },
+    "samples": 100,
+    "concurrency": 4,
+    "warmup": 5,
+    "workloads": [
+      {
+        "operation": "open_prs",
+        "args": null,
+        "baseline_p95_ms": 251.20169200000237,
+        "target_p95_ms": 280.3433449999998,
+        "ratio": 1.1160089837292861,
+        "passed": true,
+        "baseline_revision": 7875389,
+        "target_revision": 7883352,
+        "baseline_rows": 319,
+        "target_rows": 317
+      },
+      {
+        "operation": "survey",
+        "args": {
+          "roadmap": "any",
+          "skip": "",
+          "numbers": ""
+        },
+        "baseline_p95_ms": 145.09790400000202,
+        "target_p95_ms": 133.01166899999953,
+        "ratio": 0.9167028973760895,
+        "passed": true,
+        "baseline_revision": 7875389,
+        "target_revision": 7883352,
+        "baseline_rows": 500,
+        "target_rows": 500
+      },
+      {
+        "operation": "issue_comments",
+        "args": {
+          "number": 2193
+        },
+        "baseline_p95_ms": 109.39236199999868,
+        "target_p95_ms": 104.74648999999954,
+        "ratio": 0.9575301975836376,
+        "passed": true,
+        "baseline_revision": 7875389,
+        "target_revision": 7883352,
+        "baseline_rows": 2,
+        "target_rows": 2
+      }
+    ],
+    "diagnostic_workloads": [
+      {
+        "operation": "survey_cache_miss",
+        "queries": 32,
+        "baseline_p95_ms": 2268.7498710000073,
+        "target_p95_ms": 1687.7217630000087,
+        "ratio": 0.7438994419671763,
+        "acceptance_gate": false,
+        "scope": "32 distinct equivalent scope keys cycled beyond the 16-entry completedQueries cache; backend/page caches warm",
+        "baseline_revisions": [
+          {
+            "revision": 7875389,
+            "samples": 128
+          }
+        ],
+        "target_revisions": [
+          {
+            "revision": 7883382,
+            "samples": 4
+          },
+          {
+            "revision": 7883383,
+            "samples": 4
+          },
+          {
+            "revision": 7883384,
+            "samples": 4
+          },
+          {
+            "revision": 7883385,
+            "samples": 5
+          },
+          {
+            "revision": 7883386,
+            "samples": 15
+          },
+          {
+            "revision": 7883388,
+            "samples": 7
+          },
+          {
+            "revision": 7883389,
+            "samples": 11
+          },
+          {
+            "revision": 7883390,
+            "samples": 10
+          },
+          {
+            "revision": 7883391,
+            "samples": 12
+          },
+          {
+            "revision": 7883393,
+            "samples": 2
+          },
+          {
+            "revision": 7883394,
+            "samples": 4
+          },
+          {
+            "revision": 7883395,
+            "samples": 15
+          },
+          {
+            "revision": 7883397,
+            "samples": 6
+          },
+          {
+            "revision": 7883398,
+            "samples": 7
+          },
+          {
+            "revision": 7883399,
+            "samples": 7
+          },
+          {
+            "revision": 7883401,
+            "samples": 15
+          }
+        ]
+      },
+      {
+        "operation": "history_cache_miss",
+        "queries": 32,
+        "baseline_p95_ms": 89.55707599999732,
+        "target_p95_ms": 442.9491759999946,
+        "ratio": 4.945998638901608,
+        "acceptance_gate": false,
+        "scope": "32 distinct nonempty stored histories cycled beyond the 16-entry completedQueries cache; backend/page caches warm",
+        "baseline_revisions": [
+          {
+            "revision": 7875389,
+            "samples": 128
+          }
+        ],
+        "target_revisions": [
+          {
+            "revision": 7883412,
+            "samples": 128
+          }
+        ]
+      }
+    ],
+    "passed": true,
+    "scope": "Actual repeated warm public API gate includes the existing DTO cache, matching S1. Separate cycled cache-miss diagnostic latencies are reported without a 20% claim. Original same-generation SQLite cohort is retained with accelerator paused and any cron checkpoint overlap recorded; post-cutover data/revisions may include replayed inputs. Failed cohorts retained.",
+    "target_cohorts": 1,
+    "failed_target_cohorts": 0,
+    "baseline_receipt": {
+      "file": "baseline-production-1792935450043.json",
+      "sha256": "e399ef298b6f83bc2a77b59e6bda7b309f1c2ce70109874a8b0af96d390d9b6b"
+    },
+    "target_receipt": {
+      "file": "post-cutover-production-1792995720667.json",
+      "sha256": "3d6788a2040cb3a4af800f10b2cb312cb08ccefbc17ac47c5f5b73fa1a11413a"
+    }
+  },
+  "unchanged_client": {
+    "at": "2026-10-26T06:22:08.215Z",
+    "generation": "9f418a72-05d1-44f1-afcc-395a7dbaf1cf",
+    "deployment": "758ce56f-3830-4813-b139-8c0d0cf59096",
+    "phase": "complete",
+    "backend": "postgres",
+    "passed": true,
+    "public_activity": {
+      "status": 200,
+      "number": 2193,
+      "coverage": "observed",
+      "state": "CLOSED",
+      "landing_source": null,
+      "revision": 7883412,
+      "top_and_nested_clocks_equal": true
+    },
+    "client_commit": "4972ab3722606a8ca9e442a110393a7662513068",
+    "environment": "production",
+    "fresh_cache": true,
+    "client": "unchanged tauceti_worker.github_state from the original Worker checkout",
+    "workflows": [
+      {
+        "workflow": "open_prs",
+        "rows": 683,
+        "reads": 2
+      },
+      {
+        "workflow": "survey",
+        "rows": 683,
+        "reads": 2
+      },
+      {
+        "workflow": "history",
+        "rows": 2,
+        "reads": 2
+      }
+    ],
+    "http_statuses": [
+      200,
+      200,
+      200,
+      304,
+      200,
+      200,
+      304,
+      200,
+      304
+    ],
+    "github_reference_calls": 0,
+    "provider_counter_scope": "Direct requests attempted by the original client; server-side accounting is separate"
+  },
+  "additional_unchanged_clients": {
+    "at": "2026-10-26T06:22:53.739Z",
+    "started_at": 1792995765627,
+    "deployment": "758ce56f-3830-4813-b139-8c0d0cf59096",
+    "backend": "postgres",
+    "source_fenced": true,
+    "passed": true,
+    "client_commit": "4972ab3722606a8ca9e442a110393a7662513068",
+    "scope": "Additional ordinary stored-read workflows after the single latency cohort and public cursor check. Original Worker client and source files remain unchanged. Fresh cache and byte-exact copied retained markerless cache passed inventory, survey, history and per-workflow 304 revalidation. Direct client network guard observed zero independent provider attempts; server-side retained request accounting is separate. These are functional checks, not another latency cohort.",
+    "runs": [
+      {
+        "producer": {
+          "file": "client-production-v3.py",
+          "sha256": "ad0dd2b3a0cc19a14e1f4fbc36708fee0e215419555fc09730e0d9daa09205c3"
+        },
+        "report": {
+          "environment": "production",
+          "fresh_cache": true,
+          "workflows": [
+            {
+              "workflow": "open_prs",
+              "rows": 683,
+              "reads": 2,
+              "http_statuses": [
+                200,
+                200,
+                200,
+                304
+              ]
+            },
+            {
+              "workflow": "survey",
+              "rows": 683,
+              "reads": 2,
+              "http_statuses": [
+                200,
+                200,
+                304
+              ]
+            },
+            {
+              "workflow": "history",
+              "rows": 2,
+              "reads": 2,
+              "http_statuses": [
+                200,
+                304
+              ]
+            }
+          ],
+          "http_statuses": [
+            200,
+            200,
+            200,
+            304,
+            200,
+            200,
+            304,
+            200,
+            304
+          ],
+          "github_reference_calls": 0,
+          "client_commit": "4972ab3722606a8ca9e442a110393a7662513068",
+          "provider_counter_scope": "Direct requests attempted by the original client; server-side accounting is separate",
+          "retained_cache": {}
+        }
+      },
+      {
+        "producer": {
+          "file": "client-existing-cache-production-v3.py",
+          "sha256": "26197ceb2f2ab5e524a6c9e71cc028e25906ac8fbec5139efc3d8f7bdcd56655"
+        },
+        "report": {
+          "environment": "production",
+          "fresh_cache": false,
+          "retained_markerless_cache_repair": true,
+          "workflows": [
+            {
+              "workflow": "open_prs",
+              "rows": 683,
+              "reads": 2,
+              "http_statuses": [
+                200,
+                200,
+                200,
+                304
+              ]
+            },
+            {
+              "workflow": "survey",
+              "rows": 683,
+              "reads": 2,
+              "http_statuses": [
+                200,
+                200,
+                304
+              ]
+            },
+            {
+              "workflow": "history",
+              "rows": 2,
+              "reads": 2,
+              "http_statuses": [
+                200,
+                304
+              ]
+            }
+          ],
+          "http_statuses": [
+            200,
+            200,
+            200,
+            304,
+            200,
+            200,
+            304,
+            200,
+            304
+          ],
+          "github_reference_calls": 0,
+          "client_commit": "4972ab3722606a8ca9e442a110393a7662513068",
+          "provider_counter_scope": "Direct requests attempted by the original client; server-side accounting is separate",
+          "retained_cache": {
+            "before_etag": "\"7140964\"",
+            "after_etag": "\"survey-v1-empty-markers:7883415\"",
+            "before_missing_markers": 399,
+            "after_missing_markers": 0,
+            "copy_exact": true
+          }
+        }
+      }
+    ],
+    "receipt": {
+      "file": "production-final-unchanged-clients-9f418a72.json",
+      "sha256": "b10e6efe175b523ac9a0de3754d640e398e97894bc7fe6298e385ac5adfefa69"
+    }
+  },
+  "github_request_accounting": {
+    "accounting_limitations": "Retained rows count logged requests; window_complete describes suffix coverage, not proof that every external attempt was logged. Known telemetry/preparation failures reject the final observation; null failure fields do not exclude historical unrecorded attempts. Migration dispatch-fence and zero-bootstrap behavior are separately tested.",
+    "post_selection_repository_requests": 423,
+    "post_selection_separate_reporting_and_authentication": [
+      {
+        "api": "authentication",
+        "operation": "installation_token",
+        "requests": 1,
+        "points": null,
+        "unmeasured": 1,
+        "bytes": 629,
+        "latency": 129
+      },
+      {
+        "api": "core",
+        "operation": "runner_capacity",
+        "requests": 622,
+        "points": 622,
+        "unmeasured": 0,
+        "bytes": 18442934,
+        "latency": 343.81672025723475
+      }
+    ],
+    "owner_concurrency": 4,
+    "samples": 327,
+    "scope": "Discrete ten-second health samples after replay completion on the released deployment; full retained accounting window starts after both replay completion and the last recorded deployment. Sampled concurrency is not continuous peak proof. Accounting describes logged requests and bounded retained scan coverage, not an audit of every external attempt; missing telemetry cannot be excluded solely by a null failure field",
+    "max_sampled_repository_inflight": 4,
+    "sampled_inflight_scope": "Instantaneous samples, not request counts or a continuous peak audit.",
+    "full_post_completion_hour": {
+      "prepared_at": 1792998981254,
+      "window_start": 1792995381254,
+      "prepared_deployment": "758ce56f-3830-4813-b139-8c0d0cf59096",
+      "telemetry_failure": null,
+      "accounting_preparation_failure": null,
+      "window_complete": true,
+      "stale": false,
+      "settings": {
+        "concurrency": 4,
+        "dispatches": 16,
+        "launch_ms": 10000,
+        "lease_ms": 60000,
+        "weights": [
+          8,
+          4,
+          2,
+          1
+        ]
+      },
+      "scope": "One retained logged-request hour wholly after Native replay completion and the deployment. Counts are for this hour, not cumulative since selection."
+    },
+    "frozen_source": {
+      "fully_observed_hour_available": true,
+      "samples": 827,
+      "first_prepared_at": 1792938833913,
+      "last_prepared_at": 1792972856305,
+      "repository_repair_requests": 0,
+      "scope": "Fresh retained complete one-hour windows wholly inside the source fence for repository repair/bootstrap/reference operations; runner-capacity and token authentication are classified separately, and discrete observations do not cover unobserved gaps",
+      "failure_observability": {
+        "preparation_field_available": false,
+        "scope": "Frozen samples predate PR89 preparation fields where absent; no retrospective failure or all-attempt audit is claimed. Instrumentation failures can clear after later success or eviction; the dispatch fence and zero-bootstrap tests are separate evidence."
+      }
+    },
+    "original_strict_frozen_probe": {
+      "passed": false,
+      "receipt": {
+        "file": "production-frozen-full-hour-accounting-1792938975796.json",
+        "sha256": "40563a7bab75266c012a93fd68f5d9d65136fefe65b9940f630d98edcbcbabb6"
+      },
+      "resolution_receipt": {
+        "file": "production-frozen-full-hour-accounting-1792938975796-observability-resolution.json",
+        "sha256": "287db58ae35a0fbf1fafe96ca6301190cb81d46ae2bc03529332c0dd4e717f4d"
+      },
+      "scope": "The strict local diagnostic demanded an explicit null telemetry_failure field; the released service omitted its uninitialized field. Original failed probe retained. Zero logged repository requests and complete-hour preparation were separately verified; field absence is not historical proof of complete accounting."
+    }
+  },
+  "operator_contract": {
+    "execution_id": "a776c11d-c50f-469b-b676-35331b6f7759",
+    "identity_sha256": "317abd526420ca7c16e24f0297e45f01a09acc8989ffc2bdb7a906008219d724",
+    "initial_enrollment_operator_plan_sha256": "e9875eb924825395a40fd2ce4405244e90c74b5f1a997000991cf65410fb1b43",
+    "runtime_operator_plan_sha256": "22af99dc8ce9e47e13cc9e2e2643d8f8a7e1147e4c5d347851bf607797a6f11a",
+    "runtime_files": 62,
+    "scope": "Initial enrollment receipt remains unchanged; its additive operator contract binds the 62-file revision used by the driver and final observer. No source deployment change during this migration is claimed. Original TEST and prior production operation manifests remain retained."
+  },
+  "operational_recovery": {
+    "pre_generation": [
+      "The first local retention-barrier request used the wrong route and returned404 before any generation or source freeze; the corrected retention route passed.",
+      "A first start request was rejected with queue/DLQ metrics unavailable and created no generation. Fresh metrics recovered; the same target/admission then started successfully."
+    ],
+    "start_rejection_receipt": {
+      "file": "production-start-failure-1792929986562.json",
+      "sha256": "1fb066264ef13f9027ce074d5b4b265a9ac3e5340eb2e5020d31a53bee4d6ca4"
+    },
+    "successful_start_receipt": {
+      "file": "production-start-attempt-1792930103429-result.json",
+      "sha256": "8ba2866d5b8d889f498a2c05bcdbbbdbeb7a8d69dbc98fddeb837405db260b2d"
+    },
+    "driver_transport": {
+      "entries_at_snapshot": 2,
+      "http_status": "503",
+      "receipt": {
+        "file": "production-driver-transport-recovery-20261025T2358.json",
+        "sha256": "50466cc635bb75228ec07efae0c694fd8bb01e31bbf3f04e2dde4a353afe51ca"
+      },
+      "scope": "Two driver-reported admin_transport_failure/HTTP503 command errors were retained at this snapshot. The same-generation driver resumed readback and all canonical checks subsequently passed. Underlying cause was not diagnosed; no source/admission rewrite or new generation was used."
+    },
+    "supplementary_r2_read": {
+      "failed_attempts": 1,
+      "status": 429,
+      "failure_receipt": {
+        "file": "production-real-input-standby-absence-attempt-1-failure.json",
+        "sha256": "67bfb2b9676b12fad33046be7b30b3a80c300035d5e896f2990d5d313c7a1598"
+      },
+      "successful_attempt_receipt": {
+        "file": "production-real-input-standby-absence-attempt-2-attestation.json",
+        "sha256": "aea9e01ff53bfb0ac05617465cca18718420ce4bb988a80ead1c072cd130ed2f"
+      },
+      "scope": "A read-only pre-selection supplemental proof hit management API429. Failure evidence was retained; after more than five minutes cooldown, sequential reads passed. No production input or Native migration state was changed, and this was not a timing-cohort retry."
+    },
+    "native_replay_listing": {
+      "reported_error": "R2 listing concurrency rate-limit10058",
+      "failure_receipt": {
+        "file": "production-replay-list-rate-limit-20261026T0512.json",
+        "sha256": "884f098ca057de1bf651442af784c2e5adb5d15cae58a9e81e7ab99eea971772"
+      },
+      "recovery_receipt": {
+        "file": "production-replay-list-rate-limit-recovered-20261026T0513.json",
+        "sha256": "c0fe7ce66c2699f8f7f329c8f3c0b3207e2f878bc81e8f5dcc8ff2dbdf5b058a"
+      },
+      "scope": "One observed listing rate-limit during ordinary Native replay was retained with failures1 and no reported per-input failure or raw gap. The next prepared observation cleared the failure and advanced replay through its persisted automatic backoff, without operator replay, restart or service change. This is not a claim that no other unobserved transient error occurred."
+    },
+    "final_receipt_publication": {
+      "attempts": 2,
+      "failed_attempts": 1,
+      "receipt": {
+        "file": "production-final-publication-recovery-20261026.json",
+        "sha256": "96d7fbbd1b9d63b86eb3f36fe88f4d99440ba04e9218ebd3e18407a5ee374476"
+      },
+      "first_stop": {
+        "file": "production-final-publication-attempt-1-stop.json",
+        "sha256": "3e88c0f360305f5bc2b4881211e1a9bbfd2a461f322262504c2cf90d91e67beb"
+      },
+      "scope": "First final-receipt attempt stopped on one newly arriving pointer between separate empty-backlog checks. Failed attempt and logs retained. After ordinary drain, the same immutable observer reused the passed single timing cohort, client, cursor and full-hour evidence and passed fresh readiness/backlog checks. No resampling, gate weakening, manual replay or service change."
+    }
+  },
+  "recoverability": {
+    "source_receipt_sha256": "33567a1eb4a432bc28485b4b4148412e1c5b9224801185b61427caf8b504b743",
+    "terminal_receipt_sha256": "97035ed550382655d9cba9de407f892f1dd26bc9e5c037f695ce405ee9e8bbe6",
+    "restore_evidence": {
+      "file": "restore-proof-2026-10-20-from-48b.json",
+      "sha256": "34e884ebe64710bd344a2f348193f8d5cfeda9efd2e6d04066d39a57c7bc0c16"
+    },
+    "restore_reference": {
+      "file": "restore-evidence-production-ref.json",
+      "sha256": "b3e03a179dcffa3210d1bc3af03479a7f5c26352a6688ae3dd6fa966d7af4e61"
+    },
+    "restore_verified_at": "2026-10-20T08:54:07.613Z",
+    "capacity_evidence": {
+      "file": "neon-capacity-production.json",
+      "sha256": "97c7b77b041ddf40fec74323b2ce3d3bc15cf5c7aab9078392dcb46c872e1eca"
+    },
+    "original_do": "retained read-only through observation",
+    "archives": "retained",
+    "all_r2_retention_classes_pinned": true,
+    "lifecycle_object_expiry_disabled": true,
+    "observation_finished": false,
+    "post_write_recovery": "preserve PostgreSQL and parked inputs; fix forward; no lossless flipback to stale DO",
+    "final_observation": {
+      "at": "2026-10-26T06:23:16.397Z",
+      "environment": "production",
+      "generation": "9f418a72-05d1-44f1-afcc-395a7dbaf1cf",
+      "passed": true,
+      "deployment": {
+        "version": "758ce56f-3830-4813-b139-8c0d0cf59096",
+        "rollout": "72b495df-a121-4927-93f7-b7a11a9741c3",
+        "percentage": 100,
+        "code": "166866fd25cdcd433e7fad8bfb70aa770de54554",
+        "artifact": {
+          "sha256": "0162f055303b20cdcb95a790f5b3e1edbcc01bb8b32766ecac8267fd5f762be6",
+          "bytes": 719898,
+          "verified_by_version_specific_module_download": true
+        },
+        "repository_actor_version": "758ce56f-3830-4813-b139-8c0d0cf59096",
+        "installation_actor_version": "758ce56f-3830-4813-b139-8c0d0cf59096"
+      },
+      "owner": {
+        "backend": "postgres",
+        "generation": "9f418a72-05d1-44f1-afcc-395a7dbaf1cf"
+      },
+      "source_fenced": true,
+      "target_active": true,
+      "phase": "complete",
+      "observation_finished": false,
+      "source_receipt_sha256": "33567a1eb4a432bc28485b4b4148412e1c5b9224801185b61427caf8b504b743",
+      "source_archive": {
+        "file": "production-source-archive-verified-9f418a72.json",
+        "sha256": "b385c1118e8e8216a9445921cfd09d09384bf1fca0fcfe87f34389eef2c7c3cb"
+      },
+      "raw_target_verification": {
+        "file": "production-target-raw-verified-and-selected-9f418a72.json",
+        "sha256": "3e891157c16c806616ac55f4bcd5237d963748e7957bc4f617c1e469e0979efd"
+      },
+      "retention": {
+        "pinned": [
+          "r2_cursors",
+          "raw_webhooks",
+          "daily_archives",
+          "staging_pages",
+          "telemetry_intervals",
+          "staging_spills",
+          "legacy_staging_spills"
+        ],
+        "policy_sha256": "72edee232f093863865d275f0a5e5a70178b196dcae9a9e3c5a8478433183aa3",
+        "lifecycle_expiry_disabled": true
+      },
+      "scope": "Read-only point observations bracketed by completed same-generation PostgreSQL ownership and the retained source fence. The version-specific deployed module and selected rollout matched enrollment. The immutable source-receipt bytes still matched their recorded digest; all-table counts and hashes refer to retained pre-activation proofs, not new hashing of the writable target or every archive page. Seven broad retention classes remain pinned; no continuous absence-of-deletion claim."
+    },
+    "final_observation_receipt": {
+      "file": "production-final-deployment-owner-retention-9f418a72.json",
+      "sha256": "b342d18e932e558ba8d5767bf7d4385f78139638b5537797ef5ca58f777e7828"
+    }
+  },
+  "limitations": [
+    "Canonical counts and hashes refer to frozen source/import/raw target before documented execution normalization and activation; live PostgreSQL data can advance after replay.",
+    "Exactly one warm target cohort is retained. Source and target use the same deployed module with different live data revisions; workload rows/revisions and timing conditions are explicit. Warm repeated reads include the existing DTO cache, and cache-miss diagnostics have no20percent acceptance claim.",
+    "Real-input delivery receipts and retained raw-body correlation do not independently replay every materialization or audit every duplicate semantic publication.",
+    "Queue/DLQ counts are fresh approximate snapshots, and empty R2 pointer lanes are direct point observations rather than continuous-empty claims.",
+    "Retained accounting describes logged requests and bounded coverage, not proof that every external attempt was logged. The original strict diagnostic failure and omitted-field limitation remain explicit.",
+    "The original DO, migration archives and all seven broad retention pins remain retained. PostgreSQL is the sole writer; no write flipback, finish-observation, unpinning, retirement or deletion has occurred.",
+    "References to private operator evidence are hash commitments to retained local files, not claims that those files are published upstream."
+  ]
+}
