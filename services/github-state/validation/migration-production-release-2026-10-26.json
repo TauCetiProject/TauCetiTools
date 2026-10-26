@@ -1,7 +1,7 @@
 {
   "version": 1,
   "recorded_at": "2026-10-26T07:18:50.517Z",
-  "public_metadata_compiled_at": "2026-10-26T07:20:08.174289+00:00",
+  "public_metadata_compiled_at": "2026-10-26T07:29:35.915137+00:00",
   "issue": "https://github.com/TauCetiProject/TauCetiWorker/issues/316",
   "environment": "production",
   "generation": "9f418a72-05d1-44f1-afcc-395a7dbaf1cf",
@@ -26,11 +26,11 @@
       "exact_clean_build": true,
       "verified_by_version_specific_module_download": true
     },
-    "rollout": 100,
     "selection_code": "166866fd25cdcd433e7fad8bfb70aa770de54554",
     "selection_version": "758ce56f-3830-4813-b139-8c0d0cf59096",
     "runtime_receipt_version": "758ce56f-3830-4813-b139-8c0d0cf59096",
-    "fix_forwards": []
+    "fix_forwards": [],
+    "rollout_percentage": 100
   },
   "source": {
     "object": "2a1331894b591e54de243b3ff3ff5cf372ea85eb612c5b3e4dffe7d3b95cb308",
@@ -70,66 +70,96 @@
     "evidence": {
       "actual_test_release": {
         "file": "release-test.json",
-        "sha256": "0827e3e6461f52b33052f2fb590f1fecfd1417b6146c3a746fe7525840bc387b"
+        "sha256": "0827e3e6461f52b33052f2fb590f1fecfd1417b6146c3a746fe7525840bc387b",
+        "environment_scope": "test",
+        "scope": "Accepted TEST release carried forward as prerequisite evidence."
       },
       "released_artifact_s0": {
         "file": "s0-released-artifact-compatibility.json",
-        "sha256": "a17c82be1ba4b2dc83ee7fa190de22b4a34213de9d6cd457b2df60aa6dacdd56"
+        "sha256": "a17c82be1ba4b2dc83ee7fa190de22b4a34213de9d6cd457b2df60aa6dacdd56",
+        "environment_scope": "production_artifact_isolated_fixture",
+        "scope": "Full/degraded compatibility and durable-ingress fixtures executed against exact production module bytes; not a live production outage drill."
       },
       "released_artifact_s0_log": {
         "file": "operator/s0-released-artifact-v4-1792925355980.tap",
-        "sha256": "1d0a40568bb29c03ab24e8c533937dcea6b7da2ddd83773b19b03374f597c5b0"
+        "sha256": "1d0a40568bb29c03ab24e8c533937dcea6b7da2ddd83773b19b03374f597c5b0",
+        "environment_scope": "production_artifact_isolated_fixture",
+        "scope": "Test log for the exact production-module fixture checks."
       },
       "current_original_client": {
         "file": "production-enrollment-v2-317abd526420ca7c-a776c11d-c50f-469b-b676-35331b6f7759-client-758ce56f-3830-4813-b139-8c0d0cf59096-1792929431061.json",
-        "sha256": "f58b978262fe49d29cabdb66e9c8f08a34481b021be603e48a2d962267933a2c"
+        "sha256": "f58b978262fe49d29cabdb66e9c8f08a34481b021be603e48a2d962267933a2c",
+        "environment_scope": "production_live",
+        "scope": "Fresh production original-client checks on the enrolled deployment."
       },
       "live_neon_capacity": {
         "file": "neon-capacity-production.json",
-        "sha256": "97c7b77b041ddf40fec74323b2ce3d3bc15cf5c7aab9078392dcb46c872e1eca"
+        "sha256": "97c7b77b041ddf40fec74323b2ce3d3bc15cf5c7aab9078392dcb46c872e1eca",
+        "environment_scope": "production_target_live",
+        "scope": "Fresh dedicated project/target capacity observation."
       },
       "restore_reference": {
         "file": "restore-evidence-production-ref.json",
-        "sha256": "b3e03a179dcffa3210d1bc3af03479a7f5c26352a6688ae3dd6fa966d7af4e61"
+        "sha256": "b3e03a179dcffa3210d1bc3af03479a7f5c26352a6688ae3dd6fa966d7af4e61",
+        "environment_scope": "production_reference",
+        "scope": "Production reference to the actual shared-project isolated restore drill."
       },
       "actual_restore": {
         "file": "restore-proof-2026-10-20-from-48b.json",
-        "sha256": "34e884ebe64710bd344a2f348193f8d5cfeda9efd2e6d04066d39a57c7bc0c16"
+        "sha256": "34e884ebe64710bd344a2f348193f8d5cfeda9efd2e6d04066d39a57c7bc0c16",
+        "environment_scope": "shared_project_isolated_restore_fixture",
+        "scope": "Actual restore of every fixture table in the dedicated Neon project; not restoration of the live production target."
       },
       "retention_lane_barrier": {
         "file": "retention-barrier-production.json",
-        "sha256": "ac6e56138ab0de17d82e04da7b7075b171a8f8f3cb156ff180a245aa0efc8511"
+        "sha256": "ac6e56138ab0de17d82e04da7b7075b171a8f8f3cb156ff180a245aa0efc8511",
+        "environment_scope": "production_live",
+        "scope": "Production retention policy and drained deletion lane before freeze."
       },
       "live_sql_target": {
         "file": "sql-preflight-production.json",
-        "sha256": "91d872cf041b54433ab5a2cf6d22eae8ee813644c428d80d33063d49f0b25388"
+        "sha256": "91d872cf041b54433ab5a2cf6d22eae8ee813644c428d80d33063d49f0b25388",
+        "environment_scope": "production_target_live",
+        "scope": "Fresh production target schema/roles/identity/standby checks."
       },
       "s0_full_repository": {
         "file": "s0-deployed-full-test.json",
-        "sha256": "a2457704f7f0a9e325c5b918486513a26cf896e3b776275d15adee50942b407d"
+        "sha256": "a2457704f7f0a9e325c5b918486513a26cf896e3b776275d15adee50942b407d",
+        "environment_scope": "test_deployed_regression",
+        "scope": "Carried-forward TEST full-store regression evidence."
       },
       "legacy_client_under_full": {
         "file": "unchanged-client-under-full-test.json",
-        "sha256": "baefca7ca54d693cd1f48a5679659cff0afced7461bd8bd01a94225c30a6edd0"
+        "sha256": "baefca7ca54d693cd1f48a5679659cff0afced7461bd8bd01a94225c30a6edd0",
+        "environment_scope": "test_deployed_regression",
+        "scope": "Carried-forward TEST unchanged-client full-store regression evidence."
       },
       "current_scope": {
         "file": "scope-proof-production.json",
-        "sha256": "6fd34217a3a8f94695fb8ae92dd48995fe4796bd60c140af5b1f350aea5ff608"
+        "sha256": "6fd34217a3a8f94695fb8ae92dd48995fe4796bd60c140af5b1f350aea5ff608",
+        "environment_scope": "production_live",
+        "scope": "Fresh production runtime/ownership/retention scope checks."
       },
       "enrollment_deployment": {
         "file": "deployment-production.json",
-        "sha256": "89425e5b6e9bfe2cbd6a10d6c6555a8f5008ce9d68d90c1af9982618fb6da501"
+        "sha256": "89425e5b6e9bfe2cbd6a10d6c6555a8f5008ce9d68d90c1af9982618fb6da501",
+        "environment_scope": "production_live",
+        "scope": "Actual production configuration enrollment receipt."
       },
       "original_live_latency": {
         "file": "live-read-latency-test.json",
-        "sha256": "467211c6cea8b9ad0ebc13735001bdd2d9b8f012c1046b3514fb08927ba78f45"
+        "sha256": "467211c6cea8b9ad0ebc13735001bdd2d9b8f012c1046b3514fb08927ba78f45",
+        "environment_scope": "test_accepted_release",
+        "scope": "Carried-forward accepted TEST performance evidence for admission; actual production source/target cohorts are recorded in latency."
       },
       "test_freeze_probe": {
         "file": "frozen-input-replayed-test.json",
-        "sha256": "6d5bc48b0b0cd59e1cece18d44d85c67f46ef4cb5eb2d1e1c53705d976c63a99"
+        "sha256": "6d5bc48b0b0cd59e1cece18d44d85c67f46ef4cb5eb2d1e1c53705d976c63a99",
+        "environment_scope": "test_accepted_release",
+        "scope": "Carried-forward TEST signed freeze-input/replay evidence; real production input evidence is recorded separately."
       }
     },
-    "scope": "Production deployed checks passed before start and freeze; issue closure alone was not used as deployment acceptance. Private evidence references are commitments, not files published in this repository."
+    "scope": "Admission combined fresh production identity, target SQL/capacity, retention, ownership and client checks with accepted TEST regression/performance/recovery evidence and isolated fixtures against the exact production module. These labels distinguish carried-forward evidence from live production observations; TEST proofs are not relabelled as production outage drills or pre-import production target timings. Actual production freeze/input, source/target timing and release checks are recorded separately. Private hash references commit to retained operator files, not files published in this repository."
   },
   "import_verification": {
     "tables": {
@@ -880,27 +910,6 @@
   },
   "github_request_accounting": {
     "accounting_limitations": "Retained rows count logged requests; window_complete describes suffix coverage, not proof that every external attempt was logged. Known telemetry/preparation failures reject the final observation; null failure fields do not exclude historical unrecorded attempts. Migration dispatch-fence and zero-bootstrap behavior are separately tested.",
-    "post_selection_repository_requests": 423,
-    "post_selection_separate_reporting_and_authentication": [
-      {
-        "api": "authentication",
-        "operation": "installation_token",
-        "requests": 1,
-        "points": null,
-        "unmeasured": 1,
-        "bytes": 629,
-        "latency": 129
-      },
-      {
-        "api": "core",
-        "operation": "runner_capacity",
-        "requests": 622,
-        "points": 622,
-        "unmeasured": 0,
-        "bytes": 18442934,
-        "latency": 343.81672025723475
-      }
-    ],
     "owner_concurrency": 4,
     "samples": 327,
     "scope": "Discrete ten-second health samples after replay completion on the released deployment; full retained accounting window starts after both replay completion and the last recorded deployment. Sampled concurrency is not continuous peak proof. Accounting describes logged requests and bounded retained scan coverage, not an audit of every external attempt; missing telemetry cannot be excluded solely by a null failure field",
@@ -926,7 +935,32 @@
           1
         ]
       },
-      "scope": "One retained logged-request hour wholly after Native replay completion and the deployment. Counts are for this hour, not cumulative since selection."
+      "scope": "One retained logged-request hour wholly after Native replay completion and the deployment. Counts are for this hour, not cumulative since selection.",
+      "repository_requests_in_this_hour": 423,
+      "separate_reporting_and_authentication_in_this_hour": [
+        {
+          "api": "authentication",
+          "operation": "installation_token",
+          "requests": 1,
+          "points": null,
+          "unmeasured": 1,
+          "bytes": 629,
+          "latency": 129
+        },
+        {
+          "api": "core",
+          "operation": "runner_capacity",
+          "requests": 622,
+          "points": 622,
+          "unmeasured": 0,
+          "bytes": 18442934,
+          "latency": 343.81672025723475
+        }
+      ],
+      "passed": true,
+      "all_samples_phase_complete": true,
+      "failure_field_presence_recorded_separately": false,
+      "failure_field_scope": "Null values are normalized from the prepared health report; original field presence was not recorded separately for this observation. A normalized null does not establish whether a field was omitted or exclude historical unrecorded attempts."
     },
     "frozen_source": {
       "fully_observed_hour_available": true,

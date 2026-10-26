@@ -28,10 +28,12 @@ flowchart LR
   D --> R
 ```
 
-The optional [Neon PostgreSQL backend](POSTGRES.md) retains the public API and
-installation quota owner. Production remains on SQLite until the separate #316
-cutover. Its provisioning, test isolation, restore evidence, performance gate
-and explicit generation fence are documented in that guide.
+The [Neon PostgreSQL backend](POSTGRES.md) retains the public API and installation
+quota owner. The production repository moved to PostgreSQL on 2026-10-26; the
+[accepted migration receipt](validation/migration-production-release-2026-10-26.json)
+records the checks and retained recovery data. Provisioning, test isolation,
+restore evidence, the performance gate and generation fencing are documented
+in that guide.
 
 ## Data and recovery
 

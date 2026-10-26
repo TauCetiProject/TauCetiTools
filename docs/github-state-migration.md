@@ -33,12 +33,14 @@ and pre-selection stored shadow checks covered active cursors and activity.
 A real pull-request webhook arrived 19.360 seconds after the authoritative
 freeze. Its retained raw body, original timestamp and pin were verified beyond
 the configured twenty-retry horizon; it was absent from the verified standby
-delivery table before activation. After ordinary replay, one SQL delivery receipt,
-the permanent R2 receipt, exact retained raw body/timestamp and pointer/pin cleanup
-were verified. This is delivery/cleanup evidence, not an independent replay of
+delivery table before activation. Observations after replay verified one SQL
+delivery receipt, the permanent R2 receipt and exact retained raw body/timestamp;
+pointer/pin absence was observed after the SQL commit. This is delivery/cleanup
+evidence, not an independent replay of
 every materialization or audit of every semantic publication. A full logged-request
-hour wholly after replay completion contained 423 repository requests; 327 discrete
-samples respected the configured owner concurrency of four. Retained accounting
+hour wholly after replay completion contained 423 repository requests. Across 327
+discrete post-completion samples, observed in-flight requests never exceeded the
+configured owner concurrency of four. Retained accounting
 does not prove every external attempt was logged. The receipt preserves failed
 operational probes, automatic rate-limit recovery, and a final publication attempt
 that stopped on newly arriving input before safely resuming with the original

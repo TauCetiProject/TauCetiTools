@@ -1,10 +1,12 @@
 # PostgreSQL repository storage
 
-Production remains on SQLite. Backend selection and production data cutover are
-owned by [#316](https://github.com/TauCetiProject/TauCetiWorker/issues/316), after
-both the recovery release and this backend have been deployed and tested. No
-client change, GitHub bootstrap, schema migration or PostgreSQL query occurs
-merely because this code is deployed with the existing configuration.
+The production repository uses PostgreSQL following the 2026-10-26
+[#316](https://github.com/TauCetiProject/TauCetiWorker/issues/316) cutover. The
+[accepted release receipt](validation/migration-production-release-2026-10-26.json)
+records deployed prerequisites, import verification, unchanged-client checks and
+retained recovery data. Backend selection remains explicit for each repository;
+deploying this code alone does not migrate an unselected repository, bootstrap
+GitHub inventory or require a client upgrade.
 
 ## Ownership and transactions
 
