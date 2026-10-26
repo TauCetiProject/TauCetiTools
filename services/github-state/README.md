@@ -33,7 +33,7 @@ quota owner. The production repository moved to PostgreSQL on 2026-10-26; the
 [accepted migration receipt](validation/migration-production-release-2026-10-26.json)
 records the checks and retained recovery data. Provisioning, test isolation,
 restore evidence, the performance gate and generation fencing are documented
-in that guide.
+in [POSTGRES.md](POSTGRES.md).
 
 ## Data and recovery
 

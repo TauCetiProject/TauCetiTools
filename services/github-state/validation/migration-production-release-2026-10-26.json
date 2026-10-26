@@ -1,7 +1,7 @@
 {
   "version": 1,
   "recorded_at": "2026-10-26T07:18:50.517Z",
-  "public_metadata_compiled_at": "2026-10-26T07:29:35.915137+00:00",
+  "public_metadata_compiled_at": "2026-10-26T07:32:40.722997+00:00",
   "issue": "https://github.com/TauCetiProject/TauCetiWorker/issues/316",
   "environment": "production",
   "generation": "9f418a72-05d1-44f1-afcc-395a7dbaf1cf",
@@ -102,13 +102,13 @@
         "file": "restore-evidence-production-ref.json",
         "sha256": "b3e03a179dcffa3210d1bc3af03479a7f5c26352a6688ae3dd6fa966d7af4e61",
         "environment_scope": "production_reference",
-        "scope": "Production reference to the actual shared-project isolated restore drill."
+        "scope": "Production reference to the actual isolated restore drill in that dedicated github-state project."
       },
       "actual_restore": {
         "file": "restore-proof-2026-10-20-from-48b.json",
         "sha256": "34e884ebe64710bd344a2f348193f8d5cfeda9efd2e6d04066d39a57c7bc0c16",
-        "environment_scope": "shared_project_isolated_restore_fixture",
-        "scope": "Actual restore of every fixture table in the dedicated Neon project; not restoration of the live production target."
+        "environment_scope": "dedicated_project_isolated_restore_fixture",
+        "scope": "Actual restore of every fixture table in an isolated branch of the dedicated github-state Neon project used by TEST and production; not restoration of the live production target."
       },
       "retention_lane_barrier": {
         "file": "retention-barrier-production.json",
@@ -958,7 +958,6 @@
         }
       ],
       "passed": true,
-      "all_samples_phase_complete": true,
       "failure_field_presence_recorded_separately": false,
       "failure_field_scope": "Null values are normalized from the prepared health report; original field presence was not recorded separately for this observation. A normalized null does not establish whether a field was omitted or exclude historical unrecorded attempts."
     },
@@ -985,7 +984,8 @@
         "sha256": "287db58ae35a0fbf1fafe96ca6301190cb81d46ae2bc03529332c0dd4e717f4d"
       },
       "scope": "The strict local diagnostic demanded an explicit null telemetry_failure field; the released service omitted its uninitialized field. Original failed probe retained. Zero logged repository requests and complete-hour preparation were separately verified; field absence is not historical proof of complete accounting."
-    }
+    },
+    "all_samples_phase_complete": true
   },
   "operator_contract": {
     "execution_id": "a776c11d-c50f-469b-b676-35331b6f7759",

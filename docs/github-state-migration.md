@@ -95,7 +95,7 @@ correction before starting its observer.
 
 The [2026-10-23 client compatibility deployment](../services/github-state/validation/migration-client-compatibility-2026-10-23.json)
 records the production deployment of [PR #90](https://github.com/TauCetiProject/TauCetiTools/pull/90)
-while SQLite remains authoritative. The original Worker client passed fresh-cache
+while SQLite remained authoritative. The original Worker client passed fresh-cache
 and retained-cache survey, inventory, history, pagination and 304 checks.
 Rereading a byte-exact copy of the retained survey cache added the required
 marker-list field to all 399 rows that lacked it. The unchanged client performed
