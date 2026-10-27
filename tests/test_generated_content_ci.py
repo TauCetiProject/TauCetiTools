@@ -18,8 +18,11 @@ class ContentCISeparationTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+        self.configure('TauCetiProject/TauCeti')
+
+    def configure(self, repo):
         config = self.root / 'tauceti.toml'
-        config.write_text(initial_configuration('one/Project', 'human') +
+        config.write_text(initial_configuration(repo, 'human') +
                           '\n[tools.tools]\nrepo="TauCetiProject/TauCetiTools"\nref="' + 'a' * 40 +
                           '"\n[tools.review]\nrepo="TauCetiProject/TauCetiReview"\nref="' + 'b' * 40 + '"\n')
         self.project = load(str(config))
@@ -42,6 +45,16 @@ class ContentCISeparationTests(unittest.TestCase):
             for job in self.workflow(filename)['jobs'].values():
                 for step in job.get('steps', []):
                     self.assertNotIn('python3 scripts/test_', step.get('run', ''))
+
+    def test_downstreams_do_not_install_the_shared_harness_regression_suite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.root = Path(directory)
+            self.configure('one/Project')
+            self.assertFalse((self.root / '.github/workflows/infrastructure-tests.yml').exists())
+            for filename in ('ci.yml', 'lint-full.yml'):
+                for job in self.workflow(filename)['jobs'].values():
+                    for step in job.get('steps', []):
+                        self.assertNotIn('python3 scripts/test_', step.get('run', ''))
 
     def test_setup_restores_the_reviewed_workflow_test_after_materialization(self):
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
