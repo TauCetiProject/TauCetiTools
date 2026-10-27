@@ -192,18 +192,43 @@ class StatusIntentTests(unittest.TestCase):
         record = self.approved_scope()
         with patch.object(ci_status, 'scope_approved', return_value=False) as approval:
             result, fake = self.publish([record], [self.run, self.pull, {}])
-        self.assertFalse(result)
+        self.assertTrue(result)
         self.assertEqual(approval.call_count, 1)
         self.assertEqual(fake.calls[-1][2]['state'], 'failure')
         self.assertEqual(fake.calls[-1][2]['context'], 'scope')
         self.assertFalse(record[0].exists())
+
+    def test_resume_succeeds_when_build_passes_and_scope_approval_is_rejected(self):
+        records = [self.record(context) for context in ('build', 'bump-guard')]
+        records.append(self.approved_scope())
+        fake = FakeGitHub([self.run, self.pull, {}, {}, {}])
+        with patch.object(ci_status, 'GitHub', return_value=fake), \
+                patch.object(ci_status, 'scope_approved', side_effect=[True, True, False]), \
+                patch.object(sys, 'argv', ['ci_status.py', 'resume', str(records[0][0].parent)]):
+            self.assertEqual(ci_status.main(), 0)
+        posts = [call[2] for call in fake.calls if call[0] == 'POST']
+        self.assertEqual([(p['context'], p['state']) for p in posts],
+                         [('build', 'success'), ('bump-guard', 'success'), ('scope', 'failure')])
+        self.assertEqual(posts[-1]['description'], 'no valid current bors scope approval')
+        self.assertTrue(all(not path.exists() for path, _ in records))
+
+    def test_failed_delivery_of_scope_rejection_retains_intent_and_fails(self):
+        record = self.approved_scope()
+        failure = ci_status.APIError('POST', 'path', 422, {'message': 'invalid'})
+        with patch.object(ci_status, 'scope_approved', return_value=False):
+            result, fake = self.publish([record], [self.run, self.pull, failure])
+        self.assertFalse(result)
+        self.assertTrue(record[0].exists())
+        self.assertEqual(fake.calls[-1][2]['state'], 'failure')
+        self.assertEqual(fake.calls[-1][2]['context'], 'scope')
 
     def test_quota_retry_rechecks_scope_approval_before_posting(self):
         record = self.approved_scope()
         with patch.object(ci_status, 'scope_approved', side_effect=[True, False]) as approval, patch.object(ci_status.time, 'sleep'):
             result, fake = self.publish([record], [self.run, self.pull,
                                        ci_status.Deferred('write', ci_status.time.time() + 1), self.run, self.pull, {}], max_wait=10)
-        self.assertFalse(result)
+        self.assertTrue(result)
+        self.assertFalse(record[0].exists())
         self.assertEqual(approval.call_count, 2)
         self.assertEqual(fake.calls[3][2]['state'], 'success')
         self.assertEqual(fake.calls[-1][2]['state'], 'failure')

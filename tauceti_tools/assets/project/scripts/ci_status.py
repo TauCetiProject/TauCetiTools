@@ -262,8 +262,8 @@ def publish(records, *, max_wait=600):
                     api.request("POST", f"repos/{record['repo']}/statuses/{record['sha']}",
                                 payload, idempotent=True)
                     path.unlink(missing_ok=True)
-                    if not approval_ok:
-                        failures += 1
+                    # A delivered policy rejection is a successful publication.
+                    # Merge eligibility is carried by the posted status, not this exit code.
                     print(f"ci-status: posted {payload['context']}={payload['state']}")
                     break
                 except Deferred as error:
