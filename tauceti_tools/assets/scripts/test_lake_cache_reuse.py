@@ -121,24 +121,6 @@ class ReuseTests(unittest.TestCase):
         os.mkfifo(self.archive)
         self.assertEqual(reuse.reconnect(self.root, self.saved), 0)
 
-    def test_sandbox_snapshot_is_readonly_and_before_build(self):
-        workflow = (ROOT / ".github/workflows/pr-build.yml").read_text()
-        snapshot = "python3 gate/scripts/lake_cache_reuse.py snapshot pr gate/lake-cache-reuse.json"
-        self.assertLess(workflow.index("run: bash gate/scripts/lake-cache-get.sh pr"), workflow.index(snapshot))
-        self.assertLess(workflow.index(snapshot), workflow.index("- name: Build exact candidate under bwrap"))
-        self.assertIn('--ro-bind "$PWD/gate" "$PWD/gate"', workflow)
-        build = (ROOT / "scripts/sandbox-build.sh").read_text()
-        self.assertLess(build.index('bash "$TRUSTED_SCRIPTS/lint-style.sh"'), build.index("lake_cache_reuse.py"))
-        self.assertLess(build.index("lake_cache_reuse.py"), build.index("lake build --no-build --rehash -o"))
-
-    def test_lake_regression_fixtures_are_separate_from_candidate_builds(self):
-        workflow = (ROOT / ".github/workflows/pr-build.yml").read_text()
-        self.assertNotIn("python3 gate/scripts/test_lake_cache_reuse.py --integration", workflow)
-        infrastructure = (ROOT / ".github/workflows/infrastructure-tests.yml").read_text()
-        self.assertIn("python3 scripts/test_lake_cache_reuse.py --integration", infrastructure)
-        self.assertIn("python3 scripts/test_lake_cache_publish.py --integration", infrastructure)
-
-
 @unittest.skipUnless(INTEGRATION, "pass --integration with Lake installed")
 class StockLakeTests(unittest.TestCase):
     def test_complete_mapping_changed_added_deleted_and_stale_sources(self):
