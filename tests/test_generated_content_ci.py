@@ -1,8 +1,7 @@
-"""Generated content CI and publication do not depend on tooling regression suites."""
+"""Content CI must not execute tooling regression suites, including via reusable jobs."""
 
 from pathlib import Path
-import shutil
-import subprocess
+import re
 import tempfile
 import unittest
 
@@ -10,69 +9,50 @@ import yaml
 
 from tauceti_tools.project import load
 from tauceti_tools.scaffold import initial_configuration
-from tauceti_tools.templates import materialize, write_project
+from tauceti_tools.templates import write_project
+
+
+ROOT = Path(__file__).resolve().parents[1]
+REGRESSION_COMMAND = re.compile(
+    r'\b(?:python3?|bash)\s+(?:gate/)?scripts/(?:[\w/-]+/)?test_[\w-]+\.(?:py|sh)\b'
+    r'|\b(?:python3?\s+-m\s+(?:unittest|pytest)|pytest|bash\s+scripts/run-infrastructure-tests\.sh)\b'
+)
 
 
 class ContentCISeparationTests(unittest.TestCase):
-    def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
-        self.configure('TauCetiProject/TauCeti')
+    def assert_no_regression_suites(self, path):
+        document = yaml.safe_load(path.read_text())
+        for job in document['jobs'].values():
+            for step in job.get('steps', []):
+                with self.subTest(workflow=path.name, step=step.get('name')):
+                    self.assertNotRegex(step.get('run', ''), REGRESSION_COMMAND)
 
-    def configure(self, repo):
-        config = self.root / 'tauceti.toml'
-        config.write_text(initial_configuration(repo, 'human') +
-                          '\n[tools.tools]\nrepo="TauCetiProject/TauCetiTools"\nref="' + 'a' * 40 +
-                          '"\n[tools.review]\nrepo="TauCetiProject/TauCetiReview"\nref="' + 'b' * 40 + '"\n')
-        self.project = load(str(config))
-        write_project(self.project, self.root)
+    def test_generated_projects_do_not_install_tooling_regression_suites(self):
+        for repo in ('one/Project', 'TauCetiProject/TauCeti'):
+            with self.subTest(repo=repo), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                config = root / 'tauceti.toml'
+                config.write_text(initial_configuration(repo, 'human') +
+                                  '\n[tools.tools]\nrepo="TauCetiProject/TauCetiTools"\nref="' + 'a' * 40 +
+                                  '"\n[tools.review]\nrepo="TauCetiProject/TauCetiReview"\nref="' + 'b' * 40 + '"\n')
+                project = load(str(config))
+                # An existing project may own its own independent test workflow.
+                owned = root / '.github/workflows/infrastructure-tests.yml'
+                owned.parent.mkdir(parents=True)
+                expected = '# Project-owned infrastructure checks\n'
+                owned.write_text(expected)
+                written = write_project(project, root)
+                self.assertNotIn('.github/workflows/infrastructure-tests.yml', written)
+                self.assertEqual(owned.read_text(), expected)
+                for name in ('ci.yml', 'lint-full.yml', 'pr-build.yml'):
+                    self.assert_no_regression_suites(root / '.github/workflows' / name)
+                ci = yaml.safe_load((root / '.github/workflows/ci.yml').read_text())['jobs']
+                self.assertNotIn('readiness-tests', ci)
+                self.assertNotIn('duplicate-audit-tests', ci)
+                self.assertEqual(ci['publish-lake-cache']['needs'], ['build'])
 
-    def workflow(self, name):
-        return yaml.safe_load((self.root / '.github/workflows' / name).read_text())
-
-    def test_only_infrastructure_changes_run_the_additional_suites(self):
-        infra = self.workflow('infrastructure-tests.yml')
-        events = infra.get('on', infra.get(True))
-        self.assertEqual(set(events), {'push', 'pull_request'})
-        for value in events.values():
-            self.assertEqual(set(value['paths']), {'scripts/**', '.github/**'})
-        self.assertEqual(infra['permissions'], {'contents': 'read'})
-        ci = self.workflow('ci.yml')['jobs']
-        self.assertEqual(set(ci), {'build', 'publish-lake-cache'})
-        self.assertEqual(ci['publish-lake-cache']['needs'], ['build'])
-        for filename in ('ci.yml', 'lint-full.yml'):
-            for job in self.workflow(filename)['jobs'].values():
-                for step in job.get('steps', []):
-                    self.assertNotIn('python3 scripts/test_', step.get('run', ''))
-
-    def test_downstreams_do_not_install_the_shared_harness_regression_suite(self):
-        with tempfile.TemporaryDirectory() as directory:
-            self.root = Path(directory)
-            self.configure('one/Project')
-            self.assertFalse((self.root / '.github/workflows/infrastructure-tests.yml').exists())
-            for filename in ('ci.yml', 'lint-full.yml'):
-                for job in self.workflow(filename)['jobs'].values():
-                    for step in job.get('steps', []):
-                        self.assertNotIn('python3 scripts/test_', step.get('run', ''))
-
-    def test_setup_restores_the_reviewed_workflow_test_after_materialization(self):
-        subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
-        test = self.root / 'scripts/test_bors_scope_approval.py'
-        expected = '# Corrected workflow contract from the candidate revision.\n'
-        test.write_text(expected)
-        subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
-        subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
-                        'commit', '-qm', 'Fixture'], cwd=self.root, check=True)
-        shared = self.root / 'shared'
-        materialize(self.project, shared, policy_dir=self.root / 'scripts')
-        shutil.copytree(shared, self.root / 'scripts', dirs_exist_ok=True)
-        self.assertNotEqual(test.read_text(), expected)
-        steps = self.workflow('infrastructure-tests.yml')['jobs']['python-tests']['steps']
-        restore = next(s['run'] for s in steps if s.get('name') ==
-                       'Restore workflow contract tests after shared setup')
-        subprocess.run(['bash', '-euo', 'pipefail', '-c', restore], cwd=self.root, check=True)
-        self.assertEqual(test.read_text(), expected)
+    def test_reusable_pr_builder_does_not_execute_regression_suites(self):
+        self.assert_no_regression_suites(ROOT / '.github/workflows/pr-build.yml')
 
 
 if __name__ == '__main__':

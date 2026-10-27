@@ -335,8 +335,6 @@ def write_project(project: Project, checkout: Path, role: str = "content") -> li
         if not source.is_file() or "__pycache__" in source.parts or source.suffix == ".pyc":
             continue
         relative = source.relative_to(ASSETS / "project")
-        if not project.legacy and relative.name == "infrastructure-tests.yml":
-            continue  # The shared harness regression suite belongs to Tools, not every downstream.
         if not project.legacy and relative.name in ("publication_capacity_fixture.json", "stack_policy_fixtures.json"):
             continue  # Infrastructure test fixtures belong to Tools, not downstream policy.
         if not project.legacy and relative.parts[0] == "scripts" and source.suffix not in (".lean", ".txt", ".json"):

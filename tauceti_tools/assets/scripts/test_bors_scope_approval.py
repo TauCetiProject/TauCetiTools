@@ -223,7 +223,7 @@ class WorkflowTests(unittest.TestCase):
         self.steps = self.workflow['jobs']['sandboxed-build']['steps']
         self.report = next(s['run'] for s in self.steps if s.get('id') == 'report')
 
-    def verdict(self, **guards):
+    def verdict(self, backend="bors", **guards):
         start = self.report.index('if [ "${{ env.SCOPE_OK }}"')
         end = self.report.index('post_status scope "$sc_state" "$sc_desc"', start)
         script = self.report[start:end]
@@ -232,13 +232,14 @@ class WorkflowTests(unittest.TestCase):
         script = re.sub(r'\$\{\{ env\.([A-Z_]+) \}\}', lambda m: values.get(m[1], ''), script)
         result = subprocess.run(['bash', '-c', 'python3() { return 0; }; ' + script +
                                  '\nprintf "%s" "$sc_state"'], capture_output=True, text=True,
-                                env={**os.environ, 'IS_BATCH': 'false', 'MERGE_BACKEND': 'bors', 'TESTED_SCOPE_HEAD': HEAD,
+                                env={**os.environ, 'IS_BATCH': 'false', 'MERGE_BACKEND': backend, 'TESTED_SCOPE_HEAD': HEAD,
                                      'TESTED_SCOPE_BASE': BASE, 'SCOPE_PR': '1'})
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout
 
     def test_human_approval_only_waives_paths(self):
         self.assertEqual(self.verdict(), 'success')
+        self.assertEqual(self.verdict(backend="queue"), "failure")
         for guard in ['BUMP_BAD', 'INFRA', 'TOO_LARGE', 'DIFF_UNKNOWN', 'NEWFILE_TOO_LONG']:
             with self.subTest(guard=guard):
                 self.assertEqual(self.verdict(**{guard: '1'}), 'failure')
