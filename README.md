@@ -52,3 +52,18 @@ requires a separate operator grant.
 
 A [disposable project](examples/disposable-project) supplies separate content and roadmap trees
 with real immutable tool and Mathlib pins. It does not create repositories or enroll hosted services.
+
+## CI reporting collection
+
+Routine reporting uses job webhooks and bounded service-side recovery. The site
+can cache the published charts with `python3 scripts/ci_report_assets.py --out-dir
+web/static_files`, without GitHub reads or a database download. Historical
+collection is an explicit analysis: `collector.incremental --analysis` enables
+optional artifacts, failed-job logs and commit comparisons. Ruleset snapshots
+and per-module timing lists are not collected.
+
+Host resource sampling requires the repository variable `CI_RESOURCE_EXPERIMENT`
+to be `1`. Otherwise the sandbox command runs directly. Successful PR phase
+artifacts are sampled one in twenty; a resource experiment can collect the
+additional telemetry explicitly. These observations do not authorize merging or
+cache publication.

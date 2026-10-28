@@ -202,6 +202,7 @@ def main():
                 break
     except (RuntimeError, ValueError, KeyError, zipfile.BadZipFile):
         print("Phase telemetry unavailable; retaining step timing")
+    summary.setdefault("telemetry", {})["coverage"] = "complete"
     for job in jobs:
         if job.get("conclusion") == "failure" and calls < lease["max_requests"]:
             failed = next(

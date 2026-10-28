@@ -496,7 +496,7 @@ def enrich(gh, index, stamp, checkpoint, *, build, detail=False, recent=None):
             raise stopped
 
 
-def run(gh, index, repos, until, stamp, checkpoint, since=None, discover=False, jobs_for='all', requested_until=None):
+def run(gh, index, repos, until, stamp, checkpoint, since=None, discover=False, jobs_for='all', requested_until=None, analysis=False):
     index.sync()
     legacy = read_state('cursor.json')
     inventory = read_state('inventory-cursor.json') or dict(legacy)
@@ -554,7 +554,6 @@ def run(gh, index, repos, until, stamp, checkpoint, since=None, discover=False, 
                 previous = collect.parse_time(main_cursor.get(repo,legacy.get(repo,collect.iso(until))))
                 main_cursor[repo] = collect.iso(max(previous,until))
                 save_state('main-cursor.json', main_cursor)
-            collect.snapshot_settings(gh, repo, stamp, False)
     phase('main history', max(1, gh.max_calls//20), main_history, seconds=120)
     phase('older active metadata',max(1,gh.max_calls//50),
           lambda: refresh_active(gh,index,stamp,checkpoint,until),seconds=60)
@@ -599,8 +598,9 @@ def run(gh, index, repos, until, stamp, checkpoint, since=None, discover=False, 
     if jobs_for == 'all':
         phase('sampled auxiliary jobs', max(0, gh.max_calls-gh.started-min(200, remaining//10)),
           lambda: enrich(gh, index, stamp, checkpoint, build=False))
-    phase('optional details', max(0, gh.max_calls-gh.started),
-          lambda: enrich(gh, index, stamp, checkpoint, build=True, detail=True))
+    if analysis:
+        phase('optional details', max(0, gh.max_calls-gh.started),
+              lambda: enrich(gh, index, stamp, checkpoint, build=True, detail=True))
     coverage()
     checkpoint(force=True)
     index.sync()
@@ -618,6 +618,8 @@ def main(argv=None):
     ap.add_argument('--push', action='store_true', help='publish checkpoints at most two minutes apart')
     ap.add_argument('--repos', default=None)
     ap.add_argument('--jobs-for', choices=['build', 'all'], default='all')
+    ap.add_argument('--analysis', action='store_true',
+                    help='explicitly collect optional artifacts, logs and commit comparisons')
     ap.add_argument('--since')
     ap.add_argument('--until')
     from tauceti_tools.project import conf_argument
@@ -644,7 +646,7 @@ def main(argv=None):
         stamp = dt.datetime.now(collect.UTC).strftime('%Y%m%dT%H%M%S%fZ')
         run(gh, index, repos, until, stamp, checkpoint,
             since,
-            discover=not args.repos, jobs_for=args.jobs_for, requested_until=requested_until)
+            discover=not args.repos, jobs_for=args.jobs_for, requested_until=requested_until, analysis=args.analysis)
     finally:
         try:
             checkpoint(force=True)

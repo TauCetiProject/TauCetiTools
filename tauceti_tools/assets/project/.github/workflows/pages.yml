@@ -333,16 +333,14 @@ jobs:
             fi
           }
 
-      # TauCetiCI records every Actions run in the organisation and publishes a SQLite database
-      # after collection; the CI charts use independent source coverage. The release is public, so the
-      # download needs no credentials beyond the token gh wants to have.
+      # Cache the already-published CI charts. The site build does not collect CI
+      # data or download/rebuild the historical SQLite database.
       - name: Regenerate the CI charts into static_files
         working-directory: ${{ github.workspace }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          python3 scripts/ci_stats_graphs.py --download --db "$RUNNER_TEMP/ci.sqlite" \
-            --out-dir web/static_files \
+          python3 scripts/ci_report_assets.py --out-dir web/static_files \
           || {
             echo "::warning::Some CI chart groups are stale or failed; dated daily charts refresh through their coverage, other stale groups retain their previous SVGs; see static/ci-freshness.json for errors"
             echo "CI chart groups (see static/ci-freshness.json)" >> "$RUNNER_TEMP/data-failures"
