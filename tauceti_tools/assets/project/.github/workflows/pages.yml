@@ -40,6 +40,7 @@ on:
       - 'scripts/pr_stats_graphs.py'
       - 'scripts/pipeline_health.py'
       - 'scripts/ci_stats_graphs.py'
+      - 'scripts/ci_report_assets.py'
       - 'scripts/ci_daily_graphs.py'
       - 'scripts/generated_assets.py'
       - 'scripts/roadmap_progress.py'
@@ -342,7 +343,7 @@ jobs:
         run: |
           python3 scripts/ci_report_assets.py --out-dir web/static_files \
           || {
-            echo "::warning::Some CI chart groups are stale or failed; dated daily charts refresh through their coverage, other stale groups retain their previous SVGs; see static/ci-freshness.json for errors"
+            echo "::warning::Some published CI chart groups are unavailable; retained their previous SVGs; see static/ci-freshness.json"
             echo "CI chart groups (see static/ci-freshness.json)" >> "$RUNNER_TEMP/data-failures"
           }
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Cache published CI charts for the website without downloading the CI database."""
 import argparse
+import datetime as dt
 import hashlib
 import json
 from pathlib import Path
@@ -29,11 +30,20 @@ def fetch(path, limit):
 
 
 def cache(out):
-    manifest = json.loads(fetch('/v1/ci/manifest.json', 1024 * 1024))
-    if (manifest.get('schema') != 'tauceti-ci.manifest/v1' or
-            manifest.get('mode') != 'live' or manifest.get('history', {}).get('status') != 'ready'):
-        raise ValueError('Published CI charts are not ready')
     out.mkdir(parents=True, exist_ok=True)
+    try:
+        manifest = json.loads(fetch('/v1/ci/manifest.json', 1024 * 1024))
+        if (manifest.get('schema') != 'tauceti-ci.manifest/v1' or
+                manifest.get('mode') != 'live' or manifest.get('history', {}).get('status') != 'ready'):
+            raise ValueError('Published CI charts are not ready')
+    except Exception as error:
+        (out / 'ci-freshness.json').write_text(json.dumps({
+            'generated_at': dt.datetime.now(dt.timezone.utc).isoformat(),
+            'source': 'published-live-reports',
+            'groups': {group: {'status': 'error', 'reason': str(error), 'retained_previous': True}
+                       for group in GROUPS},
+        }, indent=2) + '\n')
+        return list(GROUPS)
     freshness, errors = {}, []
 
     def asset(name):
@@ -52,6 +62,8 @@ def cache(out):
         for group, names in GROUPS.items():
             metadata = dict(manifest.get('groups', {}).get(group, {}))
             try:
+                if metadata.get('status') in ('stale', 'error'):
+                    raise ValueError('Published chart group is stale or unavailable')
                 # Validate the entire group before replacing any cached member.
                 values = list(pool.map(asset, names))
                 for name, data in values:

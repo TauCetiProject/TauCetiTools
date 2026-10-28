@@ -55,6 +55,7 @@ class PublishedReportsTests(unittest.TestCase):
         responses['/v1/ci/manifest.json'] = json.dumps(manifest).encode()
         with tempfile.TemporaryDirectory() as directory, patch.object(
                 reports, 'fetch', side_effect=lambda path, limit: responses[path]):
-            with self.assertRaises(ValueError):
-                reports.cache(Path(directory))
-            self.assertEqual(list(Path(directory).iterdir()), [])
+            out = Path(directory)
+            self.assertEqual(reports.cache(out), list(reports.GROUPS))
+            self.assertEqual(list(out.glob('*.svg')), [])
+            self.assertEqual(json.loads((out / 'ci-freshness.json').read_text())['groups']['fleet']['status'], 'error')

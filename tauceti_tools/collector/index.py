@@ -56,7 +56,7 @@ class Index:
                 'referenced_workflows': record.get('referenced_workflows', []),
                 'display_title': record.get('title'), 'created_at': record['created_at'],
                 'updated_at': record.get('updated_at'), 'conclusion': record.get('conclusion'),
-                'status': 'completed', 'actor': {'login': record.get('actor')},
+                'status': 'completed',
                 'run_started_at': record.get('run_started_at')}
 
     def ingest(self, kind, r):
@@ -153,6 +153,10 @@ class Index:
                     self.ingest(name.split('/')[0], json.loads(line))
             self.db.execute('INSERT OR REPLACE INTO files VALUES (?,?)', (name, size))
             read += 1
+        # Old optional source/job payloads cannot recover expired logs/artifacts.
+        # Keep the small coverage row explicit rather than claiming completed details.
+        cutoff = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - 90 * 86400))
+        self.db.execute("UPDATE runs SET jobs=NULL,source=NULL WHERE jobs_done=1 AND status='completed' AND created<?", (cutoff,))
         self.db.commit()
         return read
 
@@ -169,7 +173,7 @@ class Index:
 
     def pending(self, *, build, detail=False, recent=None, limit=32):
         done = 'detail_done' if detail else 'jobs_done'
-        condition = 'AND jobs_done=1' if detail else ''
+        condition = 'AND jobs_done=1 AND source IS NOT NULL' if detail else ''
         args = [int(build)]
         if recent:
             condition += ' AND created >= ?'
@@ -179,7 +183,7 @@ class Index:
         rows = self.db.execute(f'''SELECT repo,source,jobs FROM runs
             WHERE {done}=0 AND build=? AND status='completed' {condition}
               AND retry_after <= ?
-            ORDER BY created,id,attempt LIMIT ?''', (*args, time.time(), limit)).fetchall()
+            ORDER BY created {'DESC' if detail else 'ASC'},id,attempt LIMIT ?''', (*args, time.time(), limit)).fetchall()
         return [(repo, json.loads(source), json.loads(jobs or '{}')) for repo, source, jobs in rows]
 
     def coverage(self, repo, through, *, build=False, detail=False):

@@ -146,7 +146,6 @@ def listing_source(run):
     out = {k: run[k] for k in keys if k in run}
     for k in ('repository', 'head_repository'):
         out[k] = {'full_name': (run.get(k) or {}).get('full_name')}
-    out['actor'] = {'login': (run.get('actor') or {}).get('login')}
     out['pull_requests'] = [{'number': p['number']} for p in run.get('pull_requests', [])]
     return out
 
@@ -600,7 +599,8 @@ def run(gh, index, repos, until, stamp, checkpoint, since=None, discover=False, 
           lambda: enrich(gh, index, stamp, checkpoint, build=False))
     if analysis:
         phase('optional details', max(0, gh.max_calls-gh.started),
-              lambda: enrich(gh, index, stamp, checkpoint, build=True, detail=True))
+              lambda: enrich(gh, index, stamp, checkpoint, build=True, detail=True,
+                             recent=collect.iso(until-dt.timedelta(days=1))))
     coverage()
     checkpoint(force=True)
     index.sync()
