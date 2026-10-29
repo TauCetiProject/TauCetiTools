@@ -159,10 +159,11 @@ test('many empty queued workflows cannot discard complete running GitHub capacit
   if(path.includes('status=in_progress'))return envelope('workflow_runs',[{id:1}]);
   if(path.includes('status=queued'))return envelope('workflow_runs',Array.from({length:100},(_,i)=>({id:i+2})));
   assert.ok(path.includes('/runs/1/jobs'),'must not begin a queued-job extension that cannot fit');
-  return envelope('jobs',[hosted]);
+  return envelope('jobs',[hosted,{name:'sandboxed-build',status:'in_progress',labels:['nscloud-ubuntu-test']}]);
  });
  assert.equal(value.routing_version,1);assert.equal(value.busy,1);assert.equal(value.requests,4);
  assert.equal(value.namespace_busy,undefined);assert.equal(value.queued_fleet,undefined);
+ assert.equal(value.namespace_busy_lower_bound,1);
  assert.equal(value.placement_unavailable,'capacity_scan_limit');assert.equal(calls.length,4);
 });
 test('missing queued placement data preserves running capacity; missing running data still fails',async()=>{

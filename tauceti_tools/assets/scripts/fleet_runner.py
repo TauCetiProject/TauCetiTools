@@ -176,6 +176,11 @@ def shared_capacity(repository, token):
             or not numeric(value.get("retry_at")) or value["retry_at"] <= now):
         raise ObservationError("incomplete or stale shared capacity")
     result = dict(github_busy=value["busy"], namespace_busy=None, queued_fleet=None)
+    lower = value.get("namespace_busy_lower_bound")
+    if lower is not None:
+        if type(lower) is not int or not 0 <= lower <= 10000:
+            raise ObservationError("invalid Namespace capacity lower bound")
+        result["namespace_busy_lower_bound"] = lower
     if value.get("routing_version") == 2:
         queued = value.get("queued_fleet")
         if (type(value.get("namespace_busy")) is not int or not 0 <= value["namespace_busy"] <= 10000
@@ -337,8 +342,10 @@ def route(*, kind, order, machines, runner_pages, observed, github_budget, names
         if candidates:
             offset = int(hashlib.sha256(selection_key.encode()).hexdigest(), 16) if selection_key else 0
             return dict(candidates[offset % len(candidates)], pool=name)
-    if ("namespace" in order and "namespace" not in excluded
+    lower = observed.get("namespace_busy_lower_bound")
+    if (kind in ("pr", "staging") and "namespace" in order and "namespace" not in excluded
             and observed.get("namespace_busy") is None
+            and lower is not None and lower < namespace_cap
             and observed.get("github_busy") is not None and observed["github_busy"] > github_budget):
         return dict(pool="namespace", waiting=True)
     return dict(pool="github", waiting=True)
@@ -397,7 +404,7 @@ def route_main():
     try:
         observed = shared_capacity(repository, environment.get("GITHUB_STATE_TOKEN", "")) or observed
     except (OSError, ValueError, KeyError, TypeError):
-        print("::notice::Shared capacity unavailable; retaining bounded direct discovery")
+        print("::warning::Shared capacity unavailable; retaining native runner fallback")
     order = config.get("staging_order" if kind == "staging" else "pr_order", ["github", "namespace"])
     excluded = set()
     attempt = int(environment["GITHUB_RUN_ATTEMPT"])
