@@ -10,8 +10,8 @@ const extension=`async fetch(req){
    const key=operation+':'+JSON.stringify(args);
    await this.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?)',key,operation,JSON.stringify(args),1,now,0,null);
   }
-  for(let offset=1;offset<=601;offset+=64){
-   const ids=Array.from({length:Math.min(64,602-offset)},(_,i)=>String(offset+i));
+  for(let offset=1;offset<=601;offset+=12){
+   const ids=Array.from({length:Math.min(12,602-offset)},(_,i)=>String(offset+i));
    await this.store.exec('INSERT INTO resources VALUES '+ids.map(()=>'(?,?,?,?,?,?,?,?)').join(','),...ids.flatMap(id=>['issue_comments',id,'7',JSON.stringify({id:Number(id),body:'mirrored'}),'',now,0,0]));
    await this.store.exec('INSERT INTO members VALUES '+ids.map(()=>'(?,?)').join(','),...ids.flatMap(id=>['issue_comments:{"number":7}',id]));
   }
