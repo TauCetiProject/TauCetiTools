@@ -9,9 +9,11 @@ repositories and all administration, health, changes and activity APIs retain
 their existing authentication. Custom deployments should publish only data
 intended for anonymous readers. Anonymous queries serve existing mirrored data;
 they never renew demand, schedule hydration, configure a repository or upload
-cursor objects. Their snapshots are returned inline, bounded at 16 MiB;
+cursor objects. Their snapshots are returned inline, bounded at 4 MiB;
 missing coverage and larger snapshots return unavailable. Authenticated clients
 retain paginated snapshots and background demand.
+
+Public queries require the `PUBLIC_QUERY_LIMIT` binding (120 queries per minute per client IP, including individual batch queries). Public reads use a separate two-entry cache and at most two concurrent snapshot builds per repository. Set `PUBLIC_READ_REPOSITORIES = "[]"` explicitly to revoke public access; `keep_vars` preserves omitted deployment variables.
 
 
 Reporting clients can use authenticated `POST /v1/activity` with

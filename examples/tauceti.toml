@@ -59,7 +59,7 @@ fleet = false
 security_audit = false
 
 [services.github_state]
-mode = "off" # off | hosted | custom
+mode = "hosted" # public Tau Ceti mirror; no client token required
 # url = "https://github-state.example.org"
 
 [services.bors]

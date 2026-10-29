@@ -835,10 +835,12 @@ administrative, health, changes or activity endpoints. Only publish repositories
 whose mirrored data is intended to be public. The default custom deployment
 continues to require scoped client credentials. Anonymous queries only read
 existing mirrored snapshots; they cannot request hydration or create cursor
-objects. Responses are inline and bounded at 16 MiB. Missing coverage or a
+objects. Responses are inline and bounded at 4 MiB. Missing coverage or a
 larger response reports unavailable so workers can use their normal fallback.
 An absent GitHub state section defaults to the public mirror for the canonical
 Tau Ceti content repository; an explicit `mode = "off"` still disables it.
+
+Public queries require the `PUBLIC_QUERY_LIMIT` binding (120 queries per minute per client IP, including individual batch queries). Public reads use a separate two-entry cache and at most two concurrent snapshot builds per repository. Set `PUBLIC_READ_REPOSITORIES = "[]"` explicitly to revoke public access; `keep_vars` preserves omitted deployment variables.
 
 `off` uses direct GitHub reads. `hosted` requests enrollment in the operator's shared mirror.
 `custom` deploys the same service in the downstream's Cloudflare account.

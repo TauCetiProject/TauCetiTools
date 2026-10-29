@@ -16,6 +16,18 @@ from tauceti_tools.scaffold import initial_configuration
 
 
 class DoctorSetupTests(unittest.TestCase):
+    def test_public_tau_ceti_mirror_needs_no_token_or_enrollment(self):
+        from tauceti_tools.doctor import extra_findings
+        project = parse(initial_configuration("TauCetiProject/TauCeti", "human").encode(), "/tmp/tauceti.toml")
+        for absent in (False, True):
+            if absent:
+                project.raw["services"].pop("github_state")
+            with patch("tauceti_tools.github_state_setup.client_token_file", side_effect=AssertionError("no token needed")):
+                findings = extra_findings(project, GitHub(), "again")
+            finding = next(f for f in findings if f.id == "services.github_state")
+            self.assertEqual(finding.status, "ready")
+            self.assertIn("no client token", finding.summary)
+
     def setUp(self):
         self.project = parse(initial_configuration("one/Project", "human").encode(), "/tmp/tauceti.toml")
         self.responses = {}

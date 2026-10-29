@@ -151,3 +151,19 @@ test('explicit SQLite ownership fencing works in the Worker SQL runtime',{skip:B
  const response=await post('storage/probe',{});assert.equal(response.status,400);assert.equal((await response.json()).error,'backend_fenced');
 });
 
+
+test('public rate limits count every batch item and authenticated queries bypass them',async()=>{
+ const extension=`async fetch(req){if(new URL(req.url).pathname==='/query')return Response.json({status:'ok',data:[]});return super.fetch(req);}`;
+ const limited=await runtime(async()=>Response.json([]),{PUBLIC_READ_REPOSITORIES:'["org/repo"]'},{repositoryAlarms:false,repositoryExtension:extension,ratelimits:{PUBLIC_QUERY_LIMIT:{namespace_id:'1002',simple:{limit:1,period:60}}}});
+ try {
+  const path='https://test/v1/query?repository=org/repo&operation=open_prs',headers={'CF-Connecting-IP':'192.0.2.1'};
+  assert.equal((await limited.dispatchFetch(path,{headers})).status,200);
+  const batch=await limited.dispatchFetch('https://test/v1/query_batch',{method:'POST',headers,body:JSON.stringify({queries:Array(2).fill({repository:'org/repo',operation:'open_prs'})})});
+  assert.deepEqual((await batch.json()).results.map(r=>r.status),[429,429]);
+  const rejected=await limited.dispatchFetch(path,{headers});assert.equal(rejected.status,429);assert.equal(rejected.headers.get('Retry-After'),'60');
+  assert.equal((await limited.dispatchFetch(path,{headers:{...headers,Authorization:'Bearer client'}})).status,200);
+  assert.equal((await limited.dispatchFetch(path,{headers:{'CF-Connecting-IP':'192.0.2.2'}})).status,200);
+ } finally {await limited.dispose();}
+ const unbound=await runtime(async()=>Response.json([]),{PUBLIC_READ_REPOSITORIES:'["org/repo"]'},{repositoryAlarms:false,repositoryExtension:extension,ratelimits:{}});
+ try {assert.equal((await unbound.dispatchFetch('https://test/v1/query?repository=org/repo&operation=open_prs')).status,503);} finally {await unbound.dispose();}
+});

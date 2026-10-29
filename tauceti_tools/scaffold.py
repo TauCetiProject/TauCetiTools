@@ -83,7 +83,7 @@ security_audit = false
 roadmap_authoring = false # WIP: TauCetiRoadmapWorker and a downstream-owned job board
 
 [services.github_state]
-mode = "off" # off | hosted | custom
+mode = "{'hosted' if repo == 'TauCetiProject/TauCeti' else 'off'}" # off | hosted | custom
 # url = "https://github-state.example.org"
 
 [services.bors]

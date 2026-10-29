@@ -1,7 +1,7 @@
 import { RepositoryStore, SQLiteStore, PostgresStore, ReadCacheStore, BufferedStore, SerialLane, columns, collectionJoin } from './repository_store';
 import { repositoryHealth } from './repository_health';
 import { DurableObject } from 'cloudflare:workers';
-import { Env, EventPointer, matchesETag, Query, Result, digest, json, queryKey, repository, stub, validateQuery, parseGitHub, CI_EVENTS, NOT_MIRRORED, stagingStateKey, stagedPageKey } from './protocol';
+import { Env, EventPointer, matchesETag, Query, Result, digest, json, queryKey, repository, stub, validateQuery, parseGitHub, CI_EVENTS, NOT_MIRRORED, publicQuery, stagingStateKey, stagedPageKey } from './protocol';
 import { comment, issue, pr, status } from './normalize';
 import { batchLimit } from './catalog';
 import { Lane, LANES, laneAt, settings } from './reconciliation';
@@ -50,6 +50,7 @@ function coordinationWindows(history:any,now:number):any {
 export class RepositoryState extends DurableObject<Env> {
   private [ACTIVITY_CLOCK]?:number;
   private inflightQueries=new Map<string,Promise<Result>>();
+  private publicCompletedQueries=new Map<string,{result:Result,expires:number,built:number}>();
   private completedQueries=new Map<string,{result:Result,expires:number,built:number}>();
   private alarmFlight?:Promise<void>;
   private revisionState:{value?:number}={};
@@ -826,6 +827,12 @@ export class RepositoryState extends DurableObject<Env> {
       const inventoryKnown=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',key)).toArray().length>0;
       await this.enqueue({repository:repo.name,operation:'open_prs'},1,Date.now(),!inventoryKnown);
       if(accepted && row.headRefOid && prior?.headRefOid!==row.headRefOid) await this.enqueue({repository:repo.name,operation:'files',args:{number:row.number}},1,Date.now(),true);
+      // Published mirrors hydrate new open PR histories from trusted webhooks,
+      // independently of anonymous query demand.
+      if(row.state==='OPEN' && publicQuery(this.env,repo))for(const operation of ['issue_comments','review_threads']) {
+        const child={repository:repo.name,operation,args:{number:row.number}};
+        if(!await this.complete(child))await this.enqueue(child,2);
+      }
       if (accepted && row.headRefOid) for (const operation of ['statuses']) {
         const q={repository:repo.name,operation,args:{sha:row.headRefOid}};
         const known=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length>0;
@@ -1013,7 +1020,7 @@ export class RepositoryState extends DurableObject<Env> {
     // configuration or R2 cursor uploads. Return bounded inline data instead.
     if(this.readOnlyQuery) {
       const inline={...result,data:rows};
-      return new TextEncoder().encode(JSON.stringify(inline)).length<=16*1024*1024?inline:await this.unavailable(q,'public_snapshot_too_large');
+      return new TextEncoder().encode(JSON.stringify(inline)).length<=4*1024*1024?inline:await this.unavailable(q,'public_snapshot_too_large');
     }
     if (Array.isArray(rows) && rows.length>100) {
       const id=crypto.randomUUID(),expires=Date.now()+600000,repo=(await this.meta('repository')).id;
@@ -2111,7 +2118,7 @@ export class RepositoryState extends DurableObject<Env> {
     }catch {throw new AdminError('migration_target_configuration');}
     this.store=new PostgresStore(this.env.REPOSITORY_DATABASE_URL,repo,owner.generation);
     this.selectedMigrationGeneration=owner.generation;this.schema='current';this.degraded=undefined;this.storageMarkerUnavailable=false;
-    this.repositoryMemo=undefined;this.revisionState.value=undefined;this.completedQueries.clear();
+    this.repositoryMemo=undefined;this.revisionState.value=undefined;this.completedQueries.clear();this.publicCompletedQueries.clear();
   }
   private async selectMigrationBackend():Promise<void> {
     const state=this.migrationState;
@@ -2612,7 +2619,8 @@ export class RepositoryState extends DurableObject<Env> {
           return new Response(null,{status:304,headers:{ETag:etag,...headers}});
         }
         const key=(readOnly?'public|':'authenticated|')+queryKey(q)+'|observed:'+Boolean(q.allow_observed)+'|'+(q.cursor || '');
-        const cached=this.completedQueries.get(key);
+        const completed=readOnly?this.publicCompletedQueries:this.completedQueries;
+        const cached=completed.get(key);
         if (!q.cursor && cached && cached.expires>Date.now() &&
           (cached.result.revision===(await this.revision()) || ['survey','open_prs','open_issues'].includes(q.operation) && Date.now()-cached.built<10000 || !await this.changedQuery(q,cached.result.revision))) {
           requestCoverage=cached.result.coverage || 'unknown';
@@ -2620,6 +2628,8 @@ export class RepositoryState extends DurableObject<Env> {
           return json(cached.result,200,{ETag:tag(cached.result.revision),...headers});
         }
         let pending=this.inflightQueries.get(key);
+        if(readOnly && !pending && [...this.inflightQueries.keys()].filter(k=>k.startsWith('public|')).length>=2)
+          return json(await this.unavailable(q,'public_read_busy'));
         if (!pending) {
           pending=q.cursor?this.continuation(q,queryKey(q)):this.stableQuery(q,readOnly);
           this.inflightQueries.set(key,pending);
@@ -2628,9 +2638,9 @@ export class RepositoryState extends DurableObject<Env> {
         try { result=await pending; }
         finally { if (this.inflightQueries.get(key)===pending) this.inflightQueries.delete(key); }
         if (!q.cursor && result.status==='ok') {
-          this.completedQueries.delete(key);
-          this.completedQueries.set(key,{result,expires:Date.now()+540000,built:Date.now()});
-          while (this.completedQueries.size>16) this.completedQueries.delete(this.completedQueries.keys().next().value!);
+          completed.delete(key);
+          completed.set(key,{result,expires:Date.now()+540000,built:Date.now()});
+          while (completed.size>(readOnly?2:16)) completed.delete(completed.keys().next().value!);
         }
         requestUnavailable=result.status==='unavailable';
         requestCoverage=result.coverage || 'unknown';
