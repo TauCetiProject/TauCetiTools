@@ -2471,6 +2471,12 @@ export class RepositoryState extends DurableObject<Env> {
     }
   }
   async fetch(req:Request): Promise<Response> {
+    // A separate route fails closed if the edge reaches an older object version
+    // that does not implement read-only public snapshots yet.
+    if(new URL(req.url).pathname==='/public-query') {
+      req=new Request(new URL('/query',req.url),req);
+      req.headers.set('x-query-readonly','1');
+    }
     const path=new URL(req.url).pathname;
     if((path==='/tick' || path==='/migration-supervise') && this.migrationUnavailable) await this.retryMigrationControl();
     if(path==='/migration-supervise') {

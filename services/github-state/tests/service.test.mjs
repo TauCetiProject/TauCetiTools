@@ -28,7 +28,7 @@ test('published public mirror queries need no token and never unlock private or 
   ALLOWED_REPOSITORIES:JSON.stringify([repo,publicRepo]),
   PUBLIC_READ_REPOSITORIES:JSON.stringify([publicRepo.name,'org/not-installed']),
  },{repositoryAlarms:false,repositoryExtension:`async fetch(req){
-  if(new URL(req.url).pathname==='/query'){
+  if(['/query','/public-query'].includes(new URL(req.url).pathname)){
    const q=await req.json();return Response.json({version:1,repository:q.repository,operation:q.operation,status:'ok',complete:true,revision:1,data:[{id:'123',body:'public comment'}]});
   }
   return super.fetch(req);
@@ -153,7 +153,7 @@ test('explicit SQLite ownership fencing works in the Worker SQL runtime',{skip:B
 
 
 test('public rate limits count every batch item and authenticated queries bypass them',async()=>{
- const extension=`async fetch(req){if(new URL(req.url).pathname==='/query')return Response.json({status:'ok',data:[]});return super.fetch(req);}`;
+ const extension=`async fetch(req){if(['/query','/public-query'].includes(new URL(req.url).pathname))return Response.json({status:'ok',data:[]});return super.fetch(req);}`;
  const limited=await runtime(async()=>Response.json([]),{PUBLIC_READ_REPOSITORIES:'["org/repo"]'},{repositoryAlarms:false,repositoryExtension:extension,ratelimits:{PUBLIC_QUERY_LIMIT:{namespace_id:'1002',simple:{limit:1,period:60}}}});
  try {
   const path='https://test/v1/query?repository=org/repo&operation=open_prs',headers={'CF-Connecting-IP':'192.0.2.1'};
@@ -166,4 +166,13 @@ test('public rate limits count every batch item and authenticated queries bypass
  } finally {await limited.dispose();}
  const unbound=await runtime(async()=>Response.json([]),{PUBLIC_READ_REPOSITORIES:'["org/repo"]'},{repositoryAlarms:false,repositoryExtension:extension,ratelimits:{}});
  try {assert.equal((await unbound.dispatchFetch('https://test/v1/query?repository=org/repo&operation=open_prs')).status,503);} finally {await unbound.dispose();}
+});
+
+test('public reads fail closed against an older repository object',async()=>{
+ const old=await runtime(async()=>Response.json([]),{PUBLIC_READ_REPOSITORIES:'["org/repo"]'},{repositoryAlarms:false,repositoryExtension:`async fetch(req){
+  if(new URL(req.url).pathname==='/public-query')return Response.json({error:'not_found'},404);
+  if(new URL(req.url).pathname==='/query')throw Error('anonymous request reached the legacy writable query route');
+  return super.fetch(req);
+ }`});
+ try {const r=await old.dispatchFetch('https://test/v1/query?repository=org/repo&operation=open_prs');assert.equal(r.status,503);assert.equal((await r.json()).error,'storage_unavailable');} finally {await old.dispose();}
 });
