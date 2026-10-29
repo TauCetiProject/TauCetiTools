@@ -22,6 +22,29 @@ test('public health does not expose internal quota or secrets',async()=>{
   const r=await request('/healthz'); assert.equal(r.status,200); assert.deepEqual(await r.json(),{service:'tauceti-github-state',version:1});
   assert.equal((await request('/v1/health?repository=org/repo')).status,401);
 });
+test('published public mirror queries need no token and never unlock private or administrative APIs',async()=>{
+ const publicRepo={id:'11',name:'org/public',installation:'20'};
+ const publicMf=await runtime(async()=>Response.json([]),{
+  ALLOWED_REPOSITORIES:JSON.stringify([repo,publicRepo]),
+  PUBLIC_READ_REPOSITORIES:JSON.stringify([publicRepo.name,'org/not-installed']),
+ },{repositoryAlarms:false,repositoryExtension:`async fetch(req){
+  if(new URL(req.url).pathname==='/query'){
+   const q=await req.json();return Response.json({version:1,repository:q.repository,operation:q.operation,status:'ok',complete:true,revision:1,data:[{id:'123',body:'public comment'}]});
+  }
+  return super.fetch(req);
+ }`});
+ try {
+  const query='/v1/query?repository=org/public&operation=issue_comments&args='+encodeURIComponent(JSON.stringify({number:7}));
+  const r=await publicMf.dispatchFetch('https://test'+query);
+  assert.equal(r.status,200);assert.equal((await r.json()).data[0].body,'public comment');
+  const batch=await publicMf.dispatchFetch('https://test/v1/query_batch',{method:'POST',body:JSON.stringify({queries:[{repository:'org/public',operation:'open_prs'},{repository:'org/repo',operation:'open_prs'}]})});
+  assert.deepEqual((await batch.json()).results.map(r=>r.status),[200,401]);
+  for(const repoName of ['org/repo','org/not-installed']) assert.equal((await publicMf.dispatchFetch('https://test/v1/query?repository='+repoName+'&operation=open_prs')).status,401);
+  for(const path of ['/v1/health?repository=org/public','/v1/changes?repository=org/public']) assert.equal((await publicMf.dispatchFetch('https://test'+path)).status,401);
+  for(const path of ['/admin/bootstrap','/admin/storage','/v1/activity']) assert.equal((await publicMf.dispatchFetch('https://test'+path,{method:'POST',body:JSON.stringify({repository:'org/public',numbers:[7]})})).status,401);
+ } finally {await publicMf.dispose();}
+});
+
 test('webhook rejects bad signatures and conflicting duplicate bodies',async()=>{
   const text=JSON.stringify(body()); const base={'x-github-delivery':'delivery-one','x-github-event':'pull_request'};
   assert.equal((await request('/webhook/github',{method:'POST',headers:base,body:text})).status,401);

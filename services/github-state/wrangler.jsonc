@@ -4,6 +4,7 @@
   "main": "src/index.ts", "compatibility_date": "2026-10-11", "observability": {"enabled": true},
   "routes": [{"pattern": "github-state.taucetiproject.org", "custom_domain": true}],
   "keep_vars": true,
+  "vars": {"PUBLIC_READ_REPOSITORIES":"[\"TauCetiProject/TauCeti\"]"},
   "version_metadata": {"binding":"CF_VERSION"},
   "services": [{"binding":"BORS_ACTIVITY","service":"tauceti-bors"}],
   "durable_objects": {"bindings": [{"name": "REPOSITORIES", "class_name": "RepositoryState"}, {"name": "INSTALLATIONS", "class_name": "InstallationScheduler"}]},

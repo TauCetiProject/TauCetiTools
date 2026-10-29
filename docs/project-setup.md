@@ -826,6 +826,15 @@ alone is insufficient reason to change merge authority.
 
 ## GitHub state
 
+The hosted Tau Ceti mirror publishes read-only queries for `TauCetiProject/TauCeti`
+without a client token, allowing ordinary Tau Ceti workers to use it by default.
+Service operators may explicitly publish other public repositories using the
+`PUBLIC_READ_REPOSITORIES` JSON name list. A name must also exist in
+`ALLOWED_REPOSITORIES`; publishing a name does not enroll a repository or expose
+administrative, health, changes or activity endpoints. Only publish repositories
+whose mirrored data is intended to be public. The default custom deployment
+continues to require scoped client credentials.
+
 `off` uses direct GitHub reads. `hosted` requests enrollment in the operator's shared mirror.
 `custom` deploys the same service in the downstream's Cloudflare account.
 
