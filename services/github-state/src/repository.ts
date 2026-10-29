@@ -50,8 +50,8 @@ function coordinationWindows(history:any,now:number):any {
 export class RepositoryState extends DurableObject<Env> {
   private [ACTIVITY_CLOCK]?:number;
   private inflightQueries=new Map<string,Promise<Result>>();
-  private publicCompletedQueries=new Map<string,{result:Result,expires:number,built:number}>();
-  private completedQueries=new Map<string,{result:Result,expires:number,built:number}>();
+  private publicCompletedQueries=new Map<string,{result:Result,expires:number,built:number,bytes?:number}>();
+  private completedQueries=new Map<string,{result:Result,expires:number,built:number,bytes?:number}>();
   private alarmFlight?:Promise<void>;
   private revisionState:{value?:number}={};
   private readRevision?:number;
@@ -989,7 +989,7 @@ export class RepositoryState extends DurableObject<Env> {
       catch(error) {return (await this.unavailable(q,this.noteFailure('configure',error)));}
     }
     const key=queryKey(q);
-    if (q.cursor) return this.readOnlyQuery?this.unavailable(q,'public_cursor_unsupported'):this.continuation(q,key);
+    if (q.cursor) return this.continuation(q,key);
     if (!q.allow_observed && !['survey','progress'].includes(q.operation))await this.noteReadDemand(q);
     let rows:any;
     let author_counts:Record<string,number> | undefined;
@@ -1016,12 +1016,9 @@ export class RepositoryState extends DurableObject<Env> {
     const result:Result={version:1,repository:q.repository,operation:q.operation,status:rows===null?'unavailable':'ok',revision:(await this.revision()),observed_at:observed || verified,verified_at:verified,complete,coverage:complete?'complete':q.allow_observed?'webhook_observed':undefined};
     if(q.operation==='survey') {result.contract=SURVEY_CONTRACT;result.author_counts=author_counts;}
     if (rows===null) return {...result,reason:'coverage_unavailable'};
-    // Anonymous queries serve existing snapshots only: no demand, repair,
-    // configuration or R2 cursor uploads. Return bounded inline data instead.
-    if(this.readOnlyQuery) {
-      const inline={...result,data:rows};
-      return new TextEncoder().encode(JSON.stringify(inline)).length<=4*1024*1024?inline:await this.unavailable(q,'public_snapshot_too_large');
-    }
+    // Public reads use the same stable pagination as authenticated reads.
+    // Only temporary cursor objects may be written; repository hydration and
+    // demand remain disabled in this read scope.
     if (Array.isArray(rows) && rows.length>100) {
       const id=crypto.randomUUID(),expires=Date.now()+600000,repo=(await this.meta('repository')).id;
       // Continuation pages go directly to private R2, never into SQLite. Each
@@ -2607,7 +2604,6 @@ export class RepositoryState extends DurableObject<Env> {
         const q=parseGitHub(await req.text()) as Query;
         const readOnly=req.headers.get('x-query-readonly')==='1';
         validateQuery(q);
-        if(readOnly && q.cursor)return json(await this.unavailable(q,'public_cursor_unsupported'));
         requestOperation=q.operation;
         if (NOT_MIRRORED.has(q.operation)){requestUnavailable=true;return json(await this.unavailable(q,'not_mirrored'));}
         await this.meta('repository');
@@ -2634,8 +2630,6 @@ export class RepositoryState extends DurableObject<Env> {
           return json(cached.result,200,{ETag:tag(cached.result.revision),...headers});
         }
         let pending=this.inflightQueries.get(key);
-        if(readOnly && !pending && [...this.inflightQueries.keys()].filter(k=>k.startsWith('public|')).length>=2)
-          return json(await this.unavailable(q,'public_read_busy'));
         if (!pending) {
           pending=q.cursor?this.continuation(q,queryKey(q)):this.stableQuery(q,readOnly);
           this.inflightQueries.set(key,pending);
@@ -2645,8 +2639,8 @@ export class RepositoryState extends DurableObject<Env> {
         finally { if (this.inflightQueries.get(key)===pending) this.inflightQueries.delete(key); }
         if (!q.cursor && result.status==='ok') {
           completed.delete(key);
-          completed.set(key,{result,expires:Date.now()+540000,built:Date.now()});
-          while (completed.size>(readOnly?2:16)) completed.delete(completed.keys().next().value!);
+          completed.set(key,{result,expires:Date.now()+540000,built:Date.now(),...(readOnly?{bytes:new TextEncoder().encode(JSON.stringify(result)).length}:{})});
+          while (completed.size>16 || readOnly && [...completed.values()].reduce((n,e)=>n+(e.bytes || 0),0)>12*1024*1024) completed.delete(completed.keys().next().value!);
         }
         requestUnavailable=result.status==='unavailable';
         requestCoverage=result.coverage || 'unknown';

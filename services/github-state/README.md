@@ -8,12 +8,12 @@ explicit JSON list of public repository names, intersected with the installed
 repositories and all administration, health, changes and activity APIs retain
 their existing authentication. Custom deployments should publish only data
 intended for anonymous readers. Anonymous queries serve existing mirrored data;
-they never renew demand, schedule hydration, configure a repository or upload
-cursor objects. Their snapshots are returned inline, bounded at 4 MiB;
-missing coverage and larger snapshots return unavailable. Authenticated clients
-retain paginated snapshots and background demand.
+they never renew demand, schedule hydration or configure a repository. Public
+and authenticated reads share stable, byte-bounded pagination. Temporary
+continuation pages are stored in private R2 and expire after ten minutes.
+Authenticated clients retain background demand.
 
-Public queries require the `PUBLIC_QUERY_LIMIT` binding (120 queries per minute per client IP, including individual batch queries). Public reads use a separate two-entry cache and at most two concurrent snapshot builds per repository. Set `PUBLIC_READ_REPOSITORIES = "[]"` explicitly to revoke public access; `keep_vars` preserves omitted deployment variables.
+Public queries require the `PUBLIC_QUERY_LIMIT` binding (1,200 queries per minute per client IP, including individual batch queries). Identical reads share preparation and public reads use a separate page cache bounded at sixteen entries and 12 MiB of serialized results. Shared-IP fleets have room for normal survey, dispatch and continuation bursts; public reads have no separate concurrency refusal or total-snapshot size cutoff. Set `PUBLIC_READ_REPOSITORIES = "[]"` explicitly to revoke public access; `keep_vars` preserves omitted deployment variables.
 
 
 Reporting clients can use authenticated `POST /v1/activity` with

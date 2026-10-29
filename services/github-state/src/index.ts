@@ -26,8 +26,14 @@ async function query(req:Request,env:Env,q:Query,request_id:string): Promise<Res
   if (!repo) return json({error:'repository_unavailable'},403);
   if(!authenticated) {
     if(!env.PUBLIC_QUERY_LIMIT)return json({error:'public_reads_unavailable'},503);
-    const allowed=await env.PUBLIC_QUERY_LIMIT.limit({key:repo.id+':'+(req.headers.get('CF-Connecting-IP') || 'unknown')});
-    if(!allowed.success)return json({error:'public_rate_limited'},429,{'Retry-After':'60'});
+    try {
+      const allowed=await env.PUBLIC_QUERY_LIMIT.limit({key:repo.id+':'+(req.headers.get('CF-Connecting-IP') || 'unknown')});
+      if(!allowed.success)return json({error:'public_rate_limited'},429,{'Retry-After':'60'});
+    } catch {
+      // A binding outage affects this public query only. Mixed batches retain
+      // their independent authenticated results and workers use normal fallback.
+      return json({error:'public_reads_unavailable'},503);
+    }
   }
   let response:Response;const started=Date.now();
   try {response=await stub(env.REPOSITORIES,repo.id).fetch('https://internal/'+(authenticated?'query':'public-query'),{method:'POST',headers:{'If-None-Match':req.headers.get('If-None-Match') || '','x-request-id':request_id,'x-query-dispatched-at':String(started),'x-query-readonly':authenticated?'0':'1'},body:JSON.stringify({...q,repository:repo.name})});}

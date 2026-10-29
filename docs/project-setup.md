@@ -834,13 +834,14 @@ Service operators may explicitly publish other public repositories using the
 administrative, health, changes or activity endpoints. Only publish repositories
 whose mirrored data is intended to be public. The default custom deployment
 continues to require scoped client credentials. Anonymous queries only read
-existing mirrored snapshots; they cannot request hydration or create cursor
-objects. Responses are inline and bounded at 4 MiB. Missing coverage or a
-larger response reports unavailable so workers can use their normal fallback.
+existing mirrored snapshots; they cannot request hydration or configure repositories. Large responses use
+the existing stable pagination with temporary R2 continuation pages, instead of
+falling back to GitHub because of inventory size. Missing coverage still uses
+the worker's normal fallback.
 An absent GitHub state section defaults to the public mirror for the canonical
 Tau Ceti content repository; an explicit `mode = "off"` still disables it.
 
-Public queries require the `PUBLIC_QUERY_LIMIT` binding (120 queries per minute per client IP, including individual batch queries). Public reads use a separate two-entry cache and at most two concurrent snapshot builds per repository. Set `PUBLIC_READ_REPOSITORIES = "[]"` explicitly to revoke public access; `keep_vars` preserves omitted deployment variables.
+Public queries require the `PUBLIC_QUERY_LIMIT` binding (1,200 queries per minute per client IP, including individual batch queries). Identical reads share preparation and public reads use a separate page cache bounded at sixteen entries and 12 MiB of serialized results. Shared-IP fleets have room for normal survey, dispatch and continuation bursts; public reads have no separate concurrency refusal or total-snapshot size cutoff. Set `PUBLIC_READ_REPOSITORIES = "[]"` explicitly to revoke public access; `keep_vars` preserves omitted deployment variables.
 
 `off` uses direct GitHub reads. `hosted` requests enrollment in the operator's shared mirror.
 `custom` deploys the same service in the downstream's Cloudflare account.

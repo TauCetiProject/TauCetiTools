@@ -176,3 +176,17 @@ test('public reads fail closed against an older repository object',async()=>{
  }`});
  try {const r=await old.dispatchFetch('https://test/v1/query?repository=org/repo&operation=open_prs');assert.equal(r.status,503);assert.equal((await r.json()).error,'storage_unavailable');} finally {await old.dispose();}
 });
+
+test('a failed public limiter does not discard authenticated results in a mixed batch',async()=>{
+ const mf=await runtime(async()=>Response.json([]),{PUBLIC_READ_REPOSITORIES:'["org/public"]',ALLOWED_REPOSITORIES:JSON.stringify([repo,{id:'11',name:'org/public',installation:'20'}]),CLIENT_TOKENS:JSON.stringify([{hash:sha('client'),repositories:['org/repo']}])},
+  {repositoryAlarms:false,repositoryExtension:`async fetch(req){if(new URL(req.url).pathname==='/query')return Response.json({status:'ok',data:[]});return super.fetch(req);}`,
+   workerExtension:`{fetch(req,env,ctx){return worker.fetch(req,{...env,PUBLIC_QUERY_LIMIT:{limit(){throw Error('limiter unavailable');}}},ctx);}}`});
+ try {
+  // The token serves org/repo, while org/public is published but outside its scope.
+  // A valid token still works for its own repository when a public item fails.
+  const one=await mf.dispatchFetch('https://test/v1/query?repository=org/public&operation=open_prs');
+  assert.equal(one.status,503);assert.equal((await one.json()).error,'public_reads_unavailable');
+  const authenticated=await mf.dispatchFetch('https://test/v1/query_batch',{method:'POST',headers:{Authorization:'Bearer client'},body:JSON.stringify({queries:[{repository:'org/repo',operation:'open_prs'},{repository:'org/public',operation:'open_prs'}]})});
+  assert.deepEqual((await authenticated.json()).results.map(r=>r.status),[200,503]);
+ } finally {await mf.dispose();}
+});
