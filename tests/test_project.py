@@ -101,6 +101,14 @@ class ProjectTests(unittest.TestCase):
             self.assertIn("Deploy to GitHub Pages", workflow)
             self.assertFalse((root / ".github/workflows/pages.yml").exists())
 
+    def test_canonical_state_default_preserves_explicit_off_and_custom_urls(self):
+        project = parse(initial_configuration("TauCetiProject/TauCeti", "human").encode())
+        self.assertEqual(project.environment()["TAUCETI_GITHUB_STATE_URL"], "")
+        project.raw["services"].pop("github_state")
+        self.assertEqual(project.environment()["TAUCETI_GITHUB_STATE_URL"], "https://github-state.taucetiproject.org")
+        project.raw["services"]["github_state"] = {"mode": "custom", "url": "https://mirror.example"}
+        self.assertEqual(project.environment()["TAUCETI_GITHUB_STATE_URL"], "https://mirror.example")
+
     def test_project_and_worker_state_are_separate(self):
         a = parse(initial_configuration("one/Project", "human").encode())
         b = parse(initial_configuration("two/Project", "human").encode())

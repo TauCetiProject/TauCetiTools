@@ -60,6 +60,7 @@ export class RepositoryState extends DurableObject<Env> {
   private mutationState={active:0,blocked:false};
   private pendingChanges?:{revision:number,at:number,kind:string,id:string,tombstone:number}[];
   private repositoryMemo?:any;
+  private readOnlyQuery=false;
   private readScope=false;
   private preparedEncodings?:Map<string,string>;
   private optionalWork={active:0};
@@ -319,6 +320,7 @@ export class RepositoryState extends DurableObject<Env> {
     }catch(error){this.revisionState.value=undefined;throw error;}finally{this.mutationState.active--;}
   }
   backgroundDemand(q:Query):void {
+    if(this.readOnlyQuery)return;
     const key=queryKey(q),now=Date.now();
     if(this.optionalWork.active>=2 || (this.demandMemo.get(key) || 0)>now-60000)return;
     this.demandMemo.set(key,now);
@@ -332,10 +334,12 @@ export class RepositoryState extends DurableObject<Env> {
     if(this.ctx.waitUntil)this.ctx.waitUntil(work);
   }
   async noteReadDemand(q:Query,known?:boolean):Promise<void> {
+    if(this.readOnlyQuery)return;
     if(this.store.backend==='postgres' && (known ?? await this.complete(q))){this.backgroundDemand(q);return;}
     await this.optionalAsync('demand',()=>this.noteDemand(q));
   }
   async optionalRead(operation:string,write:()=>Promise<unknown>):Promise<void> {
+    if(this.readOnlyQuery)return;
     if(this.store.backend==='postgres' && this.readScope){this.backgroundWrite(operation,write);return;}
     await this.optionalAsync(operation,write);
   }
@@ -677,6 +681,7 @@ export class RepositoryState extends DurableObject<Env> {
   }
   id(operation:string,row:any): string { return String(row.number || row.id || row.node_id || row.ref || row.context || row.sha || row.headRefOid || 'value'); }
   async enqueue(q:Query,priority=20,due=Date.now(),dirty=false): Promise<void> {
+    if(this.readOnlyQuery)return;
     if (q.operation==='progress' || NOT_MIRRORED.has(q.operation)) return;
     if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.enqueue.call(state,q,priority,due,dirty));
     const key=queryKey(q);
@@ -949,14 +954,14 @@ export class RepositoryState extends DurableObject<Env> {
       after,...keys,...bindings,
     )).toArray().length>0;
   }
-  async stableQuery(q:Query):Promise<Result> {
-    if(q.cursor)return this.query(q);
+  async stableQuery(q:Query,readOnly=false):Promise<Result> {
+    if(q.cursor)return this.query(q,readOnly);
     // Inventories discover candidate work. Repeating a full inventory whenever any
     // webhook advances the repository revision makes a busy repository appear
     // unavailable. Selected-PR reads check the revisions of their own inputs.
-    if(['survey','open_prs','open_issues'].includes(q.operation))return this.query(q);
+    if(['survey','open_prs','open_issues'].includes(q.operation))return this.query(q,readOnly);
     for(let attempt=0;attempt<3;attempt++) {
-      const result=await this.query(q);
+      const result=await this.query(q,readOnly);
       const row=(await this.store.exec<any>("SELECT value FROM meta WHERE key='revision'")).toArray()[0];
       const revision=row?JSON.parse(row.value):0;
       this.revisionState.value=Math.max(this.revisionState.value ?? 0,revision);
@@ -964,20 +969,20 @@ export class RepositoryState extends DurableObject<Env> {
     }
     return this.unavailable(q,'concurrent_input');
   }
-  async query(q:Query): Promise<Result> {
+  async query(q:Query,readOnly=false): Promise<Result> {
     if(!this.readScope) {
-      const scoped=Object.create(this) as RepositoryState;if(this.store.backend==='postgres')scoped.store=new ReadCacheStore(this.store);scoped.readScope=true;scoped.readRevision=await this.revision();
-      return scoped.query(q);
+      const scoped=Object.create(this) as RepositoryState;if(this.store.backend==='postgres')scoped.store=new ReadCacheStore(this.store);scoped.readScope=true;scoped.readOnlyQuery=readOnly;scoped.readRevision=await this.revision();
+      return scoped.query(q,readOnly);
     }
     validateQuery(q);
     if (NOT_MIRRORED.has(q.operation)) return this.unavailable(q,'not_mirrored');
     if (!(await this.meta('repository'))) {
-      if(this.store.backend==='postgres')return this.unavailable(q,'repository_unconfigured');
+      if(this.readOnlyQuery || this.store.backend==='postgres')return this.unavailable(q,'repository_unconfigured');
       try {await this.configure(q.repository);}
       catch(error) {return (await this.unavailable(q,this.noteFailure('configure',error)));}
     }
     const key=queryKey(q);
-    if (q.cursor) return this.continuation(q,key);
+    if (q.cursor) return this.readOnlyQuery?this.unavailable(q,'public_cursor_unsupported'):this.continuation(q,key);
     if (!q.allow_observed && !['survey','progress'].includes(q.operation))await this.noteReadDemand(q);
     let rows:any;
     let author_counts:Record<string,number> | undefined;
@@ -1004,6 +1009,12 @@ export class RepositoryState extends DurableObject<Env> {
     const result:Result={version:1,repository:q.repository,operation:q.operation,status:rows===null?'unavailable':'ok',revision:(await this.revision()),observed_at:observed || verified,verified_at:verified,complete,coverage:complete?'complete':q.allow_observed?'webhook_observed':undefined};
     if(q.operation==='survey') {result.contract=SURVEY_CONTRACT;result.author_counts=author_counts;}
     if (rows===null) return {...result,reason:'coverage_unavailable'};
+    // Anonymous queries serve existing snapshots only: no demand, repair,
+    // configuration or R2 cursor uploads. Return bounded inline data instead.
+    if(this.readOnlyQuery) {
+      const inline={...result,data:rows};
+      return new TextEncoder().encode(JSON.stringify(inline)).length<=16*1024*1024?inline:await this.unavailable(q,'public_snapshot_too_large');
+    }
     if (Array.isArray(rows) && rows.length>100) {
       const id=crypto.randomUUID(),expires=Date.now()+600000,repo=(await this.meta('repository')).id;
       // Continuation pages go directly to private R2, never into SQLite. Each
@@ -2581,11 +2592,13 @@ export class RepositoryState extends DurableObject<Env> {
       }
       if (path==='/query') {
         const q=parseGitHub(await req.text()) as Query;
+        const readOnly=req.headers.get('x-query-readonly')==='1';
         validateQuery(q);
+        if(readOnly && q.cursor)return json(await this.unavailable(q,'public_cursor_unsupported'));
         requestOperation=q.operation;
         if (NOT_MIRRORED.has(q.operation)){requestUnavailable=true;return json(await this.unavailable(q,'not_mirrored'));}
         await this.meta('repository');
-        if(q.cursor)this.backgroundDemand(q);
+        if(q.cursor && !readOnly)this.backgroundDemand(q);
         const changed=await this.frozenSince();
         const planned=this.migrationHeld() || this.migrationState?.phase==='replaying';
         if(changed!==null && !planned){requestUnavailable=true;return json({...await this.unavailable(q,'mirror_frozen'),frozen_since:changed},200,{'X-TauCeti-Storage':'degraded'});}
@@ -2595,20 +2608,20 @@ export class RepositoryState extends DurableObject<Env> {
         const etag=tag(await this.revision()),headers:Record<string,string>=this.degraded?{'X-TauCeti-Storage':'degraded'}:{};
         if(this.migrationUnavailable && this.store.backend==='sqlite') {headers['X-TauCeti-Read-Fallback']='last-known-source';const frozen=this.localMeta('backend_owner')?.frozen_at;if(frozen)headers['X-TauCeti-Source-Frozen-At']=String(frozen);}
         if (!q.cursor && matchesETag(req.headers.get('if-none-match'),etag) && q.operation!=='progress' && (await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length) {
-          this.backgroundDemand(q);
+          if(!readOnly)this.backgroundDemand(q);
           return new Response(null,{status:304,headers:{ETag:etag,...headers}});
         }
-        const key=queryKey(q)+'|observed:'+Boolean(q.allow_observed)+'|'+(q.cursor || '');
+        const key=(readOnly?'public|':'authenticated|')+queryKey(q)+'|observed:'+Boolean(q.allow_observed)+'|'+(q.cursor || '');
         const cached=this.completedQueries.get(key);
         if (!q.cursor && cached && cached.expires>Date.now() &&
           (cached.result.revision===(await this.revision()) || ['survey','open_prs','open_issues'].includes(q.operation) && Date.now()-cached.built<10000 || !await this.changedQuery(q,cached.result.revision))) {
           requestCoverage=cached.result.coverage || 'unknown';
-          this.backgroundDemand(q);
+          if(!readOnly)this.backgroundDemand(q);
           return json(cached.result,200,{ETag:tag(cached.result.revision),...headers});
         }
         let pending=this.inflightQueries.get(key);
         if (!pending) {
-          pending=q.cursor?this.continuation(q,queryKey(q)):this.stableQuery(q);
+          pending=q.cursor?this.continuation(q,queryKey(q)):this.stableQuery(q,readOnly);
           this.inflightQueries.set(key,pending);
         }
         let result:Result;

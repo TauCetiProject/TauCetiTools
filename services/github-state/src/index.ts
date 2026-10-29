@@ -18,13 +18,14 @@ const STORAGE_OPERATIONS=new Set(['ownership','scan','cleanup','probe','fault','
 async function query(req:Request,env:Env,q:Query,request_id:string): Promise<Response> {
   try { validateQuery(q); } catch { return json({error:'invalid_query'},400); }
   const repo=repository(env,q.repository);
-  if (!publicQuery(env,repo)) {
+  const authenticated=Boolean(repo) && await authorize(req,env,repo!.name);
+  if (!authenticated && !publicQuery(env,repo)) {
     if (!await authorize(req,env)) return json({error:'unauthorized'},401);
-    if (!repo || !await authorize(req,env,repo.name)) return json({version:1,repository:q.repository,operation:q.operation,status:'unavailable',revision:0,complete:false,reason:'repository_unavailable'});
+    return json({version:1,repository:q.repository,operation:q.operation,status:'unavailable',revision:0,complete:false,reason:'repository_unavailable'});
   }
   if (!repo) return json({error:'repository_unavailable'},403);
   let response:Response;const started=Date.now();
-  try {response=await stub(env.REPOSITORIES,repo.id).fetch('https://internal/query',{method:'POST',headers:{'If-None-Match':req.headers.get('If-None-Match') || '','x-request-id':request_id,'x-query-dispatched-at':String(started)},body:JSON.stringify({...q,repository:repo.name})});}
+  try {response=await stub(env.REPOSITORIES,repo.id).fetch('https://internal/query',{method:'POST',headers:{'If-None-Match':req.headers.get('If-None-Match') || '','x-request-id':request_id,'x-query-dispatched-at':String(started),'x-query-readonly':authenticated?'0':'1'},body:JSON.stringify({...q,repository:repo.name})});}
   catch(error) {
     const reason=classify(error);
     if (reason==='storage_full') await noteRepositoryFull(env,repo.id,'query',started).catch(()=>{});

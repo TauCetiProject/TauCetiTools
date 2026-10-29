@@ -833,7 +833,12 @@ Service operators may explicitly publish other public repositories using the
 `ALLOWED_REPOSITORIES`; publishing a name does not enroll a repository or expose
 administrative, health, changes or activity endpoints. Only publish repositories
 whose mirrored data is intended to be public. The default custom deployment
-continues to require scoped client credentials.
+continues to require scoped client credentials. Anonymous queries only read
+existing mirrored snapshots; they cannot request hydration or create cursor
+objects. Responses are inline and bounded at 16 MiB. Missing coverage or a
+larger response reports unavailable so workers can use their normal fallback.
+An absent GitHub state section defaults to the public mirror for the canonical
+Tau Ceti content repository; an explicit `mode = "off"` still disables it.
 
 `off` uses direct GitHub reads. `hosted` requests enrollment in the operator's shared mirror.
 `custom` deploys the same service in the downstream's Cloudflare account.

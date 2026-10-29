@@ -7,7 +7,11 @@ explicit JSON list of public repository names, intersected with the installed
 `ALLOWED_REPOSITORIES`; it is empty unless the operator configures it. Private
 repositories and all administration, health, changes and activity APIs retain
 their existing authentication. Custom deployments should publish only data
-intended for anonymous readers.
+intended for anonymous readers. Anonymous queries serve existing mirrored data;
+they never renew demand, schedule hydration, configure a repository or upload
+cursor objects. Their snapshots are returned inline, bounded at 16 MiB;
+missing coverage and larger snapshots return unavailable. Authenticated clients
+retain paginated snapshots and background demand.
 
 
 Reporting clients can use authenticated `POST /v1/activity` with

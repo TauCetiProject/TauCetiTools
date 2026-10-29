@@ -68,8 +68,10 @@ export async function authorize(req: Request, env: Env, repo?: string, admin = f
 // repositories. Never use this helper for health, changes, activity or admin APIs.
 export function publicQuery(env: Env, repo: Repository | undefined): boolean {
   if (!repo) return false;
-  const names: unknown = JSON.parse(env.PUBLIC_READ_REPOSITORIES || '[]');
-  return Array.isArray(names) && names.includes(repo.name);
+  try {
+    const names: unknown = JSON.parse(env.PUBLIC_READ_REPOSITORIES || '[]');
+    return Array.isArray(names) && names.includes(repo.name);
+  } catch { return false; }
 }
 export async function validSignature(body: ArrayBuffer, signature: string | null, secret: string): Promise<boolean> {
   if (!secret || !/^sha256=[a-f0-9]{64}$/.test(signature || '')) return false;
