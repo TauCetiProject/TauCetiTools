@@ -392,12 +392,21 @@ class RoutingEntrypoint(unittest.TestCase):
         self.assertEqual(calls, [("state", "shared")])
 
     def test_partial_shared_capacity_uses_namespace_queue_without_duplicate_scan(self):
-        for lower, pool in [(0, "namespace"), (20, "github"), (None, "github")]:
-            value = self.shared(busy=20, namespace_busy_lower_bound=lower)
-            output, calls = self.pick(dict(state=dict(shared=value)), GITHUB_STATE_TOKEN="state", BUDGET="12")
-            self.assertEqual(output["pool"], pool)
-            self.assertEqual(output["namespace_busy"], "")
-            self.assertEqual(calls, [("state", "shared")])
+        for kind, busy in [("pr", 20), ("staging", 0), ("other", 20)]:
+            for lower, pool in [(0, "namespace"), (20, "github"), (None, "github")]:
+                with self.subTest(kind=kind, lower=lower):
+                    value = self.shared(busy=busy, namespace_busy_lower_bound=lower)
+                    output, calls = self.pick(dict(state=dict(shared=value)), GITHUB_STATE_TOKEN="state", BUDGET="12", FLEET_JOB_KIND=kind)
+                    self.assertEqual(output["pool"], pool)
+                    self.assertEqual(output["namespace_busy"], "")
+                    self.assertEqual(calls, [("state", "shared")])
+
+        for lower in [True, "0", -1, 10001]:
+            with self.subTest(invalid_lower=lower):
+                output, calls = self.pick(dict(state=dict(shared=self.shared(busy=20, namespace_busy_lower_bound=lower))), GITHUB_STATE_TOKEN="state")
+                self.assertEqual(output["pool"], "github")
+                self.assertEqual(output["busy"], "20")
+                self.assertEqual(calls, [("state", "shared")])
 
     def test_invalid_shared_values_keep_native_fallback_without_duplicate_scans(self):
         for changes in [dict(observed_at=0), dict(observed_at=time.time()*1000-160000), dict(organization="Other"), dict(busy=True),

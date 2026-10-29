@@ -177,9 +177,7 @@ def shared_capacity(repository, token):
         raise ObservationError("incomplete or stale shared capacity")
     result = dict(github_busy=value["busy"], namespace_busy=None, queued_fleet=None)
     lower = value.get("namespace_busy_lower_bound")
-    if lower is not None:
-        if type(lower) is not int or not 0 <= lower <= 10000:
-            raise ObservationError("invalid Namespace capacity lower bound")
+    if type(lower) is int and 0 <= lower <= 10000:
         result["namespace_busy_lower_bound"] = lower
     if value.get("routing_version") == 2:
         queued = value.get("queued_fleet")
@@ -315,8 +313,8 @@ def route(*, kind, order, machines, runner_pages, observed, github_budget, names
     """Choose in the configured preference order using one bounded observation.
 
     Limits are approximate: simultaneous pickers can observe the same spare slot.
-    Known-full pools keep their caps. With partial observations, prefer the native
-    Namespace queue over a GitHub pool that is already known to be overloaded.
+    Partial Namespace observations can use its native queue in preference order.
+    Known-full pools keep their caps; unknown pools without an observation are skipped.
     """
     if type(github_budget) is not int or github_budget < 1 or type(namespace_cap) is not int or namespace_cap < 1:
         raise ObservationError("invalid capacity budgets")
@@ -331,23 +329,20 @@ def route(*, kind, order, machines, runner_pages, observed, github_budget, names
     except (ValueError, KeyError, TypeError):
         print("::warning::Fleet configuration or inventory invalid; retaining cloud choices")
         resolved, ranked = {}, []
+    namespace_busy = observed.get("namespace_busy")
+    if namespace_busy is None:
+        namespace_busy = observed.get("namespace_busy_lower_bound")
     for name in order:
         if name in excluded or name in resolved and resolved[name]["machine_id"] in excluded:
             continue
         if name == "github" and observed.get("github_busy") is not None and observed["github_busy"] <= github_budget:
             return dict(pool="github")
-        if name == "namespace" and observed.get("namespace_busy") is not None and observed["namespace_busy"] < namespace_cap:
+        if name == "namespace" and namespace_busy is not None and namespace_busy < namespace_cap:
             return dict(pool="namespace")
         candidates = [r for r in ranked if r["machine"] == name]
         if candidates:
             offset = int(hashlib.sha256(selection_key.encode()).hexdigest(), 16) if selection_key else 0
             return dict(candidates[offset % len(candidates)], pool=name)
-    lower = observed.get("namespace_busy_lower_bound")
-    if (kind in ("pr", "staging") and "namespace" in order and "namespace" not in excluded
-            and observed.get("namespace_busy") is None
-            and lower is not None and lower < namespace_cap
-            and observed.get("github_busy") is not None and observed["github_busy"] > github_budget):
-        return dict(pool="namespace", waiting=True)
     return dict(pool="github", waiting=True)
 
 

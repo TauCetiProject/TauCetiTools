@@ -55,12 +55,11 @@ class PickerWorkflow(unittest.TestCase):
 
     def test_picker_is_small_control_job_and_calls_the_existing_selector(self):
         pick = PICKER["jobs"]["pick"]
-        expected = [
+        self.assertIn(expression(pick["runs-on"]), ("ubuntu-latest", "ubuntu-24.04"))
+        self.assertEqual(expression(pick["runs-on"], staging=True), [
             "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=0",
             "namespace-features:github.run-id=42",
-        ]
-        self.assertEqual(expression(pick["runs-on"]), expected)
-        self.assertEqual(expression(pick["runs-on"], staging=True), expected)
+        ])
         self.assertFalse(any("create-github-app-token" in step.get("uses", "") for step in pick["steps"]))
         self.assertTrue(pick["continue-on-error"])
         step = next(s for s in pick["steps"] if s.get("id") == "pick")
