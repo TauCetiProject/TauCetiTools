@@ -310,7 +310,8 @@ def route(*, kind, order, machines, runner_pages, observed, github_budget, names
     """Choose in the configured preference order using one bounded observation.
 
     Limits are approximate: simultaneous pickers can observe the same spare slot.
-    When all pools are full or unknown, wait for a free GitHub-hosted slot.
+    Known-full pools keep their caps. With partial observations, prefer the native
+    Namespace queue over a GitHub pool that is already known to be overloaded.
     """
     if type(github_budget) is not int or github_budget < 1 or type(namespace_cap) is not int or namespace_cap < 1:
         raise ObservationError("invalid capacity budgets")
@@ -336,6 +337,10 @@ def route(*, kind, order, machines, runner_pages, observed, github_budget, names
         if candidates:
             offset = int(hashlib.sha256(selection_key.encode()).hexdigest(), 16) if selection_key else 0
             return dict(candidates[offset % len(candidates)], pool=name)
+    if ("namespace" in order and "namespace" not in excluded
+            and observed.get("namespace_busy") is None
+            and observed.get("github_busy") is not None and observed["github_busy"] > github_budget):
+        return dict(pool="namespace", waiting=True)
     return dict(pool="github", waiting=True)
 
 
@@ -434,7 +439,9 @@ def route_main():
                       selection_key=environment["GITHUB_RUN_ID"])
     selected = None if candidate.get("waiting") else candidate
     scanned = False
-    if selected is None and needs_cloud_capacity:
+    # A configured shared service owns the bounded organization scan. A partial
+    # result or outage must not fan out into another scan from every queued picker.
+    if selected is None and needs_cloud_capacity and not environment.get("GITHUB_STATE_TOKEN"):
         for credential, reserve in readers:
             try:
                 reader = GitHubRead(credential, reserve)
