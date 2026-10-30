@@ -285,6 +285,10 @@ jobs:
           path: pr
           persist-credentials: false
           fetch-depth: 0
+          # Workers author from forks. actions/checkout refuses fork heads under
+          # pull_request_target unless this is set; the candidate is only read here and run
+          # offline in the sandbox without credentials.
+          allow-unsafe-pr-checkout: true
 
       - name: Scope guard — allow ${{ inputs.lean_root }} sources and validated pins
         env:
