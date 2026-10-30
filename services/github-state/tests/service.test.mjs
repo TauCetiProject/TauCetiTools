@@ -22,6 +22,29 @@ test('public health does not expose internal quota or secrets',async()=>{
   const r=await request('/healthz'); assert.equal(r.status,200); assert.deepEqual(await r.json(),{service:'tauceti-github-state',version:1});
   assert.equal((await request('/v1/health?repository=org/repo')).status,401);
 });
+test('published public mirror queries need no token and never unlock private or administrative APIs',async()=>{
+ const publicRepo={id:'11',name:'org/public',installation:'20'};
+ const publicMf=await runtime(async()=>Response.json([]),{
+  ALLOWED_REPOSITORIES:JSON.stringify([repo,publicRepo]),
+  PUBLIC_READ_REPOSITORIES:JSON.stringify([publicRepo.name,'org/not-installed']),
+ },{repositoryAlarms:false,repositoryExtension:`async fetch(req){
+  if(['/query','/public-query'].includes(new URL(req.url).pathname)){
+   const q=await req.json();return Response.json({version:1,repository:q.repository,operation:q.operation,status:'ok',complete:true,revision:1,data:[{id:'123',body:'public comment'}]});
+  }
+  return super.fetch(req);
+ }`});
+ try {
+  const query='/v1/query?repository=org/public&operation=issue_comments&args='+encodeURIComponent(JSON.stringify({number:7}));
+  const r=await publicMf.dispatchFetch('https://test'+query);
+  assert.equal(r.status,200);assert.equal((await r.json()).data[0].body,'public comment');
+  const batch=await publicMf.dispatchFetch('https://test/v1/query_batch',{method:'POST',body:JSON.stringify({queries:[{repository:'org/public',operation:'open_prs'},{repository:'org/repo',operation:'open_prs'}]})});
+  assert.deepEqual((await batch.json()).results.map(r=>r.status),[200,401]);
+  for(const repoName of ['org/repo','org/not-installed']) assert.equal((await publicMf.dispatchFetch('https://test/v1/query?repository='+repoName+'&operation=open_prs')).status,401);
+  for(const path of ['/v1/health?repository=org/public','/v1/changes?repository=org/public']) assert.equal((await publicMf.dispatchFetch('https://test'+path)).status,401);
+  for(const path of ['/admin/bootstrap','/admin/storage','/v1/activity']) assert.equal((await publicMf.dispatchFetch('https://test'+path,{method:'POST',body:JSON.stringify({repository:'org/public',numbers:[7]})})).status,401);
+ } finally {await publicMf.dispose();}
+});
+
 test('webhook rejects bad signatures and conflicting duplicate bodies',async()=>{
   const text=JSON.stringify(body()); const base={'x-github-delivery':'delivery-one','x-github-event':'pull_request'};
   assert.equal((await request('/webhook/github',{method:'POST',headers:base,body:text})).status,401);
@@ -128,3 +151,42 @@ test('explicit SQLite ownership fencing works in the Worker SQL runtime',{skip:B
  const response=await post('storage/probe',{});assert.equal(response.status,400);assert.equal((await response.json()).error,'backend_fenced');
 });
 
+
+test('public rate limits count every batch item and authenticated queries bypass them',async()=>{
+ const extension=`async fetch(req){if(['/query','/public-query'].includes(new URL(req.url).pathname))return Response.json({status:'ok',data:[]});return super.fetch(req);}`;
+ const limited=await runtime(async()=>Response.json([]),{PUBLIC_READ_REPOSITORIES:'["org/repo"]'},{repositoryAlarms:false,repositoryExtension:extension,ratelimits:{PUBLIC_QUERY_LIMIT:{namespace_id:'1002',simple:{limit:1,period:60}}}});
+ try {
+  const path='https://test/v1/query?repository=org/repo&operation=open_prs',headers={'CF-Connecting-IP':'192.0.2.1'};
+  assert.equal((await limited.dispatchFetch(path,{headers})).status,200);
+  const batch=await limited.dispatchFetch('https://test/v1/query_batch',{method:'POST',headers,body:JSON.stringify({queries:Array(2).fill({repository:'org/repo',operation:'open_prs'})})});
+  assert.deepEqual((await batch.json()).results.map(r=>r.status),[429,429]);
+  const rejected=await limited.dispatchFetch(path,{headers});assert.equal(rejected.status,429);assert.equal(rejected.headers.get('Retry-After'),'60');
+  assert.equal((await limited.dispatchFetch(path,{headers:{...headers,Authorization:'Bearer client'}})).status,200);
+  assert.equal((await limited.dispatchFetch(path,{headers:{'CF-Connecting-IP':'192.0.2.2'}})).status,200);
+ } finally {await limited.dispose();}
+ const unbound=await runtime(async()=>Response.json([]),{PUBLIC_READ_REPOSITORIES:'["org/repo"]'},{repositoryAlarms:false,repositoryExtension:extension,ratelimits:{}});
+ try {assert.equal((await unbound.dispatchFetch('https://test/v1/query?repository=org/repo&operation=open_prs')).status,503);} finally {await unbound.dispose();}
+});
+
+test('public reads fail closed against an older repository object',async()=>{
+ const old=await runtime(async()=>Response.json([]),{PUBLIC_READ_REPOSITORIES:'["org/repo"]'},{repositoryAlarms:false,repositoryExtension:`async fetch(req){
+  if(new URL(req.url).pathname==='/public-query')return Response.json({error:'not_found'},404);
+  if(new URL(req.url).pathname==='/query')throw Error('anonymous request reached the legacy writable query route');
+  return super.fetch(req);
+ }`});
+ try {const r=await old.dispatchFetch('https://test/v1/query?repository=org/repo&operation=open_prs');assert.equal(r.status,503);assert.equal((await r.json()).error,'storage_unavailable');} finally {await old.dispose();}
+});
+
+test('a failed public limiter does not discard authenticated results in a mixed batch',async()=>{
+ const mf=await runtime(async()=>Response.json([]),{PUBLIC_READ_REPOSITORIES:'["org/public"]',ALLOWED_REPOSITORIES:JSON.stringify([repo,{id:'11',name:'org/public',installation:'20'}]),CLIENT_TOKENS:JSON.stringify([{hash:sha('client'),repositories:['org/repo']}])},
+  {repositoryAlarms:false,repositoryExtension:`async fetch(req){if(new URL(req.url).pathname==='/query')return Response.json({status:'ok',data:[]});return super.fetch(req);}`,
+   workerExtension:`{fetch(req,env,ctx){return worker.fetch(req,{...env,PUBLIC_QUERY_LIMIT:{limit(){throw Error('limiter unavailable');}}},ctx);}}`});
+ try {
+  // The token serves org/repo, while org/public is published but outside its scope.
+  // A valid token still works for its own repository when a public item fails.
+  const one=await mf.dispatchFetch('https://test/v1/query?repository=org/public&operation=open_prs');
+  assert.equal(one.status,503);assert.equal((await one.json()).error,'public_reads_unavailable');
+  const authenticated=await mf.dispatchFetch('https://test/v1/query_batch',{method:'POST',headers:{Authorization:'Bearer client'},body:JSON.stringify({queries:[{repository:'org/repo',operation:'open_prs'},{repository:'org/public',operation:'open_prs'}]})});
+  assert.deepEqual((await authenticated.json()).results.map(r=>r.status),[200,503]);
+ } finally {await mf.dispose();}
+});

@@ -5,6 +5,8 @@ export interface Env {
   ALLOWED_REPOSITORIES: string; GITHUB_APP_ID: string; GITHUB_INSTALLATION_ID: string;
   GITHUB_PRIVATE_KEY: string; WEBHOOK_SECRET: string;
   CLIENT_TOKENS: string; ADMIN_TOKEN_HASH: string;
+  PUBLIC_READ_REPOSITORIES?: string;
+  PUBLIC_QUERY_LIMIT?: RateLimit;
   RECONCILIATION_SETTINGS?: string; RECONCILIATION_TRACE?:string; REFERENCE_READS?: string; FAULT_INJECTION?: string;
   REPOSITORY_BACKEND?: 'sqlite' | 'postgres';
   REPOSITORY_DATABASE_URL?:string; REPOSITORY_GENERATION?:string;
@@ -62,6 +64,15 @@ export async function authorize(req: Request, env: Env, repo?: string, admin = f
   if (admin) return Boolean(env.ADMIN_TOKEN_HASH) && constantEqual(hash, env.ADMIN_TOKEN_HASH);
   const clients = JSON.parse(env.CLIENT_TOKENS || '[]') as { hash: string; repositories: string[] }[];
   return clients.some(c => constantEqual(hash, c.hash) && (!repo || c.repositories.includes(repo)));
+}
+// Public access is only for the query facade and only for operator-published
+// repositories. Never use this helper for health, changes, activity or admin APIs.
+export function publicQuery(env: Env, repo: Repository | undefined): boolean {
+  if (!repo) return false;
+  try {
+    const names: unknown = JSON.parse(env.PUBLIC_READ_REPOSITORIES || '[]');
+    return Array.isArray(names) && names.includes(repo.name);
+  } catch { return false; }
 }
 export async function validSignature(body: ArrayBuffer, signature: string | null, secret: string): Promise<boolean> {
   if (!secret || !/^sha256=[a-f0-9]{64}$/.test(signature || '')) return false;

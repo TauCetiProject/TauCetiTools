@@ -120,7 +120,8 @@ class Project:
         review = self.tool("review")
         progress = self.tool("progress")
         cache = self.service("cache")
-        state = self.service("github_state")
+        state = self.raw.get("services", {}).get("github_state", {})
+        state_default = "https://github-state.taucetiproject.org" if self.content == "TauCetiProject/TauCeti" else ""
         return {
             **{
                 f"TAUCETI_{role.upper()}_NAME": value.split("/")[1]
@@ -159,7 +160,7 @@ class Project:
             "TAUCETI_ZULIP_SITE": self.raw.get("publication", {}).get("zulip_site", ""),
             "TAUCETI_ZULIP_CHANNEL": self.raw.get("publication", {}).get("zulip_channel", ""),
             "TAUCETI_ZULIP_TOPIC": self.raw.get("publication", {}).get("zulip_topic", ""),
-            "TAUCETI_GITHUB_STATE_URL": state.get("url", "") if state.get("mode") != "off" else "",
+            "TAUCETI_GITHUB_STATE_URL": state.get("url", state_default) if state.get("mode") != "off" else "",
             "TAUCETI_CACHE_DOMAIN": cache.get("domain", "") if cache.get("mode") != "off" else "",
             "TAUCETI_CACHE_SERVICE": cache.get("name", self.key) if cache.get("mode") != "off" else "",
             "TAUCETI_CACHE_ARTIFACT_URL": cache.get("artifact_url", "") if cache.get("mode") != "off" else "",

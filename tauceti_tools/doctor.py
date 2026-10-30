@@ -912,6 +912,13 @@ def extra_findings(project, gh, again):
     owner = project.content.split("/")[0]
     for name in ("github_state", "bors", "cache"):
         service = project.service(name)
+        if name == "github_state" and project.environment()["TAUCETI_GITHUB_STATE_URL"] == "https://github-state.taucetiproject.org" and project.content == "TauCetiProject/TauCeti":
+            results.append(Finding(
+                "services.github_state", "ready", "Public Tau Ceti mirror selected; no client token required",
+                "Ordinary workers use the public mirror automatically. Private health and administration remain operator-only.",
+                urls=["https://github-state.taucetiproject.org"], verify=again, section="github-state",
+            ))
+            continue
         mode = service.get("mode", "off")
         results.append(
             Finding(

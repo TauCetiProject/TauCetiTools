@@ -1,5 +1,21 @@
 # Shared GitHub state
 
+The production Tau Ceti mirror publishes `/v1/query` and `/v1/query_batch` reads
+for `TauCetiProject/TauCeti` without a client token. Ordinary Tau Ceti workers
+therefore need no state-service configuration. `PUBLIC_READ_REPOSITORIES` is an
+explicit JSON list of public repository names, intersected with the installed
+`ALLOWED_REPOSITORIES`; it is empty unless the operator configures it. Private
+repositories and all administration, health, changes and activity APIs retain
+their existing authentication. Custom deployments should publish only data
+intended for anonymous readers. Anonymous queries serve existing mirrored data;
+they never renew demand, schedule hydration or configure a repository. Public
+and authenticated reads share stable, byte-bounded pagination. Temporary
+continuation pages are stored in private R2 and expire after ten minutes.
+Authenticated clients retain background demand.
+
+Public queries require the `PUBLIC_QUERY_LIMIT` binding (1,200 queries per minute per client IP, including individual batch queries). Identical reads share preparation and public reads use a separate page cache bounded at sixteen entries and 12 MiB of serialized results. Shared-IP fleets have room for normal survey, dispatch and continuation bursts; public reads have no separate concurrency refusal or total-snapshot size cutoff. Set `PUBLIC_READ_REPOSITORIES = "[]"` explicitly to revoke public access; `keep_vars` preserves omitted deployment variables.
+
+
 Reporting clients can use authenticated `POST /v1/activity` with
 `{"repository":"TauCetiProject/TauCeti","numbers":[1,2]}` (maximum 500 numbers).
 It returns stored PR headers, original observation timestamps and missing IDs.

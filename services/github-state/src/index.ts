@@ -1,4 +1,4 @@
-import { Env, EventPointer, matchesETag, Query, Repository, authorize, digest, json, repositories, repository, stub, validSignature, validateQuery, parseGitHub, CI_EVENTS } from './protocol';
+import { Env, EventPointer, matchesETag, Query, Repository, authorize, digest, json, repositories, repository, stub, validSignature, validateQuery, parseGitHub, CI_EVENTS, publicQuery } from './protocol';
 import { blocksRepairs, holdsRetention, readMigration } from './migration';
 import { classify, log, requestId } from './storage';
 import { PARK_AFTER_ATTEMPTS, backlog, backoff, replayIngress, maintainIngress, maintainRaw, release, ingressMode, noteRepositoryFull, park, reconcile, setIngressMode, storageState } from './ingress';
@@ -18,10 +18,25 @@ const STORAGE_OPERATIONS=new Set(['ownership','scan','cleanup','probe','fault','
 async function query(req:Request,env:Env,q:Query,request_id:string): Promise<Response> {
   try { validateQuery(q); } catch { return json({error:'invalid_query'},400); }
   const repo=repository(env,q.repository);
-  if (!await authorize(req,env)) return json({error:'unauthorized'},401);
-  if (!repo || !await authorize(req,env,repo.name)) return json({version:1,repository:q.repository,operation:q.operation,status:'unavailable',revision:0,complete:false,reason:'repository_unavailable'});
+  const authenticated=Boolean(repo) && await authorize(req,env,repo!.name);
+  if (!authenticated && !publicQuery(env,repo)) {
+    if (!await authorize(req,env)) return json({error:'unauthorized'},401);
+    return json({version:1,repository:q.repository,operation:q.operation,status:'unavailable',revision:0,complete:false,reason:'repository_unavailable'});
+  }
+  if (!repo) return json({error:'repository_unavailable'},403);
+  if(!authenticated) {
+    if(!env.PUBLIC_QUERY_LIMIT)return json({error:'public_reads_unavailable'},503);
+    try {
+      const allowed=await env.PUBLIC_QUERY_LIMIT.limit({key:repo.id+':'+(req.headers.get('CF-Connecting-IP') || 'unknown')});
+      if(!allowed.success)return json({error:'public_rate_limited'},429,{'Retry-After':'60'});
+    } catch {
+      // A binding outage affects this public query only. Mixed batches retain
+      // their independent authenticated results and workers use normal fallback.
+      return json({error:'public_reads_unavailable'},503);
+    }
+  }
   let response:Response;const started=Date.now();
-  try {response=await stub(env.REPOSITORIES,repo.id).fetch('https://internal/query',{method:'POST',headers:{'If-None-Match':req.headers.get('If-None-Match') || '','x-request-id':request_id,'x-query-dispatched-at':String(started)},body:JSON.stringify({...q,repository:repo.name})});}
+  try {response=await stub(env.REPOSITORIES,repo.id).fetch('https://internal/'+(authenticated?'query':'public-query'),{method:'POST',headers:{'If-None-Match':req.headers.get('If-None-Match') || '','x-request-id':request_id,'x-query-dispatched-at':String(started),'x-query-readonly':authenticated?'0':'1'},body:JSON.stringify({...q,repository:repo.name})});}
   catch(error) {
     const reason=classify(error);
     if (reason==='storage_full') await noteRepositoryFull(env,repo.id,'query',started).catch(()=>{});
