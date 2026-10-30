@@ -167,6 +167,47 @@ pg('stored survey hydration batches large histories without GitHub calls',async(
   assert.equal((await f.store.exec('SELECT COUNT(*) n FROM survey_fragments')).one().n,1100);
  }finally{await f.close();}
 });
+pg('global surveys batch dirty projections without per-PR SQL and retain exact membership',async()=>{
+ const f=await postgresFixture();try {
+  const count=300,contract=JSON.parse(await (await import('node:fs/promises')).readFile(new URL('../../../tauceti_tools/survey_contract.json',import.meta.url),'utf8')).id;
+  const resources=[],collections=[{key:'open_prs:{}',operation:'open_prs',args:'{}'}],fragments=[],members=[];
+  for(let number=1;number<=count;number++) {
+   const n=String(number),sha=number.toString(16).padStart(40,'0');
+   resources.push({kind:'pr',id:n,parent:null,data:JSON.stringify({number,headRefOid:sha,state:'OPEN',isDraft:false,labels:[],author:{login:'fixture'}})});
+   resources.push({kind:'statuses',id:'statuses:'+JSON.stringify({sha}),parent:null,data:JSON.stringify([{context:'build',state:'SUCCESS'}])});
+   members.push({collection:'open_prs:{}',id:n});
+   collections.push({key:'statuses:'+JSON.stringify({sha}),operation:'statuses',args:JSON.stringify({sha})});
+   for(const kind of ['issue_comments','review_comments'])collections.push({key:kind+':'+JSON.stringify({number}),operation:kind,args:JSON.stringify({number})});
+   const issue=String(9007199254741000n+BigInt(number)*10n),root=String(9007199254741001n+BigInt(number)*10n),reply=String(9007199254741002n+BigInt(number)*10n);
+   fragments.push({kind:'issue_comments',id:issue,parent:n,data:JSON.stringify({id:issue,updated:'2026-10-30',meta:{head_sha:sha,states:{reuse:'green'}},rebase_heads:[]})});
+   fragments.push({kind:'review_comments',id:root,parent:n,data:JSON.stringify({id:root,parent:null,root:'reuse',reply:false})});
+   fragments.push({kind:'review_comments',id:reply,parent:n,data:JSON.stringify({id:reply,parent:root,root:null,reply:true,created_at:'2026-10-30'})});
+   for(const [kind,id] of [['issue_comments',issue],['review_comments',root],['review_comments',reply]])members.push({collection:kind+':'+JSON.stringify({number}),id});
+  }
+  // Removed fragments and membership belonging to a different parent must never leak.
+  fragments.push({kind:'issue_comments',id:'1',parent:'1',data:JSON.stringify({id:'1',updated:'9999',meta:{head_sha:'orphan'},rebase_heads:[]})});
+  fragments.push({kind:'issue_comments',id:'2',parent:'1',data:JSON.stringify({id:'2',updated:'9999',meta:{head_sha:'wrong-parent'},rebase_heads:[]})});
+  members.push({collection:'issue_comments:{"number":2}',id:'2'});
+  await f.admin.query(`INSERT INTO ${f.schema}.resources(kind,id,parent,data,updated,observed,revision,tombstone) SELECT kind,id,parent,data,'',0,0,0 FROM jsonb_to_recordset($1::jsonb) AS r(kind text,id text,parent text,data text)`,[JSON.stringify(resources)]);
+  await f.admin.query(`INSERT INTO ${f.schema}.collections(key,operation,args,complete,verified,revision) SELECT key,operation,args,1,0,0 FROM jsonb_to_recordset($1::jsonb) AS r(key text,operation text,args text)`,[JSON.stringify(collections)]);
+  await f.admin.query(`INSERT INTO ${f.schema}.members(collection,id) SELECT collection,id FROM jsonb_to_recordset($1::jsonb) AS r(collection text,id text)`,[JSON.stringify(members)]);
+  await f.admin.query(`INSERT INTO ${f.schema}.survey_fragments(kind,id,parent,data) SELECT kind,id,parent,data FROM jsonb_to_recordset($1::jsonb) AS r(kind text,id text,parent text,data text)`,[JSON.stringify(fragments)]);
+  await f.admin.query(`INSERT INTO ${f.schema}.survey_hydrated(number,contract) SELECT id,$1 FROM ${f.schema}.resources WHERE kind='pr'`,[contract+':completed-scoreboards']);
+  await f.admin.query(`INSERT INTO ${f.schema}.survey_state(number,data,revision) SELECT id,'{"meta":null,"contest":null,"rebase_heads":[]}',0 FROM ${f.schema}.resources WHERE kind='pr'`);
+  await f.admin.query(`INSERT INTO ${f.schema}.survey_dirty(number) SELECT id FROM ${f.schema}.resources WHERE kind='pr'`);
+  const reference=JSON.parse(await f.state.projectedSurvey('1'));
+  let reads=0,pointReads=0,writes=0;
+  f.state.store=intercept(f.store,sql=>{reads++;if(!/^SELECT\b/.test(sql))writes++;if(/f\.parent=\?/.test(sql))pointReads++;});
+  f.env.INSTALLATIONS=new Proxy({},{get(){throw Error('Discovery attempted GitHub access');}});
+  const result=await f.state.query({repository:repo.name,operation:'survey',args:{roadmap:'auto',stages:'rebase,review'}},true);
+  assert.equal(result.status,'ok');assert.equal(result.complete,true);assert.equal(result.data.length,count);
+  assert.equal(pointReads,0,'dirty projections must not perform one remote scan per history per PR');
+  assert.ok(reads<40,'SQL work must scale with parent batches, not dirty PRs: '+reads);assert.equal(writes,0);
+  console.info(JSON.stringify({fixture:'global-dirty-survey',prs:count,sql_statements:reads,per_pr_fragment_reads:pointReads,writes}));
+  for(const item of result.data){assert.equal(item.review.meta.head_sha,item.pr.headRefOid);assert.equal(item.review.contest.rubric,'reuse');assert.equal(item.review.issue_complete,true);assert.equal(item.review.review_complete,true);}
+  assert.deepEqual({...result.data[0].review,markers:undefined,issue_complete:undefined,review_complete:undefined},{...reference,markers:undefined,issue_complete:undefined,review_complete:undefined});
+ }finally{await f.close();}
+});
 pg('long file paths retain exact identity, update and membership uniqueness beyond B-tree tuple limits',async()=>{
  const f=await postgresFixture();try{
   const {randomBytes}=await import('node:crypto');
