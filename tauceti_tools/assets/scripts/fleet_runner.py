@@ -176,6 +176,9 @@ def shared_capacity(repository, token):
             or not numeric(value.get("retry_at")) or value["retry_at"] <= now):
         raise ObservationError("incomplete or stale shared capacity")
     result = dict(github_busy=value["busy"], namespace_busy=None, queued_fleet=None)
+    lower = value.get("namespace_busy_lower_bound")
+    if type(lower) is int and 0 <= lower <= 10000:
+        result["namespace_busy_lower_bound"] = lower
     if value.get("routing_version") == 2:
         queued = value.get("queued_fleet")
         if (type(value.get("namespace_busy")) is not int or not 0 <= value["namespace_busy"] <= 10000
@@ -310,7 +313,8 @@ def route(*, kind, order, machines, runner_pages, observed, github_budget, names
     """Choose in the configured preference order using one bounded observation.
 
     Limits are approximate: simultaneous pickers can observe the same spare slot.
-    When all pools are full or unknown, wait for a free GitHub-hosted slot.
+    Partial Namespace observations can use its native queue in preference order.
+    Known-full pools keep their caps; unknown pools without an observation are skipped.
     """
     if type(github_budget) is not int or github_budget < 1 or type(namespace_cap) is not int or namespace_cap < 1:
         raise ObservationError("invalid capacity budgets")
@@ -325,12 +329,15 @@ def route(*, kind, order, machines, runner_pages, observed, github_budget, names
     except (ValueError, KeyError, TypeError):
         print("::warning::Fleet configuration or inventory invalid; retaining cloud choices")
         resolved, ranked = {}, []
+    namespace_busy = observed.get("namespace_busy")
+    if namespace_busy is None:
+        namespace_busy = observed.get("namespace_busy_lower_bound")
     for name in order:
         if name in excluded or name in resolved and resolved[name]["machine_id"] in excluded:
             continue
         if name == "github" and observed.get("github_busy") is not None and observed["github_busy"] <= github_budget:
             return dict(pool="github")
-        if name == "namespace" and observed.get("namespace_busy") is not None and observed["namespace_busy"] < namespace_cap:
+        if name == "namespace" and namespace_busy is not None and namespace_busy < namespace_cap:
             return dict(pool="namespace")
         candidates = [r for r in ranked if r["machine"] == name]
         if candidates:
@@ -392,7 +399,7 @@ def route_main():
     try:
         observed = shared_capacity(repository, environment.get("GITHUB_STATE_TOKEN", "")) or observed
     except (OSError, ValueError, KeyError, TypeError):
-        print("::notice::Shared capacity unavailable; retaining bounded direct discovery")
+        print("::warning::Shared capacity unavailable; retaining native runner fallback")
     order = config.get("staging_order" if kind == "staging" else "pr_order", ["github", "namespace"])
     excluded = set()
     attempt = int(environment["GITHUB_RUN_ATTEMPT"])
@@ -434,7 +441,9 @@ def route_main():
                       selection_key=environment["GITHUB_RUN_ID"])
     selected = None if candidate.get("waiting") else candidate
     scanned = False
-    if selected is None and needs_cloud_capacity:
+    # A configured shared service owns the bounded organization scan. A partial
+    # result or outage must not fan out into another scan from every queued picker.
+    if selected is None and needs_cloud_capacity and not environment.get("GITHUB_STATE_TOKEN"):
         for credential, reserve in readers:
             try:
                 reader = GitHubRead(credential, reserve)

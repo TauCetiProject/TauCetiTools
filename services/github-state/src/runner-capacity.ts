@@ -2,7 +2,7 @@
 export async function scanHostedCapacity(
   organization:string,
   read:(path:string)=>Promise<{status:number;body:any;link?:string;deferred?:boolean}>,
-):Promise<{routing_version:number;busy:number;namespace_busy?:number;queued_fleet?:string[][];placement_unavailable?:string;requests:number;repositories:number;runs:number;observed_at:number}> {
+):Promise<{routing_version:number;busy:number;namespace_busy?:number;namespace_busy_lower_bound?:number;queued_fleet?:string[][];placement_unavailable?:string;requests:number;repositories:number;runs:number;observed_at:number}> {
   let requests=0;const deadline=Date.now()+15000;
   async function pages(path:string,key?:string):Promise<any[]> {
     const rows:any[]=[];
@@ -66,7 +66,7 @@ export async function scanHostedCapacity(
   // discard that useful answer or force every caller to repeat the scan.
   await discover('in_progress');
   await jobs(activeRuns);
-  const running=busy,runningRuns=activeRuns.length;
+  const running=busy,namespaceLowerBound=namespace_busy,runningRuns=activeRuns.length;
   try {
     await discover('queued');
     const queued=activeRuns.slice(runningRuns);
@@ -75,7 +75,7 @@ export async function scanHostedCapacity(
     if(queued.length>80-requests)throw new Error('capacity_scan_limit');
     await jobs(queued);
   } catch(error) {
-    return {routing_version:1,busy:running,requests,repositories:all.length,runs:runningRuns,observed_at:Date.now(),placement_unavailable:error instanceof Error && error.message.startsWith('capacity_')?error.message:'capacity_inventory_unavailable'};
+    return {routing_version:1,busy:running,namespace_busy_lower_bound:namespaceLowerBound,requests,repositories:all.length,runs:runningRuns,observed_at:Date.now(),placement_unavailable:error instanceof Error && error.message.startsWith('capacity_')?error.message:'capacity_inventory_unavailable'};
   }
   return {routing_version:2,busy,namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:Date.now()};
 }

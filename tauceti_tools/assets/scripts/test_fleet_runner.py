@@ -271,7 +271,7 @@ class RoutingEntrypoint(unittest.TestCase):
         self.assertEqual(output["pool"], "chris")
         self.assertEqual([token for token, _ in calls], ["state", "fleet"])
 
-    def test_unknown_earlier_cloud_is_observed_before_later_available_machine(self):
+    def test_unknown_cloud_does_not_delay_an_available_machine_with_another_scan(self):
         config, inventory = self.staging_fixture()
         config = config.replace('[services.fleet]\n', '[services.fleet]\npr_order=["namespace","chris","github"]\n')
         output, calls = self.pick(dict(
@@ -279,8 +279,8 @@ class RoutingEntrypoint(unittest.TestCase):
             fleet={"orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1": inventory},
         ), config=config, FLEET_CI_ENABLED="true", FLEET_READ_TOKEN="fleet", FLEET_RUNNER_GROUP_ID="3",
            GITHUB_STATE_TOKEN="state")
-        self.assertEqual(output["pool"], "namespace")
-        self.assertIn(("app", "orgs/Test/repos?per_page=100&page=1"), calls)
+        self.assertEqual(output["pool"], "chris")
+        self.assertFalse(any(token == "app" for token, _ in calls))
 
     def test_available_first_cloud_does_not_fetch_unneeded_fleet_inventory(self):
         config, inventory = self.staging_fixture()
@@ -391,13 +391,30 @@ class RoutingEntrypoint(unittest.TestCase):
         self.assertEqual(output["namespace_busy"], "20")
         self.assertEqual(calls, [("state", "shared")])
 
-    def test_stale_wrong_org_invalid_and_oversized_shared_values_use_direct_fallback(self):
+    def test_partial_shared_capacity_uses_namespace_queue_without_duplicate_scan(self):
+        for kind, busy in [("pr", 20), ("staging", 0), ("other", 20)]:
+            for lower, pool in [(0, "namespace"), (20, "github"), (None, "github")]:
+                with self.subTest(kind=kind, lower=lower):
+                    value = self.shared(busy=busy, namespace_busy_lower_bound=lower)
+                    output, calls = self.pick(dict(state=dict(shared=value)), GITHUB_STATE_TOKEN="state", BUDGET="12", FLEET_JOB_KIND=kind)
+                    self.assertEqual(output["pool"], pool)
+                    self.assertEqual(output["namespace_busy"], "")
+                    self.assertEqual(calls, [("state", "shared")])
+
+        for lower in [True, "0", -1, 10001]:
+            with self.subTest(invalid_lower=lower):
+                output, calls = self.pick(dict(state=dict(shared=self.shared(busy=20, namespace_busy_lower_bound=lower))), GITHUB_STATE_TOKEN="state")
+                self.assertEqual(output["pool"], "github")
+                self.assertEqual(output["busy"], "20")
+                self.assertEqual(calls, [("state", "shared")])
+
+    def test_invalid_shared_values_keep_native_fallback_without_duplicate_scans(self):
         for changes in [dict(observed_at=0), dict(observed_at=time.time()*1000-160000), dict(organization="Other"), dict(busy=True),
                         dict(observed_at=float("nan")), dict(retry_at=0), dict(routing_version=2, namespace_busy=-1, queued_fleet=[])]:
             with self.subTest(changes=changes):
                 output, calls = self.pick(dict(state=dict(shared=self.shared(**changes)), app=self.fixture()), GITHUB_STATE_TOKEN="state")
                 self.assertEqual(output["pool"], "github")
-                self.assertIn(("app", "rate_limit"), calls)
+                self.assertEqual(calls, [("state", "shared")])
 
     def test_real_api_link_pagination_accepts_live_actions_count_drift(self):
         fixtures = self.fixture()
