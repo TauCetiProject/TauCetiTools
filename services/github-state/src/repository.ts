@@ -29,7 +29,7 @@ const FULL_DATABASE=10*1024**3-16*1024**2;
 const FROZEN_AFTER=10*60000;
 const CURSOR_UPLOADS=4;
 // Change when the survey wire representation changes without a data revision.
-const SURVEY_ETAG_PREFIX='survey-v1-empty-markers:';
+const SURVEY_ETAG_PREFIX='survey-v1-observed-statuses:';
 // Private to local read scopes; request bodies and RPC arguments cannot set it.
 const ACTIVITY_CLOCK=Symbol('activity clock');
 const decimalArgument=(value:string):number|string=>Number.isSafeInteger(Number(value))?Number(value):value;
@@ -679,7 +679,9 @@ export class RepositoryState extends DurableObject<Env> {
       // Existing v1 clients require this array. The survey projection ignores
       // coordination comments, including claims in older cached projections.
       const review={...(hydrated && projected?JSON.parse(projected):summarizeFragments([],[])),markers:[],issue_complete:false,review_complete:false};
-      const statuses=await this.rows({repository:q.repository,operation:'statuses',args:{sha:row.headRefOid}});
+      const statusQuery={repository:q.repository,operation:'statuses',args:{sha:row.headRefOid}};
+      const statuses=await this.statusRows(statusQuery,true);
+      const statusComplete=(await this.complete(statusQuery)) && (await this.store.exec('SELECT data FROM resources WHERE kind=? AND id=? AND tombstone=0','statuses',queryKey(statusQuery))).toArray().length>0;
       const green=Array.isArray(statuses) && statuses.some(c=>c.context==='build' && c.state==='SUCCESS') && !statuses.some(c=>c.context==='build' && c.state!=='SUCCESS');
       for(const [operation,field] of [['issue_comments','issue_complete'],['review_comments','review_complete']]) {
         const child={repository:q.repository,operation,args:{number:row.number}};
@@ -689,7 +691,7 @@ export class RepositoryState extends DurableObject<Env> {
         const needs=operation==='issue_comments'?(green && (stages.has('review') || stages.has('fix'))) || stages.has('rebase') && (row.labels || []).some((l:any)=>l.name==='needs-rebase'):green && (stages.has('review') || stages.has('fix'));
         if(!row.isDraft && needs && !(await this.complete(child))) {await this.noteReadDemand(child);await this.optionalAsync('enqueue',async ()=>(await this.enqueue(child,5)));}
       }
-      out.push({contract:SURVEY_CONTRACT,pr:{...compactPR(row),statusCheckRollup:Array.isArray(statuses)?statuses:[]},review});
+      out.push({contract:SURVEY_CONTRACT,pr:{...compactPR(row),statusCheckRollup:Array.isArray(statuses)?statuses:[],statusCheckRollupCoverage:statusComplete?'complete':statuses?.length?'webhook_observed':'unavailable'},review});
     }
     return {rows:out,author_counts};
   }
@@ -712,16 +714,16 @@ export class RepositoryState extends DurableObject<Env> {
     const scheduled=(await this.store.exec<any>('SELECT due FROM jobs WHERE key=?',key)).one().due;
     if (!alarm || alarm>scheduled) await this.setAlarm(Math.max(Date.now()+100,scheduled));
   }
-  async enqueueMany(input:{q:Query,priority:number,dirty?:boolean}[]):Promise<void> {
+  async enqueueMany(input:{q:Query,priority:number,dirty?:boolean}[],backfill=false):Promise<void> {
     input=input.filter(({q})=>q.operation!=='progress' && !NOT_MIRRORED.has(q.operation));
     if(!input.length)return;
-    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.enqueueMany.call(state,input));
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.enqueueMany.call(state,input,backfill));
     const readBatch=this.store.backend==='sqlite'?80:256,writeBatch=this.store.backend==='sqlite'?10:200,metricBatch=this.store.backend==='sqlite'?20:200;
     const entries=new Map<string,{q:Query,priority:number,dirty?:boolean}>();
     for(const item of input){const key=queryKey(item.q),prior=entries.get(key);entries.set(key,{...item,dirty:prior?.dirty || item.dirty});}
     if(entries.size>512){
       const unique=[...entries.values()];
-      for(let offset=0;offset<unique.length;offset+=512)await this.enqueueMany(unique.slice(offset,offset+512));
+      for(let offset=0;offset<unique.length;offset+=512)await this.enqueueMany(unique.slice(offset,offset+512),backfill);
       return;
     }
     const jobs=new Map<string,any>(),demands=new Map<string,any>(),collections=new Set<string>();
@@ -755,8 +757,12 @@ export class RepositoryState extends DurableObject<Env> {
       const comment=q.operation==='reactions'?comments.get(String(q.args?.id)):null;
       const ns=q.args?.number?[String(q.args.number)]:q.args?.sha?heads.get(String(q.args.sha)) || []:comment?.parent?[comment.parent]:[];
       const dormant=!demanded && (comment?.tombstone || ns.length>0 && ns.every(n=>states.get(n)?.state && states.get(n).state!=='OPEN'));
-      const lane=demanded && !collections.has(key)?'requested':dirty || prior?.dirty || priority<=5 || q.operation.endsWith('_delta')?'active':q.operation.startsWith('recent_') || dormant?'archive':'verification';
-      values.push([key,JSON.stringify({...q,allow_observed:undefined}),priority,now,Number(dirty),Number(dirty),lane,lane==='requested'?(prior?.requested_at || now):prior?.requested_at || null,now]);
+      if(backfill && (collections.has(key) || dormant))continue;
+      const lane=(demanded || backfill) && !collections.has(key)?'requested':dirty || prior?.dirty || priority<=5 || q.operation.endsWith('_delta')?'active':q.operation.startsWith('recent_') || dormant?'archive':'verification';
+      // Maintenance shares the requested lane without fabricating a user read.
+      // NULL sorts behind real demand and stays out of user latency metrics.
+      const requested=prior?.requested_at || (backfill && !demanded?null:now);
+      values.push([key,JSON.stringify({...q,allow_observed:undefined}),priority,now,Number(dirty),Number(dirty),lane,lane==='requested'?requested:prior?.requested_at || null,now]);
       if(!prior)metrics.push([now,'arrival',lane,q.operation,1]);
       scheduled=Math.min(scheduled,!prior?now:dirty && !prior.wait_reason && !prior.attempt?Math.min(prior.due,now):prior.due);
     }
@@ -917,24 +923,32 @@ export class RepositoryState extends DurableObject<Env> {
   }
 
   kind(q:Query): string { return ['open_prs','recent_prs','pr','pr_delta'].includes(q.operation)?'pr':['open_issues','recent_issues','issue_delta'].includes(q.operation)?'issue':q.operation; }
+  async statusRows(q:Query,allowObserved=false):Promise<any[]|null> {
+    const key=queryKey(q),complete=await this.complete(q);
+    if(!complete && !allowObserved)return null;
+    const row=complete?(await this.store.exec<any>('SELECT data FROM resources WHERE kind=? AND id=? AND tombstone=0','statuses',key)).toArray()[0]:undefined;
+    if(complete && !row && !allowObserved)return null;
+    const data=row?await this.decode(row.data):[];
+    if(!Array.isArray(data))return null;
+    const contexts=new Map(data.map(n=>{const value=status(n);return [value.context,value];}));
+    for(const row of await this.scanRows('SELECT data FROM resources WHERE kind=? AND parent=? AND tombstone=0','status_context',String(q.args?.sha))) {
+      const value=status(await this.decode(row.data)),prior=contexts.get(value.context);
+      if(!prior || Date.parse(value.startedAt)>=Date.parse(prior.startedAt))contexts.set(value.context,value);
+    }
+    return complete && row || contexts.size?[...contexts.values()]:null;
+  }
   async rows(q:Query): Promise<any[] | any | null> {
+    if(q.operation==='statuses')return this.statusRows(q);
     const key=queryKey(q), collection=(await this.store.exec<any>('SELECT * FROM collections WHERE key=? AND complete=1',key)).toArray()[0];
     if (!collection) return null;
     if (q.operation==='pr') {
       const row=(await this.store.exec<any>('SELECT data FROM resources WHERE kind=? AND id=? AND tombstone=0','pr',String(q.args?.number))).toArray()[0];
       if (row) return (await this.decode(row.data));
     }
-    if (['pr','repository','statuses'].includes(q.operation)) {
+    if (['pr','repository'].includes(q.operation)) {
       const row=(await this.store.exec<any>('SELECT data FROM resources WHERE kind=? AND id=? AND tombstone=0',q.operation,key)).toArray()[0];
       if (!row) return null;
-      const data=await this.decode(row.data);
-      if (q.operation!=='statuses' || !Array.isArray(data)) return data;
-      const contexts=new Map(data.map(n=>{const value=status(n);return [value.context,value];}));
-      for (const row of await this.scanRows('SELECT data FROM resources WHERE kind=? AND parent=? AND tombstone=0','status_context',String(q.args?.sha))) {
-        const value=status(await this.decode(row.data)),prior=contexts.get(value.context);
-        if (!prior || Date.parse(value.startedAt)>=Date.parse(prior.startedAt)) contexts.set(value.context,value);
-      }
-      return [...contexts.values()];
+      return await this.decode(row.data);
     }
     const members=await this.scanRows(`SELECT r.data FROM members m ${collectionJoin(this.store)} resources r ON r.kind=? AND r.id=m.id WHERE m.collection=? AND r.tombstone=0 ORDER BY CAST(r.id AS INTEGER),r.id`,this.kind(q),key);
     const rows=[];
@@ -1151,6 +1165,13 @@ export class RepositoryState extends DurableObject<Env> {
     const complete=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',key)).toArray().length>0;
     if (!complete && q.operation!=='progress') {
       await this.store.exec("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?),due=CASE WHEN wait_reason IS NULL AND attempt=0 THEN MIN(due,?) ELSE due END WHERE key=?",now,now,key);
+      if(q.operation==='review_comments') {
+        const source={...q,operation:'review_threads'};
+        const background=(await this.store.exec('SELECT key FROM jobs WHERE key=? AND requested_at IS NULL',queryKey(source))).toArray().length>0;
+        // A read arriving after REST deferral needs the other-pool dependency
+        // promoted too; the parent's real quota deadline remains untouched.
+        if(background)await this.noteDemand(source);
+      }
     }
     if (prior?.at>now-300000) return;
     if (complete && q.operation!=='progress' && !(await this.store.exec('SELECT key FROM jobs WHERE key=?',key)).toArray().length) await this.enqueue(q,20,now+(await this.interval(q)));
@@ -1163,10 +1184,36 @@ export class RepositoryState extends DurableObject<Env> {
   }
   async nextJob(): Promise<any> {
     if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.nextJob.call(state));
-    const now=Date.now(),turn=(await this.meta('repair_turn')) || 0;
+    const now=Date.now(),counters=(await this.store.exec<any>('SELECT key,value FROM meta WHERE key IN (?,?)','repair_turn','requested_turn')).toArray();
+    const turns=new Map(counters.map(row=>[row.key,JSON.parse(row.value)])),turn=turns.get('repair_turn') || 0,requestedTurn=turns.get('requested_turn') || 0;
     await this.setMeta('repair_turn',turn+1);
     const preferred=laneAt(turn,settings(this.env).weights);
-    return (await this.store.exec<any>('SELECT * FROM jobs WHERE due<=? AND lease_until<=? ORDER BY CASE WHEN lane=? THEN 0 WHEN lane=\'requested\' THEN 1 WHEN lane=\'active\' THEN 2 WHEN lane=\'verification\' THEN 3 ELSE 4 END,due,key LIMIT 1',now,now,preferred)).toArray()[0];
+    // Real reads precede maintenance in the requested lane. Give fresh real
+    // demand three turns out of four, retaining one oldest-first turn.
+    const fresh=requestedTurn%4!==0;
+    const job=(await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=? ORDER BY CASE WHEN lane=? AND (lane!='requested' OR requested_at IS NOT NULL) THEN 0 WHEN lane='requested' AND (requested_at IS NOT NULL OR ?='requested') THEN 1 WHEN lane='active' THEN 2 WHEN lane='requested' THEN 3 WHEN lane='verification' THEN 4 ELSE 5 END,CASE WHEN ? AND lane='requested' THEN COALESCE(requested_at,0) ELSE 0 END DESC,due,key LIMIT 1",now,now,preferred,preferred,Number(fresh))).toArray()[0];
+    if(job?.lane==='requested' && job.requested_at)await this.setMeta('requested_turn',requestedTurn+1);
+    return job;
+  }
+  async requestOpenCoverage():Promise<void> {
+    if(this.readOnlyQuery || this.degraded || this.repairsHeld() || this.schema!=='current')return;
+    // Public discovery never creates demand. The existing maintenance owner
+    // independently backfills bounded missing coverage for current open heads.
+    // Already requested jobs leave this selection, so each tick advances it.
+    const join=collectionJoin(this.store);
+    const inventory=`SELECT s.number,s.data FROM members m ${join} survey_inventory s ON s.number=m.id ${join} resources r ON r.kind='pr' AND r.id=m.id WHERE m.collection=? AND r.tombstone=0 AND json_extract(s.data,'$.state')='OPEN'`;
+    const candidates=`WITH live AS (${inventory}), wanted AS (`+
+      `SELECT number,'statuses' operation,'statuses:{"sha":"'||json_extract(data,'$.headRefOid')||'"}' AS key,json_extract(data,'$.headRefOid') head FROM live WHERE json_extract(data,'$.headRefOid') IS NOT NULL UNION ALL `+
+      `SELECT number,'issue_comments','issue_comments:{"number":'||number||'}',NULL FROM live UNION ALL `+
+      `SELECT number,'review_comments','review_comments:{"number":'||number||'}',NULL FROM live) `+
+      `SELECT w.* FROM wanted w LEFT JOIN collections c ON c.key=w.key AND c.complete=1 LEFT JOIN jobs j ON j.key=w.key WHERE c.key IS NULL AND (j.key IS NULL OR j.lane!='requested') ORDER BY CAST(w.number AS INTEGER) DESC,w.operation LIMIT 64`;
+    const missing=(await this.store.exec<any>(candidates,queryKey({operation:'open_prs'}))).toArray();
+    if(!missing.length)return;
+    const repo=(await this.meta('repository'))?.name;
+    if(!repo)return;
+    // Scan outside the writer transaction. enqueueMany rechecks completion,
+    // demand and job state atomically before promoting the bounded selection.
+    await this.enqueueMany(missing.map(row=>{const args:Record<string,string|number>=row.operation==='statuses'?{sha:row.head}:{number:decimalArgument(row.number)};return {q:{repository:repo,operation:row.operation,args},priority:5};}),true);
   }
   async dormant(q:Query): Promise<boolean> {
     const demand=(await this.store.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q))).toArray()[0];
@@ -1281,9 +1328,13 @@ export class RepositoryState extends DurableObject<Env> {
         // The existing thread reconciler supplies the same flat history. Preserve
         // the REST cooldown while promoting that dependency in the other pool.
         const source={...q,operation:'review_threads'};
-        const existing=(await this.store.exec<any>('SELECT started,dirty FROM jobs WHERE key=?',queryKey(source))).toArray()[0];
-        await this.noteDemand(source);await this.enqueue(source,1,Date.now(),!existing || !existing.started && !existing.dirty);
-        if(!(await this.complete(q))) await this.store.exec("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?) WHERE key=?",job.requested_at || Date.now(),queryKey(source));
+        const existing=(await this.store.exec<any>('SELECT started,dirty,lane FROM jobs WHERE key=?',queryKey(source))).toArray()[0];
+        // A real read may have arrived after the claim. Preserve that demand,
+        // while maintenance dependencies remain background work with no clock.
+        const parent=(await this.store.exec<any>('SELECT requested_at,lane FROM jobs WHERE key=?',job.key)).toArray()[0],requested=parent?.requested_at;
+        if(requested)await this.noteDemand(source);
+        await this.enqueue(source,1,Date.now(),!existing || !existing.started && !existing.dirty);
+        if(!(await this.complete(q)) && (requested || parent?.lane==='requested' && existing?.lane!=='active')) await this.store.exec("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?) WHERE key=?",requested || null,queryKey(source));
       }
       await this.store.exec('UPDATE jobs SET due=?,attempt=attempt+?,wait_reason=? WHERE key=?',result.retry_at || Date.now()+Math.min(3600000,60000*2**Math.min(6,job.attempt)),capacity?0:1,result.category || result.reason || 'upstream',job.key);
       await this.metric(capacity?'capacity_wait':'retry',q,job.lane || 'verification');
@@ -1793,7 +1844,7 @@ export class RepositoryState extends DurableObject<Env> {
     let jobs=[first];
     try {
       if (['issue_comments','review_threads','statuses','reactions'].includes(operation) && first.page===1 && !first.api && !first.nested) {
-        const candidates=(await this.store.exec<any>('SELECT * FROM jobs WHERE due<=? AND lease_until<=? AND lane=? AND page=1 AND api IS NULL AND nested IS NULL AND key LIKE ? ORDER BY due,key LIMIT ?',Date.now(),Date.now(),first.lane,operation+':%',Math.max(0,batchLimit(operation)-1))).toArray();
+        const candidates=(await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=? AND lane=? AND page=1 AND api IS NULL AND nested IS NULL AND key LIKE ? ORDER BY CASE WHEN lane='requested' AND requested_at IS NULL THEN 1 ELSE 0 END,due,key LIMIT ?",Date.now(),Date.now(),first.lane,operation+':%',Math.max(0,batchLimit(operation)-1))).toArray();
         for (const item of candidates) {
           if ((await this.retireUnneeded(item))) continue;
           const claimed=(await this.claim(item));if (claimed) jobs.push(claimed);
@@ -1839,12 +1890,16 @@ export class RepositoryState extends DurableObject<Env> {
     try {await this.runAlarm();} finally {this.activeOperations--;}
   }
   async runAlarm(): Promise<void> {
-    const options=settings(this.env),began=Date.now();let dispatched=0,retired=0;
+    const options=settings(this.env);let dispatched=0,retired=0;
     try {
       this.traceRepair('expire');
       await this.expire();
       this.traceRepair('select_jobs');
       if(this.schema!=='current' && !this.degraded) this.startup();
+      try {await this.requestOpenCoverage();} catch(error) {this.noteFailure('open_coverage',error);}
+      // Expiry/backfill preparation must not consume the launch window and
+      // leave every due job unstarted when the remote database is slow.
+      const began=Date.now();
       // Every dispatch writes its lease before any GitHub request, so a full
       // store stops here without spending upstream quota.
       if(!this.degraded && typeof this.schema!=='object') try {
