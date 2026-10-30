@@ -636,7 +636,7 @@ test('maintenance promotes bounded missing open-head coverage and preserves retr
 });
 
 test('fresh requested coverage bypasses an old requested backlog without starving oldest work',async()=>{
- const {state,db,insert}=await fixture();try{
+ const {state,db,insert,env}=await fixture();try{
   const now=Date.now();
   for(let n=1;n<=1000;n++)await insert('files',n,20,now-86400000+n);
   await db.prepare("UPDATE jobs SET lane='requested',requested_at=?").run(now-86400000);
@@ -645,6 +645,18 @@ test('fresh requested coverage bypasses an old requested backlog without starvin
   let freshTurns=0,oldTurns=0;
   for(let n=0;n<60;n++) {const job=await state.nextJob();if(job.key===key)freshTurns++;else oldTurns++;}
   assert.ok(freshTurns>0 && oldTurns>0);assert.equal(freshTurns,45);assert.equal(oldTurns,15);
+  env.RECONCILIATION_SETTINGS=JSON.stringify({weights:[1,1,1,1]});
+  for(const [offset,lane] of ['active','verification','archive'].entries()) {
+   const q=await insert('files',1002+offset,20,now-1);
+   await db.prepare('UPDATE jobs SET lane=? WHERE key=?').run(lane,q.operation+':'+JSON.stringify(q.args));
+  }
+  await state.setMeta('repair_turn',0);await state.setMeta('requested_turn',0);
+  freshTurns=0;oldTurns=0;let otherTurns=0;
+  for(let n=0;n<64;n++) {
+   const job=await state.nextJob();
+   if(job.lane!=='requested')otherTurns++;else if(job.key===key)freshTurns++;else oldTurns++;
+  }
+  assert.equal(freshTurns,12);assert.equal(oldTurns,4);assert.equal(otherTurns,48,'requested fairness is independent of lane weights');
   await db.prepare('UPDATE jobs SET due=? WHERE key=?').run(now+3600000,key);
   for(let n=0;n<15;n++)assert.notEqual((await state.nextJob()).key,key,'priority never bypasses a real retry deadline');
  }finally{await db.close();}

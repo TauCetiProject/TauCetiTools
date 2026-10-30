@@ -1173,13 +1173,16 @@ export class RepositoryState extends DurableObject<Env> {
   }
   async nextJob(): Promise<any> {
     if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.nextJob.call(state));
-    const now=Date.now(),turn=(await this.meta('repair_turn')) || 0;
+    const now=Date.now(),counters=(await this.store.exec<any>('SELECT key,value FROM meta WHERE key IN (?,?)','repair_turn','requested_turn')).toArray();
+    const turns=new Map(counters.map(row=>[row.key,JSON.parse(row.value)])),turn=turns.get('repair_turn') || 0,requestedTurn=turns.get('requested_turn') || 0;
     await this.setMeta('repair_turn',turn+1);
     const preferred=laneAt(turn,settings(this.env).weights);
     // Within requested coverage, give fresh demand a route around an old
     // backlog, while retaining an oldest-first turn out of every four.
-    const fresh=turn%4!==0;
-    return (await this.store.exec<any>('SELECT * FROM jobs WHERE due<=? AND lease_until<=? ORDER BY CASE WHEN lane=? THEN 0 WHEN lane=\'requested\' THEN 1 WHEN lane=\'active\' THEN 2 WHEN lane=\'verification\' THEN 3 ELSE 4 END,CASE WHEN ? AND lane=\'requested\' THEN COALESCE(requested_at,0) ELSE 0 END DESC,due,key LIMIT 1',now,now,preferred,Number(fresh))).toArray()[0];
+    const fresh=requestedTurn%4!==0;
+    const job=(await this.store.exec<any>('SELECT * FROM jobs WHERE due<=? AND lease_until<=? ORDER BY CASE WHEN lane=? THEN 0 WHEN lane=\'requested\' THEN 1 WHEN lane=\'active\' THEN 2 WHEN lane=\'verification\' THEN 3 ELSE 4 END,CASE WHEN ? AND lane=\'requested\' THEN COALESCE(requested_at,0) ELSE 0 END DESC,due,key LIMIT 1',now,now,preferred,Number(fresh))).toArray()[0];
+    if(job?.lane==='requested')await this.setMeta('requested_turn',requestedTurn+1);
+    return job;
   }
   async requestOpenCoverage():Promise<void> {
     if(this.readOnlyQuery || this.degraded || this.repairsHeld())return;
