@@ -647,7 +647,9 @@ test('maintenance coverage yields to real reads without hot refreshes or synthet
   const old=await insert('files',98,5,now-10000),real=await insert('files',99,5,now-1000);
   await db.prepare("UPDATE jobs SET lane='requested',requested_at=? WHERE key=?").run(now-10000,old.operation+':'+JSON.stringify(old.args));
   await state.noteDemand(real);
-  await state.requestOpenCoverage();await state.setMeta('requested_turn',1);
+  await state.requestOpenCoverage();await state.setMeta('requested_turn',0);
+  assert.equal((await state.nextJob()).key,old.operation+':'+JSON.stringify(old.args),'oldest real demand precedes maintenance on the aging turn');
+  await state.setMeta('requested_turn',1);
   assert.equal((await state.nextJob()).key,real.operation+':'+JSON.stringify(real.args),'later maintenance never outranks a real read');
   const promoted={repository:'org/repo',operation:'review_comments',args:{number:7}},key=promoted.operation+':'+JSON.stringify(promoted.args);
   await db.prepare('UPDATE jobs SET requested_at=? WHERE key=?').run(now-1,real.operation+':'+JSON.stringify(real.args));
@@ -662,6 +664,39 @@ test('maintenance coverage yields to real reads without hot refreshes or synthet
   state.schema='migration_pending';const store=state.store;state.store=new Proxy(store,{get(){throw Error('unusable schema touched');}});
   await state.requestOpenCoverage();state.store=store;
  }finally{await db.close();}
+});
+
+test('maintenance keeps its share while active repairs retain fallback priority',async()=>{
+ const {state,db,insert,env}=await fixture();try{
+  env.RECONCILIATION_SETTINGS=JSON.stringify({weights:[1,1,1,1]});
+  const now=Date.now(),background=await insert('files',1,5,now-10000),active=await insert('files',2,5,now-1);
+  await db.prepare("UPDATE jobs SET lane='requested',requested_at=NULL WHERE key=?").run(background.operation+':'+JSON.stringify(background.args));
+  await state.setMeta('repair_turn',2);
+  assert.equal((await state.nextJob()).key,active.operation+':'+JSON.stringify(active.args),'empty verification share falls back to active repair before maintenance');
+  await state.setMeta('repair_turn',0);
+  assert.equal((await state.nextJob()).key,background.operation+':'+JSON.stringify(background.args),'maintenance still advances on requested shares');
+  assert.equal(await state.meta('requested_turn'),undefined,'maintenance does not advance the real-request fairness counter');
+ }finally{await db.close();}
+});
+
+test('quota-deferred maintenance dependencies retain background provenance and racing real reads',async()=>{
+ for(const realRead of [false,true]) {
+  const {state,db}=await fixture();try{
+   await state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
+   const q={repository:'org/repo',operation:'review_comments',args:{number:7}};
+   await state.enqueueMany([{q,priority:5}],true);
+   const parent=await state.claim(await state.nextJob());assert.equal(parent.requested_at,null);
+   if(realRead)await state.noteDemand(q);
+   const reset=Date.now()+3600000;await state.refresh(parent,{deferred:true,category:'primary:core',retry_at:reset});
+   const source=await db.prepare('SELECT * FROM jobs WHERE key=?').get('review_threads:{"number":7}');
+   assert.equal(source.lane,'requested');assert.equal(Boolean(source.requested_at),realRead);
+   assert.equal((await db.prepare('SELECT COUNT(*) n FROM demand').get()).n,realRead?2:0);
+   assert.equal((await db.prepare('SELECT due FROM jobs WHERE key=?').get(parent.key)).due,reset);
+   const metrics=[];state.metric=async event=>metrics.push(event);
+   await state.finishJob(source,{...q,operation:'review_threads'});
+   assert.equal(metrics.includes('requested_latency_ms'),realRead);
+  }finally{await db.close();}
+ }
 });
 
 test('fresh requested coverage bypasses an old requested backlog without starving oldest work',async()=>{

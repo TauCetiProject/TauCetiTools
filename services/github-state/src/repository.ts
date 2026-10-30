@@ -1181,11 +1181,11 @@ export class RepositoryState extends DurableObject<Env> {
     const turns=new Map(counters.map(row=>[row.key,JSON.parse(row.value)])),turn=turns.get('repair_turn') || 0,requestedTurn=turns.get('requested_turn') || 0;
     await this.setMeta('repair_turn',turn+1);
     const preferred=laneAt(turn,settings(this.env).weights);
-    // Within requested coverage, give fresh demand a route around an old
-    // backlog, while retaining an oldest-first turn out of every four.
+    // Real reads precede maintenance in the requested lane. Give fresh real
+    // demand three turns out of four, retaining one oldest-first turn.
     const fresh=requestedTurn%4!==0;
-    const job=(await this.store.exec<any>('SELECT * FROM jobs WHERE due<=? AND lease_until<=? ORDER BY CASE WHEN lane=? THEN 0 WHEN lane=\'requested\' THEN 1 WHEN lane=\'active\' THEN 2 WHEN lane=\'verification\' THEN 3 ELSE 4 END,CASE WHEN ? AND lane=\'requested\' THEN COALESCE(requested_at,0) ELSE 0 END DESC,due,key LIMIT 1',now,now,preferred,Number(fresh))).toArray()[0];
-    if(job?.lane==='requested')await this.setMeta('requested_turn',requestedTurn+1);
+    const job=(await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=? ORDER BY CASE WHEN lane=? AND (lane!='requested' OR requested_at IS NOT NULL) THEN 0 WHEN lane='requested' AND (requested_at IS NOT NULL OR ?='requested') THEN 1 WHEN lane='active' THEN 2 WHEN lane='requested' THEN 3 WHEN lane='verification' THEN 4 ELSE 5 END,CASE WHEN ? AND lane='requested' THEN COALESCE(requested_at,0) ELSE 0 END DESC,due,key LIMIT 1",now,now,preferred,preferred,Number(fresh))).toArray()[0];
+    if(job?.lane==='requested' && job.requested_at)await this.setMeta('requested_turn',requestedTurn+1);
     return job;
   }
   async requestOpenCoverage():Promise<void> {
@@ -1322,8 +1322,12 @@ export class RepositoryState extends DurableObject<Env> {
         // the REST cooldown while promoting that dependency in the other pool.
         const source={...q,operation:'review_threads'};
         const existing=(await this.store.exec<any>('SELECT started,dirty FROM jobs WHERE key=?',queryKey(source))).toArray()[0];
-        await this.noteDemand(source);await this.enqueue(source,1,Date.now(),!existing || !existing.started && !existing.dirty);
-        if(!(await this.complete(q))) await this.store.exec("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?) WHERE key=?",job.requested_at || Date.now(),queryKey(source));
+        // A real read may have arrived after the claim. Preserve that demand,
+        // while maintenance dependencies remain background work with no clock.
+        const requested=(await this.store.exec<any>('SELECT requested_at FROM jobs WHERE key=?',job.key)).toArray()[0]?.requested_at;
+        if(requested)await this.noteDemand(source);
+        await this.enqueue(source,1,Date.now(),!existing || !existing.started && !existing.dirty);
+        if(!(await this.complete(q))) await this.store.exec("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?) WHERE key=?",requested || null,queryKey(source));
       }
       await this.store.exec('UPDATE jobs SET due=?,attempt=attempt+?,wait_reason=? WHERE key=?',result.retry_at || Date.now()+Math.min(3600000,60000*2**Math.min(6,job.attempt)),capacity?0:1,result.category || result.reason || 'upstream',job.key);
       await this.metric(capacity?'capacity_wait':'retry',q,job.lane || 'verification');
