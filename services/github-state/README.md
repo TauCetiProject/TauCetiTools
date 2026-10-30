@@ -154,7 +154,10 @@ even before the first full status collection is hydrated. The per-PR
 `unavailable`. Newer contexts override older snapshots, including failures; unrelated
 head SHAs never contribute. This does not declare complete comment histories or
 change the coverage gate on full status queries. Public surveys remain read-only
-and never wait for GitHub or hydration. Survey validators include a representation
+and never wait for GitHub or hydration. Authenticated surveys also return stored
+facts without awaiting per-PR dependency scheduling. The existing maintenance owner
+backfills missing open-head coverage, and selected-PR reads register real demand
+through their normal path. Survey validators include a representation
 version so old empty-status responses cannot survive deployment through a 304.
 
 `RECONCILIATION_SETTINGS` is an optional JSON variable with `concurrency`

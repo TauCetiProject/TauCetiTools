@@ -602,6 +602,14 @@ test('surveys expose exact-head webhook statuses without claiming full status or
   assert.equal(await state.rows({repository:repo,operation:'statuses',args:{sha}}),null,'complete-status consumers retain their existing coverage gate');
   assert.equal((await db.prepare("SELECT COUNT(*) n FROM collections WHERE operation='statuses'").get()).n,0);
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM demand').get()).n,0,'public survey never creates demand');assert.equal(network,0);
+  const noteReadDemand=state.noteReadDemand,enqueue=state.enqueue;
+  state.noteReadDemand=async function(q,...args){assert.equal(q.operation,'open_prs','discovery must not await missing-history demand');return noteReadDemand.call(this,q,...args);};
+  state.enqueue=async function(...args){assert.equal(args[0].operation,'open_prs','discovery must not await missing-history scheduling');return enqueue.apply(this,args);};
+  try {
+   const authenticated=await state.query(q);
+   assert.deepEqual(authenticated.data[0],row,'authentication must not change discovery facts or await coverage repair');
+  }finally{state.noteReadDemand=noteReadDemand;state.enqueue=enqueue;}
+  assert.equal((await db.prepare("SELECT COUNT(*) n FROM demand WHERE key LIKE '%comments:%'").get()).n,0);
   await state.put('status_context',sha+':build',{context:'build',state:'FAILURE',startedAt:'2026-10-30T21:00:00Z'},Date.now()+1,false,sha,true);
   const failed=await state.query(q,true);assert.equal(failed.data[0].pr.statusCheckRollup[0].state,'FAILURE');
   const key='statuses:'+JSON.stringify({sha});
