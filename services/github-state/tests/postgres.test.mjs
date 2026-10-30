@@ -634,7 +634,7 @@ pg('transactional spill decoding and commit survive a saturated maintenance budg
  }finally{for(const done of release)done();await f.close();}
 });
 
-pg('public survey uses webhook build evidence before complete status hydration with batched SQL',async()=>{
+pg('authenticated survey uses observed builds without awaiting missing-history writes',async()=>{
  const f=await postgresFixture();try{
   const {state}=f,sha='a'.repeat(40),other='b'.repeat(40);
   await complete(state,{operation:'open_prs'});
@@ -643,8 +643,9 @@ pg('public survey uses webhook build evidence before complete status hydration w
   await state.put('status_context',other+':build',{context:'build',state:'FAILURE',startedAt:'2026-10-30T21:00:00Z'},Date.now(),false,other,true);
   let reads=0,writes=0;state.store=intercept(f.store,sql=>{reads++;if(!/^SELECT\b/.test(sql))writes++;});
   f.env.INSTALLATIONS=new Proxy({},{get(){throw Error('Public survey called GitHub');}});
+  state.backgroundDemand=()=>{}; // Inventory renewal is already an independent background task.
   const q={repository:repo.name,operation:'survey',args:{roadmap:'auto',stages:'rebase,review'}};
-  const result=await state.query(q,true);assert.equal(result.status,'ok');const row=result.data[0];
+  const result=await state.query(q);assert.equal(result.status,'ok');const row=result.data[0];
   assert.equal(row.pr.statusCheckRollupCoverage,'webhook_observed');assert.deepEqual(row.pr.statusCheckRollup,[{context:'build',state:'SUCCESS',startedAt:'2026-10-30T20:00:00Z'}]);
   assert.equal(row.review.issue_complete,false);assert.equal(row.review.review_complete,false);assert.equal(writes,0);
   assert.ok(reads<25,'prefetched statuses must not add one remote SQL read per missing status collection: '+reads);

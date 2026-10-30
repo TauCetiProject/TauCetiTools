@@ -657,7 +657,7 @@ export class RepositoryState extends DurableObject<Env> {
     // roadmap. Descriptions and unrelated comment histories stay in storage.
     const rows=await this.scanRows(`SELECT COALESCE(s.data,r.data) data FROM members m ${collectionJoin(this.store)} resources r ON r.kind='pr' AND r.id=m.id LEFT JOIN survey_inventory s ON s.number=r.id WHERE m.collection=? AND r.tombstone=0 ORDER BY CAST(r.id AS INTEGER),r.id`,queryKey(inventory));
     const scope=String(q.args?.roadmap || 'any'),skip=String(q.args?.skip || '').split(',').filter(Boolean),out=[];
-    const author_counts:Record<string,number>={},stages=new Set(String(q.args?.stages ?? 'review,fix,rebase').split(','));
+    const author_counts:Record<string,number>={};
     const decoded=[];for(const storedRow of rows)decoded.push(compactPR(await this.decode(storedRow.data)));
     const selected=decoded.filter(row=>q.args?.numbers?String(q.args.numbers).split(',').includes(String(row.number)):inScope(row,scope,skip));
     await this.primeRelated(selected.map(r=>String(r.number)),selected.map(r=>r.headRefOid).filter(Boolean));
@@ -682,15 +682,13 @@ export class RepositoryState extends DurableObject<Env> {
       const statusQuery={repository:q.repository,operation:'statuses',args:{sha:row.headRefOid}};
       const statuses=await this.statusRows(statusQuery,true);
       const statusComplete=(await this.complete(statusQuery)) && (await this.store.exec('SELECT data FROM resources WHERE kind=? AND id=? AND tombstone=0','statuses',queryKey(statusQuery))).toArray().length>0;
-      const green=Array.isArray(statuses) && statuses.some(c=>c.context==='build' && c.state==='SUCCESS') && !statuses.some(c=>c.context==='build' && c.state!=='SUCCESS');
       for(const [operation,field] of [['issue_comments','issue_complete'],['review_comments','review_complete']]) {
         const child={repository:q.repository,operation,args:{number:row.number}};
         review[field]=hydrated && (await this.complete(child));
-        // Demand is deduplicated in the installation scheduler; serving a
-        // snapshot never performs synchronous upstream validation.
-        const needs=operation==='issue_comments'?(green && (stages.has('review') || stages.has('fix'))) || stages.has('rebase') && (row.labels || []).some((l:any)=>l.name==='needs-rebase'):green && (stages.has('review') || stages.has('fix'));
-        if(!row.isDraft && needs && !(await this.complete(child))) {await this.noteReadDemand(child);await this.optionalAsync('enqueue',async ()=>(await this.enqueue(child,5)));}
       }
+      // Discovery must not await one demand/enqueue transaction per missing
+      // history. The existing maintenance owner backfills open-head coverage;
+      // selected-PR reads still register real demand through their normal path.
       out.push({contract:SURVEY_CONTRACT,pr:{...compactPR(row),statusCheckRollup:Array.isArray(statuses)?statuses:[],statusCheckRollupCoverage:statusComplete?'complete':statuses?.length?'webhook_observed':'unavailable'},review});
     }
     return {rows:out,author_counts};
