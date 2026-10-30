@@ -1165,6 +1165,13 @@ export class RepositoryState extends DurableObject<Env> {
     const complete=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',key)).toArray().length>0;
     if (!complete && q.operation!=='progress') {
       await this.store.exec("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?),due=CASE WHEN wait_reason IS NULL AND attempt=0 THEN MIN(due,?) ELSE due END WHERE key=?",now,now,key);
+      if(q.operation==='review_comments') {
+        const source={...q,operation:'review_threads'};
+        const background=(await this.store.exec('SELECT key FROM jobs WHERE key=? AND requested_at IS NULL',queryKey(source))).toArray().length>0;
+        // A read arriving after REST deferral needs the other-pool dependency
+        // promoted too; the parent's real quota deadline remains untouched.
+        if(background)await this.noteDemand(source);
+      }
     }
     if (prior?.at>now-300000) return;
     if (complete && q.operation!=='progress' && !(await this.store.exec('SELECT key FROM jobs WHERE key=?',key)).toArray().length) await this.enqueue(q,20,now+(await this.interval(q)));
@@ -1321,13 +1328,13 @@ export class RepositoryState extends DurableObject<Env> {
         // The existing thread reconciler supplies the same flat history. Preserve
         // the REST cooldown while promoting that dependency in the other pool.
         const source={...q,operation:'review_threads'};
-        const existing=(await this.store.exec<any>('SELECT started,dirty FROM jobs WHERE key=?',queryKey(source))).toArray()[0];
+        const existing=(await this.store.exec<any>('SELECT started,dirty,lane FROM jobs WHERE key=?',queryKey(source))).toArray()[0];
         // A real read may have arrived after the claim. Preserve that demand,
         // while maintenance dependencies remain background work with no clock.
-        const requested=(await this.store.exec<any>('SELECT requested_at FROM jobs WHERE key=?',job.key)).toArray()[0]?.requested_at;
+        const parent=(await this.store.exec<any>('SELECT requested_at,lane FROM jobs WHERE key=?',job.key)).toArray()[0],requested=parent?.requested_at;
         if(requested)await this.noteDemand(source);
         await this.enqueue(source,1,Date.now(),!existing || !existing.started && !existing.dirty);
-        if(!(await this.complete(q))) await this.store.exec("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?) WHERE key=?",requested || null,queryKey(source));
+        if(!(await this.complete(q)) && (requested || parent?.lane==='requested' && existing?.lane!=='active')) await this.store.exec("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?) WHERE key=?",requested || null,queryKey(source));
       }
       await this.store.exec('UPDATE jobs SET due=?,attempt=attempt+?,wait_reason=? WHERE key=?',result.retry_at || Date.now()+Math.min(3600000,60000*2**Math.min(6,job.attempt)),capacity?0:1,result.category || result.reason || 'upstream',job.key);
       await this.metric(capacity?'capacity_wait':'retry',q,job.lane || 'verification');
@@ -1837,7 +1844,7 @@ export class RepositoryState extends DurableObject<Env> {
     let jobs=[first];
     try {
       if (['issue_comments','review_threads','statuses','reactions'].includes(operation) && first.page===1 && !first.api && !first.nested) {
-        const candidates=(await this.store.exec<any>('SELECT * FROM jobs WHERE due<=? AND lease_until<=? AND lane=? AND page=1 AND api IS NULL AND nested IS NULL AND key LIKE ? ORDER BY due,key LIMIT ?',Date.now(),Date.now(),first.lane,operation+':%',Math.max(0,batchLimit(operation)-1))).toArray();
+        const candidates=(await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=? AND lane=? AND page=1 AND api IS NULL AND nested IS NULL AND key LIKE ? ORDER BY CASE WHEN lane='requested' AND requested_at IS NULL THEN 1 ELSE 0 END,due,key LIMIT ?",Date.now(),Date.now(),first.lane,operation+':%',Math.max(0,batchLimit(operation)-1))).toArray();
         for (const item of candidates) {
           if ((await this.retireUnneeded(item))) continue;
           const claimed=(await this.claim(item));if (claimed) jobs.push(claimed);

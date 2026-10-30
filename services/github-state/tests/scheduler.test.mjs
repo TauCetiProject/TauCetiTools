@@ -699,6 +699,52 @@ test('quota-deferred maintenance dependencies retain background provenance and r
  }
 });
 
+test('a real read after maintenance deferral promotes its dependency without resetting quota waits',async()=>{
+ const {state,db}=await fixture();try{
+  await state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
+  const q={repository:'org/repo',operation:'review_comments',args:{number:7}};
+  await state.enqueueMany([{q,priority:5}],true);
+  const parent=await state.claim(await state.nextJob()),reset=Date.now()+3600000;
+  await state.refresh(parent,{deferred:true,category:'primary:core',retry_at:reset});
+  await db.prepare('UPDATE jobs SET lease_id=NULL,lease_until=0 WHERE key=?').run(parent.key);
+  const sourceKey='review_threads:{"number":7}';assert.equal((await db.prepare('SELECT requested_at FROM jobs WHERE key=?').get(sourceKey)).requested_at,null);
+  await state.enqueueMany([{q:{...q,operation:'review_threads',args:{number:8}},priority:5}],true);
+  await state.noteDemand(q);await state.setMeta('requested_turn',0);await state.setMeta('repair_turn',0);
+  assert.ok((await db.prepare('SELECT requested_at FROM jobs WHERE key=?').get(sourceKey)).requested_at);
+  assert.equal((await state.nextJob()).key,sourceKey,'a read after deferral advances the usable dependency');
+  assert.equal((await db.prepare('SELECT due FROM jobs WHERE key=?').get(parent.key)).due,reset);
+ }finally{await db.close();}
+});
+
+test('quota-deferred webhook dependencies retain active repair priority',async()=>{
+ const {state,db}=await fixture();try{
+  await state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
+  const q={repository:'org/repo',operation:'review_comments',args:{number:7}};
+  await state.enqueue(q,0,Date.now(),true);
+  const parent=await state.claim(await state.nextJob());assert.equal(parent.lane,'active');
+  await state.refresh(parent,{deferred:true,category:'primary:core',retry_at:Date.now()+3600000});
+  let source=await db.prepare('SELECT * FROM jobs WHERE key=?').get('review_threads:{"number":7}');assert.equal(source.lane,'active');assert.equal(source.requested_at,null);
+  // Maintenance joining an already dirty active dependency cannot demote it.
+  await db.prepare("UPDATE jobs SET lane='requested' WHERE key=?").run(parent.key);
+  await state.refresh(parent,{deferred:true,category:'primary:core',retry_at:Date.now()+3600000});
+  source=await db.prepare('SELECT * FROM jobs WHERE key=?').get(source.key);assert.equal(source.lane,'active');
+ }finally{await db.close();}
+});
+
+test('requested batches put real reads before older maintenance rows',async()=>{
+ const {state,db,env}=await fixture();try{
+  await state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
+  const queries=Array.from({length:130},(_,n)=>({repository:'org/repo',operation:'statuses',args:{sha:String(n+1).padStart(40,'0')}}));
+  await state.enqueueMany(queries.map(q=>({q,priority:5})),true);
+  for(const q of queries.slice(-2))await state.noteDemand(q);
+  const keys=queries.slice(-2).map(q=>q.operation+':'+JSON.stringify(q.args));
+  const considered=[];state.retireUnneeded=async job=>{considered.push(job.key);return true;};
+  let submitted=[];env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async(_url,init)=>{submitted=JSON.parse(init.body).jobs.map(j=>j.key);return Response.json({results:submitted.map(()=>({data:[],api:'graphql'}))});}})};
+  await state.setMeta('requested_turn',1);await state.dispatch(await state.claim(await state.nextJob()));
+  assert.ok(keys.every(key=>[submitted[0],considered[0]].includes(key)),'the first batch-fill candidate is the other real read, before older maintenance');
+ }finally{await db.close();}
+});
+
 test('fresh requested coverage bypasses an old requested backlog without starving oldest work',async()=>{
  const {state,db,insert,env}=await fixture();try{
   const now=Date.now();
