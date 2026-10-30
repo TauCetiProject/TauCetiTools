@@ -432,6 +432,24 @@ export class RepositoryState extends DurableObject<Env> {
         const rows=results[at++].toArray(),contexts=results[at++].toArray();
         for(const sha of hs){const key=queryKey({operation:'statuses',args:{sha}});cache.seed('SELECT data FROM resources WHERE kind=? AND id=? AND tombstone=0',['statuses',key],rows.filter(r=>r.id===key && !r.tombstone));cache.seed('SELECT data FROM resources WHERE kind=? AND parent=? AND tombstone=0',['status_context',sha],contexts.filter(r=>r.parent===sha));}
       }
+      if(ns.length) {
+        const hydrated=new Set(results[0].toArray().filter(row=>row.contract===SURVEY_INDEX_VERSION).map(row=>row.number));
+        const dirty=results[2].toArray().map(row=>row.number).filter(number=>hydrated.has(number));
+        await this.primeSurveyFragments(dirty);
+      }
+    }
+  }
+  async primeSurveyFragments(numbers:string[]):Promise<void> {
+    if(!(this.store instanceof ReadCacheStore) || !numbers.length)return;
+    // A changed projection still needs current fragments, but one remote round
+    // trip per history per PR makes repository-wide discovery miss its deadline.
+    // Prefetch only dirty, hydrated parents in the existing bounded parent batch.
+    // Match exact collection membership; orphaned/removed comments stay excluded.
+    for(const kind of ['issue_comments','review_comments']) {
+      const rows=await this.scanRows(`SELECT f.parent,f.data FROM survey_fragments f JOIN members m ON m.id=f.id AND m.collection=(? || '{"number":' || f.parent || '}') WHERE f.kind=? AND f.parent IN (${numbers.map(()=>'?').join(',')}) ORDER BY CAST(f.id AS INTEGER),f.id`,kind+':',kind,...numbers);
+      const grouped=new Map<string,any[]>();
+      for(const row of rows){let group=grouped.get(row.parent);if(!group){group=[];grouped.set(row.parent,group);}group.push({data:row.data});}
+      for(const number of numbers)this.store.seed('SELECT f.data FROM survey_fragments f JOIN members m ON m.id=f.id AND m.collection=? WHERE f.kind=? AND f.parent=? ORDER BY CAST(f.id AS INTEGER),f.id',[queryKey({operation:kind,args:{number:decimalArgument(number)}}),kind,number],grouped.get(number) || []);
     }
   }
   async meta(key:string):Promise<any> {

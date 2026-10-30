@@ -73,6 +73,12 @@ PR and issue headers and commit statuses update from webhook payloads. A
 changed PR does not start a full repository survey. Full inventories reconcile
 hourly; overlapping deltas catch missed updates.
 
+Repository-wide discovery batches the compact fragments needed by dirty review
+projections alongside its related metadata. Changed summaries retain exact stored
+collection membership and ordering without separate database round trips for
+every PR's issue and review history. These reads do not fetch GitHub data or wait
+for background hydration; incomplete histories remain explicitly incomplete.
+
 GitHub Actions runs and jobs and check runs are not mirrored. No client reads
 them, and keeping every run, job and check run for every commit was about 90%
 of the repository database. CI webhooks are acknowledged without being stored,
