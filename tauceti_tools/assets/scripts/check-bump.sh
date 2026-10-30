@@ -81,9 +81,15 @@ done
 
 # Multi-upstream projects authorize direct revisions, then use Lake's resolver
 # on a disposable trusted-base snapshot in a credential-free sandbox. Keep Tau Ceti's existing Mathlib-only path unchanged.
-if [ -n "${TAUCETI_CONF_SNAPSHOT:-}" ] && [ "${TAUCETI_REPO:-TauCetiProject/TauCeti}" != "TauCetiProject/TauCeti" ]; then
-  exec python3 -m tauceti_tools upstreams guard --conf "$TAUCETI_CONF_SNAPSHOT" \
-    --base "$BASE" --merge-base "$MERGE_BASE" --checkout "$PR"
+if [ -n "${TAUCETI_CONF_SNAPSHOT:-}" ]; then
+  # Read this identity from the package: materialize rewrites repository literals
+  # in shared scripts, including literals used to distinguish the legacy project.
+  canonical_repo=$(python3 -c 'from tauceti_tools.project import CANONICAL; print(CANONICAL)') \
+    || fail "cannot load canonical repository identity"
+  if [ "${TAUCETI_REPO:-$canonical_repo}" != "$canonical_repo" ]; then
+    exec python3 -m tauceti_tools upstreams guard --conf "$TAUCETI_CONF_SNAPSHOT" \
+      --base "$BASE" --merge-base "$MERGE_BASE" --checkout "$PR"
+  fi
 fi
 
 # --- helpers ------------------------------------------------------------------

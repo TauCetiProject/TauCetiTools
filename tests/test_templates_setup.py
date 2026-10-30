@@ -1,9 +1,11 @@
 """Exercise setup previews and PR creation against local Git repositories."""
 
 import io
+import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -13,7 +15,7 @@ from unittest.mock import patch
 from tauceti_tools.cli import main
 from tauceti_tools.credentials import app_setup
 from tauceti_tools.doctor import Finding
-from tauceti_tools.project import ConfigError, load
+from tauceti_tools.project import CANONICAL, ConfigError, load
 from tauceti_tools.templates import ASSETS, configuration_pr, materialize, write_project
 
 
@@ -108,6 +110,83 @@ class SetupTemplateTests(SetupFixture):
         with patch("tauceti_tools.doctor.diagnose", return_value=[Finding("test", "failed", "missing", "present")]), \
                 redirect_stdout(io.StringIO()):
             self.assertEqual(main(["doctor", "--conf", str(self.config)]), 1)
+
+
+
+class BumpGuardDispatchTests(SetupFixture):
+    def setUp(self):
+        super().setUp()
+        self.base = self.root / "base"
+        self.candidate = self.root / "candidate with spaces"
+        manifest = {"packages": [
+            {"name": "cslib", "type": "git", "url": "https://github.com/leanprover/cslib",
+             "rev": "a" * 40, "inputRev": "main", "inherited": False},
+            {"name": "mathlib", "type": "git",
+             "url": "https://github.com/leanprover-community/mathlib4",
+             "rev": "b" * 40, "inputRev": "master", "inherited": True},
+        ]}
+        for directory in (self.base, self.candidate):
+            directory.mkdir()
+            (directory / "lakefile.toml").write_text('name = "Project"\n')
+            (directory / "lean-toolchain").write_text("leanprover/lean4:v4.36.0-rc1\n")
+            (directory / "lake-manifest.json").write_text(json.dumps(manifest))
+            manifest["packages"][0]["rev"] = "c" * 40
+        self.calls = self.root / "guard-call"
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        python = bin_dir / "python3"
+        python.write_text(
+            '#!/bin/sh\n'
+            'if [ "$1" = "-m" ] && [ "$2" = "tauceti_tools" ] && '
+            '[ "$3" = "upstreams" ] && [ "$4" = "guard" ]; then\n'
+            '  printf "%s\\n" "$@" > "$GUARD_CALL"\n'
+            '  exit "$GUARD_EXIT"\n'
+            'fi\n'
+            'exec "$GUARD_PYTHON" "$@"\n'
+        )
+        python.chmod(0o755)
+        self.env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"],
+                        PYTHONPATH=str(Path(__file__).resolve().parents[1]),
+                        GUARD_PYTHON=sys.executable, GUARD_CALL=str(self.calls),
+                        GUARD_EXIT="0", TAUCETI_REPO=self.project.content,
+                        TAUCETI_CONF_SNAPSHOT=str(self.config))
+
+    def run_guard(self):
+        shared = self.root / "shared"
+        materialize(self.project, shared)
+        return subprocess.run(
+            ["bash", str(shared / "check-bump.sh"), str(self.base), str(self.base), str(self.candidate)],
+            env=self.env, capture_output=True, text=True,
+        )
+
+    def test_materialized_downstream_dispatches_cslib_only_bump_and_preserves_exit_status(self):
+        for status in (0, 7):
+            with self.subTest(status=status):
+                self.env["GUARD_EXIT"] = str(status)
+                result = self.run_guard()
+                self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+                self.assertEqual(self.calls.read_text().splitlines(), [
+                    "-m", "tauceti_tools", "upstreams", "guard", "--conf", str(self.config),
+                    "--base", str(self.base), "--merge-base", str(self.base),
+                    "--checkout", str(self.candidate),
+                ])
+
+    def test_legacy_and_unconfigured_projects_keep_mathlib_guard(self):
+        for mode in ("canonical", "no-snapshot", "no-repository"):
+            with self.subTest(mode=mode):
+                with patch.dict(self.env):
+                    self.project.raw["repositories"]["content"] = "one/Project"
+                    if mode == "canonical":
+                        self.project.raw["repositories"]["content"] = CANONICAL
+                        self.env["TAUCETI_REPO"] = CANONICAL
+                    elif mode == "no-snapshot":
+                        self.env.pop("TAUCETI_CONF_SNAPSHOT")
+                    else:
+                        self.env.pop("TAUCETI_REPO")
+                    result = self.run_guard()
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("mathlib rev unchanged but the manifest changed", result.stdout)
+                    self.assertFalse(self.calls.exists())
 
 
 class SetupPRTests(SetupFixture):
