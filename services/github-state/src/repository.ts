@@ -681,6 +681,7 @@ export class RepositoryState extends DurableObject<Env> {
       const review={...(hydrated && projected?JSON.parse(projected):summarizeFragments([],[])),markers:[],issue_complete:false,review_complete:false};
       const statusQuery={repository:q.repository,operation:'statuses',args:{sha:row.headRefOid}};
       const statuses=await this.statusRows(statusQuery,true);
+      const statusComplete=(await this.complete(statusQuery)) && (await this.store.exec('SELECT data FROM resources WHERE kind=? AND id=? AND tombstone=0','statuses',queryKey(statusQuery))).toArray().length>0;
       const green=Array.isArray(statuses) && statuses.some(c=>c.context==='build' && c.state==='SUCCESS') && !statuses.some(c=>c.context==='build' && c.state!=='SUCCESS');
       for(const [operation,field] of [['issue_comments','issue_complete'],['review_comments','review_complete']]) {
         const child={repository:q.repository,operation,args:{number:row.number}};
@@ -690,7 +691,7 @@ export class RepositoryState extends DurableObject<Env> {
         const needs=operation==='issue_comments'?(green && (stages.has('review') || stages.has('fix'))) || stages.has('rebase') && (row.labels || []).some((l:any)=>l.name==='needs-rebase'):green && (stages.has('review') || stages.has('fix'));
         if(!row.isDraft && needs && !(await this.complete(child))) {await this.noteReadDemand(child);await this.optionalAsync('enqueue',async ()=>(await this.enqueue(child,5)));}
       }
-      out.push({contract:SURVEY_CONTRACT,pr:{...compactPR(row),statusCheckRollup:Array.isArray(statuses)?statuses:[],statusCheckRollupCoverage:(await this.complete(statusQuery))?'complete':statuses?.length?'webhook_observed':'unavailable'},review});
+      out.push({contract:SURVEY_CONTRACT,pr:{...compactPR(row),statusCheckRollup:Array.isArray(statuses)?statuses:[],statusCheckRollupCoverage:statusComplete?'complete':statuses?.length?'webhook_observed':'unavailable'},review});
     }
     return {rows:out,author_counts};
   }

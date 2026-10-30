@@ -59,6 +59,7 @@ test('compact roadmap snapshot updates on comment edit/delete without reading fu
   const oldTag='"'+result.revision+'"',fresh=await wire(oldTag);
   assert.equal(fresh.status,200,'a cached markerless representation must be replaced without a revision mutation');
   const representationTag=fresh.headers.get('etag');assert.equal(representationTag,'"survey-v1-observed-statuses:'+result.revision+'"');
+  assert.equal((await wire('"survey-v1-empty-markers:'+result.revision+'"')).status,200,'previous deployed validators must refresh status evidence without a revision change');
   assert.equal(legacy(await fresh.json()).status,0);
   const cachedWire=await wire(oldTag);assert.equal(cachedWire.status,200);assert.equal(cachedWire.headers.get('etag'),representationTag);
   // Exercise the defensive early-304 branch with a legacy collection row.
@@ -609,6 +610,8 @@ test('surveys expose exact-head webhook statuses without claiming full status or
   const merged=await state.query(q,true);assert.equal(merged.data[0].pr.statusCheckRollupCoverage,'complete');
   assert.equal(merged.data[0].pr.statusCheckRollup.find(c=>c.context==='build').state,'FAILURE','newer negative webhook overrides older full snapshot');
   assert.equal(merged.data[0].pr.statusCheckRollup.find(c=>c.context==='scope').state,'SUCCESS');
+  await state.store.exec('DELETE FROM resources WHERE kind=? AND id=?','statuses',key);
+  assert.equal((await state.query(q,true)).data[0].pr.statusCheckRollupCoverage,'webhook_observed','a missing full snapshot cannot be reported as complete');
  }finally{await db.close();}
 });
 
@@ -645,4 +648,14 @@ test('fresh requested coverage bypasses an old requested backlog without starvin
   await db.prepare('UPDATE jobs SET due=? WHERE key=?').run(now+3600000,key);
   for(let n=0;n<15;n++)assert.notEqual((await state.nextJob()).key,key,'priority never bypasses a real retry deadline');
  }finally{await db.close();}
+});
+
+test('slow preparation cannot consume the entire repair launch window',async()=>{
+ const {state,db}=await fixture();const real=Date.now;let now=real(),selected=0;
+ try{
+  Date.now=()=>now;
+  state.expire=async()=>{now+=12000;return {};};state.requestOpenCoverage=async()=>{now+=12000;};
+  state.nextJob=async()=>{selected++;return undefined;};state.maintenance=async()=>{};state.startStorageMaintenance=()=>{};
+  await state.runAlarm();assert.equal(selected,1,'due work is considered after preparation even when preparation exceeds launch_ms');
+ }finally{Date.now=real;await db.close();}
 });
