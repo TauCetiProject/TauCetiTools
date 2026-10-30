@@ -135,6 +135,23 @@ calls run outside installation-wide locks; atomic quota reservations and
 expiring job leases protect concurrent requests. Large nested thread histories
 checkpoint one comment page per quantum instead of monopolizing a turn.
 
+Maintenance independently promotes at most 64 missing status/comment collections
+for current open PRs into the requested lane per turn. Already requested work is
+excluded so successive turns advance through the inventory. Existing attempts,
+pagination, leases, and retry deadlines are retained. Within the requested lane,
+three turns out of four prefer newer demand and one retains oldest-due ordering;
+the existing weighted shares between lanes remain unchanged. Expiry and coverage
+preparation precede the launch window rather than consuming it before jobs start.
+
+Compact surveys immediately include exact-head commit statuses received by webhook,
+even before the first full status collection is hydrated. The per-PR
+`statusCheckRollupCoverage` field distinguishes `webhook_observed`, `complete`, and
+`unavailable`. Newer contexts override older snapshots, including failures; unrelated
+head SHAs never contribute. This does not declare complete comment histories or
+change the coverage gate on full status queries. Public surveys remain read-only
+and never wait for GitHub or hydration. Survey validators include a representation
+version so old empty-status responses cannot survive deployment through a 304.
+
 `RECONCILIATION_SETTINGS` is an optional JSON variable with `concurrency`
 (default/max 4), `dispatches` (default 16, max 100), `launch_ms` (default 10000,
 max 30000), and four positive `weights` (default `[8,4,2,1]`). Settings affect

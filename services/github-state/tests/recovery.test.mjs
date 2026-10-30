@@ -41,7 +41,7 @@ async function deliver(env,delivery,attempts=1){
 }
 const parked=(archive,delivery)=>[...archive.objects.keys()].filter(k=>k.startsWith('parked/100/pointers/') && k.endsWith('-'+delivery+'.json'));
 test('the public survey edge replaces numeric validators and revalidates the repaired representation',async()=>{
- const h=harness(),etag='"survey-v1-empty-markers:17"';
+ const h=harness(),etag='"survey-v1-observed-statuses:17"';
  h.env.CLIENT_TOKENS=JSON.stringify([{hash:sha('client'),repositories:[repo.name]}]);
  h.env.REPOSITORIES.get=()=>({fetch:async()=>Response.json({version:1,repository:repo.name,operation:'survey',status:'ok',complete:true,revision:17,data:[]},{headers:{ETag:etag}})});
  const read=validator=>worker.fetch(new Request('https://public/v1/query?repository=org%2Frepo&operation=survey',{headers:{Authorization:'Bearer client','If-None-Match':validator}}),h.env,{});

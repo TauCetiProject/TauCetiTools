@@ -633,3 +633,24 @@ pg('transactional spill decoding and commit survive a saturated maintenance budg
   assert.equal((await f.store.exec('SELECT at FROM demand WHERE key=?','independent-spill-read')).one().at,123);
  }finally{for(const done of release)done();await f.close();}
 });
+
+pg('public survey uses webhook build evidence before complete status hydration with batched SQL',async()=>{
+ const f=await postgresFixture();try{
+  const {state}=f,sha='a'.repeat(40),other='b'.repeat(40);
+  await complete(state,{operation:'open_prs'});
+  await state.put('pr','7',{number:7,state:'OPEN',headRefOid:sha,isDraft:false,labels:[{name:'awaiting-review'}]});await state.membership('open_prs:{}','7',true);
+  await state.put('status_context',sha+':build',{context:'build',state:'SUCCESS',startedAt:'2026-10-30T20:00:00Z'},Date.now(),false,sha,true);
+  await state.put('status_context',other+':build',{context:'build',state:'FAILURE',startedAt:'2026-10-30T21:00:00Z'},Date.now(),false,other,true);
+  let reads=0,writes=0;state.store=intercept(f.store,sql=>{reads++;if(!/^SELECT\b/.test(sql))writes++;});
+  f.env.INSTALLATIONS=new Proxy({},{get(){throw Error('Public survey called GitHub');}});
+  const q={repository:repo.name,operation:'survey',args:{roadmap:'auto',stages:'rebase,review'}};
+  const result=await state.query(q,true);assert.equal(result.status,'ok');const row=result.data[0];
+  assert.equal(row.pr.statusCheckRollupCoverage,'webhook_observed');assert.deepEqual(row.pr.statusCheckRollup,[{context:'build',state:'SUCCESS',startedAt:'2026-10-30T20:00:00Z'}]);
+  assert.equal(row.review.issue_complete,false);assert.equal(row.review.review_complete,false);assert.equal(writes,0);
+  assert.ok(reads<25,'prefetched statuses must not add one remote SQL read per missing status collection: '+reads);
+  state.store=f.store;assert.equal(await state.complete({operation:'statuses',args:{sha}}),false);assert.equal(await state.rows({repository:repo.name,operation:'statuses',args:{sha}}),null);
+  await state.requestOpenCoverage();
+  const jobs=(await state.store.exec('SELECT key,lane,requested_at FROM jobs')).toArray();assert.equal(jobs.length,3);assert.ok(jobs.every(j=>j.lane==='requested' && j.requested_at>0));
+  await state.requestOpenCoverage();assert.equal((await state.store.exec('SELECT COUNT(*) n FROM jobs')).one().n,3);
+ }finally{await f.close();}
+});
