@@ -714,16 +714,16 @@ export class RepositoryState extends DurableObject<Env> {
     const scheduled=(await this.store.exec<any>('SELECT due FROM jobs WHERE key=?',key)).one().due;
     if (!alarm || alarm>scheduled) await this.setAlarm(Math.max(Date.now()+100,scheduled));
   }
-  async enqueueMany(input:{q:Query,priority:number,dirty?:boolean}[]):Promise<void> {
+  async enqueueMany(input:{q:Query,priority:number,dirty?:boolean}[],backfill=false):Promise<void> {
     input=input.filter(({q})=>q.operation!=='progress' && !NOT_MIRRORED.has(q.operation));
     if(!input.length)return;
-    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.enqueueMany.call(state,input));
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.enqueueMany.call(state,input,backfill));
     const readBatch=this.store.backend==='sqlite'?80:256,writeBatch=this.store.backend==='sqlite'?10:200,metricBatch=this.store.backend==='sqlite'?20:200;
     const entries=new Map<string,{q:Query,priority:number,dirty?:boolean}>();
     for(const item of input){const key=queryKey(item.q),prior=entries.get(key);entries.set(key,{...item,dirty:prior?.dirty || item.dirty});}
     if(entries.size>512){
       const unique=[...entries.values()];
-      for(let offset=0;offset<unique.length;offset+=512)await this.enqueueMany(unique.slice(offset,offset+512));
+      for(let offset=0;offset<unique.length;offset+=512)await this.enqueueMany(unique.slice(offset,offset+512),backfill);
       return;
     }
     const jobs=new Map<string,any>(),demands=new Map<string,any>(),collections=new Set<string>();
@@ -757,8 +757,12 @@ export class RepositoryState extends DurableObject<Env> {
       const comment=q.operation==='reactions'?comments.get(String(q.args?.id)):null;
       const ns=q.args?.number?[String(q.args.number)]:q.args?.sha?heads.get(String(q.args.sha)) || []:comment?.parent?[comment.parent]:[];
       const dormant=!demanded && (comment?.tombstone || ns.length>0 && ns.every(n=>states.get(n)?.state && states.get(n).state!=='OPEN'));
-      const lane=demanded && !collections.has(key)?'requested':dirty || prior?.dirty || priority<=5 || q.operation.endsWith('_delta')?'active':q.operation.startsWith('recent_') || dormant?'archive':'verification';
-      values.push([key,JSON.stringify({...q,allow_observed:undefined}),priority,now,Number(dirty),Number(dirty),lane,lane==='requested'?(prior?.requested_at || now):prior?.requested_at || null,now]);
+      if(backfill && (collections.has(key) || dormant))continue;
+      const lane=(demanded || backfill) && !collections.has(key)?'requested':dirty || prior?.dirty || priority<=5 || q.operation.endsWith('_delta')?'active':q.operation.startsWith('recent_') || dormant?'archive':'verification';
+      // Maintenance shares the requested lane without fabricating a user read.
+      // NULL sorts behind real demand and stays out of user latency metrics.
+      const requested=prior?.requested_at || (backfill && !demanded?null:now);
+      values.push([key,JSON.stringify({...q,allow_observed:undefined}),priority,now,Number(dirty),Number(dirty),lane,lane==='requested'?requested:prior?.requested_at || null,now]);
       if(!prior)metrics.push([now,'arrival',lane,q.operation,1]);
       scheduled=Math.min(scheduled,!prior?now:dirty && !prior.wait_reason && !prior.attempt?Math.min(prior.due,now):prior.due);
     }
@@ -1185,23 +1189,24 @@ export class RepositoryState extends DurableObject<Env> {
     return job;
   }
   async requestOpenCoverage():Promise<void> {
-    if(this.readOnlyQuery || this.degraded || this.repairsHeld())return;
-    if(!this.store.transactional)return this.atomic(state=>state.requestOpenCoverage());
+    if(this.readOnlyQuery || this.degraded || this.repairsHeld() || this.schema!=='current')return;
     // Public discovery never creates demand. The existing maintenance owner
     // independently backfills bounded missing coverage for current open heads.
     // Already requested jobs leave this selection, so each tick advances it.
-    const inventory=`SELECT s.number,s.data FROM members m JOIN survey_inventory s ON s.number=m.id JOIN resources r ON r.kind='pr' AND r.id=m.id WHERE m.collection=? AND r.tombstone=0 AND json_extract(s.data,'$.state')='OPEN'`;
+    const join=collectionJoin(this.store);
+    const inventory=`SELECT s.number,s.data FROM members m ${join} survey_inventory s ON s.number=m.id ${join} resources r ON r.kind='pr' AND r.id=m.id WHERE m.collection=? AND r.tombstone=0 AND json_extract(s.data,'$.state')='OPEN'`;
     const candidates=`WITH live AS (${inventory}), wanted AS (`+
-      `SELECT number,'statuses' operation,'statuses:{"sha":"'||json_extract(data,'$.headRefOid')||'"}' key,json_extract(data,'$.headRefOid') head FROM live WHERE json_extract(data,'$.headRefOid') IS NOT NULL UNION ALL `+
+      `SELECT number,'statuses' operation,'statuses:{"sha":"'||json_extract(data,'$.headRefOid')||'"}' AS key,json_extract(data,'$.headRefOid') head FROM live WHERE json_extract(data,'$.headRefOid') IS NOT NULL UNION ALL `+
       `SELECT number,'issue_comments','issue_comments:{"number":'||number||'}',NULL FROM live UNION ALL `+
       `SELECT number,'review_comments','review_comments:{"number":'||number||'}',NULL FROM live) `+
       `SELECT w.* FROM wanted w LEFT JOIN collections c ON c.key=w.key AND c.complete=1 LEFT JOIN jobs j ON j.key=w.key WHERE c.key IS NULL AND (j.key IS NULL OR j.lane!='requested') ORDER BY CAST(w.number AS INTEGER) DESC,w.operation LIMIT 64`;
     const missing=(await this.store.exec<any>(candidates,queryKey({operation:'open_prs'}))).toArray();
     if(!missing.length)return;
-    const now=Date.now(),repo=(await this.meta('repository'))?.name;
+    const repo=(await this.meta('repository'))?.name;
     if(!repo)return;
-    await this.store.exec('INSERT INTO demand(key,at) VALUES '+missing.map(()=>'(?,?)').join(',')+' ON CONFLICT(key) DO UPDATE SET at=excluded.at',...missing.flatMap(row=>[row.key,now]));
-    await this.enqueueMany(missing.map(row=>{const args:Record<string,string|number>=row.operation==='statuses'?{sha:row.head}:{number:decimalArgument(row.number)};return {q:{repository:repo,operation:row.operation,args},priority:5};}));
+    // Scan outside the writer transaction. enqueueMany rechecks completion,
+    // demand and job state atomically before promoting the bounded selection.
+    await this.enqueueMany(missing.map(row=>{const args:Record<string,string|number>=row.operation==='statuses'?{sha:row.head}:{number:decimalArgument(row.number)};return {q:{repository:repo,operation:row.operation,args},priority:5};}),true);
   }
   async dormant(q:Query): Promise<boolean> {
     const demand=(await this.store.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q))).toArray()[0];

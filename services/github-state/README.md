@@ -140,7 +140,10 @@ for current open PRs into the requested lane per turn. Already requested work is
 excluded so successive turns advance through the inventory. Existing attempts,
 pagination, leases, and retry deadlines are retained. Within the requested lane,
 three turns out of four prefer newer demand and one retains oldest-due ordering;
-the existing weighted shares between lanes remain unchanged. Expiry and coverage
+maintenance work sorts behind real reads without creating demand records or user
+latency samples. Its completion retains ordinary refresh intervals. The candidate
+scan runs outside the writer transaction; promotion rechecks current state atomically.
+The existing weighted shares between lanes remain unchanged. Expiry and coverage
 preparation precede the launch window rather than consuming it before jobs start.
 
 Compact surveys immediately include exact-head commit statuses received by webhook,

@@ -631,7 +631,36 @@ test('maintenance promotes bounded missing open-head coverage and preserves retr
   await state.requestOpenCoverage();
   assert.equal((await db.prepare("SELECT COUNT(*) n FROM jobs WHERE lane='requested'").get()).n,87,'next turn advances beyond already requested work');
   await state.requestOpenCoverage();assert.equal((await db.prepare('SELECT COUNT(*) n FROM jobs').get()).n,87,'promotion is idempotent');
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM demand').get()).n,0,'maintenance never fabricates recent reads');
+  assert.ok(first.every(r=>r.requested_at===null),'backfill has no user-request timestamp');
+  const atomic=state.atomic;state.atomic=async()=>{throw Error('empty backfill took writer lock');};
+  await state.requestOpenCoverage();state.atomic=atomic;
   const before=await db.prepare('SELECT COUNT(*) n FROM demand').get();state.readOnlyQuery=true;await state.requestOpenCoverage();assert.equal((await db.prepare('SELECT COUNT(*) n FROM demand').get()).n,before.n);
+ }finally{await db.close();}
+});
+
+test('maintenance coverage yields to real reads without hot refreshes or synthetic latency',async()=>{
+ const {state,db,insert}=await fixture();try{
+  await state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
+  const now=Date.now(),sha='c'.repeat(40);
+  await state.put('pr','7',{number:7,state:'OPEN',headRefOid:sha,isDraft:false,labels:[]});await state.membership('open_prs:{}','7',true);
+  const old=await insert('files',98,5,now-10000),real=await insert('files',99,5,now-1000);
+  await db.prepare("UPDATE jobs SET lane='requested',requested_at=? WHERE key=?").run(now-10000,old.operation+':'+JSON.stringify(old.args));
+  await state.noteDemand(real);
+  await state.requestOpenCoverage();await state.setMeta('requested_turn',1);
+  assert.equal((await state.nextJob()).key,real.operation+':'+JSON.stringify(real.args),'later maintenance never outranks a real read');
+  const promoted={repository:'org/repo',operation:'review_comments',args:{number:7}},key=promoted.operation+':'+JSON.stringify(promoted.args);
+  await db.prepare('UPDATE jobs SET requested_at=? WHERE key=?').run(now-1,real.operation+':'+JSON.stringify(real.args));
+  await state.noteDemand(promoted);await state.setMeta('requested_turn',2);
+  assert.equal((await state.nextJob()).key,key,'a real read upgrades maintenance work immediately');
+  const q={repository:'org/repo',operation:'statuses',args:{sha}},statusKey=q.operation+':'+JSON.stringify(q.args);
+  const job=await db.prepare('SELECT * FROM jobs WHERE key=?').get(statusKey),metrics=[];
+  state.metric=async event=>metrics.push(event);
+  await state.finishJob(job,q);
+  assert.deepEqual(metrics,['completion'],'maintenance does not pollute requested latency metrics');
+  assert.ok((await db.prepare('SELECT due FROM jobs WHERE key=?').get(statusKey)).due>=now+3600000,'completion keeps the ordinary refresh interval');
+  state.schema='migration_pending';const store=state.store;state.store=new Proxy(store,{get(){throw Error('unusable schema touched');}});
+  await state.requestOpenCoverage();state.store=store;
  }finally{await db.close();}
 });
 

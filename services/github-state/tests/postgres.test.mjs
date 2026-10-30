@@ -650,7 +650,7 @@ pg('public survey uses webhook build evidence before complete status hydration w
   assert.ok(reads<25,'prefetched statuses must not add one remote SQL read per missing status collection: '+reads);
   state.store=f.store;assert.equal(await state.complete({operation:'statuses',args:{sha}}),false);assert.equal(await state.rows({repository:repo.name,operation:'statuses',args:{sha}}),null);
   await state.requestOpenCoverage();
-  const jobs=(await state.store.exec('SELECT key,lane,requested_at FROM jobs')).toArray();assert.equal(jobs.length,3);assert.ok(jobs.every(j=>j.lane==='requested' && j.requested_at>0));
+  const jobs=(await state.store.exec('SELECT key,lane,requested_at FROM jobs')).toArray();assert.equal(jobs.length,3);assert.ok(jobs.every(j=>j.lane==='requested' && j.requested_at===null));
   await state.requestOpenCoverage();assert.equal((await state.store.exec('SELECT COUNT(*) n FROM jobs')).one().n,3);
  }finally{await f.close();}
 });
