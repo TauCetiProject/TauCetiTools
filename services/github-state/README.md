@@ -181,6 +181,28 @@ cleanup use bulk statements with the existing generation and key/token checks.
 Writer logs distinguish demand, ingress, repair, publication and other callers
 using bounded purpose names, without recording queries or payloads.
 
+Full upstream batches retain their existing sizes. Small, independent page-one
+issue-comment, status and reaction histories publish in transactions bounded by
+two members, 256 KiB of prepared data and 128 rows. Partially filled chunks run
+immediately; oversized, paginated and coupled thread results use the individual
+path. Preparation and staging remain outside the writer. Each member has its
+own consumable input/cache, sharing transaction revisions and the change journal.
+Leases are checked under the writer; a newer webhook generation can still publish
+safely and leave its new repair due. Committed publication and deferral/routing
+bookkeeping release only their own key/token leases atomically.
+
+A confirmed healthy member-data rollback permits one individual replay from
+fresh input. Fences, backend failures and uncertain commits use durable recovery;
+they do not trigger a replay loop or one connection attempt per remaining result.
+Only the attempted failed chunk receives normal retry bookkeeping. Untouched
+members retain their attempts and deadlines, and cleanup failure retains ordinary
+lease-expiry recovery. Completion metrics merge after commit; an uncertain commit
+can undercount them, so fixed durable coverage remains the acceptance evidence.
+Compatible quota/routing/retry bookkeeping also uses bounded bulk statements,
+preserving per-member deadlines, attempt increments and wait reasons. This changes
+transaction cost, not the quota owner's decisions. See
+[publication measurements](PUBLICATION-PERFORMANCE.md).
+
 Compact surveys immediately include exact-head commit statuses received by webhook,
 even before the first full status collection is hydrated. The per-PR
 `statusCheckRollupCoverage` field distinguishes `webhook_observed`, `complete`, and

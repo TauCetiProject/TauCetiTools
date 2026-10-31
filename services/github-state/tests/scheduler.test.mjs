@@ -205,7 +205,8 @@ test('one bad batched history does not turn a completed sibling into a retry',as
   await state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
   env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json({results:[{data:[],api:'graphql'},{data:[],api:'graphql'}]})})};
   for(const number of [7,8]) await state.enqueue({repository:'org/repo',operation:'issue_comments',args:{number}});
-  const original=state.refresh.bind(state);state.refresh=async(job,result)=>{if(JSON.parse(job.query).args.number===8)throw new Error('staging page missing');return original(job,result);};
+  const original=env.ARCHIVE.put.bind(env.ARCHIVE),prefix='staging/100/'+encodeURIComponent('issue_comments:{"number":8}')+'/';
+  env.ARCHIVE.put=async(key,...args)=>{if(key.startsWith(prefix))throw Error('staging page missing');return original(key,...args);};
   await state.dispatch((await state.claim((await state.nextJob()))));
   const done=(await db.prepare('SELECT * FROM jobs WHERE key=?').get('issue_comments:{"number":7}'));
   assert.equal(done.attempt,0);assert.equal(done.wait_reason,null);assert.ok(done.due>Date.now()+10000);
@@ -347,13 +348,15 @@ test('head-change webhooks refresh immutable file lists without resetting a quot
 });
 
 test('REST exhaustion repairs a flat review history through its existing GraphQL thread dependency',async()=>{
- const {state,db}=(await fixture());
+ const {state,db,env}=(await fixture());
  try {
   await state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
   const q={repository:'org/repo',operation:'review_comments',args:{number:7}},key='review_comments:{"number":7}';
   await state.noteDemand(q);await state.enqueue(q,5);
   const parent=(await state.claim((await state.nextJob()))),reset=Date.now()+3600000;
-  await state.refresh(parent,{deferred:true,category:'primary:core',retry_at:reset});
+  env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json({deferred:true,category:'primary:core',retry_at:reset})})};
+  await state.dispatch(parent);
+  assert.equal((await db.prepare('SELECT lease_id FROM jobs WHERE key=?').get(key)).lease_id,null,'normal dispatch releases the deferred owner before its dependency completes');
   assert.equal((await db.prepare('SELECT due FROM jobs WHERE key=?').get(key)).due,reset);
   const sourceKey='review_threads:{"number":7}',source=(await db.prepare('SELECT * FROM jobs WHERE key=?').get(sourceKey));
   assert.equal(source.lane,'requested');
