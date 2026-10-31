@@ -22,10 +22,16 @@ test('an interrupted publication cannot acknowledge or expose an overlapping SQL
   const pending=stub.fetch('https://internal/test-publication');await ready;
   let acknowledged=false;
   const event=send(stub,'/event',{repository:repository.name,event:'issue_comment',delivery:'concurrent-event',key:'fixture/concurrent-event',received:Date.now()}).then(response=>{acknowledged=true;return response;});
-  const read=stub.fetch('https://internal/changes');
+  // Consume this independent snapshot when it arrives, rather than retaining
+  // a live proxy Response across the other overlapping RPCs. The assertion
+  // still examines the read initiated while the publication is uncommitted.
+  const read=stub.fetch('https://internal/changes').then(async response=>{
+   assert.equal(response.status,200);return response.json();
+  });
+  read.catch(()=>{});
   await new Promise(r=>setTimeout(r,30));assert.equal(acknowledged,false,'event must wait for the active writer');
   release();assert.equal((await pending).status,409);assert.equal((await event).status,200);
-  const during=await (await read).json();assert.equal(during.changes.some(row=>row.id==='partial'),false,'read cannot see an uncommitted revision');
+  const during=await read;assert.equal(during.changes.some(row=>row.id==='partial'),false,'read cannot see an uncommitted revision');
   const after=await (await stub.fetch('https://internal/changes')).json();
   assert.equal(after.changes.some(row=>row.id==='partial'),false);assert.ok(after.changes.some(row=>row.id==='retained'));
   const before=after.revision;
