@@ -1874,14 +1874,19 @@ export class RepositoryState extends DurableObject<Env> {
     if(this.storageFlight)return this.storageFlight;
     this.owner.activeOperations++;
     this.traceRepair('storage_prepare');
-    const flight=this.prepareStorage(runExpiry);this.storageFlight=flight;
+    const flight=(async()=>{
+      await this.prepareStorage(runExpiry);
+      // PostgreSQL cleanup and derived caches share this existing background
+      // owner. Slow optional work must not hold the next repair turn.
+      if(this.store.backend==='postgres' && !this.repairsHeld() && !this.mutationState.blocked)await this.maintenance();
+    })();this.storageFlight=flight;
     try {await flight;this.traceRepair('storage_prepared');}finally {this.owner.activeOperations--;if(this.storageFlight===flight)this.storageFlight=undefined;}
   }
   get maintenanceArchive():R2Bucket {return timedBucket(this.env.ARCHIVE,this.owner.maintenanceIOScope);}
   get transactionArchive():R2Bucket {return timedBucket(this.env.ARCHIVE,this.owner.transactionIOScope);}
   startStorageMaintenance():void {
     if(this.migrationHeld() || this.mutationState.blocked)return;
-    const task=this.storageMaintenance(false).catch(error=>this.noteFailure('storage_maintenance',error));
+    const task=this.storageMaintenance(this.store.backend==='postgres').catch(error=>this.noteFailure('storage_maintenance',error));
     if(this.ctx.waitUntil)this.ctx.waitUntil(task);
   }
   async loadRetentionState():Promise<void> {
@@ -2444,14 +2449,15 @@ export class RepositoryState extends DurableObject<Env> {
       },
       maintenance:async(external,phase)=>{
         if(external && phase==='before'){
-          owner.traceRepair('expire');await owner.expire();owner.traceRepair('select_jobs');
+          if(owner.store.backend==='sqlite'){owner.traceRepair('expire');await owner.expire();}
+          owner.traceRepair('select_jobs');
           if(owner.schema!=='current' && !owner.degraded)owner.startup();
         }
         if(phase==='before' || !external)try{await owner.requestOpenCoverage();}catch(error){owner.noteFailure('open_coverage',error);}
         if(phase==='after'){
           owner.traceRepair('maintenance');
           if(owner.quotaRestriction && !owner.migrationHeld())try{await owner.retireQuotaObsolete();}catch(error){owner.noteFailure('quota_local_retirement',error);}
-          try{if(!owner.migrationHeld())await owner.maintenance();}catch(error){owner.noteFailure('maintenance',error);}
+          try{if(owner.store.backend==='sqlite' && !owner.migrationHeld())await owner.maintenance();}catch(error){owner.noteFailure('maintenance',error);}
           if(external){owner.traceRepair('storage_maintenance');owner.startStorageMaintenance();owner.traceRepair('alarm_complete');}
         }
       },
@@ -3429,7 +3435,7 @@ export class RepositoryState extends DurableObject<Env> {
         // Cron reaches a full object even if its alarm cannot be rescheduled.
         if(this.store.backend==='postgres')this.startStorageMaintenance();
         if(this.store.backend==='sqlite')await this.storageMarker();
-        await this.expire();
+        if(this.store.backend==='sqlite')await this.expire();
         if(this.degraded && this.store.backend==='sqlite')await this.recoverHeadroom();
         if (!(await this.meta('repository'))) {
           if(this.store.backend==='postgres')return json({ok:false,reason:'repository_unconfigured'},409);

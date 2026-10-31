@@ -72,6 +72,12 @@ Ingestion health separates writer wait (total and maximum milliseconds per
 event type/minute) from application-through-cleanup time. A growing writer wait
 means that increasing delivery concurrency alone will not resolve the delay.
 
+PostgreSQL expiry and survey cache rebuilding run in the existing coalesced
+storage-maintenance task. Cron and repair selection do not wait for that optional
+housekeeping. Stored reads can derive dirty survey projections from current
+fragments while the background cache catches up. SQLite retains its foreground
+expiry path for local storage recovery.
+
 Snapshots paginate at 500 rows or approximately 1.49 MB per page. Continuation
 pages are written to private R2 (at most four uploads at a time), never to
 SQLite; continuation reads individual pages rather than repeatedly decoding the
