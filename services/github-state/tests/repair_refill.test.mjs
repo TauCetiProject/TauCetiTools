@@ -51,6 +51,26 @@ test('real repair slots refill beyond sixteen launches while one group remains p
  }finally{gate.resolve();await drainRepairs(f.state);await f.close();}
 });
 
+test('migration freeze drains every complete group launched through a transaction scope',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
+ const f=await fixture(),gate=deferred();let freezing;try{
+  await seed(f,4);let started=0;const ready=deferred();
+  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>{
+   if(++started===4)ready.resolve();await gate.promise;return Response.json({api:'core',data:[]});
+  }})};
+  const scope=await f.state.atomic(state=>state);await scope.runAlarm();await ready.promise;
+  assert.equal(f.state.activeOperations,4);let frozen=false;
+  freezing=f.command('freeze').then(result=>{frozen=true;return result;});
+  for(let i=0;i<100&&!f.state.migrationState;i++)await new Promise(resolve=>setTimeout(resolve,1));
+  assert.equal(f.state.migrationState.phase,'freezing');await new Promise(resolve=>setTimeout(resolve,30));
+  assert.equal(frozen,false,'migration must see owner-level group lifetime, not an escaped scope counter');
+  assert.equal(f.state.activeOperations,4);
+  gate.resolve();const result=await bounded(freezing,'migration did not drain tracked groups');
+  assert.equal(result.status,200);assert.equal(result.body.phase,'exporting');
+  await drainRepairs(f.state);assert.equal(f.state.activeOperations,0);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs')).one().n,4,'interrupted repair obligations remain durable in the fenced source');
+ }finally{gate.resolve();if(freezing)await freezing;await drainRepairs(f.state);await f.close();}
+});
+
 test('one full publishing group does not pay an empty writer admission for every committed chunk',async()=>{
  const f=await fixture();try{
   await seed(f,100,'issue_comments');const tx=f.store.transaction.bind(f.store);let repairs=0,calls=0;
