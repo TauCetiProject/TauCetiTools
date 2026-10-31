@@ -183,5 +183,32 @@ else:
         self.assertNotIn("now=$(python3 gate/scripts/github_api.py", source)
 
 
+class ParsingContextWorkflowTests(unittest.TestCase):
+    def test_pr_restores_context_before_candidate_execution_and_never_saves_it(self):
+        text = WORKFLOW.read_text()
+        restore = text.index("      - name: Restore dot-notation parsing context")
+        lint = text.index("      - name: Dot-notation namespace lint")
+        build = text.index("      - name: Build exact candidate under bwrap")
+        self.assertLess(restore, lint)
+        self.assertLess(lint, build)
+        self.assertIn("hashFiles('gate/scripts/lean_source.py')", text[restore:lint])
+        self.assertIn("steps.pr.outputs.base_sha", text[restore:lint])
+        self.assertIn('--context-cache "$RUNNER_TEMP/dot-notation-context/context.json"',
+                      shell_for("Dot-notation namespace lint (Mathlib type namespaces stay at root)"))
+        self.assertNotIn("Save main's dot-notation", text)
+
+    def test_template_saves_context_only_from_the_default_branch(self):
+        text = (ROOT / "tauceti_tools/assets/project/.github/workflows/ci.yml").read_text()
+        start = text.index("      - name: Save main's dot-notation parsing context")
+        step = text[start:].split("\n      - name:", 1)[0]
+        self.assertIn("if: github.ref_name == github.event.repository.default_branch", step)
+        self.assertIn("uses: actions/cache/save@v4", step)
+        self.assertIn("continue-on-error: true", step)
+        self.assertLess(start, text.index("      - name: Build\n"))
+        self.assertLess(start, text.index("      - name: Environment lint"))
+        self.assertIn("hashFiles('scripts/lean_source.py')", step)
+        self.assertIn('--context-cache "$RUNNER_TEMP/dot-notation-context/context.json"', text)
+
+
 if __name__ == "__main__":
     unittest.main()
