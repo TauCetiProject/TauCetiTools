@@ -1,0 +1,160 @@
+{
+  "run_id": 40116632015,
+  "attempt": 1,
+  "workflow_url": "https://github.com/TauCetiProject/TauCeti/actions/runs/40116632015",
+  "individual_job_url": "https://api.github.com/repos/TauCetiProject/TauCeti/actions/jobs/120942874104",
+  "jobs_response": {
+    "total_count": 4,
+    "jobs": [
+      {
+        "id": 120939154743,
+        "run_id": 40116632015,
+        "run_attempt": 1,
+        "name": "pick-runner / pick",
+        "head_sha": "eb22173ddd38e60edc173c0204932ff4e3e9e075",
+        "status": "completed",
+        "conclusion": "success",
+        "runner_name": "nsc-runner-grku6eidohgmu",
+        "labels": [
+          "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=0",
+          "namespace-features:github.run-id=40116632015"
+        ]
+      },
+      {
+        "id": 120939215707,
+        "run_id": 40116632015,
+        "run_attempt": 1,
+        "name": "sandboxed-build",
+        "head_sha": "eb22173ddd38e60edc173c0204932ff4e3e9e075",
+        "status": "completed",
+        "conclusion": "success",
+        "runner_name": "fleet-11e2756fc110-d34d562a2917a6c0",
+        "labels": [
+          "fleet-11e2756fc11042d798f759410573a935",
+          "fleet-instance-d34d562a2917a6c0",
+          "linux",
+          "self-hosted",
+          "tauceti-fleet-staging",
+          "x64"
+        ]
+      },
+      {
+        "id": 120942874104,
+        "run_id": 40116632015,
+        "run_attempt": 1,
+        "name": "publish-merge-group-cache / publish",
+        "head_sha": "eb22173ddd38e60edc173c0204932ff4e3e9e075",
+        "status": "completed",
+        "conclusion": "success",
+        "runner_name": "nsc-runner-3hpu1qd59k8je",
+        "labels": [
+          "nscloud-ubuntu-24.04-amd64-4x8-with-features;job.priority=0",
+          "namespace-features:github.run-id=40116632015"
+        ],
+        "steps": []
+      },
+      {
+        "id": 120942874131,
+        "run_id": 40116632015,
+        "run_attempt": 1,
+        "name": "finalize-merge-group-build",
+        "head_sha": "eb22173ddd38e60edc173c0204932ff4e3e9e075",
+        "status": "completed",
+        "conclusion": "failure",
+        "runner_name": "nsc-runner-74fe9hacugnja",
+        "labels": [
+          "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=0",
+          "namespace-features:github.run-id=40116632015"
+        ]
+      }
+    ]
+  },
+  "job_response": {
+    "id": 120942874104,
+    "run_id": 40116632015,
+    "run_attempt": 1,
+    "name": "publish-merge-group-cache / publish",
+    "head_sha": "eb22173ddd38e60edc173c0204932ff4e3e9e075",
+    "status": "completed",
+    "conclusion": "success",
+    "runner_name": "nsc-runner-3hpu1qd59k8je",
+    "labels": [
+      "nscloud-ubuntu-24.04-amd64-4x8-with-features;job.priority=0",
+      "namespace-features:github.run-id=40116632015"
+    ],
+    "steps": [
+      {
+        "name": "Set up job",
+        "conclusion": "success"
+      },
+      {
+        "name": "Set up runner",
+        "conclusion": "success"
+      },
+      {
+        "name": "Check publisher isolation before receiving staged data",
+        "conclusion": "success"
+      },
+      {
+        "name": "Check out the immutable toolchain pin",
+        "conclusion": "success"
+      },
+      {
+        "name": "Check out workflow-pinned publication planning tools",
+        "conclusion": "success"
+      },
+      {
+        "name": "Prepare pinned shared tools",
+        "conclusion": "success"
+      },
+      {
+        "name": "Download the staged oleans",
+        "conclusion": "success"
+      },
+      {
+        "name": "Install elan (pinned + checksum) and the pinned toolchain",
+        "conclusion": "success"
+      },
+      {
+        "name": "Validate staged data and verify inherited objects without credentials",
+        "conclusion": "success"
+      },
+      {
+        "name": "Publish the staged Lake cache",
+        "conclusion": "success"
+      },
+      {
+        "name": "Confirm the exact revision map on the public endpoint",
+        "conclusion": "success"
+      },
+      {
+        "name": "Report whether publication was confirmed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Observe publication volume (statistics only)",
+        "conclusion": "success"
+      },
+      {
+        "name": "Upload publication observations",
+        "conclusion": "success"
+      },
+      {
+        "name": "Post Prepare pinned shared tools",
+        "conclusion": "success"
+      },
+      {
+        "name": "Post Check out workflow-pinned publication planning tools",
+        "conclusion": "success"
+      },
+      {
+        "name": "Post Check out the immutable toolchain pin",
+        "conclusion": "success"
+      },
+      {
+        "name": "Complete job",
+        "conclusion": "success"
+      }
+    ]
+  }
+}
