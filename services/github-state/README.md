@@ -183,13 +183,23 @@ using bounded purpose names, without recording queries or payloads.
 
 Full upstream batches retain their existing sizes. Small, independent page-one
 issue-comment, status and reaction histories publish in transactions bounded by
-two members, 256 KiB of prepared data and 128 rows. Partially filled chunks run
+eight members, 256 KiB of prepared data and 128 rows. Partially filled chunks run
 immediately; oversized, paginated and coupled thread results use the individual
 path. Preparation and staging remain outside the writer. Each member has its
 own consumable input/cache, sharing transaction revisions and the change journal.
 Leases are checked under the writer; a newer webhook generation can still publish
 safely and leave its new repair due. Committed publication and deferral/routing
 bookkeeping release only their own key/token leases atomically.
+
+If non-publication work is actually queued on the writer, publication ends at
+the next whole-history boundary and immediately queues the prepared remainder
+through the existing FIFO lane. Each admission publishes at least one owned
+member when one remains, skipping stale leases without an empty intermediate
+commit. This changes chunk size without a wait, admission gate or queue reorder.
+The protected `grouped_publication` health counters record committed admissions,
+members, maximum members and queued-work yields since instance startup. They
+are best-effort diagnostics, include refreshes of complete histories and can
+undercount uncertain commits; they are not a missing-history drainage ledger.
 
 A confirmed healthy member-data rollback permits one individual replay from
 fresh input. Fences, backend failures and uncertain commits use durable recovery;

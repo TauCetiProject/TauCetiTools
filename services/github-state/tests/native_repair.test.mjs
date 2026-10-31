@@ -123,6 +123,38 @@ for(const failure of ['backend','unclassified'])test('native Workers SQLite reta
  }`});
  try{
   const ns=await mf.getDurableObjectNamespace('REPOSITORIES'),stub=ns.get(ns.idFromName(repository.id));await send(stub,'/configure',{repository:repository.name});
-  const response=await send(stub,'/fixture/failed-turn',{});assert.equal(response.status,200);assert.deepEqual(await response.json(),{requests:1,alarms:1,attempts:failure==='backend'?100:2,leases:0});
+  const response=await send(stub,'/fixture/failed-turn',{});assert.equal(response.status,200);assert.deepEqual(await response.json(),{requests:1,alarms:1,attempts:failure==='backend'?100:8,leases:0});
+ }finally{await mf.dispose();}
+});
+
+test('native Workers SQLite commits a whole history before queued ingestion and resumes the remainder',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
+ const mf=await runtime(async()=>Response.json([]),{},{repositoryAlarms:false,repositoryExtension:`async fetch(req){
+  if(new URL(req.url).pathname==='/fixture/yield-publication'){
+   await this.store.exec('DELETE FROM jobs');
+   await this.enqueueMany([100,101,102,103].map(number=>({q:{repository:'org/repo',operation:'issue_comments',args:{number}},priority:5})),true);
+   const base=this.store;let queued=false,pending,visibility;
+   const wrap=target=>new Proxy(target,{get(target,prop){
+    if(prop==='transaction')return(apply,purpose)=>target.transaction(tx=>apply(wrap(tx)),purpose);
+    if(prop==='exec')return async(sql,...args)=>{
+     if(!queued&&sql.includes('INTO collections')&&args.includes('issue_comments:{"number":100}')){
+      queued=true;pending=base.transaction(async store=>{
+       const rows=(await store.exec("SELECT key,complete FROM collections WHERE operation='issue_comments'")).toArray(),map=new Map(rows.map(x=>[x.key,x.complete]));
+       visibility=[map.get('issue_comments:{"number":100}')||0,map.get('issue_comments:{"number":101}')||0];
+       await store.exec('INSERT INTO demand VALUES(?,?)','fixture-ingress',Date.now());
+      },'ingest');pending.catch(()=>{});
+     }
+     return target.exec(sql,...args);
+    };
+    const value=Reflect.get(target,prop,target);return typeof value==='function'?value.bind(target):value;
+   }});this.store=wrap(base);
+   this.env={...this.env,INSTALLATIONS:{idFromName:id=>id,get:()=>({fetch:async(_url,init)=>Response.json({results:JSON.parse(init.body).jobs.map(()=>({api:'graphql',data:[]}))})})}};
+   await this.dispatch(await this.claim(await this.nextJob()));await pending;
+   return Response.json({queued,visibility,complete:(await this.store.exec("SELECT COUNT(*) n FROM collections WHERE operation='issue_comments' AND complete=1")).one().n,waiting:base.queuedOtherWork,yielded:this.groupedPublication.queued_work_yields>0});
+  }
+  return super.fetch(req);
+ }`});
+ try{
+  const ns=await mf.getDurableObjectNamespace('REPOSITORIES'),stub=ns.get(ns.idFromName(repository.id));await send(stub,'/configure',{repository:repository.name});
+  const response=await send(stub,'/fixture/yield-publication',{});assert.equal(response.status,200);assert.deepEqual(await response.json(),{queued:true,visibility:[1,0],complete:4,waiting:0,yielded:true});
  }finally{await mf.dispose();}
 });

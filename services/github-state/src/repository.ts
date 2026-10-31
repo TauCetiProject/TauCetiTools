@@ -21,7 +21,7 @@ type IngestRepair={q:Query,priority:number,dirty?:boolean,dirtyIfMissing?:boolea
 const INGEST_EVENT_TYPES=new Set(['pull_request','issues','issue_comment','pull_request_review_comment','pull_request_review','pull_request_review_thread','status','push','create','delete','repository','label','milestone','merge_group']);
 interface RepairWait {job:any;due:number;attempts:number;reason:string;event:string;failure?:{category:string,request_id?:string}}
 interface PreparedRefresh {job:any;q:Query;repo:any;started:number;response:Response|null;result:any;preparedNext?:string;staged?:{key:string,expires:number};objects:Map<string,string>;encodings:Map<string,string>}
-const PUBLICATION_ITEMS=2,PUBLICATION_BYTES=256*1024,PUBLICATION_ROWS=128;
+const PUBLICATION_ITEMS=8,PUBLICATION_BYTES=256*1024,PUBLICATION_ROWS=128;
 class LeaseLost extends Error {}
 // Retain the attempted chunk and original error. Adapter-classified backend
 // failures keep group recovery; an unclassified chunk error affects only it.
@@ -81,6 +81,7 @@ export class RepositoryState extends DurableObject<Env> {
   private optionalWork={active:0};
   private demandMemo=new Map<string,number>();
   private ingestStats=new Map<string,{minute:number,deliveries:number,sql_round_trips:number,sql_samples:number,apply_through_cleanup_ms:number,apply_max_ms:number}>();
+  private groupedPublication={scope:'repository_instance_since_restart',since:Date.now(),admissions:0,members:0,queued_work_yields:0,max_members:0};
   private readDemands={pending:new Map<string,Query>(),active:new Map<string,{complete?:boolean}>(),flight:undefined as Promise<void>|undefined};
   sql:SqlStorage;
   store:RepositoryStore;
@@ -1448,7 +1449,7 @@ export class RepositoryState extends DurableObject<Env> {
       for(const p of input) {
         // Let queued non-publication callers reach the writer at a whole-history
         // boundary. Always consume one member, then immediately requeue the rest.
-        if(grouped && consumed>0 && (base.queuedOtherWork || 0)>0)break;
+        if(grouped && committed.length>0 && (base.queuedOtherWork || 0)>0)break;
         consumed++;
         attempted?.push(p.job);
         if(grouped && p.job.lease_id && leaseRows.get(p.job.key)?.lease_id!==p.job.lease_id)continue;
@@ -1477,6 +1478,10 @@ export class RepositoryState extends DurableObject<Env> {
       await this.releaseLeases(parent.store,committed.map(p=>p.job));
     },'publication');
     for(const p of input.slice(0,consumed))this.dispatchSettled?.add(p.job.key);
+    if(grouped)try{
+      const stats=this.owner.groupedPublication ||= {scope:'repository_instance_since_restart',since:Date.now(),admissions:0,members:0,queued_work_yields:0,max_members:0};
+      stats.admissions++;stats.members+=committed.length;stats.queued_work_yields+=Number(consumed<input.length);stats.max_members=Math.max(stats.max_members,committed.length);
+    }catch{}
     try{this.repairMetrics.merge(metrics);}catch{}
     for(const p of committed){p.objects.clear();p.encodings.clear();p.result.data=undefined;this.traceRepair('refresh_committed',p.job);}
     return input.slice(consumed);
@@ -3080,12 +3085,12 @@ export class RepositoryState extends DurableObject<Env> {
       }
       if (path==='/health' && this.store.backend==='postgres') {
         const monitoring=await this.preparedObservation(),storage=monitoring.storage || {backend:'postgres',schema_version:null,expected_schema_version:1,expected_generation:this.backendGeneration(),connected:null,stale:true};
-        return json({...this.diagnostics,ingestion:[...this.owner.ingestStats].map(([event_type,row])=>({event_type,...row})),reconciliation_version:2,revision:this.revisionState.value ?? this.diagnostics.revision ?? null,repository:this.repositoryMemo ?? this.diagnostics.repository ?? null,storage,monitoring,request_id,deployment_id:this.env.CF_VERSION?.id,diagnostics_at:this.diagnosticsAt || null,diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
+        return json({...this.diagnostics,grouped_publication:this.owner.groupedPublication,ingestion:[...this.owner.ingestStats].map(([event_type,row])=>({event_type,...row})),reconciliation_version:2,revision:this.revisionState.value ?? this.diagnostics.revision ?? null,repository:this.repositoryMemo ?? this.diagnostics.repository ?? null,storage,monitoring,request_id,deployment_id:this.env.CF_VERSION?.id,diagnostics_at:this.diagnosticsAt || null,diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
       }
       if (path==='/health') {
         const storage={...await this.storageState(),backend:'sqlite',schema_version:SCHEMA_VERSION};
         if(typeof this.schema==='object' || storage.connected===false)return json({storage,deployment_id:this.env.CF_VERSION?.id,monitoring:await this.preparedObservation(),request_id});
-        return json({...this.diagnostics,reconciliation_version:2,settings:settings(this.env),...this.repairMetrics.summary(),queries:[...this.queryCounts.values()],query_metrics_scope:'repository_instance_since_restart',repair_metrics_scope:'repository_instance_since_restart',storage,storage_bytes:storage.database_size ?? (storage.capacity as any)?.database_bytes,
+        return json({...this.diagnostics,grouped_publication:this.owner.groupedPublication,reconciliation_version:2,settings:settings(this.env),...this.repairMetrics.summary(),queries:[...this.queryCounts.values()],query_metrics_scope:'repository_instance_since_restart',repair_metrics_scope:'repository_instance_since_restart',storage,storage_bytes:storage.database_size ?? (storage.capacity as any)?.database_bytes,
           repository:await this.meta('repository'),revision:await this.revision(),bootstrap_inventory:await this.meta('bootstrap_inventory'),latest_applied_input:await this.meta('latest_applied_input'),
           deployment_id:this.env.CF_VERSION?.id,monitoring:await this.preparedObservation(),diagnostics_at:this.diagnosticsAt || null,diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
       }

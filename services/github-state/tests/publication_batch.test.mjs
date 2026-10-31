@@ -28,7 +28,7 @@ test('small histories share publication transactions and retain complete upstrea
  const f=await fixture();try{
   const qs=await seed(f),calls=upstream(f);let publications=0;
   const atomic=f.state.atomic;f.state.atomic=function(apply,purpose){if(purpose==='publication')publications++;return atomic.call(this,apply,purpose);};
-  await dispatch(f);assert.equal(calls(),1);assert.equal(publications,2);
+  await dispatch(f);assert.equal(calls(),1);assert.equal(publications,1);
   for(const q of qs){assert.equal(await f.state.complete(q),true);assert.equal((await f.state.rows(q))[0].body,'fetched');}
   assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE lease_id IS NOT NULL')).one().n,0);
   assert.equal(f.state.repairMetrics.summary().repair_hour.find(x=>x.event==='completion').n,4);
@@ -55,11 +55,11 @@ test('rolled-back member SQL failure replays intact input and lets healthy sibli
 
 test('unknown publication commit does not replay or retry already committed members',async()=>{
  const f=await fixture();try{
-  await seed(f);const calls=upstream(f),transaction=f.store.transaction.bind(f.store);let injected=false;
+  await seed(f,16);const calls=upstream(f),transaction=f.store.transaction.bind(f.store);let injected=false;
   f.store.transaction=async(apply,purpose)=>{const result=await transaction(apply,purpose);if(purpose==='publication'&&!injected){injected=true;throw Error('commit outcome unknown');}return result;};
   await dispatch(f);assert.equal(calls(),1);assert.equal(injected,true);
-  for(const n of [100,101]){assert.equal(await f.state.complete(query(n)),true);const j=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key(n))).one();assert.equal(j.attempt,0);assert.equal(j.wait_reason,null);assert.ok(j.due>Date.now()+10000);}
-  for(const n of [102,103]){assert.equal(await f.state.complete(query(n)),false);const j=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key(n))).one();assert.equal(j.attempt,0);assert.equal(j.wait_reason,null);assert.equal(j.lease_id,null);}
+  for(let n=100;n<108;n++){assert.equal(await f.state.complete(query(n)),true);const j=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key(n))).one();assert.equal(j.attempt,0);assert.equal(j.wait_reason,null);assert.ok(j.due>Date.now()+10000);}
+  for(let n=108;n<116;n++){assert.equal(await f.state.complete(query(n)),false);const j=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key(n))).one();assert.equal(j.attempt,0);assert.equal(j.wait_reason,null);assert.equal(j.lease_id,null);}
  }finally{await f.close();}
 });
 
@@ -178,7 +178,8 @@ for(const unrelated of [false,true])test(`a failed batch is not fetched again or
   }});
   await f.state.runAlarm();assert.equal(calls,1,'the untouched tail must not be claimed/fetched repeatedly in the same quantum');
   const jobs=(await f.store.exec("SELECT * FROM jobs WHERE key LIKE 'issue_comments:%' ORDER BY key")).toArray();
-  assert.equal(jobs.length,100);for(const j of jobs){const n=JSON.parse(j.query).args.number;assert.equal(j.attempt,0);assert.equal(j.lease_id,null);if(n>=102)assert.ok(j.due<=Date.now());}
+  const completed=new Set((await f.store.exec("SELECT key FROM collections WHERE operation='issue_comments' AND complete=1")).toArray().map(x=>x.key));
+  assert.equal(jobs.length,100);for(const j of jobs){assert.equal(j.attempt,0);assert.equal(j.lease_id,null);if(!completed.has(j.key))assert.ok(j.due<=Date.now());}
   if(unrelated)assert.equal(await f.state.complete(other),true,'unrelated useful work still progresses');
   assert.ok(alarms.every(at=>at>Date.now()+10000),'failed tails must not drive a near-immediate alarm loop');
   assert.equal(alarms.length,1,'settled collections retain their ordinary future refresh alarm');
@@ -224,17 +225,18 @@ for(const outcome of ['rolled_back','uncertain_commit','cleanup_unavailable'])te
   if(outcome==='cleanup_unavailable')await assert.rejects(dispatch(f),/cleanup_pending/);else await dispatch(f);
   assert.equal(calls(),1);assert.equal(publications,3);
   const rows=(await f.store.exec('SELECT * FROM jobs')).toArray(),complete=(await f.store.exec("SELECT COUNT(*) n FROM collections WHERE operation='issue_comments' AND complete=1")).one().n;
-  assert.equal(complete,outcome==='uncertain_commit'?6:4);
+  assert.equal(complete,outcome==='uncertain_commit'?24:16);
   for(const j of rows){
    const n=JSON.parse(j.query).args.number,prior=before.get(j.key);
    assert.equal(j.generation,prior.generation);assert.equal(j.requested_at,prior.requested_at);
-   if(n>=106){
+   if(n<116){assert.equal(j.attempt,0);assert.equal(j.wait_reason,null);assert.ok(j.due>Date.now());}
+   if(n>=124){
     assert.equal(j.attempt,outcome==='rolled_back'?1:prior.attempt);
     if(outcome==='rolled_back'){assert.ok(j.due>Date.now());assert.equal(j.wait_reason,'transport_or_parser');}
     else{assert.equal(j.due,prior.due);assert.equal(j.wait_reason,null);}
    }
-   if(n===104||n===105)assert.equal(j.attempt,outcome==='rolled_back'?1:0);
-   if(outcome==='cleanup_unavailable'&&n>=104)assert.ok(j.lease_id,'failed cleanup leaves durable ownership for expiry recovery');
+   if(n>=116&&n<124)assert.equal(j.attempt,outcome==='rolled_back'?1:0);
+   if(outcome==='cleanup_unavailable'&&n>=116)assert.ok(j.lease_id,'failed cleanup leaves durable ownership for expiry recovery');
    else assert.equal(j.lease_id,null);
   }
   if(outcome==='cleanup_unavailable'){
@@ -301,16 +303,75 @@ test('a backend error saving one middle capacity wait preserves it and backs off
 
 test('a committed newer dirty generation remains eligible after another chunk fails',async()=>{
  const f=await fixture();try{
-  await seed(f,6);upstream(f,async jobs=>{
+  await seed(f,24);upstream(f,async jobs=>{
    await f.store.exec('UPDATE jobs SET generation=generation+1,dirty=1 WHERE key=?',key(100));
    return jobs.map(()=>({api:'graphql',data:[]}));
   });
   const tx=f.store.transaction.bind(f.store);let chunks=0;
   f.store.transaction=(apply,purpose)=>{if(purpose==='publication'&&++chunks===2)throw Error('unclassified chunk failure');return tx(apply,purpose);};
   const failed=new Set();await f.state.dispatch(await f.state.claim(await f.state.nextJob()),undefined,undefined,failed);
-  assert.deepEqual([...failed].sort(),[key(104),key(105)]);
+  assert.deepEqual([...failed].sort(),Array.from({length:8},(_,i)=>key(116+i)));
   const next=await f.state.nextJob(failed);assert.equal(next.key,key(100));assert.equal(next.dirty,1);assert.ok(next.generation>next.start_generation);
  }finally{await f.close();}
+});
+
+for(const [uncertain,caller] of [[false,'ingest'],[true,'ingest'],[false,'read_demand'],[false,'repair']])test(`queued ${caller} runs between whole histories without stranding prepared input (uncertain commit=${uncertain})`,async()=>{
+ const f=await fixture();let ingress;try{
+  await seed(f,4);const calls=upstream(f);let visibility,queued=false,publications=0;
+  const tx=f.store.transaction.bind(f.store);
+  f.store.transaction=async(apply,purpose)=>{const value=await tx(apply,purpose);if(purpose==='publication'&&++publications===1&&uncertain)throw Error('unclassified commit outcome');return value;};
+  f.state.store=intercept(f.store,async(_store,sql,args)=>{
+   if(queued||!sql.includes('INTO collections')||!args.includes(key(100)))return;
+   queued=true;ingress=f.store.transaction(async store=>{
+    const rows=(await store.exec('SELECT key,complete FROM collections WHERE key IN (?,?)',key(100),key(101))).toArray(),map=new Map(rows.map(x=>[x.key,x.complete]));
+    visibility=[map.get(key(100))||0,map.get(key(101))||0];
+    await store.exec('INSERT INTO demand VALUES(?,?)','fixture-ingress',Date.now());
+   },caller);ingress.catch(()=>{});
+   assert.equal(f.store.queuedOtherWork,1);
+  });
+  await dispatch(f);await ingress;assert.equal(calls(),1);assert.equal(queued,true);assert.deepEqual(visibility,[1,0]);assert.equal(f.store.queuedOtherWork,0);
+  if(uncertain){
+   for(const n of [101,102,103]){const row=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key(n))).one();assert.equal(row.attempt,0,'an unattempted remainder must not inherit an uncertain prefix failure');assert.equal(row.lease_id,null);assert.equal(await f.state.complete(query(n)),false);}
+  }else{for(const n of [100,101,102,103])assert.equal(await f.state.complete(query(n)),true);assert.equal(publications,2);}
+ }finally{await ingress?.catch(()=>{});await f.close();}
+});
+
+for(const failure of ['member','backend'])test(`a ${failure} failure after a writer yield never replays the earlier committed history`,async()=>{
+ const f=await fixture();let ingress;try{
+  await seed(f,4);const calls=upstream(f);if(f.store.backend==='sqlite')await f.store.exec('CREATE TABLE fixture_constraint(id INTEGER CHECK(id>0))');
+  let queued=false,firstWrites=0;
+  f.state.store=intercept(f.store,async(store,sql,args)=>{
+   if(!sql.includes('INTO collections'))return;
+   if(args.includes(key(100))){firstWrites++;if(!queued){queued=true;ingress=f.store.transaction(tx=>tx.exec('INSERT INTO demand VALUES(?,?)','fixture-ingress',Date.now()),'ingest');ingress.catch(()=>{});}}
+   if(!args.includes(key(101)))return;
+   if(failure==='backend')await store.exec('SELECT * FROM fixture_missing_backend_table');
+   else if(store.backend==='postgres')await store.exec('SELECT CAST(? AS BIGINT)','invalid-bigint');
+   else await store.exec('INSERT INTO fixture_constraint VALUES(?)',-1);
+  });
+  await dispatch(f);await ingress;assert.equal(calls(),1);assert.equal(firstWrites,1);assert.equal(await f.state.complete(query(100)),true);
+  const prefix=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key(100))).one();assert.equal(prefix.attempt,0);assert.equal(prefix.wait_reason,null);
+  const bad=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key(101))).one();assert.equal(bad.attempt,1);
+  for(const n of [102,103]){const row=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key(n))).one();assert.equal(row.attempt,failure==='backend'?1:0);assert.equal(await f.state.complete(query(n)),failure==='member');}
+ }finally{await ingress?.catch(()=>{});await f.close();}
+});
+
+test('a stale first member does not force an empty publication ahead of queued ingestion',async()=>{
+ const f=await fixture();let ingress;try{
+  await seed(f,4);const calls=upstream(f,async jobs=>{
+   await f.store.exec('UPDATE jobs SET lease_id=?,lease_until=? WHERE key=?','replacement',Date.now()+60000,key(100));
+   return jobs.map(()=>({api:'graphql',data:[]}));
+  });
+  let queued=false,visibility;
+  f.state.store=intercept(f.store,async(_store,sql,args)=>{
+   if(queued||!sql.startsWith('SELECT * FROM jobs WHERE key IN (')||!args.includes(key(100)))return;
+   queued=true;ingress=f.store.transaction(async store=>{
+    const map=new Map((await store.exec('SELECT key,complete FROM collections')).toArray().map(x=>[x.key,x.complete]));visibility=[map.get(key(100))||0,map.get(key(101))||0];
+   },'ingest');ingress.catch(()=>{});
+  });
+  await dispatch(f);await ingress;assert.equal(calls(),1);assert.deepEqual(visibility,[0,1]);
+  const replaced=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key(100))).one();assert.equal(replaced.lease_id,'replacement');assert.equal(replaced.attempt,0);
+  for(const n of [101,102,103])assert.equal(await f.state.complete(query(n)),true);
+ }finally{await ingress?.catch(()=>{});await f.close();}
 });
 
 test('turn finalization preserves an earlier alarm created during maintenance',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
