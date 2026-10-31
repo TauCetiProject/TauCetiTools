@@ -1,4 +1,4 @@
-import { RepositoryStore, WriterPurpose, SQLiteStore, PostgresStore, ReadCacheStore, BufferedStore, SerialLane, columns, collectionJoin } from './repository_store';
+import { RepositoryStore, StoreUnavailable, StoreFenced, canReplayPublication, isBackendFailure, WriterPurpose, SQLiteStore, PostgresStore, ReadCacheStore, BufferedStore, SerialLane, columns, collectionJoin } from './repository_store';
 import { repositoryHealth } from './repository_health';
 import { DurableObject } from 'cloudflare:workers';
 import { Env, EventPointer, matchesETag, Query, Result, digest, json, queryKey, repository, stub, validateQuery, parseGitHub, CI_EVENTS, NOT_MIRRORED, publicQuery, stagingStateKey, stagedPageKey } from './protocol';
@@ -19,7 +19,18 @@ import { Failure, FULL_MESSAGE, AdminError, CLEANUP, PARKABLE, classify, deleteC
 
 type IngestRepair={q:Query,priority:number,dirty?:boolean,dirtyIfMissing?:boolean,missingOnly?:boolean};
 const INGEST_EVENT_TYPES=new Set(['pull_request','issues','issue_comment','pull_request_review_comment','pull_request_review','pull_request_review_thread','status','push','create','delete','repository','label','milestone','merge_group']);
+interface RepairWait {job:any;due:number;attempts:number;reason:string;event:string;failure?:{category:string,request_id?:string}}
+interface PreparedRefresh {job:any;q:Query;repo:any;started:number;response:Response|null;result:any;preparedNext?:string;staged?:{key:string,expires:number};objects:Map<string,string>;encodings:Map<string,string>}
+const PUBLICATION_ITEMS=8,PUBLICATION_BYTES=256*1024,PUBLICATION_ROWS=128;
 class LeaseLost extends Error {}
+// Retain the attempted chunk and original error. Adapter-classified backend
+// failures keep group recovery; an unclassified chunk error affects only it.
+class PublicationFailure extends Error {
+  constructor(readonly jobs:any[],readonly error:unknown){super('publication_interrupted');}
+}
+class WaitFailure extends PublicationFailure {
+  constructor(readonly waits:RepairWait[],readonly expired:boolean,error:unknown){super(waits.map(x=>x.job),error);}
+}
 const SCHEMA_VERSION=5;
 // 10 GiB limit less a margin. With no recorded storage state, a database this
 // large is treated as full: no startup write may risk a failed commit, which
@@ -66,9 +77,11 @@ export class RepositoryState extends DurableObject<Env> {
   private readOnlyQuery=false;
   private readScope=false;
   private preparedEncodings?:Map<string,string>;
+  private dispatchSettled?:Set<string>;
   private optionalWork={active:0};
   private demandMemo=new Map<string,number>();
   private ingestStats=new Map<string,{minute:number,deliveries:number,sql_round_trips:number,sql_samples:number,apply_through_cleanup_ms:number,apply_max_ms:number}>();
+  private groupedPublication={scope:'repository_instance_since_restart',since:Date.now(),admissions:0,members:0,queued_work_yields:0,max_members:0};
   private readDemands={pending:new Map<string,Query>(),active:new Map<string,{complete?:boolean}>(),flight:undefined as Promise<void>|undefined};
   sql:SqlStorage;
   store:RepositoryStore;
@@ -1294,8 +1307,14 @@ export class RepositoryState extends DurableObject<Env> {
     const alarm=this.store.backend==='postgres'?null:await this.ctx.storage.getAlarm();
     if (due && (!alarm || alarm>due)) await this.setAlarm(Math.max(now+100,due));
   }
-  async nextJob(): Promise<any> {
-    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.nextJob.call(state));
+  private excludeRepairKeys(keys?:Set<string>):{sql:string,bindings:string[]} {
+    if(!keys?.size)return {sql:'',bindings:[]};
+    // One JSON binding covers a full failed upstream group on native SQLite.
+    const values=this.store.backend==='sqlite'?'SELECT value FROM json_each(?)':'SELECT jsonb_array_elements_text(CAST(? AS JSONB))';
+    return {sql:' AND key NOT IN ('+values+')',bindings:[JSON.stringify([...keys])]};
+  }
+  async nextJob(excluded?:Set<string>): Promise<any> {
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.nextJob.call(state,excluded));
     const now=Date.now(),counters=(await this.store.exec<any>('SELECT key,value FROM meta WHERE key IN (?,?)','repair_turn','requested_turn')).toArray();
     const turns=new Map(counters.map(row=>[row.key,JSON.parse(row.value)])),turn=turns.get('repair_turn') || 0,requestedTurn=turns.get('requested_turn') || 0;
     await this.setMeta('repair_turn',turn+1);
@@ -1303,7 +1322,8 @@ export class RepositoryState extends DurableObject<Env> {
     // Real reads precede maintenance in the requested lane. Give fresh real
     // demand three turns out of four, retaining one oldest-first turn.
     const fresh=requestedTurn%4!==0;
-    const job=(await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=? ORDER BY CASE WHEN lane=? AND (lane!='requested' OR requested_at IS NOT NULL) THEN 0 WHEN lane='requested' AND (requested_at IS NOT NULL OR ?='requested') THEN 1 WHEN lane='active' THEN 2 WHEN lane='requested' THEN 3 WHEN lane='verification' THEN 4 ELSE 5 END,CASE WHEN ? AND lane='requested' THEN COALESCE(requested_at,0) ELSE 0 END DESC,due,key LIMIT 1",now,now,preferred,preferred,Number(fresh))).toArray()[0];
+    const omit=this.excludeRepairKeys(excluded);
+    const job=(await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=?"+omit.sql+" ORDER BY CASE WHEN lane=? AND (lane!='requested' OR requested_at IS NOT NULL) THEN 0 WHEN lane='requested' AND (requested_at IS NOT NULL OR ?='requested') THEN 1 WHEN lane='active' THEN 2 WHEN lane='requested' THEN 3 WHEN lane='verification' THEN 4 ELSE 5 END,CASE WHEN ? AND lane='requested' THEN COALESCE(requested_at,0) ELSE 0 END DESC,due,key LIMIT 1",now,now,...omit.bindings,preferred,preferred,Number(fresh))).toArray()[0];
     if(job?.lane==='requested' && job.requested_at)await this.setMeta('requested_turn',requestedTurn+1);
     return job;
   }
@@ -1372,6 +1392,10 @@ export class RepositoryState extends DurableObject<Env> {
     return next;
   }
   async refresh(job:any,supplied?:any): Promise<void> {
+    const prepared=await this.prepareRefresh(job,supplied);
+    try{await this.publishPrepared([prepared],false);}catch(error){if(!(error instanceof LeaseLost))throw error;}
+  }
+  private async prepareRefresh(job:any,supplied?:any):Promise<PreparedRefresh> {
     const repo=(await this.meta('repository')), q:Query=JSON.parse(job.query);
     const started=job.started || Date.now();
     if (!job.started) {
@@ -1391,7 +1415,7 @@ export class RepositoryState extends DurableObject<Env> {
     const prefix=`staging/${repo.id}/${encodeURIComponent(job.key)}/${started}/`;
     const publish=(!response || response.ok) && !result.continuation && !result.restart && !result.deferred && !result.unavailable && !result.error && !result.unchanged && result.data!==undefined;
     const preparedNext=publish?await this.nextRefreshCursor(q,result,started):undefined;
-    const checkpoint=publish?await this.meta(stagingStateKey(job.key)):undefined;
+    const checkpoint=publish && job.page>1?await this.meta(stagingStateKey(job.key)):undefined;
     // Checkpointed pages are immutable. Load them before taking the publication
     // lock; the lease is checked again inside the transaction before use.
     if(publish && !preparedNext){
@@ -1409,18 +1433,112 @@ export class RepositoryState extends DurableObject<Env> {
     }
     if(result.continuation){const text=JSON.stringify(result.continuation);if(new TextEncoder().encode(text).length>=1500000)encodings.set('staging:'+text,await this.encode(result.continuation,Date.now()+86400000));}
     this.traceRepair('refresh_transaction',job,sizes);
-    try {await this.atomic(state=>{
-      state.preparedEncodings=encodings;
-      const archive=state.env.ARCHIVE;
-      state.env={...state.env,ARCHIVE:new Proxy(archive,{get(target,key){if(key==='get')return async(name:string,...args:any[])=>{
-        if(!objects.has(name))return (target.get as any)(name,...args);
-        // Publication consumes each prepared page once; the immutable R2 key remains durable for retry.
-        const consume=()=>{const text=objects.get(name)!;objects.delete(name);return text;};
-        return {text:async()=>consume(),json:async()=>JSON.parse(consume())};
-      };const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;}})};
-      return RepositoryState.prototype.applyRefresh.call(state,job,q,repo,started,response,result,preparedNext,staged);
-    },'publication');this.traceRepair('refresh_committed',job);}
-    catch(error){if(!(error instanceof LeaseLost))throw error;}
+    return {job,q,repo,started,response,result,preparedNext,staged,objects,encodings};
+  }
+  private async publishPrepared(input:PreparedRefresh[],grouped:boolean,attempted?:any[]):Promise<PreparedRefresh[]> {
+    const metrics=new RepairMetrics(),committed:PreparedRefresh[]=[];let consumed=0;
+    await this.atomic(async parent=>{
+      const base=parent.store,leaseRows=new Map<string,any>(),collections=new Set<string>(),demands=new Map<string,any>();
+      if(grouped) {
+        const keys=input.map(p=>p.job.key),where=' WHERE key IN ('+keys.map(()=>'?').join(',')+')';
+        const [jobs,cs,ds]=await base.batch([{sql:'SELECT * FROM jobs'+where,bindings:keys},{sql:'SELECT key FROM collections'+where+' AND complete=1',bindings:keys},{sql:'SELECT key,at FROM demand'+where,bindings:keys}]);
+        for(const row of jobs.toArray())leaseRows.set(row.key,row);
+        for(const row of cs.toArray())collections.add(row.key);
+        for(const row of ds.toArray())demands.set(row.key,row);
+      }
+      for(const p of input) {
+        // Let queued non-publication callers reach the writer at a whole-history
+        // boundary. Always consume one member, then immediately requeue the rest.
+        if(grouped && committed.length>0 && (base.queuedOtherWork || 0)>0)break;
+        consumed++;
+        attempted?.push(p.job);
+        if(grouped && p.job.lease_id && leaseRows.get(p.job.key)?.lease_id!==p.job.lease_id)continue;
+        const state=Object.create(parent) as RepositoryState;
+        // The transaction owns the shared buffer/revision/change journal. Each
+        // member owns its read cache and consumable preparation state.
+        state.store=grouped?new ReadCacheStore(base):base;
+        if(grouped) {
+          const cache=state.store as ReadCacheStore,key=p.job.key,row=leaseRows.get(key);
+          cache.seed('SELECT lease_id FROM jobs WHERE key=?',[key],row?[{lease_id:row.lease_id}]:[]);
+          cache.seed('SELECT key FROM collections WHERE key=? AND complete=1',[key],collections.has(key)?[{key}]:[]);
+          cache.seed('SELECT at FROM demand WHERE key=?',[key],demands.has(key)?[{at:demands.get(key).at}]:[]);
+        }
+        const objects=grouped?new Map(p.objects):p.objects;
+        state.preparedEncodings=grouped?new Map(p.encodings):p.encodings;
+        state.repairMetrics=metrics;
+        const archive=state.env.ARCHIVE;
+        state.env={...state.env,ARCHIVE:new Proxy(archive,{get(target,key){if(key==='get')return async(name:string,...args:any[])=>{
+          if(!objects.has(name))return (target.get as any)(name,...args);
+          const consume=()=>{const text=objects.get(name)!;objects.delete(name);return text;};
+          return {text:async()=>consume(),json:async()=>JSON.parse(consume())};
+        };const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;}})};
+        await RepositoryState.prototype.applyRefresh.call(state,p.job,p.q,p.repo,p.started,p.response,grouped?{...p.result}:p.result,p.preparedNext,p.staged);
+        committed.push(p);
+      }
+      await this.releaseLeases(parent.store,committed.map(p=>p.job));
+    },'publication');
+    for(const p of input.slice(0,consumed))this.dispatchSettled?.add(p.job.key);
+    if(grouped)try{
+      const stats=this.owner.groupedPublication ||= {scope:'repository_instance_since_restart',since:Date.now(),admissions:0,members:0,queued_work_yields:0,max_members:0};
+      stats.admissions++;stats.members+=committed.length;stats.queued_work_yields+=Number(consumed<input.length);stats.max_members=Math.max(stats.max_members,committed.length);
+    }catch{}
+    try{this.repairMetrics.merge(metrics);}catch{}
+    for(const p of committed){p.objects.clear();p.encodings.clear();p.result.data=undefined;this.traceRepair('refresh_committed',p.job);}
+    return input.slice(consumed);
+  }
+  private async releaseLeases(store:RepositoryStore,jobs:any[]):Promise<void> {
+    const size=store.backend==='sqlite'?50:256;
+    for(let offset=0;offset<jobs.length;offset+=size){const chunk=jobs.slice(offset,offset+size);await store.exec('UPDATE jobs SET lease_id=NULL,lease_until=0 WHERE '+chunk.map(()=>'(key=? AND lease_id=?)').join(' OR '),...chunk.flatMap(j=>[j.key,j.lease_id]));}
+  }
+  private async publishBatch(jobs:any[],results:any[]):Promise<void> {
+    let pending:PreparedRefresh[]=[],waits:{job:any,result:any}[]=[],failures:ReturnType<RepositoryState['retryWait']>[]=[],bytes=0,rows=0;
+    const apply=async(members:any[],work:()=>Promise<void>)=>{try{await work();}catch(error){throw error instanceof PublicationFailure?error:new PublicationFailure(members,error);}};
+    const unsafePreparation=(error:unknown)=>this.degraded || this.repairsHeld() || (error instanceof StoreUnavailable || error instanceof StoreFenced || /^(backend_fenced|database_unavailable|storage_full|storage_error|schema_unavailable)$/.test(classify(error))) && !canReplayPublication(error);
+    const flushFailures=async()=>{if(failures.length){const input=failures;failures=[];for(const expired of [false,true]){const chunk=input.filter(x=>x.expired===expired);if(chunk.length)await apply(chunk.map(x=>x.job),()=>this.persistWaits(chunk,expired));}}};
+    const flushWaits=async()=>{if(waits.length){const input=waits;waits=[];await apply(input.map(x=>x.job),()=>this.deferJobs(input));}};
+    const flush=async()=>{
+      await flushFailures();
+      if(!pending.length)return;
+      let remaining=pending;pending=[];bytes=0;rows=0;
+      while(remaining.length){
+       const chunk=remaining,attempted:any[]=[];remaining=[];
+       try{remaining=await this.publishPrepared(chunk,true,attempted);}
+       catch(error){
+        if(!canReplayPublication(error))throw new PublicationFailure(attempted.length?attempted:chunk.map(p=>p.job),error);
+        // Group attempts retain immutable input. Every individual fallback gets
+        // fresh state and its own error path after the confirmed rollback.
+        for(const p of chunk)await apply([p.job],async()=>{
+          try{await this.publishPrepared([p],true);}catch(cause){
+            if(!(cause instanceof LeaseLost)){if(!canReplayPublication(cause))throw cause;await this.retryJob(p.job,cause);}
+          }
+        });
+       }
+      }
+    };
+    for(let index=0;index<jobs.length;index++) {
+      const job=jobs[index],result=results[index] || {unavailable:true};
+      if(result.deferred || result.unavailable){await flushFailures();await flush();waits.push({job,result});results[index]=undefined;continue;}
+      await flushWaits();
+      const flat=['issue_comments','statuses','reactions'].includes(JSON.parse(job.query).operation) && job.page===1 && !job.nested && !result.cursor && !result.continuation && !result.restart && !result.deferred && !result.unavailable && !result.error && !result.unchanged && Array.isArray(result.data);
+      const size=flat?new TextEncoder().encode(JSON.stringify(result.data)).length:0,count=flat?result.data.length:0;
+      if(!flat || size>PUBLICATION_BYTES || count>PUBLICATION_ROWS) {
+        await flush();
+        let prepared:PreparedRefresh;
+        try{prepared=await this.prepareRefresh(job,result);}catch(error){
+          if(unsafePreparation(error)){await flushFailures();throw new PublicationFailure([job],error);}
+          failures.push(this.retryWait(job,error));results[index]=undefined;continue;
+        }
+        try{await this.publishPrepared([prepared],false);}catch(error){
+          if(!(error instanceof LeaseLost)){if(!canReplayPublication(error))throw new PublicationFailure([job],error);failures.push(this.retryWait(job,error));}
+        }finally{results[index]=undefined;}
+        continue;
+      }
+      if(pending.length>=PUBLICATION_ITEMS || bytes+size>PUBLICATION_BYTES || rows+count>PUBLICATION_ROWS)await flush();
+      try{pending.push(await this.prepareRefresh(job,result));bytes+=size;rows+=count;}
+      catch(error){if(unsafePreparation(error)){await flushFailures();throw new PublicationFailure([job],error);}failures.push(this.retryWait(job,error));}
+      finally{results[index]=undefined;}
+    }
+    await flush();await flushWaits();await flushFailures();
   }
   async applyRefresh(job:any,q:Query,repo:any,started:number,response:Response|null,result:any,preparedNext:string|undefined,staged:{key:string,expires:number}|undefined):Promise<void> {
     if (job.lease_id && (await this.store.exec<any>('SELECT lease_id FROM jobs WHERE key=?',job.key)).toArray()[0]?.lease_id!==job.lease_id) throw new LeaseLost();
@@ -1527,6 +1645,7 @@ export class RepositoryState extends DurableObject<Env> {
     if (job.lease_id && (await this.store.exec<any>('SELECT lease_id FROM jobs WHERE key=?',job.key)).toArray()[0]?.lease_id!==job.lease_id) throw new LeaseLost();
     if (!(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',job.key)).toArray().length) await this.nextRevision('collection',job.key);
     await this.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET complete=1,verified=excluded.verified,revision=excluded.revision,etag=excluded.etag',job.key,q.operation,JSON.stringify(q.args || {}),1,Date.now(),(await this.revision()),job.page===1?result.etag || null:null);
+    if(this.store instanceof ReadCacheStore)this.store.seed('SELECT key FROM collections WHERE key=? AND complete=1',[job.key],[{key:job.key}]);
     await this.store.exec('DELETE FROM meta WHERE key=?',stagingStateKey(job.key));
     await this.finishJob(job,q,job.page===1?result.etag || null:null);
     // These paths now need only repair identities. Release payload strings
@@ -1589,9 +1708,9 @@ export class RepositoryState extends DurableObject<Env> {
       if (!(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',flatKey)).toArray().length) await this.nextRevision('collection',flatKey);
       await this.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET complete=1,verified=excluded.verified,revision=excluded.revision',flatKey,'review_comments',JSON.stringify(q.args),1,Date.now(),(await this.revision()),null);
       const dependent=(await this.store.exec<any>('SELECT * FROM jobs WHERE key=? AND wait_reason LIKE ?',flatKey,'primary%')).toArray()[0];
-      if(dependent) {
+      if(dependent && !dependent.lease_id) {
         await this.finishJob({...dependent,start_generation:dependent.generation},{...q,operation:'review_comments'});
-        await this.store.exec('UPDATE jobs SET lease_id=NULL,lease_until=0 WHERE key=?',flatKey);
+        await this.store.exec('UPDATE jobs SET lease_id=NULL,lease_until=0 WHERE key=? AND lease_id IS NULL',flatKey);
       }
     }
     // Fan-out retains only compact query identities, never the decoded inventory.
@@ -1941,20 +2060,64 @@ export class RepositoryState extends DurableObject<Env> {
     await this.store.exec('UPDATE jobs SET lease_id=?,lease_until=?,started=?,start_generation=? WHERE key=? AND lease_until<=? AND COALESCE(generation,0)=? AND COALESCE(started,0)=?',lease,now+settings(this.env).lease_ms,started,generation,job.key,now,job.generation || 0,job.started || 0);
     return (await this.store.exec<any>('SELECT * FROM jobs WHERE key=? AND lease_id=?',job.key,lease)).toArray()[0];
   }
-  async retryJob(job:any,error:unknown): Promise<void> {
-    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.retryJob.call(state,job,error));
-    const expired=error instanceof Error && /staging page missing/.test(error.message);
-    const category=expired?'staging_expired':'transport_or_parser';
-    const delay=Math.min(3600000,60000*2**Math.min(job.attempt || 0,6));
-    await this.store.exec('UPDATE jobs SET due=?,attempt=attempt+1,wait_reason=?'+(expired?',started=NULL,cursor=NULL,page=1,api=NULL,etag=NULL,nested=NULL':'')+' WHERE key=? AND lease_id=?',Date.now()+delay,category,job.key,job.lease_id);
-    await this.metric('retry',JSON.parse(job.query),job.lane);
-    await this.setMeta('last_upstream_failure',{at:Date.now(),operation:JSON.parse(job.query).operation,category});
+  async retryJob(job:any,error:unknown):Promise<void> {await this.retryJobs([job],error);}
+  private retryWait(job:any,error:unknown):RepairWait & {expired:boolean} {
+    const expired=error instanceof Error && /staging page missing/.test(error.message),reason=expired?'staging_expired':'transport_or_parser';
+    return {job,due:Date.now()+Math.min(3600000,60000*2**Math.min(job.attempt || 0,6)),attempts:1,reason,event:'retry',failure:{category:reason},expired};
   }
-  private async claimCompanions(first:any,selection?:any[]):Promise<any[]> {
+  private async retryJobs(jobs:any[],error:unknown):Promise<void> {
+    const input=jobs.map(job=>this.retryWait(job,error));await this.persistWaits(input,input[0]?.expired || false);
+  }
+  private async deferJobs(input:{job:any,result:any}[]):Promise<void> {
+    const now=Date.now();
+    await this.persistWaits(input.map(({job,result})=>{
+      const capacity=result.category==='capacity';
+      return {job,due:result.retry_at || now+Math.min(3600000,60000*2**Math.min(6,job.attempt)),attempts:capacity?0:1,reason:result.category || result.reason || 'upstream',event:capacity?'capacity_wait':'retry',failure:capacity?undefined:{category:result.category || result.reason || 'upstream',request_id:result.request_id}};
+    }));
+  }
+  private async persistWaits(input:RepairWait[],expired=false):Promise<void> {
+    if(!input.length)return;
+    if(!this.store.transactional) {
+      const metrics=new RepairMetrics();
+      try{await this.atomic(async state=>{state.repairMetrics=metrics;await state.persistWaits(input,expired);},'repair');}
+      catch(error){throw new WaitFailure(input,expired,error);}
+      for(const item of input)this.dispatchSettled?.add(item.job.key);
+      try{this.repairMetrics.merge(metrics);}catch{}return;
+    }
+    const size=this.store.backend==='sqlite'?12:128,changed=new Set<string>();
+    for(let offset=0;offset<input.length;offset+=size) {
+      const chunk=input.slice(offset,offset+size),cases=(field:'due'|'attempts'|'reason',type:string)=>'CASE key '+chunk.map(()=>`WHEN ? THEN CAST(? AS ${type})`).join(' ')+' END';
+      const rows=(await this.store.exec<any>('UPDATE jobs SET lease_id=NULL,lease_until=0,due='+cases('due','BIGINT')+',attempt=attempt+'+cases('attempts','INTEGER')+',wait_reason='+cases('reason','TEXT')+(expired?',started=NULL,cursor=NULL,page=1,api=NULL,etag=NULL,nested=NULL':'')+' WHERE '+chunk.map(()=>'(key=? AND lease_id=?)').join(' OR ')+' RETURNING key',...chunk.flatMap(x=>[x.job.key,x.due]),...chunk.flatMap(x=>[x.job.key,x.attempts]),...chunk.flatMap(x=>[x.job.key,x.reason]),...chunk.flatMap(x=>[x.job.key,x.job.lease_id]))).toArray();
+      for(const row of rows)changed.add(row.key);
+    }
+    let last:typeof input[number]|undefined;
+    for(const item of input)if(changed.has(item.job.key)){await this.metric(item.event,JSON.parse(item.job.query),item.job.lane);if(item.failure)last=item;}
+    if(last)await this.setMeta('last_upstream_failure',{at:Date.now(),operation:JSON.parse(last.job.query).operation,...last.failure});
+  }
+  private async routeBatchToCore(jobs:any[]):Promise<void> {
+    if(!this.store.transactional){await this.atomic(state=>state.routeBatchToCore(jobs),'repair');for(const job of jobs)this.dispatchSettled?.add(job.key);return;}
+    const size=this.store.backend==='sqlite'?49:256,now=Date.now();
+    for(let offset=0;offset<jobs.length;offset+=size){const chunk=jobs.slice(offset,offset+size);await this.store.exec('UPDATE jobs SET lease_id=NULL,lease_until=0,api=?,due=? WHERE '+chunk.map(()=>'(key=? AND lease_id=?)').join(' OR '),'core',now,...chunk.flatMap(j=>[j.key,j.lease_id]));}
+  }
+  private async recoverWaitFailure(failure:WaitFailure,jobs:any[]):Promise<void> {
+    const metrics=new RepairMetrics();
+    // One recovery admission preserves the exact captured waits first, then
+    // applies ordinary backend backoff only to still-owned unfinished members.
+    await this.atomic(async state=>{
+      state.repairMetrics=metrics;
+      await state.persistWaits(failure.waits,failure.expired);
+      if(isBackendFailure(failure.error))await state.retryJobs(jobs,failure.error);
+    },'repair');
+    for(const item of failure.waits)this.dispatchSettled?.add(item.job.key);
+    if(isBackendFailure(failure.error))for(const job of jobs)this.dispatchSettled?.add(job.key);
+    try{this.repairMetrics.merge(metrics);}catch{}
+  }
+  private async claimCompanions(first:any,selection?:any[],excluded?:Set<string>):Promise<any[]> {
     const operation=JSON.parse(first.query).operation;
-    const candidates=selection || (await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=? AND lane=? AND page=1 AND api IS NULL AND nested IS NULL AND key LIKE ? ORDER BY CASE WHEN lane='requested' AND requested_at IS NULL THEN 1 ELSE 0 END,due,key LIMIT ?",Date.now(),Date.now(),first.lane,operation+':%',Math.max(0,batchLimit(operation)-1))).toArray();
+    const omit=this.excludeRepairKeys(excluded);
+    const candidates=selection || (await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=? AND lane=? AND page=1 AND api IS NULL AND nested IS NULL AND key LIKE ?"+omit.sql+" ORDER BY CASE WHEN lane='requested' AND requested_at IS NULL THEN 1 ELSE 0 END,due,key LIMIT ?",Date.now(),Date.now(),first.lane,operation+':%',...omit.bindings,Math.max(0,batchLimit(operation)-1))).toArray();
     if(!candidates.length)return [];
-    if(!this.store.transactional)return this.atomic(state=>state.claimCompanions(first,candidates),'repair');
+    if(!this.store.transactional)return this.atomic(state=>state.claimCompanions(first,candidates,excluded),'repair');
     const hot=new Set<string>(),complete=new Set<string>();
     const readBatch=this.store.backend==='sqlite'?80:256;
     for(let offset=0;offset<candidates.length;offset+=readBatch) {
@@ -2017,9 +2180,13 @@ export class RepositoryState extends DurableObject<Env> {
     }
     return wanted.flatMap(j=>claimed.has(j.key)?[claimed.get(j.key)]:[]);
   }
-  async dispatch(first:any,claimedGroup?:any[],preparationError?:unknown): Promise<void> {
+  async dispatch(first:any,claimedGroup?:any[],preparationError?:unknown,failed?:Set<string>): Promise<void> {
+    const scoped=Object.create(this) as RepositoryState;scoped.dispatchSettled=new Set<string>();
+    await scoped.dispatchOwned(first,claimedGroup,preparationError,failed);
+  }
+  private async dispatchOwned(first:any,claimedGroup?:any[],preparationError?:unknown,failed?:Set<string>): Promise<void> {
     this.traceRepair('dispatch',first);
-    const q:Query=JSON.parse(first.query),operation=q.operation,repo=(await this.meta('repository'));
+    const q:Query=JSON.parse(first.query),operation=q.operation,repo=(await this.owner.meta('repository'));
     let jobs=claimedGroup || [first];
     try {
       if(preparationError)throw preparationError;
@@ -2037,24 +2204,23 @@ export class RepositoryState extends DurableObject<Env> {
         }
         const response=await stub(this.env.INSTALLATIONS,repo.installation).fetch('https://internal/batch',{method:'POST',headers:{'x-request-id':crypto.randomUUID()},body:JSON.stringify({repository:repo,jobs:jobs.map(j=>({key:j.key,query:JSON.parse(j.query),node_id:j.node_id}))})});
         const result:any=await response.json();
-        if (result.results) {
-          for(let i=0;i<jobs.length;i++) {
-            try {await this.refresh(jobs[i],result.results[i] || {unavailable:true});}
-            catch(error) {await this.retryJob(jobs[i],error);}
-          }
+        if (Array.isArray(result.results)) {
+          await this.publishBatch(jobs,result.results);
         } else if (result.deferred && operation!=='review_threads' && result.category!=='capacity' && !String(result.category).startsWith('secondary')) {
           // Retry REST-capable operations in their other pool on the next quantum.
-          for(const item of jobs) await this.store.exec('UPDATE jobs SET api=?,due=? WHERE key=? AND lease_id=?','core',Date.now(),item.key,item.lease_id);
-        } else for(const item of jobs) await this.refresh(item,result.deferred || result.unavailable?result:{unavailable:true,reason:'malformed_service_response'});
+          await this.routeBatchToCore(jobs);
+        } else await this.deferJobs(jobs.map(job=>({job,result:result.deferred || result.unavailable?result:{unavailable:true,reason:'malformed_service_response'}})));
       } else await this.refresh(first);
     } catch(error) {
-      for(const item of jobs) await this.retryJob(item,error);
+      try{
+        if(error instanceof WaitFailure)await this.recoverWaitFailure(error,jobs);
+        else{
+          const cause=error instanceof PublicationFailure?error.error:error;
+          await this.retryJobs(error instanceof PublicationFailure && !isBackendFailure(cause)?error.jobs:jobs,cause);
+        }
+      }finally{for(const job of jobs)if(!this.dispatchSettled?.has(job.key))failed?.add(job.key);}
     } finally {
-      const releaseBatch=this.store.backend==='sqlite'?50:256;
-      for(let offset=0;offset<jobs.length;offset+=releaseBatch) {
-        const chunk=jobs.slice(offset,offset+releaseBatch);
-        await this.store.exec('UPDATE jobs SET lease_id=NULL,lease_until=0 WHERE '+chunk.map(()=>'(key=? AND lease_id=?)').join(' OR '),...chunk.flatMap(item=>[item.key,item.lease_id]));
-      }
+      await this.releaseLeases(this.store,jobs);
       this.traceRepair('dispatch_complete',first);
     }
   }
@@ -2070,7 +2236,7 @@ export class RepositoryState extends DurableObject<Env> {
     try {await this.runAlarm();} finally {this.activeOperations--;}
   }
   async runAlarm(): Promise<void> {
-    const options=settings(this.env);let dispatched=0,retired=0;
+    const options=settings(this.env),failed=new Set<string>();let dispatched=0,retired=0;
     try {
       this.traceRepair('expire');
       await this.expire();
@@ -2089,7 +2255,7 @@ export class RepositoryState extends DurableObject<Env> {
             let selected:any;
             try {
               selected=await this.atomic(async state=>{
-                const next=await state.nextJob();if(!next)return undefined;
+                const next=await state.nextJob(failed);if(!next)return undefined;
                 if(await state.retireUnneeded(next))return {retired:true};
                 return {job:await state.claim(next)};
               },'repair');
@@ -2100,10 +2266,10 @@ export class RepositoryState extends DurableObject<Env> {
             const operation=JSON.parse(first.query).operation;
             const batchable=['issue_comments','review_threads','statuses','reactions'].includes(operation) && first.page===1 && !first.api && !first.nested;
             const group=[first];let preparationError:unknown;
-            if(batchable)try{group.push(...await this.claimCompanions(first));}catch(error){preparationError=error;}
+            if(batchable)try{group.push(...await this.claimCompanions(first,undefined,failed));}catch(error){preparationError=error;}
             // Commit companions before selecting the next leader, preserving
             // upstream batching. Already-started groups keep running in parallel.
-            dispatched++;wave.push(this.dispatch(first,group,preparationError));
+            dispatched++;wave.push(this.dispatch(first,group,preparationError,failed));
           }
           if(!wave.length)break;
           await Promise.allSettled(wave);
@@ -2113,10 +2279,15 @@ export class RepositoryState extends DurableObject<Env> {
       try {if(!this.migrationHeld()) await this.maintenance();} catch(error) {this.noteFailure('maintenance',error);}
     } finally {
       try {
-        const row=(await this.store.exec<any>('SELECT MIN(MAX(due,lease_until)) AS due FROM jobs')).one();
+        const omit=this.excludeRepairKeys(failed);
+        const now=Date.now(),where=omit.sql?' WHERE (due>? OR lease_until>? OR (1=1'+omit.sql+'))':'';
+        const row=(await this.store.exec<any>('SELECT MIN(MAX(due,lease_until)) AS due FROM jobs'+where,...(omit.sql?[now,now,...omit.bindings]:[]))).one();
         // Degraded mode writes nothing, not even the next alarm; the cron tick
         // keeps expiring rows until a probe restores writes.
-        if (row.due && !this.degraded && !this.migrationHeld()) await this.setAlarm(Math.max(Date.now()+100,row.due));
+        if (row.due && !this.degraded && !this.migrationHeld()) {
+          const at=Math.max(Date.now()+100,row.due),earlier=this.store.backend==='sqlite'?await this.ctx.storage.getAlarm():null;
+          if(!earlier || earlier>at)await this.setAlarm(at);
+        }
       } catch(error) {this.noteFailure('alarm',error);}
       this.traceRepair('storage_maintenance');
       this.startStorageMaintenance();
@@ -2914,12 +3085,12 @@ export class RepositoryState extends DurableObject<Env> {
       }
       if (path==='/health' && this.store.backend==='postgres') {
         const monitoring=await this.preparedObservation(),storage=monitoring.storage || {backend:'postgres',schema_version:null,expected_schema_version:1,expected_generation:this.backendGeneration(),connected:null,stale:true};
-        return json({...this.diagnostics,ingestion:[...this.owner.ingestStats].map(([event_type,row])=>({event_type,...row})),reconciliation_version:2,revision:this.revisionState.value ?? this.diagnostics.revision ?? null,repository:this.repositoryMemo ?? this.diagnostics.repository ?? null,storage,monitoring,request_id,deployment_id:this.env.CF_VERSION?.id,diagnostics_at:this.diagnosticsAt || null,diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
+        return json({...this.diagnostics,grouped_publication:this.owner.groupedPublication,ingestion:[...this.owner.ingestStats].map(([event_type,row])=>({event_type,...row})),reconciliation_version:2,revision:this.revisionState.value ?? this.diagnostics.revision ?? null,repository:this.repositoryMemo ?? this.diagnostics.repository ?? null,storage,monitoring,request_id,deployment_id:this.env.CF_VERSION?.id,diagnostics_at:this.diagnosticsAt || null,diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
       }
       if (path==='/health') {
         const storage={...await this.storageState(),backend:'sqlite',schema_version:SCHEMA_VERSION};
         if(typeof this.schema==='object' || storage.connected===false)return json({storage,deployment_id:this.env.CF_VERSION?.id,monitoring:await this.preparedObservation(),request_id});
-        return json({...this.diagnostics,reconciliation_version:2,settings:settings(this.env),...this.repairMetrics.summary(),queries:[...this.queryCounts.values()],query_metrics_scope:'repository_instance_since_restart',repair_metrics_scope:'repository_instance_since_restart',storage,storage_bytes:storage.database_size ?? (storage.capacity as any)?.database_bytes,
+        return json({...this.diagnostics,grouped_publication:this.owner.groupedPublication,reconciliation_version:2,settings:settings(this.env),...this.repairMetrics.summary(),queries:[...this.queryCounts.values()],query_metrics_scope:'repository_instance_since_restart',repair_metrics_scope:'repository_instance_since_restart',storage,storage_bytes:storage.database_size ?? (storage.capacity as any)?.database_bytes,
           repository:await this.meta('repository'),revision:await this.revision(),bootstrap_inventory:await this.meta('bootstrap_inventory'),latest_applied_input:await this.meta('latest_applied_input'),
           deployment_id:this.env.CF_VERSION?.id,monitoring:await this.preparedObservation(),diagnostics_at:this.diagnosticsAt || null,diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
       }

@@ -181,6 +181,52 @@ cleanup use bulk statements with the existing generation and key/token checks.
 Writer logs distinguish demand, ingress, repair, publication and other callers
 using bounded purpose names, without recording queries or payloads.
 
+Full upstream batches retain their existing sizes. Small, independent page-one
+issue-comment, status and reaction histories publish in transactions bounded by
+eight members, 256 KiB of prepared data and 128 rows. Partially filled chunks run
+immediately; oversized, paginated and coupled thread results use the individual
+path. Preparation and staging remain outside the writer. Each member has its
+own consumable input/cache, sharing transaction revisions and the change journal.
+Leases are checked under the writer; a newer webhook generation can still publish
+safely and leave its new repair due. Committed publication and deferral/routing
+bookkeeping release only their own key/token leases atomically.
+
+If non-publication work is actually queued on the writer, publication ends at
+the next whole-history boundary and immediately queues the prepared remainder
+through the existing FIFO lane. Each admission publishes at least one owned
+member when one remains, skipping stale leases without an empty intermediate
+commit. This changes chunk size without a wait, admission gate or queue reorder.
+The protected `grouped_publication` health counters record committed admissions,
+members, maximum members and queued-work yields since instance startup. They
+are best-effort diagnostics, include refreshes of complete histories and can
+undercount uncertain commits; they are not a missing-history drainage ledger.
+
+A confirmed healthy member-data rollback permits one individual replay from
+fresh input. Fences, backend failures and uncertain commits use durable recovery;
+they do not trigger a replay loop or one connection attempt per remaining result.
+Unclassified failures retry only the attempted chunk; untouched members retain
+their attempts and deadlines. Adapter-classified backend failures retain the
+established unfinished-group exponential retry, avoiding one costly backend
+failure per tiny chunk under a persistent timeout. Confirmed member-data rollback
+takes precedence over backend classification and still isolates healthy siblings.
+Committed or deferred outcomes remain protected by key/token checks; failed
+cleanup retains ordinary lease-expiry recovery. Completion metrics merge after commit; an uncertain commit
+can undercount them, so fixed durable coverage remains the acceptance evidence.
+Unsettled failed-tail members are excluded from leader/companion selection for
+the rest of that alarm turn. Already committed new generations and API transitions
+remain eligible. Next-alarm calculation excludes immediately due failed tails,
+while retaining future retry/lease deadlines and earlier incoming alarms. A
+failed tail cannot repeatedly refetch in the same turn or drive its own 100-ms
+alarm loop. Existing cron/tick/retry continuation starts a fresh turn; no
+persisted cooldown or new timer is added, and unrelated work remains eligible.
+Compatible quota/routing/retry bookkeeping also uses bounded bulk statements,
+preserving per-member deadlines, attempt increments and wait reasons. This changes
+transaction cost, not the quota owner's decisions. A failed bookkeeping commit
+retries its captured decision once, preserving capacity semantics and the exact
+deadline. If its cause is a backend failure, the same recovery admission applies
+ordinary backoff to the still-owned tail after saving those exact decisions. See
+[publication measurements](PUBLICATION-PERFORMANCE.md).
+
 Compact surveys immediately include exact-head commit statuses received by webhook,
 even before the first full status collection is hydrated. The per-PR
 `statusCheckRollupCoverage` field distinguishes `webhook_observed`, `complete`, and

@@ -11,7 +11,7 @@ const bundle=await build({entryPoints:['src/repository_store.ts'],bundle:true,pl
  export class Client {constructor(){return globalThis.${key}.client();}}
  `,loader:'js'}));
 }}]});
-const {PostgresStore,StoreFenced,StoreUnavailable}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
+const {PostgresStore,StoreFenced,StoreUnavailable,canReplayPublication,isBackendFailure}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
 function fixture(scenarios=[],url='postgresql://unused@ep-fixture.us-east-2.aws.neon.tech/fixture'){
  const clients=[],committed=[],logs=[],cleanupLogs=[],cleanupCalls=[],cleanupResponses=[];
  const driver={log:(event,fields)=>(event==='repository_postgres_cleanup'?cleanupLogs:logs).push({event,...fields}),async http(sql,bindings){
@@ -34,7 +34,7 @@ function fixture(scenarios=[],url='postgresql://unused@ep-fixture.us-east-2.aws.
     if(phase===scenario.phase){if(scenario.acceptCommit){committed.push(...pending.splice(0));client.sessionActive=false;}fail();}
     // A client timeout leaves an active query; a rollback queued behind it
     // cannot finish. Cleanup must discard the socket without awaiting it.
-    if(phase==='rollback'){if(scenario.stalled)return new Promise(()=>{});pending.length=0;client.sessionActive=false;return {rows:[]};}
+    if(phase==='rollback'){if(scenario.stalled)return new Promise(()=>{});pending.length=0;client.sessionActive=false;return {command:'ROLLBACK',rows:[]};}
     if(phase==='session'){client.identity={pid:clients.indexOf(client)+100,started_us:'1234567890123456',token:bindings[0]};client.sessionActive=true;return {rows:[scenario.identity?{...client.identity,...scenario.identity}:client.identity]};}
     if(phase==='owner')return {rows:[{backend:scenario.fenced?'sqlite':'postgres',generation:'test-v1',schema_version:1}]};
     if(phase==='commit'){client.sessionActive=false;if(scenario.commitTag==='ROLLBACK')pending.length=0;else committed.push(...pending.splice(0));return {command:scenario.commitTag ?? 'COMMIT',rows:[]};}
@@ -268,4 +268,26 @@ test('admission cleanup identifies both the current admission and the prior fail
   const cleanup=f.cleanupLogs.at(-1),admitted=f.logs.at(-1);assert.notEqual(admitted.transaction_id,failed);
   assert.equal(cleanup.transaction_id,admitted.transaction_id);assert.equal(cleanup.discarded_transaction_id,failed);
  }finally{t.mock.timers.reset();}
+});
+
+for(const code of ['22001','23505','54000','57014','55P03','08006'])test(`publication replay classifies confirmed apply rollback ${code}`,async()=>{
+ const f=fixture([{phase:'apply',code,severity:'ERROR'}]);let error;
+ try{await f.store.transaction(write);}catch(e){error=e;}
+ assert.ok(error);assert.equal(error.sqlstate,code);
+ assert.equal(canReplayPublication(error),/^(22|23|54)/.test(code));
+ assert.equal(isBackendFailure(error),!/^(22|23|54)/.test(code));
+});
+test('publication replay rejects transport and unknown commit but allows rolled-back application errors',async()=>{
+ const f=fixture();const error=new Error('member data invalid');await assert.rejects(f.store.transaction(()=>{throw error;}),e=>e===error);assert.equal(canReplayPublication(error),true);
+ assert.equal(isBackendFailure(error),false);
+ const unknown=fixture([{phase:'commit',stalled:true,acceptCommit:true}]);let cause;try{await unknown.store.transaction(write);}catch(e){cause=e;}assert.equal(canReplayPublication(cause),false);assert.equal(isBackendFailure(cause),true);
+ const timeout=fixture([{phase:'apply',stalled:true}]);try{await timeout.store.transaction(write);}catch(e){assert.equal(canReplayPublication(e),false);assert.equal(isBackendFailure(e),true);}
+ const fence=fixture([{fenced:true}]);try{await fence.store.transaction(write);}catch(e){assert.equal(canReplayPublication(e),false);assert.equal(isBackendFailure(e),true);}
+});
+
+test('a reused application error reflects the current rollback outcome after connection failure',async()=>{
+ const error=Error('member error');
+ const healthy=fixture();await assert.rejects(healthy.store.transaction(()=>{throw error;}),e=>e===error);assert.equal(canReplayPublication(error),true);
+ const lost=fixture([{phase:'rollback',code:'08006',severity:'FATAL'}]);await assert.rejects(lost.store.transaction(()=>{throw error;}),e=>e===error);assert.equal(canReplayPublication(error),false);assert.equal(isBackendFailure(error),true);
+ const recovered=fixture();await assert.rejects(recovered.store.transaction(()=>{throw error;}),e=>e===error);assert.equal(canReplayPublication(error),true);assert.equal(isBackendFailure(error),false);
 });

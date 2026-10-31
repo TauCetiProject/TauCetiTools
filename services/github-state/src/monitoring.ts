@@ -71,6 +71,17 @@ export class RepairMetrics {
     if (event.endsWith('_ms')) { const b = BOUNDS.findIndex(b => value <= b); row.latency[b < 0 ? BOUNDS.length : b]++; }
     this.intervals.set(key, row);
   }
+  merge(other:RepairMetrics,now=Date.now()):void {
+    const minute=Math.floor(now/60000)*60000;
+    for(const [key,row] of this.intervals)if(row.at<minute-59*60000)this.intervals.delete(key);
+    this.dropped+=other.dropped;
+    for(const row of other.snapshot(now)) {
+      const key=JSON.stringify([row.at,row.event,row.lane,row.operation]),prior=this.intervals.get(key);
+      if(prior){prior.n+=row.n;prior.value+=row.value;prior.maximum=Math.max(prior.maximum,row.maximum);prior.latency=prior.latency.map((n,i)=>n+row.latency[i]);continue;}
+      if(this.intervals.size>=10000){let oldest:string|undefined,at=Infinity;for(const [k,r] of this.intervals)if(r.at<at){oldest=k;at=r.at;}if(oldest!==undefined){this.dropped+=this.intervals.get(oldest)!.n;this.intervals.delete(oldest);}}
+      this.intervals.set(key,{...row,latency:[...row.latency]});
+    }
+  }
   snapshot(now = Date.now()): any[] { return [...this.intervals.values()].filter(r => r.at >= now - 3600000); }
   summary(now = Date.now()): any {
     const groups=new Map<string,any>(),latency=new Map<string,{samples:number,buckets:number[]}>();

@@ -41,3 +41,120 @@ test('native Workers SQLite event scheduling chunks bulk statements under the bi
   const r=await send(stub,'/fixture/ingest-batch',{});assert.equal(r.status,200);assert.deepEqual(await r.json(),{n:100,dirty:100,generation:1});
  }finally{await mf.dispose();}
 });
+
+test('native Workers SQLite records a 100-history capacity deferral in bulk',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
+ const mf=await runtime(async()=>Response.json([]),{},{repositoryAlarms:false,repositoryExtension:`async fetch(req){
+  if(new URL(req.url).pathname==='/fixture/deferred-batch'){
+   await this.store.exec('DELETE FROM jobs');const until=Date.now()+300000;
+   await this.enqueueMany(Array.from({length:100},(_,i)=>({q:{repository:'org/repo',operation:'issue_comments',args:{number:i+1}},priority:5})),true);
+   this.env={...this.env,INSTALLATIONS:{idFromName:id=>id,get:()=>({fetch:async()=>Response.json({deferred:true,category:'capacity',retry_at:until})})}};
+   await this.dispatch(await this.claim(await this.nextJob()));
+   return Response.json((await this.store.exec("SELECT COUNT(*) n,SUM(attempt) attempts,COUNT(lease_id) leases FROM jobs WHERE wait_reason='capacity' AND due=?",until)).one());
+  }
+  return super.fetch(req);
+ }`});
+ try{
+  const ns=await mf.getDurableObjectNamespace('REPOSITORIES'),stub=ns.get(ns.idFromName(repository.id));
+  await send(stub,'/configure',{repository:repository.name});const r=await send(stub,'/fixture/deferred-batch',{});assert.equal(r.status,200);assert.deepEqual(await r.json(),{n:100,attempts:0,leases:0});
+ }finally{await mf.dispose();}
+});
+
+for(const [constraint,ddl,badValue] of [
+ ['CHECK','id INTEGER CHECK(id>0)','-1'],
+ ['UNIQUE','id INTEGER UNIQUE','1'],
+ ['NOT NULL','id INTEGER NOT NULL','NULL'],
+])test('native Workers SQLite isolates a '+constraint+' failure and replays the healthy publication',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
+ const mf=await runtime(async()=>Response.json([]),{},{repositoryAlarms:false,repositoryExtension:`async fetch(req){
+  if(new URL(req.url).pathname==='/fixture/member-check'){
+   await this.store.exec('DELETE FROM jobs');await this.store.exec('CREATE TABLE fixture_member_check(${ddl})');
+   if('${constraint}'==='UNIQUE')await this.store.exec('INSERT INTO fixture_member_check VALUES(1)');
+   await this.enqueueMany([100,101].map(number=>({q:{repository:'org/repo',operation:'issue_comments',args:{number}},priority:5})),true);
+   const bad='issue_comments:{"number":101}',wrap=target=>new Proxy(target,{get(target,prop){
+    if(prop==='transaction')return(apply,purpose)=>target.transaction(tx=>apply(wrap(tx)),purpose);
+    if(prop==='exec')return async(sql,...args)=>{if(sql.includes('INTO collections')&&args.includes(bad))await target.exec('INSERT INTO fixture_member_check VALUES(${badValue})');return target.exec(sql,...args);};
+    if(prop==='batch')return async statements=>{for(const s of statements)if(s.sql.includes('INTO collections')&&(s.bindings||[]).includes(bad))await target.exec('INSERT INTO fixture_member_check VALUES(${badValue})');return target.batch(statements);};
+    const value=Reflect.get(target,prop,target);return typeof value==='function'?value.bind(target):value;
+   }});this.store=wrap(this.store);
+   this.env={...this.env,INSTALLATIONS:{idFromName:id=>id,get:()=>({fetch:async()=>Response.json({results:[{api:'graphql',data:[]},{api:'graphql',data:[]}]})})}};
+   await this.dispatch(await this.claim(await this.nextJob()));
+   return Response.json({complete:(await this.store.exec("SELECT COUNT(*) n FROM collections WHERE operation='issue_comments' AND complete=1")).one().n,bad:(await this.store.exec('SELECT attempt,wait_reason FROM jobs WHERE key=?',bad)).one(),completions:this.repairMetrics.summary().repair_hour.filter(x=>x.event==='completion').reduce((n,x)=>n+x.n,0)});
+  }
+  return super.fetch(req);
+ }`});
+ try{
+  const ns=await mf.getDurableObjectNamespace('REPOSITORIES'),stub=ns.get(ns.idFromName(repository.id));await send(stub,'/configure',{repository:repository.name});
+  const response=await send(stub,'/fixture/member-check',{});assert.equal(response.status,200);assert.deepEqual(await response.json(),{complete:1,bad:{attempt:1,wait_reason:'transport_or_parser'},completions:1});
+ }finally{await mf.dispose();}
+});
+
+test('native Workers SQLite routes a full batch with exactly 100 statement bindings',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
+ const mf=await runtime(async()=>Response.json([]),{},{repositoryAlarms:false,repositoryExtension:`async fetch(req){
+  if(new URL(req.url).pathname==='/fixture/route-batch'){
+   await this.store.exec('DELETE FROM jobs');
+   await this.enqueueMany(Array.from({length:100},(_,i)=>({q:{repository:'org/repo',operation:'issue_comments',args:{number:i+1}},priority:5})),true);
+   this.env={...this.env,INSTALLATIONS:{idFromName:id=>id,get:()=>({fetch:async()=>Response.json({deferred:true,category:'routing:core',retry_at:Date.now()})})}};
+   await this.dispatch(await this.claim(await this.nextJob()));
+   return Response.json((await this.store.exec("SELECT COUNT(*) n,SUM(attempt) attempts,COUNT(lease_id) leases FROM jobs WHERE api='core' AND due<=?",Date.now())).one());
+  }
+  return super.fetch(req);
+ }`});
+ try{
+  const ns=await mf.getDurableObjectNamespace('REPOSITORIES'),stub=ns.get(ns.idFromName(repository.id));await send(stub,'/configure',{repository:repository.name});
+  const response=await send(stub,'/fixture/route-batch',{});assert.equal(response.status,200);assert.deepEqual(await response.json(),{n:100,attempts:0,leases:0});
+ }finally{await mf.dispose();}
+});
+
+for(const failure of ['backend','unclassified'])test('native Workers SQLite retains retry alarms without failed-tail spinning: '+failure,{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
+ const mf=await runtime(async()=>Response.json([]),{},{repositoryAlarms:false,repositoryExtension:`async fetch(req){
+  if(new URL(req.url).pathname==='/fixture/failed-turn'){
+   await this.store.exec('DELETE FROM jobs');
+   await this.enqueueMany(Array.from({length:100},(_,i)=>({q:{repository:'org/repo',operation:'issue_comments',args:{number:i+100}},priority:5})),true);
+   let requests=0,alarms=0;this.setAlarm=async()=>{alarms++;};this.expire=async()=>({});this.maintenance=async()=>{};this.startStorageMaintenance=()=>{};
+   const bad='issue_comments:{"number":100}',wrap=target=>new Proxy(target,{get(target,prop){
+    if(prop==='transaction')return(apply,purpose)=>{if('${failure}'==='unclassified'&&purpose==='publication')throw Error('unclassified publication failure');return target.transaction(tx=>apply(wrap(tx)),purpose);};
+    if(prop==='exec')return async(sql,...args)=>{if(sql.includes('INTO collections')&&args.includes(bad))await target.exec('SELECT * FROM fixture_missing_backend_table');return target.exec(sql,...args);};
+    const value=Reflect.get(target,prop,target);return typeof value==='function'?value.bind(target):value;
+   }});this.store=wrap(this.store);
+   this.env={...this.env,INSTALLATIONS:{idFromName:id=>id,get:()=>({fetch:async(_url,init)=>{requests++;return Response.json({results:JSON.parse(init.body).jobs.map(()=>({api:'graphql',data:[]}))});}})}};
+   await this.runAlarm();const rows=(await this.store.exec('SELECT SUM(attempt) attempts,COUNT(lease_id) leases FROM jobs')).one();
+   return Response.json({requests,alarms,...rows});
+  }
+  return super.fetch(req);
+ }`});
+ try{
+  const ns=await mf.getDurableObjectNamespace('REPOSITORIES'),stub=ns.get(ns.idFromName(repository.id));await send(stub,'/configure',{repository:repository.name});
+  const response=await send(stub,'/fixture/failed-turn',{});assert.equal(response.status,200);assert.deepEqual(await response.json(),{requests:1,alarms:1,attempts:failure==='backend'?100:8,leases:0});
+ }finally{await mf.dispose();}
+});
+
+test('native Workers SQLite commits a whole history before queued ingestion and resumes the remainder',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
+ const mf=await runtime(async()=>Response.json([]),{},{repositoryAlarms:false,repositoryExtension:`async fetch(req){
+  if(new URL(req.url).pathname==='/fixture/yield-publication'){
+   await this.store.exec('DELETE FROM jobs');
+   await this.enqueueMany([100,101,102,103].map(number=>({q:{repository:'org/repo',operation:'issue_comments',args:{number}},priority:5})),true);
+   const base=this.store;let queued=false,pending,visibility;
+   const wrap=target=>new Proxy(target,{get(target,prop){
+    if(prop==='transaction')return(apply,purpose)=>target.transaction(tx=>apply(wrap(tx)),purpose);
+    if(prop==='exec')return async(sql,...args)=>{
+     if(!queued&&sql.includes('INTO collections')&&args.includes('issue_comments:{"number":100}')){
+      queued=true;pending=base.transaction(async store=>{
+       const rows=(await store.exec("SELECT key,complete FROM collections WHERE operation='issue_comments'")).toArray(),map=new Map(rows.map(x=>[x.key,x.complete]));
+       visibility=[map.get('issue_comments:{"number":100}')||0,map.get('issue_comments:{"number":101}')||0];
+       await store.exec('INSERT INTO demand VALUES(?,?)','fixture-ingress',Date.now());
+      },'ingest');pending.catch(()=>{});
+     }
+     return target.exec(sql,...args);
+    };
+    const value=Reflect.get(target,prop,target);return typeof value==='function'?value.bind(target):value;
+   }});this.store=wrap(base);
+   this.env={...this.env,INSTALLATIONS:{idFromName:id=>id,get:()=>({fetch:async(_url,init)=>Response.json({results:JSON.parse(init.body).jobs.map(()=>({api:'graphql',data:[]}))})})}};
+   await this.dispatch(await this.claim(await this.nextJob()));await pending;
+   return Response.json({queued,visibility,complete:(await this.store.exec("SELECT COUNT(*) n FROM collections WHERE operation='issue_comments' AND complete=1")).one().n,waiting:base.queuedOtherWork,yielded:this.groupedPublication.queued_work_yields>0});
+  }
+  return super.fetch(req);
+ }`});
+ try{
+  const ns=await mf.getDurableObjectNamespace('REPOSITORIES'),stub=ns.get(ns.idFromName(repository.id));await send(stub,'/configure',{repository:repository.name});
+  const response=await send(stub,'/fixture/yield-publication',{});assert.equal(response.status,200);assert.deepEqual(await response.json(),{queued:true,visibility:[1,0],complete:4,waiting:0,yielded:true});
+ }finally{await mf.dispose();}
+});

@@ -18,6 +18,7 @@ export interface RepositoryStore {
   readonly backend:'sqlite'|'postgres';
   readonly transactional?:boolean;
   readonly queryCount?:number;
+  readonly queuedOtherWork?:number;
   exec<T=any>(sql:string,...bindings:Bind[]):Promise<Rows<T>>;
   batch(statements:Statement[]):Promise<Rows<any>[]>;
   transaction<T>(apply:(store:RepositoryStore)=>Promise<T>,purpose?:WriterPurpose):Promise<T>;
@@ -26,8 +27,12 @@ export interface RepositoryStore {
 }
 export class SerialLane {
   private tail:Promise<unknown>=Promise.resolve();
-  run<T>(work:()=>Promise<T>):Promise<T> {
-    const pending=this.tail.then(work,work);this.tail=pending.catch(()=>{});return pending;
+  private waitingOther=0;
+  get queuedOtherWork():number{return this.waitingOther;}
+  run<T>(work:()=>Promise<T>,purpose:WriterPurpose='other'):Promise<T> {
+    if(purpose!=='publication')this.waitingOther++;
+    const begin=()=>{if(purpose!=='publication')this.waitingOther--;return work();};
+    const pending=this.tail.then(begin,begin);this.tail=pending.catch(()=>{});return pending;
   }
 }
 // SQLite otherwise prefers the kind prefix of resource_parent and walks
@@ -35,37 +40,66 @@ export class SerialLane {
 // Its CROSS JOIN fixes loop order: narrow indexed members first, then PK
 // resource lookups. Keep ordinary joins for PostgreSQL's statistics planner.
 export function collectionJoin(store:RepositoryStore):string {return store.backend==='sqlite'?'CROSS JOIN':'JOIN';}
+// A failed publication may reuse its fetched input only after the adapter
+// confirms rollback of a healthy apply transaction. The symbol survives test
+// bundles without exposing diagnostics or changing public error messages.
+const MEMBER_ROLLBACK=Symbol.for('tauceti.repository.member_rollback');
+const BACKEND_FAILURE=Symbol.for('tauceti.repository.backend_failure');
+export const canReplayPublication=(error:unknown):boolean=>Boolean(error && typeof error==='object' && (error as any)[MEMBER_ROLLBACK]===true);
+export const isBackendFailure=(error:unknown):boolean=>Boolean(error && typeof error==='object' && (error as any)[BACKEND_FAILURE]===true) && !canReplayPublication(error);
+const markMemberRollback=(error:unknown):void=>{if(error && typeof error==='object')try{Object.defineProperty(error,MEMBER_ROLLBACK,{value:true,configurable:true});}catch{}};
+const clearMemberRollback=(error:unknown):void=>{if(error && typeof error==='object')try{delete (error as any)[MEMBER_ROLLBACK];}catch{}};
+const markBackendFailure=(error:unknown):void=>{if(error && typeof error==='object')try{Object.defineProperty(error,BACKEND_FAILURE,{value:true});}catch{}};
+const memberApplyError=(error:unknown):boolean=>error instanceof Error && !(error instanceof StoreFenced) && (!(error instanceof StoreUnavailable) || Boolean(error.sqlstate && /^(22|23|54)/.test(error.sqlstate)));
+const sqliteMemberError=(error:any):boolean=>{
+  if(Number.isInteger(error?.errcode))return [18,19,20].includes(error.errcode&255);
+  if(typeof error?.code==='string')return /^SQLITE_(TOOBIG|CONSTRAINT|MISMATCH)(_|$)/.test(error.code);
+  // Workerd SqlStorage exposes only this terminal native result-code suffix.
+  // This is used only for an exception caught from the SQL API, never for an
+  // arbitrary application message. Unknown/control/storage codes do not replay.
+  const code=typeof error?.message==='string'?/: (SQLITE_[A-Z0-9_]+)(?: \(extended: SQLITE_[A-Z0-9_]+\))?$/.exec(error.message)?.[1]:undefined;
+  return code!==undefined && ['SQLITE_TOOBIG','SQLITE_CONSTRAINT','SQLITE_MISMATCH'].includes(code);
+};
 export class SQLiteStore implements RepositoryStore {
   readonly backend='sqlite';
+  private queryFailure:unknown;
   constructor(private storage:DurableObjectStorage,private sql:SqlStorage,readonly transactional=false,private generation='sqlite-v1',private context?:DurableObjectState,private lane=new SerialLane()) {}
+  get queuedOtherWork():number{return this.lane.queuedOtherWork;}
   async exec<T=any>(query:string,...bindings:Bind[]):Promise<Rows<T>> {
     if(!this.transactional)return this.lane.run(()=>new SQLiteStore(this.storage,this.sql,true,this.generation,this.context,this.lane).exec<T>(query,...bindings));
     if(!/^\s*SELECT\b/i.test(query))this.fence();
-    return new Rows(this.sql.exec<any>(query,...bindings).toArray());
+    try{return new Rows(this.sql.exec<any>(query,...bindings).toArray());}catch(error){this.queryFailure=error;if(!sqliteMemberError(error))markBackendFailure(error);throw error;}
   }
   private fence():void {
-    const row=this.sql.exec<any>("SELECT value FROM meta WHERE key='backend_owner'").toArray()[0];
-    if(row) {const owner=JSON.parse(row.value);if(owner.backend!=='sqlite' || owner.generation!==this.generation)throw new StoreFenced();}
+    try {
+      const row=this.sql.exec<any>("SELECT value FROM meta WHERE key='backend_owner'").toArray()[0];
+      if(row) {const owner=JSON.parse(row.value);if(owner.backend!=='sqlite' || owner.generation!==this.generation)throw new StoreFenced();}
+    }catch(error){this.queryFailure=error;throw error;}
   }
-  private batchSync(statements:Statement[]):Rows<any>[] {if(statements.some(s=>!/^\s*SELECT\b/i.test(s.sql)))this.fence();return statements.map(s=>new Rows(this.sql.exec(s.sql,...(s.bindings || [])).toArray()));}
+  private batchSync(statements:Statement[]):Rows<any>[] {if(statements.some(s=>!/^\s*SELECT\b/i.test(s.sql)))this.fence();return statements.map(s=>{try{return new Rows(this.sql.exec(s.sql,...(s.bindings || [])).toArray());}catch(error){this.queryFailure=error;if(!sqliteMemberError(error))markBackendFailure(error);throw error;}});}
   async batch(statements:Statement[]):Promise<Rows<any>[]> {
     if(this.transactional)return this.batchSync(statements);
     return this.lane.run(async()=>statements.some(s=>!/^\s*SELECT\b/i.test(s.sql))?this.storage.transactionSync(()=>this.batchSync(statements)):this.batchSync(statements));
   }
-  transaction<T>(apply:(store:RepositoryStore)=>Promise<T>):Promise<T> {
+  transaction<T>(apply:(store:RepositoryStore)=>Promise<T>,purpose:WriterPurpose='other'):Promise<T> {
     if(this.transactional) return apply(this);
     const queued=Date.now();
     return this.lane.run(async()=>{
       const started=Date.now();
       let result:T,error:unknown,failed=false;
-      const execute=async()=>{try{result=await this.storage.transaction(()=>{this.fence();return apply(new SQLiteStore(this.storage,this.sql,true,this.generation,this.context,this.lane));});}catch(cause){failed=true;error=cause;}};
+      const scoped=new SQLiteStore(this.storage,this.sql,true,this.generation,this.context,this.lane);let applyError:unknown;
+      const execute=async()=>{try{result=await this.storage.transaction(async()=>{this.fence();try{return await apply(scoped);}catch(cause){applyError=cause;throw cause;}});}catch(cause){
+        failed=true;error=cause;clearMemberRollback(cause);
+        if(cause===applyError && memberApplyError(cause) && (scoped.queryFailure===undefined || sqliteMemberError(scoped.queryFailure)))markMemberRollback(cause);
+        if(!canReplayPublication(cause))markBackendFailure(cause);
+      }};
       // Input gating also protects native SQLite recovery/status operations
       // from observing an open async savepoint. Catch inside the gate: an
       // expected transaction rollback must not reset the Durable Object.
       try {if(this.context)await this.context.blockConcurrencyWhile(execute);else await execute();}
       finally {const finished=Date.now();if(finished-queued>=250)log('repository_transaction_slow',{wait_ms:started-queued,transaction_ms:finished-started,failed});}
       if(failed)throw error;return result!;
-    });
+    },purpose);
   }
   async health():Promise<Record<string,unknown>> {return {backend:this.backend,schema_version:5,database_size:this.sql.databaseSize};}
 }
@@ -133,8 +167,8 @@ export function postgresSQL(input:string,schema:string):string {
   sql=sql.replace(/'(?:''|[^'])*'|\?/g,part=>part==='?'?'$'+(++parameter):part);
   return sql;
 }
-export class StoreUnavailable extends Error {constructor(code?:string){super('Repository database unavailable'+(code && /^[0-9A-Z]{5}$/.test(code)?' ('+code+')':''));}}
-export class StoreFenced extends Error {constructor(){super('Repository backend generation fenced');}}
+export class StoreUnavailable extends Error {readonly sqlstate?:string;constructor(code?:string){const safe=code && /^[0-9A-Z]{5}$/.test(code)?code:undefined;super('Repository database unavailable'+(safe?' ('+safe+')':''));this.sqlstate=safe;markBackendFailure(this);}}
+export class StoreFenced extends Error {constructor(){super('Repository backend generation fenced');markBackendFailure(this);}}
 type TransactionPhase='connect'|'begin'|'session'|'owner'|'apply'|'commit';
 interface SessionIdentity {pid:number;started_us:string;token:string}
 type SessionCleanup='terminated'|'already_ended'|'unconfirmed'|'expired';
@@ -157,6 +191,7 @@ export class PostgresStore implements RepositoryStore {
   private queriesExecuted=0;
   get queryCount():number{return this.queriesExecuted;}
   private writer=new SerialLane();
+  get queuedOtherWork():number{return this.writer.queuedOtherWork;}
   private discarded:DiscardedSession[]=[];
   private nextCleanupAt=0;
   private cleanupFailures=0;
@@ -237,7 +272,7 @@ export class PostgresStore implements RepositoryStore {
   async transaction<T>(apply:(store:RepositoryStore)=>Promise<T>,purpose:WriterPurpose='other'):Promise<T> {
     if(this.client)return apply(this);
     const queued=Date.now();
-    return this.writer.run(()=>this.transact(apply,Date.now()-queued,purpose));
+    return this.writer.run(()=>this.transact(apply,Date.now()-queued,purpose),purpose);
   }
   // WebSocket close is asynchronous: the server may retain the transaction
   // after the client times out. Prefer confirmed session cleanup before the
@@ -310,6 +345,7 @@ export class PostgresStore implements RepositoryStore {
         if(!row || row.backend!=='postgres' || row.generation!==this.generation || row.schema_version!==1)throw new StoreFenced();
       },connection);
       const scoped=new PostgresStore(this.url,this.schema.slice('github_state_'.length),this.generation,client,this.diagnostics,connection);
+      scoped.writer=this.writer;
       // Application exceptions must retain their meaning (for example an
       // expired staging page); only driver operations are sanitized.
       enterPhase('apply');
@@ -322,11 +358,14 @@ export class PostgresStore implements RepositoryStore {
       },connection);
       if(committed.command!=='COMMIT'){connection.reason='commit_rejected';connection.code='25P02';throw new StoreUnavailable('25P02');}failed=false;return result;
     }catch(error){
-      finishPhase();
+      finishPhase();clearMemberRollback(error);
       if(error instanceof StoreFenced)connection.reason='fenced';else connection.reason??='application';
+      let rolledBack=false;
       if(!connection.closed && !connection.error){const rollbackStarted=Date.now();let timer:ReturnType<typeof setTimeout>|undefined;try{
-        await Promise.race([client.query('ROLLBACK'),new Promise<void>(resolve=>{timer=setTimeout(()=>{connection.cleanup='rollback_timeout';fail('08006','rollback_timeout');resolve();},2000);})]);
+        const rollback=await Promise.race([client.query('ROLLBACK'),new Promise<void>(resolve=>{timer=setTimeout(()=>{connection.cleanup='rollback_timeout';fail('08006','rollback_timeout');resolve();},2000);})]);rolledBack=rollback?.command==='ROLLBACK';
       }catch{connection.cleanup='rollback_error';fail();}finally{if(timer)clearTimeout(timer);rollback_ms=Date.now()-rollbackStarted;}}
+      if(rolledBack && connection.phase==='apply' && !connection.error && !connection.commitUncertain && memberApplyError(error))markMemberRollback(error);
+      if(connection.error)markBackendFailure(error);
       throw error;
     }finally{
       finishPhase();
@@ -377,6 +416,7 @@ export class ReadCacheStore implements RepositoryStore {
   constructor(private source:RepositoryStore){this.backend=source.backend;}
   get transactional():boolean|undefined{return this.source.transactional;}
   get queryCount():number|undefined{return this.source.queryCount;}
+  get queuedOtherWork():number|undefined{return this.source.queuedOtherWork;}
   private key(sql:string,bindings:Bind[]):string{return JSON.stringify([sql,bindings]);}
   peek(sql:string,bindings:Bind[]):any[]|undefined{return this.cache.get(this.key(sql,bindings))?.rows;}
   private remove(key:string):void {
@@ -425,6 +465,7 @@ export class BufferedStore implements RepositoryStore {
   private pending:Statement[]=[];private identities=new Set<string>();
   constructor(private source:RepositoryStore){}
   get queryCount():number|undefined{return this.source.queryCount;}
+  get queuedOtherWork():number|undefined{return this.source.queuedOtherWork;}
   private identity(s:Statement):string|undefined {
     const insert=s.sql.match(/^INSERT(?: OR IGNORE)? INTO (\w+)(?:\(([^)]+)\))? VALUES\s*\(([^)]+)\)/);
     if(insert){

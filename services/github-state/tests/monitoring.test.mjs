@@ -136,3 +136,15 @@ test('one owner retains its budget across new publication-style views of the sam
   for(const d of stalled)d.resolve(null);await flush();
  }finally{t.mock.timers.reset();}
 });
+
+
+test('committed publication metrics merge bounded buckets with exact counts and latency',()=>{
+ const now=Date.now(),a=new monitoring.RepairMetrics(),b=new monitoring.RepairMetrics();
+ a.record('completion','requested','issue_comments',1,now);a.record('requested_single_latency_ms','requested','issue_comments',30,now);
+ for(let i=0;i<44060;i++)b.record('arrival','verification','reactions',1,now);
+ b.record('completion','requested','issue_comments',1,now);b.record('requested_single_latency_ms','requested','issue_comments',90,now);
+ a.merge(b,now);const summary=a.summary(now);
+ assert.equal(a.snapshot(now).length,3);assert.equal(summary.repair_hour.find(x=>x.event==='arrival').n,44060);
+ assert.equal(summary.repair_hour.find(x=>x.event==='completion').n,2);assert.equal(summary.requested_latency[0].samples,2);assert.equal(summary.requested_latency[0].p95_ms,100);
+ b.record('completion','requested','issue_comments',1,now);assert.equal(a.summary(now).repair_hour.find(x=>x.event==='completion').n,2,'committed metrics do not alias mutable attempts');
+});
