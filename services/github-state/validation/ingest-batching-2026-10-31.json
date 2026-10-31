@@ -1,0 +1,962 @@
+{
+  "baseline": "6dc9cd35997ae7fd582a9cfdf4234f3d92f9d7ed",
+  "implementation_sha256": "528935d869e429a923cb1a8fc80bde2353507bfe8241c970ee67769dd7880efc",
+  "trials": 3,
+  "scope": "isolated real PostgreSQL; six synthetic webhook deliveries per trial; full baseline source and store; identical installed dependencies; actual application SQL round trips instrumented below buffering; preparation/read and admission/commit latency included; no GitHub requests; not production throughput",
+  "before": [
+    {
+      "events": [
+        {
+          "event": "pull_request",
+          "elapsed_ms": 1259.369792,
+          "sql_round_trips": 41,
+          "transactions": 1
+        },
+        {
+          "event": "status",
+          "elapsed_ms": 671.532232,
+          "sql_round_trips": 13,
+          "transactions": 1
+        },
+        {
+          "event": "issue_comment",
+          "elapsed_ms": 1579.3294109999997,
+          "sql_round_trips": 21,
+          "transactions": 1
+        },
+        {
+          "event": "pull_request_review_comment",
+          "elapsed_ms": 1003.5221820000006,
+          "sql_round_trips": 25,
+          "transactions": 1
+        },
+        {
+          "event": "pull_request_review",
+          "elapsed_ms": 693.8500600000007,
+          "sql_round_trips": 16,
+          "transactions": 1
+        },
+        {
+          "event": "push",
+          "elapsed_ms": 1160.7549350000008,
+          "sql_round_trips": 30,
+          "transactions": 1
+        }
+      ],
+      "total_ms": 6368.358612000002,
+      "sql_round_trips": 146,
+      "transactions": 6,
+      "committed_deliveries": 6,
+      "jobs": [
+        {
+          "key": "files:{\"number\":7}",
+          "priority": 1,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "issue_comments:{\"number\":7}",
+          "priority": 0,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "open_issues:{}",
+          "priority": 2,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "open_prs:{}",
+          "priority": 2,
+          "dirty": 1,
+          "generation": 2,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "pr:{\"number\":7}",
+          "priority": 0,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "refs:{}",
+          "priority": 2,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "repository:{}",
+          "priority": 2,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "review_comments:{\"number\":7}",
+          "priority": 1,
+          "dirty": 1,
+          "generation": 2,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "review_threads:{\"number\":7}",
+          "priority": 1,
+          "dirty": 1,
+          "generation": 2,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "reviews:{\"number\":7}",
+          "priority": 1,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "statuses:{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+          "priority": 0,
+          "dirty": 1,
+          "generation": 2,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        }
+      ],
+      "github_requests": 0
+    },
+    {
+      "events": [
+        {
+          "event": "pull_request",
+          "elapsed_ms": 1537.2953540000017,
+          "sql_round_trips": 41,
+          "transactions": 1
+        },
+        {
+          "event": "status",
+          "elapsed_ms": 499.0197429999971,
+          "sql_round_trips": 13,
+          "transactions": 1
+        },
+        {
+          "event": "issue_comment",
+          "elapsed_ms": 676.9627010000004,
+          "sql_round_trips": 21,
+          "transactions": 1
+        },
+        {
+          "event": "pull_request_review_comment",
+          "elapsed_ms": 784.7424409999985,
+          "sql_round_trips": 25,
+          "transactions": 1
+        },
+        {
+          "event": "pull_request_review",
+          "elapsed_ms": 693.6949800000002,
+          "sql_round_trips": 16,
+          "transactions": 1
+        },
+        {
+          "event": "push",
+          "elapsed_ms": 867.503721000001,
+          "sql_round_trips": 30,
+          "transactions": 1
+        }
+      ],
+      "total_ms": 5059.218939999999,
+      "sql_round_trips": 146,
+      "transactions": 6,
+      "committed_deliveries": 6,
+      "jobs": [
+        {
+          "key": "files:{\"number\":7}",
+          "priority": 1,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "issue_comments:{\"number\":7}",
+          "priority": 0,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "open_issues:{}",
+          "priority": 2,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "open_prs:{}",
+          "priority": 2,
+          "dirty": 1,
+          "generation": 2,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "pr:{\"number\":7}",
+          "priority": 0,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "refs:{}",
+          "priority": 2,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "repository:{}",
+          "priority": 2,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "review_comments:{\"number\":7}",
+          "priority": 1,
+          "dirty": 1,
+          "generation": 2,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "review_threads:{\"number\":7}",
+          "priority": 1,
+          "dirty": 1,
+          "generation": 2,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "reviews:{\"number\":7}",
+          "priority": 1,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "statuses:{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+          "priority": 0,
+          "dirty": 1,
+          "generation": 2,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        }
+      ],
+      "github_requests": 0
+    },
+    {
+      "events": [
+        {
+          "event": "pull_request",
+          "elapsed_ms": 1372.9587820000015,
+          "sql_round_trips": 41,
+          "transactions": 1
+        },
+        {
+          "event": "status",
+          "elapsed_ms": 533.7465929999998,
+          "sql_round_trips": 13,
+          "transactions": 1
+        },
+        {
+          "event": "issue_comment",
+          "elapsed_ms": 711.6921440000006,
+          "sql_round_trips": 21,
+          "transactions": 1
+        },
+        {
+          "event": "pull_request_review_comment",
+          "elapsed_ms": 758.2083249999996,
+          "sql_round_trips": 25,
+          "transactions": 1
+        },
+        {
+          "event": "pull_request_review",
+          "elapsed_ms": 555.9158889999999,
+          "sql_round_trips": 16,
+          "transactions": 1
+        },
+        {
+          "event": "push",
+          "elapsed_ms": 1026.6005970000042,
+          "sql_round_trips": 30,
+          "transactions": 1
+        }
+      ],
+      "total_ms": 4959.122330000006,
+      "sql_round_trips": 146,
+      "transactions": 6,
+      "committed_deliveries": 6,
+      "jobs": [
+        {
+          "key": "files:{\"number\":7}",
+          "priority": 1,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "issue_comments:{\"number\":7}",
+          "priority": 0,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "open_issues:{}",
+          "priority": 2,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "open_prs:{}",
+          "priority": 2,
+          "dirty": 1,
+          "generation": 2,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "pr:{\"number\":7}",
+          "priority": 0,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "refs:{}",
+          "priority": 2,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "repository:{}",
+          "priority": 2,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "review_comments:{\"number\":7}",
+          "priority": 1,
+          "dirty": 1,
+          "generation": 2,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "review_threads:{\"number\":7}",
+          "priority": 1,
+          "dirty": 1,
+          "generation": 2,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "reviews:{\"number\":7}",
+          "priority": 1,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "statuses:{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+          "priority": 0,
+          "dirty": 1,
+          "generation": 2,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        }
+      ],
+      "github_requests": 0
+    }
+  ],
+  "after": [
+    {
+      "events": [
+        {
+          "event": "pull_request",
+          "elapsed_ms": 737.9763889999995,
+          "sql_round_trips": 13,
+          "transactions": 1
+        },
+        {
+          "event": "status",
+          "elapsed_ms": 611.8171889999994,
+          "sql_round_trips": 10,
+          "transactions": 1
+        },
+        {
+          "event": "issue_comment",
+          "elapsed_ms": 566.4440720000002,
+          "sql_round_trips": 16,
+          "transactions": 1
+        },
+        {
+          "event": "pull_request_review_comment",
+          "elapsed_ms": 684.3605650000009,
+          "sql_round_trips": 16,
+          "transactions": 1
+        },
+        {
+          "event": "pull_request_review",
+          "elapsed_ms": 358.7276270000002,
+          "sql_round_trips": 6,
+          "transactions": 1
+        },
+        {
+          "event": "push",
+          "elapsed_ms": 711.2094779999989,
+          "sql_round_trips": 12,
+          "transactions": 1
+        }
+      ],
+      "total_ms": 3670.535319999999,
+      "sql_round_trips": 73,
+      "transactions": 6,
+      "committed_deliveries": 6,
+      "jobs": [
+        {
+          "key": "files:{\"number\":7}",
+          "priority": 1,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "issue_comments:{\"number\":7}",
+          "priority": 0,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "open_issues:{}",
+          "priority": 2,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "open_prs:{}",
+          "priority": 2,
+          "dirty": 1,
+          "generation": 2,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "pr:{\"number\":7}",
+          "priority": 0,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "refs:{}",
+          "priority": 2,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "repository:{}",
+          "priority": 2,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "review_comments:{\"number\":7}",
+          "priority": 1,
+          "dirty": 1,
+          "generation": 2,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "review_threads:{\"number\":7}",
+          "priority": 1,
+          "dirty": 1,
+          "generation": 2,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "reviews:{\"number\":7}",
+          "priority": 1,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "statuses:{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+          "priority": 0,
+          "dirty": 1,
+          "generation": 2,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        }
+      ],
+      "github_requests": 0
+    },
+    {
+      "events": [
+        {
+          "event": "pull_request",
+          "elapsed_ms": 520.1346480000011,
+          "sql_round_trips": 13,
+          "transactions": 1
+        },
+        {
+          "event": "status",
+          "elapsed_ms": 555.308989000001,
+          "sql_round_trips": 10,
+          "transactions": 1
+        },
+        {
+          "event": "issue_comment",
+          "elapsed_ms": 659.3647600000004,
+          "sql_round_trips": 16,
+          "transactions": 1
+        },
+        {
+          "event": "pull_request_review_comment",
+          "elapsed_ms": 741.3913710000015,
+          "sql_round_trips": 16,
+          "transactions": 1
+        },
+        {
+          "event": "pull_request_review",
+          "elapsed_ms": 375.9211890000006,
+          "sql_round_trips": 6,
+          "transactions": 1
+        },
+        {
+          "event": "push",
+          "elapsed_ms": 622.2456750000019,
+          "sql_round_trips": 12,
+          "transactions": 1
+        }
+      ],
+      "total_ms": 3474.3666320000066,
+      "sql_round_trips": 73,
+      "transactions": 6,
+      "committed_deliveries": 6,
+      "jobs": [
+        {
+          "key": "files:{\"number\":7}",
+          "priority": 1,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "issue_comments:{\"number\":7}",
+          "priority": 0,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "open_issues:{}",
+          "priority": 2,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "open_prs:{}",
+          "priority": 2,
+          "dirty": 1,
+          "generation": 2,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "pr:{\"number\":7}",
+          "priority": 0,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "refs:{}",
+          "priority": 2,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "repository:{}",
+          "priority": 2,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "review_comments:{\"number\":7}",
+          "priority": 1,
+          "dirty": 1,
+          "generation": 2,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "review_threads:{\"number\":7}",
+          "priority": 1,
+          "dirty": 1,
+          "generation": 2,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "reviews:{\"number\":7}",
+          "priority": 1,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "statuses:{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+          "priority": 0,
+          "dirty": 1,
+          "generation": 2,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        }
+      ],
+      "github_requests": 0
+    },
+    {
+      "events": [
+        {
+          "event": "pull_request",
+          "elapsed_ms": 540.1161619999984,
+          "sql_round_trips": 13,
+          "transactions": 1
+        },
+        {
+          "event": "status",
+          "elapsed_ms": 452.47741400000086,
+          "sql_round_trips": 10,
+          "transactions": 1
+        },
+        {
+          "event": "issue_comment",
+          "elapsed_ms": 559.7049249999982,
+          "sql_round_trips": 16,
+          "transactions": 1
+        },
+        {
+          "event": "pull_request_review_comment",
+          "elapsed_ms": 606.230150000003,
+          "sql_round_trips": 16,
+          "transactions": 1
+        },
+        {
+          "event": "pull_request_review",
+          "elapsed_ms": 373.8743170000016,
+          "sql_round_trips": 6,
+          "transactions": 1
+        },
+        {
+          "event": "push",
+          "elapsed_ms": 476.19481500000256,
+          "sql_round_trips": 12,
+          "transactions": 1
+        }
+      ],
+      "total_ms": 3008.5977830000047,
+      "sql_round_trips": 73,
+      "transactions": 6,
+      "committed_deliveries": 6,
+      "jobs": [
+        {
+          "key": "files:{\"number\":7}",
+          "priority": 1,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "issue_comments:{\"number\":7}",
+          "priority": 0,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "open_issues:{}",
+          "priority": 2,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "open_prs:{}",
+          "priority": 2,
+          "dirty": 1,
+          "generation": 2,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "pr:{\"number\":7}",
+          "priority": 0,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "refs:{}",
+          "priority": 2,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "repository:{}",
+          "priority": 2,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "review_comments:{\"number\":7}",
+          "priority": 1,
+          "dirty": 1,
+          "generation": 2,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "review_threads:{\"number\":7}",
+          "priority": 1,
+          "dirty": 1,
+          "generation": 2,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "reviews:{\"number\":7}",
+          "priority": 1,
+          "dirty": 1,
+          "generation": 1,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        },
+        {
+          "key": "statuses:{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+          "priority": 0,
+          "dirty": 1,
+          "generation": 2,
+          "lane": "active",
+          "attempt": 0,
+          "wait_reason": null
+        }
+      ],
+      "github_requests": 0
+    }
+  ],
+  "summary": {
+    "before": {
+      "total_ms": 5059.218939999999,
+      "sql_round_trips": 146,
+      "transactions": 6,
+      "events": [
+        {
+          "event": "pull_request",
+          "elapsed_ms": 1372.9587820000015,
+          "sql_round_trips": 41
+        },
+        {
+          "event": "status",
+          "elapsed_ms": 533.7465929999998,
+          "sql_round_trips": 13
+        },
+        {
+          "event": "issue_comment",
+          "elapsed_ms": 711.6921440000006,
+          "sql_round_trips": 21
+        },
+        {
+          "event": "pull_request_review_comment",
+          "elapsed_ms": 784.7424409999985,
+          "sql_round_trips": 25
+        },
+        {
+          "event": "pull_request_review",
+          "elapsed_ms": 693.6949800000002,
+          "sql_round_trips": 16
+        },
+        {
+          "event": "push",
+          "elapsed_ms": 1026.6005970000042,
+          "sql_round_trips": 30
+        }
+      ]
+    },
+    "after": {
+      "total_ms": 3474.3666320000066,
+      "sql_round_trips": 73,
+      "transactions": 6,
+      "events": [
+        {
+          "event": "pull_request",
+          "elapsed_ms": 540.1161619999984,
+          "sql_round_trips": 13
+        },
+        {
+          "event": "status",
+          "elapsed_ms": 555.308989000001,
+          "sql_round_trips": 10
+        },
+        {
+          "event": "issue_comment",
+          "elapsed_ms": 566.4440720000002,
+          "sql_round_trips": 16
+        },
+        {
+          "event": "pull_request_review_comment",
+          "elapsed_ms": 684.3605650000009,
+          "sql_round_trips": 16
+        },
+        {
+          "event": "pull_request_review",
+          "elapsed_ms": 373.8743170000016,
+          "sql_round_trips": 6
+        },
+        {
+          "event": "push",
+          "elapsed_ms": 622.2456750000019,
+          "sql_round_trips": 12
+        }
+      ]
+    }
+  }
+}

@@ -148,6 +148,15 @@ preferred lane is empty. Quota-deferred dependencies retain their demand provena
 The existing weighted shares between lanes remain unchanged. Expiry and coverage
 preparation precede the launch window rather than consuming it before jobs start.
 
+Webhook ingestion collects each event's repair requests and schedules them with
+bulk coverage, demand and job lookups after its resource changes. The event's
+receipt, resources, membership and repair obligations remain one atomic commit;
+retry deadlines, pagination and existing ownership are preserved. Successful
+commits emit `repository_ingest_committed` with a bounded event type, application
+SQL round-trip count and apply-through-commit elapsed time. CPU time is reported
+as unknown; elapsed database I/O is not a CPU measurement. SQLite does not supply
+the PostgreSQL query counter. See [ingestion measurements](INGEST-PERFORMANCE.md).
+
 PostgreSQL cache misses return stored or unavailable results without awaiting
 writer admission for demand bookkeeping. One repository owner coalesces readers,
 committing demand and initial job creation together in small groups. Failed
