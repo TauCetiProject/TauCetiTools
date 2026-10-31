@@ -49,7 +49,10 @@ async function measure(Class,StoreClass,count,ingressCount,intervalMs=0,groups=1
    await f.store.exec('UPDATE jobs SET lane=? WHERE key IN ('+keys.map(()=>'?').join(',')+')',['requested','active','verification','archive'][group],...keys);
   }
   for(let i=0;i<ingressCount;i++)f.objects.set('fixture/ingress-'+i,JSON.stringify({action:'created',issue:{number:9000},comment:{id:String(90000+i),body:'concurrent webhook',created_at:'2026-10-31T00:00:00Z'}}));
-  const raw=f.store,transact=raw.transact.bind(raw);let transactions=0,roundTrips=0,upstream=0;const writers=[],reads=[];
+  const raw=f.store,transact=raw.transact.bind(raw);let transactions=0,roundTrips=0,upstream=0,standaloneReads=0;const writers=[],reads=[];
+  const exec=raw.exec.bind(raw),batch=raw.batch.bind(raw);
+  raw.exec=(sql,...args)=>{if(/^\s*SELECT\b/i.test(sql))standaloneReads++;return exec(sql,...args);};
+  raw.batch=statements=>{if(statements.every(s=>/^\s*SELECT\b/i.test(s.sql)))standaloneReads++;return batch(statements);};
   raw.transact=async(apply,wait,purpose='other')=>{
    transactions++;const start=performance.now();let calls=0,failed=true;
    try{return await transact(async tx=>{
@@ -66,14 +69,14 @@ async function measure(Class,StoreClass,count,ingressCount,intervalMs=0,groups=1
   }})};
   const start=performance.now(),alarm=f.state.runAlarm();await beganUpstream;
   const ingests=Array.from({length:ingressCount},(_,i)=>(async()=>{if(intervalMs&&i)await new Promise(resolve=>setTimeout(resolve,i*intervalMs));const t=performance.now();await f.state.ingest({repository:repo,key:'fixture/ingress-'+i,delivery:'ingress-'+i,event:'issue_comment',received:Date.now()});reads.push(performance.now()-t);})());
-  release();await Promise.all([alarm,...ingests]);await drainRepairs(f.state);const completeMs=performance.now()-start;
+  release();await Promise.all([alarm,...ingests]);await drainRepairs(f.state);const completeMs=performance.now()-start,standaloneReadTrips=standaloneReads;
   assert.equal(upstream,groups);
   for(const query of cohort)assert.equal(await f.state.complete(query),true);
   assert.equal((await raw.exec('SELECT COUNT(*) n FROM deliveries')).one().n,ingressCount);
   assert.equal((await raw.exec('SELECT COUNT(*) n FROM jobs WHERE lease_id IS NOT NULL')).one().n,0);
   const publications=writers.filter(x=>x.purpose==='publication');
   const p95=values=>[...values].sort((a,b)=>a-b)[Math.max(0,Math.ceil(values.length*.95)-1)]??null;
-  return {histories_completed:cohort.length,committed_ingress:ingressCount,groups,ingress_interval_ms:intervalMs,elapsed_ms:completeMs,transactions,application_sql_round_trips:roundTrips,upstream_batches:upstream,github_requests:0,repair_scheduler:f.state.repairCoordinator?.snapshot() || null,lease_renewal_row_updates:f.state.renewedLeases || 0,grouped_publication:f.state.groupedPublication?{...f.state.groupedPublication}:null,ingress_ms:reads,ingress_p95_ms:p95(reads),ingress_admission_p95_ms:p95(writers.filter(x=>x.purpose==='ingest').map(x=>x.queue_wait_ms)),publication_transactions:publications.length,publication_max_hold_ms:Math.max(...publications.map(x=>x.transaction_ms)),writers};
+  return {histories_completed:cohort.length,committed_ingress:ingressCount,groups,ingress_interval_ms:intervalMs,elapsed_ms:completeMs,transactions,application_sql_round_trips:roundTrips,standalone_read_http_round_trips:standaloneReadTrips,total_application_round_trips:roundTrips+standaloneReadTrips,round_trip_scope:'writer application driver actions plus root stored-read HTTP calls before completion; connection/setup/commit costs are timed separately in writer holds; reader verification excluded',upstream_batches:upstream,github_requests:0,repair_scheduler:f.state.repairCoordinator?.snapshot() || null,lease_renewal_row_updates:f.state.renewedLeases || 0,grouped_publication:f.state.groupedPublication?{...f.state.groupedPublication}:null,ingress_ms:reads,ingress_p95_ms:p95(reads),ingress_admission_p95_ms:p95(writers.filter(x=>x.purpose==='ingest').map(x=>x.queue_wait_ms)),publication_transactions:publications.length,publication_max_hold_ms:Math.max(...publications.map(x=>x.transaction_ms)),writers};
  }finally{release?.();await f.close();}
 }
 const result={baseline:baselineCommit,implementation_sha256:implementationFingerprint(),implementation_files:fingerprintFiles(),scope:'isolated real PostgreSQL; ordinary runAlarm leased scheduler and tracked background completion; configured histories per group and issue-comment deliveries to a warm complete collection, burst and steady500ms spacing; requested limits interleaved with benchmark-only cap substitution; separate100memberemptyfullbatch alternating trials; fixture upstream only, zero GitHub requests; not a production event-mix or fleet throughput claim',trials,mixed_groups:mixedGroups,histories_per_group:mixedCount,ingress_deliveries:ingressCount,full_trials:fullTrials,configured_items:configured,candidate_limits:limits,before:[],after:[],steady:{before:[],after:[]},limits:Object.fromEntries(limits.filter(n=>n!==configured).map(n=>[n,{burst:[],steady:[]}])),full_batch:{},full_batch_trials:{before:[],after:[]}};
@@ -92,7 +95,7 @@ if(process.env.BENCHMARK_FULL!=='0')for(let trial=0;trial<fullTrials;trial++)for
  writeFileSync(process.env.BENCHMARK_OUTPUT || '/tmp/publication-benchmark.json',JSON.stringify(result,null,2)+'\n');
 }
 const median=a=>[...a].sort((x,y)=>x-y)[Math.floor(a.length/2)];result.summary={};
-const summarize=xs=>Object.fromEntries(['elapsed_ms','transactions','application_sql_round_trips','publication_transactions','publication_max_hold_ms','ingress_p95_ms','ingress_admission_p95_ms'].map(k=>[k,median(xs.map(x=>x[k]))]));
+const summarize=xs=>Object.fromEntries(['elapsed_ms','transactions','application_sql_round_trips','standalone_read_http_round_trips','total_application_round_trips','publication_transactions','publication_max_hold_ms','ingress_p95_ms','ingress_admission_p95_ms'].map(k=>[k,median(xs.map(x=>x[k]))]));
 for(const set of [result,result.steady]){
  set.summary={};for(const label of ['before','after'])set.summary[label]=summarize(set[label]);
 }
