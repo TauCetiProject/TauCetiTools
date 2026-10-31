@@ -36,22 +36,23 @@ test('PostgreSQL repair turns continue while optional housekeeping is pending or
   // existing PostgreSQL suite covers actual cache and retention publication.
   f.state.store=new Proxy(f.state.store,{get(target,name){if(name==='backend')return 'postgres';const value=Reflect.get(target,name,target);return typeof value==='function'?value.bind(target):value;}});
   f.state.expire=async()=>assert.fail('foreground repair must not wait for PostgreSQL cleanup');
-  f.state.prepareStorage=async()=>{};
+  const prepared=[];f.state.prepareStorage=async runExpiry=>{prepared.push(runExpiry);};
   let housekeeping=0,selections=0,fail=false;
   f.state.maintenance=async()=>{housekeeping++;await gate.promise;if(fail)throw Error('optional cache unavailable');};
-  delete f.state.startStorageMaintenance;
+  delete f.state.startStorageMaintenance; // Restore the real method over fixture()'s instance stub.
   const c=f.state.getRepairCoordinator();
   c.hooks.select=async()=>{selections++;};c.hooks.eligible=async()=>false;c.hooks.arm=async()=>{};
   await bounded(f.state.runAlarm(),'optional housekeeping blocked the repair turn');await flush();
   await bounded(f.state.runAlarm(),'a later repair turn waited for housekeeping');
   assert.equal(selections,2);assert.equal(housekeeping,1,'the existing maintenance owner coalesces repeated wakes');
-  const pending=f.state.storageFlight;gate.resolve();await pending;
+  assert.deepEqual(prepared,[true,true],'expiry and monitoring continue independently, with PostgreSQL expiry enabled');
+  const pending=f.state.surveyFlight;gate.resolve();await pending;
   fail=true;await bounded(f.state.runAlarm(),'a housekeeping failure blocked selection');await flush();
-  if(f.state.storageFlight)await f.state.storageFlight.catch(()=>{});
+  if(f.state.surveyFlight)await f.state.surveyFlight;
   fail=false;await bounded(f.state.runAlarm(),'housekeeping did not retry on a normal wake');await flush();
-  if(f.state.storageFlight)await f.state.storageFlight;
+  if(f.state.surveyFlight)await f.state.surveyFlight;
   assert.equal(selections,4);assert.equal(housekeeping,3);
- }finally{gate.resolve();if(f.state.storageFlight)await f.state.storageFlight.catch(()=>{});await f.close();}
+ }finally{gate.resolve();if(f.state.surveyFlight)await f.state.surveyFlight;if(f.state.storageFlight)await f.state.storageFlight.catch(()=>{});await f.close();}
 });
 
 test('real repair slots refill beyond sixteen launches while one group remains pending',async()=>{

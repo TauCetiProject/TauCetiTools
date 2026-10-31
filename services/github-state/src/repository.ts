@@ -109,6 +109,7 @@ export class RepositoryState extends DurableObject<Env> {
   private retentionPolicy: Policy = DEFAULT_POLICY;
   private retentionState: Partial<Record<RetentionClass, Checkpoint>> = {};
   private storageFlight?: Promise<void>;
+  private surveyFlight?: Promise<void>;
   private storageLoaded=false;
   private retentionProgressLoaded=false;
   private retentionLoadFlight?:Promise<void>;
@@ -1874,20 +1875,27 @@ export class RepositoryState extends DurableObject<Env> {
     if(this.storageFlight)return this.storageFlight;
     this.owner.activeOperations++;
     this.traceRepair('storage_prepare');
-    const flight=(async()=>{
-      await this.prepareStorage(runExpiry);
-      // PostgreSQL cleanup and derived caches share this existing background
-      // owner. Slow optional work must not hold the next repair turn.
-      if(this.store.backend==='postgres' && !this.repairsHeld() && !this.mutationState.blocked)await this.maintenance();
-    })();this.storageFlight=flight;
+    const flight=this.prepareStorage(runExpiry);this.storageFlight=flight;
     try {await flight;this.traceRepair('storage_prepared');}finally {this.owner.activeOperations--;if(this.storageFlight===flight)this.storageFlight=undefined;}
   }
   get maintenanceArchive():R2Bucket {return timedBucket(this.env.ARCHIVE,this.owner.maintenanceIOScope);}
   get transactionArchive():R2Bucket {return timedBucket(this.env.ARCHIVE,this.owner.transactionIOScope);}
   startStorageMaintenance():void {
     if(this.migrationHeld() || this.mutationState.blocked)return;
+    if(this.store.backend==='postgres')this.owner.startSurveyMaintenance();
     const task=this.storageMaintenance(this.store.backend==='postgres').catch(error=>this.noteFailure('storage_maintenance',error));
     if(this.ctx.waitUntil)this.ctx.waitUntil(task);
+  }
+  private startSurveyMaintenance():void {
+    if(this.surveyFlight || this.repairsHeld() || this.mutationState.blocked)return;
+    // Optional cache work has its own coalesced promise so it cannot hold
+    // repair selection, expiry, monitoring or retention-policy changes.
+    this.activeOperations++;
+    const flight=Promise.resolve().then(()=>this.maintenance())
+      .catch(error=>this.noteFailure('maintenance',error))
+      .finally(()=>{this.activeOperations--;if(this.surveyFlight===flight)this.surveyFlight=undefined;});
+    this.surveyFlight=flight;
+    if(this.ctx.waitUntil)this.ctx.waitUntil(flight);
   }
   async loadRetentionState():Promise<void> {
     if(this.storageLoaded && this.retentionProgressLoaded)return;
