@@ -1,0 +1,2955 @@
+{
+  "publication": {
+    "decision": "retain existing yield; fixed chunks rejected",
+    "clean_small_comparison": {
+      "pairs": 3,
+      "selection": "original confirmation trial1 plus two final clean pairs; original trials0/2 and both first-replacement pairs excluded entirely due CI overlap",
+      "medians": {
+        "before": {
+          "repair_complete_ms": 78118.81329,
+          "input_latency_p95_ms": 5393.311205999984,
+          "reader_p95_ms": 178.77414900000076,
+          "publication_admissions": 65,
+          "max_publication_hold_ms": 879.4579539999977
+        },
+        "2": {
+          "repair_complete_ms": 55598.58483499999,
+          "input_latency_p95_ms": 7552.621914999996,
+          "reader_p95_ms": 201.57345999998506,
+          "publication_admissions": 33,
+          "max_publication_hold_ms": 1104.2981699999946
+        }
+      },
+      "input_p95_limit_ms": 6182.642326599983,
+      "cap2_passes_input": false
+    },
+    "exclusions": [
+      {
+        "file": "chunk-confirmation",
+        "trials": [
+          0,
+          2
+        ],
+        "reason": "Own postmerge CI20:15:58\u201320:17:05; unrelated CI20:22:16\u201320:30:36. Both entire pairs excluded."
+      },
+      {
+        "file": "chunk-repeat-clean",
+        "trials": [
+          0,
+          1
+        ],
+        "reason": "Main PostgreSQL CI20:34:59\u201320:43:37 overlaps trial0 and first12seconds of trial1; both pairs excluded."
+      },
+      {
+        "file": "chunk-full400/chunk-burst/chunk-quiet",
+        "trials": [
+          0
+        ],
+        "reason": "Overlaps unrelated and main CI; auxiliary contended experiments, not acceptance evidence."
+      }
+    ],
+    "experiments": {
+      "chunk-screening": {
+        "baseline": "cf29ced7b50a144a0d8cc4fda6f55781dbdca59c",
+        "implementation_sha256": "f103f98e20a2373a907308f05a9d2edad32c281ec98d0f31a99b8179b5c1d282",
+        "implementation_files": [
+          "../../tauceti_tools/github_catalog.json",
+          "package-lock.json",
+          "src/activity_landings.ts",
+          "src/catalog.ts",
+          "src/index.ts",
+          "src/ingress.ts",
+          "src/installation.ts",
+          "src/migration.ts",
+          "src/migration_control.ts",
+          "src/migration_target.ts",
+          "src/monitoring.ts",
+          "src/normalize.ts",
+          "src/protocol.ts",
+          "src/provider_monitoring.ts",
+          "src/queue_monitoring.ts",
+          "src/reconciliation.ts",
+          "src/repair_coordinator.ts",
+          "src/repair_io.ts",
+          "src/repository.ts",
+          "src/repository_health.ts",
+          "src/repository_store.ts",
+          "src/retention.ts",
+          "src/runner-capacity.ts",
+          "src/storage.ts",
+          "src/survey.ts"
+        ],
+        "variant_sha256": {
+          "2": "6f4c46aa37da3ff81207ab6883eac02550734ee49f7fddd6e8ee48d32fa5eac2",
+          "4": "b7850a0d35bf2dde089102fc4c30c0f0153cb82f843b3f3724c333f657c158a2",
+          "8": "41d8cf2e9f32d0b27e7ebd3a5ef0a251c5984db0ef984359fe56b2f23f4bea92"
+        },
+        "trials": 1,
+        "group_count": 4,
+        "histories_per_group": 16,
+        "mode": "steady",
+        "scope": "Isolated realPostgreSQL, fixtureupstream; continuousthreeeventmixat1delivery/secuntilcohortcommits, clientdemand/maintenance/readevery10arrivals, real60scron; noGitHubrequests; no runtimeconfiguration changes",
+        "rows": [
+          {
+            "mode": "steady",
+            "label": "before",
+            "histories_complete": 64,
+            "repair_complete_ms": 78180.679113,
+            "all_committed_ms": 81713.366739,
+            "deliveries": 76,
+            "deliveries_by_type": {
+              "issue_comment": 26,
+              "status": 25,
+              "pull_request": 25
+            },
+            "input_latency_p50_ms": 4668.837285000001,
+            "input_latency_p95_ms": 5291.067115999991,
+            "input_latency_p99_ms": 5458.457687999995,
+            "reader_p95_ms": 353.8794089999974,
+            "publication_admissions": 65,
+            "writer_admissions": 160,
+            "application_round_trips": 2002,
+            "standalone_read_http_calls": 157,
+            "max_writer_hold_ms": 807.8255130000016,
+            "max_publication_hold_ms": 807.8255130000016,
+            "yield_purposes": {
+              "other": 30,
+              "ingest": 56
+            },
+            "grouped_publication": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793476490597,
+              "admissions": 64,
+              "members": 64,
+              "queued_work_yields": 56,
+              "max_members": 1
+            },
+            "lease_renewal_updates": 49,
+            "maintenance_calls": 8,
+            "demand_calls": 8,
+            "reader_samples": 8,
+            "repair_scheduler": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793476495271,
+              "turns": 5,
+              "external_turns": 2,
+              "launches": 5,
+              "selections": 8,
+              "maintenance_continuations": 0,
+              "max_active_groups": 4,
+              "active_groups": 0,
+              "owned_members": 0,
+              "groups": [],
+              "slot_ms_by_lane": {
+                "requested": 75906,
+                "active": 73728,
+                "verification": 74353,
+                "archive": 75749
+              },
+              "quantum": {
+                "launches": 1,
+                "progress": 14,
+                "data_progress": 14,
+                "member_retries": 0,
+                "retired": 0
+              },
+              "stopped": false
+            },
+            "trial": 0,
+            "failed_writers": 0,
+            "writer_p95_ms": 695.7081090000065,
+            "started_at": "2026-10-31T19:54:55.271000+00:00"
+          },
+          {
+            "mode": "steady",
+            "label": "2",
+            "histories_complete": 64,
+            "repair_complete_ms": 55966.046307,
+            "all_committed_ms": 60837.04364599999,
+            "deliveries": 54,
+            "deliveries_by_type": {
+              "issue_comment": 18,
+              "status": 18,
+              "pull_request": 18
+            },
+            "input_latency_p50_ms": 6694.491771999994,
+            "input_latency_p95_ms": 7466.778095999995,
+            "input_latency_p99_ms": 7611.70444500001,
+            "reader_p95_ms": 321.3730740000028,
+            "publication_admissions": 33,
+            "writer_admissions": 102,
+            "application_round_trips": 1615,
+            "standalone_read_http_calls": 116,
+            "max_writer_hold_ms": 1070.7191469999962,
+            "max_publication_hold_ms": 1067.0825979999936,
+            "yield_purposes": {},
+            "grouped_publication": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793476577784,
+              "admissions": 32,
+              "members": 64,
+              "queued_work_yields": 0,
+              "max_members": 2
+            },
+            "lease_renewal_updates": 24,
+            "maintenance_calls": 6,
+            "demand_calls": 6,
+            "reader_samples": 6,
+            "repair_scheduler": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793476582591,
+              "turns": 4,
+              "external_turns": 1,
+              "launches": 5,
+              "selections": 8,
+              "maintenance_continuations": 0,
+              "max_active_groups": 4,
+              "active_groups": 0,
+              "owned_members": 0,
+              "groups": [],
+              "slot_ms_by_lane": {
+                "requested": 53082,
+                "active": 50777,
+                "verification": 51957,
+                "archive": 53620
+              },
+              "quantum": {
+                "launches": 5,
+                "progress": 65,
+                "data_progress": 65,
+                "member_retries": 0,
+                "retired": 0
+              },
+              "stopped": false
+            },
+            "trial": 0,
+            "failed_writers": 0,
+            "writer_p95_ms": 994.4704029999994,
+            "started_at": "2026-10-31T19:56:22.591000+00:00"
+          },
+          {
+            "mode": "steady",
+            "label": "4",
+            "histories_complete": 64,
+            "repair_complete_ms": 39436.347991999995,
+            "all_committed_ms": 46613.72360899998,
+            "deliveries": 38,
+            "deliveries_by_type": {
+              "issue_comment": 13,
+              "status": 13,
+              "pull_request": 12
+            },
+            "input_latency_p50_ms": 9330.440514000016,
+            "input_latency_p95_ms": 11058.89450200001,
+            "input_latency_p99_ms": 11420.786466999998,
+            "reader_p95_ms": 176.42906900000526,
+            "publication_admissions": 17,
+            "writer_admissions": 66,
+            "application_round_trips": 1361,
+            "standalone_read_http_calls": 82,
+            "max_writer_hold_ms": 1757.4591469999868,
+            "max_publication_hold_ms": 1757.4591469999868,
+            "yield_purposes": {},
+            "grouped_publication": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793476644351,
+              "admissions": 16,
+              "members": 64,
+              "queued_work_yields": 0,
+              "max_members": 4
+            },
+            "lease_renewal_updates": 12,
+            "maintenance_calls": 4,
+            "demand_calls": 4,
+            "reader_samples": 4,
+            "repair_scheduler": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793476648703,
+              "turns": 4,
+              "external_turns": 1,
+              "launches": 5,
+              "selections": 8,
+              "maintenance_continuations": 0,
+              "max_active_groups": 4,
+              "active_groups": 0,
+              "owned_members": 0,
+              "groups": [],
+              "slot_ms_by_lane": {
+                "requested": 35371,
+                "active": 33263,
+                "verification": 34968,
+                "archive": 37041
+              },
+              "quantum": {
+                "launches": 5,
+                "progress": 65,
+                "data_progress": 65,
+                "member_retries": 0,
+                "retired": 0
+              },
+              "stopped": false
+            },
+            "trial": 0,
+            "failed_writers": 0,
+            "writer_p95_ms": 1614.7872180000122,
+            "started_at": "2026-10-31T19:57:28.703000+00:00"
+          },
+          {
+            "mode": "steady",
+            "label": "8",
+            "histories_complete": 64,
+            "repair_complete_ms": 32722.714143999998,
+            "all_committed_ms": 43143.838957,
+            "deliveries": 31,
+            "deliveries_by_type": {
+              "issue_comment": 11,
+              "status": 10,
+              "pull_request": 10
+            },
+            "input_latency_p50_ms": 14416.67492999998,
+            "input_latency_p95_ms": 18361.480271999986,
+            "input_latency_p99_ms": 18885.47755500002,
+            "reader_p95_ms": 252.31621700001415,
+            "publication_admissions": 9,
+            "writer_admissions": 53,
+            "application_round_trips": 1264,
+            "standalone_read_http_calls": 74,
+            "max_writer_hold_ms": 3226.9544739999983,
+            "max_publication_hold_ms": 3226.9544739999983,
+            "yield_purposes": {},
+            "grouped_publication": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793476696261,
+              "admissions": 8,
+              "members": 64,
+              "queued_work_yields": 0,
+              "max_members": 8
+            },
+            "lease_renewal_updates": 0,
+            "maintenance_calls": 4,
+            "demand_calls": 4,
+            "reader_samples": 4,
+            "repair_scheduler": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793476700735,
+              "turns": 4,
+              "external_turns": 1,
+              "launches": 5,
+              "selections": 8,
+              "maintenance_continuations": 0,
+              "max_active_groups": 4,
+              "active_groups": 0,
+              "owned_members": 0,
+              "groups": [],
+              "slot_ms_by_lane": {
+                "requested": 26349,
+                "active": 21842,
+                "verification": 25795,
+                "archive": 30350
+              },
+              "quantum": {
+                "launches": 5,
+                "progress": 65,
+                "data_progress": 65,
+                "member_retries": 0,
+                "retired": 0
+              },
+              "stopped": false
+            },
+            "trial": 0,
+            "failed_writers": 0,
+            "writer_p95_ms": 2986.2996799999964,
+            "started_at": "2026-10-31T19:58:20.735000+00:00"
+          }
+        ]
+      },
+      "chunk-confirmation": {
+        "baseline": "cf29ced7b50a144a0d8cc4fda6f55781dbdca59c",
+        "implementation_sha256": "f103f98e20a2373a907308f05a9d2edad32c281ec98d0f31a99b8179b5c1d282",
+        "implementation_files": [
+          "../../tauceti_tools/github_catalog.json",
+          "package-lock.json",
+          "src/activity_landings.ts",
+          "src/catalog.ts",
+          "src/index.ts",
+          "src/ingress.ts",
+          "src/installation.ts",
+          "src/migration.ts",
+          "src/migration_control.ts",
+          "src/migration_target.ts",
+          "src/monitoring.ts",
+          "src/normalize.ts",
+          "src/protocol.ts",
+          "src/provider_monitoring.ts",
+          "src/queue_monitoring.ts",
+          "src/reconciliation.ts",
+          "src/repair_coordinator.ts",
+          "src/repair_io.ts",
+          "src/repository.ts",
+          "src/repository_health.ts",
+          "src/repository_store.ts",
+          "src/retention.ts",
+          "src/runner-capacity.ts",
+          "src/storage.ts",
+          "src/survey.ts"
+        ],
+        "harness_sha256": {
+          "scripts/benchmark-publication-sustained.mjs": "4f811ced4145fe84fb5fc5aed59396427230e48c1479e9ddedf1776cedae315c",
+          "scripts/benchmark-baseline.mjs": "a82cf117a48a198a3a3eede9d61fa1637ba0658bbd3e8402aa2a6404f8be09d8",
+          "scripts/postgres-schema.mjs": "b83b687bcab3e32acebd0ee2c6a9d54d024a122bf6c847f17e28414260d31dea",
+          "tests/postgres_runtime.mjs": "288bf390eef0d4bdb511a2450793843c84de9d299f170ed9455fcb12b4f763d9",
+          "tests/postgres_credentials.mjs": "956e64d59912ca9ad7c3d19922827724f18bf05b22702b603c3bc792be106975",
+          "tests/repair_background.mjs": "e57b4cfa6031a60513904b12355730c109344d91c3e4921d8fee097ef119241f"
+        },
+        "variant_sha256": {
+          "2": "6f4c46aa37da3ff81207ab6883eac02550734ee49f7fddd6e8ee48d32fa5eac2"
+        },
+        "trials": 3,
+        "group_count": 4,
+        "histories_per_group": 16,
+        "mode": "steady",
+        "scope": "Isolated realPostgreSQL, fixtureupstream; threeeventmixat1delivery/secuntilcohortcommit; actualingestwriterscompete, noteDemandandmaintenanceinvokedperiodicallybutmayonlyread, read-onlyclientprobeeacharrival; real60scronmayfireonlyinslowerruns; storagepreparationdisabled; noGitHubrequests; deliverycounts/horizonsdiffer, notanaggregatecombinedthroughputcomparison; no runtimeconfiguration changes",
+        "rows": [
+          {
+            "mode": "steady",
+            "label": "before",
+            "input_outstanding_at_repair_complete": 5,
+            "writer_busy_ms_within_repair_window": {
+              "other": 4338.951783000011,
+              "enqueue": 284.62123000000065,
+              "repair": 2066.737181999997,
+              "publication": 38495.94544799999,
+              "ingest": 34420.94188600006
+            },
+            "histories_complete": 64,
+            "repair_complete_ms": 79831.048531,
+            "all_committed_ms": 83157.134747,
+            "deliveries": 77,
+            "deliveries_by_type": {
+              "issue_comment": 26,
+              "status": 26,
+              "pull_request": 25
+            },
+            "input_latency_p50_ms": 4799.941782000002,
+            "input_latency_p95_ms": 5825.412050999992,
+            "input_latency_p99_ms": 5978.862304999988,
+            "reader_p95_ms": 261.36466500000097,
+            "publication_admissions": 65,
+            "writer_admissions": 162,
+            "application_round_trips": 2016,
+            "standalone_read_http_calls": 503,
+            "max_writer_hold_ms": 1215.0746060000092,
+            "max_publication_hold_ms": 1215.0746060000092,
+            "yield_purposes": {
+              "other": 32,
+              "ingest": 56
+            },
+            "grouped_publication": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793477759738,
+              "admissions": 64,
+              "members": 64,
+              "queued_work_yields": 56,
+              "max_members": 1
+            },
+            "lease_renewal_updates": 51,
+            "maintenance_calls": 8,
+            "demand_calls": 8,
+            "reader_samples": 77,
+            "repair_scheduler": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793477768295,
+              "turns": 5,
+              "external_turns": 2,
+              "launches": 5,
+              "selections": 8,
+              "maintenance_continuations": 0,
+              "max_active_groups": 4,
+              "active_groups": 0,
+              "owned_members": 0,
+              "groups": [],
+              "slot_ms_by_lane": {
+                "requested": 76767,
+                "active": 74541,
+                "verification": 75316,
+                "archive": 76931
+              },
+              "quantum": {
+                "launches": 1,
+                "progress": 14,
+                "data_progress": 14,
+                "member_retries": 0,
+                "retired": 0
+              },
+              "stopped": false
+            },
+            "trial": 0,
+            "failed_writers": 0,
+            "writer_p95_ms": 713.3300100000015,
+            "started_at": "2026-10-31T20:16:08.295000+00:00"
+          },
+          {
+            "mode": "steady",
+            "label": "2",
+            "input_outstanding_at_repair_complete": 7,
+            "writer_busy_ms_within_repair_window": {
+              "other": 2633.483764999968,
+              "enqueue": 331.12936799999443,
+              "repair": 1843.6597379999876,
+              "publication": 28215.627586000017,
+              "ingest": 22079.852931000016
+            },
+            "histories_complete": 64,
+            "repair_complete_ms": 55227.46480199999,
+            "all_committed_ms": 59995.349206,
+            "deliveries": 53,
+            "deliveries_by_type": {
+              "issue_comment": 18,
+              "status": 18,
+              "pull_request": 17
+            },
+            "input_latency_p50_ms": 6676.896094000011,
+            "input_latency_p95_ms": 7363.478708999988,
+            "input_latency_p99_ms": 7588.685217999984,
+            "reader_p95_ms": 168.76651099999435,
+            "publication_admissions": 33,
+            "writer_admissions": 101,
+            "application_round_trips": 1606,
+            "standalone_read_http_calls": 350,
+            "max_writer_hold_ms": 1209.135036000007,
+            "max_publication_hold_ms": 1209.135036000007,
+            "yield_purposes": {},
+            "grouped_publication": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793477852205,
+              "admissions": 32,
+              "members": 64,
+              "queued_work_yields": 0,
+              "max_members": 2
+            },
+            "lease_renewal_updates": 26,
+            "maintenance_calls": 6,
+            "demand_calls": 6,
+            "reader_samples": 53,
+            "repair_scheduler": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793477856854,
+              "turns": 4,
+              "external_turns": 1,
+              "launches": 5,
+              "selections": 8,
+              "maintenance_continuations": 0,
+              "max_active_groups": 4,
+              "active_groups": 0,
+              "owned_members": 0,
+              "groups": [],
+              "slot_ms_by_lane": {
+                "requested": 52449,
+                "active": 50367,
+                "verification": 51472,
+                "archive": 52683
+              },
+              "quantum": {
+                "launches": 5,
+                "progress": 65,
+                "data_progress": 65,
+                "member_retries": 0,
+                "retired": 0
+              },
+              "stopped": false
+            },
+            "trial": 0,
+            "failed_writers": 0,
+            "writer_p95_ms": 999.6677679999993,
+            "started_at": "2026-10-31T20:17:36.854000+00:00"
+          },
+          {
+            "mode": "steady",
+            "label": "2",
+            "input_outstanding_at_repair_complete": 7,
+            "writer_busy_ms_within_repair_window": {
+              "other": 3326.9850979999464,
+              "enqueue": 310.73354099999415,
+              "repair": 1793.8918429999612,
+              "publication": 28135.322716999974,
+              "ingest": 21913.560360999953
+            },
+            "histories_complete": 64,
+            "repair_complete_ms": 55598.58483499999,
+            "all_committed_ms": 60397.61839799999,
+            "deliveries": 53,
+            "deliveries_by_type": {
+              "issue_comment": 18,
+              "status": 18,
+              "pull_request": 17
+            },
+            "input_latency_p50_ms": 6683.177668999997,
+            "input_latency_p95_ms": 7268.968911000004,
+            "input_latency_p99_ms": 7392.482116000028,
+            "reader_p95_ms": 201.57345999998506,
+            "publication_admissions": 33,
+            "writer_admissions": 101,
+            "application_round_trips": 1606,
+            "standalone_read_http_calls": 350,
+            "max_writer_hold_ms": 1104.2981699999946,
+            "max_publication_hold_ms": 1104.2981699999946,
+            "yield_purposes": {},
+            "grouped_publication": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793477917686,
+              "admissions": 32,
+              "members": 64,
+              "queued_work_yields": 0,
+              "max_members": 2
+            },
+            "lease_renewal_updates": 24,
+            "maintenance_calls": 6,
+            "demand_calls": 6,
+            "reader_samples": 53,
+            "repair_scheduler": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793477922313,
+              "turns": 4,
+              "external_turns": 1,
+              "launches": 5,
+              "selections": 8,
+              "maintenance_continuations": 0,
+              "max_active_groups": 4,
+              "active_groups": 0,
+              "owned_members": 0,
+              "groups": [],
+              "slot_ms_by_lane": {
+                "requested": 52688,
+                "active": 50466,
+                "verification": 51293,
+                "archive": 52616
+              },
+              "quantum": {
+                "launches": 5,
+                "progress": 65,
+                "data_progress": 65,
+                "member_retries": 0,
+                "retired": 0
+              },
+              "stopped": false
+            },
+            "trial": 1,
+            "failed_writers": 0,
+            "writer_p95_ms": 984.1174490000121,
+            "started_at": "2026-10-31T20:18:42.313000+00:00"
+          },
+          {
+            "mode": "steady",
+            "label": "before",
+            "input_outstanding_at_repair_complete": 5,
+            "writer_busy_ms_within_repair_window": {
+              "other": 4779.88855199996,
+              "enqueue": 246.84770900002331,
+              "repair": 1689.335517999978,
+              "publication": 38527.388178999856,
+              "ingest": 34707.9914439999
+            },
+            "histories_complete": 64,
+            "repair_complete_ms": 80090.78164199999,
+            "all_committed_ms": 83623.66655699999,
+            "deliveries": 78,
+            "deliveries_by_type": {
+              "issue_comment": 26,
+              "status": 26,
+              "pull_request": 26
+            },
+            "input_latency_p50_ms": 4772.246777000022,
+            "input_latency_p95_ms": 5507.8359460000065,
+            "input_latency_p99_ms": 5671.565071000019,
+            "reader_p95_ms": 184.75826600001892,
+            "publication_admissions": 65,
+            "writer_admissions": 162,
+            "application_round_trips": 2021,
+            "standalone_read_http_calls": 509,
+            "max_writer_hold_ms": 1155.2156550000072,
+            "max_publication_hold_ms": 1155.2156550000072,
+            "yield_purposes": {
+              "other": 31,
+              "ingest": 56
+            },
+            "grouped_publication": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793477983504,
+              "admissions": 64,
+              "members": 64,
+              "queued_work_yields": 56,
+              "max_members": 1
+            },
+            "lease_renewal_updates": 49,
+            "maintenance_calls": 8,
+            "demand_calls": 8,
+            "reader_samples": 78,
+            "repair_scheduler": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793477988046,
+              "turns": 5,
+              "external_turns": 2,
+              "launches": 5,
+              "selections": 8,
+              "maintenance_continuations": 0,
+              "max_active_groups": 4,
+              "active_groups": 0,
+              "owned_members": 0,
+              "groups": [],
+              "slot_ms_by_lane": {
+                "requested": 77130,
+                "active": 75065,
+                "verification": 76622,
+                "archive": 77815
+              },
+              "quantum": {
+                "launches": 1,
+                "progress": 15,
+                "data_progress": 15,
+                "member_retries": 0,
+                "retired": 0
+              },
+              "stopped": false
+            },
+            "trial": 1,
+            "failed_writers": 0,
+            "writer_p95_ms": 705.5826890000026,
+            "started_at": "2026-10-31T20:19:48.046000+00:00"
+          },
+          {
+            "mode": "steady",
+            "label": "before",
+            "input_outstanding_at_repair_complete": 5,
+            "writer_busy_ms_within_repair_window": {
+              "other": 3753.364264999982,
+              "enqueue": 268.74448900000425,
+              "repair": 1698.5270489999675,
+              "publication": 37632.830371000164,
+              "ingest": 32670.701941999898
+            },
+            "histories_complete": 64,
+            "repair_complete_ms": 76133.875175,
+            "all_committed_ms": 79742.87334599998,
+            "deliveries": 74,
+            "deliveries_by_type": {
+              "issue_comment": 25,
+              "status": 25,
+              "pull_request": 24
+            },
+            "input_latency_p50_ms": 4588.228914999985,
+            "input_latency_p95_ms": 5215.228621999966,
+            "input_latency_p99_ms": 5379.826411999995,
+            "reader_p95_ms": 250.45208900002763,
+            "publication_admissions": 65,
+            "writer_admissions": 158,
+            "application_round_trips": 1977,
+            "standalone_read_http_calls": 485,
+            "max_writer_hold_ms": 910.2966080000042,
+            "max_publication_hold_ms": 910.2966080000042,
+            "yield_purposes": {
+              "other": 28,
+              "ingest": 56
+            },
+            "grouped_publication": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793478072440,
+              "admissions": 64,
+              "members": 64,
+              "queued_work_yields": 56,
+              "max_members": 1
+            },
+            "lease_renewal_updates": 48,
+            "maintenance_calls": 8,
+            "demand_calls": 8,
+            "reader_samples": 74,
+            "repair_scheduler": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793478076989,
+              "turns": 5,
+              "external_turns": 2,
+              "launches": 5,
+              "selections": 8,
+              "maintenance_continuations": 0,
+              "max_active_groups": 4,
+              "active_groups": 0,
+              "owned_members": 0,
+              "groups": [],
+              "slot_ms_by_lane": {
+                "requested": 73971,
+                "active": 72713,
+                "verification": 73401,
+                "archive": 73858
+              },
+              "quantum": {
+                "launches": 1,
+                "progress": 13,
+                "data_progress": 13,
+                "member_retries": 0,
+                "retired": 0
+              },
+              "stopped": false
+            },
+            "trial": 2,
+            "failed_writers": 0,
+            "writer_p95_ms": 705.2623659999808,
+            "started_at": "2026-10-31T20:21:16.989000+00:00"
+          },
+          {
+            "mode": "steady",
+            "label": "2",
+            "input_outstanding_at_repair_complete": 7,
+            "writer_busy_ms_within_repair_window": {
+              "other": 2800.653675999958,
+              "enqueue": 332.7523490000167,
+              "repair": 1722.7483400000492,
+              "publication": 28156.844169000105,
+              "ingest": 21004.949256999767
+            },
+            "histories_complete": 64,
+            "repair_complete_ms": 54161.164141000016,
+            "all_committed_ms": 58872.19322299998,
+            "deliveries": 52,
+            "deliveries_by_type": {
+              "issue_comment": 18,
+              "status": 17,
+              "pull_request": 17
+            },
+            "input_latency_p50_ms": 6553.267184999946,
+            "input_latency_p95_ms": 7320.415725999977,
+            "input_latency_p99_ms": 7434.01902800001,
+            "reader_p95_ms": 148.2251530000358,
+            "publication_admissions": 33,
+            "writer_admissions": 100,
+            "application_round_trips": 1598,
+            "standalone_read_http_calls": 344,
+            "max_writer_hold_ms": 1086.433285999985,
+            "max_publication_hold_ms": 1086.433285999985,
+            "yield_purposes": {},
+            "grouped_publication": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793478157579,
+              "admissions": 32,
+              "members": 64,
+              "queued_work_yields": 0,
+              "max_members": 2
+            },
+            "lease_renewal_updates": 24,
+            "maintenance_calls": 6,
+            "demand_calls": 6,
+            "reader_samples": 52,
+            "repair_scheduler": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793478162024,
+              "turns": 4,
+              "external_turns": 1,
+              "launches": 5,
+              "selections": 8,
+              "maintenance_continuations": 0,
+              "max_active_groups": 4,
+              "active_groups": 0,
+              "owned_members": 0,
+              "groups": [],
+              "slot_ms_by_lane": {
+                "requested": 51261,
+                "active": 49417,
+                "verification": 50308,
+                "archive": 51757
+              },
+              "quantum": {
+                "launches": 5,
+                "progress": 65,
+                "data_progress": 65,
+                "member_retries": 0,
+                "retired": 0
+              },
+              "stopped": false
+            },
+            "trial": 2,
+            "failed_writers": 0,
+            "writer_p95_ms": 998.4586930000223,
+            "started_at": "2026-10-31T20:22:42.024000+00:00"
+          }
+        ]
+      },
+      "chunk-repeat-clean": {
+        "baseline": "cf29ced7b50a144a0d8cc4fda6f55781dbdca59c",
+        "implementation_sha256": "f103f98e20a2373a907308f05a9d2edad32c281ec98d0f31a99b8179b5c1d282",
+        "implementation_files": [
+          "../../tauceti_tools/github_catalog.json",
+          "package-lock.json",
+          "src/activity_landings.ts",
+          "src/catalog.ts",
+          "src/index.ts",
+          "src/ingress.ts",
+          "src/installation.ts",
+          "src/migration.ts",
+          "src/migration_control.ts",
+          "src/migration_target.ts",
+          "src/monitoring.ts",
+          "src/normalize.ts",
+          "src/protocol.ts",
+          "src/provider_monitoring.ts",
+          "src/queue_monitoring.ts",
+          "src/reconciliation.ts",
+          "src/repair_coordinator.ts",
+          "src/repair_io.ts",
+          "src/repository.ts",
+          "src/repository_health.ts",
+          "src/repository_store.ts",
+          "src/retention.ts",
+          "src/runner-capacity.ts",
+          "src/storage.ts",
+          "src/survey.ts"
+        ],
+        "harness_sha256": {
+          "scripts/benchmark-publication-sustained.mjs": "4f811ced4145fe84fb5fc5aed59396427230e48c1479e9ddedf1776cedae315c",
+          "scripts/benchmark-baseline.mjs": "a82cf117a48a198a3a3eede9d61fa1637ba0658bbd3e8402aa2a6404f8be09d8",
+          "scripts/postgres-schema.mjs": "b83b687bcab3e32acebd0ee2c6a9d54d024a122bf6c847f17e28414260d31dea",
+          "tests/postgres_runtime.mjs": "288bf390eef0d4bdb511a2450793843c84de9d299f170ed9455fcb12b4f763d9",
+          "tests/postgres_credentials.mjs": "956e64d59912ca9ad7c3d19922827724f18bf05b22702b603c3bc792be106975",
+          "tests/repair_background.mjs": "e57b4cfa6031a60513904b12355730c109344d91c3e4921d8fee097ef119241f"
+        },
+        "variant_sha256": {
+          "2": "6f4c46aa37da3ff81207ab6883eac02550734ee49f7fddd6e8ee48d32fa5eac2"
+        },
+        "trials": 2,
+        "group_count": 4,
+        "histories_per_group": 16,
+        "mode": "steady",
+        "scope": "Isolated realPostgreSQL, fixtureupstream; threeeventmixat1delivery/secuntilcohortcommit; actualingestwriterscompete, noteDemandandmaintenanceinvokedperiodicallybutmayonlyread, read-onlyclientprobeeacharrival; real60scronmayfireonlyinslowerruns; storagepreparationdisabled; noGitHubrequests; deliverycounts/horizonsdiffer, notanaggregatecombinedthroughputcomparison; no runtimeconfiguration changes",
+        "rows": [
+          {
+            "mode": "steady",
+            "label": "before",
+            "input_outstanding_at_repair_complete": 5,
+            "writer_busy_ms_within_repair_window": {
+              "other": 3852.6578990000007,
+              "enqueue": 304.02760600000056,
+              "repair": 1883.6756400000013,
+              "publication": 38191.687126999976,
+              "ingest": 33546.99505599999
+            },
+            "histories_complete": 64,
+            "repair_complete_ms": 77931.407229,
+            "all_committed_ms": 81387.329692,
+            "deliveries": 76,
+            "deliveries_by_type": {
+              "issue_comment": 26,
+              "status": 25,
+              "pull_request": 25
+            },
+            "input_latency_p50_ms": 4607.046730000002,
+            "input_latency_p95_ms": 5184.502403000006,
+            "input_latency_p99_ms": 5423.875352000001,
+            "reader_p95_ms": 180.8715599999996,
+            "publication_admissions": 65,
+            "writer_admissions": 160,
+            "application_round_trips": 2004,
+            "standalone_read_http_calls": 497,
+            "max_writer_hold_ms": 1058.5257259999926,
+            "max_publication_hold_ms": 739.1165440000041,
+            "yield_purposes": {
+              "other": 30,
+              "ingest": 56
+            },
+            "grouped_publication": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793479248075,
+              "admissions": 64,
+              "members": 64,
+              "queued_work_yields": 56,
+              "max_members": 1
+            },
+            "lease_renewal_updates": 50,
+            "maintenance_calls": 8,
+            "demand_calls": 8,
+            "reader_samples": 76,
+            "repair_scheduler": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793479252769,
+              "turns": 5,
+              "external_turns": 2,
+              "launches": 5,
+              "selections": 8,
+              "maintenance_continuations": 0,
+              "max_active_groups": 4,
+              "active_groups": 0,
+              "owned_members": 0,
+              "groups": [],
+              "slot_ms_by_lane": {
+                "requested": 75867,
+                "active": 73525,
+                "verification": 74006,
+                "archive": 75393
+              },
+              "quantum": {
+                "launches": 1,
+                "progress": 14,
+                "data_progress": 14,
+                "member_retries": 0,
+                "retired": 0
+              },
+              "stopped": false
+            },
+            "trial": 0,
+            "failed_writers": 0,
+            "writer_p95_ms": 707.5576980000042,
+            "started_at": "2026-10-31T20:40:52.769000+00:00"
+          },
+          {
+            "mode": "steady",
+            "label": "2",
+            "input_outstanding_at_repair_complete": 7,
+            "writer_busy_ms_within_repair_window": {
+              "other": 2277.3052700000117,
+              "enqueue": 354.40100600000005,
+              "repair": 1713.922304000007,
+              "publication": 28705.51356299997,
+              "ingest": 22181.593301000088
+            },
+            "histories_complete": 64,
+            "repair_complete_ms": 55356.17726400001,
+            "all_committed_ms": 60401.51049500001,
+            "deliveries": 53,
+            "deliveries_by_type": {
+              "issue_comment": 18,
+              "status": 18,
+              "pull_request": 17
+            },
+            "input_latency_p50_ms": 6877.857936,
+            "input_latency_p95_ms": 7449.625529000012,
+            "input_latency_p99_ms": 7591.195695999995,
+            "reader_p95_ms": 199.45934799997485,
+            "publication_admissions": 33,
+            "writer_admissions": 100,
+            "application_round_trips": 1602,
+            "standalone_read_http_calls": 350,
+            "max_writer_hold_ms": 1173.717244999978,
+            "max_publication_hold_ms": 1173.717244999978,
+            "yield_purposes": {},
+            "grouped_publication": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793479335045,
+              "admissions": 32,
+              "members": 64,
+              "queued_work_yields": 0,
+              "max_members": 2
+            },
+            "lease_renewal_updates": 24,
+            "maintenance_calls": 6,
+            "demand_calls": 6,
+            "reader_samples": 53,
+            "repair_scheduler": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793479339534,
+              "turns": 4,
+              "external_turns": 1,
+              "launches": 5,
+              "selections": 8,
+              "maintenance_continuations": 0,
+              "max_active_groups": 4,
+              "active_groups": 0,
+              "owned_members": 0,
+              "groups": [],
+              "slot_ms_by_lane": {
+                "requested": 52035,
+                "active": 49731,
+                "verification": 51317,
+                "archive": 52962
+              },
+              "quantum": {
+                "launches": 5,
+                "progress": 65,
+                "data_progress": 65,
+                "member_retries": 0,
+                "retired": 0
+              },
+              "stopped": false
+            },
+            "trial": 0,
+            "failed_writers": 0,
+            "writer_p95_ms": 1053.1891040000191,
+            "started_at": "2026-10-31T20:42:19.534000+00:00"
+          },
+          {
+            "mode": "steady",
+            "label": "2",
+            "input_outstanding_at_repair_complete": 8,
+            "writer_busy_ms_within_repair_window": {
+              "other": 2683.8694059999543,
+              "enqueue": 247.14091000001645,
+              "repair": 1731.408528,
+              "publication": 28716.14363799992,
+              "ingest": 22065.19593599983
+            },
+            "histories_complete": 64,
+            "repair_complete_ms": 55575.36369500001,
+            "all_committed_ms": 60974.69743900001,
+            "deliveries": 54,
+            "deliveries_by_type": {
+              "issue_comment": 18,
+              "status": 18,
+              "pull_request": 18
+            },
+            "input_latency_p50_ms": 6804.089596000005,
+            "input_latency_p95_ms": 7531.438865000004,
+            "input_latency_p99_ms": 7698.814106000005,
+            "reader_p95_ms": 182.91951400000835,
+            "publication_admissions": 33,
+            "writer_admissions": 102,
+            "application_round_trips": 1615,
+            "standalone_read_http_calls": 356,
+            "max_writer_hold_ms": 1120.7633389999974,
+            "max_publication_hold_ms": 1120.7633389999974,
+            "yield_purposes": {},
+            "grouped_publication": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793479400798,
+              "admissions": 32,
+              "members": 64,
+              "queued_work_yields": 0,
+              "max_members": 2
+            },
+            "lease_renewal_updates": 24,
+            "maintenance_calls": 6,
+            "demand_calls": 6,
+            "reader_samples": 54,
+            "repair_scheduler": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793479405182,
+              "turns": 4,
+              "external_turns": 1,
+              "launches": 5,
+              "selections": 8,
+              "maintenance_continuations": 0,
+              "max_active_groups": 4,
+              "active_groups": 0,
+              "owned_members": 0,
+              "groups": [],
+              "slot_ms_by_lane": {
+                "requested": 53134,
+                "active": 49881,
+                "verification": 52011,
+                "archive": 53264
+              },
+              "quantum": {
+                "launches": 5,
+                "progress": 65,
+                "data_progress": 65,
+                "member_retries": 0,
+                "retired": 0
+              },
+              "stopped": false
+            },
+            "trial": 1,
+            "failed_writers": 0,
+            "writer_p95_ms": 1023.8324520000024,
+            "started_at": "2026-10-31T20:43:25.182000+00:00"
+          },
+          {
+            "mode": "steady",
+            "label": "before",
+            "input_outstanding_at_repair_complete": 5,
+            "writer_busy_ms_within_repair_window": {
+              "other": 4060.3521679998958,
+              "enqueue": 246.72730600001523,
+              "repair": 1915.5217060000286,
+              "publication": 38314.514980000036,
+              "ingest": 35264.93545699987
+            },
+            "histories_complete": 64,
+            "repair_complete_ms": 79938.91673699999,
+            "all_committed_ms": 83279.93626599998,
+            "deliveries": 78,
+            "deliveries_by_type": {
+              "issue_comment": 26,
+              "status": 26,
+              "pull_request": 26
+            },
+            "input_latency_p50_ms": 4838.063222000026,
+            "input_latency_p95_ms": 5257.2134199999855,
+            "input_latency_p99_ms": 5345.793705999997,
+            "reader_p95_ms": 202.4224599999725,
+            "publication_admissions": 65,
+            "writer_admissions": 162,
+            "application_round_trips": 2021,
+            "standalone_read_http_calls": 509,
+            "max_writer_hold_ms": 952.6098880000063,
+            "max_publication_hold_ms": 952.6098880000063,
+            "yield_purposes": {
+              "other": 32,
+              "ingest": 56
+            },
+            "grouped_publication": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793479467077,
+              "admissions": 64,
+              "members": 64,
+              "queued_work_yields": 56,
+              "max_members": 1
+            },
+            "lease_renewal_updates": 52,
+            "maintenance_calls": 8,
+            "demand_calls": 8,
+            "reader_samples": 78,
+            "repair_scheduler": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793479471743,
+              "turns": 5,
+              "external_turns": 2,
+              "launches": 5,
+              "selections": 8,
+              "maintenance_continuations": 0,
+              "max_active_groups": 4,
+              "active_groups": 0,
+              "owned_members": 0,
+              "groups": [],
+              "slot_ms_by_lane": {
+                "requested": 77452,
+                "active": 75379,
+                "verification": 76290,
+                "archive": 77437
+              },
+              "quantum": {
+                "launches": 1,
+                "progress": 15,
+                "data_progress": 15,
+                "member_retries": 0,
+                "retired": 0
+              },
+              "stopped": false
+            },
+            "trial": 1,
+            "failed_writers": 0,
+            "writer_p95_ms": 690.1270999999833,
+            "started_at": "2026-10-31T20:44:31.743000+00:00"
+          }
+        ]
+      },
+      "chunk-final-clean": {
+        "baseline": "cf29ced7b50a144a0d8cc4fda6f55781dbdca59c",
+        "implementation_sha256": "f103f98e20a2373a907308f05a9d2edad32c281ec98d0f31a99b8179b5c1d282",
+        "implementation_files": [
+          "../../tauceti_tools/github_catalog.json",
+          "package-lock.json",
+          "src/activity_landings.ts",
+          "src/catalog.ts",
+          "src/index.ts",
+          "src/ingress.ts",
+          "src/installation.ts",
+          "src/migration.ts",
+          "src/migration_control.ts",
+          "src/migration_target.ts",
+          "src/monitoring.ts",
+          "src/normalize.ts",
+          "src/protocol.ts",
+          "src/provider_monitoring.ts",
+          "src/queue_monitoring.ts",
+          "src/reconciliation.ts",
+          "src/repair_coordinator.ts",
+          "src/repair_io.ts",
+          "src/repository.ts",
+          "src/repository_health.ts",
+          "src/repository_store.ts",
+          "src/retention.ts",
+          "src/runner-capacity.ts",
+          "src/storage.ts",
+          "src/survey.ts"
+        ],
+        "harness_sha256": {
+          "scripts/benchmark-publication-sustained.mjs": "4f811ced4145fe84fb5fc5aed59396427230e48c1479e9ddedf1776cedae315c",
+          "scripts/benchmark-baseline.mjs": "a82cf117a48a198a3a3eede9d61fa1637ba0658bbd3e8402aa2a6404f8be09d8",
+          "scripts/postgres-schema.mjs": "b83b687bcab3e32acebd0ee2c6a9d54d024a122bf6c847f17e28414260d31dea",
+          "tests/postgres_runtime.mjs": "288bf390eef0d4bdb511a2450793843c84de9d299f170ed9455fcb12b4f763d9",
+          "tests/postgres_credentials.mjs": "956e64d59912ca9ad7c3d19922827724f18bf05b22702b603c3bc792be106975",
+          "tests/repair_background.mjs": "e57b4cfa6031a60513904b12355730c109344d91c3e4921d8fee097ef119241f"
+        },
+        "variant_sha256": {
+          "2": "6f4c46aa37da3ff81207ab6883eac02550734ee49f7fddd6e8ee48d32fa5eac2"
+        },
+        "trials": 2,
+        "group_count": 4,
+        "histories_per_group": 16,
+        "mode": "steady",
+        "scope": "Isolated realPostgreSQL, fixtureupstream; threeeventmixat1delivery/secuntilcohortcommit; actualingestwriterscompete, noteDemandandmaintenanceinvokedperiodicallybutmayonlyread, read-onlyclientprobeeacharrival; real60scronmayfireonlyinslowerruns; storagepreparationdisabled; noGitHubrequests; deliverycounts/horizonsdiffer, notanaggregatecombinedthroughputcomparison; no runtimeconfiguration changes",
+        "rows": [
+          {
+            "mode": "steady",
+            "label": "before",
+            "input_outstanding_at_repair_complete": 5,
+            "writer_busy_ms_within_repair_window": {
+              "other": 4093.237166000021,
+              "enqueue": 276.66566800000055,
+              "repair": 2003.1342580000019,
+              "publication": 38264.764885999975,
+              "ingest": 33352.622379999935
+            },
+            "histories_complete": 64,
+            "repair_complete_ms": 78118.81329,
+            "all_committed_ms": 81713.40201,
+            "deliveries": 76,
+            "deliveries_by_type": {
+              "issue_comment": 26,
+              "status": 25,
+              "pull_request": 25
+            },
+            "input_latency_p50_ms": 4697.772098000001,
+            "input_latency_p95_ms": 5246.723132999992,
+            "input_latency_p99_ms": 5408.076397999999,
+            "reader_p95_ms": 178.77414900000076,
+            "publication_admissions": 65,
+            "writer_admissions": 160,
+            "application_round_trips": 2004,
+            "standalone_read_http_calls": 497,
+            "max_writer_hold_ms": 879.4579539999977,
+            "max_publication_hold_ms": 879.4579539999977,
+            "yield_purposes": {
+              "other": 31,
+              "ingest": 56
+            },
+            "grouped_publication": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793479561730,
+              "admissions": 64,
+              "members": 64,
+              "queued_work_yields": 56,
+              "max_members": 1
+            },
+            "lease_renewal_updates": 49,
+            "maintenance_calls": 8,
+            "demand_calls": 8,
+            "reader_samples": 76,
+            "repair_scheduler": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793479566513,
+              "turns": 5,
+              "external_turns": 2,
+              "launches": 5,
+              "selections": 8,
+              "maintenance_continuations": 0,
+              "max_active_groups": 4,
+              "active_groups": 0,
+              "owned_members": 0,
+              "groups": [],
+              "slot_ms_by_lane": {
+                "requested": 76089,
+                "active": 73655,
+                "verification": 74158,
+                "archive": 75459
+              },
+              "quantum": {
+                "launches": 1,
+                "progress": 14,
+                "data_progress": 14,
+                "member_retries": 0,
+                "retired": 0
+              },
+              "stopped": false
+            },
+            "trial": 0,
+            "failed_writers": 0,
+            "writer_p95_ms": 702.6474949999974,
+            "started_at": "2026-10-31T20:46:06.513000+00:00"
+          },
+          {
+            "mode": "steady",
+            "label": "2",
+            "input_outstanding_at_repair_complete": 7,
+            "writer_busy_ms_within_repair_window": {
+              "other": 2818.958329000001,
+              "enqueue": 247.17894499999238,
+              "repair": 1934.110181000011,
+              "publication": 27992.079949000035,
+              "ingest": 22248.640628000037
+            },
+            "histories_complete": 64,
+            "repair_complete_ms": 55356.412807000015,
+            "all_committed_ms": 60179.93210800001,
+            "deliveries": 53,
+            "deliveries_by_type": {
+              "issue_comment": 18,
+              "status": 18,
+              "pull_request": 17
+            },
+            "input_latency_p50_ms": 6758.242434999993,
+            "input_latency_p95_ms": 7729.442899999995,
+            "input_latency_p99_ms": 7805.923704999994,
+            "reader_p95_ms": 314.88362100000086,
+            "publication_admissions": 33,
+            "writer_admissions": 101,
+            "application_round_trips": 1606,
+            "standalone_read_http_calls": 350,
+            "max_writer_hold_ms": 1320.0629829999962,
+            "max_publication_hold_ms": 1320.0629829999962,
+            "yield_purposes": {},
+            "grouped_publication": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793479649074,
+              "admissions": 32,
+              "members": 64,
+              "queued_work_yields": 0,
+              "max_members": 2
+            },
+            "lease_renewal_updates": 24,
+            "maintenance_calls": 6,
+            "demand_calls": 6,
+            "reader_samples": 53,
+            "repair_scheduler": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793479653511,
+              "turns": 4,
+              "external_turns": 1,
+              "launches": 5,
+              "selections": 8,
+              "maintenance_continuations": 0,
+              "max_active_groups": 4,
+              "active_groups": 0,
+              "owned_members": 0,
+              "groups": [],
+              "slot_ms_by_lane": {
+                "requested": 53119,
+                "active": 50801,
+                "verification": 52041,
+                "archive": 52863
+              },
+              "quantum": {
+                "launches": 5,
+                "progress": 65,
+                "data_progress": 65,
+                "member_retries": 0,
+                "retired": 0
+              },
+              "stopped": false
+            },
+            "trial": 0,
+            "failed_writers": 0,
+            "writer_p95_ms": 983.7520549999899,
+            "started_at": "2026-10-31T20:47:33.511000+00:00"
+          },
+          {
+            "mode": "steady",
+            "label": "2",
+            "input_outstanding_at_repair_complete": 8,
+            "writer_busy_ms_within_repair_window": {
+              "other": 2624.363014999981,
+              "enqueue": 255.68695000000298,
+              "repair": 1664.9058079999813,
+              "publication": 29040.086463999993,
+              "ingest": 21952.95765100009
+            },
+            "histories_complete": 64,
+            "repair_complete_ms": 55752.935410999984,
+            "all_committed_ms": 60894.38893299998,
+            "deliveries": 54,
+            "deliveries_by_type": {
+              "issue_comment": 18,
+              "status": 18,
+              "pull_request": 18
+            },
+            "input_latency_p50_ms": 6792.86925399999,
+            "input_latency_p95_ms": 7552.621914999996,
+            "input_latency_p99_ms": 7946.878782999993,
+            "reader_p95_ms": 157.00070900001447,
+            "publication_admissions": 33,
+            "writer_admissions": 102,
+            "application_round_trips": 1615,
+            "standalone_read_http_calls": 356,
+            "max_writer_hold_ms": 1070.1171109999996,
+            "max_publication_hold_ms": 1070.1171109999996,
+            "yield_purposes": {},
+            "grouped_publication": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793479714474,
+              "admissions": 32,
+              "members": 64,
+              "queued_work_yields": 0,
+              "max_members": 2
+            },
+            "lease_renewal_updates": 24,
+            "maintenance_calls": 6,
+            "demand_calls": 6,
+            "reader_samples": 54,
+            "repair_scheduler": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793479719057,
+              "turns": 4,
+              "external_turns": 1,
+              "launches": 5,
+              "selections": 8,
+              "maintenance_continuations": 0,
+              "max_active_groups": 4,
+              "active_groups": 0,
+              "owned_members": 0,
+              "groups": [],
+              "slot_ms_by_lane": {
+                "requested": 52831,
+                "active": 51069,
+                "verification": 52320,
+                "archive": 53413
+              },
+              "quantum": {
+                "launches": 5,
+                "progress": 65,
+                "data_progress": 65,
+                "member_retries": 0,
+                "retired": 0
+              },
+              "stopped": false
+            },
+            "trial": 1,
+            "failed_writers": 0,
+            "writer_p95_ms": 990.0471850000031,
+            "started_at": "2026-10-31T20:48:39.057000+00:00"
+          },
+          {
+            "mode": "steady",
+            "label": "before",
+            "input_outstanding_at_repair_complete": 5,
+            "writer_busy_ms_within_repair_window": {
+              "other": 3617.3277650000236,
+              "enqueue": 286.4818110000051,
+              "repair": 1686.3814180000045,
+              "publication": 37797.296709999995,
+              "ingest": 32115.18835299986
+            },
+            "histories_complete": 64,
+            "repair_complete_ms": 75615.51925699998,
+            "all_committed_ms": 79520.70447000003,
+            "deliveries": 74,
+            "deliveries_by_type": {
+              "issue_comment": 25,
+              "status": 25,
+              "pull_request": 24
+            },
+            "input_latency_p50_ms": 4621.465821999998,
+            "input_latency_p95_ms": 5393.311205999984,
+            "input_latency_p99_ms": 5532.4264509999775,
+            "reader_p95_ms": 160.01560400001472,
+            "publication_admissions": 65,
+            "writer_admissions": 158,
+            "application_round_trips": 1979,
+            "standalone_read_http_calls": 485,
+            "max_writer_hold_ms": 729.8644020000065,
+            "max_publication_hold_ms": 729.8644020000065,
+            "yield_purposes": {
+              "other": 28,
+              "ingest": 56
+            },
+            "grouped_publication": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793479780737,
+              "admissions": 64,
+              "members": 64,
+              "queued_work_yields": 56,
+              "max_members": 1
+            },
+            "lease_renewal_updates": 47,
+            "maintenance_calls": 8,
+            "demand_calls": 8,
+            "reader_samples": 74,
+            "repair_scheduler": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793479785255,
+              "turns": 5,
+              "external_turns": 2,
+              "launches": 5,
+              "selections": 8,
+              "maintenance_continuations": 0,
+              "max_active_groups": 4,
+              "active_groups": 0,
+              "owned_members": 0,
+              "groups": [],
+              "slot_ms_by_lane": {
+                "requested": 73919,
+                "active": 72351,
+                "verification": 72785,
+                "archive": 73326
+              },
+              "quantum": {
+                "launches": 1,
+                "progress": 13,
+                "data_progress": 13,
+                "member_retries": 0,
+                "retired": 0
+              },
+              "stopped": false
+            },
+            "trial": 1,
+            "failed_writers": 0,
+            "writer_p95_ms": 706.4252330000163,
+            "started_at": "2026-10-31T20:49:45.255000+00:00"
+          }
+        ]
+      },
+      "chunk-full400": {
+        "baseline": "cf29ced7b50a144a0d8cc4fda6f55781dbdca59c",
+        "implementation_sha256": "f103f98e20a2373a907308f05a9d2edad32c281ec98d0f31a99b8179b5c1d282",
+        "implementation_files": [
+          "../../tauceti_tools/github_catalog.json",
+          "package-lock.json",
+          "src/activity_landings.ts",
+          "src/catalog.ts",
+          "src/index.ts",
+          "src/ingress.ts",
+          "src/installation.ts",
+          "src/migration.ts",
+          "src/migration_control.ts",
+          "src/migration_target.ts",
+          "src/monitoring.ts",
+          "src/normalize.ts",
+          "src/protocol.ts",
+          "src/provider_monitoring.ts",
+          "src/queue_monitoring.ts",
+          "src/reconciliation.ts",
+          "src/repair_coordinator.ts",
+          "src/repair_io.ts",
+          "src/repository.ts",
+          "src/repository_health.ts",
+          "src/repository_store.ts",
+          "src/retention.ts",
+          "src/runner-capacity.ts",
+          "src/storage.ts",
+          "src/survey.ts"
+        ],
+        "harness_sha256": {
+          "scripts/benchmark-publication-sustained.mjs": "4f811ced4145fe84fb5fc5aed59396427230e48c1479e9ddedf1776cedae315c",
+          "scripts/benchmark-baseline.mjs": "a82cf117a48a198a3a3eede9d61fa1637ba0658bbd3e8402aa2a6404f8be09d8",
+          "scripts/postgres-schema.mjs": "b83b687bcab3e32acebd0ee2c6a9d54d024a122bf6c847f17e28414260d31dea",
+          "tests/postgres_runtime.mjs": "288bf390eef0d4bdb511a2450793843c84de9d299f170ed9455fcb12b4f763d9",
+          "tests/postgres_credentials.mjs": "956e64d59912ca9ad7c3d19922827724f18bf05b22702b603c3bc792be106975",
+          "tests/repair_background.mjs": "e57b4cfa6031a60513904b12355730c109344d91c3e4921d8fee097ef119241f"
+        },
+        "variant_sha256": {
+          "2": "6f4c46aa37da3ff81207ab6883eac02550734ee49f7fddd6e8ee48d32fa5eac2"
+        },
+        "trials": 1,
+        "group_count": 4,
+        "histories_per_group": 100,
+        "mode": "steady",
+        "scope": "Isolated realPostgreSQL, fixtureupstream; threeeventmixat1delivery/secuntilcohortcommit; actualingestwriterscompete, noteDemandandmaintenanceinvokedperiodicallybutmayonlyread, read-onlyclientprobeeacharrival; real60scronmayfireonlyinslowerruns; storagepreparationdisabled; noGitHubrequests; deliverycounts/horizonsdiffer, notanaggregatecombinedthroughputcomparison; no runtimeconfiguration changes",
+        "rows": [
+          {
+            "mode": "steady",
+            "label": "before",
+            "input_outstanding_at_repair_complete": 5,
+            "writer_busy_ms_within_repair_window": {
+              "other": 20343.984245000058,
+              "enqueue": 255.58396699999957,
+              "repair": 1795.5112009999993,
+              "publication": 241083.0376559999,
+              "ingest": 230592.12016599986
+            },
+            "histories_complete": 400,
+            "repair_complete_ms": 494201.477226,
+            "all_committed_ms": 498974.92767899996,
+            "deliveries": 492,
+            "deliveries_by_type": {
+              "issue_comment": 164,
+              "status": 164,
+              "pull_request": 164
+            },
+            "input_latency_p50_ms": 4836.377585999959,
+            "input_latency_p95_ms": 5476.621660999997,
+            "input_latency_p99_ms": 5753.579949000006,
+            "reader_p95_ms": 197.36545899999328,
+            "publication_admissions": 402,
+            "writer_admissions": 970,
+            "application_round_trips": 12200,
+            "standalone_read_http_calls": 3170,
+            "max_writer_hold_ms": 973.1363980000024,
+            "max_publication_hold_ms": 973.1363980000024,
+            "yield_purposes": {
+              "other": 179,
+              "ingest": 348
+            },
+            "grouped_publication": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793478222307,
+              "admissions": 401,
+              "members": 401,
+              "queued_work_yields": 348,
+              "max_members": 1
+            },
+            "lease_renewal_updates": 3023,
+            "maintenance_calls": 50,
+            "demand_calls": 50,
+            "reader_samples": 492,
+            "repair_scheduler": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793478227085,
+              "turns": 12,
+              "external_turns": 9,
+              "launches": 6,
+              "selections": 9,
+              "maintenance_continuations": 0,
+              "max_active_groups": 4,
+              "active_groups": 0,
+              "owned_members": 0,
+              "groups": [],
+              "slot_ms_by_lane": {
+                "requested": 491273,
+                "active": 490687,
+                "verification": 491212,
+                "archive": 491805
+              },
+              "quantum": {
+                "launches": 2,
+                "progress": 12,
+                "data_progress": 12,
+                "member_retries": 0,
+                "retired": 0
+              },
+              "stopped": false
+            },
+            "trial": 0,
+            "failed_writers": 0,
+            "writer_p95_ms": 706.5473530000309,
+            "started_at": "2026-10-31T20:23:47.085000+00:00"
+          },
+          {
+            "mode": "steady",
+            "label": "2",
+            "input_outstanding_at_repair_complete": 7,
+            "writer_busy_ms_within_repair_window": {
+              "other": 12648.542823000229,
+              "enqueue": 272.3471900000004,
+              "repair": 1952.3093210000661,
+              "publication": 176325.68247399945,
+              "ingest": 163940.40544400044
+            },
+            "histories_complete": 400,
+            "repair_complete_ms": 355274.77461799997,
+            "all_committed_ms": 361103.71971100004,
+            "deliveries": 353,
+            "deliveries_by_type": {
+              "issue_comment": 118,
+              "status": 118,
+              "pull_request": 117
+            },
+            "input_latency_p50_ms": 6850.999461999978,
+            "input_latency_p95_ms": 7691.48160300008,
+            "input_latency_p99_ms": 7970.5924260000465,
+            "reader_p95_ms": 206.6328189999913,
+            "publication_admissions": 202,
+            "writer_admissions": 607,
+            "application_round_trips": 9769,
+            "standalone_read_http_calls": 2276,
+            "max_writer_hold_ms": 1256.102162999916,
+            "max_publication_hold_ms": 1256.102162999916,
+            "yield_purposes": {},
+            "grouped_publication": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793478726900,
+              "admissions": 201,
+              "members": 401,
+              "queued_work_yields": 0,
+              "max_members": 2
+            },
+            "lease_renewal_updates": 2052,
+            "maintenance_calls": 36,
+            "demand_calls": 36,
+            "reader_samples": 353,
+            "repair_scheduler": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793478731766,
+              "turns": 9,
+              "external_turns": 6,
+              "launches": 6,
+              "selections": 9,
+              "maintenance_continuations": 0,
+              "max_active_groups": 4,
+              "active_groups": 0,
+              "owned_members": 0,
+              "groups": [],
+              "slot_ms_by_lane": {
+                "requested": 352627,
+                "active": 350521,
+                "verification": 351316,
+                "archive": 352720
+              },
+              "quantum": {
+                "launches": 2,
+                "progress": 60,
+                "data_progress": 60,
+                "member_retries": 0,
+                "retired": 0
+              },
+              "stopped": false
+            },
+            "trial": 0,
+            "failed_writers": 0,
+            "writer_p95_ms": 993.7292669999879,
+            "started_at": "2026-10-31T20:32:11.766000+00:00"
+          }
+        ]
+      },
+      "chunk-burst": {
+        "baseline": "cf29ced7b50a144a0d8cc4fda6f55781dbdca59c",
+        "implementation_sha256": "f103f98e20a2373a907308f05a9d2edad32c281ec98d0f31a99b8179b5c1d282",
+        "implementation_files": [
+          "../../tauceti_tools/github_catalog.json",
+          "package-lock.json",
+          "src/activity_landings.ts",
+          "src/catalog.ts",
+          "src/index.ts",
+          "src/ingress.ts",
+          "src/installation.ts",
+          "src/migration.ts",
+          "src/migration_control.ts",
+          "src/migration_target.ts",
+          "src/monitoring.ts",
+          "src/normalize.ts",
+          "src/protocol.ts",
+          "src/provider_monitoring.ts",
+          "src/queue_monitoring.ts",
+          "src/reconciliation.ts",
+          "src/repair_coordinator.ts",
+          "src/repair_io.ts",
+          "src/repository.ts",
+          "src/repository_health.ts",
+          "src/repository_store.ts",
+          "src/retention.ts",
+          "src/runner-capacity.ts",
+          "src/storage.ts",
+          "src/survey.ts"
+        ],
+        "harness_sha256": {
+          "scripts/benchmark-publication-sustained.mjs": "4f811ced4145fe84fb5fc5aed59396427230e48c1479e9ddedf1776cedae315c",
+          "scripts/benchmark-baseline.mjs": "a82cf117a48a198a3a3eede9d61fa1637ba0658bbd3e8402aa2a6404f8be09d8",
+          "scripts/postgres-schema.mjs": "b83b687bcab3e32acebd0ee2c6a9d54d024a122bf6c847f17e28414260d31dea",
+          "tests/postgres_runtime.mjs": "288bf390eef0d4bdb511a2450793843c84de9d299f170ed9455fcb12b4f763d9",
+          "tests/postgres_credentials.mjs": "956e64d59912ca9ad7c3d19922827724f18bf05b22702b603c3bc792be106975",
+          "tests/repair_background.mjs": "e57b4cfa6031a60513904b12355730c109344d91c3e4921d8fee097ef119241f"
+        },
+        "variant_sha256": {
+          "2": "6f4c46aa37da3ff81207ab6883eac02550734ee49f7fddd6e8ee48d32fa5eac2"
+        },
+        "trials": 1,
+        "group_count": 4,
+        "histories_per_group": 16,
+        "mode": "burst",
+        "scope": "Isolated realPostgreSQL, fixtureupstream; threeeventmixat1delivery/secuntilcohortcommit; actualingestwriterscompete, noteDemandandmaintenanceinvokedperiodicallybutmayonlyread, read-onlyclientprobeeacharrival; real60scronmayfireonlyinslowerruns; storagepreparationdisabled; noGitHubrequests; deliverycounts/horizonsdiffer, notanaggregatecombinedthroughputcomparison; no runtimeconfiguration changes",
+        "rows": [
+          {
+            "mode": "burst",
+            "label": "before",
+            "input_outstanding_at_repair_complete": 0,
+            "writer_busy_ms_within_repair_window": {
+              "other": 1398.392002999998,
+              "enqueue": 312.5476370000006,
+              "repair": 2199.035456999999,
+              "publication": 24289.284073,
+              "ingest": 3959.8271639999994
+            },
+            "histories_complete": 64,
+            "repair_complete_ms": 32312.013908,
+            "all_committed_ms": 33250.636407,
+            "deliveries": 8,
+            "deliveries_by_type": {
+              "issue_comment": 3,
+              "status": 3,
+              "pull_request": 2
+            },
+            "input_latency_p50_ms": 4821.354497,
+            "input_latency_p95_ms": 6903.861497999999,
+            "input_latency_p99_ms": 6903.861497999999,
+            "reader_p95_ms": 208.09941699999945,
+            "publication_admissions": 16,
+            "writer_admissions": 34,
+            "application_round_trips": 1019,
+            "standalone_read_http_calls": 63,
+            "max_writer_hold_ms": 2788.367318000004,
+            "max_publication_hold_ms": 2788.367318000004,
+            "yield_purposes": {
+              "other": 4,
+              "ingest": 4,
+              "repair": 3
+            },
+            "grouped_publication": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793479094099,
+              "admissions": 15,
+              "members": 64,
+              "queued_work_yields": 7,
+              "max_members": 8
+            },
+            "lease_renewal_updates": 0,
+            "maintenance_calls": 1,
+            "demand_calls": 1,
+            "reader_samples": 8,
+            "repair_scheduler": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793479098535,
+              "turns": 8,
+              "external_turns": 1,
+              "launches": 5,
+              "selections": 11,
+              "maintenance_continuations": 0,
+              "max_active_groups": 4,
+              "active_groups": 0,
+              "owned_members": 0,
+              "groups": [],
+              "slot_ms_by_lane": {
+                "requested": 29952,
+                "active": 26007,
+                "verification": 28158,
+                "archive": 29770
+              },
+              "quantum": {
+                "launches": 5,
+                "progress": 65,
+                "data_progress": 65,
+                "member_retries": 0,
+                "retired": 0
+              },
+              "stopped": false
+            },
+            "trial": 0,
+            "failed_writers": 0,
+            "writer_p95_ms": 2710.148604999995,
+            "started_at": "2026-10-31T20:38:18.535000+00:00"
+          },
+          {
+            "mode": "burst",
+            "label": "2",
+            "input_outstanding_at_repair_complete": 0,
+            "writer_busy_ms_within_repair_window": {
+              "other": 1891.5712209999983,
+              "enqueue": 263.2499190000017,
+              "repair": 1777.3970869999976,
+              "publication": 28502.55826000002,
+              "ingest": 3927.2586620000075
+            },
+            "histories_complete": 64,
+            "repair_complete_ms": 36484.500473,
+            "all_committed_ms": 37697.60847099999,
+            "deliveries": 8,
+            "deliveries_by_type": {
+              "issue_comment": 3,
+              "status": 3,
+              "pull_request": 2
+            },
+            "input_latency_p50_ms": 6357.691122999997,
+            "input_latency_p95_ms": 9303.559030000004,
+            "input_latency_p99_ms": 9303.559030000004,
+            "reader_p95_ms": 216.07483800000045,
+            "publication_admissions": 33,
+            "writer_admissions": 51,
+            "application_round_trips": 1091,
+            "standalone_read_http_calls": 60,
+            "max_writer_hold_ms": 1064.254283000002,
+            "max_publication_hold_ms": 1064.254283000002,
+            "yield_purposes": {},
+            "grouped_publication": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793479132556,
+              "admissions": 32,
+              "members": 64,
+              "queued_work_yields": 0,
+              "max_members": 2
+            },
+            "lease_renewal_updates": 8,
+            "maintenance_calls": 1,
+            "demand_calls": 1,
+            "reader_samples": 8,
+            "repair_scheduler": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793479137246,
+              "turns": 4,
+              "external_turns": 1,
+              "launches": 5,
+              "selections": 8,
+              "maintenance_continuations": 0,
+              "max_active_groups": 4,
+              "active_groups": 0,
+              "owned_members": 0,
+              "groups": [],
+              "slot_ms_by_lane": {
+                "requested": 33464,
+                "active": 33116,
+                "verification": 33758,
+                "archive": 34129
+              },
+              "quantum": {
+                "launches": 5,
+                "progress": 65,
+                "data_progress": 65,
+                "member_retries": 0,
+                "retired": 0
+              },
+              "stopped": false
+            },
+            "trial": 0,
+            "failed_writers": 0,
+            "writer_p95_ms": 1039.5392620000057,
+            "started_at": "2026-10-31T20:38:57.246000+00:00"
+          }
+        ]
+      },
+      "chunk-quiet": {
+        "baseline": "cf29ced7b50a144a0d8cc4fda6f55781dbdca59c",
+        "implementation_sha256": "f103f98e20a2373a907308f05a9d2edad32c281ec98d0f31a99b8179b5c1d282",
+        "implementation_files": [
+          "../../tauceti_tools/github_catalog.json",
+          "package-lock.json",
+          "src/activity_landings.ts",
+          "src/catalog.ts",
+          "src/index.ts",
+          "src/ingress.ts",
+          "src/installation.ts",
+          "src/migration.ts",
+          "src/migration_control.ts",
+          "src/migration_target.ts",
+          "src/monitoring.ts",
+          "src/normalize.ts",
+          "src/protocol.ts",
+          "src/provider_monitoring.ts",
+          "src/queue_monitoring.ts",
+          "src/reconciliation.ts",
+          "src/repair_coordinator.ts",
+          "src/repair_io.ts",
+          "src/repository.ts",
+          "src/repository_health.ts",
+          "src/repository_store.ts",
+          "src/retention.ts",
+          "src/runner-capacity.ts",
+          "src/storage.ts",
+          "src/survey.ts"
+        ],
+        "harness_sha256": {
+          "scripts/benchmark-publication-sustained.mjs": "4f811ced4145fe84fb5fc5aed59396427230e48c1479e9ddedf1776cedae315c",
+          "scripts/benchmark-baseline.mjs": "a82cf117a48a198a3a3eede9d61fa1637ba0658bbd3e8402aa2a6404f8be09d8",
+          "scripts/postgres-schema.mjs": "b83b687bcab3e32acebd0ee2c6a9d54d024a122bf6c847f17e28414260d31dea",
+          "tests/postgres_runtime.mjs": "288bf390eef0d4bdb511a2450793843c84de9d299f170ed9455fcb12b4f763d9",
+          "tests/postgres_credentials.mjs": "956e64d59912ca9ad7c3d19922827724f18bf05b22702b603c3bc792be106975",
+          "tests/repair_background.mjs": "e57b4cfa6031a60513904b12355730c109344d91c3e4921d8fee097ef119241f"
+        },
+        "variant_sha256": {
+          "2": "6f4c46aa37da3ff81207ab6883eac02550734ee49f7fddd6e8ee48d32fa5eac2"
+        },
+        "trials": 1,
+        "group_count": 4,
+        "histories_per_group": 16,
+        "mode": "quiet",
+        "scope": "Isolated realPostgreSQL, fixtureupstream; threeeventmixat1delivery/secuntilcohortcommit; actualingestwriterscompete, noteDemandandmaintenanceinvokedperiodicallybutmayonlyread, read-onlyclientprobeeacharrival; real60scronmayfireonlyinslowerruns; storagepreparationdisabled; noGitHubrequests; deliverycounts/horizonsdiffer, notanaggregatecombinedthroughputcomparison; no runtimeconfiguration changes",
+        "rows": [
+          {
+            "mode": "quiet",
+            "label": "before",
+            "input_outstanding_at_repair_complete": 0,
+            "writer_busy_ms_within_repair_window": {
+              "other": 599.0925699999998,
+              "enqueue": 266.34273200000007,
+              "repair": 2119.8357529999985,
+              "publication": 23730.787168
+            },
+            "histories_complete": 64,
+            "repair_complete_ms": 26845.167613,
+            "all_committed_ms": 27556.483985,
+            "deliveries": 0,
+            "deliveries_by_type": {
+              "issue_comment": 0,
+              "status": 0,
+              "pull_request": 0
+            },
+            "input_latency_p50_ms": null,
+            "input_latency_p95_ms": null,
+            "input_latency_p99_ms": null,
+            "reader_p95_ms": null,
+            "publication_admissions": 16,
+            "writer_admissions": 24,
+            "application_round_trips": 910,
+            "standalone_read_http_calls": 12,
+            "max_writer_hold_ms": 2781.000820000001,
+            "max_publication_hold_ms": 2781.000820000001,
+            "yield_purposes": {
+              "other": 4,
+              "repair": 3
+            },
+            "grouped_publication": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793479176076,
+              "admissions": 15,
+              "members": 64,
+              "queued_work_yields": 7,
+              "max_members": 8
+            },
+            "lease_renewal_updates": 0,
+            "maintenance_calls": 0,
+            "demand_calls": 0,
+            "reader_samples": 0,
+            "repair_scheduler": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793479180584,
+              "turns": 8,
+              "external_turns": 1,
+              "launches": 5,
+              "selections": 11,
+              "maintenance_continuations": 0,
+              "max_active_groups": 4,
+              "active_groups": 0,
+              "owned_members": 0,
+              "groups": [],
+              "slot_ms_by_lane": {
+                "requested": 24607,
+                "active": 20640,
+                "verification": 22278,
+                "archive": 24536
+              },
+              "quantum": {
+                "launches": 5,
+                "progress": 65,
+                "data_progress": 65,
+                "member_retries": 0,
+                "retired": 0
+              },
+              "stopped": false
+            },
+            "trial": 0,
+            "failed_writers": 0,
+            "writer_p95_ms": 2695.2713550000008,
+            "started_at": "2026-10-31T20:39:40.584000+00:00"
+          },
+          {
+            "mode": "quiet",
+            "label": "2",
+            "input_outstanding_at_repair_complete": 0,
+            "writer_busy_ms_within_repair_window": {
+              "other": 590.0675229999979,
+              "enqueue": 247.52729399999953,
+              "repair": 1926.9005969999998,
+              "publication": 28873.722343000016
+            },
+            "histories_complete": 64,
+            "repair_complete_ms": 31758.611121,
+            "all_committed_ms": 32921.816392,
+            "deliveries": 0,
+            "deliveries_by_type": {
+              "issue_comment": 0,
+              "status": 0,
+              "pull_request": 0
+            },
+            "input_latency_p50_ms": null,
+            "input_latency_p95_ms": null,
+            "input_latency_p99_ms": null,
+            "reader_p95_ms": null,
+            "publication_admissions": 33,
+            "writer_admissions": 41,
+            "application_round_trips": 978,
+            "standalone_read_http_calls": 9,
+            "max_writer_hold_ms": 1152.744967999999,
+            "max_publication_hold_ms": 1152.744967999999,
+            "yield_purposes": {},
+            "grouped_publication": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793479209069,
+              "admissions": 32,
+              "members": 64,
+              "queued_work_yields": 0,
+              "max_members": 2
+            },
+            "lease_renewal_updates": 0,
+            "maintenance_calls": 0,
+            "demand_calls": 0,
+            "reader_samples": 0,
+            "repair_scheduler": {
+              "scope": "repository_instance_since_restart",
+              "since": 1793479213889,
+              "turns": 4,
+              "external_turns": 1,
+              "launches": 5,
+              "selections": 8,
+              "maintenance_continuations": 0,
+              "max_active_groups": 4,
+              "active_groups": 0,
+              "owned_members": 0,
+              "groups": [],
+              "slot_ms_by_lane": {
+                "requested": 29110,
+                "active": 28533,
+                "verification": 28809,
+                "archive": 29243
+              },
+              "quantum": {
+                "launches": 5,
+                "progress": 65,
+                "data_progress": 65,
+                "member_retries": 0,
+                "retired": 0
+              },
+              "stopped": false
+            },
+            "trial": 0,
+            "failed_writers": 0,
+            "writer_p95_ms": 1060.2634659999967,
+            "started_at": "2026-10-31T20:40:13.889000+00:00"
+          }
+        ]
+      }
+    },
+    "limits": [
+      "All histories have empty upstream payloads; transaction overhead dominates.",
+      "Continuous mixed ingest competes for the real FIFO writer. Periodic demand/maintenance calls can be read-only/no-op; storage preparation is disabled.",
+      "Arrival rate fixed but horizons and delivery counts differ, so cohort speed is not combined throughput.",
+      "The accepted release changes only status dormancy; no publication scheduler policy changed.",
+      "Three uncontended 4x100 pairs and large/slow/migration/recovery acceptance workload were not pursued for an already-rejected candidate."
+    ]
+  },
+  "clean_control_phases": {
+    "scope": "Uncontended original confirmation trial1, four16emptyhistories. Per-phase medians are separate, not additive measured hold.",
+    "rows": [
+      {
+        "trial": 1,
+        "label": "2",
+        "publication_transactions": 33,
+        "phase_ms_median": {
+          "connect": 66,
+          "begin": 29,
+          "session": 24,
+          "owner": 22,
+          "apply": 628,
+          "commit": 23
+        },
+        "close_ms_median": 25
+      },
+      {
+        "trial": 1,
+        "label": "before",
+        "publication_transactions": 65,
+        "phase_ms_median": {
+          "connect": 67,
+          "begin": 29,
+          "session": 24,
+          "owner": 23,
+          "apply": 373,
+          "commit": 24
+        },
+        "close_ms_median": 26
+      }
+    ]
+  },
+  "ci_overlap_records": {
+    "external": 41238573234,
+    "external_pr": 41238578280,
+    "post_status_merge": 41238042858,
+    "post_housekeeping_merge": 41239553470
+  },
+  "acceptance_declared_before_candidates": {
+    "defined_at": "2026-10-31T19:52:32.922521+00:00",
+    "before_candidate_measurements": true,
+    "screening": "One alternating set of current andfixed2/4/8 with4x16histories plus continuously sustainedmixedinput. Screening selects candidate only, cannot authorize shipping.",
+    "confirmation": "Atleast3alternatingcontrol/candidate4x100trials under sustainedinput;quietandburstcomparisons; allrequiredcorrectness/CI/fairnesschecks. Selectsmallestcapmeetingcriteria.",
+    "criteria": {
+      "useful_cohort_throughput": "median repaircompletiontime improves at least5%; report peroperation and eventmix. Deliverycountdependscompletiontime so also report allcommit horizon and fixedarrivalrate.",
+      "end_to_end_input_p95": "candidate median <= control median*1.10+250ms; inspectalltrials/tails, not a license to hide new timeout/parking behavior",
+      "client_read_p95": "candidate median <=control median*1.10+100ms; allcompleteness checks unchanged",
+      "writer_holds": "report p95/max and elapsedobservationsforlarge/slowcases; capsboundworknottime; no unexplained outliers orcleanup/migration/retry/starvation regression",
+      "failure": "Zero failedwritertransactions inhealthyfixture;retainfailure/recoverytests. No higheradmissionconcurrency, runtimeguard orrelaxeddeadlines."
+    },
+    "decision": "Anyunresolvedcorrectness/fairnessconcernrejectschange; ambiguousperformancegetsdiscriminatingmeasurement; ifallcapsfailretaincurrentyield. These are engineeringacceptancechecksnotruntimeeligibilityconditions."
+  },
+  "current_HEAD_harness_smoke": {
+    "baseline": "8bfd5ca2b25ae587dd862302eff968b3ce7b61c5",
+    "rows": [
+      {
+        "label": "before",
+        "histories_complete": 4,
+        "failed_writers": 0
+      },
+      {
+        "label": "2",
+        "histories_complete": 4,
+        "failed_writers": 0
+      }
+    ]
+  },
+  "capacity_local_repeats": [
+    {
+      "trial": 0,
+      "exit": 0
+    },
+    {
+      "trial": 1,
+      "exit": 0
+    },
+    {
+      "trial": 2,
+      "exit": 0
+    },
+    {
+      "trial": 3,
+      "exit": 0
+    },
+    {
+      "trial": 4,
+      "exit": 0
+    }
+  ],
+  "existing_capacity_gap": {
+    "run": 41239553470,
+    "sqlite_service": "one shared-installation owner completed15of16; duepast capacity job, annual durable alarm",
+    "postgres": "passed",
+    "focused_local_repeats": 5,
+    "focused_failures": 0,
+    "production_backend": "postgres",
+    "introduced_by_status_fix": false,
+    "introduced_by_PR122": false,
+    "exact_interleaving": "inferred, not traced",
+    "disposition": "separate follow-up: remove SQLite deadline-timer exception and enable deadline regressions, preserve alarm/launch bounds; no runtime change in this artifact PR"
+  },
+  "production": {
+    "deployment": {
+      "version": "02f735d7-b164-44bc-9262-723c473c4623",
+      "commit": "8bfd5ca2b25ae587dd862302eff968b3ce7b61c5",
+      "includes_accepted_status_fix": true,
+      "status_merge_is_ancestor": true,
+      "identical_bindings": true,
+      "identical_runtime": true,
+      "concurrent_change": "PR122 optional housekeeping scheduling; mixed window not attributable to status fix"
+    },
+    "prepared_start": "2026-10-31T20:38:37.164744+00:00",
+    "end": "2026-10-31T20:58:37.15736+00:00",
+    "seconds": 1199.9926161766052,
+    "samples": 21,
+    "stopped": true,
+    "versions_match": true,
+    "storage_connected_samples": 21,
+    "storage_unknown_samples": 0,
+    "diagnostics_stale_samples": 0,
+    "retained_review_complete_initial": 24,
+    "retained_review_complete_final": 24,
+    "missing_distinct": [
+      {
+        "at": "2026-10-31T20:38:37.164744+00:00",
+        "missing": 10
+      },
+      {
+        "at": "2026-10-31T20:48:37.246634+00:00",
+        "missing": 3
+      },
+      {
+        "at": "2026-10-31T20:58:37.15736+00:00",
+        "missing": 0
+      }
+    ],
+    "webhook_lag_ms": {
+      "first": 5397,
+      "last": 13553,
+      "max": 23102
+    },
+    "parked": {
+      "first": {
+        "count": 0,
+        "truncated": false,
+        "oldest_received": null
+      },
+      "last": {
+        "count": 0,
+        "truncated": false,
+        "oldest_received": null
+      },
+      "max_count": 26,
+      "max_failures": 1
+    },
+    "limits": [
+      "Minute snapshots can miss short transitions. Scope exits and retired jobs are not hydration.",
+      "Input lag gauges describe latestappliedinput; queue metrics maylag. No newlive tail was enabled.",
+      "Provider/configwaits are ordinaryoperation; theyare not assumedfailures.",
+      "Cohort status SHAs are fixed; recordheadreplacementandclosureseparately from completion."
+    ],
+    "windows": [
+      {
+        "start": "2026-10-31T20:38:37.164744+00:00",
+        "end": "2026-10-31T20:48:37.246634+00:00",
+        "seconds": 600.0818901062012,
+        "counts": {
+          "statuses": {
+            "missing_to_complete": 26,
+            "entered_missing": 18,
+            "complete_left_scope": 22,
+            "entered_complete": 1
+          },
+          "issue_comments": {
+            "entered_missing": 5,
+            "complete_left_scope": 9,
+            "missing_to_complete": 4,
+            "entered_complete": 1
+          },
+          "review_comments": {
+            "entered_missing": 5,
+            "complete_left_scope": 9,
+            "missing_to_complete": 5,
+            "entered_complete": 1
+          }
+        },
+        "distinct_completions": {
+          "statuses": 26,
+          "issue_comments": 4,
+          "review_comments": 5
+        }
+      },
+      {
+        "start": "2026-10-31T20:48:37.246634+00:00",
+        "end": "2026-10-31T20:58:37.15736+00:00",
+        "seconds": 599.910726070404,
+        "counts": {
+          "issue_comments": {
+            "missing_to_complete": 7,
+            "entered_missing": 6
+          },
+          "statuses": {
+            "entered_missing": 15,
+            "complete_left_scope": 9,
+            "missing_to_complete": 17
+          },
+          "review_comments": {
+            "entered_missing": 6,
+            "missing_to_complete": 6
+          }
+        },
+        "distinct_completions": {
+          "issue_comments": 7,
+          "statuses": 17,
+          "review_comments": 6
+        }
+      }
+    ],
+    "fresh_status_keys": 8,
+    "fresh_status_complete_before_successor": 8,
+    "fresh_status_complete_at_original_baseline": 2,
+    "all_configured_alive_every_sample": true,
+    "fleet_restart_counts": [
+      0
+    ],
+    "final_worker_states": {
+      "backoff": 1,
+      "running": 1,
+      "waiting-quota": 5
+    },
+    "final_pending_publications": 1,
+    "final_caps": [
+      32
+    ],
+    "post_window_reads": {
+      "review_histories": 24,
+      "progress_queries": 4,
+      "status_histories": 8,
+      "all_complete_HTTP200": true,
+      "anonymous_survey": [
+        {
+          "page": 1,
+          "http": 200,
+          "ms": 1627,
+          "status": "ok",
+          "complete": true,
+          "coverage": "complete",
+          "rows": 500,
+          "has_cursor": true
+        },
+        {
+          "page": 2,
+          "http": 200,
+          "ms": 319,
+          "status": "ok",
+          "complete": true,
+          "coverage": "complete",
+          "rows": 86,
+          "has_cursor": false
+        }
+      ]
+    },
+    "recovery_episode": {
+      "error": "R2 list concurrent request throttle10058",
+      "observed_samples": [
+        31,
+        32
+      ],
+      "final_counter": 0,
+      "cleared_without_intervention": true
+    },
+    "original_mixed_window": {
+      "start": "2026-10-31T20:22:36.502769+00:00",
+      "end": "2026-10-31T20:42:37.199297+00:00",
+      "missing_distinct": [
+        {
+          "at": "2026-10-31T20:22:36.502769+00:00",
+          "missing": 271
+        },
+        {
+          "at": "2026-10-31T20:32:37.503333+00:00",
+          "missing": 113
+        },
+        {
+          "at": "2026-10-31T20:42:37.199297+00:00",
+          "missing": 1
+        }
+      ],
+      "versions_match": false,
+      "reason": "ConcurrentPR122 rollout at20:37UTC includes status fix; do not claim status-only second stable window."
+    },
+    "final_eligible_jobs": [
+      {
+        "operation": "reactions",
+        "lane": "archive",
+        "pr_state": "no_pr_state",
+        "jobs": 6112,
+        "requested": 0,
+        "complete": 3787,
+        "dirty": 21,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "statuses",
+        "lane": "verification",
+        "pr_state": "no_pr_state",
+        "jobs": 6038,
+        "requested": 0,
+        "complete": 6038,
+        "dirty": 4597,
+        "oldest_requested_at": null,
+        "recent_demand": 1
+      },
+      {
+        "operation": "files",
+        "lane": "archive",
+        "pr_state": "CLOSED",
+        "jobs": 4907,
+        "requested": 0,
+        "complete": 4907,
+        "dirty": 4907,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "statuses",
+        "lane": "active",
+        "pr_state": "no_pr_state",
+        "jobs": 3045,
+        "requested": 4,
+        "complete": 847,
+        "dirty": 2254,
+        "oldest_requested_at": 1793350659181,
+        "recent_demand": 0
+      },
+      {
+        "operation": "reactions",
+        "lane": "verification",
+        "pr_state": "no_pr_state",
+        "jobs": 1953,
+        "requested": 0,
+        "complete": 42,
+        "dirty": 3,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "pr",
+        "lane": "active",
+        "pr_state": "CLOSED",
+        "jobs": 1950,
+        "requested": 300,
+        "complete": 918,
+        "dirty": 1430,
+        "oldest_requested_at": 1793346459325,
+        "recent_demand": 0
+      },
+      {
+        "operation": "files",
+        "lane": "active",
+        "pr_state": "CLOSED",
+        "jobs": 1640,
+        "requested": 0,
+        "complete": 234,
+        "dirty": 1640,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "review_threads",
+        "lane": "active",
+        "pr_state": "CLOSED",
+        "jobs": 1342,
+        "requested": 250,
+        "complete": 398,
+        "dirty": 929,
+        "oldest_requested_at": 1793344658045,
+        "recent_demand": 0
+      },
+      {
+        "operation": "reviews",
+        "lane": "active",
+        "pr_state": "CLOSED",
+        "jobs": 1042,
+        "requested": 0,
+        "complete": 2,
+        "dirty": 1042,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "issue_comments",
+        "lane": "active",
+        "pr_state": "CLOSED",
+        "jobs": 905,
+        "requested": 1,
+        "complete": 894,
+        "dirty": 14,
+        "oldest_requested_at": 1793451889255,
+        "recent_demand": 0
+      },
+      {
+        "operation": "review_threads",
+        "lane": "verification",
+        "pr_state": "CLOSED",
+        "jobs": 869,
+        "requested": 0,
+        "complete": 856,
+        "dirty": 725,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "review_comments",
+        "lane": "verification",
+        "pr_state": "CLOSED",
+        "jobs": 733,
+        "requested": 79,
+        "complete": 733,
+        "dirty": 498,
+        "oldest_requested_at": 1793375976383,
+        "recent_demand": 0
+      },
+      {
+        "operation": "review_comments",
+        "lane": "active",
+        "pr_state": "CLOSED",
+        "jobs": 615,
+        "requested": 196,
+        "complete": 442,
+        "dirty": 560,
+        "oldest_requested_at": 1793363260779,
+        "recent_demand": 0
+      },
+      {
+        "operation": "files",
+        "lane": "active",
+        "pr_state": "OPEN",
+        "jobs": 445,
+        "requested": 0,
+        "complete": 7,
+        "dirty": 445,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "review_threads",
+        "lane": "active",
+        "pr_state": "OPEN",
+        "jobs": 420,
+        "requested": 11,
+        "complete": 105,
+        "dirty": 274,
+        "oldest_requested_at": 1793399237843,
+        "recent_demand": 0
+      },
+      {
+        "operation": "reviews",
+        "lane": "verification",
+        "pr_state": "CLOSED",
+        "jobs": 400,
+        "requested": 0,
+        "complete": 378,
+        "dirty": 400,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "pr",
+        "lane": "active",
+        "pr_state": "OPEN",
+        "jobs": 389,
+        "requested": 38,
+        "complete": 174,
+        "dirty": 365,
+        "oldest_requested_at": 1793438037100,
+        "recent_demand": 0
+      },
+      {
+        "operation": "issue_comments",
+        "lane": "verification",
+        "pr_state": "OPEN",
+        "jobs": 298,
+        "requested": 0,
+        "complete": 298,
+        "dirty": 1,
+        "oldest_requested_at": null,
+        "recent_demand": 20
+      },
+      {
+        "operation": "reviews",
+        "lane": "active",
+        "pr_state": "OPEN",
+        "jobs": 293,
+        "requested": 0,
+        "complete": 0,
+        "dirty": 293,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "review_comments",
+        "lane": "active",
+        "pr_state": "OPEN",
+        "jobs": 249,
+        "requested": 29,
+        "complete": 249,
+        "dirty": 244,
+        "oldest_requested_at": 1793438065780,
+        "recent_demand": 4
+      },
+      {
+        "operation": "issue_comments",
+        "lane": "active",
+        "pr_state": "OPEN",
+        "jobs": 213,
+        "requested": 0,
+        "complete": 213,
+        "dirty": 0,
+        "oldest_requested_at": null,
+        "recent_demand": 3
+      },
+      {
+        "operation": "review_comments",
+        "lane": "verification",
+        "pr_state": "OPEN",
+        "jobs": 191,
+        "requested": 5,
+        "complete": 191,
+        "dirty": 44,
+        "oldest_requested_at": 1793399895304,
+        "recent_demand": 1
+      },
+      {
+        "operation": "issue_comments",
+        "lane": "verification",
+        "pr_state": "no_pr_state",
+        "jobs": 180,
+        "requested": 0,
+        "complete": 171,
+        "dirty": 0,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "review_threads",
+        "lane": "verification",
+        "pr_state": "OPEN",
+        "jobs": 166,
+        "requested": 0,
+        "complete": 164,
+        "dirty": 121,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "pr",
+        "lane": "verification",
+        "pr_state": "OPEN",
+        "jobs": 145,
+        "requested": 1,
+        "complete": 145,
+        "dirty": 17,
+        "oldest_requested_at": 1793477450590,
+        "recent_demand": 12
+      },
+      {
+        "operation": "reviews",
+        "lane": "verification",
+        "pr_state": "OPEN",
+        "jobs": 82,
+        "requested": 0,
+        "complete": 79,
+        "dirty": 82,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "pr",
+        "lane": "active",
+        "pr_state": "MERGED",
+        "jobs": 43,
+        "requested": 0,
+        "complete": 0,
+        "dirty": 43,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "files",
+        "lane": "active",
+        "pr_state": "MERGED",
+        "jobs": 40,
+        "requested": 0,
+        "complete": 0,
+        "dirty": 40,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "pr",
+        "lane": "verification",
+        "pr_state": "CLOSED",
+        "jobs": 27,
+        "requested": 0,
+        "complete": 27,
+        "dirty": 16,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "issue_comments",
+        "lane": "verification",
+        "pr_state": "CLOSED",
+        "jobs": 10,
+        "requested": 0,
+        "complete": 10,
+        "dirty": 0,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "files",
+        "lane": "verification",
+        "pr_state": "CLOSED",
+        "jobs": 8,
+        "requested": 0,
+        "complete": 8,
+        "dirty": 8,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "files",
+        "lane": "archive",
+        "pr_state": "MERGED",
+        "jobs": 8,
+        "requested": 0,
+        "complete": 8,
+        "dirty": 8,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "files",
+        "lane": "verification",
+        "pr_state": "OPEN",
+        "jobs": 2,
+        "requested": 0,
+        "complete": 2,
+        "dirty": 2,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "refs",
+        "lane": "active",
+        "pr_state": "no_pr_state",
+        "jobs": 1,
+        "requested": 0,
+        "complete": 1,
+        "dirty": 1,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "recent_prs",
+        "lane": "archive",
+        "pr_state": "no_pr_state",
+        "jobs": 1,
+        "requested": 0,
+        "complete": 1,
+        "dirty": 1,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "recent_issues",
+        "lane": "archive",
+        "pr_state": "no_pr_state",
+        "jobs": 1,
+        "requested": 0,
+        "complete": 1,
+        "dirty": 1,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "open_prs",
+        "lane": "active",
+        "pr_state": "no_pr_state",
+        "jobs": 1,
+        "requested": 0,
+        "complete": 1,
+        "dirty": 1,
+        "oldest_requested_at": null,
+        "recent_demand": 1
+      },
+      {
+        "operation": "issue_delta",
+        "lane": "active",
+        "pr_state": "no_pr_state",
+        "jobs": 1,
+        "requested": 0,
+        "complete": 1,
+        "dirty": 1,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "pr_delta",
+        "lane": "active",
+        "pr_state": "no_pr_state",
+        "jobs": 1,
+        "requested": 0,
+        "complete": 1,
+        "dirty": 1,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "review_comments",
+        "lane": "verification",
+        "pr_state": "MERGED",
+        "jobs": 1,
+        "requested": 0,
+        "complete": 1,
+        "dirty": 1,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      },
+      {
+        "operation": "open_issues",
+        "lane": "active",
+        "pr_state": "no_pr_state",
+        "jobs": 1,
+        "requested": 0,
+        "complete": 1,
+        "dirty": 1,
+        "oldest_requested_at": null,
+        "recent_demand": 1
+      },
+      {
+        "operation": "repository",
+        "lane": "active",
+        "pr_state": "no_pr_state",
+        "jobs": 1,
+        "requested": 0,
+        "complete": 1,
+        "dirty": 0,
+        "oldest_requested_at": null,
+        "recent_demand": 0
+      }
+    ]
+  }
+}
