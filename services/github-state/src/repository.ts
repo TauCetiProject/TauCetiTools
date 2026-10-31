@@ -1,4 +1,4 @@
-import { RepositoryStore, StoreUnavailable, StoreFenced, canReplayPublication, WriterPurpose, SQLiteStore, PostgresStore, ReadCacheStore, BufferedStore, SerialLane, columns, collectionJoin } from './repository_store';
+import { RepositoryStore, StoreUnavailable, StoreFenced, canReplayPublication, isBackendFailure, WriterPurpose, SQLiteStore, PostgresStore, ReadCacheStore, BufferedStore, SerialLane, columns, collectionJoin } from './repository_store';
 import { repositoryHealth } from './repository_health';
 import { DurableObject } from 'cloudflare:workers';
 import { Env, EventPointer, matchesETag, Query, Result, digest, json, queryKey, repository, stub, validateQuery, parseGitHub, CI_EVENTS, NOT_MIRRORED, publicQuery, stagingStateKey, stagedPageKey } from './protocol';
@@ -23,10 +23,13 @@ interface RepairWait {job:any;due:number;attempts:number;reason:string;event:str
 interface PreparedRefresh {job:any;q:Query;repo:any;started:number;response:Response|null;result:any;preparedNext?:string;staged?:{key:string,expires:number};objects:Map<string,string>;encodings:Map<string,string>}
 const PUBLICATION_ITEMS=2,PUBLICATION_BYTES=256*1024,PUBLICATION_ROWS=128;
 class LeaseLost extends Error {}
-// A failed publication chunk must not charge untouched fetched siblings a
-// retry. Keep its original error for the established durable recovery path.
+// Retain the attempted chunk and original error. Adapter-classified backend
+// failures keep group recovery; an unclassified chunk error affects only it.
 class PublicationFailure extends Error {
   constructor(readonly jobs:any[],readonly error:unknown){super('publication_interrupted');}
+}
+class WaitFailure extends PublicationFailure {
+  constructor(readonly waits:RepairWait[],readonly expired:boolean,error:unknown){super(waits.map(x=>x.job),error);}
 }
 const SCHEMA_VERSION=5;
 // 10 GiB limit less a margin. With no recorded storage state, a database this
@@ -1302,8 +1305,14 @@ export class RepositoryState extends DurableObject<Env> {
     const alarm=this.store.backend==='postgres'?null:await this.ctx.storage.getAlarm();
     if (due && (!alarm || alarm>due)) await this.setAlarm(Math.max(now+100,due));
   }
-  async nextJob(): Promise<any> {
-    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.nextJob.call(state));
+  private excludeRepairKeys(keys?:Set<string>):{sql:string,bindings:string[]} {
+    if(!keys?.size)return {sql:'',bindings:[]};
+    // One JSON binding covers a full failed upstream group on native SQLite.
+    const values=this.store.backend==='sqlite'?'SELECT value FROM json_each(?)':'SELECT jsonb_array_elements_text(CAST(? AS JSONB))';
+    return {sql:' AND key NOT IN ('+values+')',bindings:[JSON.stringify([...keys])]};
+  }
+  async nextJob(excluded?:Set<string>): Promise<any> {
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.nextJob.call(state,excluded));
     const now=Date.now(),counters=(await this.store.exec<any>('SELECT key,value FROM meta WHERE key IN (?,?)','repair_turn','requested_turn')).toArray();
     const turns=new Map(counters.map(row=>[row.key,JSON.parse(row.value)])),turn=turns.get('repair_turn') || 0,requestedTurn=turns.get('requested_turn') || 0;
     await this.setMeta('repair_turn',turn+1);
@@ -1311,7 +1320,8 @@ export class RepositoryState extends DurableObject<Env> {
     // Real reads precede maintenance in the requested lane. Give fresh real
     // demand three turns out of four, retaining one oldest-first turn.
     const fresh=requestedTurn%4!==0;
-    const job=(await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=? ORDER BY CASE WHEN lane=? AND (lane!='requested' OR requested_at IS NOT NULL) THEN 0 WHEN lane='requested' AND (requested_at IS NOT NULL OR ?='requested') THEN 1 WHEN lane='active' THEN 2 WHEN lane='requested' THEN 3 WHEN lane='verification' THEN 4 ELSE 5 END,CASE WHEN ? AND lane='requested' THEN COALESCE(requested_at,0) ELSE 0 END DESC,due,key LIMIT 1",now,now,preferred,preferred,Number(fresh))).toArray()[0];
+    const omit=this.excludeRepairKeys(excluded);
+    const job=(await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=?"+omit.sql+" ORDER BY CASE WHEN lane=? AND (lane!='requested' OR requested_at IS NOT NULL) THEN 0 WHEN lane='requested' AND (requested_at IS NOT NULL OR ?='requested') THEN 1 WHEN lane='active' THEN 2 WHEN lane='requested' THEN 3 WHEN lane='verification' THEN 4 ELSE 5 END,CASE WHEN ? AND lane='requested' THEN COALESCE(requested_at,0) ELSE 0 END DESC,due,key LIMIT 1",now,now,...omit.bindings,preferred,preferred,Number(fresh))).toArray()[0];
     if(job?.lane==='requested' && job.requested_at)await this.setMeta('requested_turn',requestedTurn+1);
     return job;
   }
@@ -2053,7 +2063,8 @@ export class RepositoryState extends DurableObject<Env> {
     if(!input.length)return;
     if(!this.store.transactional) {
       const metrics=new RepairMetrics();
-      await this.atomic(async state=>{state.repairMetrics=metrics;await state.persistWaits(input,expired);},'repair');
+      try{await this.atomic(async state=>{state.repairMetrics=metrics;await state.persistWaits(input,expired);},'repair');}
+      catch(error){throw new WaitFailure(input,expired,error);}
       try{this.repairMetrics.merge(metrics);}catch{}return;
     }
     const size=this.store.backend==='sqlite'?12:128,changed=new Set<string>();
@@ -2071,11 +2082,12 @@ export class RepositoryState extends DurableObject<Env> {
     const size=this.store.backend==='sqlite'?49:256,now=Date.now();
     for(let offset=0;offset<jobs.length;offset+=size){const chunk=jobs.slice(offset,offset+size);await this.store.exec('UPDATE jobs SET lease_id=NULL,lease_until=0,api=?,due=? WHERE '+chunk.map(()=>'(key=? AND lease_id=?)').join(' OR '),'core',now,...chunk.flatMap(j=>[j.key,j.lease_id]));}
   }
-  private async claimCompanions(first:any,selection?:any[]):Promise<any[]> {
+  private async claimCompanions(first:any,selection?:any[],excluded?:Set<string>):Promise<any[]> {
     const operation=JSON.parse(first.query).operation;
-    const candidates=selection || (await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=? AND lane=? AND page=1 AND api IS NULL AND nested IS NULL AND key LIKE ? ORDER BY CASE WHEN lane='requested' AND requested_at IS NULL THEN 1 ELSE 0 END,due,key LIMIT ?",Date.now(),Date.now(),first.lane,operation+':%',Math.max(0,batchLimit(operation)-1))).toArray();
+    const omit=this.excludeRepairKeys(excluded);
+    const candidates=selection || (await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=? AND lane=? AND page=1 AND api IS NULL AND nested IS NULL AND key LIKE ?"+omit.sql+" ORDER BY CASE WHEN lane='requested' AND requested_at IS NULL THEN 1 ELSE 0 END,due,key LIMIT ?",Date.now(),Date.now(),first.lane,operation+':%',...omit.bindings,Math.max(0,batchLimit(operation)-1))).toArray();
     if(!candidates.length)return [];
-    if(!this.store.transactional)return this.atomic(state=>state.claimCompanions(first,candidates),'repair');
+    if(!this.store.transactional)return this.atomic(state=>state.claimCompanions(first,candidates,excluded),'repair');
     const hot=new Set<string>(),complete=new Set<string>();
     const readBatch=this.store.backend==='sqlite'?80:256;
     for(let offset=0;offset<candidates.length;offset+=readBatch) {
@@ -2138,7 +2150,7 @@ export class RepositoryState extends DurableObject<Env> {
     }
     return wanted.flatMap(j=>claimed.has(j.key)?[claimed.get(j.key)]:[]);
   }
-  async dispatch(first:any,claimedGroup?:any[],preparationError?:unknown): Promise<void> {
+  async dispatch(first:any,claimedGroup?:any[],preparationError?:unknown,failed?:Set<string>): Promise<void> {
     this.traceRepair('dispatch',first);
     const q:Query=JSON.parse(first.query),operation=q.operation,repo=(await this.meta('repository'));
     let jobs=claimedGroup || [first];
@@ -2166,7 +2178,14 @@ export class RepositoryState extends DurableObject<Env> {
         } else await this.deferJobs(jobs.map(job=>({job,result:result.deferred || result.unavailable?result:{unavailable:true,reason:'malformed_service_response'}})));
       } else await this.refresh(first);
     } catch(error) {
-      await this.retryJobs(error instanceof PublicationFailure?error.jobs:jobs,error instanceof PublicationFailure?error.error:error);
+      if(error instanceof WaitFailure){
+        try{await this.persistWaits(error.waits,error.expired);}
+        catch(cause){for(const job of jobs)failed?.add(job.key);throw cause;}
+      }else{
+        for(const job of jobs)failed?.add(job.key);
+        const cause=error instanceof PublicationFailure?error.error:error;
+        await this.retryJobs(error instanceof PublicationFailure && !isBackendFailure(cause)?error.jobs:jobs,cause);
+      }
     } finally {
       await this.releaseLeases(this.store,jobs);
       this.traceRepair('dispatch_complete',first);
@@ -2184,7 +2203,7 @@ export class RepositoryState extends DurableObject<Env> {
     try {await this.runAlarm();} finally {this.activeOperations--;}
   }
   async runAlarm(): Promise<void> {
-    const options=settings(this.env);let dispatched=0,retired=0;
+    const options=settings(this.env),failed=new Set<string>();let dispatched=0,retired=0;
     try {
       this.traceRepair('expire');
       await this.expire();
@@ -2203,7 +2222,7 @@ export class RepositoryState extends DurableObject<Env> {
             let selected:any;
             try {
               selected=await this.atomic(async state=>{
-                const next=await state.nextJob();if(!next)return undefined;
+                const next=await state.nextJob(failed);if(!next)return undefined;
                 if(await state.retireUnneeded(next))return {retired:true};
                 return {job:await state.claim(next)};
               },'repair');
@@ -2214,10 +2233,10 @@ export class RepositoryState extends DurableObject<Env> {
             const operation=JSON.parse(first.query).operation;
             const batchable=['issue_comments','review_threads','statuses','reactions'].includes(operation) && first.page===1 && !first.api && !first.nested;
             const group=[first];let preparationError:unknown;
-            if(batchable)try{group.push(...await this.claimCompanions(first));}catch(error){preparationError=error;}
+            if(batchable)try{group.push(...await this.claimCompanions(first,undefined,failed));}catch(error){preparationError=error;}
             // Commit companions before selecting the next leader, preserving
             // upstream batching. Already-started groups keep running in parallel.
-            dispatched++;wave.push(this.dispatch(first,group,preparationError));
+            dispatched++;wave.push(this.dispatch(first,group,preparationError,failed));
           }
           if(!wave.length)break;
           await Promise.allSettled(wave);
@@ -2227,10 +2246,14 @@ export class RepositoryState extends DurableObject<Env> {
       try {if(!this.migrationHeld()) await this.maintenance();} catch(error) {this.noteFailure('maintenance',error);}
     } finally {
       try {
-        const row=(await this.store.exec<any>('SELECT MIN(MAX(due,lease_until)) AS due FROM jobs')).one();
+        const omit=this.excludeRepairKeys(failed);
+        const row=(await this.store.exec<any>('SELECT MIN(MAX(due,lease_until)) AS due FROM jobs WHERE 1=1'+omit.sql,...omit.bindings)).one();
         // Degraded mode writes nothing, not even the next alarm; the cron tick
         // keeps expiring rows until a probe restores writes.
-        if (row.due && !this.degraded && !this.migrationHeld()) await this.setAlarm(Math.max(Date.now()+100,row.due));
+        if (row.due && !this.degraded && !this.migrationHeld()) {
+          const at=Math.max(Date.now()+100,row.due),earlier=this.store.backend==='sqlite'?await this.ctx.storage.getAlarm():null;
+          if(!earlier || earlier>at)await this.setAlarm(at);
+        }
       } catch(error) {this.noteFailure('alarm',error);}
       this.traceRepair('storage_maintenance');
       this.startStorageMaintenance();

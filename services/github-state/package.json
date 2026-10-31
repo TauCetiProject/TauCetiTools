@@ -11,6 +11,7 @@
     "drill": "node scripts/outage-drill.mjs",
     "test:postgres": "npm run typecheck && npm run build && node scripts/test-postgres.mjs",
     "benchmark:postgres": "node scripts/benchmark-postgres.mjs",
+    "benchmark:publication": "node scripts/benchmark-publication.mjs",
     "test:publication-memory": "node --max-old-space-size=96 tests/publication_memory.mjs",
     "benchmark:history-demand": "node scripts/benchmark-history-demand.mjs"
   },

@@ -39,8 +39,11 @@ export function collectionJoin(store:RepositoryStore):string {return store.backe
 // confirms rollback of a healthy apply transaction. The symbol survives test
 // bundles without exposing diagnostics or changing public error messages.
 const MEMBER_ROLLBACK=Symbol.for('tauceti.repository.member_rollback');
+const BACKEND_FAILURE=Symbol.for('tauceti.repository.backend_failure');
 export const canReplayPublication=(error:unknown):boolean=>Boolean(error && typeof error==='object' && (error as any)[MEMBER_ROLLBACK]===true);
+export const isBackendFailure=(error:unknown):boolean=>Boolean(error && typeof error==='object' && (error as any)[BACKEND_FAILURE]===true) && !canReplayPublication(error);
 const markMemberRollback=(error:unknown):void=>{if(error && typeof error==='object')try{Object.defineProperty(error,MEMBER_ROLLBACK,{value:true});}catch{}};
+const markBackendFailure=(error:unknown):void=>{if(error && typeof error==='object')try{Object.defineProperty(error,BACKEND_FAILURE,{value:true});}catch{}};
 const memberApplyError=(error:unknown):boolean=>error instanceof Error && !(error instanceof StoreFenced) && (!(error instanceof StoreUnavailable) || Boolean(error.sqlstate && /^(22|23|54)/.test(error.sqlstate)));
 const sqliteMemberError=(error:any):boolean=>{
   if(Number.isInteger(error?.errcode))return [18,19,20].includes(error.errcode&255);
@@ -58,7 +61,7 @@ export class SQLiteStore implements RepositoryStore {
   async exec<T=any>(query:string,...bindings:Bind[]):Promise<Rows<T>> {
     if(!this.transactional)return this.lane.run(()=>new SQLiteStore(this.storage,this.sql,true,this.generation,this.context,this.lane).exec<T>(query,...bindings));
     if(!/^\s*SELECT\b/i.test(query))this.fence();
-    try{return new Rows(this.sql.exec<any>(query,...bindings).toArray());}catch(error){this.queryFailure=error;throw error;}
+    try{return new Rows(this.sql.exec<any>(query,...bindings).toArray());}catch(error){this.queryFailure=error;if(!sqliteMemberError(error))markBackendFailure(error);throw error;}
   }
   private fence():void {
     try {
@@ -66,7 +69,7 @@ export class SQLiteStore implements RepositoryStore {
       if(row) {const owner=JSON.parse(row.value);if(owner.backend!=='sqlite' || owner.generation!==this.generation)throw new StoreFenced();}
     }catch(error){this.queryFailure=error;throw error;}
   }
-  private batchSync(statements:Statement[]):Rows<any>[] {if(statements.some(s=>!/^\s*SELECT\b/i.test(s.sql)))this.fence();return statements.map(s=>{try{return new Rows(this.sql.exec(s.sql,...(s.bindings || [])).toArray());}catch(error){this.queryFailure=error;throw error;}});}
+  private batchSync(statements:Statement[]):Rows<any>[] {if(statements.some(s=>!/^\s*SELECT\b/i.test(s.sql)))this.fence();return statements.map(s=>{try{return new Rows(this.sql.exec(s.sql,...(s.bindings || [])).toArray());}catch(error){this.queryFailure=error;if(!sqliteMemberError(error))markBackendFailure(error);throw error;}});}
   async batch(statements:Statement[]):Promise<Rows<any>[]> {
     if(this.transactional)return this.batchSync(statements);
     return this.lane.run(async()=>statements.some(s=>!/^\s*SELECT\b/i.test(s.sql))?this.storage.transactionSync(()=>this.batchSync(statements)):this.batchSync(statements));
@@ -81,6 +84,7 @@ export class SQLiteStore implements RepositoryStore {
       const execute=async()=>{try{result=await this.storage.transaction(async()=>{this.fence();try{return await apply(scoped);}catch(cause){applyError=cause;throw cause;}});}catch(cause){
         failed=true;error=cause;
         if(cause===applyError && memberApplyError(cause) && (scoped.queryFailure===undefined || sqliteMemberError(scoped.queryFailure)))markMemberRollback(cause);
+        if(!canReplayPublication(cause))markBackendFailure(cause);
       }};
       // Input gating also protects native SQLite recovery/status operations
       // from observing an open async savepoint. Catch inside the gate: an
@@ -156,8 +160,8 @@ export function postgresSQL(input:string,schema:string):string {
   sql=sql.replace(/'(?:''|[^'])*'|\?/g,part=>part==='?'?'$'+(++parameter):part);
   return sql;
 }
-export class StoreUnavailable extends Error {readonly sqlstate?:string;constructor(code?:string){const safe=code && /^[0-9A-Z]{5}$/.test(code)?code:undefined;super('Repository database unavailable'+(safe?' ('+safe+')':''));this.sqlstate=safe;}}
-export class StoreFenced extends Error {constructor(){super('Repository backend generation fenced');}}
+export class StoreUnavailable extends Error {readonly sqlstate?:string;constructor(code?:string){const safe=code && /^[0-9A-Z]{5}$/.test(code)?code:undefined;super('Repository database unavailable'+(safe?' ('+safe+')':''));this.sqlstate=safe;markBackendFailure(this);}}
+export class StoreFenced extends Error {constructor(){super('Repository backend generation fenced');markBackendFailure(this);}}
 type TransactionPhase='connect'|'begin'|'session'|'owner'|'apply'|'commit';
 interface SessionIdentity {pid:number;started_us:string;token:string}
 type SessionCleanup='terminated'|'already_ended'|'unconfirmed'|'expired';

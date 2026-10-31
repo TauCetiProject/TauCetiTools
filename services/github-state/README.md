@@ -194,13 +194,24 @@ bookkeeping release only their own key/token leases atomically.
 A confirmed healthy member-data rollback permits one individual replay from
 fresh input. Fences, backend failures and uncertain commits use durable recovery;
 they do not trigger a replay loop or one connection attempt per remaining result.
-Only the attempted failed chunk receives normal retry bookkeeping. Untouched
-members retain their attempts and deadlines, and cleanup failure retains ordinary
-lease-expiry recovery. Completion metrics merge after commit; an uncertain commit
+Unclassified failures retry only the attempted chunk; untouched members retain
+their attempts and deadlines. Adapter-classified backend failures retain the
+established unfinished-group exponential retry, avoiding one costly backend
+failure per tiny chunk under a persistent timeout. Confirmed member-data rollback
+takes precedence over backend classification and still isolates healthy siblings.
+Committed or deferred outcomes remain protected by key/token checks; failed
+cleanup retains ordinary lease-expiry recovery. Completion metrics merge after commit; an uncertain commit
 can undercount them, so fixed durable coverage remains the acceptance evidence.
+Failed-group members are excluded from leader/companion selection for the rest
+of that alarm turn and from its next-alarm calculation. A failed tail cannot
+repeatedly refetch in the same turn or drive a 100-ms alarm loop. Existing
+cron/tick/retry continuation starts a fresh turn; no persisted cooldown or new
+timer is added, and unrelated work remains eligible.
 Compatible quota/routing/retry bookkeeping also uses bounded bulk statements,
 preserving per-member deadlines, attempt increments and wait reasons. This changes
-transaction cost, not the quota owner's decisions. See
+transaction cost, not the quota owner's decisions. A failed bookkeeping commit
+retries its captured decision once, preserving capacity semantics and the exact
+deadline rather than replacing it with a transport penalty. See
 [publication measurements](PUBLICATION-PERFORMANCE.md).
 
 Compact surveys immediately include exact-head commit statuses received by webhook,

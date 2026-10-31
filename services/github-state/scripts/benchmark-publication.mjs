@@ -18,6 +18,17 @@ const bundle=await build({stdin:{contents:"export {RepositoryState} from './repo
  {name:'context',setup(b){b.onResolve({filter:/^cloudflare:workers$/},()=>({path:'context',namespace:'fixture'}));b.onLoad({filter:/.*/,namespace:'fixture'},()=>({contents:'export class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}}',loader:'js'}));}}
 ]});
 const {RepositoryState:Baseline,PostgresStore:BaselineStore}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
+const limits=(process.env.BENCHMARK_LIMITS || '2,4,8').split(',').map(Number);
+assert.ok(limits.includes(2)&&limits.every(n=>[2,4,8].includes(n))&&new Set(limits).size===limits.length,'limits must include2 and may include4/8');
+const candidates=new Map([[2,{RepositoryState,PostgresStore}]]);
+for(const items of limits.filter(n=>n!==2)){
+ const source=readFileSync('src/repository.ts','utf8');assert.equal(source.split('PUBLICATION_ITEMS=2,').length,2);
+ const variant=await build({stdin:{contents:"export {RepositoryState} from './repository';export {PostgresStore} from './repository_store';",loader:'ts',resolveDir:resolve('src')},bundle:true,platform:'node',format:'esm',write:false,plugins:[
+  {name:'publication-limit',setup(b){b.onLoad({filter:/\/repository\.ts$/},()=>({contents:source.replace('PUBLICATION_ITEMS=2,','PUBLICATION_ITEMS='+items+','),loader:'ts'}));}},
+  {name:'context',setup(b){b.onResolve({filter:/^cloudflare:workers$/},()=>({path:'context',namespace:'fixture'}));b.onLoad({filter:/.*/,namespace:'fixture'},()=>({contents:'export class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}}',loader:'js'}));}}
+ ]});
+ candidates.set(items,await import('data:text/javascript;base64,'+Buffer.from(variant.outputFiles[0].text).toString('base64')));
+}
 const repo='org/repo',trials=Number(process.env.BENCHMARK_TRIALS || 3);
 const q=number=>({repository:repo,operation:'issue_comments',args:{number}});
 async function measure(Class,StoreClass,count,ingressCount,intervalMs=0){
@@ -56,12 +67,19 @@ async function measure(Class,StoreClass,count,ingressCount,intervalMs=0){
   return {histories_completed:count,committed_ingress:ingressCount,ingress_interval_ms:intervalMs,elapsed_ms:completeMs,transactions,application_sql_round_trips:roundTrips,upstream_batches:upstream,github_requests:0,ingress_ms:reads,ingress_p95_ms:p95(reads),ingress_admission_p95_ms:p95(writers.filter(x=>x.purpose==='ingest').map(x=>x.queue_wait_ms)),publication_transactions:publications.length,publication_max_hold_ms:Math.max(...publications.map(x=>x.transaction_ms)),writers};
  }finally{release?.();await f.close();}
 }
-const result={baseline:baselineCommit,implementation_sha256:createHash('sha256').update(readFileSync('src/repository.ts')).update(readFileSync('src/repository_store.ts')).update(readFileSync('src/monitoring.ts')).digest('hex'),scope:'isolated real PostgreSQL; ordinary runAlarm leased scheduler; eight histories plus eight issue-comment deliveries to a warm complete collection, burst and steady500ms spacing, three alternating trials each; separate100memberemptyfullbatch once/version; fixture upstream only, zero GitHub requests; not a production fleet throughput claim',trials,before:[],after:[],steady:{before:[],after:[]},full_batch:{}};
-for(let trial=0;trial<trials;trial++)for(const label of trial%2?['after','before']:['before','after'])result[label].push(await measure(label==='before'?Baseline:RepositoryState,label==='before'?BaselineStore:PostgresStore,8,8));
-for(let trial=0;trial<trials;trial++)for(const label of trial%2?['after','before']:['before','after'])result.steady[label].push(await measure(label==='before'?Baseline:RepositoryState,label==='before'?BaselineStore:PostgresStore,8,8,500));
+const result={baseline:baselineCommit,implementation_sha256:createHash('sha256').update(readFileSync('src/repository.ts')).update(readFileSync('src/repository_store.ts')).update(readFileSync('src/monitoring.ts')).digest('hex'),scope:'isolated real PostgreSQL; ordinary runAlarm leased scheduler; eight histories plus eight issue-comment deliveries to a warm complete collection, burst and steady500ms spacing, three alternating trials each; requested limits interleaved (benchmark-only constant substitution for4/8); separate100memberemptyfullbatch once/version; fixture upstream only, zero GitHub requests; not a production fleet throughput claim',trials,candidate_limits:limits,before:[],after:[],steady:{before:[],after:[]},limits:Object.fromEntries(limits.filter(n=>n!==2).map(n=>[n,{burst:[],steady:[]}])),full_batch:{}};
+for(let trial=0;trial<trials;trial++)for(const label of trial%2?[...limits].reverse().concat(['before']):['before',...limits]){
+ const classes=label==='before'?{RepositoryState:Baseline,PostgresStore:BaselineStore}:candidates.get(label);
+ for(const [mode,interval] of [['burst',0],['steady',500]]){
+  const row=await measure(classes.RepositoryState,classes.PostgresStore,8,8,interval);
+  (label==='before'?(mode==='burst'?result.before:result.steady.before):label===2?(mode==='burst'?result.after:result.steady.after):result.limits[label][mode]).push(row);
+ }
+}
 if(process.env.BENCHMARK_FULL!=='0')for(const label of ['before','after'])result.full_batch[label]=await measure(label==='before'?Baseline:RepositoryState,label==='before'?BaselineStore:PostgresStore,100,0);
 const median=a=>[...a].sort((x,y)=>x-y)[Math.floor(a.length/2)];result.summary={};
+const summarize=xs=>Object.fromEntries(['elapsed_ms','transactions','application_sql_round_trips','publication_transactions','publication_max_hold_ms','ingress_p95_ms','ingress_admission_p95_ms'].map(k=>[k,median(xs.map(x=>x[k]))]));
 for(const set of [result,result.steady]){
- set.summary={};for(const label of ['before','after'])set.summary[label]=Object.fromEntries(['elapsed_ms','transactions','application_sql_round_trips','publication_transactions','publication_max_hold_ms','ingress_p95_ms','ingress_admission_p95_ms'].map(k=>[k,median(set[label].map(x=>x[k]))]));
+ set.summary={};for(const label of ['before','after'])set.summary[label]=summarize(set[label]);
 }
-writeFileSync(process.env.BENCHMARK_OUTPUT || '/tmp/publication-benchmark.json',JSON.stringify(result,null,2)+'\n');console.log(JSON.stringify({burst:result.summary,steady:result.steady.summary,full_batch:Object.fromEntries(Object.entries(result.full_batch).map(([k,v])=>[k,{...v,writers:undefined}]))},null,2));
+for(const v of Object.values(result.limits))v.summary={burst:summarize(v.burst),steady:summarize(v.steady)};
+writeFileSync(process.env.BENCHMARK_OUTPUT || '/tmp/publication-benchmark.json',JSON.stringify(result,null,2)+'\n');console.log(JSON.stringify({burst:result.summary,steady:result.steady.summary,limits:Object.fromEntries(Object.entries(result.limits).map(([k,v])=>[k,v.summary])),full_batch:Object.fromEntries(Object.entries(result.full_batch).map(([k,v])=>[k,{...v,writers:undefined}]))},null,2));

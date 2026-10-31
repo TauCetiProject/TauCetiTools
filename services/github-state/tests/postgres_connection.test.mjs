@@ -11,7 +11,7 @@ const bundle=await build({entryPoints:['src/repository_store.ts'],bundle:true,pl
  export class Client {constructor(){return globalThis.${key}.client();}}
  `,loader:'js'}));
 }}]});
-const {PostgresStore,StoreFenced,StoreUnavailable,canReplayPublication}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
+const {PostgresStore,StoreFenced,StoreUnavailable,canReplayPublication,isBackendFailure}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
 function fixture(scenarios=[],url='postgresql://unused@ep-fixture.us-east-2.aws.neon.tech/fixture'){
  const clients=[],committed=[],logs=[],cleanupLogs=[],cleanupCalls=[],cleanupResponses=[];
  const driver={log:(event,fields)=>(event==='repository_postgres_cleanup'?cleanupLogs:logs).push({event,...fields}),async http(sql,bindings){
@@ -275,10 +275,12 @@ for(const code of ['22001','23505','54000','57014','55P03','08006'])test(`public
  try{await f.store.transaction(write);}catch(e){error=e;}
  assert.ok(error);assert.equal(error.sqlstate,code);
  assert.equal(canReplayPublication(error),/^(22|23|54)/.test(code));
+ assert.equal(isBackendFailure(error),!/^(22|23|54)/.test(code));
 });
 test('publication replay rejects transport and unknown commit but allows rolled-back application errors',async()=>{
  const f=fixture();const error=new Error('member data invalid');await assert.rejects(f.store.transaction(()=>{throw error;}),e=>e===error);assert.equal(canReplayPublication(error),true);
- const unknown=fixture([{phase:'commit',stalled:true,acceptCommit:true}]);let cause;try{await unknown.store.transaction(write);}catch(e){cause=e;}assert.equal(canReplayPublication(cause),false);
- const timeout=fixture([{phase:'apply',stalled:true}]);try{await timeout.store.transaction(write);}catch(e){assert.equal(canReplayPublication(e),false);}
- const fence=fixture([{fenced:true}]);try{await fence.store.transaction(write);}catch(e){assert.equal(canReplayPublication(e),false);}
+ assert.equal(isBackendFailure(error),false);
+ const unknown=fixture([{phase:'commit',stalled:true,acceptCommit:true}]);let cause;try{await unknown.store.transaction(write);}catch(e){cause=e;}assert.equal(canReplayPublication(cause),false);assert.equal(isBackendFailure(cause),true);
+ const timeout=fixture([{phase:'apply',stalled:true}]);try{await timeout.store.transaction(write);}catch(e){assert.equal(canReplayPublication(e),false);assert.equal(isBackendFailure(e),true);}
+ const fence=fixture([{fenced:true}]);try{await fence.store.transaction(write);}catch(e){assert.equal(canReplayPublication(e),false);assert.equal(isBackendFailure(e),true);}
 });

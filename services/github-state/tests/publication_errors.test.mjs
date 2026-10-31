@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {load} from './prevention_runtime.mjs';
-const {SQLiteStore,canReplayPublication}=await load('src/repository_store.ts');
+const {SQLiteStore,canReplayPublication,isBackendFailure}=await load('src/repository_store.ts');
 for(const [message,fields,expected] of [
  ['CHECK failed: SQLITE_CONSTRAINT (extended: SQLITE_CONSTRAINT_CHECK)',{},true],
  ['too big: SQLITE_TOOBIG',{},true],
@@ -16,4 +16,5 @@ for(const [message,fields,expected] of [
  const error=Object.assign(Error(message),fields),sql={exec(query){if(query.startsWith('SELECT'))return {toArray:()=>[]};throw error;}},storage={transaction:async fn=>fn()};
  const store=new SQLiteStore(storage,sql);await assert.rejects(store.transaction(tx=>tx.exec('INSERT INTO resources VALUES(?)','fixture')),e=>e===error);
  assert.equal(canReplayPublication(error),expected);
+ assert.equal(isBackendFailure(error),!expected);
 });

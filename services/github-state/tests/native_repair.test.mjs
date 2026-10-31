@@ -59,15 +59,20 @@ test('native Workers SQLite records a 100-history capacity deferral in bulk',{sk
  }finally{await mf.dispose();}
 });
 
-test('native Workers SQLite isolates a CHECK failure and replays the healthy publication',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
+for(const [constraint,ddl,badValue] of [
+ ['CHECK','id INTEGER CHECK(id>0)','-1'],
+ ['UNIQUE','id INTEGER UNIQUE','1'],
+ ['NOT NULL','id INTEGER NOT NULL','NULL'],
+])test('native Workers SQLite isolates a '+constraint+' failure and replays the healthy publication',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
  const mf=await runtime(async()=>Response.json([]),{},{repositoryAlarms:false,repositoryExtension:`async fetch(req){
   if(new URL(req.url).pathname==='/fixture/member-check'){
-   await this.store.exec('DELETE FROM jobs');await this.store.exec('CREATE TABLE fixture_member_check(id INTEGER CHECK(id>0))');
+   await this.store.exec('DELETE FROM jobs');await this.store.exec('CREATE TABLE fixture_member_check(${ddl})');
+   if('${constraint}'==='UNIQUE')await this.store.exec('INSERT INTO fixture_member_check VALUES(1)');
    await this.enqueueMany([100,101].map(number=>({q:{repository:'org/repo',operation:'issue_comments',args:{number}},priority:5})),true);
    const bad='issue_comments:{"number":101}',wrap=target=>new Proxy(target,{get(target,prop){
     if(prop==='transaction')return(apply,purpose)=>target.transaction(tx=>apply(wrap(tx)),purpose);
-    if(prop==='exec')return async(sql,...args)=>{if(sql.includes('INTO collections')&&args.includes(bad))await target.exec('INSERT INTO fixture_member_check VALUES(?)',-1);return target.exec(sql,...args);};
-    if(prop==='batch')return async statements=>{for(const s of statements)if(s.sql.includes('INTO collections')&&(s.bindings||[]).includes(bad))await target.exec('INSERT INTO fixture_member_check VALUES(?)',-1);return target.batch(statements);};
+    if(prop==='exec')return async(sql,...args)=>{if(sql.includes('INTO collections')&&args.includes(bad))await target.exec('INSERT INTO fixture_member_check VALUES(${badValue})');return target.exec(sql,...args);};
+    if(prop==='batch')return async statements=>{for(const s of statements)if(s.sql.includes('INTO collections')&&(s.bindings||[]).includes(bad))await target.exec('INSERT INTO fixture_member_check VALUES(${badValue})');return target.batch(statements);};
     const value=Reflect.get(target,prop,target);return typeof value==='function'?value.bind(target):value;
    }});this.store=wrap(this.store);
    this.env={...this.env,INSTALLATIONS:{idFromName:id=>id,get:()=>({fetch:async()=>Response.json({results:[{api:'graphql',data:[]},{api:'graphql',data:[]}]})})}};
@@ -79,5 +84,45 @@ test('native Workers SQLite isolates a CHECK failure and replays the healthy pub
  try{
   const ns=await mf.getDurableObjectNamespace('REPOSITORIES'),stub=ns.get(ns.idFromName(repository.id));await send(stub,'/configure',{repository:repository.name});
   const response=await send(stub,'/fixture/member-check',{});assert.equal(response.status,200);assert.deepEqual(await response.json(),{complete:1,bad:{attempt:1,wait_reason:'transport_or_parser'},completions:1});
+ }finally{await mf.dispose();}
+});
+
+test('native Workers SQLite routes a full batch with exactly 100 statement bindings',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
+ const mf=await runtime(async()=>Response.json([]),{},{repositoryAlarms:false,repositoryExtension:`async fetch(req){
+  if(new URL(req.url).pathname==='/fixture/route-batch'){
+   await this.store.exec('DELETE FROM jobs');
+   await this.enqueueMany(Array.from({length:100},(_,i)=>({q:{repository:'org/repo',operation:'issue_comments',args:{number:i+1}},priority:5})),true);
+   this.env={...this.env,INSTALLATIONS:{idFromName:id=>id,get:()=>({fetch:async()=>Response.json({deferred:true,category:'routing:core',retry_at:Date.now()})})}};
+   await this.dispatch(await this.claim(await this.nextJob()));
+   return Response.json((await this.store.exec("SELECT COUNT(*) n,SUM(attempt) attempts,COUNT(lease_id) leases FROM jobs WHERE api='core' AND due<=?",Date.now())).one());
+  }
+  return super.fetch(req);
+ }`});
+ try{
+  const ns=await mf.getDurableObjectNamespace('REPOSITORIES'),stub=ns.get(ns.idFromName(repository.id));await send(stub,'/configure',{repository:repository.name});
+  const response=await send(stub,'/fixture/route-batch',{});assert.equal(response.status,200);assert.deepEqual(await response.json(),{n:100,attempts:0,leases:0});
+ }finally{await mf.dispose();}
+});
+
+test('native Workers SQLite excludes a failed full batch from selection and immediate rearming',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
+ const mf=await runtime(async()=>Response.json([]),{},{repositoryAlarms:false,repositoryExtension:`async fetch(req){
+  if(new URL(req.url).pathname==='/fixture/failed-turn'){
+   await this.store.exec('DELETE FROM jobs');
+   await this.enqueueMany(Array.from({length:100},(_,i)=>({q:{repository:'org/repo',operation:'issue_comments',args:{number:i+100}},priority:5})),true);
+   let requests=0,alarms=0;this.setAlarm=async()=>{alarms++;};this.expire=async()=>({});this.maintenance=async()=>{};this.startStorageMaintenance=()=>{};
+   const bad='issue_comments:{"number":100}',wrap=target=>new Proxy(target,{get(target,prop){
+    if(prop==='transaction')return(apply,purpose)=>target.transaction(tx=>apply(wrap(tx)),purpose);
+    if(prop==='exec')return async(sql,...args)=>{if(sql.includes('INTO collections')&&args.includes(bad))await target.exec('SELECT * FROM fixture_missing_backend_table');return target.exec(sql,...args);};
+    const value=Reflect.get(target,prop,target);return typeof value==='function'?value.bind(target):value;
+   }});this.store=wrap(this.store);
+   this.env={...this.env,INSTALLATIONS:{idFromName:id=>id,get:()=>({fetch:async(_url,init)=>{requests++;return Response.json({results:JSON.parse(init.body).jobs.map(()=>({api:'graphql',data:[]}))});}})}};
+   await this.runAlarm();const rows=(await this.store.exec('SELECT SUM(attempt) attempts,COUNT(lease_id) leases FROM jobs')).one();
+   return Response.json({requests,alarms,...rows});
+  }
+  return super.fetch(req);
+ }`});
+ try{
+  const ns=await mf.getDurableObjectNamespace('REPOSITORIES'),stub=ns.get(ns.idFromName(repository.id));await send(stub,'/configure',{repository:repository.name});
+  const response=await send(stub,'/fixture/failed-turn',{});assert.equal(response.status,200);assert.deepEqual(await response.json(),{requests:1,alarms:0,attempts:100,leases:0});
  }finally{await mf.dispose();}
 });

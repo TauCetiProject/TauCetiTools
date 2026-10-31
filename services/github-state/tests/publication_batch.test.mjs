@@ -149,7 +149,55 @@ test('non-replayable publication failure stops individual members without one co
   const calls=upstream(f,async jobs=>jobs.map(()=>({api:'graphql',data:[]}))),tx=f.store.transaction.bind(f.store);let publications=0;
   f.store.transaction=async(apply,purpose)=>{if(purpose==='publication'){publications++;throw Error('non-replayable connection failure');}return tx(apply,purpose);};
   await dispatch(f);assert.equal(calls(),1);assert.equal(publications,1);
+  const rows=(await f.store.exec('SELECT * FROM jobs ORDER BY key')).toArray();
+  for(let i=0;i<rows.length;i++){assert.equal(rows[i].attempt,i===0?1:0);assert.equal(rows[i].lease_id,null);if(i)assert.ok(rows[i].due<=Date.now());}
   for(const q of qs)assert.equal(await f.state.complete(q),false);
+ }finally{await f.close();}
+});
+
+for(const unrelated of [false,true])test(`a failed batch is not fetched again or used to rearm an immediate alarm in its turn (unrelated work=${unrelated})`,async()=>{
+ const f=await fixture();try{
+  await seed(f,100);const other={repository:'org/repo',operation:'statuses',args:{sha:'a'.repeat(40)}};
+  if(unrelated)await f.state.enqueueMany([{q:other,priority:5}],true);
+  f.state.expire=async()=>({});f.state.maintenance=async()=>{};f.state.startStorageMaintenance=()=>{};
+  f.state.ctx.storage.getAlarm=async()=>null; // The current alarm has been consumed.
+  const alarms=[];f.state.setAlarm=async at=>alarms.push(at);
+  let calls=0,recovering=false;
+  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async(_url,init)=>{
+   const input=JSON.parse(init.body),op=input.jobs[0].query.operation;
+   if(op==='issue_comments')calls++;
+   if(recovering)return Response.json({deferred:true,category:'capacity',retry_at:Date.now()+300000});
+   return Response.json({results:input.jobs.map(()=>({api:'graphql',data:[]}))});
+  }})};
+  f.state.store=new Proxy(f.store,{get(target,prop){
+   if(prop==='transaction')return async(apply,purpose)=>{
+    let uncertain=false;const result=await target.transaction(tx=>apply(intercept(tx,async(_store,sql,args)=>{if(!recovering&&sql.includes('INTO collections')&&args.includes(key(100)))uncertain=true;})),purpose);
+    if(uncertain)throw Error('unclassified uncertain commit');return result;
+   };
+   const value=Reflect.get(target,prop,target);return typeof value==='function'?value.bind(target):value;
+  }});
+  await f.state.runAlarm();assert.equal(calls,1,'the untouched tail must not be claimed/fetched repeatedly in the same quantum');
+  const jobs=(await f.store.exec("SELECT * FROM jobs WHERE key LIKE 'issue_comments:%' ORDER BY key")).toArray();
+  assert.equal(jobs.length,100);for(const j of jobs){const n=JSON.parse(j.query).args.number;assert.equal(j.attempt,0);assert.equal(j.lease_id,null);if(n>=102)assert.ok(j.due<=Date.now());}
+  if(unrelated)assert.equal(await f.state.complete(other),true,'unrelated useful work still progresses');
+  assert.ok(alarms.every(at=>at>Date.now()+10000),'failed tails must not drive a near-immediate alarm loop');
+  assert.equal(alarms.length,unrelated?1:0,'other scheduled work retains its alarm; an excluded-only tail does not add one');
+  recovering=true;await f.state.runAlarm();assert.equal(calls,2,'ordinary next-turn continuation retries without an operator reset');
+ }finally{await f.close();}
+});
+
+test('a rolled-back capacity bookkeeping write retries its exact decision without a transport penalty',async()=>{
+ const f=await fixture();try{
+  await seed(f,100);const until=Date.now()+300000,tx=f.store.transaction.bind(f.store);let ready=false,injected=false;
+  f.state.expire=async()=>({});f.state.maintenance=async()=>{};f.state.startStorageMaintenance=()=>{};
+  f.state.ctx.storage.getAlarm=async()=>null;
+  const alarms=[];f.state.setAlarm=async at=>alarms.push(at);
+  f.store.transaction=(apply,purpose)=>{if(ready&&purpose==='repair'&&!injected){injected=true;throw Error('deferral bookkeeping rollback');}return tx(apply,purpose);};
+  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>{ready=true;return Response.json({deferred:true,category:'capacity',retry_at:until});}})};
+  await f.state.runAlarm();assert.equal(injected,true);assert.ok(alarms.includes(until),'a successfully retried quota decision retains its normal wakeup');
+  const rows=(await f.store.exec('SELECT * FROM jobs')).toArray();assert.equal(rows.length,100);
+  for(const row of rows){assert.equal(row.attempt,0);assert.equal(row.due,until);assert.equal(row.wait_reason,'capacity');assert.equal(row.lease_id,null);}
+  assert.equal(f.state.repairMetrics.summary().repair_hour.find(x=>x.event==='capacity_wait').n,100);
  }finally{await f.close();}
 });
 
@@ -180,7 +228,11 @@ for(const outcome of ['rolled_back','uncertain_commit','cleanup_unavailable'])te
   for(const j of rows){
    const n=JSON.parse(j.query).args.number,prior=before.get(j.key);
    assert.equal(j.generation,prior.generation);assert.equal(j.requested_at,prior.requested_at);
-   if(n>=106){assert.equal(j.attempt,prior.attempt);assert.equal(j.due,prior.due);assert.equal(j.wait_reason,null);}
+   if(n>=106){
+    assert.equal(j.attempt,outcome==='rolled_back'?1:prior.attempt);
+    if(outcome==='rolled_back'){assert.ok(j.due>Date.now());assert.equal(j.wait_reason,'transport_or_parser');}
+    else{assert.equal(j.due,prior.due);assert.equal(j.wait_reason,null);}
+   }
    if(n===104||n===105)assert.equal(j.attempt,outcome==='rolled_back'?1:0);
    if(outcome==='cleanup_unavailable'&&n>=104)assert.ok(j.lease_id,'failed cleanup leaves durable ownership for expiry recovery');
    else assert.equal(j.lease_id,null);
@@ -202,5 +254,34 @@ test('a separate PostgreSQL reader cannot see partial collection publication',{s
    assert.deepEqual(r.rows[0],{complete:0,resources:0});
   });
   await dispatch(f);assert.equal(observed,true);assert.equal((await f.admin.query(`SELECT COUNT(*)::int n FROM ${f.schema}.collections WHERE complete=1`)).rows[0].n,2);
+ }finally{await f.close();}
+});
+
+test('persistent backend publication failure keeps group exponential retry instead of refetching tiny tails',async()=>{
+ const f=await fixture(),now=Date.now;try{
+  await seed(f,100);const requested=now()-3600000;await f.store.exec('UPDATE jobs SET requested_at=?',requested);
+  const calls=upstream(f,async jobs=>jobs.map(()=>({api:'graphql',data:[]})));
+  f.state.expire=async()=>({});f.state.maintenance=async()=>{};f.state.startStorageMaintenance=()=>{};
+  f.state.store=intercept(f.store,async(store,sql)=>{
+   if(!sql.includes('INTO collections'))return;
+   if(store.backend==='postgres'){await store.exec("SELECT set_config('statement_timeout','20ms',true)");await store.exec('SELECT pg_sleep(0.1)');}
+   else await store.exec('SELECT * FROM fixture_missing_backend_table');
+  });
+  for(const [attempt,advance] of [[1,0],[2,65000]]){
+   Date.now=()=>now()+advance;const began=Date.now();await f.state.runAlarm();assert.equal(calls(),attempt);
+   const rows=(await f.store.exec('SELECT * FROM jobs')).toArray();assert.equal(rows.length,100);
+   for(const row of rows){assert.equal(row.attempt,attempt);assert.ok(row.due>=began+(attempt===1?60000:120000));assert.equal(row.requested_at,requested);assert.equal(row.lease_id,null);assert.equal(row.wait_reason,'transport_or_parser');}
+  }
+  assert.equal((await f.store.exec("SELECT COUNT(*) n FROM collections WHERE complete=1")).one().n,0);
+ }finally{Date.now=now;await f.close();}
+});
+
+test('turn finalization preserves an earlier alarm created during maintenance',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
+ const f=await fixture();try{
+  await seed(f,1);await f.store.exec('UPDATE jobs SET due=?',Date.now()+300000);
+  let incoming=null,updates=0;f.state.ctx.storage.getAlarm=async()=>incoming;
+  f.state.setAlarm=async()=>{updates++;};f.state.expire=async()=>({});f.state.startStorageMaintenance=()=>{};
+  f.state.maintenance=async()=>{incoming=Date.now()+100;};
+  await f.state.runAlarm();assert.equal(updates,0);assert.ok(incoming>Date.now());
  }finally{await f.close();}
 });
