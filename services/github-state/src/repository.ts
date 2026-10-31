@@ -1892,7 +1892,7 @@ export class RepositoryState extends DurableObject<Env> {
     // repair selection, expiry, monitoring or retention-policy changes.
     this.activeOperations++;
     const flight=Promise.resolve().then(()=>this.maintenance())
-      .catch(error=>this.noteFailure('maintenance',error))
+      .catch(error=>{this.noteFailure('maintenance',error);})
       .finally(()=>{this.activeOperations--;if(this.surveyFlight===flight)this.surveyFlight=undefined;});
     this.surveyFlight=flight;
     if(this.ctx.waitUntil)this.ctx.waitUntil(flight);
