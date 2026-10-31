@@ -82,11 +82,14 @@ for(let trial=0;trial<trials;trial++)for(const label of trial%2?[...limits].reve
  for(const [mode,interval] of [['burst',0],['steady',500]]){
   const row=await measure(classes.RepositoryState,classes.PostgresStore,mixedCount,ingressCount,interval,mixedGroups);
   (label==='before'?(mode==='burst'?result.before:result.steady.before):label===configured?(mode==='burst'?result.after:result.steady.after):result.limits[label][mode]).push(row);
+  writeFileSync(process.env.BENCHMARK_OUTPUT || '/tmp/publication-benchmark.json',JSON.stringify(result,null,2)+'\n');
+  console.log(JSON.stringify({trial,label,mode,histories:row.histories_completed,elapsed_ms:row.elapsed_ms,ingress_p95_ms:row.ingress_p95_ms,publication_transactions:row.publication_transactions}));
  }
 }
 if(process.env.BENCHMARK_FULL!=='0')for(let trial=0;trial<fullTrials;trial++)for(const label of trial%2?['after','before']:['before','after']){
  const row=await measure(label==='before'?Baseline:RepositoryState,label==='before'?BaselineStore:PostgresStore,100,0);
  result.full_batch_trials[label].push(row);result.full_batch[label]??=row;
+ writeFileSync(process.env.BENCHMARK_OUTPUT || '/tmp/publication-benchmark.json',JSON.stringify(result,null,2)+'\n');
 }
 const median=a=>[...a].sort((x,y)=>x-y)[Math.floor(a.length/2)];result.summary={};
 const summarize=xs=>Object.fromEntries(['elapsed_ms','transactions','application_sql_round_trips','publication_transactions','publication_max_hold_ms','ingress_p95_ms','ingress_admission_p95_ms'].map(k=>[k,median(xs.map(x=>x[k]))]));
@@ -95,4 +98,5 @@ for(const set of [result,result.steady]){
 }
 for(const v of Object.values(result.limits))v.summary={burst:summarize(v.burst),steady:summarize(v.steady)};
 result.full_batch_summary=Object.fromEntries(Object.entries(result.full_batch_trials).filter(([,v])=>v.length).map(([k,v])=>[k,summarize(v)]));
+assert.equal(result.implementation_sha256,implementationFingerprint(),'source changed during trials');
 writeFileSync(process.env.BENCHMARK_OUTPUT || '/tmp/publication-benchmark.json',JSON.stringify(result,null,2)+'\n');console.log(JSON.stringify({burst:result.summary,steady:result.steady.summary,limits:Object.fromEntries(Object.entries(result.limits).map(([k,v])=>[k,v.summary])),full_batch:result.full_batch_summary},null,2));
