@@ -18,6 +18,7 @@ export interface RepositoryStore {
   readonly backend:'sqlite'|'postgres';
   readonly transactional?:boolean;
   readonly queryCount?:number;
+  readonly queuedOtherWork?:number;
   exec<T=any>(sql:string,...bindings:Bind[]):Promise<Rows<T>>;
   batch(statements:Statement[]):Promise<Rows<any>[]>;
   transaction<T>(apply:(store:RepositoryStore)=>Promise<T>,purpose?:WriterPurpose):Promise<T>;
@@ -26,8 +27,12 @@ export interface RepositoryStore {
 }
 export class SerialLane {
   private tail:Promise<unknown>=Promise.resolve();
-  run<T>(work:()=>Promise<T>):Promise<T> {
-    const pending=this.tail.then(work,work);this.tail=pending.catch(()=>{});return pending;
+  private waitingOther=0;
+  get queuedOtherWork():number{return this.waitingOther;}
+  run<T>(work:()=>Promise<T>,purpose:WriterPurpose='other'):Promise<T> {
+    if(purpose!=='publication')this.waitingOther++;
+    const begin=()=>{if(purpose!=='publication')this.waitingOther--;return work();};
+    const pending=this.tail.then(begin,begin);this.tail=pending.catch(()=>{});return pending;
   }
 }
 // SQLite otherwise prefers the kind prefix of resource_parent and walks
@@ -59,6 +64,7 @@ export class SQLiteStore implements RepositoryStore {
   readonly backend='sqlite';
   private queryFailure:unknown;
   constructor(private storage:DurableObjectStorage,private sql:SqlStorage,readonly transactional=false,private generation='sqlite-v1',private context?:DurableObjectState,private lane=new SerialLane()) {}
+  get queuedOtherWork():number{return this.lane.queuedOtherWork;}
   async exec<T=any>(query:string,...bindings:Bind[]):Promise<Rows<T>> {
     if(!this.transactional)return this.lane.run(()=>new SQLiteStore(this.storage,this.sql,true,this.generation,this.context,this.lane).exec<T>(query,...bindings));
     if(!/^\s*SELECT\b/i.test(query))this.fence();
@@ -75,7 +81,7 @@ export class SQLiteStore implements RepositoryStore {
     if(this.transactional)return this.batchSync(statements);
     return this.lane.run(async()=>statements.some(s=>!/^\s*SELECT\b/i.test(s.sql))?this.storage.transactionSync(()=>this.batchSync(statements)):this.batchSync(statements));
   }
-  transaction<T>(apply:(store:RepositoryStore)=>Promise<T>):Promise<T> {
+  transaction<T>(apply:(store:RepositoryStore)=>Promise<T>,purpose:WriterPurpose='other'):Promise<T> {
     if(this.transactional) return apply(this);
     const queued=Date.now();
     return this.lane.run(async()=>{
@@ -93,7 +99,7 @@ export class SQLiteStore implements RepositoryStore {
       try {if(this.context)await this.context.blockConcurrencyWhile(execute);else await execute();}
       finally {const finished=Date.now();if(finished-queued>=250)log('repository_transaction_slow',{wait_ms:started-queued,transaction_ms:finished-started,failed});}
       if(failed)throw error;return result!;
-    });
+    },purpose);
   }
   async health():Promise<Record<string,unknown>> {return {backend:this.backend,schema_version:5,database_size:this.sql.databaseSize};}
 }
@@ -185,6 +191,7 @@ export class PostgresStore implements RepositoryStore {
   private queriesExecuted=0;
   get queryCount():number{return this.queriesExecuted;}
   private writer=new SerialLane();
+  get queuedOtherWork():number{return this.writer.queuedOtherWork;}
   private discarded:DiscardedSession[]=[];
   private nextCleanupAt=0;
   private cleanupFailures=0;
@@ -265,7 +272,7 @@ export class PostgresStore implements RepositoryStore {
   async transaction<T>(apply:(store:RepositoryStore)=>Promise<T>,purpose:WriterPurpose='other'):Promise<T> {
     if(this.client)return apply(this);
     const queued=Date.now();
-    return this.writer.run(()=>this.transact(apply,Date.now()-queued,purpose));
+    return this.writer.run(()=>this.transact(apply,Date.now()-queued,purpose),purpose);
   }
   // WebSocket close is asynchronous: the server may retain the transaction
   // after the client times out. Prefer confirmed session cleanup before the
@@ -338,6 +345,7 @@ export class PostgresStore implements RepositoryStore {
         if(!row || row.backend!=='postgres' || row.generation!==this.generation || row.schema_version!==1)throw new StoreFenced();
       },connection);
       const scoped=new PostgresStore(this.url,this.schema.slice('github_state_'.length),this.generation,client,this.diagnostics,connection);
+      scoped.writer=this.writer;
       // Application exceptions must retain their meaning (for example an
       // expired staging page); only driver operations are sanitized.
       enterPhase('apply');
@@ -408,6 +416,7 @@ export class ReadCacheStore implements RepositoryStore {
   constructor(private source:RepositoryStore){this.backend=source.backend;}
   get transactional():boolean|undefined{return this.source.transactional;}
   get queryCount():number|undefined{return this.source.queryCount;}
+  get queuedOtherWork():number|undefined{return this.source.queuedOtherWork;}
   private key(sql:string,bindings:Bind[]):string{return JSON.stringify([sql,bindings]);}
   peek(sql:string,bindings:Bind[]):any[]|undefined{return this.cache.get(this.key(sql,bindings))?.rows;}
   private remove(key:string):void {
@@ -456,6 +465,7 @@ export class BufferedStore implements RepositoryStore {
   private pending:Statement[]=[];private identities=new Set<string>();
   constructor(private source:RepositoryStore){}
   get queryCount():number|undefined{return this.source.queryCount;}
+  get queuedOtherWork():number|undefined{return this.source.queuedOtherWork;}
   private identity(s:Statement):string|undefined {
     const insert=s.sql.match(/^INSERT(?: OR IGNORE)? INTO (\w+)(?:\(([^)]+)\))? VALUES\s*\(([^)]+)\)/);
     if(insert){

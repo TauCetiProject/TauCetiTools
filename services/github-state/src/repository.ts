@@ -1434,8 +1434,8 @@ export class RepositoryState extends DurableObject<Env> {
     this.traceRepair('refresh_transaction',job,sizes);
     return {job,q,repo,started,response,result,preparedNext,staged,objects,encodings};
   }
-  private async publishPrepared(input:PreparedRefresh[],grouped:boolean):Promise<void> {
-    const metrics=new RepairMetrics(),committed:PreparedRefresh[]=[];
+  private async publishPrepared(input:PreparedRefresh[],grouped:boolean,attempted?:any[]):Promise<PreparedRefresh[]> {
+    const metrics=new RepairMetrics(),committed:PreparedRefresh[]=[];let consumed=0;
     await this.atomic(async parent=>{
       const base=parent.store,leaseRows=new Map<string,any>(),collections=new Set<string>(),demands=new Map<string,any>();
       if(grouped) {
@@ -1446,6 +1446,11 @@ export class RepositoryState extends DurableObject<Env> {
         for(const row of ds.toArray())demands.set(row.key,row);
       }
       for(const p of input) {
+        // Let queued non-publication callers reach the writer at a whole-history
+        // boundary. Always consume one member, then immediately requeue the rest.
+        if(grouped && consumed>0 && (base.queuedOtherWork || 0)>0)break;
+        consumed++;
+        attempted?.push(p.job);
         if(grouped && p.job.lease_id && leaseRows.get(p.job.key)?.lease_id!==p.job.lease_id)continue;
         const state=Object.create(parent) as RepositoryState;
         // The transaction owns the shared buffer/revision/change journal. Each
@@ -1471,9 +1476,10 @@ export class RepositoryState extends DurableObject<Env> {
       }
       await this.releaseLeases(parent.store,committed.map(p=>p.job));
     },'publication');
-    for(const p of input)this.dispatchSettled?.add(p.job.key);
+    for(const p of input.slice(0,consumed))this.dispatchSettled?.add(p.job.key);
     try{this.repairMetrics.merge(metrics);}catch{}
     for(const p of committed){p.objects.clear();p.encodings.clear();p.result.data=undefined;this.traceRepair('refresh_committed',p.job);}
+    return input.slice(consumed);
   }
   private async releaseLeases(store:RepositoryStore,jobs:any[]):Promise<void> {
     const size=store.backend==='sqlite'?50:256;
@@ -1488,10 +1494,12 @@ export class RepositoryState extends DurableObject<Env> {
     const flush=async()=>{
       await flushFailures();
       if(!pending.length)return;
-      const chunk=pending;pending=[];bytes=0;rows=0;
-      try{await this.publishPrepared(chunk,true);}
-      catch(error){
-        if(!canReplayPublication(error))throw new PublicationFailure(chunk.map(p=>p.job),error);
+      let remaining=pending;pending=[];bytes=0;rows=0;
+      while(remaining.length){
+       const chunk=remaining,attempted:any[]=[];remaining=[];
+       try{remaining=await this.publishPrepared(chunk,true,attempted);}
+       catch(error){
+        if(!canReplayPublication(error))throw new PublicationFailure(attempted.length?attempted:chunk.map(p=>p.job),error);
         // Group attempts retain immutable input. Every individual fallback gets
         // fresh state and its own error path after the confirmed rollback.
         for(const p of chunk)await apply([p.job],async()=>{
@@ -1499,6 +1507,7 @@ export class RepositoryState extends DurableObject<Env> {
             if(!(cause instanceof LeaseLost)){if(!canReplayPublication(cause))throw cause;await this.retryJob(p.job,cause);}
           }
         });
+       }
       }
     };
     for(let index=0;index<jobs.length;index++) {
