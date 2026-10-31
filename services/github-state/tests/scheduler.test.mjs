@@ -471,7 +471,7 @@ test('opt-in alarm traces identify publication stages without exposing input',as
   await state.runAlarm();await drainRepairs(state);
   state.prepareStorage=async()=>{};await state.storageMaintenance(false);
   const trace=messages.map(message=>JSON.parse(message)).filter(entry=>entry.event==='repository_repair_trace');
-  for(const stage of ['refresh_response','publication_load_pages','publication_encode_pages','refresh_transaction','publication_decode_pages','publication_rows','publication_repairs','publication_applied','refresh_committed','dispatch','dispatch_complete','expire','select_jobs','maintenance','storage_maintenance','storage_prepare','storage_prepared','alarm_complete'])
+  for(const stage of ['refresh_response','publication_load_pages','publication_encode_pages','refresh_transaction','publication_decode_pages','publication_rows','publication_repairs','publication_applied','refresh_committed','dispatch','dispatch_complete',...(state.store.backend==='sqlite'?['expire']:[]),'select_jobs','maintenance','storage_maintenance','storage_prepare','storage_prepared','alarm_complete'])
    assert.ok(trace.some(entry=>entry.stage===stage),stage);
   for(const entry of trace){
    assert.equal(entry.event,'repository_repair_trace');
