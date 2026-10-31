@@ -32,7 +32,7 @@ async function measure(RepositoryClass,StoreClass,burst=false){
   f.env.PUBLIC_READ_REPOSITORIES=JSON.stringify([repo]);
   await f.state.put('pr','7',{number:7,state:'OPEN',headRefOid:'b'.repeat(40),body:'old'});
   const original=f.state.atomic;let roundTrips=0,transactions=0;
-  f.state.atomic=function(apply,purpose){return original.call(this,async state=>{
+  f.state.atomic=function(apply,purpose){if(this.store.transactional)return apply(this);return original.call(this,async state=>{
    transactions++;let source=state.store;while(source.source)source=source.source;
    const run=source.run.bind(source);source.run=(...args)=>{roundTrips++;return run(...args);};
    return apply(state);

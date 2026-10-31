@@ -1,6 +1,6 @@
 {
   "baseline": "6dc9cd35997ae7fd582a9cfdf4234f3d92f9d7ed",
-  "implementation_sha256": "996c9611872ac61ae784806a74f0497c67504bba43dfd5e8bf6b3499d3059f55",
+  "implementation_sha256": "12f4dadc852846535939ffc13cbfd644ac81f89ccff24cbaa80322b931e3b16c",
   "trials": 3,
   "scope": "isolated real PostgreSQL; six serial synthetic webhook deliveries plus eight concurrent independent reviews per trial; full baseline source and store; identical installed dependencies; actual application SQL round trips instrumented below buffering; preparation/read and admission/commit latency included; no GitHub requests; not production throughput",
   "before": [
@@ -8,42 +8,42 @@
       "events": [
         {
           "event": "pull_request",
-          "elapsed_ms": 1353.146621,
+          "elapsed_ms": 1330.1363279999998,
           "sql_round_trips": 41,
           "transactions": 1
         },
         {
           "event": "status",
-          "elapsed_ms": 583.8425940000002,
+          "elapsed_ms": 484.344102,
           "sql_round_trips": 13,
           "transactions": 1
         },
         {
           "event": "issue_comment",
-          "elapsed_ms": 664.4735470000005,
+          "elapsed_ms": 887.4954659999994,
           "sql_round_trips": 21,
           "transactions": 1
         },
         {
           "event": "pull_request_review_comment",
-          "elapsed_ms": 813.9534119999998,
+          "elapsed_ms": 763.5675209999999,
           "sql_round_trips": 25,
           "transactions": 1
         },
         {
           "event": "pull_request_review",
-          "elapsed_ms": 595.312793,
+          "elapsed_ms": 682.4833359999993,
           "sql_round_trips": 16,
           "transactions": 1
         },
         {
           "event": "push",
-          "elapsed_ms": 1101.2119979999998,
+          "elapsed_ms": 1044.3289400000003,
           "sql_round_trips": 30,
           "transactions": 1
         }
       ],
-      "total_ms": 5112.105949,
+      "total_ms": 5192.495078999999,
       "sql_round_trips": 146,
       "transactions": 6,
       "committed_deliveries": 6,
@@ -154,42 +154,42 @@
       "events": [
         {
           "event": "pull_request",
-          "elapsed_ms": 1610.571802999999,
+          "elapsed_ms": 1369.000469999999,
           "sql_round_trips": 41,
           "transactions": 1
         },
         {
           "event": "status",
-          "elapsed_ms": 526.2388690000007,
+          "elapsed_ms": 484.0221049999964,
           "sql_round_trips": 13,
           "transactions": 1
         },
         {
           "event": "issue_comment",
-          "elapsed_ms": 675.8479569999981,
+          "elapsed_ms": 819.7279080000008,
           "sql_round_trips": 21,
           "transactions": 1
         },
         {
           "event": "pull_request_review_comment",
-          "elapsed_ms": 745.7697870000047,
+          "elapsed_ms": 809.4869800000015,
           "sql_round_trips": 25,
           "transactions": 1
         },
         {
           "event": "pull_request_review",
-          "elapsed_ms": 559.1893859999982,
+          "elapsed_ms": 684.3391269999993,
           "sql_round_trips": 16,
           "transactions": 1
         },
         {
           "event": "push",
-          "elapsed_ms": 1075.1558719999957,
+          "elapsed_ms": 853.8761589999995,
           "sql_round_trips": 30,
           "transactions": 1
         }
       ],
-      "total_ms": 5192.8463919999995,
+      "total_ms": 5020.509610000001,
       "sql_round_trips": 146,
       "transactions": 6,
       "committed_deliveries": 6,
@@ -300,42 +300,42 @@
       "events": [
         {
           "event": "pull_request",
-          "elapsed_ms": 1379.448504,
+          "elapsed_ms": 1385.9510729999965,
           "sql_round_trips": 41,
           "transactions": 1
         },
         {
           "event": "status",
-          "elapsed_ms": 598.814996000001,
+          "elapsed_ms": 647.6777510000029,
           "sql_round_trips": 13,
           "transactions": 1
         },
         {
           "event": "issue_comment",
-          "elapsed_ms": 677.402270000006,
+          "elapsed_ms": 685.6025890000019,
           "sql_round_trips": 21,
           "transactions": 1
         },
         {
           "event": "pull_request_review_comment",
-          "elapsed_ms": 939.998384999999,
+          "elapsed_ms": 754.9535739999992,
           "sql_round_trips": 25,
           "transactions": 1
         },
         {
           "event": "pull_request_review",
-          "elapsed_ms": 545.138119999996,
+          "elapsed_ms": 603.277313999999,
           "sql_round_trips": 16,
           "transactions": 1
         },
         {
           "event": "push",
-          "elapsed_ms": 1077.212188999998,
+          "elapsed_ms": 841.9144410000008,
           "sql_round_trips": 30,
           "transactions": 1
         }
       ],
-      "total_ms": 5218.076808000005,
+      "total_ms": 4919.437392,
       "sql_round_trips": 146,
       "transactions": 6,
       "committed_deliveries": 6,
@@ -448,42 +448,42 @@
       "events": [
         {
           "event": "pull_request",
-          "elapsed_ms": 668.7933699999994,
+          "elapsed_ms": 506.33218000000124,
           "sql_round_trips": 13,
           "transactions": 1
         },
         {
           "event": "status",
-          "elapsed_ms": 518.7991829999992,
+          "elapsed_ms": 460.5832849999988,
           "sql_round_trips": 10,
           "transactions": 1
         },
         {
           "event": "issue_comment",
-          "elapsed_ms": 593.8864009999998,
+          "elapsed_ms": 611.952451000001,
           "sql_round_trips": 16,
           "transactions": 1
         },
         {
           "event": "pull_request_review_comment",
-          "elapsed_ms": 720.2864979999977,
+          "elapsed_ms": 557.7787089999983,
           "sql_round_trips": 16,
           "transactions": 1
         },
         {
           "event": "pull_request_review",
-          "elapsed_ms": 367.7135690000032,
+          "elapsed_ms": 465.61183900000105,
           "sql_round_trips": 6,
           "transactions": 1
         },
         {
           "event": "push",
-          "elapsed_ms": 475.69268499999816,
+          "elapsed_ms": 569.6712359999983,
           "sql_round_trips": 12,
           "transactions": 1
         }
       ],
-      "total_ms": 3345.261099000001,
+      "total_ms": 3172.0033089999997,
       "sql_round_trips": 73,
       "transactions": 6,
       "committed_deliveries": 6,
@@ -594,42 +594,42 @@
       "events": [
         {
           "event": "pull_request",
-          "elapsed_ms": 656.280025,
+          "elapsed_ms": 537.289122000002,
           "sql_round_trips": 13,
           "transactions": 1
         },
         {
           "event": "status",
-          "elapsed_ms": 458.16310499999963,
+          "elapsed_ms": 422.3018579999989,
           "sql_round_trips": 10,
           "transactions": 1
         },
         {
           "event": "issue_comment",
-          "elapsed_ms": 634.8575739999978,
+          "elapsed_ms": 590.888422,
           "sql_round_trips": 16,
           "transactions": 1
         },
         {
           "event": "pull_request_review_comment",
-          "elapsed_ms": 550.4503139999979,
+          "elapsed_ms": 593.8529049999997,
           "sql_round_trips": 16,
           "transactions": 1
         },
         {
           "event": "pull_request_review",
-          "elapsed_ms": 335.534727000002,
+          "elapsed_ms": 409.84704799999963,
           "sql_round_trips": 6,
           "transactions": 1
         },
         {
           "event": "push",
-          "elapsed_ms": 468.8001299999996,
+          "elapsed_ms": 579.2210989999985,
           "sql_round_trips": 12,
           "transactions": 1
         }
       ],
-      "total_ms": 3104.1468639999985,
+      "total_ms": 3133.466904000001,
       "sql_round_trips": 73,
       "transactions": 6,
       "committed_deliveries": 6,
@@ -740,42 +740,42 @@
       "events": [
         {
           "event": "pull_request",
-          "elapsed_ms": 504.27406700000574,
+          "elapsed_ms": 504.38709799999924,
           "sql_round_trips": 13,
           "transactions": 1
         },
         {
           "event": "status",
-          "elapsed_ms": 450.9103959999993,
+          "elapsed_ms": 564.5033970000004,
           "sql_round_trips": 10,
           "transactions": 1
         },
         {
           "event": "issue_comment",
-          "elapsed_ms": 567.3119050000023,
+          "elapsed_ms": 609.8291250000038,
           "sql_round_trips": 16,
           "transactions": 1
         },
         {
           "event": "pull_request_review_comment",
-          "elapsed_ms": 549.3891120000044,
+          "elapsed_ms": 762.5867279999948,
           "sql_round_trips": 16,
           "transactions": 1
         },
         {
           "event": "pull_request_review",
-          "elapsed_ms": 424.8412679999965,
+          "elapsed_ms": 350.19050199999765,
           "sql_round_trips": 6,
           "transactions": 1
         },
         {
           "event": "push",
-          "elapsed_ms": 471.63307899999927,
+          "elapsed_ms": 468.0511839999963,
           "sql_round_trips": 12,
           "transactions": 1
         }
       ],
-      "total_ms": 2968.425314,
+      "total_ms": 3259.621591999996,
       "sql_round_trips": 73,
       "transactions": 6,
       "committed_deliveries": 6,
@@ -889,54 +889,54 @@
         "events": [
           {
             "event": "pull_request_review",
-            "elapsed_ms": 1597.402372999999,
+            "elapsed_ms": 623.2099560000006,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 1070.9700469999989,
+            "elapsed_ms": 1286.3716239999994,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 2171.1692029999995,
+            "elapsed_ms": 2341.286444000001,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 2856.2222309999997,
+            "elapsed_ms": 3715.964438000001,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 3913.4588239999994,
+            "elapsed_ms": 1812.5970290000005,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 5004.489603,
+            "elapsed_ms": 3052.7357900000006,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 3386.629188000001,
+            "elapsed_ms": 5177.144498,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 4443.6982530000005,
+            "elapsed_ms": 4385.943171000001,
             "sql_round_trips": null,
             "transactions": null
           }
         ],
-        "total_ms": 5004.661126999999,
+        "total_ms": 5177.327179,
         "sql_round_trips": 128,
         "transactions": 8,
         "committed_deliveries": 8,
@@ -1164,54 +1164,54 @@
         "events": [
           {
             "event": "pull_request_review",
-            "elapsed_ms": 1448.0942250000007,
+            "elapsed_ms": 1124.6553839999979,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 740.8057509999999,
+            "elapsed_ms": 557.1021269999983,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 2728.2696060000017,
+            "elapsed_ms": 4041.0945500000016,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 3822.8135729999995,
+            "elapsed_ms": 1787.0974669999996,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 5081.600825000001,
+            "elapsed_ms": 2320.3975359999968,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 4483.936865000003,
+            "elapsed_ms": 2976.4837389999957,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 3263.2400479999997,
+            "elapsed_ms": 4564.624409000004,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 2160.9545670000007,
+            "elapsed_ms": 3507.5484550000037,
             "sql_round_trips": null,
             "transactions": null
           }
         ],
-        "total_ms": 5081.720031999997,
+        "total_ms": 4564.772268000001,
         "sql_round_trips": 128,
         "transactions": 8,
         "committed_deliveries": 8,
@@ -1439,54 +1439,54 @@
         "events": [
           {
             "event": "pull_request_review",
-            "elapsed_ms": 595.0033570000014,
+            "elapsed_ms": 625.8975190000056,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 1122.2702009999994,
+            "elapsed_ms": 1154.9009010000009,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 2318.7866209999993,
+            "elapsed_ms": 4284.6920889999965,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 1785.3366529999985,
+            "elapsed_ms": 4850.557724999999,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 3396.320477999994,
+            "elapsed_ms": 1730.5452399999995,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 4047.7865780000066,
+            "elapsed_ms": 2256.7419020000016,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 2853.4741339999964,
+            "elapsed_ms": 2960.5277609999976,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 4578.445630000002,
+            "elapsed_ms": 3618.1688280000017,
             "sql_round_trips": null,
             "transactions": null
           }
         ],
-        "total_ms": 4578.6052960000015,
+        "total_ms": 4850.683431999998,
         "sql_round_trips": 128,
         "transactions": 8,
         "committed_deliveries": 8,
@@ -1716,54 +1716,54 @@
         "events": [
           {
             "event": "pull_request_review",
-            "elapsed_ms": 819.3294700000006,
+            "elapsed_ms": 837.780283,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 506.0781489999972,
+            "elapsed_ms": 496.87309099999766,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 1135.8662199999999,
+            "elapsed_ms": 1148.6732809999994,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 1564.5285110000004,
+            "elapsed_ms": 2115.885224999998,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 2613.3968509999977,
+            "elapsed_ms": 1798.2835449999984,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 1910.4043149999998,
+            "elapsed_ms": 2850.3262780000005,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 3027.7909450000006,
+            "elapsed_ms": 1460.983529000001,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 2222.9965679999987,
+            "elapsed_ms": 2540.733006999999,
             "sql_round_trips": null,
             "transactions": null
           }
         ],
-        "total_ms": 3027.9648530000013,
+        "total_ms": 2850.4677379999994,
         "sql_round_trips": 48,
         "transactions": 8,
         "committed_deliveries": 8,
@@ -1991,54 +1991,54 @@
         "events": [
           {
             "event": "pull_request_review",
-            "elapsed_ms": 486.11864799999967,
+            "elapsed_ms": 902.4872759999998,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 825.458663999998,
+            "elapsed_ms": 587.6622109999989,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 1690.230324,
+            "elapsed_ms": 1212.3600209999968,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 1254.7675140000028,
+            "elapsed_ms": 1516.5925580000003,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 3235.966944,
+            "elapsed_ms": 2265.442556000002,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 2004.837263999998,
+            "elapsed_ms": 1911.579012000002,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 2456.4831399999966,
+            "elapsed_ms": 2574.526031999998,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 2845.4561179999982,
+            "elapsed_ms": 2997.1669630000033,
             "sql_round_trips": null,
             "transactions": null
           }
         ],
-        "total_ms": 3236.109975999996,
+        "total_ms": 2997.340510000002,
         "sql_round_trips": 48,
         "transactions": 8,
         "committed_deliveries": 8,
@@ -2266,54 +2266,54 @@
         "events": [
           {
             "event": "pull_request_review",
-            "elapsed_ms": 873.8589890000003,
+            "elapsed_ms": 666.5662650000013,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 452.3892779999878,
+            "elapsed_ms": 352.5605340000038,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 2311.8995549999963,
+            "elapsed_ms": 2551.735676000011,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 2624.4627559999935,
+            "elapsed_ms": 1057.371582000007,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 1185.6880530000053,
+            "elapsed_ms": 1421.6452559999889,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 2948.455436999997,
+            "elapsed_ms": 1736.6181020000076,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 1901.3311699999904,
+            "elapsed_ms": 2133.212056999997,
             "sql_round_trips": null,
             "transactions": null
           },
           {
             "event": "pull_request_review",
-            "elapsed_ms": 1504.6442589999933,
+            "elapsed_ms": 2865.239493999994,
             "sql_round_trips": null,
             "transactions": null
           }
         ],
-        "total_ms": 2948.662823999999,
+        "total_ms": 2865.415504000004,
         "sql_round_trips": 48,
         "transactions": 8,
         "committed_deliveries": 8,
@@ -2540,13 +2540,13 @@
     ],
     "summary": {
       "before": {
-        "total_ms": 5004.661126999999,
+        "total_ms": 4850.683431999998,
         "sql_round_trips": 128,
         "transactions": 8,
         "committed_deliveries": 8
       },
       "after": {
-        "total_ms": 3027.9648530000013,
+        "total_ms": 2865.415504000004,
         "sql_round_trips": 48,
         "transactions": 8,
         "committed_deliveries": 8
@@ -2555,75 +2555,75 @@
   },
   "summary": {
     "before": {
-      "total_ms": 5192.8463919999995,
+      "total_ms": 5020.509610000001,
       "sql_round_trips": 146,
       "transactions": 6,
       "events": [
         {
           "event": "pull_request",
-          "elapsed_ms": 1379.448504,
+          "elapsed_ms": 1369.000469999999,
           "sql_round_trips": 41
         },
         {
           "event": "status",
-          "elapsed_ms": 583.8425940000002,
+          "elapsed_ms": 484.344102,
           "sql_round_trips": 13
         },
         {
           "event": "issue_comment",
-          "elapsed_ms": 675.8479569999981,
+          "elapsed_ms": 819.7279080000008,
           "sql_round_trips": 21
         },
         {
           "event": "pull_request_review_comment",
-          "elapsed_ms": 813.9534119999998,
+          "elapsed_ms": 763.5675209999999,
           "sql_round_trips": 25
         },
         {
           "event": "pull_request_review",
-          "elapsed_ms": 559.1893859999982,
+          "elapsed_ms": 682.4833359999993,
           "sql_round_trips": 16
         },
         {
           "event": "push",
-          "elapsed_ms": 1077.212188999998,
+          "elapsed_ms": 853.8761589999995,
           "sql_round_trips": 30
         }
       ]
     },
     "after": {
-      "total_ms": 3104.1468639999985,
+      "total_ms": 3172.0033089999997,
       "sql_round_trips": 73,
       "transactions": 6,
       "events": [
         {
           "event": "pull_request",
-          "elapsed_ms": 656.280025,
+          "elapsed_ms": 506.33218000000124,
           "sql_round_trips": 13
         },
         {
           "event": "status",
-          "elapsed_ms": 458.16310499999963,
+          "elapsed_ms": 460.5832849999988,
           "sql_round_trips": 10
         },
         {
           "event": "issue_comment",
-          "elapsed_ms": 593.8864009999998,
+          "elapsed_ms": 609.8291250000038,
           "sql_round_trips": 16
         },
         {
           "event": "pull_request_review_comment",
-          "elapsed_ms": 550.4503139999979,
+          "elapsed_ms": 593.8529049999997,
           "sql_round_trips": 16
         },
         {
           "event": "pull_request_review",
-          "elapsed_ms": 367.7135690000032,
+          "elapsed_ms": 409.84704799999963,
           "sql_round_trips": 6
         },
         {
           "event": "push",
-          "elapsed_ms": 471.63307899999927,
+          "elapsed_ms": 569.6712359999983,
           "sql_round_trips": 12
         }
       ]

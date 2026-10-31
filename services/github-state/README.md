@@ -152,9 +152,12 @@ Webhook ingestion collects each event's repair requests and schedules them with
 bulk coverage, demand and job lookups after its resource changes. The event's
 receipt, resources, membership and repair obligations remain one atomic commit;
 retry deadlines, pagination and existing ownership are preserved. Successful
-commits emit `repository_ingest_committed` with a bounded event type, application
-SQL round-trip count and apply-through-commit elapsed time. CPU time is reported
-as unknown; elapsed database I/O is not a CPU measurement. SQLite does not supply
+commits update a bounded latest-minute aggregate for each event type, exposed
+as `ingestion` in protected health. When that type next appears in a later minute,
+`repository_ingest_summary` logs its completed bucket. Each bucket records committed
+deliveries, application SQL round trips (excluding transaction setup/commit), and
+elapsed time from application entry through commit and connection cleanup. These
+are I/O-inclusive measurements; CPU is not measured. SQLite does not supply
 the PostgreSQL query counter. See [ingestion measurements](INGEST-PERFORMANCE.md).
 
 PostgreSQL cache misses return stored or unavailable results without awaiting

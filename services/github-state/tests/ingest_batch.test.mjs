@@ -7,9 +7,10 @@ async function fixture(){
  const db=new DatabaseSync(':memory:');let alarm=null;
  const sql={exec(query,...args){let rows=[];if(!args.length&&query.includes(';'))db.exec(query);else{const statement=db.prepare(query);if(statement.columns().length)rows=statement.all(...args);else statement.run(...args);}return {toArray:()=>rows,one:()=>{assert.equal(rows.length,1);return rows[0];}};}};
  const ctx={id:{toString:()=>'100'},waitUntil:()=>{},blockConcurrencyWhile:fn=>fn(),storage:{sql,getAlarm:async()=>alarm,setAlarm:async at=>{alarm=at;},transactionSync(fn){db.exec('SAVEPOINT tx');try{const r=fn();db.exec('RELEASE tx');return r;}catch(e){db.exec('ROLLBACK TO tx');db.exec('RELEASE tx');throw e;}},async transaction(fn){db.exec('SAVEPOINT atx');try{const r=await fn();db.exec('RELEASE atx');return r;}catch(e){db.exec('ROLLBACK TO atx');db.exec('RELEASE atx');throw e;}}}};
- const env={ALLOWED_REPOSITORIES:JSON.stringify([{id:'100',name:'org/repo',installation:'200'}]),ARCHIVE:{get:async()=>null}};
+ const objects=new Map();
+ const env={ALLOWED_REPOSITORIES:JSON.stringify([{id:'100',name:'org/repo',installation:'200'}]),ARCHIVE:{head:async key=>objects.has(key)?{key}:null,get:async key=>objects.has(key)?{text:async()=>objects.get(key),json:async()=>JSON.parse(objects.get(key))}:null}};
  const state=new RepositoryState(ctx,env);await state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
- return {state,store:state.store,close:async()=>db.close()};
+ return {state,store:state.store,objects,close:async()=>db.close()};
 }
 
 test('event bulk scheduling preserves individual enqueue semantics across coverage, demand, retries and leases',async()=>{
@@ -26,7 +27,7 @@ test('event bulk scheduling preserves individual enqueue semantics across covera
      const {q}=inputs[bits],key=q.operation+':'+JSON.stringify(q.args);
      if(bits&8)await state.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?)',key,q.operation,JSON.stringify(q.args),1,fixed,0,null);
      if(bits&16)await state.store.exec('INSERT INTO demand VALUES(?,?)',key,fixed);
-     if(bits&32)await state.store.exec('INSERT INTO jobs(key,query,priority,due,dirty,generation,lane,requested_at,attempt,wait_reason,lease_id,lease_until,started,start_generation,page,cursor) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',key,JSON.stringify(q),20,fixed+3600000,1,9,'verification',fixed-100000,2,'primary:core','existing-owner',fixed+60000,fixed-5000,8,3,'retained-cursor');
+     if(bits&32)await state.store.exec('INSERT INTO jobs(key,query,priority,due,dirty,generation,lane,requested_at,attempt,wait_reason,lease_id,lease_until,started,start_generation,page,cursor) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',key,JSON.stringify(q),20,bits&2?fixed-3600000:fixed+3600000,Number(Boolean(bits&4)),9,bits&2?'requested':'verification',bits&1?fixed-100000:null,bits&8?2:0,bits&16?'primary:core':bits&4?'':null,'existing-owner',fixed+60000,fixed-5000,8,3,'retained-cursor');
     }
    });
    const before=(await f.store.exec('SELECT * FROM jobs')).toArray();
@@ -56,5 +57,22 @@ test('event scheduling preserves an earlier SQLite alarm for unrelated work',{sk
   await f.state.ctx.storage.setAlarm(earlier);
   await f.state.atomic(state=>state.enqueueIngest([{q,priority:2}]));
   assert.equal(await f.state.ctx.storage.getAlarm(),earlier);
+ }finally{await f.close();}
+});
+
+
+test('failed event commit exposes no partial state and replay commits exactly once',async()=>{
+ const f=await fixture();try{
+  const body={action:'created',issue:{number:7},comment:{id:'99',body:'retained',created_at:'2026-10-31T04:00:00Z'}},pointer={repository:'org/repo',key:'fixture/input',delivery:'delivery',event:'issue_comment',received:Date.now()};
+  f.objects.set(pointer.key,JSON.stringify(body));
+  const commit=f.state.commitReceipt;let fail=true;
+  f.state.commitReceipt=async function(p){await commit.call(this,p);if(fail)throw Error('injected before commit');};
+  await assert.rejects(f.state.ingest(pointer),/injected before commit/);
+  for(const table of ['resources','members','jobs','deliveries','changes'])assert.equal((await f.store.exec('SELECT COUNT(*) n FROM '+table)).one().n,0,table);
+  assert.equal(f.state.ingestStats.size,0,'a rolled-back delivery contributes no committed metrics');
+  fail=false;assert.equal(await f.state.ingest(pointer),true);assert.equal(await f.state.ingest(pointer),false);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,1);
+  assert.equal(JSON.parse((await f.store.exec("SELECT data FROM resources WHERE kind='issue_comments' AND id='99'")).one().data).body,'retained');
+  const stats=f.state.ingestStats.get('issue_comment');assert.equal(stats.deliveries,1);if(f.store.backend==='postgres'){assert.equal(stats.sql_samples,1);assert.ok(stats.sql_round_trips>0);}
  }finally{await f.close();}
 });

@@ -68,6 +68,7 @@ export class RepositoryState extends DurableObject<Env> {
   private preparedEncodings?:Map<string,string>;
   private optionalWork={active:0};
   private demandMemo=new Map<string,number>();
+  private ingestStats=new Map<string,{minute:number,deliveries:number,sql_round_trips:number,sql_samples:number,apply_through_cleanup_ms:number,apply_max_ms:number}>();
   private readDemands={pending:new Map<string,Query>(),active:new Map<string,{complete?:boolean}>(),flight:undefined as Promise<void>|undefined};
   sql:SqlStorage;
   store:RepositoryStore;
@@ -838,6 +839,7 @@ export class RepositoryState extends DurableObject<Env> {
     if(!alarm || alarm>scheduled)await this.setAlarm(Math.max(now+100,scheduled));
   }
   private async enqueueIngest(input:IngestRepair[]):Promise<void> {
+    if(!this.store.transactional)return this.atomic(state=>state.enqueueIngest(input),'ingest');
     // Ingest requests all have active priority (0..2). Read the post-event
     // scheduling facts together, preserving the individual enqueue semantics.
     input=input.filter(({q})=>q.operation!=='progress' && !NOT_MIRRORED.has(q.operation));
@@ -861,7 +863,7 @@ export class RepositoryState extends DurableObject<Env> {
       const prior=jobs.get(key),changed=dirty || dirtyIfMissing && !known;
       const lane:Lane=(demand.get(key) || 0)>now-300000 && !known?'requested':'active';
       const requested=lane==='requested'?(prior?.requested_at || now):prior?.requested_at || null;
-      const due=prior?(changed && !prior.wait_reason && !prior.attempt?Math.min(prior.due,now):prior.due):now;
+      const due=prior?(changed && prior.wait_reason==null && !prior.attempt?Math.min(prior.due,now):prior.due):now;
       const generation=(increments.get(key) || 0)+Number(changed);increments.set(key,generation);
       const values=[key,JSON.stringify({...q,allow_observed:undefined}),priority,due,Number(changed || Boolean(prior?.dirty)),generation,lane,requested,now];
       writes.set(key,values);jobs.set(key,{...prior,dirty:values[4],requested_at:requested,due});
@@ -913,16 +915,24 @@ export class RepositoryState extends DurableObject<Env> {
     const history=await this.meta('review_coordination');
     return coordinationWindows(history,this[ACTIVITY_CLOCK] ?? Date.now());
   }
-  async ingest(pointer:EventPointer,preparedBody?:any): Promise<void> {
+  private recordIngest(event:string,queries:number|undefined,elapsed:number):void {
+    const type=INGEST_EVENT_TYPES.has(event)?event:'other',minute=Math.floor(Date.now()/60000)*60000;
+    let row=this.ingestStats.get(type);
+    if(row && row.minute!==minute){try{log('repository_ingest_summary',{event_type:type,...row});}catch{}row=undefined;}
+    if(!row){row={minute,deliveries:0,sql_round_trips:0,sql_samples:0,apply_through_cleanup_ms:0,apply_max_ms:0};this.ingestStats.set(type,row);}
+    row.deliveries++;row.apply_through_cleanup_ms+=elapsed;row.apply_max_ms=Math.max(row.apply_max_ms,elapsed);
+    if(queries!==undefined){row.sql_round_trips+=queries;row.sql_samples++;}
+  }
+  async ingest(pointer:EventPointer,preparedBody?:any): Promise<boolean> {
     const configured=repository(this.env,pointer.repository);if(!configured)throw Error('repository not allowed');
     if(!this.store.transactional){
       // Archival publishes R2 before deleting SQL. Read SQL first: either its
       // receipt is still present, or the following R2 check can see the archive.
       // Reversing these reads needs another remote lookup under the writer.
-      if((await this.store.exec('SELECT id FROM deliveries WHERE id=?',pointer.delivery)).toArray().length)return;
+      if((await this.store.exec('SELECT id FROM deliveries WHERE id=?',pointer.delivery)).toArray().length)return false;
       const receiptStarted=Date.now(),archived=await this.env.ARCHIVE.head(receiptKey(configured.id,pointer.delivery));
       if(Date.now()-receiptStarted>=100)log('repository_receipt_slow',{elapsed_ms:Date.now()-receiptStarted,transactional:false});
-      if(archived)return;
+      if(archived)return false;
       let body:any,encodings=new Map<string,string>();
       if(!CI_EVENTS.has(pointer.event)){
         const object=await this.env.ARCHIVE.get(pointer.key);if(!object)throw Error('event body unavailable');body=parseGitHub(await object.text());
@@ -932,18 +942,16 @@ export class RepositoryState extends DurableObject<Env> {
       await this.atomic(async state=>{
         measured=state.store;applyStarted=Date.now();state.preparedEncodings=encodings;
         if(state.store.backend==='postgres')state.store=new ReadCacheStore(state.store);
-        const commit=state.commitReceipt;
-        state.commitReceipt=async p=>{await commit.call(state,p);committed=true;};
-        await RepositoryState.prototype.ingest.call(state,pointer,body);
+        committed=await RepositoryState.prototype.ingest.call(state,pointer,body);
       },'ingest');
-      if(committed)try{log('repository_ingest_committed',{event_type:INGEST_EVENT_TYPES.has(pointer.event)?pointer.event:'other',sql_round_trips:measured?.queryCount ?? null,apply_commit_ms:Date.now()-applyStarted,cpu_ms:null});}catch{}
-      return;
+      if(committed)try{this.owner.recordIngest(pointer.event,measured?.queryCount,Date.now()-applyStarted);}catch{}
+      return committed;
     }
     // Another ingest can commit while we preload the body. Its fresh SQL
     // receipt remains retained; no external I/O is needed under the writer.
-    if((await this.store.exec('SELECT id FROM deliveries WHERE id=?',pointer.delivery)).toArray().length)return;
+    if((await this.store.exec('SELECT id FROM deliveries WHERE id=?',pointer.delivery)).toArray().length)return false;
     if(this.degraded){if(this.degraded.reason!=='storage_full')throw Error('repository storage control unavailable');throw Error('Exceeded the maximum database size; SQLITE_FULL recorded at '+new Date(this.degraded.since).toISOString());}
-    if(CI_EVENTS.has(pointer.event)){await this.store.exec('INSERT OR IGNORE INTO deliveries VALUES(?,?,?)',pointer.delivery,'ignored:'+pointer.event,Date.now());return;}
+    if(CI_EVENTS.has(pointer.event)){await this.store.exec('INSERT OR IGNORE INTO deliveries VALUES(?,?,?)',pointer.delivery,'ignored:'+pointer.event,Date.now());return true;}
     const body:any=preparedBody,repo=configured;await this.setMeta('repository',repo);
     const event=pointer.event, deleted=body.action==='deleted',repairs:IngestRepair[]=[];
     // All updates are idempotent; receipt is committed only after their durable rows and jobs.
@@ -1009,7 +1017,7 @@ export class RepositoryState extends DurableObject<Env> {
       }
     }
     await this.enqueueIngest(repairs);
-    await this.commitReceipt(pointer);
+    await this.commitReceipt(pointer);return true;
   }
   async commitReceipt(pointer:EventPointer):Promise<void> {
     // Use commit time, not the event's age: writer-side ingest deduplication
@@ -2906,7 +2914,7 @@ export class RepositoryState extends DurableObject<Env> {
       }
       if (path==='/health' && this.store.backend==='postgres') {
         const monitoring=await this.preparedObservation(),storage=monitoring.storage || {backend:'postgres',schema_version:null,expected_schema_version:1,expected_generation:this.backendGeneration(),connected:null,stale:true};
-        return json({...this.diagnostics,reconciliation_version:2,revision:this.revisionState.value ?? this.diagnostics.revision ?? null,repository:this.repositoryMemo ?? this.diagnostics.repository ?? null,storage,monitoring,request_id,deployment_id:this.env.CF_VERSION?.id,diagnostics_at:this.diagnosticsAt || null,diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
+        return json({...this.diagnostics,ingestion:[...this.owner.ingestStats].map(([event_type,row])=>({event_type,...row})),reconciliation_version:2,revision:this.revisionState.value ?? this.diagnostics.revision ?? null,repository:this.repositoryMemo ?? this.diagnostics.repository ?? null,storage,monitoring,request_id,deployment_id:this.env.CF_VERSION?.id,diagnostics_at:this.diagnosticsAt || null,diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
       }
       if (path==='/health') {
         const storage={...await this.storageState(),backend:'sqlite',schema_version:SCHEMA_VERSION};

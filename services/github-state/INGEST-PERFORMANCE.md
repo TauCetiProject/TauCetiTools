@@ -9,13 +9,13 @@ transaction setup, application and commit. No GitHub request is made.
 
 | Workload | Application SQL round trips | Delivery elapsed |
 | --- | ---: | ---: |
-| pull_request | 41 → 13 | 1379 → 656 ms |
-| status | 13 → 10 | 584 → 458 ms |
-| issue_comment | 21 → 16 | 676 → 594 ms |
-| pull_request_review_comment | 25 → 16 | 814 → 550 ms |
-| pull_request_review | 16 → 6 | 559 → 368 ms |
-| push | 30 → 12 | 1077 → 472 ms |
-| All six deliveries | 146 → 73 | 5193 → 3104 ms |
+| pull_request | 41 → 13 | 1369 → 506 ms |
+| status | 13 → 10 | 484 → 461 ms |
+| issue_comment | 21 → 16 | 820 → 610 ms |
+| pull_request_review_comment | 25 → 16 | 764 → 594 ms |
+| pull_request_review | 16 → 6 | 682 → 410 ms |
+| push | 30 → 12 | 854 → 570 ms |
+| All six deliveries | 146 → 73 | 5021 → 3172 ms |
 
 Each version commits six deliveries in six transactions per trial. A comparison
 of all durable job keys, priorities, dirty generations, lanes, attempts and wait
@@ -26,7 +26,7 @@ leases. Duplicate requests retain cumulative dirty generations and last priority
 
 A second workload submits eight independent review events concurrently through
 the normal per-repository writer. Median burst elapsed is
-5005 → 3028 ms, with
+4851 → 2865 ms, with
 128 → 48 SQL round trips and eight committed deliveries in
 eight transactions in both versions. Durable repair state is again identical.
 This isolates burst admission and scheduling; it is not a replay of all live
