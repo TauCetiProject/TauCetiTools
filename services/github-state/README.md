@@ -63,6 +63,15 @@ The selected repository store holds indexed resources, collection membership and
 jobs with pagination state, a seven-day change journal, and stable query
 snapshots. Initial inventories and histories publish complete coverage after
 all pages finish. A failed page preserves the previous complete collection.
+
+The main webhook queue admits up to sixteen concurrent single-message consumers
+in production and test. This overlaps delivery I/O while the existing repository
+writer serializes mutations. Each message retains its own acknowledgement,
+retry and durable replay behavior; the dead-letter consumer remains at one.
+Ingestion health separates writer wait (total and maximum milliseconds per
+event type/minute) from application-through-cleanup time. A growing writer wait
+means that increasing delivery concurrency alone will not resolve the delay.
+
 Snapshots paginate at 500 rows or approximately 1.49 MB per page. Continuation
 pages are written to private R2 (at most four uploads at a time), never to
 SQLite; continuation reads individual pages rather than repeatedly decoding the
