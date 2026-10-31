@@ -153,12 +153,17 @@ bulk coverage, demand and job lookups after its resource changes. The event's
 receipt, resources, membership and repair obligations remain one atomic commit;
 retry deadlines, pagination and existing ownership are preserved. Successful
 commits update a bounded latest-minute aggregate for each event type, exposed
-as `ingestion` in protected health. When that type next appears in a later minute,
+as `ingestion` in protected PostgreSQL health. When that type next appears in a later minute,
 `repository_ingest_summary` logs its completed bucket. Each bucket records committed
 deliveries, application SQL round trips (excluding transaction setup/commit), and
 elapsed time from application entry through commit and connection cleanup. These
 are I/O-inclusive measurements; CPU is not measured. SQLite does not supply
-the PostgreSQL query counter. See [ingestion measurements](INGEST-PERFORMANCE.md).
+the PostgreSQL query counter. Buckets carry their minute timestamp and can be
+old; these process-local, best-effort aggregates can lose the last quiet bucket
+on eviction or undercount an uncertain commit. Existing repair-arrival counters
+can also include rolled-back attempts. Use durable receipts/jobs and fixed-cohort
+coverage for acceptance measurements, rather than treating diagnostic counters
+as a complete ledger. See [ingestion measurements](INGEST-PERFORMANCE.md).
 
 PostgreSQL cache misses return stored or unavailable results without awaiting
 writer admission for demand bookkeeping. One repository owner coalesces readers,
