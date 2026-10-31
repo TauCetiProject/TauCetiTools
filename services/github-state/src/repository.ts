@@ -17,6 +17,8 @@ import { Checkpoint, DEFAULT_POLICY, Policy, RetentionClass, R2_CLASSES, RULES, 
 import { CapacitySample, RepairMetrics, RequestMetrics, SQLITE_ALLOWANCE, capacity, postgresCapacity, emitAlarm, timedBucket, within } from './monitoring';
 import { Failure, FULL_MESSAGE, AdminError, CLEANUP, PARKABLE, classify, deleteClass, faultySql, log, missingSchema, requestId, scan, summary, userTables as summaryTables } from './storage';
 
+type IngestRepair={q:Query,priority:number,dirty?:boolean,dirtyIfMissing?:boolean,missingOnly?:boolean};
+const INGEST_EVENT_TYPES=new Set(['pull_request','issues','issue_comment','pull_request_review_comment','pull_request_review','pull_request_review_thread','status','push','create','delete','repository','label','milestone','merge_group']);
 class LeaseLost extends Error {}
 const SCHEMA_VERSION=5;
 // 10 GiB limit less a margin. With no recorded storage state, a database this
@@ -66,6 +68,7 @@ export class RepositoryState extends DurableObject<Env> {
   private preparedEncodings?:Map<string,string>;
   private optionalWork={active:0};
   private demandMemo=new Map<string,number>();
+  private ingestStats=new Map<string,{minute:number,deliveries:number,sql_round_trips:number,sql_samples:number,apply_through_cleanup_ms:number,apply_max_ms:number}>();
   private readDemands={pending:new Map<string,Query>(),active:new Map<string,{complete?:boolean}>(),flight:undefined as Promise<void>|undefined};
   sql:SqlStorage;
   store:RepositoryStore;
@@ -835,6 +838,47 @@ export class RepositoryState extends DurableObject<Env> {
     const alarm=this.store.backend==='postgres'?null:await this.ctx.storage.getAlarm();
     if(!alarm || alarm>scheduled)await this.setAlarm(Math.max(now+100,scheduled));
   }
+  private async enqueueIngest(input:IngestRepair[]):Promise<void> {
+    if(!this.store.transactional)return this.atomic(state=>state.enqueueIngest(input),'ingest');
+    // Ingest requests all have active priority (0..2). Read the post-event
+    // scheduling facts together, preserving the individual enqueue semantics.
+    input=input.filter(({q})=>q.operation!=='progress' && !NOT_MIRRORED.has(q.operation));
+    if(!input.length)return;
+    const keys=[...new Set(input.map(({q})=>queryKey(q)))],jobs=new Map<string,any>(),demand=new Map<string,number>(),complete=new Set<string>();
+    const readBatch=this.store.backend==='sqlite'?80:256;
+    for(let offset=0;offset<keys.length;offset+=readBatch) {
+      const chunk=keys.slice(offset,offset+readBatch),where=' WHERE key IN ('+chunk.map(()=>'?').join(',')+')';
+      const [js,ds,cs]=await this.store.batch([
+        {sql:'SELECT key,dirty,generation,lane,requested_at,due,attempt,wait_reason FROM jobs'+where,bindings:chunk},
+        {sql:'SELECT key,at FROM demand'+where,bindings:chunk},
+        {sql:'SELECT key FROM collections'+where+' AND complete=1',bindings:chunk}
+      ]);
+      for(const row of js.toArray())jobs.set(row.key,row);
+      for(const row of ds.toArray())demand.set(row.key,row.at);
+      for(const row of cs.toArray())complete.add(row.key);
+    }
+    const now=Date.now(),writes=new Map<string,any[]>(),increments=new Map<string,number>();
+    for(const {q,priority,dirty=false,dirtyIfMissing=false,missingOnly=false} of input) {
+      const key=queryKey(q),known=complete.has(key);if(missingOnly && known)continue;
+      const prior=jobs.get(key),changed=dirty || dirtyIfMissing && !known;
+      const lane:Lane=(demand.get(key) || 0)>now-300000 && !known?'requested':'active';
+      const requested=lane==='requested'?(prior?.requested_at || now):prior?.requested_at || null;
+      const due=prior?(changed && prior.wait_reason==null && !prior.attempt?Math.min(prior.due,now):prior.due):now;
+      const generation=(increments.get(key) || 0)+Number(changed);increments.set(key,generation);
+      const values=[key,JSON.stringify({...q,allow_observed:undefined}),priority,due,Number(changed || Boolean(prior?.dirty)),generation,lane,requested,now];
+      writes.set(key,values);jobs.set(key,{...prior,dirty:values[4],requested_at:requested,due});
+      if(!prior)await this.metric('arrival',q,lane);
+    }
+    const rows=[...writes.values()],writeBatch=this.store.backend==='sqlite'?10:200;
+    for(let offset=0;offset<rows.length;offset+=writeBatch) {
+      const chunk=rows.slice(offset,offset+writeBatch);
+      await this.store.exec('INSERT INTO jobs(key,query,priority,due,dirty,generation,lane,requested_at,created_at) VALUES '+chunk.map(()=>'(?,?,?,?,?,?,?,?,?)').join(',')+' ON CONFLICT(key) DO UPDATE SET priority=excluded.priority,due=excluded.due,dirty=excluded.dirty,generation=generation+excluded.generation,lane=excluded.lane,requested_at=excluded.requested_at',...chunk.flat());
+    }
+    if(rows.length && this.store.backend==='sqlite') {
+      const scheduled=Math.min(...rows.map(row=>Number(row[3]))),alarm=await this.ctx.storage.getAlarm();
+      if(!alarm || alarm>scheduled)await this.setAlarm(Math.max(now+100,scheduled));
+    }
+  }
   async complete(q:Pick<Query,'operation'|'args'>): Promise<boolean> { return (await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length>0; }
   async metric(event:string,q:Query,lane:Lane,value=1): Promise<void> {try{this.repairMetrics.record(event,lane,q.operation,value);}catch(error){try{this.noteFailure('repair_metrics',error);}catch{}}}
   async lane(q:Query,dirty=false,priority=20): Promise<Lane> {
@@ -871,63 +915,74 @@ export class RepositoryState extends DurableObject<Env> {
     const history=await this.meta('review_coordination');
     return coordinationWindows(history,this[ACTIVITY_CLOCK] ?? Date.now());
   }
-  async ingest(pointer:EventPointer,preparedBody?:any): Promise<void> {
+  private recordIngest(event:string,queries:number|undefined,elapsed:number):void {
+    const type=INGEST_EVENT_TYPES.has(event)?event:'other',minute=Math.floor(Date.now()/60000)*60000;
+    let row=this.ingestStats.get(type);
+    if(row && row.minute!==minute){try{log('repository_ingest_summary',{event_type:type,...row});}catch{}row=undefined;}
+    if(!row){row={minute,deliveries:0,sql_round_trips:0,sql_samples:0,apply_through_cleanup_ms:0,apply_max_ms:0};this.ingestStats.set(type,row);}
+    row.deliveries++;row.apply_through_cleanup_ms+=elapsed;row.apply_max_ms=Math.max(row.apply_max_ms,elapsed);
+    if(queries!==undefined){row.sql_round_trips+=queries;row.sql_samples++;}
+  }
+  async ingest(pointer:EventPointer,preparedBody?:any): Promise<boolean> {
     const configured=repository(this.env,pointer.repository);if(!configured)throw Error('repository not allowed');
     if(!this.store.transactional){
       // Archival publishes R2 before deleting SQL. Read SQL first: either its
       // receipt is still present, or the following R2 check can see the archive.
       // Reversing these reads needs another remote lookup under the writer.
-      if((await this.store.exec('SELECT id FROM deliveries WHERE id=?',pointer.delivery)).toArray().length)return;
+      if((await this.store.exec('SELECT id FROM deliveries WHERE id=?',pointer.delivery)).toArray().length)return false;
       const receiptStarted=Date.now(),archived=await this.env.ARCHIVE.head(receiptKey(configured.id,pointer.delivery));
       if(Date.now()-receiptStarted>=100)log('repository_receipt_slow',{elapsed_ms:Date.now()-receiptStarted,transactional:false});
-      if(archived)return;
+      if(archived)return false;
       let body:any,encodings=new Map<string,string>();
       if(!CI_EVENTS.has(pointer.event)){
         const object=await this.env.ARCHIVE.get(pointer.key);if(!object)throw Error('event body unavailable');body=parseGitHub(await object.text());
         if(body.comment){const value=comment(body.comment),text=JSON.stringify(value);if(new TextEncoder().encode(text).length>=1500000)encodings.set('resource:'+text,await this.encode(value,undefined,configured.id));}
       }
-      return this.atomic(async state=>{state.preparedEncodings=encodings;await RepositoryState.prototype.ingest.call(state,pointer,body);},'ingest');
+      let measured:RepositoryStore|undefined,applyStarted=0,committed=false;
+      await this.atomic(async state=>{
+        measured=state.store;applyStarted=Date.now();state.preparedEncodings=encodings;
+        if(state.store.backend==='postgres')state.store=new ReadCacheStore(state.store);
+        committed=await RepositoryState.prototype.ingest.call(state,pointer,body);
+      },'ingest');
+      if(committed)try{this.owner.recordIngest(pointer.event,measured?.queryCount,Date.now()-applyStarted);}catch{}
+      return committed;
     }
     // Another ingest can commit while we preload the body. Its fresh SQL
     // receipt remains retained; no external I/O is needed under the writer.
-    if((await this.store.exec('SELECT id FROM deliveries WHERE id=?',pointer.delivery)).toArray().length)return;
+    if((await this.store.exec('SELECT id FROM deliveries WHERE id=?',pointer.delivery)).toArray().length)return false;
     if(this.degraded){if(this.degraded.reason!=='storage_full')throw Error('repository storage control unavailable');throw Error('Exceeded the maximum database size; SQLITE_FULL recorded at '+new Date(this.degraded.since).toISOString());}
-    if(CI_EVENTS.has(pointer.event)){await this.store.exec('INSERT OR IGNORE INTO deliveries VALUES(?,?,?)',pointer.delivery,'ignored:'+pointer.event,Date.now());return;}
+    if(CI_EVENTS.has(pointer.event)){await this.store.exec('INSERT OR IGNORE INTO deliveries VALUES(?,?,?)',pointer.delivery,'ignored:'+pointer.event,Date.now());return true;}
     const body:any=preparedBody,repo=configured;await this.setMeta('repository',repo);
-    const event=pointer.event, deleted=body.action==='deleted';
+    const event=pointer.event, deleted=body.action==='deleted',repairs:IngestRepair[]=[];
     // All updates are idempotent; receipt is committed only after their durable rows and jobs.
     if (event==='pull_request' && body.pull_request) {
       const row=pr(body.pull_request), number=String(row.number);
-      const before=(await this.store.exec<any>('SELECT data FROM resources WHERE kind=? AND id=?','pr',number)).toArray()[0];
+      const before=(await this.store.exec<any>('SELECT * FROM resources WHERE kind=? AND id=?','pr',number)).toArray()[0];
+      if(this.store instanceof ReadCacheStore)this.store.seed('SELECT * FROM resources WHERE kind=? AND id=?',['pr',number],before?[before]:[]);
       const prior=before?await this.decode(before.data):null;
       const accepted=await this.put('pr',number,row,pointer.received,false,number,true);
       // A webhook describes one PR, not a complete inventory. Never create fake coverage.
       const key=queryKey({operation:'open_prs'});
       if (accepted) await this.membership(key,number,body.pull_request.state==='open');
       const detail={repository:repo.name,operation:'pr',args:{number:row.number}};
-      const detailKnown=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(detail))).toArray().length>0;
-      await this.enqueue(detail,0,Date.now(),!detailKnown || row.mergeable==='UNKNOWN');
-      const inventoryKnown=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',key)).toArray().length>0;
-      await this.enqueue({repository:repo.name,operation:'open_prs'},1,Date.now(),!inventoryKnown);
-      if(accepted && row.headRefOid && prior?.headRefOid!==row.headRefOid) await this.enqueue({repository:repo.name,operation:'files',args:{number:row.number}},1,Date.now(),true);
+      repairs.push({q:detail,priority:0,dirty:row.mergeable==='UNKNOWN',dirtyIfMissing:true},{q:{repository:repo.name,operation:'open_prs'},priority:1,dirtyIfMissing:true});
+      if(accepted && row.headRefOid && prior?.headRefOid!==row.headRefOid) repairs.push({q:{repository:repo.name,operation:'files',args:{number:row.number}},priority:1,dirty:true});
       // Published mirrors hydrate new open PR histories from trusted webhooks,
       // independently of anonymous query demand.
       if(row.state==='OPEN' && publicQuery(this.env,repo))for(const operation of ['issue_comments','review_threads']) {
         const child={repository:repo.name,operation,args:{number:row.number}};
-        if(!await this.complete(child))await this.enqueue(child,2);
+        repairs.push({q:child,priority:2,missingOnly:true});
       }
       if (accepted && row.headRefOid) for (const operation of ['statuses']) {
         const q={repository:repo.name,operation,args:{sha:row.headRefOid}};
-        const known=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length>0;
-        await this.enqueue(q,1,Date.now(),!known || prior?.headRefOid!==row.headRefOid);
+        repairs.push({q,priority:1,dirtyIfMissing:true,dirty:prior?.headRefOid!==row.headRefOid});
       }
     }
     if (event==='issues' && body.issue) {
       const row=issue(body.issue); const accepted=await this.put('issue',String(row.number),row,pointer.received,deleted,String(row.number),true);
       if (accepted) await this.membership(queryKey({operation:'open_issues'}),String(row.number),!deleted && row.state==='OPEN');
       const q={repository:repo.name,operation:'open_issues'};
-      const known=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length>0;
-      await this.enqueue(q,1,Date.now(),!known);
+      repairs.push({q,priority:1,dirtyIfMissing:true});
     }
     if (event==='issue_comment' && body.action==='created' && body.comment) await this.recordReviewStart(body.comment,pointer.received);
     if (['issue_comment','pull_request_review_comment'].includes(event) && body.comment) {
@@ -936,19 +991,17 @@ export class RepositoryState extends DurableObject<Env> {
       const row=comment(body.comment); const accepted=await this.put(operation,String(row.id),row,pointer.received,deleted,String(number),true);
       const key=queryKey({operation,args:{number}});
       if (accepted) await this.membership(key,String(row.id),!deleted);
-      const known=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',key)).toArray().length>0;
-      await this.enqueue({repository:repo.name,operation,args:{number}},0,Date.now(),!known);
-      if (operation==='review_comments') await this.enqueue({repository:repo.name,operation:'review_threads',args:{number}},2,Date.now(),true);
+      repairs.push({q:{repository:repo.name,operation,args:{number}},priority:0,dirtyIfMissing:true});
+      if (operation==='review_comments')repairs.push({q:{repository:repo.name,operation:'review_threads',args:{number}},priority:2,dirty:true});
     }
     if (event==='pull_request_review' || event==='pull_request_review_thread') {
       const number=body.pull_request?.number;
-      if (number) for (const operation of ['review_threads','reviews','review_comments']) await this.enqueue({repository:repo.name,operation,args:{number}},1,Date.now(),true);
+      if (number) for (const operation of ['review_threads','reviews','review_comments'])repairs.push({q:{repository:repo.name,operation,args:{number}},priority:1,dirty:true});
     }
     if (event==='status' && body.sha && body.context) {
       await this.put('status_context',body.sha+':'+body.context,status(body),pointer.received,false,body.sha,true);
       const q={repository:repo.name,operation:'statuses',args:{sha:body.sha}};
-      const known=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length>0;
-      await this.enqueue(q,0,Date.now(),!known);
+      repairs.push({q,priority:0,dirtyIfMissing:true});
     }
     if (['push','create','delete','repository','label','milestone','merge_group'].includes(event)) {
       if (event==='push' && String(body.ref).startsWith('refs/heads/')) {
@@ -960,11 +1013,11 @@ export class RepositoryState extends DurableObject<Env> {
       // changed PR must not trigger a repository-wide survey at fleet scale.
       for (const operation of ['open_prs','open_issues','refs','repository']) {
         const q={repository:repo.name,operation};
-        const known=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length>0;
-        await this.enqueue(q,2,Date.now(),!known || operation==='repository' && event==='repository' || operation==='refs' && ['create','delete'].includes(event));
+        repairs.push({q,priority:2,dirtyIfMissing:true,dirty:operation==='repository' && event==='repository' || operation==='refs' && ['create','delete'].includes(event)});
       }
     }
-    await this.commitReceipt(pointer);
+    await this.enqueueIngest(repairs);
+    await this.commitReceipt(pointer);return true;
   }
   async commitReceipt(pointer:EventPointer):Promise<void> {
     // Use commit time, not the event's age: writer-side ingest deduplication
@@ -2861,7 +2914,7 @@ export class RepositoryState extends DurableObject<Env> {
       }
       if (path==='/health' && this.store.backend==='postgres') {
         const monitoring=await this.preparedObservation(),storage=monitoring.storage || {backend:'postgres',schema_version:null,expected_schema_version:1,expected_generation:this.backendGeneration(),connected:null,stale:true};
-        return json({...this.diagnostics,reconciliation_version:2,revision:this.revisionState.value ?? this.diagnostics.revision ?? null,repository:this.repositoryMemo ?? this.diagnostics.repository ?? null,storage,monitoring,request_id,deployment_id:this.env.CF_VERSION?.id,diagnostics_at:this.diagnosticsAt || null,diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
+        return json({...this.diagnostics,ingestion:[...this.owner.ingestStats].map(([event_type,row])=>({event_type,...row})),reconciliation_version:2,revision:this.revisionState.value ?? this.diagnostics.revision ?? null,repository:this.repositoryMemo ?? this.diagnostics.repository ?? null,storage,monitoring,request_id,deployment_id:this.env.CF_VERSION?.id,diagnostics_at:this.diagnosticsAt || null,diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
       }
       if (path==='/health') {
         const storage={...await this.storageState(),backend:'sqlite',schema_version:SCHEMA_VERSION};

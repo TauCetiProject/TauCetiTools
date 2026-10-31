@@ -17,6 +17,7 @@ export type WriterPurpose='other'|'read_demand'|'ingest'|'repair'|'enqueue'|'pub
 export interface RepositoryStore {
   readonly backend:'sqlite'|'postgres';
   readonly transactional?:boolean;
+  readonly queryCount?:number;
   exec<T=any>(sql:string,...bindings:Bind[]):Promise<Rows<T>>;
   batch(statements:Statement[]):Promise<Rows<any>[]>;
   transaction<T>(apply:(store:RepositoryStore)=>Promise<T>,purpose?:WriterPurpose):Promise<T>;
@@ -153,6 +154,8 @@ export class PostgresStore implements RepositoryStore {
   readonly schema:string;
 
   private http;
+  private queriesExecuted=0;
+  get queryCount():number{return this.queriesExecuted;}
   private writer=new SerialLane();
   private discarded:DiscardedSession[]=[];
   private nextCleanupAt=0;
@@ -168,6 +171,7 @@ export class PostgresStore implements RepositoryStore {
   get transactional():boolean {return Boolean(this.client);}
   private async run<T>(action:()=>Promise<T>,connection=this.connectionState):Promise<T> {
     if(connection?.error)throw connection.error;
+    this.queriesExecuted++;
     this.onQuery?.();
     try{return await action();}catch(error){
       if(connection?.error)throw connection.error;
@@ -372,6 +376,7 @@ export class ReadCacheStore implements RepositoryStore {
   private index=new Map<string,Map<string,Set<string>>>();
   constructor(private source:RepositoryStore){this.backend=source.backend;}
   get transactional():boolean|undefined{return this.source.transactional;}
+  get queryCount():number|undefined{return this.source.queryCount;}
   private key(sql:string,bindings:Bind[]):string{return JSON.stringify([sql,bindings]);}
   peek(sql:string,bindings:Bind[]):any[]|undefined{return this.cache.get(this.key(sql,bindings))?.rows;}
   private remove(key:string):void {
@@ -419,6 +424,7 @@ export class BufferedStore implements RepositoryStore {
   readonly backend='postgres';readonly transactional=true;
   private pending:Statement[]=[];private identities=new Set<string>();
   constructor(private source:RepositoryStore){}
+  get queryCount():number|undefined{return this.source.queryCount;}
   private identity(s:Statement):string|undefined {
     const insert=s.sql.match(/^INSERT(?: OR IGNORE)? INTO (\w+)(?:\(([^)]+)\))? VALUES\s*\(([^)]+)\)/);
     if(insert){
