@@ -27,12 +27,13 @@ above include that correction. A longer, realistic scan remains to be measured.
 
 ## Verification status
 
-- The service source passes 564 tests; 93 PostgreSQL-only cases are skipped in
+- The latest service source passes 579 tests; 93 PostgreSQL-only cases are skipped in
   that run. The 1,200-PR inventory fixture keeps its original deadline and data.
 - The 11,100-row publication-memory fixture passes with 44,060 dependent jobs.
   Its Node heap measurements do not establish a native isolate memory limit.
 - The preceding candidate `31aca6b` passed the complete isolated PostgreSQL
-  suite: 223 passes and three SQLite-only skips. The final-source run is active.
+  suite: 223 passes and three SQLite-only skips. Runtime `9e48298` also passed 227 PostgreSQL tests with three skips. The
+  `f05f4e5` optimization run and final-source performance checks are active.
 - A real native SQLite alarm test now verifies that paced member retries retain
   failed tails across firing scheduling fallbacks, avoid external maintenance,
   re-arm durable recovery and reset normally on a genuine tick. Uncertain alarm

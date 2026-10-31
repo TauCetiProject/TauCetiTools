@@ -192,6 +192,10 @@ Same-owner scheduling fallback alarms resume that record without external
 maintenance. Genuine ticks and future retry/lease alarms remain external. A
 consumed stale fallback re-arms durable recovery even if no fill is needed;
 lost or uncertain optional alarm tags recover through the ordinary external path.
+An overdue wake retained without a storage rewrite still records ordinary demand;
+intent is checked again when the alarm is consumed, including a racing schedule
+write. Accepted ordinary work during a continuation handler retains an external
+wake. Existing mutation/schema holds keep repair wakeups future-only.
 Active local key/token ownership prevents duplicate fetches after persisted lease
 expiry. Existing repair/publication transactions renew matching leases near
 expiry, without a heartbeat timer. Each committed member releases its local
