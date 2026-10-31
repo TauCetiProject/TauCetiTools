@@ -145,9 +145,13 @@ test('four active full batches remain excluded after lease expiry and renew only
   assert.equal(JSON.parse((await f.state.nextJob()).query).args.number,999,'exclusion applies before the candidate limit');
   const replacementUntil=Date.now()+300000;
   await f.store.exec('UPDATE jobs SET lease_id=?,lease_until=? WHERE key=?','replacement',replacementUntil,key(100,'issue_comments'));
-  await f.state.atomic(async()=>{},'repair');
+  let renewalStatements=0;
+  await f.state.atomic(async state=>{
+   const exec=state.store.exec.bind(state.store);
+   state.store.exec=(sql,...args)=>{if(sql.startsWith('UPDATE jobs SET lease_until='))renewalStatements++;return exec(sql,...args);};
+  },'repair');
   const renewed=(await f.store.exec("SELECT COUNT(*) n FROM jobs WHERE lease_id IS NOT NULL AND lease_id!='replacement' AND lease_until>?",Date.now()+50000)).one().n;
-  assert.equal(renewed,399);assert.equal(f.state.renewedLeases,399);
+  assert.equal(renewed,399);assert.equal(f.state.renewedLeases,399);assert.equal(renewalStatements,1,'all remaining full-batch leases renew in one statement inside the existing admission');
   assert.equal((await f.store.exec('SELECT lease_until FROM jobs WHERE key=?',key(100,'issue_comments'))).one().lease_until,replacementUntil);
   const before=calls;await f.state.runAlarm();assert.equal(calls,before,'full slots do not duplicate an expired local fetch');
   // Keep this case focused on the held groups; its unrelated work was only peeked.

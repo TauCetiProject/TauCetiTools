@@ -1,0 +1,1612 @@
+{
+  "baseline": "2732eb5ce51c1d49d2ad30a8a2b9bfd14b4951d9",
+  "implementation_sha256": "0567bdfbeeade48ea84d4b8f1c8ab805351d91bbf5be899ddb93f3b17d7442f1",
+  "implementation_files": [
+    "../../tauceti_tools/github_catalog.json",
+    "package-lock.json",
+    "src/activity_landings.ts",
+    "src/catalog.ts",
+    "src/index.ts",
+    "src/ingress.ts",
+    "src/installation.ts",
+    "src/migration.ts",
+    "src/migration_control.ts",
+    "src/migration_target.ts",
+    "src/monitoring.ts",
+    "src/normalize.ts",
+    "src/protocol.ts",
+    "src/provider_monitoring.ts",
+    "src/queue_monitoring.ts",
+    "src/reconciliation.ts",
+    "src/repair_coordinator.ts",
+    "src/repair_io.ts",
+    "src/repository.ts",
+    "src/repository_health.ts",
+    "src/repository_store.ts",
+    "src/retention.ts",
+    "src/runner-capacity.ts",
+    "src/storage.ts",
+    "src/survey.ts"
+  ],
+  "scope": "isolated real PostgreSQL;21independent missing file histories, one65s transport, real60s cron; fixed held-hop horizon includes incomplete baseline work; no GitHub requests; no fleet throughput claim",
+  "trials": 3,
+  "before": [
+    {
+      "elapsed_ms": 67448.134448,
+      "held_ms": 65652.080913,
+      "cohort": 21,
+      "complete": 4,
+      "missing": 17,
+      "fast_complete_before_held": 3,
+      "completed_ms": {
+        "files:{\"number\":101}": 2151.373093,
+        "files:{\"number\":102}": 3344.1004620000003,
+        "files:{\"number\":103}": 4482.06076,
+        "files:{\"number\":100}": 66317.126297
+      },
+      "upstream_calls": {
+        "100": 1,
+        "101": 1,
+        "102": 1,
+        "103": 1
+      },
+      "maintenance": {
+        "expiry": 1,
+        "coverage": 1,
+        "maintenance": 1
+      },
+      "repair_scheduler": null,
+      "lease_renewal_row_updates": 0,
+      "writer_admissions": 13,
+      "application_sql_round_trips": 121,
+      "writers": [
+        {
+          "purpose": "other",
+          "wait_ms": 0,
+          "hold_ms": 229.48951899999997,
+          "sql": 1,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 0,
+          "hold_ms": 420.8132249999999,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 0,
+          "hold_ms": 418.2725300000002,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 0,
+          "hold_ms": 356.2614450000001,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 354,
+          "hold_ms": 725.364728,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 724,
+          "hold_ms": 333.9054489999994,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 1058,
+          "hold_ms": 858.8109050000003,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "wait_ms": 1192,
+          "hold_ms": 253.771479,
+          "sql": 1,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 1111,
+          "hold_ms": 884.1732350000002,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "wait_ms": 1137,
+          "hold_ms": 208.7561170000008,
+          "sql": 1,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "wait_ms": 208,
+          "hold_ms": 204.4730410000002,
+          "sql": 1,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 664.630879999997,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "wait_ms": 0,
+          "hold_ms": 532.3422569999966,
+          "sql": 1,
+          "failed": false
+        }
+      ]
+    },
+    {
+      "elapsed_ms": 67058.22794500002,
+      "held_ms": 65672.707317,
+      "cohort": 21,
+      "complete": 4,
+      "missing": 17,
+      "fast_complete_before_held": 3,
+      "completed_ms": {
+        "files:{\"number\":101}": 2093.566617000004,
+        "files:{\"number\":102}": 3143.767821000016,
+        "files:{\"number\":103}": 4316.505142000009,
+        "files:{\"number\":100}": 66461.01470199999
+      },
+      "upstream_calls": {
+        "100": 1,
+        "101": 1,
+        "102": 1,
+        "103": 1
+      },
+      "maintenance": {
+        "expiry": 1,
+        "coverage": 1,
+        "maintenance": 1
+      },
+      "repair_scheduler": null,
+      "lease_renewal_row_updates": 0,
+      "writer_admissions": 13,
+      "application_sql_round_trips": 121,
+      "writers": [
+        {
+          "purpose": "other",
+          "wait_ms": 0,
+          "hold_ms": 322.3200910000014,
+          "sql": 1,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 0,
+          "hold_ms": 349.35683500001323,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 0,
+          "hold_ms": 346.4422670000058,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 0,
+          "hold_ms": 391.2431439999782,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 389,
+          "hold_ms": 683.676157000009,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 682,
+          "hold_ms": 379.95773100000224,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 1062,
+          "hold_ms": 670.2318359999917,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "wait_ms": 1049,
+          "hold_ms": 274.43680699999095,
+          "sql": 1,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 943,
+          "hold_ms": 898.2708100000164,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "wait_ms": 1172,
+          "hold_ms": 239.00253999998677,
+          "sql": 1,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "wait_ms": 238,
+          "hold_ms": 203.57886800001143,
+          "sql": 1,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 787.4453470000299,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "wait_ms": 0,
+          "hold_ms": 280.56375000003027,
+          "sql": 1,
+          "failed": false
+        }
+      ]
+    },
+    {
+      "elapsed_ms": 67099.02647799999,
+      "held_ms": 65678.34383600001,
+      "cohort": 21,
+      "complete": 4,
+      "missing": 17,
+      "fast_complete_before_held": 3,
+      "completed_ms": {
+        "files:{\"number\":101}": 2262.5734299999895,
+        "files:{\"number\":102}": 3450.6427590000094,
+        "files:{\"number\":103}": 4390.055699000019,
+        "files:{\"number\":100}": 66351.52170600003
+      },
+      "upstream_calls": {
+        "100": 1,
+        "101": 1,
+        "102": 1,
+        "103": 1
+      },
+      "maintenance": {
+        "expiry": 1,
+        "coverage": 1,
+        "maintenance": 1
+      },
+      "repair_scheduler": null,
+      "lease_renewal_row_updates": 0,
+      "writer_admissions": 13,
+      "application_sql_round_trips": 121,
+      "writers": [
+        {
+          "purpose": "other",
+          "wait_ms": 0,
+          "hold_ms": 257.62644100002944,
+          "sql": 1,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 0,
+          "hold_ms": 419.3644099999801,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 1,
+          "hold_ms": 366.9239819999784,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 1,
+          "hold_ms": 442.59101900004316,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 441,
+          "hold_ms": 775.6704700000118,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 775,
+          "hold_ms": 359.5191299999715,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 1134,
+          "hold_ms": 828.5410249999841,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "wait_ms": 1187,
+          "hold_ms": 209.13503499998478,
+          "sql": 1,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 1037,
+          "hold_ms": 730.2711249999702,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "wait_ms": 938,
+          "hold_ms": 226.4824410000001,
+          "sql": 1,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "wait_ms": 226,
+          "hold_ms": 302.80025200004457,
+          "sql": 1,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 672.8550019999966,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "wait_ms": 0,
+          "hold_ms": 253.58081900002435,
+          "sql": 1,
+          "failed": false
+        }
+      ]
+    }
+  ],
+  "after": [
+    {
+      "elapsed_ms": 66646.20516600001,
+      "held_ms": 65734.95011300001,
+      "cohort": 21,
+      "complete": 21,
+      "missing": 0,
+      "fast_complete_before_held": 20,
+      "completed_ms": {
+        "files:{\"number\":101}": 1964.007368000006,
+        "files:{\"number\":102}": 3061.7689859999955,
+        "files:{\"number\":103}": 4085.9469490000047,
+        "files:{\"number\":104}": 5504.864623000001,
+        "files:{\"number\":105}": 6728.553589000003,
+        "files:{\"number\":106}": 7809.396258000008,
+        "files:{\"number\":107}": 8871.129943000007,
+        "files:{\"number\":108}": 10139.532387,
+        "files:{\"number\":109}": 11380.350065999999,
+        "files:{\"number\":110}": 12608.337214,
+        "files:{\"number\":111}": 13827.598563000007,
+        "files:{\"number\":112}": 14897.326385000008,
+        "files:{\"number\":113}": 15966.307820999995,
+        "files:{\"number\":114}": 17223.784168,
+        "files:{\"number\":115}": 18482.803140000004,
+        "files:{\"number\":116}": 19604.797392000008,
+        "files:{\"number\":117}": 20706.282963999998,
+        "files:{\"number\":118}": 21758.521913000004,
+        "files:{\"number\":119}": 22962.128868,
+        "files:{\"number\":120}": 24196.422776000007,
+        "files:{\"number\":100}": 66430.390691
+      },
+      "upstream_calls": {
+        "100": 1,
+        "101": 1,
+        "102": 1,
+        "103": 1,
+        "104": 1,
+        "105": 1,
+        "106": 1,
+        "107": 1,
+        "108": 1,
+        "109": 1,
+        "110": 1,
+        "111": 1,
+        "112": 1,
+        "113": 1,
+        "114": 1,
+        "115": 1,
+        "116": 1,
+        "117": 1,
+        "118": 1,
+        "119": 1,
+        "120": 1
+      },
+      "maintenance": {
+        "expiry": 2,
+        "coverage": 3,
+        "maintenance": 3
+      },
+      "repair_scheduler": {
+        "scope": "repository_instance_since_restart",
+        "since": 1793455694066,
+        "turns": 7,
+        "external_turns": 2,
+        "launches": 21,
+        "selections": 27,
+        "maintenance_continuations": 1,
+        "max_active_groups": 2,
+        "active_groups": 0,
+        "owned_members": 0,
+        "groups": [],
+        "slot_ms_by_lane": {
+          "requested": 81456
+        },
+        "quantum": {
+          "launches": 0,
+          "progress": 1,
+          "data_progress": 1,
+          "member_retries": 0,
+          "retired": 0
+        },
+        "stopped": false
+      },
+      "lease_renewal_row_updates": 0,
+      "writer_admissions": 45,
+      "application_sql_round_trips": 613,
+      "writers": [
+        {
+          "purpose": "other",
+          "wait_ms": 0,
+          "hold_ms": 389.23359000000346,
+          "sql": 1,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 0,
+          "hold_ms": 341.93437300001096,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 0,
+          "hold_ms": 425.1549079999968,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 772.015922999999,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 743,
+          "hold_ms": 371.3499609999999,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 725.4608080000035,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 696,
+          "hold_ms": 339.517010999989,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 683.432541000002,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 653,
+          "hold_ms": 526.5385179999867,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 891.277403,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 862,
+          "hold_ms": 343.1989179999946,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 878.6764220000041,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 846,
+          "hold_ms": 352.60466499999166,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 726.9249279999931,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 696,
+          "hold_ms": 346.68797800000175,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 713.3224730000074,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 683,
+          "hold_ms": 421.0409229999932,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 846.210063999999,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 816,
+          "hold_ms": 345.1026290000009,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 894.3040999999939,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 860,
+          "hold_ms": 397.5262300000031,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 828.869909999994,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 798,
+          "hold_ms": 419.99789900000906,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 798.4798489999957,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 768,
+          "hold_ms": 341.64711899998656,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 727.0698149999953,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 697,
+          "hold_ms": 339.0397459999949,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 729.1507989999955,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 699,
+          "hold_ms": 423.5686199999909,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 832.6725559999904,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 803,
+          "hold_ms": 343.4873260000022,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "wait_ms": 0,
+          "hold_ms": 211.31972099999257,
+          "sql": 1,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 210,
+          "hold_ms": 703.8482559999975,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 377,
+          "hold_ms": 442.0025459999888,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 679.2032380000019,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 650,
+          "hold_ms": 431.86607599999115,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 668.9176869999937,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 634,
+          "hold_ms": 373.0005989999918,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 677.5082059999986,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 647,
+          "hold_ms": 371.4646530000027,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 831.3510589999933,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 802,
+          "hold_ms": 343.7639269999927,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 889.6302080000023,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "wait_ms": 0,
+          "hold_ms": 223.7721469999815,
+          "sql": 1,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 694.5377300000109,
+          "sql": 23,
+          "failed": false
+        }
+      ]
+    },
+    {
+      "elapsed_ms": 66732.08625200001,
+      "held_ms": 65615.77716999999,
+      "cohort": 21,
+      "complete": 21,
+      "missing": 0,
+      "fast_complete_before_held": 20,
+      "completed_ms": {
+        "files:{\"number\":101}": 1692.249014000001,
+        "files:{\"number\":102}": 2774.081130000006,
+        "files:{\"number\":103}": 4133.84706,
+        "files:{\"number\":104}": 5181.637913999992,
+        "files:{\"number\":105}": 6207.686069999996,
+        "files:{\"number\":106}": 7335.9191839999985,
+        "files:{\"number\":107}": 8356.870257000002,
+        "files:{\"number\":108}": 9450.603319999995,
+        "files:{\"number\":109}": 10693.47318500001,
+        "files:{\"number\":110}": 11887.972053999983,
+        "files:{\"number\":111}": 12900.263716999994,
+        "files:{\"number\":112}": 13934.276557000005,
+        "files:{\"number\":113}": 15054.677678999986,
+        "files:{\"number\":114}": 16227.513728999998,
+        "files:{\"number\":115}": 17544.722141999984,
+        "files:{\"number\":116}": 18642.182891000004,
+        "files:{\"number\":117}": 19944.598234999983,
+        "files:{\"number\":118}": 21009.58243000001,
+        "files:{\"number\":119}": 22033.08238400001,
+        "files:{\"number\":120}": 23229.434632999997,
+        "files:{\"number\":100}": 66560.084646
+      },
+      "upstream_calls": {
+        "100": 1,
+        "101": 1,
+        "102": 1,
+        "103": 1,
+        "104": 1,
+        "105": 1,
+        "106": 1,
+        "107": 1,
+        "108": 1,
+        "109": 1,
+        "110": 1,
+        "111": 1,
+        "112": 1,
+        "113": 1,
+        "114": 1,
+        "115": 1,
+        "116": 1,
+        "117": 1,
+        "118": 1,
+        "119": 1,
+        "120": 1
+      },
+      "maintenance": {
+        "expiry": 2,
+        "coverage": 3,
+        "maintenance": 3
+      },
+      "repair_scheduler": {
+        "scope": "repository_instance_since_restart",
+        "since": 1793455762670,
+        "turns": 7,
+        "external_turns": 2,
+        "launches": 21,
+        "selections": 27,
+        "maintenance_continuations": 1,
+        "max_active_groups": 2,
+        "active_groups": 0,
+        "owned_members": 0,
+        "groups": [],
+        "slot_ms_by_lane": {
+          "requested": 80924
+        },
+        "quantum": {
+          "launches": 0,
+          "progress": 1,
+          "data_progress": 1,
+          "member_retries": 0,
+          "retired": 0
+        },
+        "stopped": false
+      },
+      "lease_renewal_row_updates": 0,
+      "writer_admissions": 45,
+      "application_sql_round_trips": 613,
+      "writers": [
+        {
+          "purpose": "other",
+          "wait_ms": 0,
+          "hold_ms": 269.82510799999,
+          "sql": 1,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 0,
+          "hold_ms": 344.8557800000126,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 0,
+          "hold_ms": 357.8274809999857,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 695.5719030000037,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 671,
+          "hold_ms": 394.3134359999967,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 686.4141729999974,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 663,
+          "hold_ms": 456.59404399999767,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 902.2347880000016,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 880,
+          "hold_ms": 376.83697000000393,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 669.8907590000017,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 648,
+          "hold_ms": 340.2814809999836,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 684.7347249999875,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 662,
+          "hold_ms": 452.5715940000082,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 674.3318609999842,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 651,
+          "hold_ms": 344.9349569999904,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 674.8695869999938,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 652,
+          "hold_ms": 413.9775050000171,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 678.7370779999765,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 586,
+          "hold_ms": 345.55553700000746,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 895.3705079999927,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 872,
+          "hold_ms": 352.75814999997965,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 840.2698289999971,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 815,
+          "hold_ms": 344.83257599998615,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 666.5927739999897,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 644,
+          "hold_ms": 342.91972200002056,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 689.4876800000202,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 666,
+          "hold_ms": 455.5326730000088,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 663.740856999997,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 642,
+          "hold_ms": 340.4782140000025,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 831.5322029999807,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 810,
+          "hold_ms": 453.6970830000064,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "wait_ms": 0,
+          "hold_ms": 207.54755599997588,
+          "sql": 1,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 206,
+          "hold_ms": 655.7186809999985,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 298,
+          "hold_ms": 369.94242500001565,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 726.6889249999949,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 704,
+          "hold_ms": 422.6979379999975,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 878.2568299999984,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 855,
+          "hold_ms": 378.7645670000056,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 685.1527070000011,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 662,
+          "hold_ms": 351.5449829999998,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 670.6992500000051,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 646,
+          "hold_ms": 342.58313300000736,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 852.6457299999893,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "wait_ms": 0,
+          "hold_ms": 214.73569999999017,
+          "sql": 1,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 943.5366250000079,
+          "sql": 23,
+          "failed": false
+        }
+      ]
+    },
+    {
+      "elapsed_ms": 66596.022696,
+      "held_ms": 65677.27637899999,
+      "cohort": 21,
+      "complete": 21,
+      "missing": 0,
+      "fast_complete_before_held": 20,
+      "completed_ms": {
+        "files:{\"number\":101}": 1703.5546079999767,
+        "files:{\"number\":102}": 2956.232622999989,
+        "files:{\"number\":103}": 4081.9388749999925,
+        "files:{\"number\":104}": 5102.877967000008,
+        "files:{\"number\":105}": 6249.774810999981,
+        "files:{\"number\":106}": 7602.586611000006,
+        "files:{\"number\":107}": 8636.324380000005,
+        "files:{\"number\":108}": 9711.612980999984,
+        "files:{\"number\":109}": 10883.062569000002,
+        "files:{\"number\":110}": 12074.007837999961,
+        "files:{\"number\":111}": 13421.066853999975,
+        "files:{\"number\":112}": 14743.674517999985,
+        "files:{\"number\":113}": 15970.830545999983,
+        "files:{\"number\":114}": 17031.07313199999,
+        "files:{\"number\":115}": 18455.620957000006,
+        "files:{\"number\":116}": 19612.578813,
+        "files:{\"number\":117}": 20732.684619000007,
+        "files:{\"number\":118}": 21775.441215,
+        "files:{\"number\":119}": 22769.987589999975,
+        "files:{\"number\":120}": 23782.188236999966,
+        "files:{\"number\":100}": 66368.04677700001
+      },
+      "upstream_calls": {
+        "100": 1,
+        "101": 1,
+        "102": 1,
+        "103": 1,
+        "104": 1,
+        "105": 1,
+        "106": 1,
+        "107": 1,
+        "108": 1,
+        "109": 1,
+        "110": 1,
+        "111": 1,
+        "112": 1,
+        "113": 1,
+        "114": 1,
+        "115": 1,
+        "116": 1,
+        "117": 1,
+        "118": 1,
+        "119": 1,
+        "120": 1
+      },
+      "maintenance": {
+        "expiry": 2,
+        "coverage": 3,
+        "maintenance": 3
+      },
+      "repair_scheduler": {
+        "scope": "repository_instance_since_restart",
+        "since": 1793455968651,
+        "turns": 7,
+        "external_turns": 2,
+        "launches": 21,
+        "selections": 27,
+        "maintenance_continuations": 1,
+        "max_active_groups": 2,
+        "active_groups": 0,
+        "owned_members": 0,
+        "groups": [],
+        "slot_ms_by_lane": {
+          "requested": 80352
+        },
+        "quantum": {
+          "launches": 0,
+          "progress": 1,
+          "data_progress": 1,
+          "member_retries": 0,
+          "retired": 0
+        },
+        "stopped": false
+      },
+      "lease_renewal_row_updates": 0,
+      "writer_admissions": 45,
+      "application_sql_round_trips": 613,
+      "writers": [
+        {
+          "purpose": "other",
+          "wait_ms": 0,
+          "hold_ms": 224.5569709999836,
+          "sql": 1,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 0,
+          "hold_ms": 452.0736170000164,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 0,
+          "hold_ms": 334.8167689999682,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 669.1747789999936,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 647,
+          "hold_ms": 589.6277919999557,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 662.3545819999999,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 640,
+          "hold_ms": 419.2696259999648,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 705.9277819999843,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 685,
+          "hold_ms": 363.02077399997506,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 657.29210099997,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 636,
+          "hold_ms": 482.13271999999415,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 664.1677489999565,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 642,
+          "hold_ms": 691.0132110000122,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 661.241653999954,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 639,
+          "hold_ms": 379.1075229999842,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 654.0613340000273,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 632,
+          "hold_ms": 415.3361080000177,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 659.2836629999802,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 637,
+          "hold_ms": 453.1614290000289,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 717.6678099999554,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 696,
+          "hold_ms": 363.41376700002,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 826.9336459999904,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 806,
+          "hold_ms": 673.4592490000068,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 673.0598669999745,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 651,
+          "hold_ms": 364.0381720000296,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 957.8734900000272,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 936,
+          "hold_ms": 336.52341900003375,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 890.0981369999936,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 868,
+          "hold_ms": 332.82039199996507,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 726.9607309999992,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 706,
+          "hold_ms": 342.5953570000129,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "wait_ms": 0,
+          "hold_ms": 260.1731290000025,
+          "sql": 1,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 260,
+          "hold_ms": 821.6461010000203,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 439,
+          "hold_ms": 423.7139530000277,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 732.7576920000138,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 711,
+          "hold_ms": 452.61102400004165,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 666.983423000027,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 645,
+          "hold_ms": 334.3350770000252,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 707.7844849999528,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 686,
+          "hold_ms": 338.17757100000745,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 655.7085960000404,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "wait_ms": 634,
+          "hold_ms": 349.28878599999007,
+          "sql": 7,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 662.398450000037,
+          "sql": 22,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "wait_ms": 0,
+          "hold_ms": 258.97079900000244,
+          "sql": 1,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 690.4045860000188,
+          "sql": 23,
+          "failed": false
+        }
+      ]
+    }
+  ]
+}

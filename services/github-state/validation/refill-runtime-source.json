@@ -1,0 +1,32 @@
+{
+  "head": "566c2d36624940ebba804ca0c22e65708178da0f",
+  "sha256": "f103f98e20a2373a907308f05a9d2edad32c281ec98d0f31a99b8179b5c1d282",
+  "files": [
+    "../../tauceti_tools/github_catalog.json",
+    "package-lock.json",
+    "src/activity_landings.ts",
+    "src/catalog.ts",
+    "src/index.ts",
+    "src/ingress.ts",
+    "src/installation.ts",
+    "src/migration.ts",
+    "src/migration_control.ts",
+    "src/migration_target.ts",
+    "src/monitoring.ts",
+    "src/normalize.ts",
+    "src/protocol.ts",
+    "src/provider_monitoring.ts",
+    "src/queue_monitoring.ts",
+    "src/reconciliation.ts",
+    "src/repair_coordinator.ts",
+    "src/repair_io.ts",
+    "src/repository.ts",
+    "src/repository_health.ts",
+    "src/repository_store.ts",
+    "src/retention.ts",
+    "src/runner-capacity.ts",
+    "src/storage.ts",
+    "src/survey.ts"
+  ],
+  "at": "2026-10-31T14:08:28.487894+00:00"
+}

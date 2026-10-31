@@ -1,0 +1,1227 @@
+{
+  "baseline": "2732eb5ce51c1d49d2ad30a8a2b9bfd14b4951d9",
+  "implementation_sha256": "0567bdfbeeade48ea84d4b8f1c8ab805351d91bbf5be899ddb93f3b17d7442f1",
+  "source_files": [
+    "../../tauceti_tools/github_catalog.json",
+    "package-lock.json",
+    "src/activity_landings.ts",
+    "src/catalog.ts",
+    "src/index.ts",
+    "src/ingress.ts",
+    "src/installation.ts",
+    "src/migration.ts",
+    "src/migration_control.ts",
+    "src/migration_target.ts",
+    "src/monitoring.ts",
+    "src/normalize.ts",
+    "src/protocol.ts",
+    "src/provider_monitoring.ts",
+    "src/queue_monitoring.ts",
+    "src/reconciliation.ts",
+    "src/repair_coordinator.ts",
+    "src/repair_io.ts",
+    "src/repository.ts",
+    "src/repository_health.ts",
+    "src/repository_store.ts",
+    "src/retention.ts",
+    "src/runner-capacity.ts",
+    "src/storage.ts",
+    "src/survey.ts"
+  ],
+  "publication": {
+    "burst": {
+      "elapsed_ms": {
+        "before_median": 146811.054335,
+        "after_median": 138258.281731,
+        "before_range": [
+          144452.32242500002,
+          147075.46858100002
+        ],
+        "after_range": [
+          137466.20790500008,
+          142313.98756699997
+        ],
+        "change_percent": -5.825700689052948
+      },
+      "transactions": {
+        "before_median": 83,
+        "after_median": 69,
+        "before_range": [
+          83,
+          83
+        ],
+        "after_range": [
+          69,
+          69
+        ],
+        "change_percent": -16.867469879518072
+      },
+      "application_sql_round_trips": {
+        "before_median": 5217,
+        "after_median": 5197,
+        "before_range": [
+          5217,
+          5217
+        ],
+        "after_range": [
+          5197,
+          5197
+        ],
+        "change_percent": -0.3833620854897468
+      },
+      "standalone_read_http_round_trips": {
+        "before_median": 13,
+        "after_median": 17,
+        "before_range": [
+          13,
+          13
+        ],
+        "after_range": [
+          17,
+          17
+        ],
+        "change_percent": 30.76923076923077
+      },
+      "total_application_round_trips": {
+        "before_median": 5230,
+        "after_median": 5214,
+        "before_range": [
+          5230,
+          5230
+        ],
+        "after_range": [
+          5214,
+          5214
+        ],
+        "change_percent": -0.3059273422562181
+      },
+      "publication_transactions": {
+        "before_median": 62,
+        "after_median": 56,
+        "before_range": [
+          62,
+          62
+        ],
+        "after_range": [
+          56,
+          56
+        ],
+        "change_percent": -9.677419354838712
+      },
+      "publication_max_hold_ms": {
+        "before_median": 3412.058186999988,
+        "after_median": 3238.045342999976,
+        "before_range": [
+          3232.38175099995,
+          3585.3648480000047
+        ],
+        "after_range": [
+          3179.9514160000253,
+          3295.694167999958
+        ],
+        "change_percent": -5.099937763752216
+      },
+      "ingress_p95_ms": {
+        "before_median": 7560.329447000055,
+        "after_median": 7847.0001250000205,
+        "before_range": [
+          7498.54943000013,
+          8152.213721999999
+        ],
+        "after_range": [
+          7682.228342999995,
+          8016.219858000055
+        ],
+        "change_percent": 3.791774948560178
+      },
+      "ingress_admission_p95_ms": {
+        "before_median": 6612,
+        "after_median": 6770,
+        "before_range": [
+          6291,
+          6990
+        ],
+        "after_range": [
+          6446,
+          6972
+        ],
+        "change_percent": 2.3895946763460296
+      },
+      "candidate_chunks": [
+        {
+          "scope": "repository_instance_since_restart",
+          "since": 1793453830549,
+          "admissions": 56,
+          "members": 400,
+          "queued_work_yields": 4,
+          "max_members": 8
+        },
+        {
+          "scope": "repository_instance_since_restart",
+          "since": 1793454136781,
+          "admissions": 56,
+          "members": 400,
+          "queued_work_yields": 4,
+          "max_members": 8
+        },
+        {
+          "scope": "repository_instance_since_restart",
+          "since": 1793455084522,
+          "admissions": 56,
+          "members": 400,
+          "queued_work_yields": 4,
+          "max_members": 8
+        }
+      ],
+      "candidate_renewal_updates": [
+        720,
+        736,
+        704
+      ],
+      "claim_and_cleanup_admissions": {
+        "before": [
+          8,
+          8,
+          8
+        ],
+        "after": [
+          4,
+          4,
+          4
+        ]
+      }
+    },
+    "steady": {
+      "elapsed_ms": {
+        "before_median": 146903.59306799993,
+        "after_median": 141605.48035899992,
+        "before_range": [
+          146712.98279599985,
+          149097.71120500003
+        ],
+        "after_range": [
+          141347.80108000006,
+          142735.064198
+        ],
+        "change_percent": -3.606523569881359
+      },
+      "transactions": {
+        "before_median": 87,
+        "after_median": 73,
+        "before_range": [
+          87,
+          87
+        ],
+        "after_range": [
+          73,
+          73
+        ],
+        "change_percent": -16.09195402298851
+      },
+      "application_sql_round_trips": {
+        "before_median": 5233,
+        "after_median": 5213,
+        "before_range": [
+          5233,
+          5233
+        ],
+        "after_range": [
+          5213,
+          5214
+        ],
+        "change_percent": -0.3821899484043545
+      },
+      "standalone_read_http_round_trips": {
+        "before_median": 13,
+        "after_median": 17,
+        "before_range": [
+          13,
+          13
+        ],
+        "after_range": [
+          17,
+          17
+        ],
+        "change_percent": 30.76923076923077
+      },
+      "total_application_round_trips": {
+        "before_median": 5246,
+        "after_median": 5230,
+        "before_range": [
+          5246,
+          5246
+        ],
+        "after_range": [
+          5230,
+          5231
+        ],
+        "change_percent": -0.3049942813572293
+      },
+      "publication_transactions": {
+        "before_median": 66,
+        "after_median": 60,
+        "before_range": [
+          66,
+          66
+        ],
+        "after_range": [
+          60,
+          60
+        ],
+        "change_percent": -9.090909090909093
+      },
+      "publication_max_hold_ms": {
+        "before_median": 3322.602779000066,
+        "after_median": 3189.2056259999517,
+        "before_range": [
+          3281.177028000122,
+          3362.977983000019
+        ],
+        "after_range": [
+          3188.41190200008,
+          3238.369767999975
+        ],
+        "change_percent": -4.014839024490923
+      },
+      "ingress_p95_ms": {
+        "before_median": 5969.308798999991,
+        "after_median": 5982.740322999889,
+        "before_range": [
+          5616.687602999853,
+          6254.533033000014
+        ],
+        "after_range": [
+          5720.498684999999,
+          5992.030635999981
+        ],
+        "change_percent": 0.22500970300192158
+      },
+      "ingress_admission_p95_ms": {
+        "before_median": 5376,
+        "after_median": 5376,
+        "before_range": [
+          5065,
+          5567
+        ],
+        "after_range": [
+          5122,
+          5424
+        ],
+        "change_percent": 0.0
+      },
+      "candidate_chunks": [
+        {
+          "scope": "repository_instance_since_restart",
+          "since": 1793453981799,
+          "admissions": 60,
+          "members": 400,
+          "queued_work_yields": 8,
+          "max_members": 8
+        },
+        {
+          "scope": "repository_instance_since_restart",
+          "since": 1793454294101,
+          "admissions": 60,
+          "members": 400,
+          "queued_work_yields": 8,
+          "max_members": 8
+        },
+        {
+          "scope": "repository_instance_since_restart",
+          "since": 1793455234772,
+          "admissions": 60,
+          "members": 400,
+          "queued_work_yields": 8,
+          "max_members": 8
+        }
+      ],
+      "candidate_renewal_updates": [
+        736,
+        768,
+        760
+      ],
+      "claim_and_cleanup_admissions": {
+        "before": [
+          8,
+          8,
+          8
+        ],
+        "after": [
+          4,
+          4,
+          4
+        ]
+      }
+    },
+    "full100": {
+      "elapsed_ms": {
+        "before_median": 34326.44890099997,
+        "after_median": 33212.52349300007,
+        "before_range": [
+          34062.86679899995,
+          34511.03250900004
+        ],
+        "after_range": [
+          32954.43816499994,
+          34839.86759499996
+        ],
+        "change_percent": -3.2450936338114578
+      },
+      "transactions": {
+        "before_median": 18,
+        "after_median": 15,
+        "before_range": [
+          18,
+          18
+        ],
+        "after_range": [
+          15,
+          15
+        ],
+        "change_percent": -16.666666666666664
+      },
+      "application_sql_round_trips": {
+        "before_median": 1266,
+        "after_median": 1264,
+        "before_range": [
+          1266,
+          1266
+        ],
+        "after_range": [
+          1264,
+          1264
+        ],
+        "change_percent": -0.15797788309637184
+      },
+      "standalone_read_http_round_trips": {
+        "before_median": 2,
+        "after_median": 14,
+        "before_range": [
+          2,
+          2
+        ],
+        "after_range": [
+          14,
+          14
+        ],
+        "change_percent": 600.0
+      },
+      "total_application_round_trips": {
+        "before_median": 1268,
+        "after_median": 1278,
+        "before_range": [
+          1268,
+          1268
+        ],
+        "after_range": [
+          1278,
+          1278
+        ],
+        "change_percent": 0.7886435331230235
+      },
+      "publication_transactions": {
+        "before_median": 13,
+        "after_median": 13,
+        "before_range": [
+          13,
+          13
+        ],
+        "after_range": [
+          13,
+          13
+        ],
+        "change_percent": 0.0
+      },
+      "publication_max_hold_ms": {
+        "before_median": 3110.0121939999517,
+        "after_median": 3242.44815800013,
+        "before_range": [
+          2993.3817330000456,
+          3268.9583509999793
+        ],
+        "after_range": [
+          3076.276810000185,
+          3245.3988739999477
+        ],
+        "change_percent": 4.258374428746059
+      },
+      "ingress_p95_ms": {
+        "before_median": null,
+        "after_median": null,
+        "before_range": null,
+        "after_range": null,
+        "change_percent": null
+      },
+      "ingress_admission_p95_ms": {
+        "before_median": null,
+        "after_median": null,
+        "before_range": null,
+        "after_range": null,
+        "change_percent": null
+      },
+      "candidate_chunks": [
+        {
+          "scope": "repository_instance_since_restart",
+          "since": 1793455428305,
+          "admissions": 13,
+          "members": 100,
+          "queued_work_yields": 0,
+          "max_members": 8
+        },
+        {
+          "scope": "repository_instance_since_restart",
+          "since": 1793455468773,
+          "admissions": 13,
+          "members": 100,
+          "queued_work_yields": 0,
+          "max_members": 8
+        },
+        {
+          "scope": "repository_instance_since_restart",
+          "since": 1793455585366,
+          "admissions": 13,
+          "members": 100,
+          "queued_work_yields": 0,
+          "max_members": 8
+        }
+      ],
+      "candidate_renewal_updates": [
+        4,
+        4,
+        4
+      ],
+      "claim_and_cleanup_admissions": {
+        "before": [
+          3,
+          3,
+          3
+        ],
+        "after": [
+          1,
+          1,
+          1
+        ]
+      }
+    }
+  },
+  "refill": {
+    "elapsed_ms": {
+      "before_median": 67099.02647799999,
+      "after_median": 66646.20516600001,
+      "before_range": [
+        67058.22794500002,
+        67448.134448
+      ],
+      "after_range": [
+        66596.022696,
+        66732.08625200001
+      ],
+      "change_percent": -0.6748552635833516
+    },
+    "held_ms": {
+      "before_median": 65672.707317,
+      "after_median": 65677.27637899999,
+      "before_range": [
+        65652.080913,
+        65678.34383600001
+      ],
+      "after_range": [
+        65615.77716999999,
+        65734.95011300001
+      ],
+      "change_percent": 0.006957322435230395
+    },
+    "complete": {
+      "before_median": 4,
+      "after_median": 21,
+      "before_range": [
+        4,
+        4
+      ],
+      "after_range": [
+        21,
+        21
+      ],
+      "change_percent": 425.0
+    },
+    "missing": {
+      "before_median": 17,
+      "after_median": 0,
+      "before_range": [
+        17,
+        17
+      ],
+      "after_range": [
+        0,
+        0
+      ],
+      "change_percent": -100.0
+    },
+    "fast_complete_before_held": {
+      "before_median": 3,
+      "after_median": 20,
+      "before_range": [
+        3,
+        3
+      ],
+      "after_range": [
+        20,
+        20
+      ],
+      "change_percent": 566.6666666666667
+    },
+    "writer_admissions": {
+      "before_median": 13,
+      "after_median": 45,
+      "before_range": [
+        13,
+        13
+      ],
+      "after_range": [
+        45,
+        45
+      ],
+      "change_percent": 246.15384615384616
+    },
+    "application_sql_round_trips": {
+      "before_median": 121,
+      "after_median": 613,
+      "before_range": [
+        121,
+        121
+      ],
+      "after_range": [
+        613,
+        613
+      ],
+      "change_percent": 406.61157024793386
+    }
+  },
+  "refill_maintenance": {
+    "before": [
+      {
+        "expiry": 1,
+        "coverage": 1,
+        "maintenance": 1
+      },
+      {
+        "expiry": 1,
+        "coverage": 1,
+        "maintenance": 1
+      },
+      {
+        "expiry": 1,
+        "coverage": 1,
+        "maintenance": 1
+      }
+    ],
+    "after": [
+      {
+        "expiry": 2,
+        "coverage": 3,
+        "maintenance": 3
+      },
+      {
+        "expiry": 2,
+        "coverage": 3,
+        "maintenance": 3
+      },
+      {
+        "expiry": 2,
+        "coverage": 3,
+        "maintenance": 3
+      }
+    ]
+  },
+  "shared": {
+    "elapsed_ms": {
+      "before_median": 70843.41520199999,
+      "after_median": 20821.915676000004,
+      "before_range": [
+        70603.62772399999,
+        90000.30169800002
+      ],
+      "after_range": [
+        20694.143325000012,
+        20963.511411
+      ],
+      "change_percent": -70.60853769312328
+    },
+    "runner_ms": {
+      "before_median": 3611.6159629999893,
+      "after_median": 3610.0961569999927,
+      "before_range": [
+        3609.555712000001,
+        3614.9849520000002
+      ],
+      "after_range": [
+        3607.785214000003,
+        3611.6179330000014
+      ],
+      "change_percent": -0.04208105223718617
+    },
+    "runner_requests": {
+      "before_median": 40,
+      "after_median": 40,
+      "before_range": [
+        40,
+        40
+      ],
+      "after_range": [
+        40,
+        40
+      ],
+      "change_percent": 0.0
+    }
+  },
+  "shared_per_repository": {
+    "before": [
+      {
+        "completions": [
+          16,
+          16
+        ],
+        "admissions": [
+          60,
+          61
+        ],
+        "completion_ms": [
+          [
+            5015.3110369999995,
+            6235.258936999999,
+            7635.435550999999,
+            8501.512431,
+            10514.426512,
+            11604.159400999999,
+            12997.780162000001,
+            13998.429290999999,
+            61872.20578599999,
+            63033.099684999994,
+            64405.491177,
+            65300.993180000005,
+            67317.940965,
+            68446.781155,
+            69729.331295,
+            70603.136886
+          ],
+          [
+            3620.55762,
+            5663.349833999999,
+            6723.050207999999,
+            8102.190338999999,
+            9019.217671999999,
+            10934.617128,
+            11930.162323999999,
+            13130.406626999998,
+            14052.939607999999,
+            61794.15263,
+            62926.858949999994,
+            64331.448896,
+            65198.43524199999,
+            67288.511263,
+            68297.316026,
+            69596.396903
+          ]
+        ],
+        "upstream_repairs": [
+          16,
+          16
+        ],
+        "scheduler": [
+          null,
+          null
+        ],
+        "notifications": [
+          0,
+          0
+        ],
+        "capacity_wakes": null
+      },
+      {
+        "completions": [
+          16,
+          16
+        ],
+        "admissions": [
+          60,
+          61
+        ],
+        "completion_ms": [
+          [
+            5364.9115929999825,
+            6522.491391999982,
+            7818.9396470000065,
+            8855.457776999989,
+            10811.31809499998,
+            11807.276740999994,
+            13265.044404,
+            14314.866880000001,
+            61805.976764999985,
+            62984.876906000005,
+            64332.97750299999,
+            65211.653214999984,
+            67340.24816999999,
+            68536.005582,
+            69792.293364,
+            70842.94201099999
+          ],
+          [
+            3685.9662319999916,
+            5445.941149000006,
+            6462.719426999989,
+            7924.590198999984,
+            8795.777927999981,
+            10783.296199999997,
+            11793.343092999989,
+            13333.326099999991,
+            14218.175984999994,
+            61589.810110000006,
+            62894.006676000005,
+            64255.611625000005,
+            65141.854269999996,
+            66975.10635,
+            68227.83210300001,
+            69449.27342599999
+          ]
+        ],
+        "upstream_repairs": [
+          16,
+          16
+        ],
+        "scheduler": [
+          null,
+          null
+        ],
+        "notifications": [
+          0,
+          0
+        ],
+        "capacity_wakes": null
+      },
+      {
+        "completions": [
+          16,
+          13
+        ],
+        "admissions": [
+          61,
+          50
+        ],
+        "completion_ms": [
+          [
+            4208.3754980000085,
+            5996.55978499999,
+            7268.501535999996,
+            8611.204467000003,
+            9583.648044000001,
+            11425.665848000004,
+            12504.411984000006,
+            13894.455079000007,
+            14979.570334999997,
+            62200.29262699999,
+            63495.032019000006,
+            64866.58908799998,
+            65753.882656,
+            67658.59232299999,
+            68826.870333,
+            69956.44326599999
+          ],
+          [
+            4135.9587649999885,
+            6083.286954999989,
+            7333.933729000011,
+            8844.056458999985,
+            9864.833992,
+            61909.93536699997,
+            63012.268141999986,
+            64399.38132299998,
+            65337.44467799997,
+            67176.24704700001,
+            68178.94860899998,
+            69375.60445199997,
+            70439.35111700001
+          ]
+        ],
+        "upstream_repairs": [
+          16,
+          13
+        ],
+        "scheduler": [
+          null,
+          null
+        ],
+        "notifications": [
+          0,
+          0
+        ],
+        "capacity_wakes": null
+      }
+    ],
+    "after": [
+      {
+        "completions": [
+          16,
+          16
+        ],
+        "admissions": [
+          38,
+          40
+        ],
+        "completion_ms": [
+          [
+            3565.4761560000043,
+            4682.422313000003,
+            5673.777789999993,
+            6783.292254,
+            7912.998781000002,
+            9198.418605999992,
+            10447.801158000002,
+            11541.499205,
+            12662.349768999993,
+            13674.329589,
+            14671.497170999995,
+            15658.326872000005,
+            16819.715889999992,
+            17795.852526000002,
+            19160.330516999995,
+            19812.335129
+          ],
+          [
+            4154.737498999995,
+            5176.777736999997,
+            6263.849463999999,
+            7263.794068999996,
+            8529.467852000002,
+            9755.837732999993,
+            10812.811849000005,
+            11877.080124999993,
+            13102.580296999993,
+            14130.362425,
+            15305.538262000002,
+            16435.274594000002,
+            17540.253509000002,
+            19044.039137999993,
+            20131.724025000003,
+            20821.899351999993
+          ]
+        ],
+        "upstream_repairs": [
+          16,
+          16
+        ],
+        "scheduler": [
+          {
+            "scope": "repository_instance_since_restart",
+            "since": 1793456113579,
+            "turns": 9,
+            "external_turns": 1,
+            "launches": 18,
+            "selections": 26,
+            "maintenance_continuations": 1,
+            "max_active_groups": 2,
+            "active_groups": 0,
+            "owned_members": 0,
+            "groups": [],
+            "slot_ms_by_lane": {
+              "requested": 27771
+            },
+            "quantum": {
+              "launches": 2,
+              "progress": 3,
+              "data_progress": 3,
+              "member_retries": 0,
+              "retired": 0
+            },
+            "stopped": false
+          },
+          {
+            "scope": "repository_instance_since_restart",
+            "since": 1793456113579,
+            "turns": 8,
+            "external_turns": 1,
+            "launches": 19,
+            "selections": 26,
+            "maintenance_continuations": 1,
+            "max_active_groups": 2,
+            "active_groups": 1,
+            "owned_members": 1,
+            "groups": [
+              {
+                "lane": "requested",
+                "age_ms": 1354,
+                "remaining_members": 1,
+                "pending_hops": 0,
+                "expired_hops": 0
+              }
+            ],
+            "slot_ms_by_lane": {
+              "requested": 28666
+            },
+            "quantum": {
+              "launches": 3,
+              "progress": 3,
+              "data_progress": 3,
+              "member_retries": 0,
+              "retired": 0
+            },
+            "stopped": false
+          }
+        ],
+        "notifications": [
+          1,
+          2
+        ],
+        "capacity_wakes": {
+          "scope": "installation_instance_since_restart",
+          "repository": 3,
+          "runner": 1
+        }
+      },
+      {
+        "completions": [
+          16,
+          16
+        ],
+        "admissions": [
+          40,
+          38
+        ],
+        "completion_ms": [
+          [
+            4208.307857000007,
+            5309.267487000005,
+            6358.106652000002,
+            7347.429430000004,
+            8489.57024700001,
+            9555.134576000011,
+            10800.83168100001,
+            11987.220438000004,
+            13077.914147000003,
+            14318.98487700001,
+            15525.856798000008,
+            16524.443796000007,
+            17559.713804,
+            19262.77255600001,
+            20312.869497000007,
+            20963.49186200001
+          ],
+          [
+            3380.832567999998,
+            4582.400237000009,
+            5664.45029600001,
+            6810.709696000005,
+            7811.189888000008,
+            8959.396042000008,
+            10120.464768000005,
+            11287.469641000003,
+            12377.244988000006,
+            13398.52438300001,
+            14489.12228000001,
+            15574.55335100001,
+            16678.418537999998,
+            17596.462981999997,
+            19128.90460000001,
+            19948.036427
+          ]
+        ],
+        "upstream_repairs": [
+          16,
+          16
+        ],
+        "scheduler": [
+          {
+            "scope": "repository_instance_since_restart",
+            "since": 1793456137774,
+            "turns": 8,
+            "external_turns": 1,
+            "launches": 19,
+            "selections": 26,
+            "maintenance_continuations": 1,
+            "max_active_groups": 2,
+            "active_groups": 1,
+            "owned_members": 1,
+            "groups": [
+              {
+                "lane": "requested",
+                "age_ms": 1367,
+                "remaining_members": 1,
+                "pending_hops": 0,
+                "expired_hops": 0
+              }
+            ],
+            "slot_ms_by_lane": {
+              "requested": 28859
+            },
+            "quantum": {
+              "launches": 3,
+              "progress": 3,
+              "data_progress": 3,
+              "member_retries": 0,
+              "retired": 0
+            },
+            "stopped": false
+          },
+          {
+            "scope": "repository_instance_since_restart",
+            "since": 1793456137774,
+            "turns": 9,
+            "external_turns": 1,
+            "launches": 18,
+            "selections": 26,
+            "maintenance_continuations": 1,
+            "max_active_groups": 2,
+            "active_groups": 0,
+            "owned_members": 0,
+            "groups": [],
+            "slot_ms_by_lane": {
+              "requested": 27729
+            },
+            "quantum": {
+              "launches": 2,
+              "progress": 3,
+              "data_progress": 3,
+              "member_retries": 0,
+              "retired": 0
+            },
+            "stopped": false
+          }
+        ],
+        "notifications": [
+          2,
+          1
+        ],
+        "capacity_wakes": {
+          "scope": "installation_instance_since_restart",
+          "repository": 3,
+          "runner": 1
+        }
+      },
+      {
+        "completions": [
+          16,
+          16
+        ],
+        "admissions": [
+          40,
+          38
+        ],
+        "completion_ms": [
+          [
+            4213.293134999985,
+            5269.176199999987,
+            6324.313970000017,
+            7404.658104000031,
+            8555.36156400002,
+            9712.295767000003,
+            10879.297680000018,
+            12014.968192,
+            13139.139744999993,
+            14222.917688000016,
+            15226.760445000022,
+            16442.320106,
+            17454.249687000003,
+            18888.637800999975,
+            19971.022860000026,
+            20694.10749199998
+          ],
+          [
+            3397.935055000009,
+            4562.867048999993,
+            5548.071725999995,
+            6553.684996000025,
+            7648.802591999993,
+            8675.92236299999,
+            9722.403025000007,
+            10792.549047000008,
+            11868.355487000023,
+            12921.75351000001,
+            13981.679627000005,
+            14976.471560999984,
+            16043.483068000001,
+            17365.399189000018,
+            18744.036947000015,
+            19566.068738
+          ]
+        ],
+        "upstream_repairs": [
+          16,
+          16
+        ],
+        "scheduler": [
+          {
+            "scope": "repository_instance_since_restart",
+            "since": 1793456330571,
+            "turns": 8,
+            "external_turns": 1,
+            "launches": 19,
+            "selections": 26,
+            "maintenance_continuations": 1,
+            "max_active_groups": 2,
+            "active_groups": 1,
+            "owned_members": 1,
+            "groups": [
+              {
+                "lane": "requested",
+                "age_ms": 1430,
+                "remaining_members": 1,
+                "pending_hops": 0,
+                "expired_hops": 0
+              }
+            ],
+            "slot_ms_by_lane": {
+              "requested": 28425
+            },
+            "quantum": {
+              "launches": 3,
+              "progress": 3,
+              "data_progress": 3,
+              "member_retries": 0,
+              "retired": 0
+            },
+            "stopped": false
+          },
+          {
+            "scope": "repository_instance_since_restart",
+            "since": 1793456330571,
+            "turns": 9,
+            "external_turns": 1,
+            "launches": 18,
+            "selections": 26,
+            "maintenance_continuations": 1,
+            "max_active_groups": 2,
+            "active_groups": 0,
+            "owned_members": 0,
+            "groups": [],
+            "slot_ms_by_lane": {
+              "requested": 27238
+            },
+            "quantum": {
+              "launches": 2,
+              "progress": 3,
+              "data_progress": 3,
+              "member_retries": 0,
+              "retired": 0
+            },
+            "stopped": false
+          }
+        ],
+        "notifications": [
+          2,
+          1
+        ],
+        "capacity_wakes": {
+          "scope": "installation_instance_since_restart",
+          "repository": 3,
+          "runner": 1
+        }
+      }
+    ]
+  },
+  "limits": [
+    "This analyzer requires all trial files but does not prove process cleanup; also verify the pipeline exited0.",
+    "Writer and stored-read application round trips are counted separately; connection/setup/commit costs are timed in writer holds.",
+    "Benchmark upstreams are fixtures. Warm issue-comment ingress is not the production event mix.",
+    "Fixed observation horizons retain incomplete baseline work; compare completions as well as elapsed time.",
+    "No performance result is a runtime admission rule. Production cohort, arrival rates, parking/lag, clients and all7workers still require observation."
+  ]
+}

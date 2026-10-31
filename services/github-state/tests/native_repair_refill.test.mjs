@@ -21,23 +21,25 @@ test('native SQLite excludes 400 active keys and renews only 399 still-owned lea
     return Response.json({results:jobs.map(()=>({api:'graphql',data:[]}))});
    }})}};
    await this.runAlarm();await started;
-   const c=this.repairCoordinator,owned=c.owned.size,clock=Date.now;let selection,blocked,renewed;
+   const c=this.repairCoordinator,owned=c.owned.size,clock=Date.now;let selection,blocked,renewed,renewalStatements=0;
    try{
     Date.now=()=>clock()+70000;
     const q={repository:'org/repo',operation:'files',args:{number:999}},key='files:{"number":999}';
     await this.enqueue(q,5);c.current.paths.set(key,new Set(['auto']));blocked=!(await this.nextJob());c.current.paths.delete(key);
     selection=JSON.parse((await this.nextJob()).query).args.number;
     await this.store.exec('UPDATE jobs SET lease_id=?,lease_until=? WHERE key=?','replacement',Date.now()+300000,'issue_comments:{"number":100}');
-    await this.atomic(async()=>{},'repair');renewed=this.renewedLeases;
+    await this.atomic(async state=>{
+     const exec=state.store.exec.bind(state.store);state.store.exec=(sql,...args)=>{if(sql.startsWith('UPDATE jobs SET lease_until='))renewalStatements++;return exec(sql,...args);};
+    },'repair');renewed=this.renewedLeases;
     await this.runAlarm();await this.store.exec('DELETE FROM jobs WHERE key=?',key);
    }finally{Date.now=clock;release();}
    ${nativeDrainRepairs}
-   return Response.json({owned,calls,selection,blocked,renewed,complete:(await this.store.exec("SELECT COUNT(*) n FROM collections WHERE operation='issue_comments' AND complete=1")).one().n,replacement:(await this.store.exec('SELECT lease_id FROM jobs WHERE key=?','issue_comments:{"number":100}')).one().lease_id});
+   return Response.json({owned,calls,selection,blocked,renewed,renewalStatements,complete:(await this.store.exec("SELECT COUNT(*) n FROM collections WHERE operation='issue_comments' AND complete=1")).one().n,replacement:(await this.store.exec('SELECT lease_id FROM jobs WHERE key=?','issue_comments:{"number":100}')).one().lease_id});
   }return super.fetch(req);
  }`});
  try{
   const r=await send(await configured(mf),'/fixture/owned-400',{});assert.equal(r.status,200);
-  assert.deepEqual(await r.json(),{owned:400,calls:4,selection:999,blocked:true,renewed:399,complete:399,replacement:'replacement'});
+  assert.deepEqual(await r.json(),{owned:400,calls:4,selection:999,blocked:true,renewed:399,renewalStatements:1,complete:399,replacement:'replacement'});
  }finally{await mf.dispose();}
 });
 
