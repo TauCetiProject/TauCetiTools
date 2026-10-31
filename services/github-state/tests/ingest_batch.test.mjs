@@ -48,3 +48,13 @@ test('bulk event duplicates preserve monotonic dirty generations and last priori
   const row=(await f.store.exec('SELECT * FROM jobs')).one();assert.equal(row.generation,2);assert.equal(row.dirty,1);assert.equal(row.priority,0);assert.equal(row.lane,'active');
  }finally{await f.close();}
 });
+
+test('event scheduling preserves an earlier SQLite alarm for unrelated work',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
+ const f=await fixture();try{
+  const q={repository:'org/repo',operation:'review_threads',args:{number:7}},now=Date.now(),earlier=now+10;
+  await f.state.enqueue(q,20,now+3600000);
+  await f.state.ctx.storage.setAlarm(earlier);
+  await f.state.atomic(state=>state.enqueueIngest([{q,priority:2}]));
+  assert.equal(await f.state.ctx.storage.getAlarm(),earlier);
+ }finally{await f.close();}
+});

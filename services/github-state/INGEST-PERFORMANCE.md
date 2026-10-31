@@ -9,13 +9,13 @@ transaction setup, application and commit. No GitHub request is made.
 
 | Workload | Application SQL round trips | Delivery elapsed |
 | --- | ---: | ---: |
-| pull_request | 41 → 13 | 1373 → 540 ms |
-| status | 13 → 10 | 534 → 555 ms |
-| issue_comment | 21 → 16 | 712 → 566 ms |
-| pull_request_review_comment | 25 → 16 | 785 → 684 ms |
-| pull_request_review | 16 → 6 | 694 → 374 ms |
-| push | 30 → 12 | 1027 → 622 ms |
-| All six deliveries | 146 → 73 | 5059 → 3474 ms |
+| pull_request | 41 → 13 | 1379 → 656 ms |
+| status | 13 → 10 | 584 → 458 ms |
+| issue_comment | 21 → 16 | 676 → 594 ms |
+| pull_request_review_comment | 25 → 16 | 814 → 550 ms |
+| pull_request_review | 16 → 6 | 559 → 368 ms |
+| push | 30 → 12 | 1077 → 472 ms |
+| All six deliveries | 146 → 73 | 5193 → 3104 ms |
 
 Each version commits six deliveries in six transactions per trial. A comparison
 of all durable job keys, priorities, dirty generations, lanes, attempts and wait
@@ -24,12 +24,20 @@ scheduling with the retained individual enqueue operation over 64 combinations
 of coverage, demand, dirty and missing-only requests, existing retries and active
 leases. Duplicate requests retain cumulative dirty generations and last priority.
 
+A second workload submits eight independent review events concurrently through
+the normal per-repository writer. Median burst elapsed is
+5005 → 3028 ms, with
+128 → 48 SQL round trips and eight committed deliveries in
+eight transactions in both versions. Durable repair state is again identical.
+This isolates burst admission and scheduling; it is not a replay of all live
+webhook shapes at production arrival rates.
+
 Application round trips are counted below the buffering/cache layer, after
 transaction setup and through the final buffer flush. The measurement includes
 SQL I/O, not just CPU. Individual event timings can vary with connection/host load;
 this small isolated workload does not establish production ingestion or backlog
-drainage rates. It does not exercise burst queue contention or large-history
-publication; these remain explicit production and subsequent-phase checks.
+drainage rates. It does not exercise large-history publication or the Cloudflare queue delivery
+path; these remain explicit production and subsequent-phase checks.
 
 Run from `services/github-state` with isolated test application/migration URLs in
 `TEST_POSTGRES_URL` and `TEST_POSTGRES_MIGRATION_URL` (usernames containing `_test_`):

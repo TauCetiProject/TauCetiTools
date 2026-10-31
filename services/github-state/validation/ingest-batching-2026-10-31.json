@@ -1,49 +1,49 @@
 {
   "baseline": "6dc9cd35997ae7fd582a9cfdf4234f3d92f9d7ed",
-  "implementation_sha256": "528935d869e429a923cb1a8fc80bde2353507bfe8241c970ee67769dd7880efc",
+  "implementation_sha256": "996c9611872ac61ae784806a74f0497c67504bba43dfd5e8bf6b3499d3059f55",
   "trials": 3,
-  "scope": "isolated real PostgreSQL; six synthetic webhook deliveries per trial; full baseline source and store; identical installed dependencies; actual application SQL round trips instrumented below buffering; preparation/read and admission/commit latency included; no GitHub requests; not production throughput",
+  "scope": "isolated real PostgreSQL; six serial synthetic webhook deliveries plus eight concurrent independent reviews per trial; full baseline source and store; identical installed dependencies; actual application SQL round trips instrumented below buffering; preparation/read and admission/commit latency included; no GitHub requests; not production throughput",
   "before": [
     {
       "events": [
         {
           "event": "pull_request",
-          "elapsed_ms": 1259.369792,
+          "elapsed_ms": 1353.146621,
           "sql_round_trips": 41,
           "transactions": 1
         },
         {
           "event": "status",
-          "elapsed_ms": 671.532232,
+          "elapsed_ms": 583.8425940000002,
           "sql_round_trips": 13,
           "transactions": 1
         },
         {
           "event": "issue_comment",
-          "elapsed_ms": 1579.3294109999997,
+          "elapsed_ms": 664.4735470000005,
           "sql_round_trips": 21,
           "transactions": 1
         },
         {
           "event": "pull_request_review_comment",
-          "elapsed_ms": 1003.5221820000006,
+          "elapsed_ms": 813.9534119999998,
           "sql_round_trips": 25,
           "transactions": 1
         },
         {
           "event": "pull_request_review",
-          "elapsed_ms": 693.8500600000007,
+          "elapsed_ms": 595.312793,
           "sql_round_trips": 16,
           "transactions": 1
         },
         {
           "event": "push",
-          "elapsed_ms": 1160.7549350000008,
+          "elapsed_ms": 1101.2119979999998,
           "sql_round_trips": 30,
           "transactions": 1
         }
       ],
-      "total_ms": 6368.358612000002,
+      "total_ms": 5112.105949,
       "sql_round_trips": 146,
       "transactions": 6,
       "committed_deliveries": 6,
@@ -154,42 +154,42 @@
       "events": [
         {
           "event": "pull_request",
-          "elapsed_ms": 1537.2953540000017,
+          "elapsed_ms": 1610.571802999999,
           "sql_round_trips": 41,
           "transactions": 1
         },
         {
           "event": "status",
-          "elapsed_ms": 499.0197429999971,
+          "elapsed_ms": 526.2388690000007,
           "sql_round_trips": 13,
           "transactions": 1
         },
         {
           "event": "issue_comment",
-          "elapsed_ms": 676.9627010000004,
+          "elapsed_ms": 675.8479569999981,
           "sql_round_trips": 21,
           "transactions": 1
         },
         {
           "event": "pull_request_review_comment",
-          "elapsed_ms": 784.7424409999985,
+          "elapsed_ms": 745.7697870000047,
           "sql_round_trips": 25,
           "transactions": 1
         },
         {
           "event": "pull_request_review",
-          "elapsed_ms": 693.6949800000002,
+          "elapsed_ms": 559.1893859999982,
           "sql_round_trips": 16,
           "transactions": 1
         },
         {
           "event": "push",
-          "elapsed_ms": 867.503721000001,
+          "elapsed_ms": 1075.1558719999957,
           "sql_round_trips": 30,
           "transactions": 1
         }
       ],
-      "total_ms": 5059.218939999999,
+      "total_ms": 5192.8463919999995,
       "sql_round_trips": 146,
       "transactions": 6,
       "committed_deliveries": 6,
@@ -300,42 +300,42 @@
       "events": [
         {
           "event": "pull_request",
-          "elapsed_ms": 1372.9587820000015,
+          "elapsed_ms": 1379.448504,
           "sql_round_trips": 41,
           "transactions": 1
         },
         {
           "event": "status",
-          "elapsed_ms": 533.7465929999998,
+          "elapsed_ms": 598.814996000001,
           "sql_round_trips": 13,
           "transactions": 1
         },
         {
           "event": "issue_comment",
-          "elapsed_ms": 711.6921440000006,
+          "elapsed_ms": 677.402270000006,
           "sql_round_trips": 21,
           "transactions": 1
         },
         {
           "event": "pull_request_review_comment",
-          "elapsed_ms": 758.2083249999996,
+          "elapsed_ms": 939.998384999999,
           "sql_round_trips": 25,
           "transactions": 1
         },
         {
           "event": "pull_request_review",
-          "elapsed_ms": 555.9158889999999,
+          "elapsed_ms": 545.138119999996,
           "sql_round_trips": 16,
           "transactions": 1
         },
         {
           "event": "push",
-          "elapsed_ms": 1026.6005970000042,
+          "elapsed_ms": 1077.212188999998,
           "sql_round_trips": 30,
           "transactions": 1
         }
       ],
-      "total_ms": 4959.122330000006,
+      "total_ms": 5218.076808000005,
       "sql_round_trips": 146,
       "transactions": 6,
       "committed_deliveries": 6,
@@ -448,42 +448,42 @@
       "events": [
         {
           "event": "pull_request",
-          "elapsed_ms": 737.9763889999995,
+          "elapsed_ms": 668.7933699999994,
           "sql_round_trips": 13,
           "transactions": 1
         },
         {
           "event": "status",
-          "elapsed_ms": 611.8171889999994,
+          "elapsed_ms": 518.7991829999992,
           "sql_round_trips": 10,
           "transactions": 1
         },
         {
           "event": "issue_comment",
-          "elapsed_ms": 566.4440720000002,
+          "elapsed_ms": 593.8864009999998,
           "sql_round_trips": 16,
           "transactions": 1
         },
         {
           "event": "pull_request_review_comment",
-          "elapsed_ms": 684.3605650000009,
+          "elapsed_ms": 720.2864979999977,
           "sql_round_trips": 16,
           "transactions": 1
         },
         {
           "event": "pull_request_review",
-          "elapsed_ms": 358.7276270000002,
+          "elapsed_ms": 367.7135690000032,
           "sql_round_trips": 6,
           "transactions": 1
         },
         {
           "event": "push",
-          "elapsed_ms": 711.2094779999989,
+          "elapsed_ms": 475.69268499999816,
           "sql_round_trips": 12,
           "transactions": 1
         }
       ],
-      "total_ms": 3670.535319999999,
+      "total_ms": 3345.261099000001,
       "sql_round_trips": 73,
       "transactions": 6,
       "committed_deliveries": 6,
@@ -594,42 +594,42 @@
       "events": [
         {
           "event": "pull_request",
-          "elapsed_ms": 520.1346480000011,
+          "elapsed_ms": 656.280025,
           "sql_round_trips": 13,
           "transactions": 1
         },
         {
           "event": "status",
-          "elapsed_ms": 555.308989000001,
+          "elapsed_ms": 458.16310499999963,
           "sql_round_trips": 10,
           "transactions": 1
         },
         {
           "event": "issue_comment",
-          "elapsed_ms": 659.3647600000004,
+          "elapsed_ms": 634.8575739999978,
           "sql_round_trips": 16,
           "transactions": 1
         },
         {
           "event": "pull_request_review_comment",
-          "elapsed_ms": 741.3913710000015,
+          "elapsed_ms": 550.4503139999979,
           "sql_round_trips": 16,
           "transactions": 1
         },
         {
           "event": "pull_request_review",
-          "elapsed_ms": 375.9211890000006,
+          "elapsed_ms": 335.534727000002,
           "sql_round_trips": 6,
           "transactions": 1
         },
         {
           "event": "push",
-          "elapsed_ms": 622.2456750000019,
+          "elapsed_ms": 468.8001299999996,
           "sql_round_trips": 12,
           "transactions": 1
         }
       ],
-      "total_ms": 3474.3666320000066,
+      "total_ms": 3104.1468639999985,
       "sql_round_trips": 73,
       "transactions": 6,
       "committed_deliveries": 6,
@@ -740,42 +740,42 @@
       "events": [
         {
           "event": "pull_request",
-          "elapsed_ms": 540.1161619999984,
+          "elapsed_ms": 504.27406700000574,
           "sql_round_trips": 13,
           "transactions": 1
         },
         {
           "event": "status",
-          "elapsed_ms": 452.47741400000086,
+          "elapsed_ms": 450.9103959999993,
           "sql_round_trips": 10,
           "transactions": 1
         },
         {
           "event": "issue_comment",
-          "elapsed_ms": 559.7049249999982,
+          "elapsed_ms": 567.3119050000023,
           "sql_round_trips": 16,
           "transactions": 1
         },
         {
           "event": "pull_request_review_comment",
-          "elapsed_ms": 606.230150000003,
+          "elapsed_ms": 549.3891120000044,
           "sql_round_trips": 16,
           "transactions": 1
         },
         {
           "event": "pull_request_review",
-          "elapsed_ms": 373.8743170000016,
+          "elapsed_ms": 424.8412679999965,
           "sql_round_trips": 6,
           "transactions": 1
         },
         {
           "event": "push",
-          "elapsed_ms": 476.19481500000256,
+          "elapsed_ms": 471.63307899999927,
           "sql_round_trips": 12,
           "transactions": 1
         }
       ],
-      "total_ms": 3008.5977830000047,
+      "total_ms": 2968.425314,
       "sql_round_trips": 73,
       "transactions": 6,
       "committed_deliveries": 6,
@@ -883,77 +883,1747 @@
       "github_requests": 0
     }
   ],
+  "burst": {
+    "before": [
+      {
+        "events": [
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 1597.402372999999,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 1070.9700469999989,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 2171.1692029999995,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 2856.2222309999997,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 3913.4588239999994,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 5004.489603,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 3386.629188000001,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 4443.6982530000005,
+            "sql_round_trips": null,
+            "transactions": null
+          }
+        ],
+        "total_ms": 5004.661126999999,
+        "sql_round_trips": 128,
+        "transactions": 8,
+        "committed_deliveries": 8,
+        "jobs": [
+          {
+            "key": "review_comments:{\"number\":100}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":101}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":102}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":103}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":104}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":105}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":106}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":107}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":100}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":101}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":102}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":103}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":104}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":105}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":106}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":107}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":100}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":101}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":102}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":103}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":104}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":105}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":106}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":107}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          }
+        ],
+        "github_requests": 0
+      },
+      {
+        "events": [
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 1448.0942250000007,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 740.8057509999999,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 2728.2696060000017,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 3822.8135729999995,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 5081.600825000001,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 4483.936865000003,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 3263.2400479999997,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 2160.9545670000007,
+            "sql_round_trips": null,
+            "transactions": null
+          }
+        ],
+        "total_ms": 5081.720031999997,
+        "sql_round_trips": 128,
+        "transactions": 8,
+        "committed_deliveries": 8,
+        "jobs": [
+          {
+            "key": "review_comments:{\"number\":100}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":101}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":102}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":103}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":104}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":105}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":106}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":107}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":100}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":101}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":102}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":103}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":104}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":105}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":106}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":107}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":100}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":101}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":102}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":103}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":104}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":105}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":106}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":107}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          }
+        ],
+        "github_requests": 0
+      },
+      {
+        "events": [
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 595.0033570000014,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 1122.2702009999994,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 2318.7866209999993,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 1785.3366529999985,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 3396.320477999994,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 4047.7865780000066,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 2853.4741339999964,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 4578.445630000002,
+            "sql_round_trips": null,
+            "transactions": null
+          }
+        ],
+        "total_ms": 4578.6052960000015,
+        "sql_round_trips": 128,
+        "transactions": 8,
+        "committed_deliveries": 8,
+        "jobs": [
+          {
+            "key": "review_comments:{\"number\":100}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":101}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":102}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":103}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":104}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":105}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":106}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":107}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":100}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":101}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":102}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":103}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":104}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":105}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":106}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":107}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":100}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":101}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":102}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":103}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":104}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":105}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":106}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":107}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          }
+        ],
+        "github_requests": 0
+      }
+    ],
+    "after": [
+      {
+        "events": [
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 819.3294700000006,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 506.0781489999972,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 1135.8662199999999,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 1564.5285110000004,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 2613.3968509999977,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 1910.4043149999998,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 3027.7909450000006,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 2222.9965679999987,
+            "sql_round_trips": null,
+            "transactions": null
+          }
+        ],
+        "total_ms": 3027.9648530000013,
+        "sql_round_trips": 48,
+        "transactions": 8,
+        "committed_deliveries": 8,
+        "jobs": [
+          {
+            "key": "review_comments:{\"number\":100}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":101}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":102}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":103}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":104}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":105}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":106}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":107}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":100}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":101}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":102}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":103}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":104}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":105}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":106}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":107}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":100}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":101}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":102}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":103}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":104}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":105}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":106}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":107}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          }
+        ],
+        "github_requests": 0
+      },
+      {
+        "events": [
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 486.11864799999967,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 825.458663999998,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 1690.230324,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 1254.7675140000028,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 3235.966944,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 2004.837263999998,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 2456.4831399999966,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 2845.4561179999982,
+            "sql_round_trips": null,
+            "transactions": null
+          }
+        ],
+        "total_ms": 3236.109975999996,
+        "sql_round_trips": 48,
+        "transactions": 8,
+        "committed_deliveries": 8,
+        "jobs": [
+          {
+            "key": "review_comments:{\"number\":100}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":101}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":102}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":103}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":104}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":105}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":106}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":107}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":100}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":101}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":102}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":103}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":104}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":105}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":106}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":107}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":100}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":101}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":102}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":103}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":104}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":105}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":106}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":107}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          }
+        ],
+        "github_requests": 0
+      },
+      {
+        "events": [
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 873.8589890000003,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 452.3892779999878,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 2311.8995549999963,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 2624.4627559999935,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 1185.6880530000053,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 2948.455436999997,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 1901.3311699999904,
+            "sql_round_trips": null,
+            "transactions": null
+          },
+          {
+            "event": "pull_request_review",
+            "elapsed_ms": 1504.6442589999933,
+            "sql_round_trips": null,
+            "transactions": null
+          }
+        ],
+        "total_ms": 2948.662823999999,
+        "sql_round_trips": 48,
+        "transactions": 8,
+        "committed_deliveries": 8,
+        "jobs": [
+          {
+            "key": "review_comments:{\"number\":100}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":101}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":102}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":103}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":104}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":105}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":106}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_comments:{\"number\":107}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":100}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":101}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":102}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":103}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":104}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":105}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":106}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "review_threads:{\"number\":107}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":100}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":101}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":102}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":103}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":104}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":105}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":106}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          },
+          {
+            "key": "reviews:{\"number\":107}",
+            "priority": 1,
+            "dirty": 1,
+            "generation": 1,
+            "lane": "active",
+            "attempt": 0,
+            "wait_reason": null
+          }
+        ],
+        "github_requests": 0
+      }
+    ],
+    "summary": {
+      "before": {
+        "total_ms": 5004.661126999999,
+        "sql_round_trips": 128,
+        "transactions": 8,
+        "committed_deliveries": 8
+      },
+      "after": {
+        "total_ms": 3027.9648530000013,
+        "sql_round_trips": 48,
+        "transactions": 8,
+        "committed_deliveries": 8
+      }
+    }
+  },
   "summary": {
     "before": {
-      "total_ms": 5059.218939999999,
+      "total_ms": 5192.8463919999995,
       "sql_round_trips": 146,
       "transactions": 6,
       "events": [
         {
           "event": "pull_request",
-          "elapsed_ms": 1372.9587820000015,
+          "elapsed_ms": 1379.448504,
           "sql_round_trips": 41
         },
         {
           "event": "status",
-          "elapsed_ms": 533.7465929999998,
+          "elapsed_ms": 583.8425940000002,
           "sql_round_trips": 13
         },
         {
           "event": "issue_comment",
-          "elapsed_ms": 711.6921440000006,
+          "elapsed_ms": 675.8479569999981,
           "sql_round_trips": 21
         },
         {
           "event": "pull_request_review_comment",
-          "elapsed_ms": 784.7424409999985,
+          "elapsed_ms": 813.9534119999998,
           "sql_round_trips": 25
         },
         {
           "event": "pull_request_review",
-          "elapsed_ms": 693.6949800000002,
+          "elapsed_ms": 559.1893859999982,
           "sql_round_trips": 16
         },
         {
           "event": "push",
-          "elapsed_ms": 1026.6005970000042,
+          "elapsed_ms": 1077.212188999998,
           "sql_round_trips": 30
         }
       ]
     },
     "after": {
-      "total_ms": 3474.3666320000066,
+      "total_ms": 3104.1468639999985,
       "sql_round_trips": 73,
       "transactions": 6,
       "events": [
         {
           "event": "pull_request",
-          "elapsed_ms": 540.1161619999984,
+          "elapsed_ms": 656.280025,
           "sql_round_trips": 13
         },
         {
           "event": "status",
-          "elapsed_ms": 555.308989000001,
+          "elapsed_ms": 458.16310499999963,
           "sql_round_trips": 10
         },
         {
           "event": "issue_comment",
-          "elapsed_ms": 566.4440720000002,
+          "elapsed_ms": 593.8864009999998,
           "sql_round_trips": 16
         },
         {
           "event": "pull_request_review_comment",
-          "elapsed_ms": 684.3605650000009,
+          "elapsed_ms": 550.4503139999979,
           "sql_round_trips": 16
         },
         {
           "event": "pull_request_review",
-          "elapsed_ms": 373.8743170000016,
+          "elapsed_ms": 367.7135690000032,
           "sql_round_trips": 6
         },
         {
           "event": "push",
-          "elapsed_ms": 622.2456750000019,
+          "elapsed_ms": 471.63307899999927,
           "sql_round_trips": 12
         }
       ]

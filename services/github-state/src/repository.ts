@@ -872,7 +872,10 @@ export class RepositoryState extends DurableObject<Env> {
       const chunk=rows.slice(offset,offset+writeBatch);
       await this.store.exec('INSERT INTO jobs(key,query,priority,due,dirty,generation,lane,requested_at,created_at) VALUES '+chunk.map(()=>'(?,?,?,?,?,?,?,?,?)').join(',')+' ON CONFLICT(key) DO UPDATE SET priority=excluded.priority,due=excluded.due,dirty=excluded.dirty,generation=generation+excluded.generation,lane=excluded.lane,requested_at=excluded.requested_at',...chunk.flat());
     }
-    if(rows.length)await this.setAlarm(Math.max(now+100,Math.min(...rows.map(row=>Number(row[3])))));
+    if(rows.length && this.store.backend==='sqlite') {
+      const scheduled=Math.min(...rows.map(row=>Number(row[3]))),alarm=await this.ctx.storage.getAlarm();
+      if(!alarm || alarm>scheduled)await this.setAlarm(Math.max(now+100,scheduled));
+    }
   }
   async complete(q:Pick<Query,'operation'|'args'>): Promise<boolean> { return (await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length>0; }
   async metric(event:string,q:Query,lane:Lane,value=1): Promise<void> {try{this.repairMetrics.record(event,lane,q.operation,value);}catch(error){try{this.noteFailure('repair_metrics',error);}catch{}}}
