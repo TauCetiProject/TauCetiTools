@@ -1,8 +1,9 @@
 import { scanHostedCapacity } from './runner-capacity';
 import { blocksRepairs, readMigration } from './migration';
 import { DurableObject } from 'cloudflare:workers';
-import { Env, json, Repository, stub, parseGitHub, digest } from './protocol';
-import { Recipe, extract, recipes, batchQuery, batchLimit } from './catalog';
+import { Env, json, Repository, repositories, stub, parseGitHub, digest } from './protocol';
+import { INSTALLATION_HOP_MS } from './repair_io';
+import { Recipe, extract, recipes, batchQuery, batchLimit, UpstreamDataError } from './catalog';
 import { settings } from './reconciliation';
 import { AccountingMetrics } from './monitoring';
 import { classify, log, requestId } from './storage';
@@ -10,6 +11,7 @@ import { classify, log, requestId } from './storage';
 class QuotaDeferred extends Error {
   constructor(readonly result:any) { super('GitHub quota deferred'); }
 }
+type CapacityWaiter={repository:Repository}|{readyAt:number,wake:()=>void};
 
 export class InstallationScheduler extends DurableObject<Env> {
   private tokenFlight?:Promise<string>;
@@ -20,6 +22,10 @@ export class InstallationScheduler extends DurableObject<Env> {
   private accountingFailure:any;
   private accountingPreparationFailure:any;
   private preparedAccounting:any;
+  private capacityWaiters=new Map<string,CapacityWaiter>();
+  private capacityNotifying=new Set<string>();
+  private capacityReleaseHints=0;
+  private capacityWakeStats={scope:'installation_instance_since_restart',repository:0,runner:0};
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS budgets(resource TEXT PRIMARY KEY,remaining INTEGER,lim INTEGER,reset INTEGER,blocked INTEGER DEFAULT 0);
@@ -62,7 +68,7 @@ export class InstallationScheduler extends DurableObject<Env> {
     let t = await this.ctx.storage.get<{token:string;expires:number}>('token');
     if (!force && t && t.expires > Date.now()+300000) return t.token;
     const until=await this.ctx.storage.get<number>('secondary_until') || 0,budget=this.budget('app-core');
-    if (until>Date.now() || budget?.blocked>Date.now()) throw new QuotaDeferred({deferred:true,category:until>Date.now()?'secondary':'primary:app-core',retry_at:Math.max(until,budget?.blocked || 0)});
+    if (until>Date.now() || budget?.blocked>Date.now()) throw new QuotaDeferred({deferred:true,category:until>Date.now()?'secondary':'primary:app-core',retry_at:Math.max(until,budget?.blocked || 0),scope:until>Date.now()?{kind:'installation'}:{kind:'pool',api:'app-core'}});
     const response = await this.http('/app/installations/' + installation + '/access_tokens', await this.jwt(), 'POST', {}, 'installation_token', 'authentication');
     if (response.deferred) throw new QuotaDeferred(response);
     if (response.status !== 201 || !response.body.token) throw new Error('installation token unavailable');
@@ -96,10 +102,11 @@ export class InstallationScheduler extends DurableObject<Env> {
   }
   deferral(api:string,cost:number): any {
     const b=this.budget(api),now=Date.now();
-    if(this.usable(api)>=cost) return null;
+    const usable=this.usable(api);if(usable>=cost) return null;
     const actual=b && b.reset>now?b.remaining:b?.lim || 5000;
-    if((!b || b.blocked<=now) && actual>=cost) return {deferred:true,category:'capacity',retry_at:now+250};
-    return {deferred:true,category:'primary:'+api,retry_at:Math.max(now+1000,b?.blocked || b?.reset || now+60000)};
+    const scope={kind:usable<=0?'pool':'query',api};
+    if((!b || b.blocked<=now) && actual>=cost) return {deferred:true,category:'capacity',retry_at:now+250,scope};
+    return {deferred:true,category:'primary:'+api,retry_at:Math.max(now+1000,b?.blocked || b?.reset || now+60000),scope};
   }
   estimate(operation:string,api:string,shape?:string,fallback=1): number {
     if(api!=='graphql') return 1;
@@ -114,12 +121,14 @@ export class InstallationScheduler extends DurableObject<Env> {
     const aliases=[...query.matchAll(/q\d+:/g)].length,batchSize=aliases || 1;
     const predicted=this.estimate(operation,api,shape,operation==='review_threads_batch'?Math.max(1,Math.round(batchSize*11/100)):1);
     const secondary=await this.ctx.storage.get<number>('secondary_until') || 0;
-    if(secondary>Date.now()) throw new QuotaDeferred({deferred:true,category:'secondary',retry_at:secondary});
-    this.ctx.storage.sql.exec('DELETE FROM reservations WHERE expires<=?',Date.now());
-    if(this.ctx.storage.sql.exec<any>('SELECT COUNT(*) n FROM reservations').one().n>=settings(this.env).concurrency) throw new QuotaDeferred({deferred:true,category:'capacity',retry_at:Date.now()+250});
-    const deferred=this.deferral(resource,predicted);if(deferred) throw new QuotaDeferred(deferred);
+    if(secondary>Date.now()) throw new QuotaDeferred({deferred:true,category:'secondary',retry_at:secondary,scope:{kind:'installation'}});
+    const expired=this.ctx.storage.sql.exec('DELETE FROM reservations WHERE expires<=? RETURNING id',Date.now()).toArray().length;
+    if(expired)this.capacityReleaseHints=Math.min(settings(this.env).concurrency,this.capacityReleaseHints+expired);
+    if(this.ctx.storage.sql.exec<any>('SELECT COUNT(*) n FROM reservations').one().n>=settings(this.env).concurrency) throw new QuotaDeferred({deferred:true,category:'capacity',retry_at:Date.now()+250,scope:{kind:'installation'}});
+    const deferred=this.deferral(resource,predicted);if(deferred){this.notifyCapacityWaiters();throw new QuotaDeferred(deferred);}
     const reservation=crypto.randomUUID();
     this.ctx.storage.sql.exec('INSERT INTO reservations VALUES(?,?,?,?)',reservation,resource,predicted,Date.now()+settings(this.env).lease_ms);
+    this.notifyCapacityWaiters();
     let observedDebit=false;
     try {
     const headers: Record<string,string> = {'Authorization':'Bearer ' + token,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'tauceti-github-state','Content-Type':'application/json'};
@@ -170,7 +179,7 @@ export class InstallationScheduler extends DurableObject<Env> {
         this.ctx.storage.sql.exec('INSERT INTO quota_types VALUES(?,?,?,?,?) ON CONFLICT(category) DO UPDATE SET last_seen=excluded.last_seen,count=count+1,evidence=excluded.evidence',category,Date.now(),Date.now(),1,evidence);
         if (newType) console.error(JSON.stringify({event:'new_quota_type',category,evidence:JSON.parse(evidence)}));
         if (!primary) await this.ctx.storage.put('secondary_until',until);
-        return {status:response.status,body:parsed,deferred:true,category,retry_at:until};
+        return {status:response.status,body:parsed,deferred:true,category,retry_at:until,scope:primary?{kind:olderWindow?'query':'pool',api:bucket}:{kind:'installation'}};
       }
     }
     return {status:response.status,body:parsed,etag:response.headers.get('etag'),link:response.headers.get('link'),points,bytes:text.length,elapsed_ms:Date.now()-started,remaining:response.headers.get('x-ratelimit-remaining'),limit:response.headers.get('x-ratelimit-limit')};
@@ -178,7 +187,7 @@ export class InstallationScheduler extends DurableObject<Env> {
       // A lost response can still have consumed quota; retain the predicted debit.
       if(!observedDebit)this.ctx.storage.sql.exec('UPDATE budgets SET remaining=MAX(0,remaining-?) WHERE resource=?',predicted,resource);
       throw error;
-    } finally {this.ctx.storage.sql.exec('DELETE FROM reservations WHERE id=?',reservation);}
+    } finally {if(this.ctx.storage.sql.exec('DELETE FROM reservations WHERE id=? RETURNING id',reservation).toArray().length)this.releaseCapacityHints(1);}
   }
   // All GitHub requests from all repository objects pass through this installation owner.
   // Budget selection affects background reads only; authoring writes never enter this service.
@@ -186,13 +195,13 @@ export class InstallationScheduler extends DurableObject<Env> {
     const request_id=/^[A-Za-z0-9-]{1,64}$/.test(input.request_id || '')?input.request_id:crypto.randomUUID();
     const reason=error instanceof Error && error.message==='upstream_identity_unavailable'?'upstream_identity_unavailable':'malformed_upstream_response';
     try {log('upstream_response_unavailable',{request_id,operation,api,reason});}catch {}
-    return {unavailable:true,reason,request_id};
+    return {unavailable:true,reason,request_id,failure_kind:error instanceof UpstreamDataError?'member':'unknown'};
   }
   async read(input: any): Promise<Response> {
     if (input.nested) return this.threadPage(input);
     const candidates = recipes(input.repository.name,input.query,input.cursor,input.page).map(r=>({...r,cost:this.estimate(input.query.operation,r.api,undefined,r.cost)}));
     const until = await this.ctx.storage.get<number>('secondary_until') || 0;
-    if (until > Date.now()) return json({deferred:true,category:'secondary',retry_at:until});
+    if (until > Date.now()) return json({deferred:true,category:'secondary',retry_at:until,scope:{kind:'installation'}});
     const available = candidates.filter(r => {
       if (input.api && r.api!==input.api) return false;
       const b = this.budget(r.api);
@@ -224,7 +233,7 @@ export class InstallationScheduler extends DurableObject<Env> {
         if (result.status === 401) { token = await this.token(input.repository.installation,true); result = await request(); }
       } catch(error) {if(error instanceof QuotaDeferred) result=error.result;else throw error;}
       if (result.deferred) {
-        if (String(result.category).startsWith('secondary') || result.category==='capacity') return json(result);
+        if (String(result.category).startsWith('secondary') || result.category==='capacity') {this.registerCapacityWaiter(input.repository,result);return json(result);}
         continue;
       }
       if (result.status === 304) return json({unchanged:true,api:recipe.api,etag:result.etag});
@@ -283,7 +292,7 @@ export class InstallationScheduler extends DurableObject<Env> {
   }
   async batch(input:any): Promise<Response> {
     const b=this.budget('graphql'), until=await this.ctx.storage.get<number>('secondary_until') || 0;
-    if (until>Date.now()) return json({deferred:true,category:'secondary',retry_at:until});
+    if (until>Date.now()) return json({deferred:true,category:'secondary',retry_at:until,scope:{kind:'installation'}});
     if (!Array.isArray(input.jobs) || !input.jobs.length) throw new Error('invalid batch');
     const operation=input.jobs[0].query.operation;
     const limit=batchLimit(operation);
@@ -446,7 +455,9 @@ export class InstallationScheduler extends DurableObject<Env> {
             try {return await this.http(path,token,'GET',undefined,'runner_capacity','core');}
             catch(error) {
               if(!(error instanceof QuotaDeferred) || error.result.category!=='capacity' || Date.now()+250>deadline)throw error;
-              await new Promise(resolve=>setTimeout(resolve,250));
+              if(error.result.scope?.kind==='installation' && Number.isSafeInteger(error.result.retry_at)){
+                if(!await this.waitRunnerCapacity(error.result.retry_at,deadline))throw error;
+              }else await new Promise(resolve=>setTimeout(resolve,250));
             }
           }
         });
@@ -461,35 +472,135 @@ export class InstallationScheduler extends DurableObject<Env> {
     })().finally(()=>{this.capacityFlight=undefined;});
     const value=await this.capacityFlight;return json({cached:false,...value},value.complete?200:503);
   }
+  private releaseCapacityHints(count:number):void {
+    this.capacityReleaseHints=Math.min(settings(this.env).concurrency,this.capacityReleaseHints+count);
+    this.notifyCapacityWaiters();
+  }
+  private registerCapacityWaiter(repo:Repository|undefined,result:any):void {
+    if(!repo || result?.category!=='capacity' || result.scope?.kind!=='installation')return;
+    // Optional hints are bounded by configured repositories. Unknown callers
+    // keep ordinary quota handling and cron; this never rejects their request.
+    let known:Repository|undefined;
+    try{known=repositories(this.env).find(candidate=>candidate.id===repo.id && candidate.installation===repo.installation);}catch{return;}
+    if(!known)return;
+    this.capacityWaiters.set(repo.id,{repository:known});
+    // A reservation may have been released between rejection and registration.
+    this.notifyCapacityWaiters();
+  }
+  private async waitRunnerCapacity(readyAt:number,deadline:number):Promise<boolean> {
+    // One coalesced scan has at most three parallel reads. These local wake
+    // recipients share the same best-effort hints as repository recipients;
+    // they never hold or grant a reservation. Ordinary requests use no probe.
+    const id='runner:'+crypto.randomUUID(),entry={readyAt,wake:()=>{}};
+    let timer:ReturnType<typeof setTimeout>|undefined;
+    try{
+      for(;;){
+        const now=Date.now();if(now>=deadline)return false;
+        const wake=new Promise<void>(resolve=>entry.wake=resolve);
+        this.capacityWaiters.set(id,entry);
+        if(now>=readyAt){
+          // Only after an actual scoped rejection and its real retry deadline.
+          // While still full, retain this eligible registration instead of
+          // manufacturing another250ms deferral that misses every release.
+          try{if(this.ctx.storage.sql.exec<any>('SELECT COUNT(*) n FROM reservations WHERE expires>?',now).one().n<settings(this.env).concurrency)return true;}
+          catch{return true;} // A failed optional hint falls back to real http.
+        }
+        this.notifyCapacityWaiters();
+        const delay=Math.min(deadline-now,now<readyAt?readyAt-now:250);
+        await Promise.race([wake,new Promise<void>(resolve=>{timer=setTimeout(resolve,delay);})]);
+        if(timer!==undefined){clearTimeout(timer);timer=undefined;}
+      }
+    }finally{if(timer!==undefined)clearTimeout(timer);this.capacityWaiters.delete(id);}
+  }
+  private notifyCapacityWaiters():void {
+    if(!this.capacityWaiters.size || !this.capacityReleaseHints)return;
+    try{
+    const active=this.ctx.storage.sql.exec<any>('SELECT COUNT(*) n FROM reservations WHERE expires>?',Date.now()).one().n;
+    this.capacityReleaseHints=Math.min(this.capacityReleaseHints,Math.max(0,settings(this.env).concurrency-active));
+    for(const [id,recipient] of this.capacityWaiters) {
+      if(!this.capacityReleaseHints)break;
+      if('wake' in recipient){
+        if(recipient.readyAt>Date.now())continue;
+        this.capacityWaiters.delete(id);this.capacityReleaseHints--;this.capacityWakeStats.runner++;recipient.wake();continue;
+      }
+      // Hints cannot occupy all of the Worker's outgoing connections. They do
+      // not hold quota reservations, and ordinary requests never await them.
+      if(this.capacityNotifying.size)continue;
+      if(this.capacityNotifying.has(id))continue;
+      const repo=recipient.repository;
+      this.capacityWaiters.delete(id);this.capacityReleaseHints--;this.capacityNotifying.add(id);this.capacityWakeStats.repository++;
+      const work=Promise.resolve().then(()=>stub(this.env.REPOSITORIES,id).fetch('https://internal/capacity-ready',{
+        method:'POST',body:JSON.stringify({installation:repo.installation}),signal:AbortSignal.timeout(1500)
+      })).then(async response=>{const ok=response.ok;await response.body?.cancel();if(!ok)throw Error('capacity wake unavailable');}).catch(()=>{
+        try{log('capacity_wake_failed',{reason:'notification_unavailable'});}catch{}
+      }).finally(()=>{this.capacityNotifying.delete(id);this.notifyCapacityWaiters();});
+      this.ctx.waitUntil?.(work);
+    }
+    }catch{try{log('capacity_wake_failed',{reason:'notification_unavailable'});}catch{}}
+  }
+  private availability(repo?:Repository):Response {
+    const active=this.ctx.storage.sql.exec<any>('SELECT COUNT(*) n FROM reservations WHERE expires>?',Date.now()).one().n;
+    const result=active>=settings(this.env).concurrency
+      ?{deferred:true,category:'capacity',retry_at:Date.now()+250,scope:{kind:'installation'}}
+      :{available:true};
+    // A lost notification or installation restart can leave a repository's
+    // capacity restriction alive after its advisory registration was lost.
+    // A full hint renews that bounded registration; requests still reserve
+    // capacity normally, and an unknown optional recipient changes no result.
+    if(result.deferred)this.registerCapacityWaiter(repo,result);
+    return json(result);
+  }
+  protected get repairHopLimit():number{return INSTALLATION_HOP_MS;}
   async fetch(req: Request): Promise<Response> {
+    const path=new URL(req.url).pathname;
+    if(!['/read','/batch'].includes(path))return this.handleFetch(req);
+    // The installation hop itself must recover even if a caller is canceled.
+    // This bounds one RPC, never a complete paginated history or repository turn.
+    let timer:ReturnType<typeof setTimeout>|undefined;
+    const actual=this.handleFetch(req);
+    this.ctx.waitUntil?.(actual.then(()=>{},()=>{}));
+    try{return await Promise.race([actual,new Promise<Response>(()=>{
+      timer=setTimeout(()=>this.ctx.abort('installation_transport_stalled'),this.repairHopLimit);
+    })]);}finally{if(timer!==undefined)clearTimeout(timer);}
+  }
+  private async handleFetch(req: Request): Promise<Response> {
     let tracked:string|undefined;
     try {
       const path = new URL(req.url).pathname;
-      if(['/read','/batch','/measure','/audit'].includes(path) && ['test','production'].includes(this.env.MIGRATION_ENVIRONMENT || '')) {
-        const input:any=await req.clone().json(),repo=path==='/audit'?input:input.repository;
+      let input:any;
+      if(['/read','/batch','/measure','/audit'].includes(path)) {
+        input=await req.json();const repo=path==='/audit'?input:input.repository;
         if(typeof repo?.id==='string') {tracked=repo.id;this.repositoryRequests.set(tracked!,1+(this.repositoryRequests.get(tracked!) || 0));}
-        if(repo?.id && blocksRepairs(await readMigration(this.env.ARCHIVE,repo.id)))return json({unavailable:true,reason:'migration_frozen',retry_at:Date.now()+60000},503);
+        if(['test','production'].includes(this.env.MIGRATION_ENVIRONMENT || '') && repo?.id && blocksRepairs(await readMigration(this.env.ARCHIVE,repo.id)))return json({unavailable:true,reason:'migration_frozen',retry_at:Date.now()+60000},503);
+      }
+      if(path==='/availability'){
+        let repo:Repository|undefined;
+        try{repo=(await req.json() as any)?.repository;}catch{}
+        return this.availability(repo);
       }
       if (path==='/runner-capacity') return await this.runnerCapacity(await req.json() as Repository);
-      if (path==='/read') return await this.read({...await req.json() as object,request_id:requestId(req)});
-      if (path==='/batch') return await this.batch({...await req.json() as object,request_id:requestId(req)});
-      if (path==='/measure') return await this.measure({...await req.json() as object,request_id:requestId(req)});
+      if (path==='/read') return await this.read({...input,request_id:requestId(req)});
+      if (path==='/batch') return await this.batch({...input,request_id:requestId(req)});
+      if (path==='/measure') return await this.measure({...input,request_id:requestId(req)});
       if (path==='/maintenance') {
         this.expireAccounting();this.prepareAccounting();return json({ok:true,telemetry_failure:this.accountingFailure,accounting_preparation_failure:this.accountingPreparationFailure ?? null});
       }
       if (path==='/audit') {
         this.expireAccounting();
-        const repo=await req.json() as Repository;
+        const repo=input as Repository;
         this.auditFlight ||= this.audit(repo).finally(()=>{this.auditFlight=undefined;});
         await this.auditFlight;return json({ok:true});
       }
-      if (path==='/health') return json({repository_inflight:[...this.repositoryRequests].map(([repository,requests])=>({repository,requests})),redelivery_failure:await this.ctx.storage.get('last_redelivery_failure') || null,reconciliation_version:2,deployment_id:this.env.CF_VERSION?.id,settings:settings(this.env),inflight:this.ctx.storage.sql.exec('SELECT resource,COUNT(*) requests,SUM(cost) reserved_points FROM reservations WHERE expires>? GROUP BY resource',Date.now()).toArray(),budgets:this.ctx.storage.sql.exec('SELECT * FROM budgets').toArray(),quota_types:this.ctx.storage.sql.exec('SELECT * FROM quota_types').toArray(),...(this.preparedAccounting?{...this.preparedAccounting,stale:Date.now()-this.preparedAccounting.at>180000}:this.accountingMetrics.snapshot()),telemetry_failure:this.accountingFailure,accounting_preparation_failure:this.accountingPreparationFailure ?? null});
+      if (path==='/health') return json({capacity_wakes:{...this.capacityWakeStats},repository_inflight:[...this.repositoryRequests].map(([repository,requests])=>({repository,requests})),redelivery_failure:await this.ctx.storage.get('last_redelivery_failure') || null,reconciliation_version:2,deployment_id:this.env.CF_VERSION?.id,settings:settings(this.env),inflight:this.ctx.storage.sql.exec('SELECT resource,COUNT(*) requests,SUM(cost) reserved_points FROM reservations WHERE expires>? GROUP BY resource',Date.now()).toArray(),budgets:this.ctx.storage.sql.exec('SELECT * FROM budgets').toArray(),quota_types:this.ctx.storage.sql.exec('SELECT * FROM quota_types').toArray(),...(this.preparedAccounting?{...this.preparedAccounting,stale:Date.now()-this.preparedAccounting.at>180000}:this.accountingMetrics.snapshot()),telemetry_failure:this.accountingFailure,accounting_preparation_failure:this.accountingPreparationFailure ?? null});
       return json({error:'not_found'},404);
     } catch (error) {
-      if (error instanceof QuotaDeferred) return json(error.result);
+      if (error instanceof QuotaDeferred) {
+        let repo:Repository|undefined;try{repo=tracked?repositories(this.env).find(repo=>repo.id===tracked):undefined;}catch{}
+        this.registerCapacityWaiter(repo,error.result);return json(error.result);
+      }
       const reason=error instanceof Error && error.message==='malformed_upstream_response'?'malformed_upstream_response':classify(error),request_id=requestId(req);
       try {log('installation_operation_failed',{reason,request_id});}catch {}
-      return json({unavailable:true,reason,request_id,...(reason==='malformed_upstream_response'?{}:{retry_at:Date.now()+60000})},503);
+      return json({unavailable:true,reason,request_id,failure_kind:reason==='malformed_upstream_response'?'transport':'unknown',...(reason==='malformed_upstream_response'?{}:{retry_at:Date.now()+60000})},503);
     } finally {if(tracked) {const remaining=(this.repositoryRequests.get(tracked) || 1)-1;if(remaining)this.repositoryRequests.set(tracked,remaining);else this.repositoryRequests.delete(tracked);}}
   }
 }

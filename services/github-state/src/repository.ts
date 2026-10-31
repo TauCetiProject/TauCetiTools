@@ -1,10 +1,12 @@
-import { RepositoryStore, StoreUnavailable, StoreFenced, canReplayPublication, isBackendFailure, WriterPurpose, SQLiteStore, PostgresStore, ReadCacheStore, BufferedStore, SerialLane, columns, collectionJoin } from './repository_store';
+import { RepositoryStore, StoreUnavailable, StoreFenced, canReplayPublication, isBackendFailure, isMemberDataFailure, WriterPurpose, SQLiteStore, PostgresStore, ReadCacheStore, BufferedStore, SerialLane, columns, collectionJoin } from './repository_store';
 import { repositoryHealth } from './repository_health';
 import { DurableObject } from 'cloudflare:workers';
 import { Env, EventPointer, matchesETag, Query, Result, digest, json, queryKey, repository, stub, validateQuery, parseGitHub, CI_EVENTS, NOT_MIRRORED, publicQuery, stagingStateKey, stagedPageKey } from './protocol';
 import { comment, issue, pr, status } from './normalize';
 import { batchLimit } from './catalog';
 import { Lane, LANES, laneAt, settings } from './reconciliation';
+import { RepairCoordinator, RepairGroup, RepairIdentity, RepairQuantum, RepairEffect, repairPath } from './repair_coordinator';
+import { repairHop, RepairTransportTimeout, REPAIR_HOP_MS } from './repair_io';
 import { SURVEY_CONTRACT, SURVEY_INDEX_VERSION, compactPR, issueFragment, reviewFragment, summarizeFragments, inScope, roadmapFocuses } from './survey';
 import { readPromotionReceipts } from './activity_landings';
 import { queueMetrics } from './queue_monitoring';
@@ -19,8 +21,11 @@ import { Failure, FULL_MESSAGE, AdminError, CLEANUP, PARKABLE, classify, deleteC
 
 type IngestRepair={q:Query,priority:number,dirty?:boolean,dirtyIfMissing?:boolean,missingOnly?:boolean};
 const INGEST_EVENT_TYPES=new Set(['pull_request','issues','issue_comment','pull_request_review_comment','pull_request_review','pull_request_review_thread','status','push','create','delete','repository','label','milestone','merge_group']);
-interface RepairWait {job:any;due:number;attempts:number;reason:string;event:string;failure?:{category:string,request_id?:string}}
-interface PreparedRefresh {job:any;q:Query;repo:any;started:number;response:Response|null;result:any;preparedNext?:string;staged?:{key:string,expires:number};objects:Map<string,string>;encodings:Map<string,string>}
+interface RepairWait {job:any;due:number;attempts:number;reason:string;event:string;installationCapacity?:boolean;memberFailure?:boolean;failure?:{category:string,request_id?:string}}
+interface PreparedRefresh {job:any;q:Query;repo:any;started:number;response:Response|null;result:any;memberRetryAt?:number;preparedNext?:string;staged?:{key:string,expires:number};objects:Map<string,string>;encodings:Map<string,string>}
+// Explicit per-result parser/identity failures are distinct from quota waits,
+// transport/backend failures, and an unclassified unavailable response.
+const memberUnavailable=(result:any):boolean=>!result.deferred && result.unavailable && result.failure_kind==='member';
 const PUBLICATION_ITEMS=8,PUBLICATION_BYTES=256*1024,PUBLICATION_ROWS=128;
 class LeaseLost extends Error {}
 // Retain the attempted chunk and original error. Adapter-classified backend
@@ -78,6 +83,15 @@ export class RepositoryState extends DurableObject<Env> {
   private readScope=false;
   private preparedEncodings?:Map<string,string>;
   private dispatchSettled?:Set<string>;
+  private repairGroup?:RepairGroup;
+  private repairCoordinator?:RepairCoordinator;
+  private quotaRestriction?:{category:string,retry_at:number,installation:string,quantum:RepairQuantum,dataProgress:number};
+  private capacityWake?:{at:number,latest?:number,timer:ReturnType<typeof setTimeout>,resolve:()=>void};
+  private repairAlarm?:{at:number,quota:boolean,continuation:boolean};
+  private ordinaryAlarmAt?:number;
+  private alarmSchedule=0;
+  private availabilityFlight?:Promise<any>;
+  private renewedLeases=0;
   private optionalWork={active:0};
   private demandMemo=new Map<string,number>();
   private ingestStats=new Map<string,{minute:number,deliveries:number,sql_round_trips:number,sql_samples:number,apply_through_cleanup_ms:number,apply_max_ms:number}>();
@@ -313,26 +327,47 @@ export class RepositoryState extends DurableObject<Env> {
     if(this.degraded || this.repairsHeld()) return;
     try {await write();} catch(error) {this.noteFailure(operation,error);}
   }
-  async setAlarm(at:number): Promise<void> {
+  async setAlarm(at:number,quota=false,continuation=false,repair=false): Promise<void> {
     // PostgreSQL uses the existing cron tick, never the obsolete SQLite file.
     if(this.store.backend==='postgres')return;
     if(this.faultFull) throw new Error(FULL_MESSAGE);
+    const owner=this.owner,schedule=++owner.alarmSchedule;
+    if(!repair)owner.ordinaryAlarmAt=Math.min(owner.ordinaryAlarmAt ?? at,at);
+    // A new input/demand wake can race an older continuation's alarm read.
+    // Preserve its external meaning even if the continuation schedules earlier.
+    if((continuation || quota) && owner.ordinaryAlarmAt!==undefined && owner.ordinaryAlarmAt<=Date.now()+100){continuation=false;quota=false;}
+    // Uncertain scheduling loses the optional tag and recovers as an ordinary
+    // external alarm; never misclassify an old durable wake using a failed write.
+    owner.repairAlarm=undefined;
     await this.ctx.storage.setAlarm(at);
+    if(owner.alarmSchedule===schedule)owner.repairAlarm={at,quota,continuation};
+  }
+  private noteOrdinaryAlarm(at:number):void {
+    if(this.store.backend!=='sqlite')return;
+    const owner=this.owner,now=Date.now();
+    owner.ordinaryAlarmAt=Math.min(owner.ordinaryAlarmAt ?? at,at);
+    // An already-pending wake can be earlier than new demand and need no
+    // storage rewrite. Preserve the ordinary intent when that wake is overdue.
+    if(at<=now+100 && owner.repairAlarm && owner.repairAlarm.at<=now+100)owner.repairAlarm=undefined;
   }
   async atomic<T>(apply:(state:RepositoryState)=>Promise<T>,purpose:WriterPurpose='other'):Promise<T> {
     if(this.store.transactional)return apply(this);
     if(this.migrationHeld())throw new AdminError('migration_frozen');
     if(this.mutationState.blocked)throw new Error('Repository backend generation fenced');
     this.mutationState.active++;
-    let scoped:RepositoryState | undefined;
+    let scoped:RepositoryState | undefined,renewed:{key:string,lease_id:string,lease_until:number}[]=[];
     try {
       const result=await this.store.transaction(async store=>{
         scoped=Object.create(this) as RepositoryState;
         const buffered=store.backend==='postgres'?new BufferedStore(store):undefined;
         scoped!.store=buffered || store;scoped!.revisionState={};scoped!.readScope=false;scoped!.readRevision=undefined;scoped!.repositoryMemo=undefined;scoped!.pendingChanges=store.backend==='postgres'?[]:undefined;
-        const result=await apply(scoped!);await scoped!.flushChanges();await buffered?.flush();return result;
+        const result=await apply(scoped!);
+        if(purpose==='repair' || purpose==='publication')renewed=await scoped!.renewRepairLeases();
+        await scoped!.flushChanges();await buffered?.flush();return result;
       },purpose);
       if(scoped?.revisionState.value!==undefined)this.revisionState.value=Math.max(this.revisionState.value ?? 0,scoped.revisionState.value);
+      for(const row of renewed){const current=this.owner.repairCoordinator?.owned.get(row.key);if(current?.lease_id===row.lease_id)current.lease_until=row.lease_until;}
+      this.owner.renewedLeases+=renewed.length;
       if(scoped?.repositoryMemo!==undefined)this.repositoryMemo=scoped.repositoryMemo;
       return result;
     }catch(error){this.revisionState.value=undefined;throw error;}finally{this.mutationState.active--;}
@@ -586,7 +621,16 @@ export class RepositoryState extends DurableObject<Env> {
   }
   async *decodeRows(rows:{data:string}[]):AsyncGenerator<any> {
     // Archived collection reads preserve order with a bounded R2 fanout.
-    for(let i=0;i<rows.length;i+=8)for(const data of await Promise.all(rows.slice(i,i+8).map(r=>this.decode(r.data))))yield data;
+    for(let i=0;i<rows.length;i+=8)for(const data of await this.repairAll(rows.slice(i,i+8).map(r=>this.decode(r.data))))yield data;
+  }
+  private async repairAll<T>(work:Promise<T>[]):Promise<T[]> {
+    if(!this.repairGroup)return Promise.all(work);
+    // A bad page must not orphan its healthy siblings' get/body operations.
+    const results=await Promise.allSettled(work);
+    if([...this.repairGroup.pendingIO.values()].some(hop=>hop.expired))throw new RepairTransportTimeout();
+    const failed=results.find((result):result is PromiseRejectedResult=>result.status==='rejected');
+    if(failed)throw failed.reason;
+    return results.map(result=>(result as PromiseFulfilledResult<T>).value);
   }
   async put(kind:string,id:string,data:any,started=Date.now(),deleted=false,parent='',fromEvent=false,prepared?:string): Promise<boolean> {
     if(!this.store.transactional) {
@@ -711,7 +755,7 @@ export class RepositoryState extends DurableObject<Env> {
     const fragments:(string|number)[][]=[];
     const flush=async()=>{if(!fragments.length)return;const batch=fragments.splice(0);await this.store.exec('INSERT INTO survey_fragments VALUES '+batch.map(()=>'(?,?,?,?)').join(',')+' ON CONFLICT(kind,id) DO UPDATE SET parent=excluded.parent,data=excluded.data',...batch.flat());};
     if(prRow)for(let offset=0;offset<rows.length;offset+=8) {
-      const decoded=await Promise.all(rows.slice(offset,offset+8).map(async row=>({row,data:await this.decode(row.data)})));
+      const decoded=await this.repairAll(rows.slice(offset,offset+8).map(async row=>({row,data:await this.decode(row.data)})));
       for(const {row,data} of decoded) {
         const fragment=row.kind==='issue_comments'?issueFragment(data):reviewFragment(data);
         const useful=row.kind==='issue_comments'?fragment.meta!==null || fragment.rebase_heads.length:fragment.root || fragment.parent && fragment.reply;
@@ -788,6 +832,7 @@ export class RepositoryState extends DurableObject<Env> {
     const alarm=this.store.backend==='postgres'?null:await this.ctx.storage.getAlarm();
     const scheduled=(await this.store.exec<any>('SELECT due FROM jobs WHERE key=?',key)).one().due;
     if (!alarm || alarm>scheduled) await this.setAlarm(Math.max(Date.now()+100,scheduled));
+    else this.noteOrdinaryAlarm(scheduled);
   }
   async enqueueMany(input:{q:Query,priority:number,dirty?:boolean}[],backfill=false):Promise<void> {
     input=input.filter(({q})=>q.operation!=='progress' && !NOT_MIRRORED.has(q.operation));
@@ -850,6 +895,7 @@ export class RepositoryState extends DurableObject<Env> {
     for(const [at,event,lane,operation,value] of metrics)this.repairMetrics.record(event,lane,operation,value,at);
     const alarm=this.store.backend==='postgres'?null:await this.ctx.storage.getAlarm();
     if(!alarm || alarm>scheduled)await this.setAlarm(Math.max(now+100,scheduled));
+    else this.noteOrdinaryAlarm(scheduled);
   }
   private async enqueueIngest(input:IngestRepair[]):Promise<void> {
     if(!this.store.transactional)return this.atomic(state=>state.enqueueIngest(input),'ingest');
@@ -890,6 +936,7 @@ export class RepositoryState extends DurableObject<Env> {
     if(rows.length && this.store.backend==='sqlite') {
       const scheduled=Math.min(...rows.map(row=>Number(row[3]))),alarm=await this.ctx.storage.getAlarm();
       if(!alarm || alarm>scheduled)await this.setAlarm(Math.max(now+100,scheduled));
+      else this.noteOrdinaryAlarm(scheduled);
     }
   }
   async complete(q:Pick<Query,'operation'|'args'>): Promise<boolean> { return (await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length>0; }
@@ -1194,7 +1241,7 @@ export class RepositoryState extends DurableObject<Env> {
           await this.env.ARCHIVE.put(cursorKey(repo,id,next.offset),body,{customMetadata:{kind:'cursor',expires:String(expires+60000)}});
         }
       };
-      await Promise.all(Array.from({length:Math.min(CURSOR_UPLOADS,pending.length)},upload));
+      await this.repairAll(Array.from({length:Math.min(CURSOR_UPLOADS,pending.length)},upload));
       return pages[0].page;
     }
     return {...result,data:rows};
@@ -1306,24 +1353,41 @@ export class RepositoryState extends DurableObject<Env> {
     const due=(await this.store.exec<any>('SELECT due FROM jobs WHERE key=?',key)).toArray()[0]?.due;
     const alarm=this.store.backend==='postgres'?null:await this.ctx.storage.getAlarm();
     if (due && (!alarm || alarm>due)) await this.setAlarm(Math.max(now+100,due));
+    else if(due)this.noteOrdinaryAlarm(due);
   }
-  private excludeRepairKeys(keys?:Set<string>):{sql:string,bindings:string[]} {
-    if(!keys?.size)return {sql:'',bindings:[]};
+  private excludeRepairKeys(keys?:Set<string>,includePaths=true):{sql:string,bindings:string[]} {
+    const coordinator=this.owner.repairCoordinator;
+    const omitted=new Set([...(keys || []),...(coordinator?.owned.keys() || [])]);
+    const paths=includePaths?[
+      ...[...(coordinator?.current.paths || [])].flatMap(([key,paths])=>[...paths].map(path=>({key,path}))),
+      ...[...(coordinator?.current.capacityPaths || [])].flatMap(([key,paths])=>[...paths.keys()].map(path=>({key,path}))),
+    ]:[];
+    if(!omitted.size && !paths.length)return {sql:'',bindings:[]};
     // One JSON binding covers a full failed upstream group on native SQLite.
     const values=this.store.backend==='sqlite'?'SELECT value FROM json_each(?)':'SELECT jsonb_array_elements_text(CAST(? AS JSONB))';
-    return {sql:' AND key NOT IN ('+values+')',bindings:[JSON.stringify([...keys])]};
+    let sql=omitted.size?' AND key NOT IN ('+values+')':'',bindings=omitted.size?[JSON.stringify([...omitted])]:[];
+    if(paths.length){
+      if(this.store.backend==='sqlite'){
+        sql+=" AND key||char(0)||COALESCE(api,'auto') NOT IN (SELECT value FROM json_each(?))";
+        bindings.push(JSON.stringify(paths.map(p=>p.key+'\0'+p.path)));
+      }else{
+        sql+=" AND NOT EXISTS (SELECT 1 FROM jsonb_to_recordset(CAST(? AS JSONB)) AS p(key TEXT,path TEXT) WHERE p.key=jobs.key AND p.path=COALESCE(jobs.api,'auto'))";
+        bindings.push(JSON.stringify(paths));
+      }
+    }
+    return {sql,bindings};
   }
   async nextJob(excluded?:Set<string>): Promise<any> {
     if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.nextJob.call(state,excluded));
     const now=Date.now(),counters=(await this.store.exec<any>('SELECT key,value FROM meta WHERE key IN (?,?)','repair_turn','requested_turn')).toArray();
     const turns=new Map(counters.map(row=>[row.key,JSON.parse(row.value)])),turn=turns.get('repair_turn') || 0,requestedTurn=turns.get('requested_turn') || 0;
-    await this.setMeta('repair_turn',turn+1);
     const preferred=laneAt(turn,settings(this.env).weights);
     // Real reads precede maintenance in the requested lane. Give fresh real
     // demand three turns out of four, retaining one oldest-first turn.
     const fresh=requestedTurn%4!==0;
     const omit=this.excludeRepairKeys(excluded);
     const job=(await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=?"+omit.sql+" ORDER BY CASE WHEN lane=? AND (lane!='requested' OR requested_at IS NOT NULL) THEN 0 WHEN lane='requested' AND (requested_at IS NOT NULL OR ?='requested') THEN 1 WHEN lane='active' THEN 2 WHEN lane='requested' THEN 3 WHEN lane='verification' THEN 4 ELSE 5 END,CASE WHEN ? AND lane='requested' THEN COALESCE(requested_at,0) ELSE 0 END DESC,due,key LIMIT 1",now,now,...omit.bindings,preferred,preferred,Number(fresh))).toArray()[0];
+    if(job)await this.setMeta('repair_turn',turn+1);
     if(job?.lane==='requested' && job.requested_at)await this.setMeta('requested_turn',requestedTurn+1);
     return job;
   }
@@ -1410,6 +1474,7 @@ export class RepositoryState extends DurableObject<Env> {
     }
     const response=supplied?null:await stub(this.env.INSTALLATIONS,repo.installation).fetch('https://internal/read',{method:'POST',headers:{'x-request-id':crypto.randomUUID()},body:JSON.stringify({repository:repo,query:upstream,cursor:job.cursor,page:job.page,api:job.api,nested,etag:job.page===1 && !job.nested && q.operation!=='workflow_runs'?job.etag:undefined})});
     const result:any=supplied?{...supplied}:await response!.json();
+    if(result.deferred)await this.noteQuotaRestriction(result);
     this.traceRepair('refresh_response',job);
     const objects=new Map<string,string>(),encodings=new Map<string,string>();
     const prefix=`staging/${repo.id}/${encodeURIComponent(job.key)}/${started}/`;
@@ -1421,7 +1486,7 @@ export class RepositoryState extends DurableObject<Env> {
     if(publish && !preparedNext){
       this.traceRepair('publication_load_pages',job);
       const pages=Array.from({length:Math.max(0,(job.page || 1)-1)},(_,i)=>i+1);
-      for(let offset=0;offset<pages.length;offset+=8)await Promise.all(pages.slice(offset,offset+8).map(async page=>{const object=await this.env.ARCHIVE.get(stagedPageKey(checkpoint,prefix+page,started,page));if(!object)throw Error('staging page missing');objects.set(prefix+page,await object.text());}));
+      for(let offset=0;offset<pages.length;offset+=8)await this.repairAll(pages.slice(offset,offset+8).map(async page=>{const object=await this.env.ARCHIVE.get(stagedPageKey(checkpoint,prefix+page,started,page));if(!object)throw Error('staging page missing');objects.set(prefix+page,await object.text());}));
     }
     let staged:{key:string,expires:number}|undefined;
     if(publish){const text=JSON.stringify(result.data);staged={key:prefix+job.page+'-'+crypto.randomUUID(),expires:Date.now()+86400000};await this.env.ARCHIVE.put(staged.key,text,{customMetadata:{expires:String(staged.expires)}});objects.set(prefix+job.page,text);}
@@ -1472,12 +1537,16 @@ export class RepositoryState extends DurableObject<Env> {
           const consume=()=>{const text=objects.get(name)!;objects.delete(name);return text;};
           return {text:async()=>consume(),json:async()=>JSON.parse(consume())};
         };const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;}})};
-        await RepositoryState.prototype.applyRefresh.call(state,p.job,p.q,p.repo,p.started,p.response,grouped?{...p.result}:p.result,p.preparedNext,p.staged);
+        p.memberRetryAt=await RepositoryState.prototype.applyRefresh.call(state,p.job,p.q,p.repo,p.started,p.response,grouped?{...p.result}:p.result,p.preparedNext,p.staged) || undefined;
         committed.push(p);
       }
       await this.releaseLeases(parent.store,committed.map(p=>p.job));
     },'publication');
-    for(const p of input.slice(0,consumed))this.dispatchSettled?.add(p.job.key);
+    for(const p of input.slice(0,consumed)){
+      const changed=committed.includes(p),result=p.result;
+      const effect=!changed?'none':p.memberRetryAt && p.memberRetryAt>Date.now()?'member-retry':result.deferred || result.unavailable?(result.category==='capacity' && result.scope?.kind==='installation'?'capacity':'defer'):result.restart || result.api!==p.job.api && p.job.page>1 && p.job.api?'restart':'progress';
+      this.settleRepairJobs([p.job],effect);
+    }
     if(grouped)try{
       const stats=this.owner.groupedPublication ||= {scope:'repository_instance_since_restart',since:Date.now(),admissions:0,members:0,queued_work_yields:0,max_members:0};
       stats.admissions++;stats.members+=committed.length;stats.queued_work_yields+=Number(consumed<input.length);stats.max_members=Math.max(stats.max_members,committed.length);
@@ -1490,9 +1559,29 @@ export class RepositoryState extends DurableObject<Env> {
     const size=store.backend==='sqlite'?50:256;
     for(let offset=0;offset<jobs.length;offset+=size){const chunk=jobs.slice(offset,offset+size);await store.exec('UPDATE jobs SET lease_id=NULL,lease_until=0 WHERE '+chunk.map(()=>'(key=? AND lease_id=?)').join(' OR '),...chunk.flatMap(j=>[j.key,j.lease_id]));}
   }
+  private settleRepairJobs(jobs:any[],effect:RepairEffect='none'):void {
+    if(!jobs.length)return;
+    for(const job of jobs)this.dispatchSettled?.add(job.key);
+    if(this.repairGroup)this.owner.repairCoordinator?.settled(jobs,effect);
+    const coordinator=this.owner.repairCoordinator,group=this.repairGroup;
+    if(effect==='capacity' && coordinator && group?.capacityRetryAt && coordinator.wakeSequence>group.wakeAtStart){
+      if(group.capacityRetryAt>Date.now())this.owner.scheduleCapacityDeadline(group.capacityRetryAt);
+      else void coordinator.resumeCapacity();
+    }
+  }
+  private async renewRepairLeases():Promise<{key:string,lease_id:string,lease_until:number}[]> {
+    const owned=this.owner.repairCoordinator?.owned;
+    if(!owned?.size)return [];
+    const now=Date.now(),interval=settings(this.env).lease_ms;
+    const near=[...owned.values()].filter(job=>job.lease_until<=now+interval/2);
+    if(!near.length)return [];
+    const values=JSON.stringify(near.map(j=>({key:j.key,token:j.lease_id})));
+    if(this.store.backend==='sqlite')return (await this.store.exec<any>("UPDATE jobs SET lease_until=? WHERE key IN (SELECT j.key FROM json_each(?) o CROSS JOIN jobs j ON j.key=json_extract(o.value,'$.key') WHERE j.lease_id=json_extract(o.value,'$.token') AND j.lease_until<=?) RETURNING key,lease_id,lease_until",now+interval,values,now+interval/2)).toArray();
+    return (await this.store.exec<any>('UPDATE jobs SET lease_until=? WHERE lease_until<=? AND EXISTS (SELECT 1 FROM jsonb_to_recordset(CAST(? AS JSONB)) AS o(key TEXT,token TEXT) WHERE o.key=jobs.key AND o.token=jobs.lease_id) RETURNING key,lease_id,lease_until',now+interval,now+interval/2,values)).toArray();
+  }
   private async publishBatch(jobs:any[],results:any[]):Promise<void> {
     let pending:PreparedRefresh[]=[],waits:{job:any,result:any}[]=[],failures:ReturnType<RepositoryState['retryWait']>[]=[],bytes=0,rows=0;
-    const apply=async(members:any[],work:()=>Promise<void>)=>{try{await work();}catch(error){throw error instanceof PublicationFailure?error:new PublicationFailure(members,error);}};
+    const apply=async(members:any[],work:()=>Promise<unknown>)=>{try{await work();}catch(error){throw error instanceof PublicationFailure?error:new PublicationFailure(members,error);}};
     const unsafePreparation=(error:unknown)=>this.degraded || this.repairsHeld() || (error instanceof StoreUnavailable || error instanceof StoreFenced || /^(backend_fenced|database_unavailable|storage_full|storage_error|schema_unavailable)$/.test(classify(error))) && !canReplayPublication(error);
     const flushFailures=async()=>{if(failures.length){const input=failures;failures=[];for(const expired of [false,true]){const chunk=input.filter(x=>x.expired===expired);if(chunk.length)await apply(chunk.map(x=>x.job),()=>this.persistWaits(chunk,expired));}}};
     const flushWaits=async()=>{if(waits.length){const input=waits;waits=[];await apply(input.map(x=>x.job),()=>this.deferJobs(input));}};
@@ -1540,7 +1629,7 @@ export class RepositoryState extends DurableObject<Env> {
     }
     await flush();await flushWaits();await flushFailures();
   }
-  async applyRefresh(job:any,q:Query,repo:any,started:number,response:Response|null,result:any,preparedNext:string|undefined,staged:{key:string,expires:number}|undefined):Promise<void> {
+  async applyRefresh(job:any,q:Query,repo:any,started:number,response:Response|null,result:any,preparedNext:string|undefined,staged:{key:string,expires:number}|undefined):Promise<number|void> {
     if (job.lease_id && (await this.store.exec<any>('SELECT lease_id FROM jobs WHERE key=?',job.key)).toArray()[0]?.lease_id!==job.lease_id) throw new LeaseLost();
     if (result.continuation) {
       const nested=await this.encode(result.continuation,Date.now()+86400000);
@@ -1566,9 +1655,10 @@ export class RepositoryState extends DurableObject<Env> {
         await this.enqueue(source,1,Date.now(),!existing || !existing.started && !existing.dirty);
         if(!(await this.complete(q)) && (requested || parent?.lane==='requested' && existing?.lane!=='active')) await this.store.exec("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?) WHERE key=?",requested || null,queryKey(source));
       }
-      await this.store.exec('UPDATE jobs SET due=?,attempt=attempt+?,wait_reason=? WHERE key=?',result.retry_at || Date.now()+Math.min(3600000,60000*2**Math.min(6,job.attempt)),capacity?0:1,result.category || result.reason || 'upstream',job.key);
+      const due=result.retry_at || Date.now()+Math.min(3600000,60000*2**Math.min(6,job.attempt));
+      await this.store.exec('UPDATE jobs SET due=?,attempt=attempt+?,wait_reason=? WHERE key=?',due,capacity?0:1,result.category || result.reason || 'upstream',job.key);
       await this.metric(capacity?'capacity_wait':'retry',q,job.lane || 'verification');
-      if(!capacity) await this.setMeta('last_upstream_failure',{at:Date.now(),operation:q.operation,category:result.category || result.reason || 'upstream',request_id:result.request_id}); return;
+      if(!capacity) await this.setMeta('last_upstream_failure',{at:Date.now(),operation:q.operation,category:result.category || result.reason || 'upstream',request_id:result.request_id}); return memberUnavailable(result)?due:undefined;
     }
     if (result.unchanged) {
       await this.store.exec('DELETE FROM meta WHERE key=?',stagingStateKey(job.key));
@@ -1781,10 +1871,10 @@ export class RepositoryState extends DurableObject<Env> {
   async storageMaintenance(runExpiry=true): Promise<void> {
     if(this.migrationHeld() || this.mutationState.blocked)return;
     if(this.storageFlight)return this.storageFlight;
-    this.activeOperations++;
+    this.owner.activeOperations++;
     this.traceRepair('storage_prepare');
     const flight=this.prepareStorage(runExpiry);this.storageFlight=flight;
-    try {await flight;this.traceRepair('storage_prepared');}finally {this.activeOperations--;if(this.storageFlight===flight)this.storageFlight=undefined;}
+    try {await flight;this.traceRepair('storage_prepared');}finally {this.owner.activeOperations--;if(this.storageFlight===flight)this.storageFlight=undefined;}
   }
   get maintenanceArchive():R2Bucket {return timedBucket(this.env.ARCHIVE,this.owner.maintenanceIOScope);}
   get transactionArchive():R2Bucket {return timedBucket(this.env.ARCHIVE,this.owner.transactionIOScope);}
@@ -2063,26 +2153,32 @@ export class RepositoryState extends DurableObject<Env> {
   async retryJob(job:any,error:unknown):Promise<void> {await this.retryJobs([job],error);}
   private retryWait(job:any,error:unknown):RepairWait & {expired:boolean} {
     const expired=error instanceof Error && /staging page missing/.test(error.message),reason=expired?'staging_expired':'transport_or_parser';
-    return {job,due:Date.now()+Math.min(3600000,60000*2**Math.min(job.attempt || 0,6)),attempts:1,reason,event:'retry',failure:{category:reason},expired};
+    const named=error instanceof Error && error.constructor===Error && ['staging page missing','repeated upstream cursor'].includes(error.message);
+    return {job,due:Date.now()+Math.min(3600000,60000*2**Math.min(job.attempt || 0,6)),attempts:1,reason,event:'retry',failure:{category:reason},memberFailure:named || isMemberDataFailure(error),expired};
   }
-  private async retryJobs(jobs:any[],error:unknown):Promise<void> {
-    const input=jobs.map(job=>this.retryWait(job,error));await this.persistWaits(input,input[0]?.expired || false);
+  private async retryJobs(jobs:any[],error:unknown):Promise<Set<string>> {
+    const input=jobs.map(job=>this.retryWait(job,error));return this.persistWaits(input,input[0]?.expired || false);
   }
   private async deferJobs(input:{job:any,result:any}[]):Promise<void> {
+    for(const {result} of input)await this.noteQuotaRestriction(result);
     const now=Date.now();
     await this.persistWaits(input.map(({job,result})=>{
       const capacity=result.category==='capacity';
-      return {job,due:result.retry_at || now+Math.min(3600000,60000*2**Math.min(6,job.attempt)),attempts:capacity?0:1,reason:result.category || result.reason || 'upstream',event:capacity?'capacity_wait':'retry',failure:capacity?undefined:{category:result.category || result.reason || 'upstream',request_id:result.request_id}};
+      return {job,due:result.retry_at || now+Math.min(3600000,60000*2**Math.min(6,job.attempt)),attempts:capacity?0:1,reason:result.category || result.reason || 'upstream',event:capacity?'capacity_wait':'retry',installationCapacity:capacity&&result.scope?.kind==='installation',memberFailure:memberUnavailable(result),failure:capacity?undefined:{category:result.category || result.reason || 'upstream',request_id:result.request_id}};
     }));
   }
-  private async persistWaits(input:RepairWait[],expired=false):Promise<void> {
-    if(!input.length)return;
+  private async persistWaits(input:RepairWait[],expired=false):Promise<Set<string>> {
+    if(!input.length)return new Set();
     if(!this.store.transactional) {
       const metrics=new RepairMetrics();
-      try{await this.atomic(async state=>{state.repairMetrics=metrics;await state.persistWaits(input,expired);},'repair');}
+      let waiting:Set<string>;
+      try{waiting=await this.atomic(async state=>{state.repairMetrics=metrics;return state.persistWaits(input,expired);},'repair');}
       catch(error){throw new WaitFailure(input,expired,error);}
-      for(const item of input)this.dispatchSettled?.add(item.job.key);
-      try{this.repairMetrics.merge(metrics);}catch{}return;
+      this.settleRepairJobs(input.map(item=>item.job));
+      this.settleRepairJobs(input.filter(item=>waiting.has(item.job.key)&&!item.installationCapacity&&!(item.memberFailure&&item.due>Date.now())).map(item=>item.job),'defer');
+      this.settleRepairJobs(input.filter(item=>waiting.has(item.job.key)&&item.memberFailure&&item.due>Date.now()).map(item=>item.job),'member-retry');
+      this.settleRepairJobs(input.filter(item=>waiting.has(item.job.key)&&item.installationCapacity).map(item=>item.job),'capacity');
+      try{this.repairMetrics.merge(metrics);}catch{}return waiting;
     }
     const size=this.store.backend==='sqlite'?12:128,changed=new Set<string>();
     for(let offset=0;offset<input.length;offset+=size) {
@@ -2093,31 +2189,52 @@ export class RepositoryState extends DurableObject<Env> {
     let last:typeof input[number]|undefined;
     for(const item of input)if(changed.has(item.job.key)){await this.metric(item.event,JSON.parse(item.job.query),item.job.lane);if(item.failure)last=item;}
     if(last)await this.setMeta('last_upstream_failure',{at:Date.now(),operation:JSON.parse(last.job.query).operation,...last.failure});
+    // An earlier uncertain commit can already have saved the exact decision.
+    // Confirm that state without excluding a committed newer dirty generation.
+    const waiting=new Set(changed),unmatched=input.filter(item=>!changed.has(item.job.key));
+    const batch=this.store.backend==='sqlite'?80:128;
+    for(let offset=0;offset<unmatched.length;offset+=batch){
+      const chunk=unmatched.slice(offset,offset+batch),expected=new Map(chunk.map(item=>[item.job.key,item]));
+      const rows=(await this.store.exec<any>('SELECT key,due,wait_reason,lease_id FROM jobs WHERE key IN ('+chunk.map(()=>'?').join(',')+')',...chunk.map(item=>item.job.key))).toArray();
+      for(const row of rows){const item=expected.get(row.key)!;if(!row.lease_id && row.due===item.due && row.wait_reason===item.reason)waiting.add(row.key);}
+    }
+    return waiting;
   }
-  private async routeBatchToCore(jobs:any[]):Promise<void> {
-    if(!this.store.transactional){await this.atomic(state=>state.routeBatchToCore(jobs),'repair');for(const job of jobs)this.dispatchSettled?.add(job.key);return;}
-    const size=this.store.backend==='sqlite'?49:256,now=Date.now();
-    for(let offset=0;offset<jobs.length;offset+=size){const chunk=jobs.slice(offset,offset+size);await this.store.exec('UPDATE jobs SET lease_id=NULL,lease_until=0,api=?,due=? WHERE '+chunk.map(()=>'(key=? AND lease_id=?)').join(' OR '),'core',now,...chunk.flatMap(j=>[j.key,j.lease_id]));}
+  private async routeBatchToCore(jobs:any[]):Promise<Set<string>> {
+    if(!this.store.transactional){
+      const changed=await this.atomic(state=>state.routeBatchToCore(jobs),'repair');this.settleRepairJobs(jobs);
+      this.settleRepairJobs(jobs.filter(job=>changed.has(job.key)),'route');return changed;
+    }
+    const size=this.store.backend==='sqlite'?49:256,now=Date.now(),changed=new Set<string>();
+    for(let offset=0;offset<jobs.length;offset+=size){const chunk=jobs.slice(offset,offset+size);
+      for(const row of (await this.store.exec('UPDATE jobs SET lease_id=NULL,lease_until=0,api=?,due=? WHERE '+chunk.map(()=>'(key=? AND lease_id=?)').join(' OR ')+' RETURNING key','core',now,...chunk.flatMap(j=>[j.key,j.lease_id]))).toArray())changed.add(row.key);
+    }
+    return changed;
   }
   private async recoverWaitFailure(failure:WaitFailure,jobs:any[]):Promise<void> {
     const metrics=new RepairMetrics();
     // One recovery admission preserves the exact captured waits first, then
     // applies ordinary backend backoff only to still-owned unfinished members.
-    await this.atomic(async state=>{
+    const waiting=await this.atomic(async state=>{
       state.repairMetrics=metrics;
-      await state.persistWaits(failure.waits,failure.expired);
-      if(isBackendFailure(failure.error))await state.retryJobs(jobs,failure.error);
+      const saved=await state.persistWaits(failure.waits,failure.expired);
+      if(isBackendFailure(failure.error))for(const key of await state.retryJobs(jobs,failure.error))saved.add(key);
+      return saved;
     },'repair');
-    for(const item of failure.waits)this.dispatchSettled?.add(item.job.key);
-    if(isBackendFailure(failure.error))for(const job of jobs)this.dispatchSettled?.add(job.key);
+    const input=isBackendFailure(failure.error)?jobs:failure.waits.map(item=>item.job);
+    const capacity=new Set(failure.waits.filter(item=>item.installationCapacity).map(item=>item.job.key));
+    const member=new Set(failure.waits.filter(item=>item.memberFailure&&item.due>Date.now()).map(item=>item.job.key));
+    this.settleRepairJobs(input);this.settleRepairJobs(input.filter(job=>waiting.has(job.key)&&!capacity.has(job.key)&&!member.has(job.key)),'defer');
+    this.settleRepairJobs(input.filter(job=>waiting.has(job.key)&&member.has(job.key)),'member-retry');
+    this.settleRepairJobs(input.filter(job=>waiting.has(job.key)&&capacity.has(job.key)),'capacity');
     try{this.repairMetrics.merge(metrics);}catch{}
   }
-  private async claimCompanions(first:any,selection?:any[],excluded?:Set<string>):Promise<any[]> {
+  private async claimCompanions(first:any,selection?:any[],excluded?:Set<string>,retireOnly=false):Promise<any[]> {
     const operation=JSON.parse(first.query).operation;
     const omit=this.excludeRepairKeys(excluded);
     const candidates=selection || (await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=? AND lane=? AND page=1 AND api IS NULL AND nested IS NULL AND key LIKE ?"+omit.sql+" ORDER BY CASE WHEN lane='requested' AND requested_at IS NULL THEN 1 ELSE 0 END,due,key LIMIT ?",Date.now(),Date.now(),first.lane,operation+':%',...omit.bindings,Math.max(0,batchLimit(operation)-1))).toArray();
     if(!candidates.length)return [];
-    if(!this.store.transactional)return this.atomic(state=>state.claimCompanions(first,candidates,excluded),'repair');
+    if(!this.store.transactional)return this.atomic(state=>state.claimCompanions(first,candidates,excluded,retireOnly),'repair');
     const hot=new Set<string>(),complete=new Set<string>();
     const readBatch=this.store.backend==='sqlite'?80:256;
     for(let offset=0;offset<candidates.length;offset+=readBatch) {
@@ -2170,6 +2287,7 @@ export class RepositoryState extends DurableObject<Env> {
       await this.store.exec('DELETE FROM meta WHERE key IN ('+keys.map(()=>'?').join(',')+')',...keys);
     }
     for(const job of retired)await this.metric('cancellation',JSON.parse(job.query),job.lane);
+    if(retireOnly)return retired;
     const wanted=candidates.filter(j=>!deleted.has(j.key));if(!wanted.length)return [];
     const now=Date.now(),lease=crypto.randomUUID(),claimed=new Map<string,any>();
     const claimBatch=this.store.backend==='sqlite'?32:256;
@@ -2218,81 +2336,270 @@ export class RepositoryState extends DurableObject<Env> {
           const cause=error instanceof PublicationFailure?error.error:error;
           await this.retryJobs(error instanceof PublicationFailure && !isBackendFailure(cause)?error.jobs:jobs,cause);
         }
-      }finally{for(const job of jobs)if(!this.dispatchSettled?.has(job.key))failed?.add(job.key);}
+      }finally{
+        const unfinished=jobs.filter(job=>!this.dispatchSettled?.has(job.key));
+        for(const job of unfinished)failed?.add(job.key);
+        if(this.repairGroup)this.owner.repairCoordinator?.failed(unfinished);
+      }
     } finally {
-      await this.releaseLeases(this.store,jobs);
+      await this.releaseLeases(this.store,jobs.filter(job=>!this.dispatchSettled?.has(job.key)));
       this.traceRepair('dispatch_complete',first);
     }
   }
   async alarm(): Promise<void> {
-    if(this.owner.alarmFlight)return this.owner.alarmFlight;
-    const flight=this.runSingleAlarm();this.owner.alarmFlight=flight;
+    const owner=this.owner,tag=owner.repairAlarm;
+    const ordinaryDue=owner.store.backend==='sqlite' && owner.ordinaryAlarmAt!==undefined && owner.ordinaryAlarmAt<=Date.now()+100;
+    const continuation=!ordinaryDue && owner.store.backend==='sqlite' && tag?.continuation && tag.at<=Date.now() && owner.repairCoordinator;
+    if(owner.alarmFlight){
+      if(continuation){
+        await owner.alarmFlight;
+        if(owner.repairAlarm===tag)owner.repairAlarm=undefined;
+        return owner.runContinuationAlarm();
+      }
+      void owner.repairCoordinator?.wake(true);return owner.alarmFlight;
+    }
+    const quota=!ordinaryDue && owner.store.backend==='sqlite' && tag?.quota && tag.at<=Date.now() && owner.quotaRestriction?.category==='capacity';
+    if(!continuation && !quota && owner.ordinaryAlarmAt!==undefined && owner.ordinaryAlarmAt<=Date.now()+100)owner.ordinaryAlarmAt=undefined;
+    owner.repairAlarm=undefined;
+    const flight=continuation?owner.runContinuationAlarm():quota?owner.runQuotaAlarm():this.runSingleAlarm();owner.alarmFlight=flight;
     try{await flight;}finally{if(this.owner.alarmFlight===flight)this.owner.alarmFlight=undefined;}
   }
   async runSingleAlarm(): Promise<void> {
     if(this.migrationUnavailable) await this.retryMigrationControl();
     if(this.repairsHeld()) return;
-    this.activeOperations++;
-    try {await this.runAlarm();} finally {this.activeOperations--;}
+    await this.runAlarm();
   }
   async runAlarm(): Promise<void> {
-    const options=settings(this.env),failed=new Set<string>();let dispatched=0,retired=0;
-    try {
-      this.traceRepair('expire');
-      await this.expire();
-      this.traceRepair('select_jobs');
-      if(this.schema!=='current' && !this.degraded) this.startup();
-      try {await this.requestOpenCoverage();} catch(error) {this.noteFailure('open_coverage',error);}
-      // Expiry/backfill preparation must not consume the launch window and
-      // leave every due job unstarted when the remote database is slow.
-      const began=Date.now();
-      // Every dispatch writes its lease before any GitHub request, so a full
-      // store stops here without spending upstream quota.
-      if(!this.degraded && typeof this.schema!=='object') try {
-        while(dispatched<options.dispatches && Date.now()-began<options.launch_ms && !this.degraded && !this.migrationHeld()) {
-          const wave:Promise<void>[]=[];
-          while(wave.length<options.concurrency && dispatched<options.dispatches) {
-            let selected:any;
-            try {
-              selected=await this.atomic(async state=>{
-                const next=await state.nextJob(failed);if(!next)return undefined;
-                if(await state.retireUnneeded(next))return {retired:true};
-                return {job:await state.claim(next)};
-              },'repair');
-            } catch(error){this.noteFailure('repair_dispatch',error);break;}
-            if(!selected)break;
-            if(selected.retired){if(++retired>=200)break;continue;}
-            const first=selected.job;if(!first)break;
-            const operation=JSON.parse(first.query).operation;
-            const batchable=['issue_comments','review_threads','statuses','reactions'].includes(operation) && first.page===1 && !first.api && !first.nested;
-            const group=[first];let preparationError:unknown;
-            if(batchable)try{group.push(...await this.claimCompanions(first,undefined,failed));}catch(error){preparationError=error;}
-            // Commit companions before selecting the next leader, preserving
-            // upstream batching. Already-started groups keep running in parallel.
-            dispatched++;wave.push(this.dispatch(first,group,preparationError,failed));
+    if(this.owner.ordinaryAlarmAt!==undefined && this.owner.ordinaryAlarmAt<=Date.now()+100)this.owner.ordinaryAlarmAt=undefined;
+    await this.getRepairCoordinator().wake(true);
+  }
+  private async runContinuationAlarm():Promise<void> {
+    if(this.migrationUnavailable)await this.retryMigrationControl();
+    if(this.repairsHeld() || this.degraded)return;
+    this.owner.activeOperations++;
+    try{
+      await this.getRepairCoordinator().wake();
+      // A consumed stale continuation may find a now-closed or full owner.
+      // Re-arm durable future retry/lease recovery even when wake() is a no-op.
+      await this.armRepairAlarm();
+    }finally{this.owner.activeOperations--;}
+  }
+  private async runQuotaAlarm():Promise<void> {
+    if(this.repairsHeld() || this.degraded)return;
+    this.owner.activeOperations++;
+    try{
+      if(this.getRepairCoordinator().full){await this.armRepairAlarm();return;}
+      // A retry of a known restriction is not another external maintenance pass.
+      if(await this.quotaAllowsRepairClaim(true))await this.getRepairCoordinator().resumeCapacity(true);
+      else await this.armRepairAlarm();
+    }finally{this.owner.activeOperations--;}
+  }
+  private getRepairCoordinator():RepairCoordinator {
+    const owner=this.owner;if(owner!==this)return owner.getRepairCoordinator();
+    if(this.repairCoordinator)return this.repairCoordinator;
+    const options=settings(this.env);
+    return this.repairCoordinator=new RepairCoordinator({
+      concurrency:options.concurrency,dispatches:options.dispatches,
+      held:()=>Boolean(owner.degraded || owner.repairsHeld() || owner.mutationState.blocked || typeof owner.schema==='object'),
+      operations:delta=>{owner.activeOperations+=delta;},
+      lifetime:work=>{owner.ctx.waitUntil?.(work);},
+      failure:error=>{owner.noteFailure('repair_dispatch',error);},
+      stalled:()=>{owner.ctx.abort('repair_transport_stalled');},
+      select:async q=>{
+        if(!await owner.quotaAllowsRepairClaim())return undefined;
+        // A chunk can settle members while its group still occupies a slot.
+        // When that prompts refill, use the existing read-only eligibility
+        // query before paying for an empty writer transaction and connection.
+        // The atomic claim below still rechecks the current row and ownership.
+        if(owner.getRepairCoordinator().groups.size){
+          try{if(!await owner.hasEligibleRepair(q))return undefined;}
+          catch{/* An optional HTTP-read failure cannot replace the atomic writer claim. */}
+        }
+        let attempted:any;
+        try{return await owner.atomic(async state=>{
+          const next=await state.nextJob(q.failed);if(!next)return undefined;attempted=next;
+          if(await state.retireUnneeded(next))return {retired:true};
+          const first=await state.claim(next);if(!first)return undefined;
+          const operation=JSON.parse(first.query).operation;
+          const batchable=['issue_comments','review_threads','statuses','reactions'].includes(operation) && first.page===1 && !first.api && !first.nested;
+          const jobs=[first];if(batchable)jobs.push(...await state.claimCompanions(first,undefined,q.failed));
+          return {jobs};
+        },'repair');}catch(error){
+          if(attempted)q.failed.add(attempted.key);
+          if(attempted && canReplayPublication(error)){
+            // A healthy rolled-back preparation failure isolates its leader.
+            // Backend/uncertain claim failures never split into a retry loop.
+            const first=await owner.atomic(state=>state.claim(attempted),'repair');
+            return first?{jobs:[first],preparationError:error}:{skipped:true};
           }
-          if(!wave.length)break;
-          await Promise.allSettled(wave);
+          throw error;
         }
-      } catch(error) {this.noteFailure('repair_dispatch',error);}
-      this.traceRepair('maintenance');
-      try {if(!this.migrationHeld()) await this.maintenance();} catch(error) {this.noteFailure('maintenance',error);}
-    } finally {
-      try {
-        const omit=this.excludeRepairKeys(failed);
-        const now=Date.now(),where=omit.sql?' WHERE (due>? OR lease_until>? OR (1=1'+omit.sql+'))':'';
-        const row=(await this.store.exec<any>('SELECT MIN(MAX(due,lease_until)) AS due FROM jobs'+where,...(omit.sql?[now,now,...omit.bindings]:[]))).one();
-        // Degraded mode writes nothing, not even the next alarm; the cron tick
-        // keeps expiring rows until a probe restores writes.
-        if (row.due && !this.degraded && !this.migrationHeld()) {
-          const at=Math.max(Date.now()+100,row.due),earlier=this.store.backend==='sqlite'?await this.ctx.storage.getAlarm():null;
-          if(!earlier || earlier>at)await this.setAlarm(at);
+      },
+      eligible:q=>owner.hasEligibleRepair(q),
+      dispatch:async group=>{
+        const scoped=Object.create(owner) as RepositoryState;scoped.repairGroup=group;
+        scoped.env=scoped.repairEnvironment(group);
+        await scoped.dispatch(group.jobs[0],group.jobs,group.preparationError);
+      },
+      maintenance:async(external,phase)=>{
+        if(external && phase==='before'){
+          owner.traceRepair('expire');await owner.expire();owner.traceRepair('select_jobs');
+          if(owner.schema!=='current' && !owner.degraded)owner.startup();
         }
-      } catch(error) {this.noteFailure('alarm',error);}
-      this.traceRepair('storage_maintenance');
-      this.startStorageMaintenance();
-      this.traceRepair('alarm_complete');
+        if(phase==='before' || !external)try{await owner.requestOpenCoverage();}catch(error){owner.noteFailure('open_coverage',error);}
+        if(phase==='after'){
+          owner.traceRepair('maintenance');
+          if(owner.quotaRestriction && !owner.migrationHeld())try{await owner.retireQuotaObsolete();}catch(error){owner.noteFailure('quota_local_retirement',error);}
+          try{if(!owner.migrationHeld())await owner.maintenance();}catch(error){owner.noteFailure('maintenance',error);}
+          if(external){owner.traceRepair('storage_maintenance');owner.startStorageMaintenance();owner.traceRepair('alarm_complete');}
+        }
+      },
+      arm:()=>owner.armRepairAlarm(),
+    });
+  }
+  private async hasEligibleRepair(q:RepairQuantum):Promise<boolean> {
+    const restriction=this.quotaRestriction;
+    if(restriction && restriction.installation===(await this.meta('repository'))?.installation && this.quotaBlocksRepairTurn(q))return false;
+    const omit=this.excludeRepairKeys(q.failed),now=Date.now();
+    return Boolean((await this.store.exec('SELECT key FROM jobs WHERE due<=? AND lease_until<=?'+omit.sql+' LIMIT 1',now,now,...omit.bindings)).toArray().length);
+  }
+  private async retireQuotaObsolete():Promise<void> {
+    if(this.degraded || this.repairsHeld())return;
+    const omit=this.excludeRepairKeys(undefined,false),now=Date.now();
+    // A bounded, read-only candidate scan never waits for upstream availability.
+    // The existing bulk dormancy path rechecks current resources/demand under
+    // the writer and deletes only matching, unowned generation snapshots.
+    const candidates=(await this.store.exec<any>("SELECT jobs.* FROM jobs JOIN collections c USING(key) WHERE c.complete=1 AND dirty=0 AND due<=? AND lease_until<=?"+omit.sql+
+      " AND NOT EXISTS (SELECT 1 FROM demand d WHERE d.key=jobs.key AND d.at>?) AND json_extract(query,'$.operation') IN ('pr','files','reviews','review_comments','review_threads','issue_comments') AND EXISTS (SELECT 1 FROM resources r WHERE r.kind IN ('pr','issue') AND r.id=CAST(json_extract(jobs.query,'$.args.number') AS TEXT) AND r.tombstone=0 AND json_extract(r.data,'$.state') IN ('CLOSED','MERGED') AND (r.kind='pr' OR NOT EXISTS (SELECT 1 FROM resources p WHERE p.kind='pr' AND p.id=r.id))) ORDER BY key LIMIT 100",now,now,...omit.bindings,now-300000)).toArray();
+    if(!candidates.length)return;
+    const operation=JSON.parse(candidates[0].query).operation,group=candidates.filter(job=>JSON.parse(job.query).operation===operation);
+    await this.atomic(state=>state.claimCompanions(group[0],group,undefined,true),'repair');
+  }
+  private async armRepairAlarm():Promise<void> {
+    if(this.store.backend==='postgres' || this.degraded || this.migrationHeld())return;
+    if(this.owner.ordinaryAlarmAt!==undefined && this.owner.ordinaryAlarmAt<=Date.now()+100){
+      // New demand can reuse an overdue alarm while a continuation is already
+      // executing. Preserve a real external wake even when failed keys would
+      // otherwise disappear from the repair-only alarm query.
+      const now=Date.now(),existing=await this.ctx.storage.getAlarm();
+      await this.setAlarm(existing && existing>now?Math.min(existing,now+100):now+100,false,false,true);return;
     }
+    const coordinator=this.repairCoordinator!,now=Date.now(),omit=this.excludeRepairKeys(coordinator.current.failed);
+    const restriction=this.quotaRestriction;
+    const restricted=Boolean(restriction && restriction.installation===(await this.meta('repository'))?.installation && this.quotaBlocksRepairTurn(coordinator.current));
+    const futureOnly=coordinator.full || coordinator.unproductiveStop || restricted || this.owner.mutationState.blocked || typeof this.owner.schema==='object';
+    const where=futureOnly?' WHERE (due>? OR lease_until>?)':omit.sql?' WHERE (due>? OR lease_until>? OR (1=1'+omit.sql+'))':'';
+    const bindings=futureOnly?[now,now]:omit.sql?[now,now,...omit.bindings]:[];
+    const row=(await this.store.exec<any>('SELECT MIN(MAX(due,lease_until)) AS due FROM jobs'+where,...bindings)).one();
+    const retryAt=!coordinator.full?this.quotaRestriction?.retry_at:undefined,soon=Date.now()+100;
+    const quotaAt=retryAt?Math.max(soon,retryAt):undefined,jobAt=row.due?Math.max(soon,row.due):undefined;
+    const at=quotaAt&&jobAt?Math.min(quotaAt,jobAt):quotaAt || jobAt;if(!at)return;
+    const earlier=await this.ctx.storage.getAlarm();
+    const quota=Boolean(quotaAt===at && this.quotaRestriction?.category==='capacity');
+    const continuation=Boolean(!quota && jobAt===at && row.due<=now);
+    if(!earlier || earlier>at)await this.setAlarm(at,quota,continuation,true);
+  }
+  protected get repairHopLimit():number{return REPAIR_HOP_MS;}
+  private repairEnvironment(group:RepairGroup):Env {
+    const owner=this.owner,env=this.env;
+    const hop=<T>(action:()=>Promise<T>,cancel?:()=>void)=>repairHop(group,action,cancel,owner.repairHopLimit);
+    const body=(value:any):any=>value && typeof value==='object'?new Proxy(value,{get(target,key){
+      const item=Reflect.get(target,key,target);
+      if(typeof item!=='function')return item;
+      return ['text','json','arrayBuffer','bytes'].includes(String(key))?(...args:any[])=>hop(()=>item.apply(target,args)):item.bind(target);
+    }}):value;
+    const archive=new Proxy(env.ARCHIVE,{get(target,key){
+      const value=Reflect.get(target,key,target);if(typeof value!=='function')return value;
+      return (...args:any[])=>hop(()=>value.apply(target,args)).then(result=>key==='get'?body(result):result);
+    }});
+    const installations=new Proxy(env.INSTALLATIONS,{get(target,key){
+      if(key!=='get'){const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;}
+      return (...args:any[])=>{
+        const instance=(target.get as any)(...args);
+        return new Proxy(instance,{get(stub,key){
+          if(key!=='fetch'){const value=Reflect.get(stub,key,stub);return typeof value==='function'?value.bind(stub):value;}
+          return (input:any,init:any)=>{
+            group.wakeAtStart=owner.getRepairCoordinator().wakeSequence;
+            const abort=new AbortController();
+            return hop(()=>stub.fetch(input,{...init,signal:abort.signal}),()=>abort.abort()).then(body);
+          };
+        }});
+      };
+    }});
+    return {...env,ARCHIVE:archive,INSTALLATIONS:installations};
+  }
+  private async noteQuotaRestriction(result:any):Promise<void> {
+    const owner=this.owner;
+    if(!this.repairGroup || result?.scope?.kind!=='installation' || !Number.isSafeInteger(result.retry_at)
+      || typeof result.category!=='string' || result.category!=='capacity' && !result.category.startsWith('secondary'))return;
+    if(result.category==='capacity'){
+      this.repairGroup.capacityRetryAt=result.retry_at;
+      if(this.repairGroup.wakeAtStart!==owner.repairCoordinator?.wakeSequence){owner.scheduleCapacityDeadline(result.retry_at);return;}
+    }
+    if(result.retry_at<=Date.now() && result.category!=='capacity')return;
+    const repo=await owner.meta('repository');if(!repo?.installation)return;
+    if(result.category==='capacity' && this.repairGroup.wakeAtStart!==owner.repairCoordinator?.wakeSequence){owner.scheduleCapacityDeadline(result.retry_at);return;}
+    const quantum=owner.getRepairCoordinator().current;
+    owner.quotaRestriction={category:result.category,retry_at:result.retry_at,installation:repo.installation,quantum,dataProgress:quantum.dataProgress};
+  }
+  private scheduleCapacityDeadline(at:number):void {
+    const owner=this.owner;
+    // Native SQLite already has the exact quota deadline in its durable alarm.
+    if(owner.store.backend!=='postgres')return;
+    const delay=at-Date.now();
+    if(delay<=0 || delay>settings(owner.env).lease_ms)return;
+    if(owner.capacityWake?.at===at)return;
+    if(owner.capacityWake && owner.capacityWake.at<at){owner.capacityWake.latest=Math.max(owner.capacityWake.latest || at,at);return;}
+    const latest=owner.capacityWake?Math.max(owner.capacityWake.latest || owner.capacityWake.at,owner.capacityWake.at):undefined;
+    if(owner.capacityWake){clearTimeout(owner.capacityWake.timer);owner.capacityWake.resolve();owner.capacityWake=undefined;}
+    let resolve!:()=>void;const waiting=new Promise<void>(done=>resolve=done);
+    const fire=()=>{
+      if(owner.capacityWake?.at!==at)return;
+      // Timers may round down by a millisecond. A wake before the durable due
+      // time can find no job and lose the only prompt continuation.
+      const remaining=at-Date.now();
+      if(remaining>0){owner.capacityWake.timer=setTimeout(fire,remaining);return;}
+      const latest=owner.capacityWake.latest;
+      owner.capacityWake=undefined;resolve();
+      void owner.getRepairCoordinator().resumeCapacity(true);
+      if(latest && latest>Date.now())owner.scheduleCapacityDeadline(latest);
+    };
+    const timer=setTimeout(fire,delay);
+    owner.capacityWake={at,latest,timer,resolve};owner.ctx.waitUntil?.(waiting);
+  }
+  private quotaBlocksRepairTurn(quantum:RepairQuantum):boolean {
+    const restriction=this.owner.quotaRestriction;
+    return Boolean(restriction && (restriction.retry_at>Date.now() || restriction.quantum===quantum && restriction.dataProgress===quantum.dataProgress));
+  }
+  private async quotaAllowsRepairClaim(probe=false):Promise<boolean> {
+    const owner=this.owner,restriction=owner.quotaRestriction;if(!restriction)return true;
+    const repo=await owner.meta('repository');
+    if(repo?.installation!==restriction.installation){owner.quotaRestriction=undefined;return true;}
+    if(!probe && owner.quotaBlocksRepairTurn(owner.getRepairCoordinator().current))return false;
+    if(restriction.retry_at>Date.now())return false;
+    owner.quotaRestriction=undefined;
+    if(owner.store.backend!=='sqlite' || restriction.category!=='capacity')return true;
+    // Only after a real global-capacity rejection. A hung optional hint does
+    // not hold a repair slot or block normal claims; at most one is outstanding.
+    if(owner.availabilityFlight)return true;
+    const wake=owner.getRepairCoordinator().wakeSequence;
+    const abort=new AbortController();
+    const actual=(async()=>{
+      const response=await stub(owner.env.INSTALLATIONS,repo.installation).fetch('https://internal/availability',{method:'POST',body:JSON.stringify({repository:repo}),signal:abort.signal});
+      return response.ok?await response.json():null;
+    })();
+    owner.availabilityFlight=actual;
+    const tracked=actual.finally(()=>{if(owner.availabilityFlight===actual)owner.availabilityFlight=undefined;}).catch(()=>{});
+    owner.ctx.waitUntil?.(tracked);
+    let timer:ReturnType<typeof setTimeout>|undefined;
+    try{
+      const result:any=await Promise.race([actual,new Promise(resolve=>{timer=setTimeout(()=>{abort.abort();resolve(null);},1500);})]);
+      if(wake===owner.getRepairCoordinator().wakeSequence && result?.scope?.kind==='installation' && result.category==='capacity' && Number.isSafeInteger(result.retry_at) && result.retry_at>Date.now()){
+        const quantum=owner.getRepairCoordinator().current;
+        owner.quotaRestriction={...restriction,retry_at:result.retry_at,quantum,dataProgress:quantum.dataProgress};return false;
+      }
+    }catch{}finally{if(timer!==undefined)clearTimeout(timer);}
+    return true;
   }
   async refreshActivityLandings(): Promise<void> {
     const configured=await this.meta('repository'),receiptURL=configured?.bors_receipts_url;
@@ -2588,7 +2895,7 @@ export class RepositoryState extends DurableObject<Env> {
     if(health.deployment_id!==this.env.CF_VERSION?.id || !Array.isArray(health.repository_inflight))throw new AdminError('migration_dispatch_drain_unavailable');
     if(health.repository_inflight.some((row:any)=>row.repository===repo.id && row.requests>0))throw new AdminError('migration_drain_pending');
     }
-    if(this.activeOperations || this.mutationState.active || this.optionalWork.active || this.applying)throw new AdminError('migration_drain_pending');
+    if(this.owner.activeOperations || this.mutationState.active || this.optionalWork.active || this.applying)throw new AdminError('migration_drain_pending');
   }
   private async fenceMigration(state:Migration):Promise<void> {
     const sql=this.nativeSql;
@@ -2866,7 +3173,7 @@ export class RepositoryState extends DurableObject<Env> {
       if(input.operation==='abandon') {
         // There is no PostgreSQL write switch in this protocol. Preserve all
         // archives; explicit abandonment only releases this source fence.
-        if(this.activeOperations || this.mutationState.active || this.optionalWork.active) throw new AdminError('migration_drain_pending');
+        if(this.owner.activeOperations || this.mutationState.active || this.optionalWork.active) throw new AdminError('migration_drain_pending');
         state={...state,phase:'abandoned',failure:null};
         await this.env.ARCHIVE.put(archiveKey(repo,id)+'/abandoned.json',encodeMigration(state));
         await saveMigration(this.env.ARCHIVE,state);
@@ -2881,8 +3188,8 @@ export class RepositoryState extends DurableObject<Env> {
           const owner:any=await claimed.json();
           if(owner.generation!==id || owner.target!==target || owner.source.object!==state.source.object || owner.source.deployment!==state.source.deployment) throw new AdminError('migration_generation_used');
         } else if(!await this.env.ARCHIVE.put(claimKey,JSON.stringify({generation:id,target,source:state.source}),{onlyIf:{etagDoesNotMatch:'*'}})) throw new AdminError('migration_generation_used');
-        for(const deadline=Date.now()+25000;(this.activeOperations>0 || this.mutationState.active>0 || this.optionalWork.active>0) && Date.now()<deadline;) await new Promise(resolve=>setTimeout(resolve,25));
-        if(this.activeOperations || this.mutationState.active || this.optionalWork.active) throw new AdminError('migration_drain_pending');
+        for(const deadline=Date.now()+25000;(this.owner.activeOperations>0 || this.mutationState.active>0 || this.optionalWork.active>0) && Date.now()<deadline;) await new Promise(resolve=>setTimeout(resolve,25));
+        if(this.owner.activeOperations || this.mutationState.active || this.optionalWork.active) throw new AdminError('migration_drain_pending');
         await beginExport(this.env.ARCHIVE,this.ctx.storage,this.sql,state);
       } else if(input.operation==='step') {
         if(state.phase==='exporting') await exportStep(this.env.ARCHIVE,this.sql,state,input.limit);
@@ -2928,7 +3235,7 @@ export class RepositoryState extends DurableObject<Env> {
       if(path==='/retained-object') return json({retained:true});
     }
     const tracked=!this.migrationHeld();
-    if(tracked) this.activeOperations++;
+    if(tracked) this.owner.activeOperations++;
     const started=Date.now();
     try {
       const response=await this.repositoryFetch(req);
@@ -2938,7 +3245,7 @@ export class RepositoryState extends DurableObject<Env> {
         if(dispatched>0)response.headers.set('X-TauCeti-Input-Wait-Ms',String(Math.max(0,started-dispatched)));
       }
       return response;
-    } finally {if(tracked) this.activeOperations--;}
+    } finally {if(tracked) this.owner.activeOperations--;}
   }
   async repositoryFetch(req:Request): Promise<Response> {
     const url=new URL(req.url),path=url.pathname,request_id=requestId(req),requestStarted=Date.now();
@@ -2947,6 +3254,15 @@ export class RepositoryState extends DurableObject<Env> {
       if (path.startsWith('/storage/')) return await this.storage(path,req);
       // A genuinely missing schema is a precise error, not empty data.
       if (typeof this.schema==='object' && path!=='/health') return json({error:this.schema.error,missing:this.schema.missing,cause:this.schema.cause,parkable:true,request_id},503);
+      if(path==='/capacity-ready' && req.method==='POST'){
+        const input:any=await req.json(),owner=this.owner,repo=await owner.meta('repository');
+        if(input?.installation!==repo?.installation)return json({ok:true,stale:true});
+        const restriction=owner.quotaRestriction;
+        if(restriction?.category==='capacity'){
+          owner.scheduleCapacityDeadline(restriction.retry_at);owner.quotaRestriction=undefined;
+        }
+        void owner.getRepairCoordinator().capacityWake(restriction?.category==='capacity');return json({ok:true});
+      }
       if (path==='/configure') { await this.configure((await req.json() as any).repository); return json({ok:true}); }
       if (path==='/ci-receipts') {
         // Old parked CI input predates the decision not to mirror these events.
@@ -3085,12 +3401,12 @@ export class RepositoryState extends DurableObject<Env> {
       }
       if (path==='/health' && this.store.backend==='postgres') {
         const monitoring=await this.preparedObservation(),storage=monitoring.storage || {backend:'postgres',schema_version:null,expected_schema_version:1,expected_generation:this.backendGeneration(),connected:null,stale:true};
-        return json({...this.diagnostics,grouped_publication:this.owner.groupedPublication,ingestion:[...this.owner.ingestStats].map(([event_type,row])=>({event_type,...row})),reconciliation_version:2,revision:this.revisionState.value ?? this.diagnostics.revision ?? null,repository:this.repositoryMemo ?? this.diagnostics.repository ?? null,storage,monitoring,request_id,deployment_id:this.env.CF_VERSION?.id,diagnostics_at:this.diagnosticsAt || null,diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
+        return json({...this.diagnostics,grouped_publication:this.owner.groupedPublication,repair_scheduler:{...this.owner.repairCoordinator?.snapshot(),lease_renewal_row_updates:this.owner.renewedLeases || 0},ingestion:[...this.owner.ingestStats].map(([event_type,row])=>({event_type,...row})),reconciliation_version:2,revision:this.revisionState.value ?? this.diagnostics.revision ?? null,repository:this.repositoryMemo ?? this.diagnostics.repository ?? null,storage,monitoring,request_id,deployment_id:this.env.CF_VERSION?.id,diagnostics_at:this.diagnosticsAt || null,diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
       }
       if (path==='/health') {
         const storage={...await this.storageState(),backend:'sqlite',schema_version:SCHEMA_VERSION};
         if(typeof this.schema==='object' || storage.connected===false)return json({storage,deployment_id:this.env.CF_VERSION?.id,monitoring:await this.preparedObservation(),request_id});
-        return json({...this.diagnostics,grouped_publication:this.owner.groupedPublication,reconciliation_version:2,settings:settings(this.env),...this.repairMetrics.summary(),queries:[...this.queryCounts.values()],query_metrics_scope:'repository_instance_since_restart',repair_metrics_scope:'repository_instance_since_restart',storage,storage_bytes:storage.database_size ?? (storage.capacity as any)?.database_bytes,
+        return json({...this.diagnostics,grouped_publication:this.owner.groupedPublication,repair_scheduler:{...this.owner.repairCoordinator?.snapshot(),lease_renewal_row_updates:this.owner.renewedLeases || 0},reconciliation_version:2,settings:settings(this.env),...this.repairMetrics.summary(),queries:[...this.queryCounts.values()],query_metrics_scope:'repository_instance_since_restart',repair_metrics_scope:'repository_instance_since_restart',storage,storage_bytes:storage.database_size ?? (storage.capacity as any)?.database_bytes,
           repository:await this.meta('repository'),revision:await this.revision(),bootstrap_inventory:await this.meta('bootstrap_inventory'),latest_applied_input:await this.meta('latest_applied_input'),
           deployment_id:this.env.CF_VERSION?.id,monitoring:await this.preparedObservation(),diagnostics_at:this.diagnosticsAt || null,diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
       }

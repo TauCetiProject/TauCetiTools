@@ -175,11 +175,80 @@ restart backstop. A bookkeeping memo never establishes complete coverage, and
 an actual miss bypasses it immediately. Public and migration shadow reads do
 not create demand.
 
-Repair waves claim complete upstream groups before sending requests, preserving
-four-group parallelism and normal batch sizes. Companion claims and lease
-cleanup use bulk statements with the existing generation and key/token checks.
+An owner-level repair coordinator claims complete upstream groups before sending
+requests, preserving four-group parallelism and normal batch sizes. A slot spans
+fetch, preparation, publication and cleanup. Finishing one group immediately
+refills its slot while other groups continue. Companion claims and lease cleanup
+use bulk statements with the existing generation and key/token checks.
 Writer logs distinguish demand, ingress, repair, publication and other callers
 using bounded purpose names, without recording queries or payloads.
+
+Alarm/tick handlers return after finite scheduling work. The dispatch count
+bounds a scheduling quantum; productive work continues automatically across
+quanta, with bounded coverage and maintenance between them. Full slots pause the
+quantum until a completion, without repeatedly selecting due backlog or waiting
+inside an alarm handler. Ordinary ticks retain expiry and restart recovery.
+Same-owner scheduling fallback alarms resume that record without external
+maintenance. Genuine ticks and future retry/lease alarms remain external. A
+consumed stale fallback re-arms durable recovery even if no fill is needed;
+lost or uncertain optional alarm tags recover through the ordinary external path.
+An overdue wake retained without a storage rewrite still records ordinary demand;
+intent is checked again when the alarm is consumed, including a racing schedule
+write. Accepted ordinary work during a continuation handler retains an external
+wake. Existing mutation/schema holds keep repair wakeups future-only.
+Active local key/token ownership prevents duplicate fetches after persisted lease
+expiry. Existing repair/publication transactions renew matching leases near
+expiry, without a heartbeat timer. Each committed member releases its local
+ownership so a newer dirty generation can proceed before its siblings finish.
+Protected `repair_scheduler` health diagnostics report active groups and members,
+pending transport hops, selections, launch/maintenance counts, lease-renewal row
+updates and accumulated slot milliseconds by the group leader's lane. These are
+instance counters, include active group time and reset on owner replacement;
+they are neither a durable completion ledger nor scheduling inputs.
+
+Finite per-key/API attempt records prevent no-progress deferral and restart
+loops; ordinary external wakes refresh these records. A confirmed member-data
+error committed to a future ordinary retry can advance independent ready work
+across a quantum; its retry settlement is recorded separately from data/checkpoint
+progress and completed coverage. Backend failures, unknown outcomes and
+unclassified unavailable responses do not earn this continuation credit.
+Explicit data validation uses additive `failure_kind` metadata; a malformed or
+truncated HTTP body and a generic JavaScript exception earn no credit. Replay
+eligibility is broader than continuation eligibility. Failed untouched tails
+remain excluded across internal chains until an ordinary external wake.
+Quota deferrals retain their exact deadlines and carry additive
+installation/pool/query scope. Unknown
+scope retains ordinary bounded selection. Only a known installation reservation
+restriction can use an optional bounded SQLite availability hint. PostgreSQL
+receives best-effort capacity-release notifications, normally one registered
+recipient per released reservation, with coalesced wakes at existing retry
+deadlines when necessary. Notifications and hints never grant reservations or
+become prerequisites for ordinary work; lost notifications recover through cron.
+Capacity wakes preserve unrelated failed-tail and API-path records even after
+a turn closes. They clear only capacity rejections known when the wake arrived;
+a newer rejection cannot be cleared by an older pending hint. Partial slot
+occupancy retains the owner-reported deadline without repeated empty maintenance.
+The existing runner-capacity scan also registers bounded local wake recipients
+after a real installation-reservation rejection. Its actual retry deadline stays
+unchanged. Once that deadline passes, a still-full installation retains the
+eligible registration rather than issuing another futile request and moving the
+retry deadline forward. Each release wakes at most one eligible recipient per
+released slot, in registration order; local recipients need no outgoing callback.
+The existing timed fallback remains, failed optional availability checks fall
+back to the real request, and every request still acquires its ordinary quota
+reservation. This adds no reservation queue, grant or ordinary-request preflight.
+
+Each repair archive/installation transport hop has a conservative fifteen-minute
+bound, independent of total history size or queue age. The installation owner's
+fourteen-minute RPC bound lets a stalled dependency recover first. Verified
+transport cancellation is preferred; an uncancellable expired hop retains its
+slot until automatic owner recovery, after durable key/token backoff where the
+writer is usable. Unconfirmed outcomes retain ordinary lease recovery. A normal
+member failure drains its neighboring archive operations without resetting the
+owner. Successful paginated histories have no total-duration deadline.
+Cancellable expired hops allow at most two seconds for actual cancellation
+acknowledgement after cleanup before last-resort recovery; this applies only to
+an already-failed transport and never to healthy work or job eligibility.
 
 Full upstream batches retain their existing sizes. Small, independent page-one
 issue-comment, status and reaction histories publish in transactions bounded by
@@ -240,9 +309,10 @@ through their normal path. Survey validators include a representation
 version so old empty-status responses cannot survive deployment through a 304.
 
 `RECONCILIATION_SETTINGS` is an optional JSON variable with `concurrency`
-(default/max 4), `dispatches` (default 16, max 100), `launch_ms` (default 10000,
-max 30000), and four positive `weights` (default `[8,4,2,1]`). Settings affect
-background reads only. Health includes lane eligibility, oldest requested age,
+(default/max 4), `dispatches` (default 16, max 100), and four positive `weights`
+(default `[8,4,2,1]`). Legacy `launch_ms` values still load and appear in settings;
+the elapsed launch window is retired and does not impose a cooldown. Settings
+affect background reads only. Health includes lane eligibility, oldest requested age,
 repair arrivals/completions/cancellations, wait reasons, requested latency p95,
 and measured cost/latency by query shape and batch size.
 
