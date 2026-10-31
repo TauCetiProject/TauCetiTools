@@ -66,8 +66,8 @@ for(const hint of ['blocked','unknown'])test('native SQLite quota retry skips re
    let expiry=0,maintenance=0,coverage=0,calls=0,hints=0;this.expire=async()=>{expiry++;};this.maintenance=async()=>{maintenance++;};this.requestOpenCoverage=async()=>{coverage++;};this.startStorageMaintenance=()=>{};
    await this.store.exec('DELETE FROM jobs');await this.enqueueMany([{q:{repository:'org/repo',operation:'files',args:{number:100}},priority:5}],true);
    this.setAlarm=async(at,quota=false)=>{this.repairAlarm={at,quota};};
-   this.env={...this.env,INSTALLATIONS:{idFromName:id=>id,get:()=>({fetch:async url=>{
-    if(url.endsWith('/availability')){hints++;if('${hint}'==='unknown')return Response.json({}, {status:503});}
+   this.env={...this.env,INSTALLATIONS:{idFromName:id=>id,get:()=>({fetch:async(url,init)=>{
+    if(url.endsWith('/availability')){hints++;if(JSON.parse(init.body).repository.id!=='100')throw Error('missing hint recipient');if('${hint}'==='unknown')return Response.json({}, {status:503});}
     else calls++;
     return Response.json({deferred:true,category:'capacity',retry_at:Date.now()+250,scope:{kind:'installation'}});
    }})}};

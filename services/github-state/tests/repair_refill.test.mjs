@@ -85,6 +85,51 @@ test('one full publishing group does not pay an empty writer admission for every
  }finally{await drainRepairs(f.state);await f.close();}
 });
 
+test('persistent unclassified publication faults remain finite across external wakes while webhook receipts and read demand progress',async()=>{
+ const f=await fixture();let release;try{
+  await seed(f,100,'issue_comments');
+  const warm=query(9000,'issue_comments'),warmKey=key(9000,'issue_comments');
+  await f.state.put('pr','9000',{number:9000,state:'CLOSED'});
+  await f.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?)',warmKey,warm.operation,JSON.stringify(warm.args),1,Date.now(),0,null);
+  await f.state.enqueue(warm,20,Date.now()+3600000);
+  const publish=f.state.publishPrepared;
+  f.state.publishPrepared=function(input,...args){
+   if(input.some(p=>JSON.parse(p.job.query).operation==='issue_comments'&&JSON.parse(p.job.query).args.number<200))throw Error('persistent unclassified fixture fault');
+   return publish.call(this,input,...args);
+  };
+  let batches=0,writerAdmissions=0;const ingressMs=[],admissions=[],tx=f.store.transaction.bind(f.store);
+  f.store.transaction=(apply,purpose)=>{writerAdmissions++;return tx(apply,purpose);};
+  for(let turn=0;turn<3;turn++){
+   const ready=deferred(),gate=deferred();release=gate.resolve;
+   f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async(url,init)=>{
+    if(url.endsWith('/batch')){batches++;ready.resolve();await gate.promise;return Response.json({results:JSON.parse(init.body).jobs.map(()=>({api:'graphql',data:[]}))});}
+    return Response.json({api:'core',data:[]});
+   }})};
+   const before=writerAdmissions,alarm=f.state.runAlarm();await bounded(ready.promise,'external wake lost due failed-tail recovery');
+   const ingests=[];
+   for(let i=0;i<2;i++){
+    const id=turn*2+i,path='fixture/fault-ingress-'+id;
+    await f.env.ARCHIVE.put(path,JSON.stringify({action:'created',issue:{number:9000},comment:{id:String(90000+id),body:'concurrent ingress',created_at:'2026-10-31T00:00:00Z'}}));
+    const start=performance.now();ingests.push(f.state.ingest({repository:'org/repo',key:path,delivery:'fault-ingress-'+id,event:'issue_comment',received:Date.now()}).then(committed=>{assert.equal(committed,true);ingressMs.push(performance.now()-start);}));
+   }
+   const read=await f.state.query(query(1000+turn));assert.equal(read.status,'unavailable');
+   await Promise.all(ingests);gate.resolve();await alarm;await bounded(drainRepairs(f.state),'fault turn did not terminate');
+   assert.equal(batches,turn+1,'internal continuations must not multiply failed-tail fetches');
+   assert.equal(f.state.repairCoordinator.groups.size,0);assert.equal(f.state.repairCoordinator.owned.size,0);
+   admissions.push(writerAdmissions-before);
+  }
+  assert.equal((await f.store.exec("SELECT COUNT(*) n FROM deliveries WHERE id LIKE 'fault-ingress-%'")).one().n,6);
+  assert.equal((await f.store.exec("SELECT COUNT(*) n FROM demand WHERE key LIKE 'files:%'")).one().n,3);
+  assert.ok(admissions.every(count=>count<=32),'a failed100-member batch must not become one writer admission per member: '+JSON.stringify(admissions));
+  assert.equal((await f.store.exec("SELECT COUNT(*) n FROM collections WHERE operation='issue_comments' AND complete=1")).one().n,1,'a failed chunk cannot claim complete coverage');
+  const before=batches;f.state.publishPrepared=publish;
+  await f.state.runAlarm();await bounded(drainRepairs(f.state),'fault removal did not restore ordinary progress');
+  assert.ok(batches>before,'an ordinary external wake retains prompt recovery of untouched due work');
+  assert.ok((await f.store.exec("SELECT COUNT(*) n FROM collections WHERE operation='issue_comments' AND complete=1")).one().n>1);
+  console.log(JSON.stringify({fixture:'persistent_unclassified_external_wakes',backend:f.store.backend,external_fault_turns:3,fault_batches:before,writer_admissions_per_turn:admissions,committed_ingress:6,ingress_ms:ingressMs}));
+ }finally{release?.();await drainRepairs(f.state);await f.close();}
+});
+
 test('four active full batches remain excluded after lease expiry and renew only matching tokens',async()=>{
  const f=await fixture(),gate=deferred(),ready=deferred(),clock=Date.now;let offset=0;try{
   await seed(f,400,'issue_comments');

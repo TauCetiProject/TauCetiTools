@@ -538,11 +538,17 @@ export class InstallationScheduler extends DurableObject<Env> {
     }
     }catch{try{log('capacity_wake_failed',{reason:'notification_unavailable'});}catch{}}
   }
-  private availability():Response {
+  private availability(repo?:Repository):Response {
     const active=this.ctx.storage.sql.exec<any>('SELECT COUNT(*) n FROM reservations WHERE expires>?',Date.now()).one().n;
-    return json(active>=settings(this.env).concurrency
+    const result=active>=settings(this.env).concurrency
       ?{deferred:true,category:'capacity',retry_at:Date.now()+250,scope:{kind:'installation'}}
-      :{available:true});
+      :{available:true};
+    // A lost notification or installation restart can leave a repository's
+    // capacity restriction alive after its advisory registration was lost.
+    // A full hint renews that bounded registration; requests still reserve
+    // capacity normally, and an unknown optional recipient changes no result.
+    if(result.deferred)this.registerCapacityWaiter(repo,result);
+    return json(result);
   }
   protected get repairHopLimit():number{return INSTALLATION_HOP_MS;}
   async fetch(req: Request): Promise<Response> {
@@ -567,7 +573,11 @@ export class InstallationScheduler extends DurableObject<Env> {
         if(typeof repo?.id==='string') {tracked=repo.id;this.repositoryRequests.set(tracked!,1+(this.repositoryRequests.get(tracked!) || 0));}
         if(['test','production'].includes(this.env.MIGRATION_ENVIRONMENT || '') && repo?.id && blocksRepairs(await readMigration(this.env.ARCHIVE,repo.id)))return json({unavailable:true,reason:'migration_frozen',retry_at:Date.now()+60000},503);
       }
-      if(path==='/availability')return this.availability();
+      if(path==='/availability'){
+        let repo:Repository|undefined;
+        try{repo=(await req.json() as any)?.repository;}catch{}
+        return this.availability(repo);
+      }
       if (path==='/runner-capacity') return await this.runnerCapacity(await req.json() as Repository);
       if (path==='/read') return await this.read({...input,request_id:requestId(req)});
       if (path==='/batch') return await this.batch({...input,request_id:requestId(req)});

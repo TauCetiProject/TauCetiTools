@@ -2585,7 +2585,7 @@ export class RepositoryState extends DurableObject<Env> {
     const wake=owner.getRepairCoordinator().wakeSequence;
     const abort=new AbortController();
     const actual=(async()=>{
-      const response=await stub(owner.env.INSTALLATIONS,repo.installation).fetch('https://internal/availability',{method:'POST',signal:abort.signal});
+      const response=await stub(owner.env.INSTALLATIONS,repo.installation).fetch('https://internal/availability',{method:'POST',body:JSON.stringify({repository:repo}),signal:abort.signal});
       return response.ok?await response.json():null;
     })();
     owner.availabilityFlight=actual;

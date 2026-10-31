@@ -14,7 +14,7 @@ export function installationFixture(Scheduler=InstallationScheduler){
   sql:{exec(sql,...args){let rows=[];if(!args.length&&sql.includes(';'))db.exec(sql);else{const statement=db.prepare(sql);rows=statement.columns().length?statement.all(...args):(statement.run(...args),[]);}return {toArray:()=>rows,one:()=>rows[0]};}}
  }};
  const env={ALLOWED_REPOSITORIES:JSON.stringify(repos),ARCHIVE:{get:async()=>null},REPOSITORIES:{idFromName:id=>id,get:id=>({fetch:async(_url,init)=>{
-  received.push(id);if(f.notify)await f.notify(id,JSON.parse(init.body));return Response.json({ok:true});
+  received.push(id);if(f.notify){const response=await f.notify(id,JSON.parse(init.body));if(response instanceof Response)return response;}return Response.json({ok:true});
  }})}};
  const scheduler=new Scheduler(ctx,env);
  const f={db,ctx,env,scheduler,repos,received,background,gates:[],requests:[],notify:undefined,
