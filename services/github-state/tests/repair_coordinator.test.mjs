@@ -100,7 +100,7 @@ test('a capacity release clears only installation-capacity paths in a paused qua
  h.dispatch=async group=>{attempts++;await gate.promise;h.c.settled(group.jobs,'defer');};
  await h.c.wake(true);await flush();const q=h.c.current;
  q.failed.add('failed-tail');q.paths.set('primary',new Set(['core']));q.paths.set('restart',new Set(['graphql']));q.routed.add('routed');
- q.capacityPaths.set('job4',new Set(['auto']));await h.c.capacityWake();
+ q.capacityPaths.set('job4',new Map([['auto',0]]));await h.c.capacityWake();
  assert.equal(h.c.current,q,'full slots retain the paused quantum');
  gate.resolve();await flush();
  assert.equal(h.c.current,q);assert.equal(q.capacityPaths.size,0);assert.ok(q.failed.has('failed-tail'));
@@ -129,6 +129,28 @@ test('a capacity release during a stale empty selection resumes without losing i
  assert.equal(attempts,2);assert.equal(h.c.current,q);assert.ok(q.failed.has('unrelated-backend-tail'));assert.equal(h.stats().operations,0);
 });
 
+for(const dispatches of [1,16])test('a closed capacity continuation retains failed tails and unrelated paths with budget '+dispatches,async()=>{
+ const h=harness(1,{dispatches});let attempts=0;
+ h.dispatch=async group=>{
+  if(++attempts===1){h.c.settled(group.jobs,'capacity');h.queue.push(group.jobs[0]);}
+  else h.c.settled(group.jobs,'progress');
+ };
+ await h.c.wake(true);await flush();const q=h.c.current;
+ q.failed.add('failed-tail');q.paths.set('primary',new Set(['graphql']));q.routed.add('routed');
+ await h.c.capacityWake();await flush();
+ assert.equal(attempts,2);assert.ok(h.c.current.failed.has('failed-tail'));
+ assert.deepEqual([...h.c.current.paths.get('primary')],['graphql']);assert.ok(h.c.current.routed.has('routed'));
+ assert.equal(h.stats().operations,0);
+});
+
+test('a pending release cannot clear a rejection settled after that wake',async()=>{
+ const h=harness(5),gate=deferred();
+ h.dispatch=async group=>{await gate.promise;h.c.settled(group.jobs,'capacity');};
+ await h.c.wake(true);await h.c.capacityWake();
+ gate.resolve();await flush();assert.equal(h.c.current.capacityPaths.size,5,'new rejection epochs survive the older pending wake');
+ assert.equal(h.stats().operations,0);
+});
+
 test('an ordinary error drains a nonexpired neighboring hop without resetting the owner',async()=>{
  const h=harness(2,{concurrency:1}),gate=deferred(),wait=deferred();let resets=0,attempts=0;
  h.stalled=()=>resets++;
@@ -142,4 +164,35 @@ test('an ordinary error drains a nonexpired neighboring hop without resetting th
  await h.c.wake(true);await flush();assert.equal(resets,0);assert.equal(attempts,1);assert.equal(h.c.groups.size,1);
  gate.resolve();await flush();assert.equal(resets,0);assert.equal(attempts,2);assert.equal(h.stats().operations,0);
  assert.equal(h.failures.length,1);
+});
+
+test('durable member-data retries advance independent ready work without crediting data progress',async()=>{
+ const h=harness(21);let attempts=0;const records=[];
+ h.dispatch=async group=>{
+  attempts++;if(!records.includes(h.c.current))records.push(h.c.current);
+  h.c.settled(group.jobs,attempts<=20?'member-retry':'progress');
+ };
+ await h.c.wake(true);await flush();assert.equal(attempts,21);assert.equal(h.queue.length,0);
+ assert.equal(records[0].memberRetries,16);assert.equal(records[0].progress,0);assert.equal(records[0].dataProgress,0);
+ assert.equal(records[1].memberRetries,4);assert.equal(records[1].dataProgress,1);assert.equal(h.stats().operations,0);
+});
+
+test('delayed cancellation acknowledgement releases its slot without resetting unrelated work',async()=>{
+ const h=harness(2,{concurrency:1}),cancel=deferred();let resets=0,attempts=0;
+ h.stalled=()=>resets++;
+ h.dispatch=async group=>{
+  if(++attempts===1){
+   const actual=cancel.promise.finally(()=>group.pendingIO.delete(actual));
+   group.pendingIO.set(actual,{wait:Promise.resolve(),expired:true,cancellable:true});
+  }else h.c.settled(group.jobs,'progress');
+ };
+ await h.c.wake(true);await flush();assert.equal(attempts,1);assert.equal(resets,0);assert.equal(h.c.groups.size,1);
+ cancel.resolve();await flush();assert.equal(attempts,2);assert.equal(resets,0);assert.equal(h.stats().operations,0);
+});
+
+test('a canceled transport that never acknowledges still has bounded owner recovery',async()=>{
+ const h=harness(1),reset=deferred(),start=Date.now();
+ h.stalled=()=>reset.resolve();h.dispatch=async group=>{group.pendingIO.set(new Promise(()=>{}),{wait:Promise.resolve(),expired:true,cancellable:true});};
+ await h.c.wake(true);await reset.promise;const elapsed=Date.now()-start;
+ assert.ok(elapsed>=1900&&elapsed<10000);assert.equal(h.c.groups.size,1,'an unacknowledged operation is never silently abandoned');
 });

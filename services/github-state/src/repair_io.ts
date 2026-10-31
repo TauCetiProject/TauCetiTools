@@ -11,7 +11,7 @@ export class RepairTransportTimeout extends StoreUnavailable {
 }
 export async function repairHop<T>(group:RepairGroup,action:()=>Promise<T>,cancel?:()=>void,limit=REPAIR_HOP_MS):Promise<T> {
   const actual=Promise.resolve().then(action);
-  const entry={wait:undefined as unknown as Promise<unknown>,expired:false};
+  const entry={wait:undefined as unknown as Promise<unknown>,expired:false,cancellable:Boolean(cancel)};
   group.pendingIO.set(actual,entry);
   const observed=actual.then(value=>{group.pendingIO.delete(actual);return value;},error=>{group.pendingIO.delete(actual);throw error;});
   let timer:ReturnType<typeof setTimeout>|undefined;

@@ -199,14 +199,23 @@ instance counters, include active group time and reset on owner replacement;
 they are neither a durable completion ledger nor scheduling inputs.
 
 Finite per-key/API attempt records prevent no-progress deferral and restart
-loops; ordinary external wakes refresh these records. Quota deferrals retain
-their exact deadlines and carry additive installation/pool/query scope. Unknown
+loops; ordinary external wakes refresh these records. A confirmed member-data
+error committed to a future ordinary retry can advance independent ready work
+across a quantum; its retry settlement is recorded separately from data/checkpoint
+progress and completed coverage. Backend failures, unknown outcomes and
+unclassified unavailable responses do not earn this continuation credit.
+Quota deferrals retain their exact deadlines and carry additive
+installation/pool/query scope. Unknown
 scope retains ordinary bounded selection. Only a known installation reservation
 restriction can use an optional bounded SQLite availability hint. PostgreSQL
 receives best-effort capacity-release notifications, normally one registered
 recipient per released reservation, with coalesced wakes at existing retry
 deadlines when necessary. Notifications and hints never grant reservations or
 become prerequisites for ordinary work; lost notifications recover through cron.
+Capacity wakes preserve unrelated failed-tail and API-path records even after
+a turn closes. They clear only capacity rejections known when the wake arrived;
+a newer rejection cannot be cleared by an older pending hint. Partial slot
+occupancy retains the owner-reported deadline without repeated empty maintenance.
 
 Each repair archive/installation transport hop has a conservative fifteen-minute
 bound, independent of total history size or queue age. The installation owner's
@@ -216,6 +225,9 @@ slot until automatic owner recovery, after durable key/token backoff where the
 writer is usable. Unconfirmed outcomes retain ordinary lease recovery. A normal
 member failure drains its neighboring archive operations without resetting the
 owner. Successful paginated histories have no total-duration deadline.
+Cancellable expired hops allow at most two seconds for actual cancellation
+acknowledgement after cleanup before last-resort recovery; this applies only to
+an already-failed transport and never to healthy work or job eligibility.
 
 Full upstream batches retain their existing sizes. Small, independent page-one
 issue-comment, status and reaction histories publish in transactions bounded by

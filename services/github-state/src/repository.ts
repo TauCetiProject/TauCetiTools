@@ -5,7 +5,7 @@ import { Env, EventPointer, matchesETag, Query, Result, digest, json, queryKey, 
 import { comment, issue, pr, status } from './normalize';
 import { batchLimit } from './catalog';
 import { Lane, LANES, laneAt, settings } from './reconciliation';
-import { RepairCoordinator, RepairGroup, RepairIdentity, RepairQuantum, repairPath } from './repair_coordinator';
+import { RepairCoordinator, RepairGroup, RepairIdentity, RepairQuantum, RepairEffect, repairPath } from './repair_coordinator';
 import { repairHop, RepairTransportTimeout, REPAIR_HOP_MS } from './repair_io';
 import { SURVEY_CONTRACT, SURVEY_INDEX_VERSION, compactPR, issueFragment, reviewFragment, summarizeFragments, inScope, roadmapFocuses } from './survey';
 import { readPromotionReceipts } from './activity_landings';
@@ -21,8 +21,11 @@ import { Failure, FULL_MESSAGE, AdminError, CLEANUP, PARKABLE, classify, deleteC
 
 type IngestRepair={q:Query,priority:number,dirty?:boolean,dirtyIfMissing?:boolean,missingOnly?:boolean};
 const INGEST_EVENT_TYPES=new Set(['pull_request','issues','issue_comment','pull_request_review_comment','pull_request_review','pull_request_review_thread','status','push','create','delete','repository','label','milestone','merge_group']);
-interface RepairWait {job:any;due:number;attempts:number;reason:string;event:string;installationCapacity?:boolean;failure?:{category:string,request_id?:string}}
-interface PreparedRefresh {job:any;q:Query;repo:any;started:number;response:Response|null;result:any;preparedNext?:string;staged?:{key:string,expires:number};objects:Map<string,string>;encodings:Map<string,string>}
+interface RepairWait {job:any;due:number;attempts:number;reason:string;event:string;installationCapacity?:boolean;memberFailure?:boolean;failure?:{category:string,request_id?:string}}
+interface PreparedRefresh {job:any;q:Query;repo:any;started:number;response:Response|null;result:any;memberRetryAt?:number;preparedNext?:string;staged?:{key:string,expires:number};objects:Map<string,string>;encodings:Map<string,string>}
+// Explicit per-result parser/identity failures are distinct from quota waits,
+// transport/backend failures, and an unclassified unavailable response.
+const memberUnavailable=(result:any):boolean=>!result.deferred && result.unavailable && ['malformed_upstream_response','upstream_identity_unavailable'].includes(result.reason);
 const PUBLICATION_ITEMS=8,PUBLICATION_BYTES=256*1024,PUBLICATION_ROWS=128;
 class LeaseLost extends Error {}
 // Retain the attempted chunk and original error. Adapter-classified backend
@@ -1333,7 +1336,10 @@ export class RepositoryState extends DurableObject<Env> {
   private excludeRepairKeys(keys?:Set<string>,includePaths=true):{sql:string,bindings:string[]} {
     const coordinator=this.owner.repairCoordinator;
     const omitted=new Set([...(keys || []),...(coordinator?.owned.keys() || [])]);
-    const paths=includePaths?[...(coordinator?.current.paths || []),...(coordinator?.current.capacityPaths || [])].flatMap(([key,paths])=>[...paths].map(path=>({key,path}))):[];
+    const paths=includePaths?[
+      ...[...(coordinator?.current.paths || [])].flatMap(([key,paths])=>[...paths].map(path=>({key,path}))),
+      ...[...(coordinator?.current.capacityPaths || [])].flatMap(([key,paths])=>[...paths.keys()].map(path=>({key,path}))),
+    ]:[];
     if(!omitted.size && !paths.length)return {sql:'',bindings:[]};
     // One JSON binding covers a full failed upstream group on native SQLite.
     const values=this.store.backend==='sqlite'?'SELECT value FROM json_each(?)':'SELECT jsonb_array_elements_text(CAST(? AS JSONB))';
@@ -1353,13 +1359,13 @@ export class RepositoryState extends DurableObject<Env> {
     if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.nextJob.call(state,excluded));
     const now=Date.now(),counters=(await this.store.exec<any>('SELECT key,value FROM meta WHERE key IN (?,?)','repair_turn','requested_turn')).toArray();
     const turns=new Map(counters.map(row=>[row.key,JSON.parse(row.value)])),turn=turns.get('repair_turn') || 0,requestedTurn=turns.get('requested_turn') || 0;
-    await this.setMeta('repair_turn',turn+1);
     const preferred=laneAt(turn,settings(this.env).weights);
     // Real reads precede maintenance in the requested lane. Give fresh real
     // demand three turns out of four, retaining one oldest-first turn.
     const fresh=requestedTurn%4!==0;
     const omit=this.excludeRepairKeys(excluded);
     const job=(await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=?"+omit.sql+" ORDER BY CASE WHEN lane=? AND (lane!='requested' OR requested_at IS NOT NULL) THEN 0 WHEN lane='requested' AND (requested_at IS NOT NULL OR ?='requested') THEN 1 WHEN lane='active' THEN 2 WHEN lane='requested' THEN 3 WHEN lane='verification' THEN 4 ELSE 5 END,CASE WHEN ? AND lane='requested' THEN COALESCE(requested_at,0) ELSE 0 END DESC,due,key LIMIT 1",now,now,...omit.bindings,preferred,preferred,Number(fresh))).toArray()[0];
+    if(job)await this.setMeta('repair_turn',turn+1);
     if(job?.lane==='requested' && job.requested_at)await this.setMeta('requested_turn',requestedTurn+1);
     return job;
   }
@@ -1509,14 +1515,14 @@ export class RepositoryState extends DurableObject<Env> {
           const consume=()=>{const text=objects.get(name)!;objects.delete(name);return text;};
           return {text:async()=>consume(),json:async()=>JSON.parse(consume())};
         };const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;}})};
-        await RepositoryState.prototype.applyRefresh.call(state,p.job,p.q,p.repo,p.started,p.response,grouped?{...p.result}:p.result,p.preparedNext,p.staged);
+        p.memberRetryAt=await RepositoryState.prototype.applyRefresh.call(state,p.job,p.q,p.repo,p.started,p.response,grouped?{...p.result}:p.result,p.preparedNext,p.staged) || undefined;
         committed.push(p);
       }
       await this.releaseLeases(parent.store,committed.map(p=>p.job));
     },'publication');
     for(const p of input.slice(0,consumed)){
       const changed=committed.includes(p),result=p.result;
-      const effect=!changed?'none':result.deferred || result.unavailable?(result.category==='capacity' && result.scope?.kind==='installation'?'capacity':'defer'):result.restart || result.api!==p.job.api && p.job.page>1 && p.job.api?'restart':'progress';
+      const effect=!changed?'none':p.memberRetryAt && p.memberRetryAt>Date.now()?'member-retry':result.deferred || result.unavailable?(result.category==='capacity' && result.scope?.kind==='installation'?'capacity':'defer'):result.restart || result.api!==p.job.api && p.job.page>1 && p.job.api?'restart':'progress';
       this.settleRepairJobs([p.job],effect);
     }
     if(grouped)try{
@@ -1531,7 +1537,7 @@ export class RepositoryState extends DurableObject<Env> {
     const size=store.backend==='sqlite'?50:256;
     for(let offset=0;offset<jobs.length;offset+=size){const chunk=jobs.slice(offset,offset+size);await store.exec('UPDATE jobs SET lease_id=NULL,lease_until=0 WHERE '+chunk.map(()=>'(key=? AND lease_id=?)').join(' OR '),...chunk.flatMap(j=>[j.key,j.lease_id]));}
   }
-  private settleRepairJobs(jobs:any[],effect:'progress'|'defer'|'capacity'|'restart'|'route'|'none'='none'):void {
+  private settleRepairJobs(jobs:any[],effect:RepairEffect='none'):void {
     if(!jobs.length)return;
     for(const job of jobs)this.dispatchSettled?.add(job.key);
     if(this.repairGroup)this.owner.repairCoordinator?.settled(jobs,effect);
@@ -1601,7 +1607,7 @@ export class RepositoryState extends DurableObject<Env> {
     }
     await flush();await flushWaits();await flushFailures();
   }
-  async applyRefresh(job:any,q:Query,repo:any,started:number,response:Response|null,result:any,preparedNext:string|undefined,staged:{key:string,expires:number}|undefined):Promise<void> {
+  async applyRefresh(job:any,q:Query,repo:any,started:number,response:Response|null,result:any,preparedNext:string|undefined,staged:{key:string,expires:number}|undefined):Promise<number|void> {
     if (job.lease_id && (await this.store.exec<any>('SELECT lease_id FROM jobs WHERE key=?',job.key)).toArray()[0]?.lease_id!==job.lease_id) throw new LeaseLost();
     if (result.continuation) {
       const nested=await this.encode(result.continuation,Date.now()+86400000);
@@ -1627,9 +1633,10 @@ export class RepositoryState extends DurableObject<Env> {
         await this.enqueue(source,1,Date.now(),!existing || !existing.started && !existing.dirty);
         if(!(await this.complete(q)) && (requested || parent?.lane==='requested' && existing?.lane!=='active')) await this.store.exec("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?) WHERE key=?",requested || null,queryKey(source));
       }
-      await this.store.exec('UPDATE jobs SET due=?,attempt=attempt+?,wait_reason=? WHERE key=?',result.retry_at || Date.now()+Math.min(3600000,60000*2**Math.min(6,job.attempt)),capacity?0:1,result.category || result.reason || 'upstream',job.key);
+      const due=result.retry_at || Date.now()+Math.min(3600000,60000*2**Math.min(6,job.attempt));
+      await this.store.exec('UPDATE jobs SET due=?,attempt=attempt+?,wait_reason=? WHERE key=?',due,capacity?0:1,result.category || result.reason || 'upstream',job.key);
       await this.metric(capacity?'capacity_wait':'retry',q,job.lane || 'verification');
-      if(!capacity) await this.setMeta('last_upstream_failure',{at:Date.now(),operation:q.operation,category:result.category || result.reason || 'upstream',request_id:result.request_id}); return;
+      if(!capacity) await this.setMeta('last_upstream_failure',{at:Date.now(),operation:q.operation,category:result.category || result.reason || 'upstream',request_id:result.request_id}); return memberUnavailable(result)?due:undefined;
     }
     if (result.unchanged) {
       await this.store.exec('DELETE FROM meta WHERE key=?',stagingStateKey(job.key));
@@ -2124,7 +2131,7 @@ export class RepositoryState extends DurableObject<Env> {
   async retryJob(job:any,error:unknown):Promise<void> {await this.retryJobs([job],error);}
   private retryWait(job:any,error:unknown):RepairWait & {expired:boolean} {
     const expired=error instanceof Error && /staging page missing/.test(error.message),reason=expired?'staging_expired':'transport_or_parser';
-    return {job,due:Date.now()+Math.min(3600000,60000*2**Math.min(job.attempt || 0,6)),attempts:1,reason,event:'retry',failure:{category:reason},expired};
+    return {job,due:Date.now()+Math.min(3600000,60000*2**Math.min(job.attempt || 0,6)),attempts:1,reason,event:'retry',failure:{category:reason},memberFailure:expired || canReplayPublication(error),expired};
   }
   private async retryJobs(jobs:any[],error:unknown):Promise<Set<string>> {
     const input=jobs.map(job=>this.retryWait(job,error));return this.persistWaits(input,input[0]?.expired || false);
@@ -2134,7 +2141,7 @@ export class RepositoryState extends DurableObject<Env> {
     const now=Date.now();
     await this.persistWaits(input.map(({job,result})=>{
       const capacity=result.category==='capacity';
-      return {job,due:result.retry_at || now+Math.min(3600000,60000*2**Math.min(6,job.attempt)),attempts:capacity?0:1,reason:result.category || result.reason || 'upstream',event:capacity?'capacity_wait':'retry',installationCapacity:capacity&&result.scope?.kind==='installation',failure:capacity?undefined:{category:result.category || result.reason || 'upstream',request_id:result.request_id}};
+      return {job,due:result.retry_at || now+Math.min(3600000,60000*2**Math.min(6,job.attempt)),attempts:capacity?0:1,reason:result.category || result.reason || 'upstream',event:capacity?'capacity_wait':'retry',installationCapacity:capacity&&result.scope?.kind==='installation',memberFailure:memberUnavailable(result),failure:capacity?undefined:{category:result.category || result.reason || 'upstream',request_id:result.request_id}};
     }));
   }
   private async persistWaits(input:RepairWait[],expired=false):Promise<Set<string>> {
@@ -2145,7 +2152,8 @@ export class RepositoryState extends DurableObject<Env> {
       try{waiting=await this.atomic(async state=>{state.repairMetrics=metrics;return state.persistWaits(input,expired);},'repair');}
       catch(error){throw new WaitFailure(input,expired,error);}
       this.settleRepairJobs(input.map(item=>item.job));
-      this.settleRepairJobs(input.filter(item=>waiting.has(item.job.key)&&!item.installationCapacity).map(item=>item.job),'defer');
+      this.settleRepairJobs(input.filter(item=>waiting.has(item.job.key)&&!item.installationCapacity&&!(item.memberFailure&&item.due>Date.now())).map(item=>item.job),'defer');
+      this.settleRepairJobs(input.filter(item=>waiting.has(item.job.key)&&item.memberFailure&&item.due>Date.now()).map(item=>item.job),'member-retry');
       this.settleRepairJobs(input.filter(item=>waiting.has(item.job.key)&&item.installationCapacity).map(item=>item.job),'capacity');
       try{this.repairMetrics.merge(metrics);}catch{}return waiting;
     }
@@ -2192,7 +2200,9 @@ export class RepositoryState extends DurableObject<Env> {
     },'repair');
     const input=isBackendFailure(failure.error)?jobs:failure.waits.map(item=>item.job);
     const capacity=new Set(failure.waits.filter(item=>item.installationCapacity).map(item=>item.job.key));
-    this.settleRepairJobs(input);this.settleRepairJobs(input.filter(job=>waiting.has(job.key)&&!capacity.has(job.key)),'defer');
+    const member=new Set(failure.waits.filter(item=>item.memberFailure&&item.due>Date.now()).map(item=>item.job.key));
+    this.settleRepairJobs(input);this.settleRepairJobs(input.filter(job=>waiting.has(job.key)&&!capacity.has(job.key)&&!member.has(job.key)),'defer');
+    this.settleRepairJobs(input.filter(job=>waiting.has(job.key)&&member.has(job.key)),'member-retry');
     this.settleRepairJobs(input.filter(job=>waiting.has(job.key)&&capacity.has(job.key)),'capacity');
     try{this.repairMetrics.merge(metrics);}catch{}
   }
@@ -2414,12 +2424,14 @@ export class RepositoryState extends DurableObject<Env> {
   private async armRepairAlarm():Promise<void> {
     if(this.store.backend==='postgres' || this.degraded || this.migrationHeld())return;
     const coordinator=this.repairCoordinator!,now=Date.now(),omit=this.excludeRepairKeys(coordinator.current.failed);
-    const futureOnly=coordinator.full || coordinator.unproductiveStop;
+    const restriction=this.quotaRestriction;
+    const restricted=Boolean(restriction && restriction.installation===(await this.meta('repository'))?.installation && this.quotaBlocksRepairTurn(coordinator.current));
+    const futureOnly=coordinator.full || coordinator.unproductiveStop || restricted;
     const where=futureOnly?' WHERE (due>? OR lease_until>?)':omit.sql?' WHERE (due>? OR lease_until>? OR (1=1'+omit.sql+'))':'';
     const bindings=futureOnly?[now,now]:omit.sql?[now,now,...omit.bindings]:[];
     const row=(await this.store.exec<any>('SELECT MIN(MAX(due,lease_until)) AS due FROM jobs'+where,...bindings)).one();
-    const restriction=!coordinator.full?this.quotaRestriction?.retry_at:undefined,soon=Date.now()+100;
-    const quotaAt=restriction?Math.max(soon,restriction):undefined,jobAt=row.due?Math.max(soon,row.due):undefined;
+    const retryAt=!coordinator.full?this.quotaRestriction?.retry_at:undefined,soon=Date.now()+100;
+    const quotaAt=retryAt?Math.max(soon,retryAt):undefined,jobAt=row.due?Math.max(soon,row.due):undefined;
     const at=quotaAt&&jobAt?Math.min(quotaAt,jobAt):quotaAt || jobAt;if(!at)return;
     const earlier=await this.ctx.storage.getAlarm();
     const quota=Boolean(quotaAt===at && this.quotaRestriction?.category==='capacity');

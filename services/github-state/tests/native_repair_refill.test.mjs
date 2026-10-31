@@ -86,3 +86,37 @@ for(const hint of ['blocked','unknown'])test('native SQLite quota retry skips re
   assert.equal(body.calls,hint==='blocked'?1:4,'unknown optional hints fall back to actual requests');
  }finally{await mf.dispose();}
 });
+
+for(const category of ['capacity','secondary'])test('native SQLite restriction with three occupied slots retains its actual '+category+' wake',{skip},async()=>{
+ const mf=await runtime(async()=>Response.json([]),{},{repositoryAlarms:false,repositoryExtension:`async fetch(req){
+  if(new URL(req.url).pathname==='/fixture/partial-restriction'){
+   let expiry=0,maintenance=0,calls=0,hints=0,release;const gate=new Promise(resolve=>release=resolve),alarms=[];
+   this.expire=async()=>{expiry++;};this.maintenance=async()=>{maintenance++;};this.requestOpenCoverage=async()=>{};this.startStorageMaintenance=()=>{};
+   this.setAlarm=async(at,quota=false)=>{this.repairAlarm={at,quota};alarms.push({at,quota});};
+   await this.store.exec('DELETE FROM jobs');await this.enqueueMany(Array.from({length:8},(_,number)=>({q:{repository:'org/repo',operation:'files',args:{number}},priority:5})),true);
+   let until;this.env={...this.env,INSTALLATIONS:{idFromName:id=>id,get:()=>({fetch:async url=>{
+    if(url.endsWith('/availability')){hints++;return Response.json({deferred:true,category:'capacity',retry_at:Date.now()+250,scope:{kind:'installation'}});}
+    calls++;if(calls<=3)await gate;
+    else if(calls===4){until=Date.now()+('${category}'==='capacity'?250:30000);return Response.json({deferred:true,category:'${category}',retry_at:until,scope:{kind:'installation'}});}
+    return Response.json({api:'core',data:[]});
+   }})}};
+   await this.runAlarm();
+   while(this.repairCoordinator.groups.size===4)await new Promise(resolve=>setTimeout(resolve,1));
+   await this.repairCoordinator.flight;
+   const at=this.repairAlarm.at,quota=this.repairAlarm.quota,occupied=this.repairCoordinator.groups.size;
+   const clock=Date.now;let offset=0;
+   try{Date.now=()=>clock()+offset;
+    if('${category}'==='capacity')for(let i=0;i<3;i++){offset=this.repairAlarm.at-clock()+1;await this.alarm();}
+   }finally{Date.now=clock;}
+   const before={expiry,maintenance,calls,hints},alarmCount=alarms.length;
+   this.quotaRestriction=undefined;release();${nativeDrainRepairs}
+   return Response.json({occupied,actualDeadline:at>=until,quota,before,alarmCount});
+  }return super.fetch(req);
+ }`});
+ try{
+  const r=await send(await configured(mf),'/fixture/partial-restriction',{});assert.equal(r.status,200);const body=await r.json();
+  assert.equal(body.occupied,3);assert.equal(body.actualDeadline,true);assert.equal(body.quota,category==='capacity');
+  assert.deepEqual(body.before,{expiry:1,maintenance:1,calls:4,hints:category==='capacity'?3:0});
+  assert.ok(body.alarmCount<=12,'a partial registry does not create a self-generated maintenance loop');
+ }finally{await mf.dispose();}
+});

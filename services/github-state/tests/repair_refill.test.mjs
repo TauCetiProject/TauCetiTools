@@ -165,6 +165,52 @@ test('local obsolete work retires while an installation-wide restriction blocks 
  }finally{await drainRepairs(f.state);await f.close();}
 });
 
+test('durably backed-off malformed members do not strand a healthy item behind the dispatch cap',async()=>{
+ const f=await fixture();try{
+  await seed(f,18);const healthy=117;let calls=0;
+  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async(_url,init)=>{
+   calls++;const input=JSON.parse(init.body);
+   return Response.json(input.query.args.number===healthy?{api:'core',data:[]}:{unavailable:true,reason:'malformed_upstream_response'});
+  }})};
+  await f.state.runAlarm();await drainRepairs(f.state);
+  assert.equal(await f.state.complete(query(healthy)),true,'ordinary completion-driven refill reaches independent valid data');
+  const rows=(await f.store.exec('SELECT key,attempt,due,lease_id FROM jobs')).toArray();
+  assert.equal(calls,18);assert.equal(rows.filter(j=>j.attempt===1&&j.due>Date.now()).length,17);
+  assert.ok(rows.every(j=>j.lease_id===null));
+  assert.equal((await f.store.exec("SELECT COUNT(*) n FROM collections WHERE operation='files' AND complete=1")).one().n,1,'retry settlement is not completed coverage');
+ }finally{await drainRepairs(f.state);await f.close();}
+});
+
+test('a capacity release after closure does not refetch an unclassified publication tail',async()=>{
+ const f=await fixture();try{
+  await seed(f,24,'issue_comments');
+  await f.store.exec('UPDATE jobs SET due=?',Date.now()-2000);
+  const good=query(500);await f.state.enqueue(good,5,Date.now()-1000);
+  const publish=f.state.publishPrepared;let batches=0,files=0;
+  f.state.publishPrepared=async function(input,...args){
+   // Target the second history chunk, independently of where the other
+   // group's deferral bookkeeping enters the writer.
+   if(input.some(p=>p.job.key===key(108,'issue_comments')))throw Error('unclassified publication interruption');
+   return publish.call(this,input,...args);
+  };
+  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async(url,init)=>{
+   const input=JSON.parse(init.body);
+   if(url.endsWith('/batch')){batches++;return Response.json({results:input.jobs.map(()=>({api:'graphql',data:[]}))});}
+   if(++files===1)return Response.json({deferred:true,category:'capacity',retry_at:Date.now()+250,scope:{kind:'installation'}});
+   return Response.json({api:'core',data:[]});
+  }})};
+  await f.state.runAlarm();await drainRepairs(f.state);assert.equal(batches,1);assert.equal(files,1);
+  const c=f.state.repairCoordinator,tail=key(123,'issue_comments');assert.ok(c.current.failed.has(tail));
+  assert.equal((await f.store.exec('SELECT attempt FROM jobs WHERE key=?',tail)).one().attempt,0);
+  const due=(await f.store.exec('SELECT due FROM jobs WHERE key=?',key(500))).one().due;
+  await new Promise(resolve=>setTimeout(resolve,Math.max(0,due-Date.now()+5)));
+  await f.state.fetch(new Request('https://internal/capacity-ready',{method:'POST',body:JSON.stringify({installation:'200'})}));
+  await drainRepairs(f.state);
+  assert.equal(await f.state.complete(good),true);assert.equal(files,2);assert.equal(batches,1,'a capacity release does not authorize refetch of an unrelated failed tail');
+  assert.equal((await f.store.exec('SELECT attempt FROM jobs WHERE key=?',tail)).one().attempt,0);
+ }finally{await drainRepairs(f.state);await f.close();}
+});
+
 test('PostgreSQL coalesced release deadlines preserve both early and late wakes',{skip:!process.env.TEST_POSTGRES_URL},async()=>{
  const f=await fixture();try{
   const c=f.state.getRepairCoordinator(),wakes=[],start=Date.now();

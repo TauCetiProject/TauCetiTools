@@ -22,6 +22,7 @@ test('large inventory snapshots paginate coherently and coalesce concurrent read
  },{},{repositoryExtension:`async fetch(req){
   const path=new URL(req.url).pathname;
   if(path==='/fixture/idle'){await this.alarmFlight;return Response.json({ok:true});}
+  if(path==='/fixture/repair-state')return Response.json({scheduler:this.repairCoordinator?.snapshot(),inventory:(await this.store.exec("SELECT key,page,due,lease_until,wait_reason,api FROM jobs WHERE key='open_prs:{}'")).toArray(),jobs:(await this.store.exec('SELECT key,page,due,lease_until,wait_reason,api FROM jobs ORDER BY due LIMIT 20')).toArray()});
   if(path==='/fixture/expire-discovery'){for(const entry of this.completedQueries.values())entry.built=Date.now()-10001;return Response.json({ok:true});}
   return super.fetch(req);
  }`});
@@ -35,7 +36,7 @@ test('large inventory snapshots paginate coherently and coalesce concurrent read
    await new Promise(resolve=>setTimeout(resolve,50));
    health=await (await stub.fetch('https://internal/health')).json();
   }while(!health.bootstrap_inventory && Date.now()<deadline);
-  assert.ok(health.bootstrap_inventory,'inventory finished bootstrapping');
+  assert.ok(health.bootstrap_inventory,'inventory finished bootstrapping; inventory requests='+inventoryRequests+' '+JSON.stringify(health.bootstrap_inventory?{}:await(await send(stub,'/fixture/repair-state',{})).json()));
   assert.equal(inventoryRequests,count/100);
   const archive=await mf.getR2Bucket('ARCHIVE');
   let baseline;
