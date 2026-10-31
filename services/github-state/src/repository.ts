@@ -94,7 +94,7 @@ export class RepositoryState extends DurableObject<Env> {
   private renewedLeases=0;
   private optionalWork={active:0};
   private demandMemo=new Map<string,number>();
-  private ingestStats=new Map<string,{minute:number,deliveries:number,sql_round_trips:number,sql_samples:number,apply_through_cleanup_ms:number,apply_max_ms:number}>();
+  private ingestStats=new Map<string,{minute:number,deliveries:number,sql_round_trips:number,sql_samples:number,writer_wait_ms:number,writer_wait_max_ms:number,apply_through_cleanup_ms:number,apply_max_ms:number}>();
   private groupedPublication={scope:'repository_instance_since_restart',since:Date.now(),admissions:0,members:0,queued_work_yields:0,max_members:0};
   private readDemands={pending:new Map<string,Query>(),active:new Map<string,{complete?:boolean}>(),flight:undefined as Promise<void>|undefined};
   sql:SqlStorage;
@@ -975,11 +975,12 @@ export class RepositoryState extends DurableObject<Env> {
     const history=await this.meta('review_coordination');
     return coordinationWindows(history,this[ACTIVITY_CLOCK] ?? Date.now());
   }
-  private recordIngest(event:string,queries:number|undefined,elapsed:number):void {
+  private recordIngest(event:string,queries:number|undefined,elapsed:number,writerWait:number):void {
     const type=INGEST_EVENT_TYPES.has(event)?event:'other',minute=Math.floor(Date.now()/60000)*60000;
     let row=this.ingestStats.get(type);
     if(row && row.minute!==minute){try{log('repository_ingest_summary',{event_type:type,...row});}catch{}row=undefined;}
-    if(!row){row={minute,deliveries:0,sql_round_trips:0,sql_samples:0,apply_through_cleanup_ms:0,apply_max_ms:0};this.ingestStats.set(type,row);}
+    if(!row){row={minute,deliveries:0,sql_round_trips:0,sql_samples:0,writer_wait_ms:0,writer_wait_max_ms:0,apply_through_cleanup_ms:0,apply_max_ms:0};this.ingestStats.set(type,row);}
+    row.writer_wait_ms+=writerWait;row.writer_wait_max_ms=Math.max(row.writer_wait_max_ms,writerWait);
     row.deliveries++;row.apply_through_cleanup_ms+=elapsed;row.apply_max_ms=Math.max(row.apply_max_ms,elapsed);
     if(queries!==undefined){row.sql_round_trips+=queries;row.sql_samples++;}
   }
@@ -998,13 +999,13 @@ export class RepositoryState extends DurableObject<Env> {
         const object=await this.env.ARCHIVE.get(pointer.key);if(!object)throw Error('event body unavailable');body=parseGitHub(await object.text());
         if(body.comment){const value=comment(body.comment),text=JSON.stringify(value);if(new TextEncoder().encode(text).length>=1500000)encodings.set('resource:'+text,await this.encode(value,undefined,configured.id));}
       }
-      let measured:RepositoryStore|undefined,applyStarted=0,committed=false;
+      let measured:RepositoryStore|undefined,applyStarted=0,committed=false;const queuedAt=Date.now();
       await this.atomic(async state=>{
         measured=state.store;applyStarted=Date.now();state.preparedEncodings=encodings;
         if(state.store.backend==='postgres')state.store=new ReadCacheStore(state.store);
         committed=await RepositoryState.prototype.ingest.call(state,pointer,body);
       },'ingest');
-      if(committed)try{this.owner.recordIngest(pointer.event,measured?.queryCount,Date.now()-applyStarted);}catch{}
+      if(committed)try{this.owner.recordIngest(pointer.event,measured?.queryCount,Date.now()-applyStarted,Math.max(0,applyStarted-queuedAt));}catch{}
       return committed;
     }
     // Another ingest can commit while we preload the body. Its fresh SQL
