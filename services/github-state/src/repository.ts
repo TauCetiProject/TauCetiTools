@@ -342,6 +342,14 @@ export class RepositoryState extends DurableObject<Env> {
     await this.ctx.storage.setAlarm(at);
     if(owner.alarmSchedule===schedule)owner.repairAlarm={at,quota,continuation};
   }
+  private noteOrdinaryAlarm(at:number):void {
+    if(this.store.backend!=='sqlite')return;
+    const owner=this.owner,now=Date.now();
+    owner.ordinaryAlarmAt=Math.min(owner.ordinaryAlarmAt ?? at,at);
+    // An already-pending wake can be earlier than new demand and need no
+    // storage rewrite. Preserve the ordinary intent when that wake is overdue.
+    if(at<=now+100 && owner.repairAlarm && owner.repairAlarm.at<=now+100)owner.repairAlarm=undefined;
+  }
   async atomic<T>(apply:(state:RepositoryState)=>Promise<T>,purpose:WriterPurpose='other'):Promise<T> {
     if(this.store.transactional)return apply(this);
     if(this.migrationHeld())throw new AdminError('migration_frozen');
@@ -824,6 +832,7 @@ export class RepositoryState extends DurableObject<Env> {
     const alarm=this.store.backend==='postgres'?null:await this.ctx.storage.getAlarm();
     const scheduled=(await this.store.exec<any>('SELECT due FROM jobs WHERE key=?',key)).one().due;
     if (!alarm || alarm>scheduled) await this.setAlarm(Math.max(Date.now()+100,scheduled));
+    else this.noteOrdinaryAlarm(scheduled);
   }
   async enqueueMany(input:{q:Query,priority:number,dirty?:boolean}[],backfill=false):Promise<void> {
     input=input.filter(({q})=>q.operation!=='progress' && !NOT_MIRRORED.has(q.operation));
@@ -886,6 +895,7 @@ export class RepositoryState extends DurableObject<Env> {
     for(const [at,event,lane,operation,value] of metrics)this.repairMetrics.record(event,lane,operation,value,at);
     const alarm=this.store.backend==='postgres'?null:await this.ctx.storage.getAlarm();
     if(!alarm || alarm>scheduled)await this.setAlarm(Math.max(now+100,scheduled));
+    else this.noteOrdinaryAlarm(scheduled);
   }
   private async enqueueIngest(input:IngestRepair[]):Promise<void> {
     if(!this.store.transactional)return this.atomic(state=>state.enqueueIngest(input),'ingest');
@@ -926,6 +936,7 @@ export class RepositoryState extends DurableObject<Env> {
     if(rows.length && this.store.backend==='sqlite') {
       const scheduled=Math.min(...rows.map(row=>Number(row[3]))),alarm=await this.ctx.storage.getAlarm();
       if(!alarm || alarm>scheduled)await this.setAlarm(Math.max(now+100,scheduled));
+      else this.noteOrdinaryAlarm(scheduled);
     }
   }
   async complete(q:Pick<Query,'operation'|'args'>): Promise<boolean> { return (await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length>0; }
@@ -1342,6 +1353,7 @@ export class RepositoryState extends DurableObject<Env> {
     const due=(await this.store.exec<any>('SELECT due FROM jobs WHERE key=?',key)).toArray()[0]?.due;
     const alarm=this.store.backend==='postgres'?null:await this.ctx.storage.getAlarm();
     if (due && (!alarm || alarm>due)) await this.setAlarm(Math.max(now+100,due));
+    else if(due)this.noteOrdinaryAlarm(due);
   }
   private excludeRepairKeys(keys?:Set<string>,includePaths=true):{sql:string,bindings:string[]} {
     const coordinator=this.owner.repairCoordinator;
@@ -2464,7 +2476,7 @@ export class RepositoryState extends DurableObject<Env> {
     const coordinator=this.repairCoordinator!,now=Date.now(),omit=this.excludeRepairKeys(coordinator.current.failed);
     const restriction=this.quotaRestriction;
     const restricted=Boolean(restriction && restriction.installation===(await this.meta('repository'))?.installation && this.quotaBlocksRepairTurn(coordinator.current));
-    const futureOnly=coordinator.full || coordinator.unproductiveStop || restricted;
+    const futureOnly=coordinator.full || coordinator.unproductiveStop || restricted || this.owner.mutationState.blocked || typeof this.owner.schema==='object';
     const where=futureOnly?' WHERE (due>? OR lease_until>?)':omit.sql?' WHERE (due>? OR lease_until>? OR (1=1'+omit.sql+'))':'';
     const bindings=futureOnly?[now,now]:omit.sql?[now,now,...omit.bindings]:[];
     const row=(await this.store.exec<any>('SELECT MIN(MAX(due,lease_until)) AS due FROM jobs'+where,...bindings)).one();

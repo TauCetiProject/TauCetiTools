@@ -260,13 +260,44 @@ test('a late member retry cannot clear an installation restriction by creating a
 });
 
 test('an uncertain SQLite alarm write loses its hint and retains ordinary durable recovery',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
- const f=await fixture();try{
+ const f=await fixture(),clock=Date.now;let offset=0;try{
   const c=f.state.getRepairCoordinator();c.current.failed.add('failed-tail');
-  const until=Date.now()+10000;await f.state.setAlarm(until,false,true);
+  const until=Date.now()+10000;await f.state.setAlarm(until,false,true,true);
   const set=f.ctx.storage.setAlarm;f.ctx.storage.setAlarm=async()=>{throw Error('fixture alarm storage failure');};
-  await assert.rejects(f.state.setAlarm(until+10000,false,true));assert.equal(f.state.repairAlarm,undefined);
+  await assert.rejects(f.state.setAlarm(until+10000,false,true,true));assert.equal(f.state.repairAlarm,undefined);
   assert.equal(await f.ctx.storage.getAlarm(),until,'the previously persisted alarm is retained');
+  Date.now=()=>clock()+offset;offset=11000;
   f.ctx.storage.setAlarm=set;await f.state.alarm();assert.equal(c.current.failed.size,0,'missing optional metadata makes the durable wake external');
+ }finally{offset=0;Date.now=clock;await drainRepairs(f.state);await f.close();}
+});
+
+for(const hold of ['fenced','schema'])test('a consumed continuation while '+hold+' does not rearm due backlog every100ms',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
+ const f=await fixture();try{
+  await seed(f,2);const c=f.state.getRepairCoordinator();let expiry=0;f.state.expire=async()=>{expiry++;};
+  await f.store.exec('UPDATE jobs SET due=? WHERE key=?',Date.now()+60000,key(101));
+  await f.ctx.storage.setAlarm(null);f.state.repairAlarm={at:Date.now()-1,quota:false,continuation:true};
+  if(hold==='fenced')f.state.mutationState.blocked=true;else f.state.schema={error:'schema_unavailable'};
+  await f.state.alarm();assert.equal(c.snapshot().launches,0);assert.equal(expiry,0);
+  assert.ok(await f.ctx.storage.getAlarm()>Date.now()+50000,'future recovery remains armed while immediate selection is held');
+  f.state.mutationState.blocked=false;f.state.schema='current';
+  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json({api:'core',data:[]})})};
+  await f.state.runAlarm();await drainRepairs(f.state);assert.equal(await f.state.complete(query(100)),true);
+ }finally{f.state.mutationState.blocked=false;f.state.schema='current';await drainRepairs(f.state);await f.close();}
+});
+
+for(const operation of ['enqueue','enqueueMany','enqueueIngest','noteDemand'])test('an overdue continuation retaining its storage time still accepts ordinary intent from '+operation,{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
+ const f=await fixture();try{
+  await seed(f,1);const c=f.state.getRepairCoordinator();c.current.failed.add(key(100));
+  const at=Date.now()-1000;await f.state.setAlarm(at,false,true,true);f.state.ordinaryAlarmAt=undefined;
+  const q=query(100);
+  if(operation==='enqueue')await f.state.enqueue(q,5);
+  else if(operation==='enqueueMany')await f.state.enqueueMany([{q,priority:5}],true);
+  else if(operation==='enqueueIngest')await f.state.atomic(state=>state.enqueueIngest([{q,priority:2,dirty:true}]),'ingest');
+  else await f.state.noteDemand(q);
+  assert.equal(await f.ctx.storage.getAlarm(),at,'ordinary demand keeps the earlier persisted wake');
+  assert.equal(f.state.repairAlarm,undefined,'the earlier overdue wake becomes external without another storage write');
+  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json({api:'core',data:[]})})};
+  await f.state.alarm();await drainRepairs(f.state);assert.equal(await f.state.complete(q),true);
  }finally{await drainRepairs(f.state);await f.close();}
 });
 
