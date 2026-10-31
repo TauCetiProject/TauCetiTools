@@ -2248,21 +2248,6 @@
     },
     "decision": "Anyunresolvedcorrectness/fairnessconcernrejectschange; ambiguousperformancegetsdiscriminatingmeasurement; ifallcapsfailretaincurrentyield. These are engineeringacceptancechecksnotruntimeeligibilityconditions."
   },
-  "current_HEAD_harness_smoke": {
-    "baseline": "8bfd5ca2b25ae587dd862302eff968b3ce7b61c5",
-    "rows": [
-      {
-        "label": "before",
-        "histories_complete": 4,
-        "failed_writers": 0
-      },
-      {
-        "label": "2",
-        "histories_complete": 4,
-        "failed_writers": 0
-      }
-    ]
-  },
   "capacity_local_repeats": [
     {
       "trial": 0,
@@ -2951,5 +2936,86 @@
         "recent_demand": 0
       }
     ]
-  }
+  },
+  "current_HEAD_harness_fast_check": {
+    "baseline": "b370fdc98635509e318efa3a54c120f75935b258",
+    "implementation_sha256": "de8431ffd0c7aa1e9fa5af9a0639f5662f17fceff5f7cf1cd9060019f0ad0134",
+    "implementation_files": [
+      "../../tauceti_tools/github_catalog.json",
+      "package-lock.json",
+      "src/activity_landings.ts",
+      "src/catalog.ts",
+      "src/index.ts",
+      "src/ingress.ts",
+      "src/installation.ts",
+      "src/migration.ts",
+      "src/migration_control.ts",
+      "src/migration_target.ts",
+      "src/monitoring.ts",
+      "src/normalize.ts",
+      "src/protocol.ts",
+      "src/provider_monitoring.ts",
+      "src/queue_monitoring.ts",
+      "src/reconciliation.ts",
+      "src/repair_coordinator.ts",
+      "src/repair_io.ts",
+      "src/repository.ts",
+      "src/repository_health.ts",
+      "src/repository_store.ts",
+      "src/retention.ts",
+      "src/runner-capacity.ts",
+      "src/storage.ts",
+      "src/survey.ts"
+    ],
+    "harness_sha256": {
+      "scripts/benchmark-publication-sustained.mjs": "346e4452f60227a8e5427f01f41747a63c4643ea79dd2828e559c8ff8ed477c9",
+      "scripts/benchmark-baseline.mjs": "a82cf117a48a198a3a3eede9d61fa1637ba0658bbd3e8402aa2a6404f8be09d8",
+      "scripts/postgres-schema.mjs": "b83b687bcab3e32acebd0ee2c6a9d54d024a122bf6c847f17e28414260d31dea",
+      "tests/postgres_runtime.mjs": "288bf390eef0d4bdb511a2450793843c84de9d299f170ed9455fcb12b4f763d9",
+      "tests/postgres_credentials.mjs": "956e64d59912ca9ad7c3d19922827724f18bf05b22702b603c3bc792be106975",
+      "tests/repair_background.mjs": "e57b4cfa6031a60513904b12355730c109344d91c3e4921d8fee097ef119241f"
+    },
+    "variant_sha256": {
+      "2": "1a5388739d97cfe4bc1cdd5812d0cd67960d1ecaa7457a8409e8283f7ef556b0"
+    },
+    "group_count": 4,
+    "histories_per_group": 1,
+    "mode": "quiet",
+    "rows": [
+      {
+        "label": "before",
+        "histories_complete": 4,
+        "failed_writers": 0
+      },
+      {
+        "label": "2",
+        "histories_complete": 4,
+        "failed_writers": 0
+      }
+    ]
+  },
+  "screening_limits": {
+    "unhashed_earlier_harness": true,
+    "control_first": true,
+    "trials": 1,
+    "read_frequency": "every10arrivals",
+    "reader_samples": "4\u20138 per row",
+    "uses_frozen5754ddc_harness": false
+  },
+  "benchmark_preparation_fault_checks": [
+    {
+      "case": "reject",
+      "exit": 1,
+      "expected_error": true,
+      "fixture_close_completed": true,
+      "diagnostic_script_sha256": "8b606db5a42af27cc08ef2dd6aa1e5715212de02ee63fa64516a3c3fdd1ca0d2"
+    },
+    {
+      "case": "empty",
+      "exit": 1,
+      "expected_error": true,
+      "fixture_close_completed": true,
+      "diagnostic_script_sha256": "17176371a706cc4f42a29da6a468f9e673ce07889e87feb047551c9abdbd7427"
+    }
+  ]
 }

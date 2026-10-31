@@ -53,7 +53,7 @@ Preserve repair concurrency, finite scheduling quanta, lane weights, old-request
 turns, compatible fetches, automatic cron/alarm continuation and quota decisions.
 Keep reads independent of writer admission and anonymous reads demand-free.
 
-Add no sleep, minimum batch fill, cooldown, health gate, admission prerequisite,
+Add no sleep, minimum batch fill, cooldown, health prerequisite, admission prerequisite,
 queue-priority system, worker setting, dependency service or total-history
 execution deadline. Metrics are diagnostic only. Do not modify provider
 coordination or the personal `~/.claude` system.

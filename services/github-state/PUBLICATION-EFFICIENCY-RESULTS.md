@@ -39,7 +39,8 @@ to the tested synthetic merge, including PR #121's queue setting and wait metric
 
 ## Publication experiment
 
-The isolated benchmark builds the real FIFO writer with test-only substitutions
+The frozen confirmation benchmark builds the real FIFO writer with test-only
+substitutions
 for fixed caps 2/4/8 and removal of the queued-work break. Runtime source is
 unchanged. Four compatible issue-comment groups publish while mixed status,
 PR and issue-comment ingress arrives once a second until cohort completion.
@@ -48,7 +49,12 @@ periodically, but can be read-only/no-op. Storage preparation is disabled.
 All upstream histories in this fixture are empty, and upstream services are
 mocked: no GitHub requests are made.
 
-Initial 4×16-history screening:
+Initial 4×16-history screening used an earlier, unhashed harness revision,
+with the control first in a single trial and reads every ten arrivals (only
+4–8 reader samples per row). Its later-fixed promise/cleanup and sampling
+limitations are retained in the record; it is preliminary input-latency evidence.
+
+Screening results:
 
 | Yield policy | Cohort completion, s | Input p95, s | Publication admissions |
 | --- | ---: | ---: | ---: |
@@ -90,7 +96,8 @@ cannot establish a clean performance comparison.
 Arrival rate is fixed but cohort horizons and delivery counts differ. A faster
 cohort can leave more deliveries pending; neither cohort time nor the time to
 commit all arrivals establishes combined workload throughput. Completions are
-counted after confirmed transaction return. Source, variant and harness hashes,
+counted after confirmed transaction return. For the frozen confirmation and
+auxiliary runs, source, variant and harness hashes,
 per-purpose writer time and outstanding input at cohort completion are retained.
 Purpose-at-yield counts are nonexclusive observations, not exclusive causes.
 
@@ -116,8 +123,8 @@ reached the objects at 20:37 UTC, so the second half is a mixed-deployment windo
 and is not used as a stable-release comparison.
 
 The successor `02f735d7-b164-44bc-9262-723c473c4623` is merged main `8bfd5ca`,
-which includes the status fix, with identical bindings/runtime. After its initial
-stale diagnostic sample, a second prepared 21-sample window ran 20:38:37–20:58:37
+which includes the status fix, with identical bindings and runtime settings. Its
+code also includes PR #122. After its initial stale diagnostic sample, a second prepared 21-sample window ran 20:38:37–20:58:37
 UTC. Both object versions matched throughout; all 21 storage checks were connected
 and diagnostics fresh.
 
@@ -144,8 +151,8 @@ All seven configured worker identities were observed alive in every stable sampl
 with zero restarts and no degraded GitHub instrumentation at the end. All retained
 the existing default cap of 32. The final states were one running a review, five
 waiting for provider quota and one in its progress-attempt backoff; one worker had
-a pending publication. These waits are not evidence of a new state-server gate.
-Provider availability/pacing is now the immediate fleet constraint.
+a pending publication. These waits are not evidence of a new state-server prerequisite.
+In that final sample, provider availability/pacing was the immediate fleet constraint.
 
 The stable-window latest-applied-input lag gauge ranged up to 23.10 s and ended
 at 13.55 s. Parked input peaked at 26 and ended at zero. One observed R2 listing
@@ -162,9 +169,9 @@ final reconciliation and are outside the status-head correction.
 
 Minute snapshots can miss short transitions; queue metrics are approximate and
 can lag. The latest-applied-input lag is a sampled gauge, not a latency distribution.
-The production workload has no matched control and includes the prior queue
-change, so improvement cannot be attributed solely to status retirement. Job
-retirements and scope exits are never counted as hydration.
+The production workload has no matched control and includes both the prior queue
+change and PR #122’s housekeeping change, so improvement cannot be attributed
+solely to status retirement. Job retirements and scope exits are never counted as hydration.
 
 ## Separate existing SQLite wake-up gap
 
@@ -214,12 +221,18 @@ BENCHMARK_CAPS=2 BENCHMARK_TRIALS=3 BENCHMARK_HISTORY_COUNT=100 \
   node scripts/benchmark-publication-sustained.mjs
 ```
 
-The historical frozen measurements used harness commit `5754ddc` and control
+The frozen confirmation and auxiliary measurements used harness commit `5754ddc` and control
 `cf29ced`, before status retirement. To reproduce that source comparison, check
 out `5754ddc` in a separate worktree and install its locked dependencies. Run the
 script there; setting `BASELINE_REF` on different runtime source is intentionally
-rejected. The final script's HEAD default is a reproduction convenience, not the
-harness that produced the historical measurements.
+rejected. The screening predates that commit and has no harness hash.
+The final script's HEAD default and preparation-error cleanup are reproduction
+conveniences added after measurement, not the harness that produced the historical
+measurements. The preparation check observes the already registered repair groups;
+it adds no timer or execution deadline. Unexpected fixture paths are also retained
+for a final assertion even if a repair retry absorbs the original error. The
+current script passed a four-group check on both control and cap 2; injected alarm
+rejection and empty dispatch both failed as expected and closed the test fixture.
 
 [Condensed trials and provenance](validation/publication-efficiency.json) preserve
 all trials, exclusions, decisions and fingerprints; the complete raw logs,

@@ -31,7 +31,7 @@ const q=number=>({repository:'org/repo',operation:'issue_comments',args:{number}
 const percentile=(values,p)=>{const a=[...values].sort((a,b)=>a-b);return a.length?a[Math.max(0,Math.ceil(a.length*p)-1)]:null;};
 async function measure(label){
  const C=classes.get(label),f=await postgresFixture({RepositoryClass:C.RepositoryState,StoreClass:C.PostgresStore});
- let release,done=false,repairAt,started,cron,produce;const inflight=[];const gate=new Promise(resolve=>release=resolve),writers=[],ingests=[],requests=[],demands=[],maintenance=[],readerTimes=[],cohortKeys=new Set(Array.from({length:4*count},(_,i)=>key(100+i))),complete=new Set(),queued={},yieldPurposes={};
+ let release,done=false,repairAt,started,cron,produce;const inflight=[];const gate=new Promise(resolve=>release=resolve),unexpectedPaths=[],writers=[],ingests=[],requests=[],demands=[],maintenance=[],readerTimes=[],cohortKeys=new Set(Array.from({length:4*count},(_,i)=>key(100+i))),complete=new Set(),queued={},yieldPurposes={};
  try{
   const now=Date.now(),sha='a'.repeat(40),warm={number:9000,state:'OPEN',headRefOid:sha,baseRefOid:'b'.repeat(40),mergeable:'MERGEABLE',labels:[],body:'warm fixture'};
   await f.state.put('pr','9000',warm);await f.state.membership('open_prs:{}','9000',true);
@@ -53,12 +53,20 @@ async function measure(label){
   const execute=f.store.exec.bind(f.store);let standaloneReads=0;f.store.exec=(sql,...args)=>{if(/^\s*SELECT\b/i.test(sql))standaloneReads++;return execute(sql,...args);};
   let groups=0;let ready;const prepared=new Promise(resolve=>ready=resolve);
   f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async(url,init)=>{
-   assert.ok(['/batch','/read'].includes(new URL(url).pathname),'unexpected installation path');const input=JSON.parse(init.body);requests.push({path:new URL(url).pathname,operation:input.query?.operation,members:input.jobs?.length||1});
+   const path=new URL(url).pathname;if(!['/batch','/read'].includes(path))unexpectedPaths.push(path);assert.ok(['/batch','/read'].includes(path),'unexpected installation path');const input=JSON.parse(init.body);requests.push({path:new URL(url).pathname,operation:input.query?.operation,members:input.jobs?.length||1});
    if(url.endsWith('/batch')){if(++groups===4)ready();await gate;return Response.json({results:input.jobs.map(()=>({api:'graphql',data:[]}))});}
    return Response.json({api:'core',data:input.query?.operation==='pr'?warm:[]});
   }})};
   f.state.startStorageMaintenance=()=>{};
-  started=performance.now();const alarm=f.state.runAlarm();await prepared;
+  started=performance.now();const alarm=f.state.runAlarm();
+  const preparing=alarm.then(async()=>{
+   if(groups===4)return;
+   const pending=[...(f.state.repairCoordinator?.groups.values() || [])];
+   assert.equal(pending.length,4,'fixture alarm stopped before four repair groups');
+   await Promise.race(pending.map(group=>group.task));
+   assert.equal(groups,4,'repair group stopped before four upstream batches');
+  });
+  await Promise.race([prepared,preparing]);
   let deliveries=0;
   const emit=async i=>{
    const event=['issue_comment','status','pull_request'][i%3],path='fixture/ingress-'+i;
@@ -76,7 +84,7 @@ async function measure(label){
   })();produce.catch(()=>{});
   release();cron=setInterval(()=>{const task=f.state.runAlarm();inflight.push(task);task.catch(()=>{});},60000);
   await alarm;await drainRepairs(f.state);assert.equal(complete.size,4*count);done=true;await produce;await Promise.all(inflight);clearInterval(cron);
-  const allAt=performance.now()-started,readTrips=standaloneReads;assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,deliveries);assert.ok(!writers.some(w=>w.failed));assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE lease_id IS NOT NULL')).one().n,0);
+  const allAt=performance.now()-started,readTrips=standaloneReads;assert.deepEqual(unexpectedPaths,[],'unexpected installation paths were absorbed by repair retries');assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,deliveries);assert.ok(!writers.some(w=>w.failed));assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE lease_id IS NOT NULL')).one().n,0);
   return {mode,label,input_outstanding_at_repair_complete:ingests.filter(x=>x.arrival_ms<=repairAt&&x.arrival_ms+x.latency_ms>repairAt).length,writer_busy_ms_within_repair_window:Object.fromEntries([...new Set(writers.map(w=>w.purpose))].map(p=>[p,writers.filter(w=>w.purpose===p).reduce((n,w)=>n+Math.max(0,Math.min(w.began_ms+w.hold_ms,repairAt)-Math.max(w.began_ms,0)),0)])),histories_complete:complete.size,repair_complete_ms:repairAt,all_committed_ms:allAt,deliveries,deliveries_by_type:Object.fromEntries(['issue_comment','status','pull_request'].map(e=>[e,ingests.filter(v=>v.event===e).length])),input_latency_p50_ms:percentile(ingests.map(x=>x.latency_ms),.5),input_latency_p95_ms:percentile(ingests.map(x=>x.latency_ms),.95),input_latency_p99_ms:percentile(ingests.map(x=>x.latency_ms),.99),reader_p95_ms:percentile(readerTimes,.95),publication_admissions:writers.filter(w=>w.purpose==='publication').length,writer_admissions:writers.length,application_round_trips:writers.reduce((n,w)=>n+w.round_trips,0),standalone_read_http_calls:readTrips,max_writer_hold_ms:Math.max(...writers.map(w=>w.hold_ms)),max_publication_hold_ms:Math.max(...writers.filter(w=>w.purpose==='publication').map(w=>w.hold_ms)),yield_purposes:yieldPurposes,grouped_publication:f.state.groupedPublication,lease_renewal_updates:f.state.renewedLeases,maintenance_calls:maintenance.length,demand_calls:demands.length,reader_samples:readerTimes.length,ingests,writers,upstream_requests:requests,repair_scheduler:f.state.repairCoordinator.snapshot()};
  }finally{done=true;release?.();clearInterval(cron);await Promise.allSettled([produce,...inflight].filter(Boolean));try{await drainRepairs(f.state);}finally{await f.close();}}
 }
