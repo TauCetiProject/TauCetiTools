@@ -2394,6 +2394,11 @@ export class RepositoryState extends DurableObject<Env> {
       stalled:()=>{owner.ctx.abort('repair_transport_stalled');},
       select:async q=>{
         if(!await owner.quotaAllowsRepairClaim())return undefined;
+        // A chunk can settle members while its group still occupies a slot.
+        // When that prompts refill, use the existing read-only eligibility
+        // query before paying for an empty writer transaction and connection.
+        // The atomic claim below still rechecks the current row and ownership.
+        if(owner.getRepairCoordinator().groups.size && !await owner.hasEligibleRepair(q))return undefined;
         let attempted:any;
         try{return await owner.atomic(async state=>{
           const next=await state.nextJob(q.failed);if(!next)return undefined;attempted=next;
@@ -2414,12 +2419,7 @@ export class RepositoryState extends DurableObject<Env> {
           throw error;
         }
       },
-      eligible:async q=>{
-        const restriction=owner.quotaRestriction;
-        if(restriction && restriction.installation===(await owner.meta('repository'))?.installation && owner.quotaBlocksRepairTurn(q))return false;
-        const omit=owner.excludeRepairKeys(q.failed),now=Date.now();
-        return Boolean((await owner.store.exec('SELECT key FROM jobs WHERE due<=? AND lease_until<=?'+omit.sql+' LIMIT 1',now,now,...omit.bindings)).toArray().length);
-      },
+      eligible:q=>owner.hasEligibleRepair(q),
       dispatch:async group=>{
         const scoped=Object.create(owner) as RepositoryState;scoped.repairGroup=group;
         scoped.env=scoped.repairEnvironment(group);
@@ -2440,6 +2440,12 @@ export class RepositoryState extends DurableObject<Env> {
       },
       arm:()=>owner.armRepairAlarm(),
     });
+  }
+  private async hasEligibleRepair(q:RepairQuantum):Promise<boolean> {
+    const restriction=this.quotaRestriction;
+    if(restriction && restriction.installation===(await this.meta('repository'))?.installation && this.quotaBlocksRepairTurn(q))return false;
+    const omit=this.excludeRepairKeys(q.failed),now=Date.now();
+    return Boolean((await this.store.exec('SELECT key FROM jobs WHERE due<=? AND lease_until<=?'+omit.sql+' LIMIT 1',now,now,...omit.bindings)).toArray().length);
   }
   private async retireQuotaObsolete():Promise<void> {
     if(this.degraded || this.repairsHeld())return;

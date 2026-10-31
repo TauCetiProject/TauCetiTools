@@ -51,6 +51,20 @@ test('real repair slots refill beyond sixteen launches while one group remains p
  }finally{gate.resolve();await drainRepairs(f.state);await f.close();}
 });
 
+test('one full publishing group does not pay an empty writer admission for every committed chunk',async()=>{
+ const f=await fixture();try{
+  await seed(f,100,'issue_comments');const tx=f.store.transaction.bind(f.store);let repairs=0,calls=0;
+  f.store.transaction=(apply,purpose)=>{if(purpose==='repair')repairs++;return tx(apply,purpose);};
+  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async(_url,init)=>{
+   calls++;return Response.json({results:JSON.parse(init.body).jobs.map(()=>({api:'graphql',data:[]}))});
+  }})};
+  await f.state.runAlarm();await drainRepairs(f.state);
+  assert.equal(calls,1);assert.equal((await f.store.exec("SELECT COUNT(*) n FROM collections WHERE operation='issue_comments' AND complete=1")).one().n,100);
+  assert.ok(repairs<=3,'empty chunk-triggered selections must remain read-only: '+repairs);
+  assert.equal(f.state.repairCoordinator.owned.size,0);
+ }finally{await drainRepairs(f.state);await f.close();}
+});
+
 test('four active full batches remain excluded after lease expiry and renew only matching tokens',async()=>{
  const f=await fixture(),gate=deferred(),ready=deferred(),clock=Date.now;let offset=0;try{
   await seed(f,400,'issue_comments');
