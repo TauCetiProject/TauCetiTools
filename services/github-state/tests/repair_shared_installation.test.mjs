@@ -57,7 +57,10 @@ test('two repair owners and a runner-capacity scan progress through shared real 
   assert.ok(installation.scheduler.capacityWaiters.size>=1,'actual capacity rejection registers repository wakes');
   const runner=installation.scheduler.runnerCapacity(repos[0]);
   for(const gate of held){gate.resolve();await pause(20);}
-  const deadline=new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('shared installation stranded '+JSON.stringify({complete,completionMs,received:installation.received}))),process.env.TEST_POSTGRES_URL?90000:10000);});
+  const deadline=new Promise((_,reject)=>{timer=setTimeout(async()=>{
+   const states=await Promise.all(owners.map(async f=>({scheduler:f.state.repairCoordinator.snapshot(),tag:f.state.repairAlarm,ordinary:f.state.ordinaryAlarmAt,alarm:await f.state.ctx.storage.getAlarm(),restriction:f.state.quotaRestriction,waits:(await f.state.store.exec('SELECT key,due,lease_id,wait_reason FROM jobs WHERE due<?',Date.now()+10000)).toArray()})));
+   reject(Error('shared installation stranded '+JSON.stringify({complete,completionMs,received:installation.received,states})));
+  },process.env.TEST_POSTGRES_URL?90000:10000);});
   const [,capacity]=await Promise.race([Promise.all([all.promise,runner.then(r=>r.json())]),deadline]);
   assert.equal(capacity.complete,true);assert.equal(capacity.requests,5);assert.equal(repairRequests,32);assert.equal(peak,4);
   assert.deepEqual(complete,[16,16]);
@@ -75,6 +78,7 @@ test('two repair owners and a runner-capacity scan progress through shared real 
   console.log(JSON.stringify({fixture:'shared_installation',backend:process.env.TEST_POSTGRES_URL?'postgres':'sqlite',elapsed_ms:Date.now()-started,completions:complete,completion_ms:completionMs,launches:owners.map(f=>f.state.repairCoordinator.snapshot().launches),notifications:repos.map(repo=>installation.received.filter(id=>id===repo.id).length),alarm_counts:alarmCounts,runner_requests:capacity.requests}));
   assert.equal(installation.db.prepare('SELECT COUNT(*) n FROM reservations').get().n,0);
   assert.ok(installation.received.length<=41,'one release cannot broadcast to multiple recipients:32repairs+5runner requests+4held reservations');
+  assert.ok(alarmCounts.every(n=>n<=20),'short shared-capacity fixture must not create a repeated empty-alarm loop');
  }finally{
   closing=true;clearTimeout(timer);for(const value of alarmTimers.values())clearTimeout(value);for(const gate of held)gate.resolve();
   await Promise.allSettled(alarmWork);

@@ -3,11 +3,11 @@
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {writeFileSync,readFileSync} from 'node:fs';
-import {createHash} from 'node:crypto';
 import {resolve,relative} from 'node:path';
 import {build} from 'esbuild';
 import {postgresFixture,RepositoryState,PostgresStore} from '../tests/postgres_runtime.mjs';
 import {drainRepairs} from '../tests/repair_background.mjs';
+import {implementationFingerprint,fingerprintFiles} from './benchmark-baseline.mjs';
 const baseline=process.env.BASELINE_REF || '2732eb5';
 const baselineCommit=execFileSync('git',['rev-parse',baseline],{encoding:'utf8'}).trim();
 const bundle=await build({stdin:{contents:"export {RepositoryState} from './repository';export {PostgresStore} from './repository_store';",loader:'ts',resolveDir:process.cwd()+'/src'},bundle:true,platform:'node',format:'esm',write:false,plugins:[{
@@ -15,7 +15,7 @@ const bundle=await build({stdin:{contents:"export {RepositoryState} from './repo
   if(!args.path.startsWith(resolve('src')+'/'))return;
   const path='services/github-state/src/'+relative(resolve('src'),args.path);
   return {contents:execFileSync('git',['show',baselineCommit+':'+path],{encoding:'utf8'}),loader:'ts'};
- });}},
+ });b.onLoad({filter:/github_catalog\.json$/},args=>args.path===resolve('../../tauceti_tools/github_catalog.json')?{contents:execFileSync('git',['show',baselineCommit+':tauceti_tools/github_catalog.json'],{encoding:'utf8'}),loader:'json'}:undefined);}},
  {name:'context',setup(b){b.onResolve({filter:/^cloudflare:workers$/},()=>({path:'context',namespace:'fixture'}));b.onLoad({filter:/.*/,namespace:'fixture'},()=>({contents:'export class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}}',loader:'js'}));}}
 ]});
 const {RepositoryState:Baseline,PostgresStore:BaselineStore}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
@@ -76,7 +76,7 @@ async function measure(Class,StoreClass,count,ingressCount,intervalMs=0,groups=1
   return {histories_completed:cohort.length,committed_ingress:ingressCount,groups,ingress_interval_ms:intervalMs,elapsed_ms:completeMs,transactions,application_sql_round_trips:roundTrips,upstream_batches:upstream,github_requests:0,repair_scheduler:f.state.repairCoordinator?.snapshot() || null,lease_renewal_row_updates:f.state.renewedLeases || 0,grouped_publication:f.state.groupedPublication?{...f.state.groupedPublication}:null,ingress_ms:reads,ingress_p95_ms:p95(reads),ingress_admission_p95_ms:p95(writers.filter(x=>x.purpose==='ingest').map(x=>x.queue_wait_ms)),publication_transactions:publications.length,publication_max_hold_ms:Math.max(...publications.map(x=>x.transaction_ms)),writers};
  }finally{release?.();await f.close();}
 }
-const result={baseline:baselineCommit,implementation_sha256:createHash('sha256').update(['repository.ts','repository_store.ts','monitoring.ts','repair_coordinator.ts','repair_io.ts','installation.ts','catalog.ts'].map(name=>readFileSync('src/'+name)).join('')).digest('hex'),scope:'isolated real PostgreSQL; ordinary runAlarm leased scheduler and tracked background completion; configured histories per group and issue-comment deliveries to a warm complete collection, burst and steady500ms spacing; requested limits interleaved with benchmark-only cap substitution; separate100memberemptyfullbatch alternating trials; fixture upstream only, zero GitHub requests; not a production event-mix or fleet throughput claim',trials,mixed_groups:mixedGroups,histories_per_group:mixedCount,ingress_deliveries:ingressCount,full_trials:fullTrials,configured_items:configured,candidate_limits:limits,before:[],after:[],steady:{before:[],after:[]},limits:Object.fromEntries(limits.filter(n=>n!==configured).map(n=>[n,{burst:[],steady:[]}])),full_batch:{},full_batch_trials:{before:[],after:[]}};
+const result={baseline:baselineCommit,implementation_sha256:implementationFingerprint(),implementation_files:fingerprintFiles(),scope:'isolated real PostgreSQL; ordinary runAlarm leased scheduler and tracked background completion; configured histories per group and issue-comment deliveries to a warm complete collection, burst and steady500ms spacing; requested limits interleaved with benchmark-only cap substitution; separate100memberemptyfullbatch alternating trials; fixture upstream only, zero GitHub requests; not a production event-mix or fleet throughput claim',trials,mixed_groups:mixedGroups,histories_per_group:mixedCount,ingress_deliveries:ingressCount,full_trials:fullTrials,configured_items:configured,candidate_limits:limits,before:[],after:[],steady:{before:[],after:[]},limits:Object.fromEntries(limits.filter(n=>n!==configured).map(n=>[n,{burst:[],steady:[]}])),full_batch:{},full_batch_trials:{before:[],after:[]}};
 for(let trial=0;trial<trials;trial++)for(const label of trial%2?[...limits].reverse().concat(['before']):['before',...limits]){
  const classes=label==='before'?{RepositoryState:Baseline,PostgresStore:BaselineStore}:candidates.get(label);
  for(const [mode,interval] of [['burst',0],['steady',500]]){

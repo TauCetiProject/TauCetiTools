@@ -5,9 +5,11 @@ import {fixture as sqliteFixture,RepositoryState as SQLiteRepository} from '../t
 import {postgresFixture,RepositoryState,PostgresStore} from '../tests/postgres_runtime.mjs';
 import {installationFixture,InstallationScheduler} from '../tests/repair_installation_fixture.mjs';
 import {drainRepairs} from '../tests/repair_background.mjs';
-import {baseline,implementationFingerprint} from './benchmark-baseline.mjs';
+import {baseline,implementationFingerprint,fingerprintFiles} from './benchmark-baseline.mjs';
 const previous=await baseline(),pg=Boolean(process.env.TEST_POSTGRES_URL),trials=Number(process.env.BENCHMARK_TRIALS || 3);
 const windowMs=Number(process.env.BENCHMARK_WINDOW_MS || (pg?90000:4000)),historyCount=Number(process.env.BENCHMARK_SHARED_HISTORIES || 16);
+const runnerRepos=Number(process.env.BENCHMARK_RUNNER_REPOSITORIES || 2),runnerRuns=process.env.BENCHMARK_RUNNER_RUNS==='1',runnerDelay=Number(process.env.BENCHMARK_RUNNER_DELAY_MS || 0);
+assert.ok(Number.isInteger(runnerRepos)&&runnerRepos>0&&runnerRepos<=26&&Number.isInteger(runnerDelay)&&runnerDelay>=0);
 assert.ok(Number.isInteger(trials)&&trials>0&&Number.isInteger(windowMs)&&windowMs>2000&&Number.isInteger(historyCount)&&historyCount>0);
 const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
 const response=body=>Response.json(body,{headers:{'x-ratelimit-resource':'core','x-ratelimit-remaining':'4999','x-ratelimit-limit':'5000','x-ratelimit-reset':String(Math.floor(Date.now()/1000)+3600)}});
@@ -21,8 +23,10 @@ async function measure(label){
    if(!github(url))return original(url,init);
    if(!started){const gate=deferred();held.push(gate);if(held.length===4)ready.resolve();await gate.promise;return response({});}
    peak=Math.max(peak,installation.db.prepare('SELECT COUNT(*) n FROM reservations').get().n);const path=new URL(url).pathname;
-   if(path.startsWith('/orgs/'))return response(installation.repos.slice(0,2).map(r=>({name:r.name.split('/')[1],archived:false})));
-   if(path.includes('/actions/runs'))return response({workflow_runs:[],total_count:0});
+   const scanResponse=async body=>{if(runnerDelay)await new Promise(resolve=>setTimeout(resolve,runnerDelay));return response(body);};
+   if(path.startsWith('/orgs/'))return scanResponse(Array.from({length:runnerRepos},(_,i)=>({name:'repo'+i,archived:false})));
+   if(path.endsWith('/jobs'))return scanResponse({jobs:[],total_count:0});
+   if(path.includes('/actions/runs')){const runs=runnerRuns&&new URL(url).searchParams.get('status')==='in_progress'?[{id:String(Number(/repo(\d+)/.exec(path)[1])+1)}]:[];return scanResponse({workflow_runs:runs,total_count:runs.length});}
    assert.ok(path.includes('/pulls/')&&path.endsWith('/files'));requests[path.includes('/repo0/')?0:1]++;
    await new Promise(resolve=>setTimeout(resolve,100));return response([]);
   };
@@ -70,7 +74,7 @@ async function measure(label){
   await Promise.allSettled(flights);await installation.close();for(const f of owners){await drainRepairs(f.state);if(f.close)await f.close();else f.db.close();}globalThis.fetch=original;
  }
 }
-const result={baseline:previous.commit,implementation_sha256:implementationFingerprint(),backend:pg?'real isolated PostgreSQL':'node:sqlite fixture',scope:'two16-history repositories and actual runner-capacity scan sharing four reservations; fixed2s capacity release,100ms upstream reads, ordinary60s cron and SQLite durable alarm emulation; source-specific90sPG/3sSQLite horizon retains incomplete baseline work; zero GitHub requests',trials,histories_per_repository:historyCount,window_ms:windowMs,before:[],after:[]};
+const result={baseline:previous.commit,implementation_sha256:implementationFingerprint(),implementation_files:fingerprintFiles(),backend:pg?'real isolated PostgreSQL':'node:sqlite fixture',scope:'two configured-history repositories and actual configurable runner-capacity inventory sharing four reservations; fixed2s capacity release,100ms repair reads, ordinary60s cron and SQLite durable alarm emulation; fixed observation horizon retains incomplete baseline work; zero GitHub requests',trials,histories_per_repository:historyCount,runner_repositories:runnerRepos,runner_runs:runnerRuns,runner_delay_ms:runnerDelay,window_ms:windowMs,before:[],after:[]};
 for(let trial=0;trial<trials;trial++)for(const label of trial%2?['after','before']:['before','after']){
  const row=await measure(label);result[label].push(row);console.log(JSON.stringify({trial,label,completions:row.completions,elapsed_ms:row.elapsed_ms,admissions:row.transaction_admissions,runner_ms:row.runner_ms}));
  writeFileSync(process.env.BENCHMARK_OUTPUT || '/tmp/shared-installation-benchmark.json',JSON.stringify(result,null,2)+'\n');

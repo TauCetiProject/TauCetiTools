@@ -206,6 +206,15 @@ test('a truncated-body response receives no member-data continuation credit',asy
  }finally{await drainRepairs(f.state);await f.close();}
 });
 
+test('a malformed internal service envelope backs off without member-data continuation credit',async()=>{
+ const f=await fixture();try{
+  await seed(f,40);let calls=0;
+  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>{calls++;return Response.json({});}})};
+  await f.state.runAlarm();await drainRepairs(f.state);assert.equal(calls,16);assert.equal(f.state.repairCoordinator.current.memberRetries,0);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE attempt=1')).one().n,16);
+ }finally{await drainRepairs(f.state);await f.close();}
+});
+
 test('a failed publication tail is retained across member-retry-only internal chains',async()=>{
  const f=await fixture();try{
   await seed(f,24,'issue_comments');await f.store.exec('UPDATE jobs SET due=?',Date.now()-2000);await seed(f,40);
@@ -234,6 +243,35 @@ test('a late member retry cannot clear an installation restriction by creating a
   f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json({api:'core',data:[]})})};
   await f.state.runAlarm();await drainRepairs(f.state);assert.equal(await f.state.complete(query(100)),true);
  }finally{await drainRepairs(f.state);await f.close();}
+});
+
+test('an uncertain SQLite alarm write loses its hint and retains ordinary durable recovery',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
+ const f=await fixture();try{
+  const c=f.state.getRepairCoordinator();c.current.failed.add('failed-tail');
+  const until=Date.now()+10000;await f.state.setAlarm(until,false,true);
+  const set=f.ctx.storage.setAlarm;f.ctx.storage.setAlarm=async()=>{throw Error('fixture alarm storage failure');};
+  await assert.rejects(f.state.setAlarm(until+10000,false,true));assert.equal(f.state.repairAlarm,undefined);
+  assert.equal(await f.ctx.storage.getAlarm(),until,'the previously persisted alarm is retained');
+  f.ctx.storage.setAlarm=set;await f.state.alarm();assert.equal(c.current.failed.size,0,'missing optional metadata makes the durable wake external');
+ }finally{await drainRepairs(f.state);await f.close();}
+});
+
+test('an ordinary demand wake racing a stale continuation alarm read retains external recovery',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
+ const f=await fixture(),reading=deferred(),release=deferred(),clock=Date.now;let offset=0;try{
+  await seed(f,2);const c=f.state.getRepairCoordinator();c.current.failed.add(key(100));
+  f.state.ordinaryAlarmAt=undefined;
+  const future=Date.now()+60000;await f.state.setAlarm(future,false,false,true);
+  const get=f.ctx.storage.getAlarm;let first=true;
+  f.ctx.storage.getAlarm=async()=>{if(first){first=false;reading.resolve();await release.promise;return future;}return get();};
+  const pending=f.state.armRepairAlarm();await reading.promise;
+  await f.state.setAlarm(Date.now()+100);release.resolve();await pending;
+  assert.equal(f.state.repairAlarm.continuation,false,'an earlier self-wake cannot downgrade a newly accepted ordinary wake');
+  Date.now=()=>clock()+offset;offset=1000;
+  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json({api:'core',data:[]})})};
+  await f.state.alarm();await drainRepairs(f.state);
+  assert.equal(await f.state.complete(query(100)),true,'fresh demand is not stranded behind the old failed-path record');
+  assert.equal(await f.state.complete(query(101)),true);
+ }finally{release.resolve();offset=0;Date.now=clock;await drainRepairs(f.state);await f.close();}
 });
 
 test('a capacity release after closure does not refetch an unclassified publication tail',async()=>{

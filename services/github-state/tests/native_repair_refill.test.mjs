@@ -120,3 +120,55 @@ for(const category of ['capacity','secondary'])test('native SQLite restriction w
   assert.ok(body.alarmCount<=12,'a partial registry does not create a self-generated maintenance loop');
  }finally{await mf.dispose();}
 });
+
+test('native firing continuation alarms retain failed tails and durable recovery without external maintenance',{skip},async()=>{
+ const mf=await runtime(async()=>Response.json([]),{},{repositoryExtension:`
+ fixtureBatches=0;fixtureFiles=0;fixtureAlarms=0;fixtureExternal=0;fixtureExpiry=0;
+ async alarm(){this.fixtureAlarms++;return super.alarm();}
+ async runAlarm(){this.fixtureExternal++;return super.runAlarm();}
+ async fetch(req){const path=new URL(req.url).pathname;
+  if(path==='/fixture/firing-continuations'){
+   await this.alarmFlight;${nativeDrainRepairs}${quiet}
+   await this.ctx.storage.deleteAlarm();this.repairAlarm=undefined;
+   const schedule=this.setAlarm;this.setAlarm=async()=>{};
+   this.expire=async()=>{this.fixtureExpiry++;};
+   this.fixtureExternal=0;this.fixtureAlarms=0;this.fixtureExpiry=0;
+   await this.store.exec('DELETE FROM jobs');
+   await this.enqueueMany(Array.from({length:24},(_,i)=>({q:{repository:'org/repo',operation:'issue_comments',args:{number:100+i}},priority:5})),true);
+   await this.store.exec('UPDATE jobs SET due=?',Date.now()-2000);
+   await this.enqueueMany(Array.from({length:40},(_,i)=>({q:{repository:'org/repo',operation:'files',args:{number:200+i}},priority:5})),true);
+   const publish=this.publishPrepared;
+   this.publishPrepared=async function(input,...args){
+    if(input.some(p=>p.job.key==='issue_comments:{"number":108}'))throw Error('unclassified publication interruption');
+    return publish.call(this,input,...args);
+   };
+   this.env={...this.env,INSTALLATIONS:{idFromName:id=>id,get:()=>({fetch:async(url,init)=>{
+    const input=JSON.parse(init.body);
+    if(url.endsWith('/batch')){this.fixtureBatches++;return Response.json({results:input.jobs.map(()=>({api:'graphql',data:[]}))});}
+    this.fixtureFiles++;await new Promise(resolve=>setTimeout(resolve,40));
+    return Response.json({unavailable:true,reason:'malformed_upstream_response',failure_kind:'member'});
+   }})}};
+   // The explicit initial run consumes the setup wake. Later alarms below
+   // are delivered by the real runtime, without a manual alarm emulation.
+   this.setAlarm=schedule;await this.ctx.storage.deleteAlarm();this.repairAlarm=undefined;
+   await this.runAlarm();return Response.json({ok:true});
+  }
+  if(path==='/fixture/continuation-status')return Response.json({batches:this.fixtureBatches,files:this.fixtureFiles,alarms:this.fixtureAlarms,external:this.fixtureExternal,expiry:this.fixtureExpiry,groups:this.repairCoordinator?.groups.size || 0,next_alarm:await this.ctx.storage.getAlarm(),continuation:Boolean(this.repairAlarm?.continuation)});
+  return super.fetch(req);
+ }`});
+ try{
+  const stub=await configured(mf);assert.equal((await send(stub,'/fixture/firing-continuations',{})).status,200);
+  let body;const deadline=Date.now()+10000;
+  do{await new Promise(resolve=>setTimeout(resolve,20));body=await(await send(stub,'/fixture/continuation-status',{})).json();}
+  while(!(body.files===40&&body.groups===0&&body.alarms>=1&&!body.continuation&&body.next_alarm>Date.now()+50000)&&Date.now()<deadline);
+  assert.equal(body.files,40);assert.equal(body.groups,0);assert.equal(body.batches,1,'self-generated alarms must not refetch a failed tail');
+  assert.equal(body.external,1);assert.equal(body.expiry,1);assert.ok(body.alarms>=1&&body.alarms<=5);
+  assert.ok(body.next_alarm>Date.now()+50000,'consuming a stale continuation retains durable future retry recovery');
+  await send(stub,'/tick',{repository:repository.name});
+  do{await new Promise(resolve=>setTimeout(resolve,20));body=await(await send(stub,'/fixture/continuation-status',{})).json();}
+  while(body.batches<2&&Date.now()<deadline);
+  assert.equal(body.batches,2,'a genuine external tick clears the record and resumes ordinary recovery');
+  // /tick retains its pre-existing direct expiry pass, followed by the alarm.
+  assert.equal(body.external,2);assert.equal(body.expiry,3);
+ }finally{await mf.dispose();}
+});

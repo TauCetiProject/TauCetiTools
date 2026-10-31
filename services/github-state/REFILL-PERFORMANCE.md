@@ -1,7 +1,7 @@
 # Repair refill validation
 
-Verification is in progress. The runtime source at `9e48298` has not been
-deployed. Production remains on the separately measured grouped-publication
+Verification is in progress. Refill has not been deployed. Each result names
+the runtime revision it measures. Production remains on the separately measured grouped-publication
 release. These results are isolated fixtures, not fleet throughput claims.
 
 ## Shared installation under sustained repair load
@@ -33,9 +33,10 @@ above include that correction. A longer, realistic scan remains to be measured.
   Its Node heap measurements do not establish a native isolate memory limit.
 - The preceding candidate `31aca6b` passed the complete isolated PostgreSQL
   suite: 223 passes and three SQLite-only skips. The final-source run is active.
-- Native SQLite continuation alarms still need a correction: a self-generated
-  scheduling wake must not discard failed-tail exclusions or repeat external
-  maintenance. This must be verified before rollout.
+- A real native SQLite alarm test now verifies that paced member retries retain
+  failed tails across firing scheduling fallbacks, avoid external maintenance,
+  re-arm durable recovery and reset normally on a genuine tick. Uncertain alarm
+  writes lose optional tags and recover externally.
 - Final real PostgreSQL comparisons still need four full 100-history groups
   under steady and burst ingress, a real fetch longer than the lease, and
   shared-installation fairness with a realistic runner scan.

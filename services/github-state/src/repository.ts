@@ -87,7 +87,9 @@ export class RepositoryState extends DurableObject<Env> {
   private repairCoordinator?:RepairCoordinator;
   private quotaRestriction?:{category:string,retry_at:number,installation:string,quantum:RepairQuantum,dataProgress:number};
   private capacityWake?:{at:number,latest?:number,timer:ReturnType<typeof setTimeout>,resolve:()=>void};
-  private repairAlarm?:{at:number,quota:boolean};
+  private repairAlarm?:{at:number,quota:boolean,continuation:boolean};
+  private ordinaryAlarmAt?:number;
+  private alarmSchedule=0;
   private availabilityFlight?:Promise<any>;
   private renewedLeases=0;
   private optionalWork={active:0};
@@ -325,12 +327,20 @@ export class RepositoryState extends DurableObject<Env> {
     if(this.degraded || this.repairsHeld()) return;
     try {await write();} catch(error) {this.noteFailure(operation,error);}
   }
-  async setAlarm(at:number,quota=false): Promise<void> {
+  async setAlarm(at:number,quota=false,continuation=false,repair=false): Promise<void> {
     // PostgreSQL uses the existing cron tick, never the obsolete SQLite file.
     if(this.store.backend==='postgres')return;
     if(this.faultFull) throw new Error(FULL_MESSAGE);
-    this.owner.repairAlarm={at,quota};
+    const owner=this.owner,schedule=++owner.alarmSchedule;
+    if(!repair)owner.ordinaryAlarmAt=Math.min(owner.ordinaryAlarmAt ?? at,at);
+    // A new input/demand wake can race an older continuation's alarm read.
+    // Preserve its external meaning even if the continuation schedules earlier.
+    if((continuation || quota) && owner.ordinaryAlarmAt!==undefined && owner.ordinaryAlarmAt<=Date.now()+100){continuation=false;quota=false;}
+    // Uncertain scheduling loses the optional tag and recovers as an ordinary
+    // external alarm; never misclassify an old durable wake using a failed write.
+    owner.repairAlarm=undefined;
     await this.ctx.storage.setAlarm(at);
+    if(owner.alarmSchedule===schedule)owner.repairAlarm={at,quota,continuation};
   }
   async atomic<T>(apply:(state:RepositoryState)=>Promise<T>,purpose:WriterPurpose='other'):Promise<T> {
     if(this.store.transactional)return apply(this);
@@ -2131,7 +2141,7 @@ export class RepositoryState extends DurableObject<Env> {
   async retryJob(job:any,error:unknown):Promise<void> {await this.retryJobs([job],error);}
   private retryWait(job:any,error:unknown):RepairWait & {expired:boolean} {
     const expired=error instanceof Error && /staging page missing/.test(error.message),reason=expired?'staging_expired':'transport_or_parser';
-    const named=error instanceof Error && error.constructor===Error && ['staging page missing','repeated upstream cursor','malformed service response'].includes(error.message);
+    const named=error instanceof Error && error.constructor===Error && ['staging page missing','repeated upstream cursor'].includes(error.message);
     return {job,due:Date.now()+Math.min(3600000,60000*2**Math.min(job.attempt || 0,6)),attempts:1,reason,event:'retry',failure:{category:reason},memberFailure:named || isMemberDataFailure(error),expired};
   }
   private async retryJobs(jobs:any[],error:unknown):Promise<Set<string>> {
@@ -2325,11 +2335,20 @@ export class RepositoryState extends DurableObject<Env> {
     }
   }
   async alarm(): Promise<void> {
-    if(this.owner.alarmFlight){void this.owner.repairCoordinator?.wake(true);return this.owner.alarmFlight;}
     const owner=this.owner,tag=owner.repairAlarm;
+    const continuation=owner.store.backend==='sqlite' && tag?.continuation && tag.at<=Date.now() && owner.repairCoordinator;
+    if(owner.alarmFlight){
+      if(continuation){
+        await owner.alarmFlight;
+        if(owner.repairAlarm===tag)owner.repairAlarm=undefined;
+        return owner.runContinuationAlarm();
+      }
+      void owner.repairCoordinator?.wake(true);return owner.alarmFlight;
+    }
     const quota=owner.store.backend==='sqlite' && tag?.quota && tag.at<=Date.now() && owner.quotaRestriction?.category==='capacity';
+    if(!continuation && !quota && owner.ordinaryAlarmAt!==undefined && owner.ordinaryAlarmAt<=Date.now()+100)owner.ordinaryAlarmAt=undefined;
     owner.repairAlarm=undefined;
-    const flight=quota?owner.runQuotaAlarm():this.runSingleAlarm();owner.alarmFlight=flight;
+    const flight=continuation?owner.runContinuationAlarm():quota?owner.runQuotaAlarm():this.runSingleAlarm();owner.alarmFlight=flight;
     try{await flight;}finally{if(this.owner.alarmFlight===flight)this.owner.alarmFlight=undefined;}
   }
   async runSingleAlarm(): Promise<void> {
@@ -2338,7 +2357,19 @@ export class RepositoryState extends DurableObject<Env> {
     await this.runAlarm();
   }
   async runAlarm(): Promise<void> {
+    if(this.owner.ordinaryAlarmAt!==undefined && this.owner.ordinaryAlarmAt<=Date.now()+100)this.owner.ordinaryAlarmAt=undefined;
     await this.getRepairCoordinator().wake(true);
+  }
+  private async runContinuationAlarm():Promise<void> {
+    if(this.migrationUnavailable)await this.retryMigrationControl();
+    if(this.repairsHeld() || this.degraded)return;
+    this.owner.activeOperations++;
+    try{
+      await this.getRepairCoordinator().wake();
+      // A consumed stale continuation may find a now-closed or full owner.
+      // Re-arm durable future retry/lease recovery even when wake() is a no-op.
+      await this.armRepairAlarm();
+    }finally{this.owner.activeOperations--;}
   }
   private async runQuotaAlarm():Promise<void> {
     if(this.repairsHeld() || this.degraded)return;
@@ -2436,7 +2467,8 @@ export class RepositoryState extends DurableObject<Env> {
     const at=quotaAt&&jobAt?Math.min(quotaAt,jobAt):quotaAt || jobAt;if(!at)return;
     const earlier=await this.ctx.storage.getAlarm();
     const quota=Boolean(quotaAt===at && this.quotaRestriction?.category==='capacity');
-    if(!earlier || earlier>at)await this.setAlarm(at,quota);
+    const continuation=Boolean(!quota && jobAt===at && row.due<=now);
+    if(!earlier || earlier>at)await this.setAlarm(at,quota,continuation,true);
   }
   protected get repairHopLimit():number{return REPAIR_HOP_MS;}
   private repairEnvironment(group:RepairGroup):Env {

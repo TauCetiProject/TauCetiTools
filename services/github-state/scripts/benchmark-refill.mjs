@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {writeFileSync} from 'node:fs';
 import {postgresFixture,RepositoryState,PostgresStore} from '../tests/postgres_runtime.mjs';
 import {drainRepairs} from '../tests/repair_background.mjs';
-import {baseline,implementationFingerprint} from './benchmark-baseline.mjs';
+import {baseline,implementationFingerprint,fingerprintFiles} from './benchmark-baseline.mjs';
 const before=await baseline(),trials=Number(process.env.BENCHMARK_TRIALS || 3),holdMs=Number(process.env.BENCHMARK_HOLD_MS || 65000);
 assert.ok(Number.isInteger(trials)&&trials>0);assert.ok(Number.isInteger(holdMs)&&holdMs>60000,'exercise a real wait beyond lease expiry');
 const queries=Array.from({length:21},(_,i)=>({repository:'org/repo',operation:'files',args:{number:100+i}}));
@@ -50,7 +50,7 @@ async function measure(RepositoryClass,StoreClass){
   return {elapsed_ms:elapsed,held_ms:heldAt,cohort:21,complete:complete.length,missing,fast_complete_before_held:[...completed].filter(([key,at])=>key!=='files:{"number":100}'&&at<heldAt).length,completed_ms:Object.fromEntries(completed),upstream_calls:Object.fromEntries(calls),maintenance,repair_scheduler:f.state.repairCoordinator?.snapshot() || null,lease_renewal_row_updates:f.state.renewedLeases || 0,writer_admissions:writers.length,application_sql_round_trips:writers.reduce((n,r)=>n+r.sql,0),writers};
  }finally{clearInterval(cron);clearTimeout(heldTimer);release();await Promise.allSettled([initial,...cronWork].filter(Boolean));await drainRepairs(f.state);await f.close();}
 }
-const result={baseline:before.commit,implementation_sha256:implementationFingerprint(),scope:'isolated real PostgreSQL;21independent missing file histories, one65s transport, real60s cron; fixed held-hop horizon includes incomplete baseline work; no GitHub requests; no fleet throughput claim',trials,before:[],after:[]};
+const result={baseline:before.commit,implementation_sha256:implementationFingerprint(),implementation_files:fingerprintFiles(),scope:'isolated real PostgreSQL;21independent missing file histories, one65s transport, real60s cron; fixed held-hop horizon includes incomplete baseline work; no GitHub requests; no fleet throughput claim',trials,before:[],after:[]};
 for(let trial=0;trial<trials;trial++)for(const label of trial%2?['after','before']:['before','after']){
  const row=await measure(label==='before'?before.RepositoryState:RepositoryState,label==='before'?before.PostgresStore:PostgresStore);
  if(label==='after')assert.equal(row.complete,21,'refill reaches every short group beyond the16-launch boundary');

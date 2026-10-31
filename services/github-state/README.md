@@ -188,6 +188,10 @@ bounds a scheduling quantum; productive work continues automatically across
 quanta, with bounded coverage and maintenance between them. Full slots pause the
 quantum until a completion, without repeatedly selecting due backlog or waiting
 inside an alarm handler. Ordinary ticks retain expiry and restart recovery.
+Same-owner scheduling fallback alarms resume that record without external
+maintenance. Genuine ticks and future retry/lease alarms remain external. A
+consumed stale fallback re-arms durable recovery even if no fill is needed;
+lost or uncertain optional alarm tags recover through the ordinary external path.
 Active local key/token ownership prevents duplicate fetches after persisted lease
 expiry. Existing repair/publication transactions renew matching leases near
 expiry, without a heartbeat timer. Each committed member releases its local
