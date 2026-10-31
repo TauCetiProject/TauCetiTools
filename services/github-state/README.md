@@ -175,11 +175,47 @@ restart backstop. A bookkeeping memo never establishes complete coverage, and
 an actual miss bypasses it immediately. Public and migration shadow reads do
 not create demand.
 
-Repair waves claim complete upstream groups before sending requests, preserving
-four-group parallelism and normal batch sizes. Companion claims and lease
-cleanup use bulk statements with the existing generation and key/token checks.
+An owner-level repair coordinator claims complete upstream groups before sending
+requests, preserving four-group parallelism and normal batch sizes. A slot spans
+fetch, preparation, publication and cleanup. Finishing one group immediately
+refills its slot while other groups continue. Companion claims and lease cleanup
+use bulk statements with the existing generation and key/token checks.
 Writer logs distinguish demand, ingress, repair, publication and other callers
 using bounded purpose names, without recording queries or payloads.
+
+Alarm/tick handlers return after finite scheduling work. The dispatch count
+bounds a scheduling quantum; productive work continues automatically across
+quanta, with bounded coverage and maintenance between them. Full slots pause the
+quantum until a completion, without repeatedly selecting due backlog or waiting
+inside an alarm handler. Ordinary ticks retain expiry and restart recovery.
+Active local key/token ownership prevents duplicate fetches after persisted lease
+expiry. Existing repair/publication transactions renew matching leases near
+expiry, without a heartbeat timer. Each committed member releases its local
+ownership so a newer dirty generation can proceed before its siblings finish.
+Protected `repair_scheduler` health diagnostics report active groups and members,
+pending transport hops, selections, launch/maintenance counts, lease-renewal row
+updates and accumulated slot milliseconds by the group leader's lane. These are
+instance counters, include active group time and reset on owner replacement;
+they are neither a durable completion ledger nor scheduling inputs.
+
+Finite per-key/API attempt records prevent no-progress deferral and restart
+loops; ordinary external wakes refresh these records. Quota deferrals retain
+their exact deadlines and carry additive installation/pool/query scope. Unknown
+scope retains ordinary bounded selection. Only a known installation reservation
+restriction can use an optional bounded SQLite availability hint. PostgreSQL
+receives best-effort capacity-release notifications, normally one registered
+recipient per released reservation, with coalesced wakes at existing retry
+deadlines when necessary. Notifications and hints never grant reservations or
+become prerequisites for ordinary work; lost notifications recover through cron.
+
+Each repair archive/installation transport hop has a conservative fifteen-minute
+bound, independent of total history size or queue age. The installation owner's
+fourteen-minute RPC bound lets a stalled dependency recover first. Verified
+transport cancellation is preferred; an uncancellable expired hop retains its
+slot until automatic owner recovery, after durable key/token backoff where the
+writer is usable. Unconfirmed outcomes retain ordinary lease recovery. A normal
+member failure drains its neighboring archive operations without resetting the
+owner. Successful paginated histories have no total-duration deadline.
 
 Full upstream batches retain their existing sizes. Small, independent page-one
 issue-comment, status and reaction histories publish in transactions bounded by
@@ -240,9 +276,10 @@ through their normal path. Survey validators include a representation
 version so old empty-status responses cannot survive deployment through a 304.
 
 `RECONCILIATION_SETTINGS` is an optional JSON variable with `concurrency`
-(default/max 4), `dispatches` (default 16, max 100), `launch_ms` (default 10000,
-max 30000), and four positive `weights` (default `[8,4,2,1]`). Settings affect
-background reads only. Health includes lane eligibility, oldest requested age,
+(default/max 4), `dispatches` (default 16, max 100), and four positive `weights`
+(default `[8,4,2,1]`). Legacy `launch_ms` values still load and appear in settings;
+the elapsed launch window is retired and does not impose a cooldown. Settings
+affect background reads only. Health includes lane eligibility, oldest requested age,
 repair arrivals/completions/cancellations, wait reasons, requested latency p95,
 and measured cost/latency by query shape and batch size.
 

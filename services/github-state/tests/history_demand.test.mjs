@@ -1,3 +1,4 @@
+import {drainRepairs} from './repair_background.mjs';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {postgresFixture} from './postgres_runtime.mjs';
@@ -90,7 +91,7 @@ pg('failed companion preparation retries its leader while unrelated work proceed
   const prepare=f.state.claimCompanions;f.state.claimCompanions=async function(first,...args){if(JSON.parse(first.query).operation==='issue_comments')throw Error('injected companion failure');return prepare.call(this,first,...args);};
   f.state.maintenance=async()=>{};f.state.startStorageMaintenance=()=>{};let reads=0;
   f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>{reads++;return Response.json({api:'core',data:[]});}})};
-  await f.state.runAlarm();assert.equal(reads,1);assert.equal(await f.state.complete(good),true);
+  await f.state.runAlarm();await drainRepairs(f.state);assert.equal(reads,1);assert.equal(await f.state.complete(good),true);
   const failed=(await f.store.exec('SELECT * FROM jobs WHERE key=?','issue_comments:{"number":31}')).one();
   assert.equal(failed.attempt,1);assert.ok(failed.due>Date.now());assert.equal(failed.lease_id,null);assert.equal(failed.lease_until,0);
  }finally{await f.close();}
@@ -106,7 +107,7 @@ pg('repair-wave batching preserves one upstream batch for compatible histories',
    assert.equal(input.jobs.length,4,'one compatible group must not become four upstream requests');
    return Response.json({results:input.jobs.map(()=>({api:'graphql',data:[]}))});
   }})};
-  await f.state.runAlarm();assert.equal(calls,1);
+  await f.state.runAlarm();await drainRepairs(f.state);assert.equal(calls,1);
   for(const query of queries)assert.equal(await f.state.complete(query),true);
  }finally{await f.close();}
 });
@@ -173,7 +174,7 @@ pg('retiring obsolete jobs yields the writer and continues to useful work',async
   },purpose);};
   f.state.maintenance=async()=>{};f.state.startStorageMaintenance=()=>{};
   f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json({api:'core',data:[]})})};
-  await f.state.runAlarm();
+  await f.state.runAlarm();await drainRepairs(f.state);
   assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs')).one().n,2);
   for(const number of [5,6])assert.equal(await f.state.complete(q(number)),true);
  }finally{await f.close();}
@@ -198,6 +199,7 @@ pg('a mixed backlog runs full upstream groups and unrelated work concurrently',a
   let timer;const alarm=f.state.runAlarm();
   try{await Promise.race([ready,new Promise((_,reject)=>timer=setTimeout(()=>reject(Error('mixed work lost upstream parallelism')),30000))]);await alarm;}
   finally{clearTimeout(timer);release();await alarm;}
+  await drainRepairs(f.state);
   assert.equal(calls,4);assert.equal(reads,1);assert.deepEqual(sizes.sort((a,b)=>a-b),[5,10,10]);
   for(const query of threads)assert.equal(await f.state.complete(query),true);
   assert.equal(await f.state.complete(q(999)),true);

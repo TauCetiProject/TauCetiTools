@@ -1,3 +1,4 @@
+import {nativeDrainRepairs} from './repair_background.mjs';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {runtime,repository,send} from './runtime.mjs';
@@ -116,14 +117,14 @@ for(const failure of ['backend','unclassified'])test('native Workers SQLite reta
     const value=Reflect.get(target,prop,target);return typeof value==='function'?value.bind(target):value;
    }});this.store=wrap(this.store);
    this.env={...this.env,INSTALLATIONS:{idFromName:id=>id,get:()=>({fetch:async(_url,init)=>{requests++;return Response.json({results:JSON.parse(init.body).jobs.map(()=>({api:'graphql',data:[]}))});}})}};
-   await this.runAlarm();const rows=(await this.store.exec('SELECT SUM(attempt) attempts,COUNT(lease_id) leases FROM jobs')).one();
+   await this.runAlarm();${nativeDrainRepairs}const rows=(await this.store.exec('SELECT SUM(attempt) attempts,COUNT(lease_id) leases FROM jobs')).one();
    return Response.json({requests,alarms,...rows});
   }
   return super.fetch(req);
  }`});
  try{
   const ns=await mf.getDurableObjectNamespace('REPOSITORIES'),stub=ns.get(ns.idFromName(repository.id));await send(stub,'/configure',{repository:repository.name});
-  const response=await send(stub,'/fixture/failed-turn',{});assert.equal(response.status,200);assert.deepEqual(await response.json(),{requests:1,alarms:1,attempts:failure==='backend'?100:8,leases:0});
+  const response=await send(stub,'/fixture/failed-turn',{});assert.equal(response.status,200);const {alarms,...result}=await response.json();assert.deepEqual(result,{requests:1,attempts:failure==='backend'?100:8,leases:0});assert.ok(alarms>=1 && alarms<=2,'initial filling and completion do not create an alarm loop');
  }finally{await mf.dispose();}
 });
 

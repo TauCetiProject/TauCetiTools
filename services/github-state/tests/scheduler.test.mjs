@@ -1,3 +1,4 @@
+import {drainRepairs} from './repair_background.mjs';
 import {postgresContractFixture} from './postgres_runtime.mjs';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
@@ -461,13 +462,13 @@ test('opt-in alarm traces identify publication stages without exposing input',as
   state.expire=async()=>({});state.nextJob=async()=>undefined;
   state.maintenance=async()=>{};state.startStorageMaintenance=()=>{};
   await state.refresh(job,result);
-  await state.runAlarm();
+  await state.runAlarm();await drainRepairs(state);
   assert.equal(messages.map(message=>JSON.parse(message)).filter(entry=>entry.event==='repository_repair_trace').length,0,'ordinary operation has no repair trace logging');
   env.RECONCILIATION_TRACE='true';
   await state.refresh(job,result);
   env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json(result)})};
   await state.dispatch(await state.claim(await db.prepare('SELECT * FROM jobs WHERE key=?').get(key)));
-  await state.runAlarm();
+  await state.runAlarm();await drainRepairs(state);
   state.prepareStorage=async()=>{};await state.storageMaintenance(false);
   const trace=messages.map(message=>JSON.parse(message)).filter(entry=>entry.event==='repository_repair_trace');
   for(const stage of ['refresh_response','publication_load_pages','publication_encode_pages','refresh_transaction','publication_decode_pages','publication_rows','publication_repairs','publication_applied','refresh_committed','dispatch','dispatch_complete','expire','select_jobs','maintenance','storage_maintenance','storage_prepare','storage_prepared','alarm_complete'])
@@ -791,6 +792,6 @@ test('slow preparation cannot consume the entire repair launch window',async()=>
   Date.now=()=>now;
   state.expire=async()=>{now+=12000;return {};};state.requestOpenCoverage=async()=>{now+=12000;};
   state.nextJob=async()=>{selected++;return undefined;};state.maintenance=async()=>{};state.startStorageMaintenance=()=>{};
-  await state.runAlarm();assert.equal(selected,1,'due work is considered after preparation even when preparation exceeds launch_ms');
+  await state.runAlarm();await drainRepairs(state);assert.equal(selected,1,'due work is considered after preparation even when preparation exceeds launch_ms');
  }finally{Date.now=real;await db.close();}
 });

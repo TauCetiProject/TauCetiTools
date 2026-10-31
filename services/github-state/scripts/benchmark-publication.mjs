@@ -7,7 +7,8 @@ import {createHash} from 'node:crypto';
 import {resolve,relative} from 'node:path';
 import {build} from 'esbuild';
 import {postgresFixture,RepositoryState,PostgresStore} from '../tests/postgres_runtime.mjs';
-const baseline=process.env.BASELINE_REF || '38ec297';
+import {drainRepairs} from '../tests/repair_background.mjs';
+const baseline=process.env.BASELINE_REF || '2732eb5';
 const baselineCommit=execFileSync('git',['rev-parse',baseline],{encoding:'utf8'}).trim();
 const bundle=await build({stdin:{contents:"export {RepositoryState} from './repository';export {PostgresStore} from './repository_store';",loader:'ts',resolveDir:process.cwd()+'/src'},bundle:true,platform:'node',format:'esm',write:false,plugins:[{
  name:'baseline-source',setup(b){b.onLoad({filter:/\.ts$/},args=>{
@@ -31,7 +32,9 @@ for(const items of limits.filter(n=>n!==configured)){
  candidates.set(items,await import('data:text/javascript;base64,'+Buffer.from(variant.outputFiles[0].text).toString('base64')));
 }
 const repo='org/repo',trials=Number(process.env.BENCHMARK_TRIALS || 3),mixedGroups=Number(process.env.BENCHMARK_GROUPS || 1),fullTrials=Number(process.env.BENCHMARK_FULL_TRIALS || trials);
+const mixedCount=Number(process.env.BENCHMARK_HISTORY_COUNT || 8),ingressCount=Number(process.env.BENCHMARK_INGRESS_COUNT || 8);
 assert.ok(Number.isInteger(trials)&&trials>0&&[1,4].includes(mixedGroups)&&Number.isInteger(fullTrials)&&fullTrials>0);
+assert.ok(Number.isInteger(mixedCount)&&mixedCount>0&&mixedCount<=100&&Number.isInteger(ingressCount)&&ingressCount>=0);
 const q=number=>({repository:repo,operation:'issue_comments',args:{number}});
 async function measure(Class,StoreClass,count,ingressCount,intervalMs=0,groups=1){
  const f=await postgresFixture({RepositoryClass:Class,StoreClass});let release;
@@ -63,21 +66,21 @@ async function measure(Class,StoreClass,count,ingressCount,intervalMs=0,groups=1
   }})};
   const start=performance.now(),alarm=f.state.runAlarm();await beganUpstream;
   const ingests=Array.from({length:ingressCount},(_,i)=>(async()=>{if(intervalMs&&i)await new Promise(resolve=>setTimeout(resolve,i*intervalMs));const t=performance.now();await f.state.ingest({repository:repo,key:'fixture/ingress-'+i,delivery:'ingress-'+i,event:'issue_comment',received:Date.now()});reads.push(performance.now()-t);})());
-  release();await Promise.all([alarm,...ingests]);const completeMs=performance.now()-start;
+  release();await Promise.all([alarm,...ingests]);await drainRepairs(f.state);const completeMs=performance.now()-start;
   assert.equal(upstream,groups);
   for(const query of cohort)assert.equal(await f.state.complete(query),true);
   assert.equal((await raw.exec('SELECT COUNT(*) n FROM deliveries')).one().n,ingressCount);
   assert.equal((await raw.exec('SELECT COUNT(*) n FROM jobs WHERE lease_id IS NOT NULL')).one().n,0);
   const publications=writers.filter(x=>x.purpose==='publication');
   const p95=values=>[...values].sort((a,b)=>a-b)[Math.max(0,Math.ceil(values.length*.95)-1)]??null;
-  return {histories_completed:cohort.length,committed_ingress:ingressCount,groups,ingress_interval_ms:intervalMs,elapsed_ms:completeMs,transactions,application_sql_round_trips:roundTrips,upstream_batches:upstream,github_requests:0,grouped_publication:f.state.groupedPublication?{...f.state.groupedPublication}:null,ingress_ms:reads,ingress_p95_ms:p95(reads),ingress_admission_p95_ms:p95(writers.filter(x=>x.purpose==='ingest').map(x=>x.queue_wait_ms)),publication_transactions:publications.length,publication_max_hold_ms:Math.max(...publications.map(x=>x.transaction_ms)),writers};
+  return {histories_completed:cohort.length,committed_ingress:ingressCount,groups,ingress_interval_ms:intervalMs,elapsed_ms:completeMs,transactions,application_sql_round_trips:roundTrips,upstream_batches:upstream,github_requests:0,repair_scheduler:f.state.repairCoordinator?.snapshot() || null,lease_renewal_row_updates:f.state.renewedLeases || 0,grouped_publication:f.state.groupedPublication?{...f.state.groupedPublication}:null,ingress_ms:reads,ingress_p95_ms:p95(reads),ingress_admission_p95_ms:p95(writers.filter(x=>x.purpose==='ingest').map(x=>x.queue_wait_ms)),publication_transactions:publications.length,publication_max_hold_ms:Math.max(...publications.map(x=>x.transaction_ms)),writers};
  }finally{release?.();await f.close();}
 }
-const result={baseline:baselineCommit,implementation_sha256:createHash('sha256').update(readFileSync('src/repository.ts')).update(readFileSync('src/repository_store.ts')).update(readFileSync('src/monitoring.ts')).digest('hex'),scope:'isolated real PostgreSQL; ordinary runAlarm leased scheduler; eight histories per compatible group plus eight issue-comment deliveries to a warm complete collection, burst and steady500ms spacing; requested limits interleaved with benchmark-only cap substitution; separate100memberemptyfullbatch alternating trials; fixture upstream only, zero GitHub requests; not a production fleet throughput claim',trials,mixed_groups:mixedGroups,full_trials:fullTrials,configured_items:configured,candidate_limits:limits,before:[],after:[],steady:{before:[],after:[]},limits:Object.fromEntries(limits.filter(n=>n!==configured).map(n=>[n,{burst:[],steady:[]}])),full_batch:{},full_batch_trials:{before:[],after:[]}};
+const result={baseline:baselineCommit,implementation_sha256:createHash('sha256').update(['repository.ts','repository_store.ts','monitoring.ts','repair_coordinator.ts','repair_io.ts','installation.ts'].map(name=>readFileSync('src/'+name)).join('')).digest('hex'),scope:'isolated real PostgreSQL; ordinary runAlarm leased scheduler and tracked background completion; configured histories per group and issue-comment deliveries to a warm complete collection, burst and steady500ms spacing; requested limits interleaved with benchmark-only cap substitution; separate100memberemptyfullbatch alternating trials; fixture upstream only, zero GitHub requests; not a production event-mix or fleet throughput claim',trials,mixed_groups:mixedGroups,histories_per_group:mixedCount,ingress_deliveries:ingressCount,full_trials:fullTrials,configured_items:configured,candidate_limits:limits,before:[],after:[],steady:{before:[],after:[]},limits:Object.fromEntries(limits.filter(n=>n!==configured).map(n=>[n,{burst:[],steady:[]}])),full_batch:{},full_batch_trials:{before:[],after:[]}};
 for(let trial=0;trial<trials;trial++)for(const label of trial%2?[...limits].reverse().concat(['before']):['before',...limits]){
  const classes=label==='before'?{RepositoryState:Baseline,PostgresStore:BaselineStore}:candidates.get(label);
  for(const [mode,interval] of [['burst',0],['steady',500]]){
-  const row=await measure(classes.RepositoryState,classes.PostgresStore,8,8,interval,mixedGroups);
+  const row=await measure(classes.RepositoryState,classes.PostgresStore,mixedCount,ingressCount,interval,mixedGroups);
   (label==='before'?(mode==='burst'?result.before:result.steady.before):label===configured?(mode==='burst'?result.after:result.steady.after):result.limits[label][mode]).push(row);
  }
 }

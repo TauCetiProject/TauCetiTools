@@ -1,3 +1,4 @@
+import {drainRepairs} from './repair_background.mjs';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {fixture as sqliteFixture} from './migration_fixture.mjs';
@@ -176,14 +177,15 @@ for(const unrelated of [false,true])test(`a failed batch is not fetched again or
    };
    const value=Reflect.get(target,prop,target);return typeof value==='function'?value.bind(target):value;
   }});
-  await f.state.runAlarm();assert.equal(calls,1,'the untouched tail must not be claimed/fetched repeatedly in the same quantum');
+  await f.state.runAlarm();await drainRepairs(f.state);assert.equal(calls,1,'the untouched tail must not be claimed/fetched repeatedly in the same quantum');
   const jobs=(await f.store.exec("SELECT * FROM jobs WHERE key LIKE 'issue_comments:%' ORDER BY key")).toArray();
   const completed=new Set((await f.store.exec("SELECT key FROM collections WHERE operation='issue_comments' AND complete=1")).toArray().map(x=>x.key));
   assert.equal(jobs.length,100);for(const j of jobs){assert.equal(j.attempt,0);assert.equal(j.lease_id,null);if(!completed.has(j.key))assert.ok(j.due<=Date.now());}
   if(unrelated)assert.equal(await f.state.complete(other),true,'unrelated useful work still progresses');
   assert.ok(alarms.every(at=>at>Date.now()+10000),'failed tails must not drive a near-immediate alarm loop');
-  assert.equal(alarms.length,1,'settled collections retain their ordinary future refresh alarm');
-  recovering=true;await f.state.runAlarm();assert.equal(calls,2,'ordinary next-turn continuation retries without an operator reset');
+  if(f.store.backend==='sqlite')assert.ok(alarms.length>=1 && alarms.length<=4,'finite slot/completion turns retain future alarms without spinning');
+  else assert.equal(alarms.length,0,'PostgreSQL keeps ordinary cron continuation without writing SQLite alarms');
+  recovering=true;await f.state.runAlarm();await drainRepairs(f.state);assert.equal(calls,2,'ordinary next-turn continuation retries without an operator reset');
  }finally{await f.close();}
 });
 
@@ -195,7 +197,9 @@ test('a rolled-back capacity bookkeeping write retries its exact decision withou
   const alarms=[];f.state.setAlarm=async at=>alarms.push(at);
   f.store.transaction=(apply,purpose)=>{if(ready&&purpose==='repair'&&!injected){injected=true;throw Error('deferral bookkeeping rollback');}return tx(apply,purpose);};
   f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>{ready=true;return Response.json({deferred:true,category:'capacity',retry_at:until});}})};
-  await f.state.runAlarm();assert.equal(injected,true);assert.ok(alarms.includes(until),'a successfully retried quota decision retains its normal wakeup');
+  await f.state.runAlarm();await drainRepairs(f.state);assert.equal(injected,true);
+  if(f.store.backend==='sqlite')assert.ok(alarms.includes(until),'a successfully retried quota decision retains its normal wakeup');
+  else assert.equal(alarms.length,0,'PostgreSQL retains durable retry time for its cron continuation');
   const rows=(await f.store.exec('SELECT * FROM jobs')).toArray();assert.equal(rows.length,100);
   for(const row of rows){assert.equal(row.attempt,0);assert.equal(row.due,until);assert.equal(row.wait_reason,'capacity');assert.equal(row.lease_id,null);}
   assert.equal(f.state.repairMetrics.summary().repair_hour.find(x=>x.event==='capacity_wait').n,100);
@@ -270,7 +274,7 @@ test('persistent backend publication failure keeps group exponential retry inste
    else await store.exec('SELECT * FROM fixture_missing_backend_table');
   });
   for(const [attempt,advance] of [[1,0],[2,65000]]){
-   Date.now=()=>now()+advance;const began=Date.now();await f.state.runAlarm();assert.equal(calls(),attempt);
+   Date.now=()=>now()+advance;const began=Date.now();await f.state.runAlarm();await drainRepairs(f.state);assert.equal(calls(),attempt);
    const rows=(await f.store.exec('SELECT * FROM jobs')).toArray();assert.equal(rows.length,100);
    for(const row of rows){assert.equal(row.attempt,attempt);assert.ok(row.due>=began+(attempt===1?60000:120000));assert.equal(row.requested_at,requested);assert.equal(row.lease_id,null);assert.equal(row.wait_reason,'transport_or_parser');}
   }
@@ -289,7 +293,7 @@ test('a backend error saving one middle capacity wait preserves it and backs off
   });
   f.state.expire=async()=>({});f.state.maintenance=async()=>{};f.state.startStorageMaintenance=()=>{};f.state.ctx.storage.getAlarm=async()=>null;
   const alarms=[];f.state.setAlarm=async at=>alarms.push(at);
-  await f.state.runAlarm();assert.equal(injected,true);assert.equal(calls(),1);
+  await f.state.runAlarm();await drainRepairs(f.state);assert.equal(injected,true);assert.equal(calls(),1);
   const rows=(await f.store.exec('SELECT * FROM jobs')).toArray();assert.equal(rows.length,100);
   for(const row of rows){const n=JSON.parse(row.query).args.number;assert.equal(row.lease_id,null);
    if(n<103){assert.equal(row.attempt,0);assert.equal(row.wait_reason,null);assert.equal(await f.state.complete(query(n)),true);}
@@ -297,7 +301,8 @@ test('a backend error saving one middle capacity wait preserves it and backs off
    else{assert.equal(row.attempt,1);assert.ok(row.due>Date.now());assert.equal(row.wait_reason,'transport_or_parser');assert.equal(row.requested_at,requested);}
   }
   assert.equal(f.state.repairMetrics.summary().repair_hour.find(x=>x.event==='capacity_wait').n,1);
-  assert.ok(alarms.some(at=>at>Date.now()+10000&&at<until),'existing backend retry deadline retains its alarm');
+  if(f.store.backend==='sqlite')assert.ok(alarms.some(at=>at>Date.now()+10000&&at<until),'existing backend retry deadline retains its alarm');
+  else assert.equal(alarms.length,0,'PostgreSQL uses its existing cron, not SQLite alarms');
  }finally{await f.close();}
 });
 
@@ -380,6 +385,6 @@ test('turn finalization preserves an earlier alarm created during maintenance',{
   let incoming=null,updates=0;f.state.ctx.storage.getAlarm=async()=>incoming;
   f.state.setAlarm=async()=>{updates++;};f.state.expire=async()=>({});f.state.startStorageMaintenance=()=>{};
   f.state.maintenance=async()=>{incoming=Date.now()+100;};
-  await f.state.runAlarm();assert.equal(updates,0);assert.ok(incoming>Date.now());
+  await f.state.runAlarm();await drainRepairs(f.state);assert.equal(updates,0);assert.ok(incoming>Date.now());
  }finally{await f.close();}
 });

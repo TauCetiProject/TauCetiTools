@@ -49,7 +49,7 @@ export const canReplayPublication=(error:unknown):boolean=>Boolean(error && type
 export const isBackendFailure=(error:unknown):boolean=>Boolean(error && typeof error==='object' && (error as any)[BACKEND_FAILURE]===true) && !canReplayPublication(error);
 const markMemberRollback=(error:unknown):void=>{if(error && typeof error==='object')try{Object.defineProperty(error,MEMBER_ROLLBACK,{value:true,configurable:true});}catch{}};
 const clearMemberRollback=(error:unknown):void=>{if(error && typeof error==='object')try{delete (error as any)[MEMBER_ROLLBACK];}catch{}};
-const markBackendFailure=(error:unknown):void=>{if(error && typeof error==='object')try{Object.defineProperty(error,BACKEND_FAILURE,{value:true});}catch{}};
+export const markBackendFailure=(error:unknown):void=>{if(error && typeof error==='object')try{Object.defineProperty(error,BACKEND_FAILURE,{value:true});}catch{}};
 const memberApplyError=(error:unknown):boolean=>error instanceof Error && !(error instanceof StoreFenced) && (!(error instanceof StoreUnavailable) || Boolean(error.sqlstate && /^(22|23|54)/.test(error.sqlstate)));
 const sqliteMemberError=(error:any):boolean=>{
   if(Number.isInteger(error?.errcode))return [18,19,20].includes(error.errcode&255);
