@@ -746,10 +746,12 @@ test('requested batches put real reads before older maintenance rows',async()=>{
   await state.enqueueMany(queries.map(q=>({q,priority:5})),true);
   for(const q of queries.slice(-2))await state.noteDemand(q);
   const keys=queries.slice(-2).map(q=>q.operation+':'+JSON.stringify(q.args));
-  const considered=[];state.retireUnneeded=async job=>{considered.push(job.key);return true;};
+  // Observe actual upstream ordering without publishing 100 fixture results.
+  // Companion selection, claims and lease cleanup still use their real paths.
+  state.refresh=async()=>{};
   let submitted=[];env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async(_url,init)=>{submitted=JSON.parse(init.body).jobs.map(j=>j.key);return Response.json({results:submitted.map(()=>({data:[],api:'graphql'}))});}})};
   await state.setMeta('requested_turn',1);await state.dispatch(await state.claim(await state.nextJob()));
-  assert.ok(keys.every(key=>[submitted[0],considered[0]].includes(key)),'the first batch-fill candidate is the other real read, before older maintenance');
+  assert.ok(keys.every(key=>submitted.slice(0,2).includes(key)),'the first batch-fill candidate is the other real read, before older maintenance');
  }finally{await db.close();}
 });
 

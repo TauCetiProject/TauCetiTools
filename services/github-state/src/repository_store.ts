@@ -13,12 +13,13 @@ export class Rows<T=Record<string,unknown>> {
 const integer=(value:string)=>{const n=Number(value);if(!Number.isSafeInteger(n))throw new Error('Repository integer exceeds safe range');return n;};
 types.setTypeParser(20,integer);
 types.setTypeParser(1700,value=>{const n=Number(value);if(!Number.isFinite(n) || Number.isInteger(n)&&!Number.isSafeInteger(n))throw new Error('Repository numeric exceeds safe range');return n;});
+export type WriterPurpose='other'|'read_demand'|'ingest'|'repair'|'enqueue'|'publication';
 export interface RepositoryStore {
   readonly backend:'sqlite'|'postgres';
   readonly transactional?:boolean;
   exec<T=any>(sql:string,...bindings:Bind[]):Promise<Rows<T>>;
   batch(statements:Statement[]):Promise<Rows<any>[]>;
-  transaction<T>(apply:(store:RepositoryStore)=>Promise<T>):Promise<T>;
+  transaction<T>(apply:(store:RepositoryStore)=>Promise<T>,purpose?:WriterPurpose):Promise<T>;
   health():Promise<Record<string,unknown>>;
   prepareMonitoring?(analyzeTables:boolean,attemptToken?:number):Promise<any>;
 }
@@ -229,10 +230,10 @@ export class PostgresStore implements RepositoryStore {
       return results.map(rows=>new Rows(rows));
     });
   }
-  async transaction<T>(apply:(store:RepositoryStore)=>Promise<T>):Promise<T> {
+  async transaction<T>(apply:(store:RepositoryStore)=>Promise<T>,purpose:WriterPurpose='other'):Promise<T> {
     if(this.client)return apply(this);
     const queued=Date.now();
-    return this.writer.run(()=>this.transact(apply,Date.now()-queued));
+    return this.writer.run(()=>this.transact(apply,Date.now()-queued,purpose));
   }
   // WebSocket close is asynchronous: the server may retain the transaction
   // after the client times out. Prefer confirmed session cleanup before the
@@ -268,11 +269,11 @@ export class PostgresStore implements RepositoryStore {
     storeLog('repository_postgres_cleanup',{result,transaction_id,discarded_transaction_id:session.transaction_id});return result;
   }
   private cleanupBlocked():boolean {return this.discarded.some(s=>Date.now()-s.discardedAt<45000);}
-  private async transact<T>(apply:(store:RepositoryStore)=>Promise<T>,wait_ms:number):Promise<T> {
+  private async transact<T>(apply:(store:RepositoryStore)=>Promise<T>,wait_ms:number,purpose:WriterPurpose):Promise<T> {
     const transaction_id=crypto.randomUUID(),admission_started_at=Date.now();
     const pendingCleanup=await this.cleanupDiscarded(transaction_id),admission_cleanup_ms=Date.now()-admission_started_at;
     if(this.cleanupBlocked()){
-      storeLog('repository_postgres_transaction',{phase:'cleanup',code:null,reason:'cleanup_pending',admission_cleanup:pendingCleanup ?? null,session_cleanup:pendingCleanup,outcome:'failed',transaction_id,admission_started_at,admission_cleanup_ms,wait_ms,transaction_ms:0,failed:true,connection_discarded:false});
+      storeLog('repository_postgres_transaction',{purpose,phase:'cleanup',code:null,reason:'cleanup_pending',admission_cleanup:pendingCleanup ?? null,session_cleanup:pendingCleanup,outcome:'failed',transaction_id,admission_started_at,admission_cleanup_ms,wait_ms,transaction_ms:0,failed:true,connection_discarded:false});
       throw new StoreUnavailable();
     }
     // Leave time for the server's 15s statement timeout to return its SQLSTATE.
@@ -337,7 +338,7 @@ export class PostgresStore implements RepositoryStore {
       }
       cleanup_ms=Date.now()-cleaning;
       const transaction_ms=Date.now()-started;
-      if(failed || session_cleanup || wait_ms+transaction_ms>=250)storeLog('repository_postgres_transaction',{phase:connection.phase,code:connection.code ?? null,reason:connection.reason ?? null,cleanup:connection.cleanup ?? null,admission_cleanup:pendingCleanup ?? null,session_cleanup:session_cleanup ?? null,outcome:failed?(connection.commitUncertain?'unknown':'failed'):'committed',transaction_id,admission_started_at,admission_cleanup_ms,transaction_started_at:started,phase_ms,rollback_ms,close_ms,cleanup_ms,wait_ms,transaction_ms,failed,connection_discarded:Boolean(connection.error)});
+      if(failed || session_cleanup || wait_ms+transaction_ms>=250)storeLog('repository_postgres_transaction',{purpose,phase:connection.phase,code:connection.code ?? null,reason:connection.reason ?? null,cleanup:connection.cleanup ?? null,admission_cleanup:pendingCleanup ?? null,session_cleanup:session_cleanup ?? null,outcome:failed?(connection.commitUncertain?'unknown':'failed'):'committed',transaction_id,admission_started_at,admission_cleanup_ms,transaction_started_at:started,phase_ms,rollback_ms,close_ms,cleanup_ms,wait_ms,transaction_ms,failed,connection_discarded:Boolean(connection.error)});
     }
   }
   async prepareMonitoring(analyzeTables:boolean,attemptToken=Date.now()):Promise<any> {
@@ -407,7 +408,7 @@ export class ReadCacheStore implements RepositoryStore {
     if(table==='survey_dirty' && /^DELETE/.test(sql)){if(!bindings.length)this.dirtyParents.clear();else for(const value of bindings)this.dirtyParents.delete(String(value));}
   }
   batch(statements:Statement[]):Promise<Rows<any>[]> {for(const s of statements)this.invalidate(s.sql,s.bindings || []);return this.source.batch(statements);}
-  transaction<T>(apply:(store:RepositoryStore)=>Promise<T>):Promise<T>{return this.source.transaction(apply);}
+  transaction<T>(apply:(store:RepositoryStore)=>Promise<T>,purpose?:WriterPurpose):Promise<T>{return this.source.transaction(apply,purpose);}
   health():Promise<Record<string,unknown>> {return this.source.health();}
 }
 

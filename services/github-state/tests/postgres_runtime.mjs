@@ -12,7 +12,7 @@ const imported=await Promise.all(bundle.outputFiles.map(file=>import('data:text/
 export const {RepositoryState}=imported.find(m=>m.RepositoryState);
 export const {PostgresStore,SQLiteStore,postgresSQL,Rows,columns}=imported.find(m=>m.PostgresStore);
 export const {rawReceiptLookup}=imported.find(m=>m.rawReceiptLookup);
-export async function postgresFixture({configured=true}={}) {
+export async function postgresFixture({configured=true,RepositoryClass=RepositoryState,StoreClass=PostgresStore}={}) {
  const credentials=testCredentials();
  const admin=new Client(credentials.migration.toString());await admin.connect();
  const id=BigInt('0x'+randomBytes(8).toString('hex')).toString(),schema='github_state_'+id;
@@ -21,8 +21,8 @@ export async function postgresFixture({configured=true}={}) {
  const env={BORS_ACTIVITY:{fetch:(...args)=>globalThis.fetch(...args)},ALLOWED_REPOSITORIES:JSON.stringify([{id:'100',name:'org/repo',installation:'200'}]),ARCHIVE:{async head(key){return objects.has(key)?{key}:null;},async put(key,text){objects.set(key,text);},async get(key){const text=objects.get(key);return text===undefined?null:{text:async()=>text,json:async()=>JSON.parse(text)};}}};
  const context={id:{toString:()=>'100'},waitUntil:work=>background.push(work),storage:{sql:{},getAlarm:async()=>alarm,setAlarm:async at=>{alarm=at;}}};
  Object.assign(env,{REPOSITORY_BACKEND:'postgres',REPOSITORY_DATABASE_URL:process.env.TEST_POSTGRES_URL,REPOSITORY_GENERATION:'test-v1',REPOSITORIES:{idFromName:id=>({toString:()=>id})}});
- const state=new RepositoryState(context,env);
- state.store=new PostgresStore(process.env.TEST_POSTGRES_URL,id,'test-v1');
+ const state=new RepositoryClass(context,env);
+ state.store=new StoreClass(process.env.TEST_POSTGRES_URL,id,'test-v1');
  if(configured)await state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
  state.owner=state;
  await state.setMeta('last_snapshot',Date.now());
