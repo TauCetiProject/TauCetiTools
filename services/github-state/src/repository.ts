@@ -1,4 +1,4 @@
-import { RepositoryStore, SQLiteStore, PostgresStore, ReadCacheStore, BufferedStore, SerialLane, columns, collectionJoin } from './repository_store';
+import { RepositoryStore, WriterPurpose, SQLiteStore, PostgresStore, ReadCacheStore, BufferedStore, SerialLane, columns, collectionJoin } from './repository_store';
 import { repositoryHealth } from './repository_health';
 import { DurableObject } from 'cloudflare:workers';
 import { Env, EventPointer, matchesETag, Query, Result, digest, json, queryKey, repository, stub, validateQuery, parseGitHub, CI_EVENTS, NOT_MIRRORED, publicQuery, stagingStateKey, stagedPageKey } from './protocol';
@@ -66,6 +66,7 @@ export class RepositoryState extends DurableObject<Env> {
   private preparedEncodings?:Map<string,string>;
   private optionalWork={active:0};
   private demandMemo=new Map<string,number>();
+  private readDemands={pending:new Map<string,Query>(),active:new Map<string,{complete?:boolean}>(),flight:undefined as Promise<void>|undefined};
   sql:SqlStorage;
   store:RepositoryStore;
   localMeta(key:string):any {const row=this.sql.exec<any>('SELECT value FROM meta WHERE key=?',key).toArray()[0];return row?JSON.parse(row.value):undefined;}
@@ -302,7 +303,7 @@ export class RepositoryState extends DurableObject<Env> {
     if(this.faultFull) throw new Error(FULL_MESSAGE);
     await this.ctx.storage.setAlarm(at);
   }
-  async atomic<T>(apply:(state:RepositoryState)=>Promise<T>):Promise<T> {
+  async atomic<T>(apply:(state:RepositoryState)=>Promise<T>,purpose:WriterPurpose='other'):Promise<T> {
     if(this.store.transactional)return apply(this);
     if(this.migrationHeld())throw new AdminError('migration_frozen');
     if(this.mutationState.blocked)throw new Error('Repository backend generation fenced');
@@ -314,19 +315,79 @@ export class RepositoryState extends DurableObject<Env> {
         const buffered=store.backend==='postgres'?new BufferedStore(store):undefined;
         scoped!.store=buffered || store;scoped!.revisionState={};scoped!.readScope=false;scoped!.readRevision=undefined;scoped!.repositoryMemo=undefined;scoped!.pendingChanges=store.backend==='postgres'?[]:undefined;
         const result=await apply(scoped!);await scoped!.flushChanges();await buffered?.flush();return result;
-      });
+      },purpose);
       if(scoped?.revisionState.value!==undefined)this.revisionState.value=Math.max(this.revisionState.value ?? 0,scoped.revisionState.value);
       if(scoped?.repositoryMemo!==undefined)this.repositoryMemo=scoped.repositoryMemo;
       return result;
     }catch(error){this.revisionState.value=undefined;throw error;}finally{this.mutationState.active--;}
   }
-  backgroundDemand(q:Query):void {
+  backgroundDemand(q:Query,missing=false):void {
     if(this.readOnlyQuery)return;
+    if(this.store.backend==='postgres') {
+      if(q.allow_observed || ['survey','progress'].includes(q.operation) || this.repairsHeld())return;
+      const owner=this.owner,key=queryKey(q);
+      if(owner.store.backend!=='postgres')return;
+      if(missing)owner.demandMemo.delete(key);
+      const active=owner.readDemands.active.get(key);
+      // An active miss already covers this key. Requeue only when a newer
+      // miss contradicts that transaction's completed-collection decision.
+      if(active && (!missing || active.complete!==true))return;
+      if(!missing && (owner.demandMemo.get(key) || 0)>Date.now()-60000)return;
+      owner.readDemands.pending.set(key,{...q,cursor:undefined});
+      owner.startReadDemands();return;
+    }
     const key=queryKey(q),now=Date.now();
     if(this.optionalWork.active>=2 || (this.demandMemo.get(key) || 0)>now-60000)return;
     this.demandMemo.set(key,now);
     while(this.demandMemo.size>2000)this.demandMemo.delete(this.demandMemo.keys().next().value!);
     this.backgroundWrite('demand',()=>this.noteDemand(q));
+  }
+  private startReadDemands():void {
+    const owner=this.owner,work=owner.readDemands;
+    if(work.flight || !work.pending.size || owner.degraded || owner.repairsHeld())return;
+    // One owner coalesces racing readers. No cache response awaits this work,
+    // and no busy-work cap drops a different reader's repair request.
+    let retryLater=false;
+    const flight=Promise.resolve().then(async()=>{
+      while(work.pending.size && !owner.degraded && !owner.repairsHeld()) {
+        // Small transactions yield the writer to ingress and repair between
+        // groups, without a timer, quota change or an extra admission rule.
+        const batch=[...work.pending.entries()].slice(0,4);
+        for(const [key] of batch){work.pending.delete(key);work.active.set(key,{});}
+        try {
+          await owner.atomic(async state=>{
+            const missing:{q:Query,priority:number}[]=[];
+            for(const [key,q] of batch) {
+              await state.noteDemand(q);
+              const done=await state.complete(q);
+              work.active.get(key)!.complete=done;
+              if(!done)missing.push({q,priority:5});
+            }
+            // Demand and initial job creation commit together. Existing jobs
+            // retain their generation, lease, retry and upstream wait deadline.
+            await state.enqueueMany(missing);
+          },'read_demand');
+          // This memo records committed bookkeeping, not complete coverage.
+          // Every actual miss bypasses it; cached results retain their existing
+          // once-per-minute refresh limit, including observed partial PR rows.
+          for(const [key] of batch)if(!work.pending.has(key))owner.demandMemo.set(key,Date.now());
+          while(owner.demandMemo.size>2000)owner.demandMemo.delete(owner.demandMemo.keys().next().value!);
+        } catch(error) {
+          for(const [key,q] of batch)if(!work.pending.has(key))work.pending.set(key,q);
+          retryLater=true;
+          owner.noteFailure('demand',error);
+          // Keep the intent, but do not spin on an unavailable writer. A later
+          // read or the existing cron tick resumes it through the same owner.
+          break;
+        } finally {for(const [key] of batch)work.active.delete(key);}
+      }
+    }).finally(()=>{
+      if(work.flight===flight)work.flight=undefined;
+      // A reader can enqueue between the last empty check and this finally.
+      if(!retryLater && work.pending.size)owner.startReadDemands();
+    });
+    work.flight=flight;
+    owner.ctx.waitUntil?.(flight);
   }
   backgroundWrite(operation:string,write:()=>Promise<unknown>):void {
     if(this.optionalWork.active>=2)return;
@@ -336,7 +397,7 @@ export class RepositoryState extends DurableObject<Env> {
   }
   async noteReadDemand(q:Query,known?:boolean):Promise<void> {
     if(this.readOnlyQuery)return;
-    if(this.store.backend==='postgres' && (known ?? await this.complete(q))){this.backgroundDemand(q);return;}
+    if(this.store.backend==='postgres'){this.backgroundDemand(q,!(known ?? await this.complete(q)));return;}
     await this.optionalAsync('demand',()=>this.noteDemand(q));
   }
   async optionalRead(operation:string,write:()=>Promise<unknown>):Promise<void> {
@@ -702,7 +763,7 @@ export class RepositoryState extends DurableObject<Env> {
   async enqueue(q:Query,priority=20,due=Date.now(),dirty=false): Promise<void> {
     if(this.readOnlyQuery)return;
     if (q.operation==='progress' || NOT_MIRRORED.has(q.operation)) return;
-    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.enqueue.call(state,q,priority,due,dirty));
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.enqueue.call(state,q,priority,due,dirty),'enqueue');
     const key=queryKey(q);
     const prior=(await this.store.exec<any>('SELECT * FROM jobs WHERE key=?',key)).toArray()[0];
     const lane=(await this.lane(q,dirty || Boolean(prior?.dirty),priority)),requested=lane==='requested'?(prior?.requested_at || Date.now()):prior?.requested_at || null;
@@ -715,7 +776,7 @@ export class RepositoryState extends DurableObject<Env> {
   async enqueueMany(input:{q:Query,priority:number,dirty?:boolean}[],backfill=false):Promise<void> {
     input=input.filter(({q})=>q.operation!=='progress' && !NOT_MIRRORED.has(q.operation));
     if(!input.length)return;
-    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.enqueueMany.call(state,input,backfill));
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.enqueueMany.call(state,input,backfill),'enqueue');
     const readBatch=this.store.backend==='sqlite'?80:256,writeBatch=this.store.backend==='sqlite'?10:200,metricBatch=this.store.backend==='sqlite'?20:200;
     const entries=new Map<string,{q:Query,priority:number,dirty?:boolean}>();
     for(const item of input){const key=queryKey(item.q),prior=entries.get(key);entries.set(key,{...item,dirty:prior?.dirty || item.dirty});}
@@ -825,7 +886,7 @@ export class RepositoryState extends DurableObject<Env> {
         const object=await this.env.ARCHIVE.get(pointer.key);if(!object)throw Error('event body unavailable');body=parseGitHub(await object.text());
         if(body.comment){const value=comment(body.comment),text=JSON.stringify(value);if(new TextEncoder().encode(text).length>=1500000)encodings.set('resource:'+text,await this.encode(value,undefined,configured.id));}
       }
-      return this.atomic(async state=>{state.preparedEncodings=encodings;await RepositoryState.prototype.ingest.call(state,pointer,body);});
+      return this.atomic(async state=>{state.preparedEncodings=encodings;await RepositoryState.prototype.ingest.call(state,pointer,body);},'ingest');
     }
     // Another ingest can commit while we preload the body. Its fresh SQL
     // receipt remains retained; no external I/O is needed under the writer.
@@ -1028,17 +1089,17 @@ export class RepositoryState extends DurableObject<Env> {
     } else if (q.operation==='progress') {
       const detail={...q,operation:'pr'};
       const p=await this.rows(detail);
-      await this.noteReadDemand(detail,p!==null);
-      if(!(await this.complete(detail))) await this.optionalAsync('enqueue',async ()=>(await this.enqueue(detail,5)));
+      await this.noteReadDemand(detail,await this.complete(detail));
+      if(this.store.backend!=='postgres' && !(await this.complete(detail))) await this.optionalAsync('enqueue',async ()=>(await this.enqueue(detail,5)));
       const cs=await this.rows({...q,operation:'issue_comments'}), rcs=await this.rows({...q,operation:'review_comments'});
       for (const operation of ['issue_comments','review_comments']) {
         const child={...q,operation};
         await this.noteReadDemand(child);
-        if (!(await this.complete(child))) await this.optionalAsync('enqueue',async ()=>(await this.enqueue(child,5)));
+        if (this.store.backend!=='postgres' && !(await this.complete(child))) await this.optionalAsync('enqueue',async ()=>(await this.enqueue(child,5)));
       }
       rows=p && cs && rcs ? {head:p.headRefOid,state:p.state,ncomments:cs.length+rcs.length,revision:(await this.revision())}:null;
     } else {
-      if (!q.allow_observed && !(await this.complete(q))) await this.optionalAsync('enqueue',async ()=>(await this.enqueue(q,5)));
+      if (this.store.backend!=='postgres' && !q.allow_observed && !(await this.complete(q))) await this.optionalAsync('enqueue',async ()=>(await this.enqueue(q,5)));
       rows=await this.rows(q);
     }
     const complete=rows!==null && (q.operation==='survey' || q.operation==='progress' || (await this.complete(q)));
@@ -1234,7 +1295,7 @@ export class RepositoryState extends DurableObject<Env> {
     }))).every(Boolean);
   }
   async finishJob(job:any,q:Query,etag?:string): Promise<void> {
-    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.finishJob.call(state,job,q,etag));
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.finishJob.call(state,job,q,etag),'repair');
     const current=(await this.store.exec<any>('SELECT generation,priority,requested_at,lane FROM jobs WHERE key=?',job.key)).toArray()[0];
     const again=current?.generation>(job.start_generation || 0);
     // A newer webhook can arrive while pages are being fetched. Completing the
@@ -1305,7 +1366,7 @@ export class RepositoryState extends DurableObject<Env> {
         return {text:async()=>consume(),json:async()=>JSON.parse(consume())};
       };const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;}})};
       return RepositoryState.prototype.applyRefresh.call(state,job,q,repo,started,response,result,preparedNext,staged);
-    });this.traceRepair('refresh_committed',job);}
+    },'publication');this.traceRepair('refresh_committed',job);}
     catch(error){if(!(error instanceof LeaseLost))throw error;}
   }
   async applyRefresh(job:any,q:Query,repo:any,started:number,response:Response|null,result:any,preparedNext:string|undefined,staged:{key:string,expires:number}|undefined):Promise<void> {
@@ -1836,17 +1897,81 @@ export class RepositoryState extends DurableObject<Env> {
     await this.metric('retry',JSON.parse(job.query),job.lane);
     await this.setMeta('last_upstream_failure',{at:Date.now(),operation:JSON.parse(job.query).operation,category});
   }
-  async dispatch(first:any): Promise<void> {
+  private async claimCompanions(first:any,selection?:any[]):Promise<any[]> {
+    const operation=JSON.parse(first.query).operation;
+    const candidates=selection || (await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=? AND lane=? AND page=1 AND api IS NULL AND nested IS NULL AND key LIKE ? ORDER BY CASE WHEN lane='requested' AND requested_at IS NULL THEN 1 ELSE 0 END,due,key LIMIT ?",Date.now(),Date.now(),first.lane,operation+':%',Math.max(0,batchLimit(operation)-1))).toArray();
+    if(!candidates.length)return [];
+    if(!this.store.transactional)return this.atomic(state=>state.claimCompanions(first,candidates),'repair');
+    const hot=new Set<string>(),complete=new Set<string>();
+    const readBatch=this.store.backend==='sqlite'?80:256;
+    for(let offset=0;offset<candidates.length;offset+=readBatch) {
+      const keys=candidates.slice(offset,offset+readBatch).map(j=>j.key),where=' WHERE key IN ('+keys.map(()=>'?').join(',')+')';
+      const [cs,ds]=await this.store.batch([{sql:'SELECT key FROM collections'+where+' AND complete=1',bindings:keys},{sql:'SELECT key FROM demand'+where+' AND at>?',bindings:[...keys,Date.now()-300000]}]);
+      for(const row of cs.toArray())complete.add(row.key);for(const row of ds.toArray())hot.add(row.key);
+    }
+    const quiet=candidates.filter(j=>!j.dirty && complete.has(j.key) && !hot.has(j.key));
+    const states=new Map<string,string>(),comments=new Map<string,any>(),closedHeads=new Set<string>();
+    const numbers=new Set<string>();
+    if(operation==='statuses') {
+      const heads=[...new Set(quiet.map(j=>String(JSON.parse(j.query).args.sha)))];
+      for(let offset=0;offset<heads.length;offset+=readBatch) {
+        const chunk=heads.slice(offset,offset+readBatch);
+        for(const row of (await this.store.exec<any>("SELECT h.sha,COUNT(*) total,SUM(CASE WHEN json_extract(r.data,'$.state') IN ('CLOSED','MERGED') THEN 1 ELSE 0 END) closed FROM head_prs h LEFT JOIN resources r ON r.kind='pr' AND r.id=h.number WHERE h.sha IN ("+chunk.map(()=>'?').join(',')+') GROUP BY h.sha',...chunk)).toArray())if(row.total>0 && row.closed===row.total)closedHeads.add(row.sha);
+      }
+    } else if(operation==='reactions') {
+      const ids=[...new Set(quiet.map(j=>String(JSON.parse(j.query).args.id)))];
+      for(let offset=0;offset<ids.length;offset+=readBatch) {
+        const chunk=ids.slice(offset,offset+readBatch);
+        for(const row of (await this.store.exec<any>("SELECT id,parent,tombstone FROM resources WHERE kind='review_comments' AND id IN ("+chunk.map(()=>'?').join(',')+')',...chunk)).toArray()){comments.set(row.id,row);if(row.parent)numbers.add(row.parent);}
+      }
+    } else for(const job of quiet)numbers.add(String(JSON.parse(job.query).args.number));
+    const ns=[...numbers],prs=new Set<string>();
+    for(let offset=0;offset<ns.length;offset+=readBatch) {
+      const chunk=ns.slice(offset,offset+readBatch);
+      for(const row of (await this.store.exec<any>("SELECT id,kind,json_extract(data,'$.state') state FROM resources WHERE kind IN ('pr','issue') AND id IN ("+chunk.map(()=>'?').join(',')+')',...chunk)).toArray())if(!prs.has(row.id)){states.set(row.id,row.state);if(row.kind==='pr')prs.add(row.id);}
+    }
+    const dormant=(job:any):boolean=>{
+      if(NOT_MIRRORED.has(operation))return true;
+      if(job.dirty || !complete.has(job.key) || hot.has(job.key))return false;
+      const args=JSON.parse(job.query).args;
+      if(operation==='statuses')return closedHeads.has(String(args.sha));
+      const comment=operation==='reactions'?comments.get(String(args.id)):null;
+      if(comment?.tombstone)return true;
+      const state=states.get(String(operation==='reactions'?comment?.parent:args.number));
+      return Boolean(state && state!=='OPEN');
+    };
+    const obsolete=candidates.filter(dormant),deleted=new Set<string>();
+    // Use the same snapshot predicates as retireUnneeded. Chunking below is
+    // solely SQLite's 100-binding SQL limit, not a limit on jobs or batches.
+    const deleteBatch=this.store.backend==='sqlite'?24:256;
+    for(let offset=0;offset<obsolete.length;offset+=deleteBatch) {
+      const chunk=obsolete.slice(offset,offset+deleteBatch);
+      for(const row of (await this.store.exec<any>('DELETE FROM jobs WHERE lease_until<=? AND ('+chunk.map(()=>'(key=? AND COALESCE(generation,0)=? AND COALESCE(started,0)=? AND dirty=?)').join(' OR ')+') RETURNING key',Date.now(),...chunk.flatMap(j=>[j.key,j.generation || 0,j.started || 0,j.dirty]))).toArray())deleted.add(row.key);
+    }
+    const retired=candidates.filter(j=>deleted.has(j.key));
+    for(let offset=0;offset<retired.length;offset+=readBatch) {
+      const keys=retired.slice(offset,offset+readBatch).map(j=>stagingStateKey(j.key));
+      await this.store.exec('DELETE FROM meta WHERE key IN ('+keys.map(()=>'?').join(',')+')',...keys);
+    }
+    for(const job of retired)await this.metric('cancellation',JSON.parse(job.query),job.lane);
+    const wanted=candidates.filter(j=>!deleted.has(j.key));if(!wanted.length)return [];
+    const now=Date.now(),lease=crypto.randomUUID(),claimed=new Map<string,any>();
+    const claimBatch=this.store.backend==='sqlite'?32:256;
+    for(let offset=0;offset<wanted.length;offset+=claimBatch) {
+      const chunk=wanted.slice(offset,offset+claimBatch);
+      const rows=(await this.store.exec<any>('UPDATE jobs SET lease_id=?,lease_until=?,started=CASE WHEN COALESCE(started,0)=0 THEN ? ELSE started END,start_generation=CASE WHEN COALESCE(started,0)=0 THEN generation ELSE start_generation END WHERE lease_until<=? AND ('+chunk.map(()=>'(key=? AND COALESCE(generation,0)=? AND COALESCE(started,0)=?)').join(' OR ')+') RETURNING *',lease,now+settings(this.env).lease_ms,now,now,...chunk.flatMap(j=>[j.key,j.generation || 0,j.started || 0]))).toArray();
+      for(const row of rows)claimed.set(row.key,row);
+    }
+    return wanted.flatMap(j=>claimed.has(j.key)?[claimed.get(j.key)]:[]);
+  }
+  async dispatch(first:any,claimedGroup?:any[],preparationError?:unknown): Promise<void> {
     this.traceRepair('dispatch',first);
     const q:Query=JSON.parse(first.query),operation=q.operation,repo=(await this.meta('repository'));
-    let jobs=[first];
+    let jobs=claimedGroup || [first];
     try {
+      if(preparationError)throw preparationError;
       if (['issue_comments','review_threads','statuses','reactions'].includes(operation) && first.page===1 && !first.api && !first.nested) {
-        const candidates=(await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=? AND lane=? AND page=1 AND api IS NULL AND nested IS NULL AND key LIKE ? ORDER BY CASE WHEN lane='requested' AND requested_at IS NULL THEN 1 ELSE 0 END,due,key LIMIT ?",Date.now(),Date.now(),first.lane,operation+':%',Math.max(0,batchLimit(operation)-1))).toArray();
-        for (const item of candidates) {
-          if ((await this.retireUnneeded(item))) continue;
-          const claimed=(await this.claim(item));if (claimed) jobs.push(claimed);
-        }
+        if(!claimedGroup)jobs.push(...await this.claimCompanions(first));
         if (operation==='reactions') {
           const supported=[];
           for (const item of jobs) {
@@ -1872,7 +1997,11 @@ export class RepositoryState extends DurableObject<Env> {
     } catch(error) {
       for(const item of jobs) await this.retryJob(item,error);
     } finally {
-      for(const item of jobs) await this.store.exec('UPDATE jobs SET lease_id=NULL,lease_until=0 WHERE key=? AND lease_id=?',item.key,item.lease_id);
+      const releaseBatch=this.store.backend==='sqlite'?50:256;
+      for(let offset=0;offset<jobs.length;offset+=releaseBatch) {
+        const chunk=jobs.slice(offset,offset+releaseBatch);
+        await this.store.exec('UPDATE jobs SET lease_id=NULL,lease_until=0 WHERE '+chunk.map(()=>'(key=? AND lease_id=?)').join(' OR '),...chunk.flatMap(item=>[item.key,item.lease_id]));
+      }
       this.traceRepair('dispatch_complete',first);
     }
   }
@@ -1904,13 +2033,26 @@ export class RepositoryState extends DurableObject<Env> {
         while(dispatched<options.dispatches && Date.now()-began<options.launch_ms && !this.degraded && !this.migrationHeld()) {
           const wave:Promise<void>[]=[];
           while(wave.length<options.concurrency && dispatched<options.dispatches) {
-            const selected=await this.atomic(async state=>{const next=await state.nextJob();if(!next)return undefined;if(await state.retireUnneeded(next))return {retired:true,job:undefined};return {retired:false,job:await state.claim(next)};});
+            let selected:any;
+            try {
+              selected=await this.atomic(async state=>{
+                const next=await state.nextJob();if(!next)return undefined;
+                if(await state.retireUnneeded(next))return {retired:true};
+                return {job:await state.claim(next)};
+              },'repair');
+            } catch(error){this.noteFailure('repair_dispatch',error);break;}
             if(!selected)break;
             if(selected.retired){if(++retired>=200)break;continue;}
-            const job=selected.job;if(!job)continue;
-            dispatched++;wave.push(this.dispatch(job));
+            const first=selected.job;if(!first)break;
+            const operation=JSON.parse(first.query).operation;
+            const batchable=['issue_comments','review_threads','statuses','reactions'].includes(operation) && first.page===1 && !first.api && !first.nested;
+            const group=[first];let preparationError:unknown;
+            if(batchable)try{group.push(...await this.claimCompanions(first));}catch(error){preparationError=error;}
+            // Commit companions before selecting the next leader, preserving
+            // upstream batching. Already-started groups keep running in parallel.
+            dispatched++;wave.push(this.dispatch(first,group,preparationError));
           }
-          if (!wave.length) break;
+          if(!wave.length)break;
           await Promise.allSettled(wave);
         }
       } catch(error) {this.noteFailure('repair_dispatch',error);}
@@ -2742,6 +2884,7 @@ export class RepositoryState extends DurableObject<Env> {
       }
       if (path==='/activity-refresh' && req.method==='POST') {if(!this.degraded) await this.refreshActivityLandings();return json({ok:true,degraded:Boolean(this.degraded)});}
       if (path==='/tick') {
+        this.owner.startReadDemands();
         // Cron reaches a full object even if its alarm cannot be rescheduled.
         if(this.store.backend==='postgres')this.startStorageMaintenance();
         if(this.store.backend==='sqlite')await this.storageMarker();

@@ -148,6 +148,22 @@ preferred lane is empty. Quota-deferred dependencies retain their demand provena
 The existing weighted shares between lanes remain unchanged. Expiry and coverage
 preparation precede the launch window rather than consuming it before jobs start.
 
+PostgreSQL cache misses return stored or unavailable results without awaiting
+writer admission for demand bookkeeping. One repository owner coalesces readers,
+committing demand and initial job creation together in small groups. Failed
+groups retain pending intent for a later read or the existing cron tick; no new
+timer or hydration prerequisite is introduced. Uncommitted intent is local to
+the instance; ordinary missing-coverage maintenance and later reads remain its
+restart backstop. A bookkeeping memo never establishes complete coverage, and
+an actual miss bypasses it immediately. Public and migration shadow reads do
+not create demand.
+
+Repair waves claim complete upstream groups before sending requests, preserving
+four-group parallelism and normal batch sizes. Companion claims and lease
+cleanup use bulk statements with the existing generation and key/token checks.
+Writer logs distinguish demand, ingress, repair, publication and other callers
+using bounded purpose names, without recording queries or payloads.
+
 Compact surveys immediately include exact-head commit statuses received by webhook,
 even before the first full status collection is hydrated. The per-PR
 `statusCheckRollupCoverage` field distinguishes `webhook_observed`, `complete`, and
@@ -308,6 +324,11 @@ mints an independent installation token or spends quota outside that owner.
 
 Service measurement commands remain in `scripts/measure.py`, `measure_surveys.py`,
 `measure_capacity.py` and `observe_reconciliation.py`.
+`npm run benchmark:history-demand` compares a full baseline source snapshot with
+the current implementation on isolated PostgreSQL schemas. It measures cache-miss
+responses, durable demand, fixed-cohort repair and companion claims; upstream
+responses are fixtures and it makes no GitHub requests. See
+[the method and results](HISTORY-DEMAND-PERFORMANCE.md) for scope and limitations.
 The example worker's process-manager rollout and shadow commands live in
 [TauCetiWorker/services/github-state/scripts](https://github.com/TauCetiProject/TauCetiWorker/tree/main/services/github-state/scripts).
 Downstream deployment and credential setup are documented in the
