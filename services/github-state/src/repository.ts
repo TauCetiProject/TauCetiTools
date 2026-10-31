@@ -2348,7 +2348,8 @@ export class RepositoryState extends DurableObject<Env> {
   }
   async alarm(): Promise<void> {
     const owner=this.owner,tag=owner.repairAlarm;
-    const continuation=owner.store.backend==='sqlite' && tag?.continuation && tag.at<=Date.now() && owner.repairCoordinator;
+    const ordinaryDue=owner.store.backend==='sqlite' && owner.ordinaryAlarmAt!==undefined && owner.ordinaryAlarmAt<=Date.now()+100;
+    const continuation=!ordinaryDue && owner.store.backend==='sqlite' && tag?.continuation && tag.at<=Date.now() && owner.repairCoordinator;
     if(owner.alarmFlight){
       if(continuation){
         await owner.alarmFlight;
@@ -2357,7 +2358,7 @@ export class RepositoryState extends DurableObject<Env> {
       }
       void owner.repairCoordinator?.wake(true);return owner.alarmFlight;
     }
-    const quota=owner.store.backend==='sqlite' && tag?.quota && tag.at<=Date.now() && owner.quotaRestriction?.category==='capacity';
+    const quota=!ordinaryDue && owner.store.backend==='sqlite' && tag?.quota && tag.at<=Date.now() && owner.quotaRestriction?.category==='capacity';
     if(!continuation && !quota && owner.ordinaryAlarmAt!==undefined && owner.ordinaryAlarmAt<=Date.now()+100)owner.ordinaryAlarmAt=undefined;
     owner.repairAlarm=undefined;
     const flight=continuation?owner.runContinuationAlarm():quota?owner.runQuotaAlarm():this.runSingleAlarm();owner.alarmFlight=flight;
@@ -2410,7 +2411,10 @@ export class RepositoryState extends DurableObject<Env> {
         // When that prompts refill, use the existing read-only eligibility
         // query before paying for an empty writer transaction and connection.
         // The atomic claim below still rechecks the current row and ownership.
-        if(owner.getRepairCoordinator().groups.size && !await owner.hasEligibleRepair(q))return undefined;
+        if(owner.getRepairCoordinator().groups.size){
+          try{if(!await owner.hasEligibleRepair(q))return undefined;}
+          catch{/* An optional HTTP-read failure cannot replace the atomic writer claim. */}
+        }
         let attempted:any;
         try{return await owner.atomic(async state=>{
           const next=await state.nextJob(q.failed);if(!next)return undefined;attempted=next;
@@ -2473,6 +2477,13 @@ export class RepositoryState extends DurableObject<Env> {
   }
   private async armRepairAlarm():Promise<void> {
     if(this.store.backend==='postgres' || this.degraded || this.migrationHeld())return;
+    if(this.owner.ordinaryAlarmAt!==undefined && this.owner.ordinaryAlarmAt<=Date.now()+100){
+      // New demand can reuse an overdue alarm while a continuation is already
+      // executing. Preserve a real external wake even when failed keys would
+      // otherwise disappear from the repair-only alarm query.
+      const now=Date.now(),existing=await this.ctx.storage.getAlarm();
+      await this.setAlarm(existing && existing>now?Math.min(existing,now+100):now+100,false,false,true);return;
+    }
     const coordinator=this.repairCoordinator!,now=Date.now(),omit=this.excludeRepairKeys(coordinator.current.failed);
     const restriction=this.quotaRestriction;
     const restricted=Boolean(restriction && restriction.installation===(await this.meta('repository'))?.installation && this.quotaBlocksRepairTurn(coordinator.current));

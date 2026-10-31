@@ -295,7 +295,7 @@ for(const hold of ['fenced','schema'])test('a consumed continuation while '+hold
  const f=await fixture();try{
   await seed(f,2);const c=f.state.getRepairCoordinator();let expiry=0;f.state.expire=async()=>{expiry++;};
   await f.store.exec('UPDATE jobs SET due=? WHERE key=?',Date.now()+60000,key(101));
-  await f.ctx.storage.setAlarm(null);f.state.repairAlarm={at:Date.now()-1,quota:false,continuation:true};
+  await f.ctx.storage.setAlarm(null);f.state.ordinaryAlarmAt=undefined;f.state.repairAlarm={at:Date.now()-1,quota:false,continuation:true};
   if(hold==='fenced')f.state.mutationState.blocked=true;else f.state.schema={error:'schema_unavailable'};
   await f.state.alarm();assert.equal(c.snapshot().launches,0);assert.equal(expiry,0);
   assert.ok(await f.ctx.storage.getAlarm()>Date.now()+50000,'future recovery remains armed while immediate selection is held');
@@ -319,6 +319,44 @@ for(const operation of ['enqueue','enqueueMany','enqueueIngest','noteDemand'])te
   f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json({api:'core',data:[]})})};
   await f.state.alarm();await drainRepairs(f.state);assert.equal(await f.state.complete(q),true);
  }finally{await drainRepairs(f.state);await f.close();}
+});
+
+test('ordinary intent arriving during a continuation scheduling write is rechecked when consumed',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
+ const f=await fixture(),writing=deferred(),release=deferred(),clock=Date.now;let offset=0;try{
+  await seed(f,1);const c=f.state.getRepairCoordinator();c.current.failed.add(key(100));
+  const past=Date.now()-1000;await f.ctx.storage.setAlarm(past);f.state.ordinaryAlarmAt=undefined;
+  const set=f.ctx.storage.setAlarm;
+  f.ctx.storage.setAlarm=async at=>{writing.resolve();await release.promise;return set(at);};
+  const scheduling=f.state.setAlarm(Date.now()+100,false,true,true);await writing.promise;
+  await f.state.noteDemand(query(100));release.resolve();await scheduling;
+  assert.equal(f.state.repairAlarm.continuation,true,'the test preserves the tag assigned after new intent was recorded');
+  Date.now=()=>clock()+offset;offset=1000;
+  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json({api:'core',data:[]})})};
+  await f.state.alarm();await drainRepairs(f.state);assert.equal(await f.state.complete(query(100)),true);
+ }finally{release.resolve();offset=0;Date.now=clock;await drainRepairs(f.state);await f.close();}
+});
+
+test('ordinary intent accepted during a continuation handler retains a plain pending alarm',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
+ const f=await fixture();try{
+  await seed(f,1);const c=f.state.getRepairCoordinator();c.current.failed.add(key(100));
+  const at=Date.now()-1000;await f.state.setAlarm(at,false,true,true);f.state.ordinaryAlarmAt=undefined;
+  await f.state.noteDemand(query(100));
+  await f.state.armRepairAlarm();assert.ok(await f.ctx.storage.getAlarm()>=Date.now());assert.equal(f.state.repairAlarm.continuation,false);
+ }finally{await drainRepairs(f.state);await f.close();}
+});
+
+test('a failed optional ready-work read falls through to the authoritative writer claim',async()=>{
+ const f=await fixture(),gate=deferred();try{
+  await seed(f,2);let calls=0,failures=0;const hint=f.state.hasEligibleRepair;
+  f.state.hasEligibleRepair=async function(q){if(!failures++&&this.repairCoordinator.groups.size)throw Error('isolated stored-read outage');return hint.call(this,q);};
+  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async(_url,init)=>{
+   const n=JSON.parse(init.body).query.args.number;calls++;if(n===100)await gate.promise;return Response.json({api:'core',data:[]});
+  }})};
+  await f.state.runAlarm();
+  const second=[...f.state.repairCoordinator.groups.values()].find(group=>group.jobs[0].key===key(101));
+  if(second)await second.task;assert.equal(await f.state.complete(query(101)),true);assert.ok(failures>0);
+  gate.resolve();await drainRepairs(f.state);assert.equal(calls,2);
+ }finally{gate.resolve();await drainRepairs(f.state);await f.close();}
 });
 
 test('an ordinary demand wake racing a stale continuation alarm read retains external recovery',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
