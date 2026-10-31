@@ -1,0 +1,613 @@
+{
+  "baseline": "cf29ced7b50a144a0d8cc4fda6f55781dbdca59c",
+  "implementation_sha256": "0619202dfe4b1d65e1e7ceecfd7300d1ff239ea9bc8793129f20053340e4dbbd",
+  "implementation_files": [
+    "../../tauceti_tools/github_catalog.json",
+    "package-lock.json",
+    "src/activity_landings.ts",
+    "src/catalog.ts",
+    "src/index.ts",
+    "src/ingress.ts",
+    "src/installation.ts",
+    "src/migration.ts",
+    "src/migration_control.ts",
+    "src/migration_target.ts",
+    "src/monitoring.ts",
+    "src/normalize.ts",
+    "src/protocol.ts",
+    "src/provider_monitoring.ts",
+    "src/queue_monitoring.ts",
+    "src/reconciliation.ts",
+    "src/repair_coordinator.ts",
+    "src/repair_io.ts",
+    "src/repository.ts",
+    "src/repository_health.ts",
+    "src/repository_store.ts",
+    "src/retention.ts",
+    "src/runner-capacity.ts",
+    "src/storage.ts",
+    "src/survey.ts"
+  ],
+  "trials": 3,
+  "scope": "Isolated realPostgreSQL;5000knownPRheadassociations,100completecleanbackgroundstatuses;98supersededheads,2current; noGitHubrequests; countsrefreshesnotnewhydration",
+  "before": [
+    {
+      "elapsed_ms": 39038.909789,
+      "eligible_histories": 100,
+      "historical_histories": 98,
+      "current_histories": 2,
+      "upstream_batches": 1,
+      "upstream_histories": 100,
+      "jobs_remaining": 100,
+      "new_missing_completions": 0,
+      "writer_admissions": 14,
+      "application_round_trips": 1364,
+      "writers": [
+        {
+          "purpose": "repair",
+          "wait_ms": 0,
+          "hold_ms": 622.1265679999999,
+          "application_round_trips": 11,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 2787.942344,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 5200.732599999999,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 2591.2197989999986,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 2761.5872039999995,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 3208.8624419999996,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 2551.2588539999997,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 3197.098426999997,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 2971.1079360000003,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 2789.4230180000013,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 2618.9347050000033,
+          "application_round_trips": 109,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 2997.4712380000055,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 3251.6948820000034,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 1450.6074050000025,
+          "application_round_trips": 56,
+          "failed": false
+        }
+      ],
+      "metrics": {
+        "repair_hour": [
+          {
+            "event": "page",
+            "lane": "verification",
+            "operation": "statuses",
+            "n": 100,
+            "value": 100,
+            "maximum": 1
+          },
+          {
+            "event": "completion",
+            "lane": "verification",
+            "operation": "statuses",
+            "n": 100,
+            "value": 100,
+            "maximum": 1
+          }
+        ],
+        "requested_latency": [],
+        "dropped_samples": 0
+      }
+    },
+    {
+      "elapsed_ms": 36587.23493700001,
+      "eligible_histories": 100,
+      "historical_histories": 98,
+      "current_histories": 2,
+      "upstream_batches": 1,
+      "upstream_histories": 100,
+      "jobs_remaining": 100,
+      "new_missing_completions": 0,
+      "writer_admissions": 14,
+      "application_round_trips": 1364,
+      "writers": [
+        {
+          "purpose": "repair",
+          "wait_ms": 0,
+          "hold_ms": 472.1311960000021,
+          "application_round_trips": 11,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 3328.810292000002,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 2749.326433000002,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 3373.4395559999975,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 3197.1650059999956,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 2621.6911300000065,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 2577.2126100000023,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 2758.736109000005,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 2555.6633929999953,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 3345.1972689999966,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 2641.003712000005,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 2835.9857769999944,
+          "application_round_trips": 109,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 2621.523862000002,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 1476.9824149999913,
+          "application_round_trips": 56,
+          "failed": false
+        }
+      ],
+      "metrics": {
+        "repair_hour": [
+          {
+            "event": "page",
+            "lane": "verification",
+            "operation": "statuses",
+            "n": 100,
+            "value": 100,
+            "maximum": 1
+          },
+          {
+            "event": "completion",
+            "lane": "verification",
+            "operation": "statuses",
+            "n": 100,
+            "value": 100,
+            "maximum": 1
+          }
+        ],
+        "requested_latency": [],
+        "dropped_samples": 0
+      }
+    },
+    {
+      "elapsed_ms": 38460.232795,
+      "eligible_histories": 100,
+      "historical_histories": 98,
+      "current_histories": 2,
+      "upstream_batches": 1,
+      "upstream_histories": 100,
+      "jobs_remaining": 100,
+      "new_missing_completions": 0,
+      "writer_admissions": 14,
+      "application_round_trips": 1364,
+      "writers": [
+        {
+          "purpose": "repair",
+          "wait_ms": 0,
+          "hold_ms": 499.22620299999835,
+          "application_round_trips": 11,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 3597.322392000002,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 2986.8494959999953,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 2566.5807329999952,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 2529.665663000007,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 2616.2496260000044,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 2528.2664490000025,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 3412.293669999999,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 2609.881078000006,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 2876.171464999992,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 4013.193048000001,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 3070.1485410000023,
+          "application_round_trips": 109,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 3206.1773729999986,
+          "application_round_trips": 108,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 1915.2398979999998,
+          "application_round_trips": 56,
+          "failed": false
+        }
+      ],
+      "metrics": {
+        "repair_hour": [
+          {
+            "event": "page",
+            "lane": "verification",
+            "operation": "statuses",
+            "n": 100,
+            "value": 100,
+            "maximum": 1
+          },
+          {
+            "event": "completion",
+            "lane": "verification",
+            "operation": "statuses",
+            "n": 100,
+            "value": 100,
+            "maximum": 1
+          }
+        ],
+        "requested_latency": [],
+        "dropped_samples": 0
+      }
+    }
+  ],
+  "after": [
+    {
+      "elapsed_ms": 2251.5138550000047,
+      "eligible_histories": 100,
+      "historical_histories": 98,
+      "current_histories": 2,
+      "upstream_batches": 1,
+      "upstream_histories": 2,
+      "jobs_remaining": 2,
+      "new_missing_completions": 0,
+      "writer_admissions": 2,
+      "application_round_trips": 43,
+      "writers": [
+        {
+          "purpose": "repair",
+          "wait_ms": 0,
+          "hold_ms": 1078.2431090000027,
+          "application_round_trips": 13,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 1143.579150999998,
+          "application_round_trips": 30,
+          "failed": false
+        }
+      ],
+      "metrics": {
+        "repair_hour": [
+          {
+            "event": "cancellation",
+            "lane": "verification",
+            "operation": "statuses",
+            "n": 98,
+            "value": 98,
+            "maximum": 1
+          },
+          {
+            "event": "page",
+            "lane": "verification",
+            "operation": "statuses",
+            "n": 2,
+            "value": 2,
+            "maximum": 1
+          },
+          {
+            "event": "completion",
+            "lane": "verification",
+            "operation": "statuses",
+            "n": 2,
+            "value": 2,
+            "maximum": 1
+          }
+        ],
+        "requested_latency": [],
+        "dropped_samples": 0
+      }
+    },
+    {
+      "elapsed_ms": 1514.5555999999997,
+      "eligible_histories": 100,
+      "historical_histories": 98,
+      "current_histories": 2,
+      "upstream_batches": 1,
+      "upstream_histories": 2,
+      "jobs_remaining": 2,
+      "new_missing_completions": 0,
+      "writer_admissions": 2,
+      "application_round_trips": 43,
+      "writers": [
+        {
+          "purpose": "repair",
+          "wait_ms": 0,
+          "hold_ms": 538.7770890000029,
+          "application_round_trips": 13,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 953.063897,
+          "application_round_trips": 30,
+          "failed": false
+        }
+      ],
+      "metrics": {
+        "repair_hour": [
+          {
+            "event": "cancellation",
+            "lane": "verification",
+            "operation": "statuses",
+            "n": 98,
+            "value": 98,
+            "maximum": 1
+          },
+          {
+            "event": "page",
+            "lane": "verification",
+            "operation": "statuses",
+            "n": 2,
+            "value": 2,
+            "maximum": 1
+          },
+          {
+            "event": "completion",
+            "lane": "verification",
+            "operation": "statuses",
+            "n": 2,
+            "value": 2,
+            "maximum": 1
+          }
+        ],
+        "requested_latency": [],
+        "dropped_samples": 0
+      }
+    },
+    {
+      "elapsed_ms": 1661.0309160000033,
+      "eligible_histories": 100,
+      "historical_histories": 98,
+      "current_histories": 2,
+      "upstream_batches": 1,
+      "upstream_histories": 2,
+      "jobs_remaining": 2,
+      "new_missing_completions": 0,
+      "writer_admissions": 2,
+      "application_round_trips": 43,
+      "writers": [
+        {
+          "purpose": "repair",
+          "wait_ms": 0,
+          "hold_ms": 659.3254290000041,
+          "application_round_trips": 13,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "wait_ms": 0,
+          "hold_ms": 978.7425439999934,
+          "application_round_trips": 30,
+          "failed": false
+        }
+      ],
+      "metrics": {
+        "repair_hour": [
+          {
+            "event": "cancellation",
+            "lane": "verification",
+            "operation": "statuses",
+            "n": 98,
+            "value": 98,
+            "maximum": 1
+          },
+          {
+            "event": "page",
+            "lane": "verification",
+            "operation": "statuses",
+            "n": 2,
+            "value": 2,
+            "maximum": 1
+          },
+          {
+            "event": "completion",
+            "lane": "verification",
+            "operation": "statuses",
+            "n": 2,
+            "value": 2,
+            "maximum": 1
+          }
+        ],
+        "requested_latency": [],
+        "dropped_samples": 0
+      }
+    }
+  ]
+}

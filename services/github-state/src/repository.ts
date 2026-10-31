@@ -27,6 +27,10 @@ interface PreparedRefresh {job:any;q:Query;repo:any;started:number;response:Resp
 // transport/backend failures, and an unclassified unavailable response.
 const memberUnavailable=(result:any):boolean=>!result.deferred && result.unavailable && result.failure_kind==='member';
 const PUBLICATION_ITEMS=8,PUBLICATION_BYTES=256*1024,PUBLICATION_ROWS=128;
+// Historical associations are retained in head_prs. An open PR keeps only its
+// current head active; unknown head data must never retire a status obligation.
+const statusHeadDormant=(state:unknown,head:unknown,sha:string):boolean=>state==='CLOSED' || state==='MERGED'
+  || state==='OPEN' && typeof head==='string' && /^[0-9a-f]{40}$/i.test(head) && head.toLowerCase()!==sha.toLowerCase();
 class LeaseLost extends Error {}
 // Retain the attempted chunk and original error. Adapter-classified backend
 // failures keep group recovery; an unclassified chunk error affects only it.
@@ -869,14 +873,17 @@ export class RepositoryState extends DurableObject<Env> {
     const ids=[...entries.values()].filter(e=>e.q.operation==='reactions').map(e=>String(e.q.args?.id));
     if(ids.length)for(const row of await select('resources','id',ids," AND kind='review_comments'",'id,kind,parent,tombstone'))if(row.kind==='review_comments'){comments.set(row.id,row);if(row.parent)numbers.add(row.parent);}
     const states=new Map<string,any>();
-    for(const row of await select('resources','id',[...numbers]," AND kind IN ('pr','issue')","id,kind,json_extract(data,'$.state') state"))if(['pr','issue'].includes(row.kind) && (!states.has(row.id)||row.kind==='pr'))states.set(row.id,row);
+    const head=this.store.backend==='postgres'?"CASE WHEN json_type(data,'$.headRefOid')='string' THEN json_extract(data,'$.headRefOid') END":"json_extract(data,'$.headRefOid')";
+    for(const row of await select('resources','id',[...numbers]," AND kind IN ('pr','issue')","id,kind,json_extract(data,'$.state') state,"+(shas.length?head:"NULL")+" head"))if(['pr','issue'].includes(row.kind) && (!states.has(row.id)||row.kind==='pr'))states.set(row.id,row);
     const now=Date.now();let scheduled=Infinity;
     const values:any[][]=[],metrics:any[][]=[];
     for(const [key,{q,priority,dirty=false}] of entries) {
       const prior=jobs.get(key),demanded=(demands.get(key)?.at || 0)>now-300000;
       const comment=q.operation==='reactions'?comments.get(String(q.args?.id)):null;
       const ns=q.args?.number?[String(q.args.number)]:q.args?.sha?heads.get(String(q.args.sha)) || []:comment?.parent?[comment.parent]:[];
-      const dormant=!demanded && (comment?.tombstone || ns.length>0 && ns.every(n=>states.get(n)?.state && states.get(n).state!=='OPEN'));
+      const dormant=!demanded && (comment?.tombstone || ns.length>0 && ns.every(n=>q.operation==='statuses'
+        ?states.get(n)?.kind==='pr' && statusHeadDormant(states.get(n)?.state,states.get(n)?.head,String(q.args?.sha))
+        :states.get(n)?.state && states.get(n).state!=='OPEN'));
       if(backfill && (collections.has(key) || dormant))continue;
       const lane=(demanded || backfill) && !collections.has(key)?'requested':dirty || prior?.dirty || priority<=5 || q.operation.endsWith('_delta')?'active':q.operation.startsWith('recent_') || dormant?'archive':'verification';
       // Maintenance shares the requested lane without fabricating a user read.
@@ -1412,6 +1419,16 @@ export class RepositoryState extends DurableObject<Env> {
     // demand and job state atomically before promoting the bounded selection.
     await this.enqueueMany(missing.map(row=>{const args:Record<string,string|number>=row.operation==='statuses'?{sha:row.head}:{number:decimalArgument(row.number)};return {q:{repository:repo,operation:row.operation,args},priority:5};}),true);
   }
+  private async dormantStatusHeads(heads:string[]):Promise<Set<string>> {
+    if(!heads.length)return new Set();
+    const type=this.store.backend==='postgres'?'string':'text';
+    // Materialize only compact indexed projections, not whole PR bodies. This
+    // prevents PostgreSQL from repeating the sanitized body parse per predicate.
+    const head="CASE WHEN json_type(r.data,'$.headRefOid')='"+type+"' THEN json_extract(r.data,'$.headRefOid') END";
+    const valid=this.store.backend==='postgres'?"head ~ '^[0-9a-fA-F]{40}$'":"length(head)=40 AND head NOT GLOB '*[^0-9a-fA-F]*'";
+    const rows=(await this.store.exec<any>("WITH status_heads AS MATERIALIZED (SELECT h.sha,json_extract(r.data,'$.state') state,"+head+" head FROM head_prs h LEFT JOIN resources r ON r.kind='pr' AND r.id=h.number WHERE h.sha IN ("+heads.map(()=>'?').join(',')+")) SELECT sha,COUNT(*) total,SUM(CASE WHEN state IN ('CLOSED','MERGED') OR (state='OPEN' AND "+valid+" AND lower(head)!=lower(sha)) THEN 1 ELSE 0 END) dormant FROM status_heads GROUP BY sha",...heads)).toArray();
+    return new Set(rows.filter(row=>row.total>0 && row.dormant===row.total).map(row=>row.sha));
+  }
   async dormant(q:Query): Promise<boolean> {
     const demand=(await this.store.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q))).toArray()[0];
     if (demand?.at>Date.now()-300000) return false;
@@ -1422,8 +1439,7 @@ export class RepositoryState extends DurableObject<Env> {
       if (row?.tombstone) return true;
       if (row?.parent) numbers=[row.parent];
     } else if (q.operation==='statuses') {
-      const counts=(await this.store.exec<any>("SELECT COUNT(*) total,SUM(CASE WHEN json_extract(r.data,'$.state') IN ('CLOSED','MERGED') THEN 1 ELSE 0 END) closed FROM head_prs h LEFT JOIN resources r ON r.kind='pr' AND r.id=h.number WHERE h.sha=?",String(q.args?.sha))).one();
-      return counts.total>0 && counts.closed===counts.total;
+      return (await this.dormantStatusHeads([String(q.args?.sha)])).has(String(q.args?.sha));
     }
     if (!numbers.length) return false;
     return (await Promise.all(numbers.map(async number=>{
@@ -2139,7 +2155,9 @@ export class RepositoryState extends DurableObject<Env> {
   async retireUnneeded(job:any): Promise<boolean> {
     if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.retireUnneeded.call(state,job));
     const q:Query=JSON.parse(job.query);
-    if (!NOT_MIRRORED.has(q.operation) && (job.dirty || !(await this.dormant(q)) || !(await this.complete(q)))) return false;
+    // Only statuses widen retirement to superseded heads; explicit requested
+    // work still receives its ordinary reconciliation before retirement.
+    if (!NOT_MIRRORED.has(q.operation) && (job.dirty || q.operation==='statuses' && job.requested_at || !(await this.dormant(q)) || !(await this.complete(q)))) return false;
     const removed=(await this.store.exec('DELETE FROM jobs WHERE key=? AND COALESCE(generation,0)=? AND lease_until<=? AND COALESCE(started,0)=? AND dirty=? RETURNING key',job.key,job.generation || 0,Date.now(),job.started || 0,job.dirty || 0)).toArray();
     if(!removed.length)return false;
     await this.store.exec('DELETE FROM meta WHERE key=?',stagingStateKey(job.key));
@@ -2243,14 +2261,14 @@ export class RepositoryState extends DurableObject<Env> {
       const [cs,ds]=await this.store.batch([{sql:'SELECT key FROM collections'+where+' AND complete=1',bindings:keys},{sql:'SELECT key FROM demand'+where+' AND at>?',bindings:[...keys,Date.now()-300000]}]);
       for(const row of cs.toArray())complete.add(row.key);for(const row of ds.toArray())hot.add(row.key);
     }
-    const quiet=candidates.filter(j=>!j.dirty && complete.has(j.key) && !hot.has(j.key));
+    const quiet=candidates.filter(j=>!j.dirty && !(operation==='statuses' && j.requested_at) && complete.has(j.key) && !hot.has(j.key));
     const states=new Map<string,string>(),comments=new Map<string,any>(),closedHeads=new Set<string>();
     const numbers=new Set<string>();
     if(operation==='statuses') {
       const heads=[...new Set(quiet.map(j=>String(JSON.parse(j.query).args.sha)))];
       for(let offset=0;offset<heads.length;offset+=readBatch) {
         const chunk=heads.slice(offset,offset+readBatch);
-        for(const row of (await this.store.exec<any>("SELECT h.sha,COUNT(*) total,SUM(CASE WHEN json_extract(r.data,'$.state') IN ('CLOSED','MERGED') THEN 1 ELSE 0 END) closed FROM head_prs h LEFT JOIN resources r ON r.kind='pr' AND r.id=h.number WHERE h.sha IN ("+chunk.map(()=>'?').join(',')+') GROUP BY h.sha',...chunk)).toArray())if(row.total>0 && row.closed===row.total)closedHeads.add(row.sha);
+        for(const sha of await this.dormantStatusHeads(chunk))closedHeads.add(sha);
       }
     } else if(operation==='reactions') {
       const ids=[...new Set(quiet.map(j=>String(JSON.parse(j.query).args.id)))];
@@ -2266,7 +2284,7 @@ export class RepositoryState extends DurableObject<Env> {
     }
     const dormant=(job:any):boolean=>{
       if(NOT_MIRRORED.has(operation))return true;
-      if(job.dirty || !complete.has(job.key) || hot.has(job.key))return false;
+      if(job.dirty || operation==='statuses' && job.requested_at || !complete.has(job.key) || hot.has(job.key))return false;
       const args=JSON.parse(job.query).args;
       if(operation==='statuses')return closedHeads.has(String(args.sha));
       const comment=operation==='reactions'?comments.get(String(args.id)):null;
