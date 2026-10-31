@@ -77,6 +77,7 @@ export class RepositoryState extends DurableObject<Env> {
   private readOnlyQuery=false;
   private readScope=false;
   private preparedEncodings?:Map<string,string>;
+  private dispatchSettled?:Set<string>;
   private optionalWork={active:0};
   private demandMemo=new Map<string,number>();
   private ingestStats=new Map<string,{minute:number,deliveries:number,sql_round_trips:number,sql_samples:number,apply_through_cleanup_ms:number,apply_max_ms:number}>();
@@ -1470,6 +1471,7 @@ export class RepositoryState extends DurableObject<Env> {
       }
       await this.releaseLeases(parent.store,committed.map(p=>p.job));
     },'publication');
+    for(const p of input)this.dispatchSettled?.add(p.job.key);
     try{this.repairMetrics.merge(metrics);}catch{}
     for(const p of committed){p.objects.clear();p.encodings.clear();p.result.data=undefined;this.traceRepair('refresh_committed',p.job);}
   }
@@ -2065,6 +2067,7 @@ export class RepositoryState extends DurableObject<Env> {
       const metrics=new RepairMetrics();
       try{await this.atomic(async state=>{state.repairMetrics=metrics;await state.persistWaits(input,expired);},'repair');}
       catch(error){throw new WaitFailure(input,expired,error);}
+      for(const item of input)this.dispatchSettled?.add(item.job.key);
       try{this.repairMetrics.merge(metrics);}catch{}return;
     }
     const size=this.store.backend==='sqlite'?12:128,changed=new Set<string>();
@@ -2078,9 +2081,22 @@ export class RepositoryState extends DurableObject<Env> {
     if(last)await this.setMeta('last_upstream_failure',{at:Date.now(),operation:JSON.parse(last.job.query).operation,...last.failure});
   }
   private async routeBatchToCore(jobs:any[]):Promise<void> {
-    if(!this.store.transactional)return this.atomic(state=>state.routeBatchToCore(jobs),'repair');
+    if(!this.store.transactional){await this.atomic(state=>state.routeBatchToCore(jobs),'repair');for(const job of jobs)this.dispatchSettled?.add(job.key);return;}
     const size=this.store.backend==='sqlite'?49:256,now=Date.now();
     for(let offset=0;offset<jobs.length;offset+=size){const chunk=jobs.slice(offset,offset+size);await this.store.exec('UPDATE jobs SET lease_id=NULL,lease_until=0,api=?,due=? WHERE '+chunk.map(()=>'(key=? AND lease_id=?)').join(' OR '),'core',now,...chunk.flatMap(j=>[j.key,j.lease_id]));}
+  }
+  private async recoverWaitFailure(failure:WaitFailure,jobs:any[]):Promise<void> {
+    const metrics=new RepairMetrics();
+    // One recovery admission preserves the exact captured waits first, then
+    // applies ordinary backend backoff only to still-owned unfinished members.
+    await this.atomic(async state=>{
+      state.repairMetrics=metrics;
+      await state.persistWaits(failure.waits,failure.expired);
+      if(isBackendFailure(failure.error))await state.retryJobs(jobs,failure.error);
+    },'repair');
+    for(const item of failure.waits)this.dispatchSettled?.add(item.job.key);
+    if(isBackendFailure(failure.error))for(const job of jobs)this.dispatchSettled?.add(job.key);
+    try{this.repairMetrics.merge(metrics);}catch{}
   }
   private async claimCompanions(first:any,selection?:any[],excluded?:Set<string>):Promise<any[]> {
     const operation=JSON.parse(first.query).operation;
@@ -2151,8 +2167,12 @@ export class RepositoryState extends DurableObject<Env> {
     return wanted.flatMap(j=>claimed.has(j.key)?[claimed.get(j.key)]:[]);
   }
   async dispatch(first:any,claimedGroup?:any[],preparationError?:unknown,failed?:Set<string>): Promise<void> {
+    const scoped=Object.create(this) as RepositoryState;scoped.dispatchSettled=new Set<string>();
+    await scoped.dispatchOwned(first,claimedGroup,preparationError,failed);
+  }
+  private async dispatchOwned(first:any,claimedGroup?:any[],preparationError?:unknown,failed?:Set<string>): Promise<void> {
     this.traceRepair('dispatch',first);
-    const q:Query=JSON.parse(first.query),operation=q.operation,repo=(await this.meta('repository'));
+    const q:Query=JSON.parse(first.query),operation=q.operation,repo=(await this.owner.meta('repository'));
     let jobs=claimedGroup || [first];
     try {
       if(preparationError)throw preparationError;
@@ -2178,14 +2198,13 @@ export class RepositoryState extends DurableObject<Env> {
         } else await this.deferJobs(jobs.map(job=>({job,result:result.deferred || result.unavailable?result:{unavailable:true,reason:'malformed_service_response'}})));
       } else await this.refresh(first);
     } catch(error) {
-      if(error instanceof WaitFailure){
-        try{await this.persistWaits(error.waits,error.expired);}
-        catch(cause){for(const job of jobs)failed?.add(job.key);throw cause;}
-      }else{
-        for(const job of jobs)failed?.add(job.key);
-        const cause=error instanceof PublicationFailure?error.error:error;
-        await this.retryJobs(error instanceof PublicationFailure && !isBackendFailure(cause)?error.jobs:jobs,cause);
-      }
+      try{
+        if(error instanceof WaitFailure)await this.recoverWaitFailure(error,jobs);
+        else{
+          const cause=error instanceof PublicationFailure?error.error:error;
+          await this.retryJobs(error instanceof PublicationFailure && !isBackendFailure(cause)?error.jobs:jobs,cause);
+        }
+      }finally{for(const job of jobs)if(!this.dispatchSettled?.has(job.key))failed?.add(job.key);}
     } finally {
       await this.releaseLeases(this.store,jobs);
       this.traceRepair('dispatch_complete',first);
@@ -2247,7 +2266,8 @@ export class RepositoryState extends DurableObject<Env> {
     } finally {
       try {
         const omit=this.excludeRepairKeys(failed);
-        const row=(await this.store.exec<any>('SELECT MIN(MAX(due,lease_until)) AS due FROM jobs WHERE 1=1'+omit.sql,...omit.bindings)).one();
+        const now=Date.now(),where=omit.sql?' WHERE (due>? OR lease_until>? OR (1=1'+omit.sql+'))':'';
+        const row=(await this.store.exec<any>('SELECT MIN(MAX(due,lease_until)) AS due FROM jobs'+where,...(omit.sql?[now,now,...omit.bindings]:[]))).one();
         // Degraded mode writes nothing, not even the next alarm; the cron tick
         // keeps expiring rows until a probe restores writes.
         if (row.due && !this.degraded && !this.migrationHeld()) {

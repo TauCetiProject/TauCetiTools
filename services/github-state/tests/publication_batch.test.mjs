@@ -181,7 +181,7 @@ for(const unrelated of [false,true])test(`a failed batch is not fetched again or
   assert.equal(jobs.length,100);for(const j of jobs){const n=JSON.parse(j.query).args.number;assert.equal(j.attempt,0);assert.equal(j.lease_id,null);if(n>=102)assert.ok(j.due<=Date.now());}
   if(unrelated)assert.equal(await f.state.complete(other),true,'unrelated useful work still progresses');
   assert.ok(alarms.every(at=>at>Date.now()+10000),'failed tails must not drive a near-immediate alarm loop');
-  assert.equal(alarms.length,unrelated?1:0,'other scheduled work retains its alarm; an excluded-only tail does not add one');
+  assert.equal(alarms.length,1,'settled collections retain their ordinary future refresh alarm');
   recovering=true;await f.state.runAlarm();assert.equal(calls,2,'ordinary next-turn continuation retries without an operator reset');
  }finally{await f.close();}
 });
@@ -274,6 +274,43 @@ test('persistent backend publication failure keeps group exponential retry inste
   }
   assert.equal((await f.store.exec("SELECT COUNT(*) n FROM collections WHERE complete=1")).one().n,0);
  }finally{Date.now=now;await f.close();}
+});
+
+test('a backend error saving one middle capacity wait preserves it and backs off the unfinished tail once',async()=>{
+ const f=await fixture();try{
+  await seed(f,100);const until=Date.now()+300000,requested=Date.now()-3600000;await f.store.exec('UPDATE jobs SET requested_at=?',requested);
+  const calls=upstream(f,async jobs=>jobs.map(j=>j.query.args.number===103?{deferred:true,category:'capacity',retry_at:until}:{api:'graphql',data:[]}));
+  let injected=false;f.state.store=intercept(f.store,async(store,sql,args)=>{
+   if(injected||!sql.startsWith('UPDATE jobs SET lease_id=NULL')||!sql.includes('CASE key')||!args.includes(key(103)))return;
+   injected=true;if(store.backend==='postgres'){await store.exec("SELECT set_config('statement_timeout','20ms',true)");await store.exec('SELECT pg_sleep(0.1)');}
+   else await store.exec('SELECT * FROM fixture_missing_backend_table');
+  });
+  f.state.expire=async()=>({});f.state.maintenance=async()=>{};f.state.startStorageMaintenance=()=>{};f.state.ctx.storage.getAlarm=async()=>null;
+  const alarms=[];f.state.setAlarm=async at=>alarms.push(at);
+  await f.state.runAlarm();assert.equal(injected,true);assert.equal(calls(),1);
+  const rows=(await f.store.exec('SELECT * FROM jobs')).toArray();assert.equal(rows.length,100);
+  for(const row of rows){const n=JSON.parse(row.query).args.number;assert.equal(row.lease_id,null);
+   if(n<103){assert.equal(row.attempt,0);assert.equal(row.wait_reason,null);assert.equal(await f.state.complete(query(n)),true);}
+   else if(n===103){assert.equal(row.attempt,0);assert.equal(row.due,until);assert.equal(row.wait_reason,'capacity');assert.equal(row.requested_at,requested);}
+   else{assert.equal(row.attempt,1);assert.ok(row.due>Date.now());assert.equal(row.wait_reason,'transport_or_parser');assert.equal(row.requested_at,requested);}
+  }
+  assert.equal(f.state.repairMetrics.summary().repair_hour.find(x=>x.event==='capacity_wait').n,1);
+  assert.ok(alarms.some(at=>at>Date.now()+10000&&at<until),'existing backend retry deadline retains its alarm');
+ }finally{await f.close();}
+});
+
+test('a committed newer dirty generation remains eligible after another chunk fails',async()=>{
+ const f=await fixture();try{
+  await seed(f,6);upstream(f,async jobs=>{
+   await f.store.exec('UPDATE jobs SET generation=generation+1,dirty=1 WHERE key=?',key(100));
+   return jobs.map(()=>({api:'graphql',data:[]}));
+  });
+  const tx=f.store.transaction.bind(f.store);let chunks=0;
+  f.store.transaction=(apply,purpose)=>{if(purpose==='publication'&&++chunks===2)throw Error('unclassified chunk failure');return tx(apply,purpose);};
+  const failed=new Set();await f.state.dispatch(await f.state.claim(await f.state.nextJob()),undefined,undefined,failed);
+  assert.deepEqual([...failed].sort(),[key(104),key(105)]);
+  const next=await f.state.nextJob(failed);assert.equal(next.key,key(100));assert.equal(next.dirty,1);assert.ok(next.generation>next.start_generation);
+ }finally{await f.close();}
 });
 
 test('turn finalization preserves an earlier alarm created during maintenance',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{

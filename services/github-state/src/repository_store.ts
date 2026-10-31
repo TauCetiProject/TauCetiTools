@@ -42,7 +42,8 @@ const MEMBER_ROLLBACK=Symbol.for('tauceti.repository.member_rollback');
 const BACKEND_FAILURE=Symbol.for('tauceti.repository.backend_failure');
 export const canReplayPublication=(error:unknown):boolean=>Boolean(error && typeof error==='object' && (error as any)[MEMBER_ROLLBACK]===true);
 export const isBackendFailure=(error:unknown):boolean=>Boolean(error && typeof error==='object' && (error as any)[BACKEND_FAILURE]===true) && !canReplayPublication(error);
-const markMemberRollback=(error:unknown):void=>{if(error && typeof error==='object')try{Object.defineProperty(error,MEMBER_ROLLBACK,{value:true});}catch{}};
+const markMemberRollback=(error:unknown):void=>{if(error && typeof error==='object')try{Object.defineProperty(error,MEMBER_ROLLBACK,{value:true,configurable:true});}catch{}};
+const clearMemberRollback=(error:unknown):void=>{if(error && typeof error==='object')try{delete (error as any)[MEMBER_ROLLBACK];}catch{}};
 const markBackendFailure=(error:unknown):void=>{if(error && typeof error==='object')try{Object.defineProperty(error,BACKEND_FAILURE,{value:true});}catch{}};
 const memberApplyError=(error:unknown):boolean=>error instanceof Error && !(error instanceof StoreFenced) && (!(error instanceof StoreUnavailable) || Boolean(error.sqlstate && /^(22|23|54)/.test(error.sqlstate)));
 const sqliteMemberError=(error:any):boolean=>{
@@ -82,7 +83,7 @@ export class SQLiteStore implements RepositoryStore {
       let result:T,error:unknown,failed=false;
       const scoped=new SQLiteStore(this.storage,this.sql,true,this.generation,this.context,this.lane);let applyError:unknown;
       const execute=async()=>{try{result=await this.storage.transaction(async()=>{this.fence();try{return await apply(scoped);}catch(cause){applyError=cause;throw cause;}});}catch(cause){
-        failed=true;error=cause;
+        failed=true;error=cause;clearMemberRollback(cause);
         if(cause===applyError && memberApplyError(cause) && (scoped.queryFailure===undefined || sqliteMemberError(scoped.queryFailure)))markMemberRollback(cause);
         if(!canReplayPublication(cause))markBackendFailure(cause);
       }};
@@ -349,13 +350,14 @@ export class PostgresStore implements RepositoryStore {
       },connection);
       if(committed.command!=='COMMIT'){connection.reason='commit_rejected';connection.code='25P02';throw new StoreUnavailable('25P02');}failed=false;return result;
     }catch(error){
-      finishPhase();
+      finishPhase();clearMemberRollback(error);
       if(error instanceof StoreFenced)connection.reason='fenced';else connection.reason??='application';
       let rolledBack=false;
       if(!connection.closed && !connection.error){const rollbackStarted=Date.now();let timer:ReturnType<typeof setTimeout>|undefined;try{
         const rollback=await Promise.race([client.query('ROLLBACK'),new Promise<void>(resolve=>{timer=setTimeout(()=>{connection.cleanup='rollback_timeout';fail('08006','rollback_timeout');resolve();},2000);})]);rolledBack=rollback?.command==='ROLLBACK';
       }catch{connection.cleanup='rollback_error';fail();}finally{if(timer)clearTimeout(timer);rollback_ms=Date.now()-rollbackStarted;}}
       if(rolledBack && connection.phase==='apply' && !connection.error && !connection.commitUncertain && memberApplyError(error))markMemberRollback(error);
+      if(connection.error)markBackendFailure(error);
       throw error;
     }finally{
       finishPhase();

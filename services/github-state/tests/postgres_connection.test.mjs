@@ -284,3 +284,10 @@ test('publication replay rejects transport and unknown commit but allows rolled-
  const timeout=fixture([{phase:'apply',stalled:true}]);try{await timeout.store.transaction(write);}catch(e){assert.equal(canReplayPublication(e),false);assert.equal(isBackendFailure(e),true);}
  const fence=fixture([{fenced:true}]);try{await fence.store.transaction(write);}catch(e){assert.equal(canReplayPublication(e),false);assert.equal(isBackendFailure(e),true);}
 });
+
+test('a reused application error reflects the current rollback outcome after connection failure',async()=>{
+ const error=Error('member error');
+ const healthy=fixture();await assert.rejects(healthy.store.transaction(()=>{throw error;}),e=>e===error);assert.equal(canReplayPublication(error),true);
+ const lost=fixture([{phase:'rollback',code:'08006',severity:'FATAL'}]);await assert.rejects(lost.store.transaction(()=>{throw error;}),e=>e===error);assert.equal(canReplayPublication(error),false);assert.equal(isBackendFailure(error),true);
+ const recovered=fixture();await assert.rejects(recovered.store.transaction(()=>{throw error;}),e=>e===error);assert.equal(canReplayPublication(error),true);assert.equal(isBackendFailure(error),false);
+});

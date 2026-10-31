@@ -104,14 +104,14 @@ test('native Workers SQLite routes a full batch with exactly 100 statement bindi
  }finally{await mf.dispose();}
 });
 
-test('native Workers SQLite excludes a failed full batch from selection and immediate rearming',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
+for(const failure of ['backend','unclassified'])test('native Workers SQLite retains retry alarms without failed-tail spinning: '+failure,{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
  const mf=await runtime(async()=>Response.json([]),{},{repositoryAlarms:false,repositoryExtension:`async fetch(req){
   if(new URL(req.url).pathname==='/fixture/failed-turn'){
    await this.store.exec('DELETE FROM jobs');
    await this.enqueueMany(Array.from({length:100},(_,i)=>({q:{repository:'org/repo',operation:'issue_comments',args:{number:i+100}},priority:5})),true);
    let requests=0,alarms=0;this.setAlarm=async()=>{alarms++;};this.expire=async()=>({});this.maintenance=async()=>{};this.startStorageMaintenance=()=>{};
    const bad='issue_comments:{"number":100}',wrap=target=>new Proxy(target,{get(target,prop){
-    if(prop==='transaction')return(apply,purpose)=>target.transaction(tx=>apply(wrap(tx)),purpose);
+    if(prop==='transaction')return(apply,purpose)=>{if('${failure}'==='unclassified'&&purpose==='publication')throw Error('unclassified publication failure');return target.transaction(tx=>apply(wrap(tx)),purpose);};
     if(prop==='exec')return async(sql,...args)=>{if(sql.includes('INTO collections')&&args.includes(bad))await target.exec('SELECT * FROM fixture_missing_backend_table');return target.exec(sql,...args);};
     const value=Reflect.get(target,prop,target);return typeof value==='function'?value.bind(target):value;
    }});this.store=wrap(this.store);
@@ -123,6 +123,6 @@ test('native Workers SQLite excludes a failed full batch from selection and imme
  }`});
  try{
   const ns=await mf.getDurableObjectNamespace('REPOSITORIES'),stub=ns.get(ns.idFromName(repository.id));await send(stub,'/configure',{repository:repository.name});
-  const response=await send(stub,'/fixture/failed-turn',{});assert.equal(response.status,200);assert.deepEqual(await response.json(),{requests:1,alarms:0,attempts:100,leases:0});
+  const response=await send(stub,'/fixture/failed-turn',{});assert.equal(response.status,200);assert.deepEqual(await response.json(),{requests:1,alarms:1,attempts:failure==='backend'?100:2,leases:0});
  }finally{await mf.dispose();}
 });

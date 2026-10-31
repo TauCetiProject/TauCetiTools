@@ -202,16 +202,19 @@ takes precedence over backend classification and still isolates healthy siblings
 Committed or deferred outcomes remain protected by key/token checks; failed
 cleanup retains ordinary lease-expiry recovery. Completion metrics merge after commit; an uncertain commit
 can undercount them, so fixed durable coverage remains the acceptance evidence.
-Failed-group members are excluded from leader/companion selection for the rest
-of that alarm turn and from its next-alarm calculation. A failed tail cannot
-repeatedly refetch in the same turn or drive a 100-ms alarm loop. Existing
-cron/tick/retry continuation starts a fresh turn; no persisted cooldown or new
-timer is added, and unrelated work remains eligible.
+Unsettled failed-tail members are excluded from leader/companion selection for
+the rest of that alarm turn. Already committed new generations and API transitions
+remain eligible. Next-alarm calculation excludes immediately due failed tails,
+while retaining future retry/lease deadlines and earlier incoming alarms. A
+failed tail cannot repeatedly refetch in the same turn or drive its own 100-ms
+alarm loop. Existing cron/tick/retry continuation starts a fresh turn; no
+persisted cooldown or new timer is added, and unrelated work remains eligible.
 Compatible quota/routing/retry bookkeeping also uses bounded bulk statements,
 preserving per-member deadlines, attempt increments and wait reasons. This changes
 transaction cost, not the quota owner's decisions. A failed bookkeeping commit
 retries its captured decision once, preserving capacity semantics and the exact
-deadline rather than replacing it with a transport penalty. See
+deadline. If its cause is a backend failure, the same recovery admission applies
+ordinary backoff to the still-owned tail after saving those exact decisions. See
 [publication measurements](PUBLICATION-PERFORMANCE.md).
 
 Compact surveys immediately include exact-head commit statuses received by webhook,
