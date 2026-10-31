@@ -74,6 +74,7 @@ test('two repair owners and a runner-capacity scan progress through shared real 
   }
   console.log(JSON.stringify({fixture:'shared_installation',backend:process.env.TEST_POSTGRES_URL?'postgres':'sqlite',elapsed_ms:Date.now()-started,completions:complete,completion_ms:completionMs,launches:owners.map(f=>f.state.repairCoordinator.snapshot().launches),notifications:repos.map(repo=>installation.received.filter(id=>id===repo.id).length),alarm_counts:alarmCounts,runner_requests:capacity.requests}));
   assert.equal(installation.db.prepare('SELECT COUNT(*) n FROM reservations').get().n,0);
+  assert.ok(installation.received.length<=41,'one release cannot broadcast to multiple recipients:32repairs+5runner requests+4held reservations');
  }finally{
   closing=true;clearTimeout(timer);for(const value of alarmTimers.values())clearTimeout(value);for(const gate of held)gate.resolve();
   await Promise.allSettled(alarmWork);

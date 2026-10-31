@@ -44,11 +44,14 @@ export function collectionJoin(store:RepositoryStore):string {return store.backe
 // confirms rollback of a healthy apply transaction. The symbol survives test
 // bundles without exposing diagnostics or changing public error messages.
 const MEMBER_ROLLBACK=Symbol.for('tauceti.repository.member_rollback');
+const MEMBER_DATA=Symbol.for('tauceti.repository.member_data');
 const BACKEND_FAILURE=Symbol.for('tauceti.repository.backend_failure');
 export const canReplayPublication=(error:unknown):boolean=>Boolean(error && typeof error==='object' && (error as any)[MEMBER_ROLLBACK]===true);
+export const isMemberDataFailure=(error:unknown):boolean=>canReplayPublication(error) && (error as any)[MEMBER_DATA]===true;
 export const isBackendFailure=(error:unknown):boolean=>Boolean(error && typeof error==='object' && (error as any)[BACKEND_FAILURE]===true) && !canReplayPublication(error);
 const markMemberRollback=(error:unknown):void=>{if(error && typeof error==='object')try{Object.defineProperty(error,MEMBER_ROLLBACK,{value:true,configurable:true});}catch{}};
-const clearMemberRollback=(error:unknown):void=>{if(error && typeof error==='object')try{delete (error as any)[MEMBER_ROLLBACK];}catch{}};
+const markMemberData=(error:unknown):void=>{if(error && typeof error==='object')try{Object.defineProperty(error,MEMBER_DATA,{value:true,configurable:true});}catch{}};
+const clearMemberRollback=(error:unknown):void=>{if(error && typeof error==='object')try{delete (error as any)[MEMBER_ROLLBACK];delete (error as any)[MEMBER_DATA];}catch{}};
 export const markBackendFailure=(error:unknown):void=>{if(error && typeof error==='object')try{Object.defineProperty(error,BACKEND_FAILURE,{value:true});}catch{}};
 const memberApplyError=(error:unknown):boolean=>error instanceof Error && !(error instanceof StoreFenced) && (!(error instanceof StoreUnavailable) || Boolean(error.sqlstate && /^(22|23|54)/.test(error.sqlstate)));
 const sqliteMemberError=(error:any):boolean=>{
@@ -90,7 +93,10 @@ export class SQLiteStore implements RepositoryStore {
       const scoped=new SQLiteStore(this.storage,this.sql,true,this.generation,this.context,this.lane);let applyError:unknown;
       const execute=async()=>{try{result=await this.storage.transaction(async()=>{this.fence();try{return await apply(scoped);}catch(cause){applyError=cause;throw cause;}});}catch(cause){
         failed=true;error=cause;clearMemberRollback(cause);
-        if(cause===applyError && memberApplyError(cause) && (scoped.queryFailure===undefined || sqliteMemberError(scoped.queryFailure)))markMemberRollback(cause);
+        if(cause===applyError && memberApplyError(cause) && (scoped.queryFailure===undefined || sqliteMemberError(scoped.queryFailure))){
+          markMemberRollback(cause);
+          if(cause===scoped.queryFailure && sqliteMemberError(cause))markMemberData(cause);
+        }
         if(!canReplayPublication(cause))markBackendFailure(cause);
       }};
       // Input gating also protects native SQLite recovery/status operations
@@ -174,7 +180,7 @@ interface SessionIdentity {pid:number;started_us:string;token:string}
 type SessionCleanup='terminated'|'already_ended'|'unconfirmed'|'expired';
 interface DiscardedSession extends SessionIdentity {discardedAt:number;transaction_id:string}
 type ConnectionFailure='client_timeout'|'server_error'|'driver_error'|'connection_lost'|'connect_timeout'|'rollback_timeout'|'application'|'fenced'|'commit_rejected';
-interface ConnectionState {closed:boolean;ending:boolean;error?:StoreUnavailable;phase:TransactionPhase;code?:string;reason?:ConnectionFailure;commitUncertain?:boolean;cleanup?:'rollback_timeout'|'rollback_error';session?:SessionIdentity;ownerAttempted?:boolean;abort?:(error:StoreUnavailable)=>void}
+interface ConnectionState {closed:boolean;ending:boolean;error?:StoreUnavailable;dataError?:StoreUnavailable;phase:TransactionPhase;code?:string;reason?:ConnectionFailure;commitUncertain?:boolean;cleanup?:'rollback_timeout'|'rollback_error';session?:SessionIdentity;ownerAttempted?:boolean;abort?:(error:StoreUnavailable)=>void}
 const sqlState=(code:unknown):string|undefined=>typeof code==='string' && /^[0-9A-Z]{5}$/.test(code)?code:undefined;
 const serverCode=(error:any):string|undefined=>['ERROR','FATAL','PANIC'].includes(error?.severity)?sqlState(error?.code):undefined;
 // A client-side timeout does not cancel the active PostgreSQL query. Queuing
@@ -223,7 +229,9 @@ export class PostgresStore implements RepositoryStore {
       if(code!=='P0308'){this.diagnostics.queries++;if(unusableConnection(code) || code?.startsWith('28') || !serverError){this.diagnostics.connections++;this.diagnostics.lastConnection=Date.now();}}
       // Driver errors can contain connection strings or parameter data.
       if(code==='P0308')throw new StoreFenced();
-      throw new StoreUnavailable(code);
+      const unavailable=new StoreUnavailable(code);
+      if(connection && serverError && code && /^(22|23|54)/.test(code))connection.dataError=unavailable;
+      throw unavailable;
     }
   }
   async exec<T=any>(sql:string,...bindings:Bind[]):Promise<Rows<T>> {
@@ -364,7 +372,10 @@ export class PostgresStore implements RepositoryStore {
       if(!connection.closed && !connection.error){const rollbackStarted=Date.now();let timer:ReturnType<typeof setTimeout>|undefined;try{
         const rollback=await Promise.race([client.query('ROLLBACK'),new Promise<void>(resolve=>{timer=setTimeout(()=>{connection.cleanup='rollback_timeout';fail('08006','rollback_timeout');resolve();},2000);})]);rolledBack=rollback?.command==='ROLLBACK';
       }catch{connection.cleanup='rollback_error';fail();}finally{if(timer)clearTimeout(timer);rollback_ms=Date.now()-rollbackStarted;}}
-      if(rolledBack && connection.phase==='apply' && !connection.error && !connection.commitUncertain && memberApplyError(error))markMemberRollback(error);
+      if(rolledBack && connection.phase==='apply' && !connection.error && !connection.commitUncertain && memberApplyError(error)){
+        markMemberRollback(error);
+        if(error===connection.dataError)markMemberData(error);
+      }
       if(connection.error)markBackendFailure(error);
       throw error;
     }finally{

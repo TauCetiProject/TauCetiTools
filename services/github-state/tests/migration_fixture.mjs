@@ -30,11 +30,11 @@ function bucket(pageSize=2){
   async list({prefix='',cursor,startAfter,limit=1000}={}){assert.ok(limit<=1000,'R2 list limit exceeds the platform maximum');const keys=[...objects.keys()].filter(k=>k.startsWith(prefix) && (!startAfter || k>startAfter)).sort();const start=Number(cursor || 0),end=start+Math.min(limit,pageSize);return {objects:keys.slice(start,end).map(k=>meta(k,objects.get(k))),truncated:end<keys.length,cursor:String(end)};},
  };
 }
-async function fixture(db=new DatabaseSync(':memory:'),archive=bucket(),overrides={}){
+async function fixture(db=new DatabaseSync(':memory:'),archive=bucket(),overrides={},RepositoryClass=RepositoryState){
  let alarm=null;const ready=[];
  const ctx={waitUntil(work){ready.push(Promise.resolve(work));},id:{toString:()=>'source-object'},blockConcurrencyWhile(fn){const pending=fn();ready.push(pending);return pending;},storage:{sql:{databaseSize:1024,exec(sql,...bindings){let rows=[];if(!bindings.length && sql.includes(';'))db.exec(sql);else{const st=db.prepare(sql);if(st.columns().length)rows=st.all(...bindings);else st.run(...bindings);}return {toArray:()=>rows,one:()=>rows[0]};}},async transaction(fn){db.exec('SAVEPOINT async_tx');try{const result=await fn();db.exec('RELEASE async_tx');return result;}catch(error){db.exec('ROLLBACK TO async_tx');db.exec('RELEASE async_tx');throw error;}},transactionSync(fn){db.exec('SAVEPOINT tx');try{const v=fn();db.exec('RELEASE tx');return v;}catch(e){db.exec('ROLLBACK TO tx');db.exec('RELEASE tx');throw e;}},sync:async()=>{},getCurrentBookmark:async()=>'authoritative-bookmark',setAlarm:async v=>{alarm=v;},getAlarm:async()=>alarm}};
  const env={INSTALLATIONS:{idFromName:id=>id,get:()=>({fetch:async()=>Response.json({deployment_id:'test-deployment',repository_inflight:[],hour:[]})})},ARCHIVE:archive,ALLOWED_REPOSITORIES:JSON.stringify([repo]),CF_VERSION:{id:'test-deployment'},MIGRATION_ENVIRONMENT:'test',...overrides};
- const state=new RepositoryState(ctx,env);await Promise.all(ready);
+ const state=new RepositoryClass(ctx,env);await Promise.all(ready);
  if(!(await state.meta('repository')))(await state.setMeta('repository',repo));
  env.REPOSITORIES={idFromName:x=>x,get:()=>({fetch:(url,options)=>state.fetch(new Request(url,options))})};
  const request=(path,body)=>state.fetch(new Request('https://internal'+path,{method:'POST',body:JSON.stringify(body)}));

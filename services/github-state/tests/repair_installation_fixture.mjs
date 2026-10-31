@@ -3,9 +3,9 @@ import {build} from 'esbuild';
 const bundle=await build({entryPoints:['src/installation.ts'],bundle:true,platform:'node',format:'esm',write:false,plugins:[{
  name:'context',setup(b){b.onResolve({filter:/^cloudflare:workers$/},()=>({path:'context',namespace:'fixture'}));b.onLoad({filter:/.*/,namespace:'fixture'},()=>({contents:'export class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}}',loader:'js'}));}
 }]});
-const {InstallationScheduler}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text+'\n//# sourceURL=repair-quota-fixture.mjs').toString('base64'));
+export const {InstallationScheduler}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text+'\n//# sourceURL=repair-quota-fixture.mjs').toString('base64'));
 const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
-export function installationFixture(){
+export function installationFixture(Scheduler=InstallationScheduler){
  const db=new DatabaseSync(':memory:'),values=new Map(),background=[],received=[];
  const repos=Array.from({length:8},(_,i)=>({id:String(100+i),name:'org/repo'+i,installation:'200'}));
  values.set('token',{token:'fixture-token',expires:Date.now()+3600000});
@@ -16,7 +16,7 @@ export function installationFixture(){
  const env={ALLOWED_REPOSITORIES:JSON.stringify(repos),ARCHIVE:{get:async()=>null},REPOSITORIES:{idFromName:id=>id,get:id=>({fetch:async(_url,init)=>{
   received.push(id);if(f.notify)await f.notify(id,JSON.parse(init.body));return Response.json({ok:true});
  }})}};
- const scheduler=new InstallationScheduler(ctx,env);
+ const scheduler=new Scheduler(ctx,env);
  const f={db,ctx,env,scheduler,repos,received,background,gates:[],requests:[],notify:undefined,
   async close(){for(const g of f.gates)g.resolve();await Promise.allSettled(f.requests);for(let i=0;i<background.length;i++)await background[i].catch(()=>{});db.close();}};
  return f;

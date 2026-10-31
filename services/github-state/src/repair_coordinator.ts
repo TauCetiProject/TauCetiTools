@@ -44,6 +44,8 @@ export class RepairCoordinator {
   private newQuantumAllowed=false;
   private capacityPending?:number;
   private capacityEpoch=0;
+  private capacityBudgetReady=false;
+  private memberPending=false;
   private readonly stats={since:Date.now(),turns:0,external_turns:0,launches:0,selections:0,maintenance_continuations:0,max_active_groups:0};
   private readonly slotMilliseconds:Record<string,number>={};
   constructor(private hooks:Hooks) {}
@@ -60,7 +62,7 @@ export class RepairCoordinator {
       quantum:{launches:this.current.launches,progress:this.current.progress,data_progress:this.current.dataProgress,member_retries:this.current.memberRetries,retired:this.current.retired},stopped:this.stopped};
   }
   wake(external=false):Promise<void> {
-    if(this.closed && !external && !this.external && !this.newQuantumAllowed && this.capacityPending===undefined)return Promise.resolve();
+    if(this.closed && !external && !this.external && !this.newQuantumAllowed && this.capacityPending===undefined && !this.memberPending)return Promise.resolve();
     this.requested=true;this.external ||= external;
     if(this.flight)return this.flight;
     if(this.stopped || this.hooks.held())return Promise.resolve();
@@ -75,8 +77,8 @@ export class RepairCoordinator {
     });
     this.flight=flight;this.hooks.lifetime(flight);return flight;
   }
-  capacityWake():Promise<void>{this.wakeSequence++;return this.resumeCapacity();}
-  resumeCapacity():Promise<void>{this.capacityPending=this.capacityEpoch;return this.wake();}
+  capacityWake(restrictionReleased=false):Promise<void>{this.wakeSequence++;return this.resumeCapacity(restrictionReleased);}
+  resumeCapacity(restrictionReleased=false):Promise<void>{this.capacityPending=this.capacityEpoch;this.capacityBudgetReady ||= restrictionReleased;return this.wake();}
   settled(jobs:RepairIdentity[],effect:RepairEffect='none'):void {
     for(const job of jobs) {
       const actual=this.owned.get(job.key);
@@ -96,7 +98,8 @@ export class RepairCoordinator {
     }
     if(effect==='progress'){this.current.progress+=jobs.length;this.current.dataProgress+=jobs.length;}
     if(effect==='member-retry')this.current.memberRetries+=jobs.length;
-    if(effect==='progress' || effect==='route' || effect==='member-retry'){if(this.closed)this.newQuantumAllowed=true;void this.wake();}
+    if(effect==='member-retry'){this.memberPending=true;void this.wake();}
+    if(effect==='progress' || effect==='route'){if(this.closed)this.newQuantumAllowed=true;void this.wake();}
   }
   excludePath(job:RepairIdentity):void {
     const paths=this.current.paths.get(job.key) || new Set<string>();
@@ -141,9 +144,19 @@ export class RepairCoordinator {
     this.requested=false;
     const external=this.external;this.external=false;
     this.stats.turns++;if(external)this.stats.external_turns++;
+    try {
+    if(this.memberPending){
+      this.memberPending=false;
+      if(this.closed && !external && !this.newQuantumAllowed && this.capacityPending===undefined){
+        // A member retry does not establish that a quota restriction cleared.
+        if(!await this.hooks.eligible(this.current,this.owned))return;
+        this.newQuantumAllowed=true;
+      }
+    }
     if(external || this.closed && this.newQuantumAllowed) {
       // Ordinary wakes cannot inherit an exclusion past a real retry deadline.
-      this.current=quantum();this.boundary=false;this.closed=false;this.newQuantumAllowed=false;
+      const failed=external?new Set<string>():this.current.failed;
+      this.current={...quantum(),failed};this.boundary=false;this.closed=false;this.newQuantumAllowed=false;
     }
     if(this.capacityPending!==undefined){
       // A release may arrive during an in-flight selection that then closes
@@ -154,7 +167,8 @@ export class RepairCoordinator {
         for(const [path,epoch] of paths)if(epoch<=cutoff){paths.delete(path);cleared++;}
         if(!paths.size)this.current.capacityPaths.delete(key);
       }
-      if(cleared && this.current.launches>=this.hooks.dispatches){
+      const renew=cleared>0 || this.capacityBudgetReady;this.capacityBudgetReady=false;
+      if(renew && this.current.launches>=this.hooks.dispatches){
         // A capacity signal can renew its finite attempt budget, but says
         // nothing about backend failures, primary waits or API restart paths.
         const prior=this.current;
@@ -163,7 +177,6 @@ export class RepairCoordinator {
       }
       this.closed=false;
     }
-    try {
       if(external)await this.hooks.maintenance(true,'before');
       while(!this.stopped && !this.hooks.held() && !this.full) {
         const q=this.current;

@@ -204,6 +204,10 @@ error committed to a future ordinary retry can advance independent ready work
 across a quantum; its retry settlement is recorded separately from data/checkpoint
 progress and completed coverage. Backend failures, unknown outcomes and
 unclassified unavailable responses do not earn this continuation credit.
+Explicit data validation uses additive `failure_kind` metadata; a malformed or
+truncated HTTP body and a generic JavaScript exception earn no credit. Replay
+eligibility is broader than continuation eligibility. Failed untouched tails
+remain excluded across internal chains until an ordinary external wake.
 Quota deferrals retain their exact deadlines and carry additive
 installation/pool/query scope. Unknown
 scope retains ordinary bounded selection. Only a known installation reservation
@@ -216,6 +220,15 @@ Capacity wakes preserve unrelated failed-tail and API-path records even after
 a turn closes. They clear only capacity rejections known when the wake arrived;
 a newer rejection cannot be cleared by an older pending hint. Partial slot
 occupancy retains the owner-reported deadline without repeated empty maintenance.
+The existing runner-capacity scan also registers bounded local wake recipients
+after a real installation-reservation rejection. Its actual retry deadline stays
+unchanged. Once that deadline passes, a still-full installation retains the
+eligible registration rather than issuing another futile request and moving the
+retry deadline forward. Each release wakes at most one eligible recipient per
+released slot, in registration order; local recipients need no outgoing callback.
+The existing timed fallback remains, failed optional availability checks fall
+back to the real request, and every request still acquires its ordinary quota
+reservation. This adds no reservation queue, grant or ordinary-request preflight.
 
 Each repair archive/installation transport hop has a conservative fifteen-minute
 bound, independent of total history size or queue age. The installation owner's

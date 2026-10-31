@@ -3,7 +3,7 @@ import { blocksRepairs, readMigration } from './migration';
 import { DurableObject } from 'cloudflare:workers';
 import { Env, json, Repository, repositories, stub, parseGitHub, digest } from './protocol';
 import { INSTALLATION_HOP_MS } from './repair_io';
-import { Recipe, extract, recipes, batchQuery, batchLimit } from './catalog';
+import { Recipe, extract, recipes, batchQuery, batchLimit, UpstreamDataError } from './catalog';
 import { settings } from './reconciliation';
 import { AccountingMetrics } from './monitoring';
 import { classify, log, requestId } from './storage';
@@ -11,6 +11,7 @@ import { classify, log, requestId } from './storage';
 class QuotaDeferred extends Error {
   constructor(readonly result:any) { super('GitHub quota deferred'); }
 }
+type CapacityWaiter={repository:Repository}|{readyAt:number,wake:()=>void};
 
 export class InstallationScheduler extends DurableObject<Env> {
   private tokenFlight?:Promise<string>;
@@ -21,9 +22,10 @@ export class InstallationScheduler extends DurableObject<Env> {
   private accountingFailure:any;
   private accountingPreparationFailure:any;
   private preparedAccounting:any;
-  private capacityWaiters=new Map<string,Repository>();
+  private capacityWaiters=new Map<string,CapacityWaiter>();
   private capacityNotifying=new Set<string>();
   private capacityReleaseHints=0;
+  private capacityWakeStats={scope:'installation_instance_since_restart',repository:0,runner:0};
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS budgets(resource TEXT PRIMARY KEY,remaining INTEGER,lim INTEGER,reset INTEGER,blocked INTEGER DEFAULT 0);
@@ -193,7 +195,7 @@ export class InstallationScheduler extends DurableObject<Env> {
     const request_id=/^[A-Za-z0-9-]{1,64}$/.test(input.request_id || '')?input.request_id:crypto.randomUUID();
     const reason=error instanceof Error && error.message==='upstream_identity_unavailable'?'upstream_identity_unavailable':'malformed_upstream_response';
     try {log('upstream_response_unavailable',{request_id,operation,api,reason});}catch {}
-    return {unavailable:true,reason,request_id};
+    return {unavailable:true,reason,request_id,failure_kind:error instanceof UpstreamDataError?'member':'unknown'};
   }
   async read(input: any): Promise<Response> {
     if (input.nested) return this.threadPage(input);
@@ -453,7 +455,9 @@ export class InstallationScheduler extends DurableObject<Env> {
             try {return await this.http(path,token,'GET',undefined,'runner_capacity','core');}
             catch(error) {
               if(!(error instanceof QuotaDeferred) || error.result.category!=='capacity' || Date.now()+250>deadline)throw error;
-              await new Promise(resolve=>setTimeout(resolve,250));
+              if(error.result.scope?.kind==='installation' && Number.isSafeInteger(error.result.retry_at)){
+                if(!await this.waitRunnerCapacity(error.result.retry_at,deadline))throw error;
+              }else await new Promise(resolve=>setTimeout(resolve,250));
             }
           }
         });
@@ -479,22 +483,52 @@ export class InstallationScheduler extends DurableObject<Env> {
     let known:Repository|undefined;
     try{known=repositories(this.env).find(candidate=>candidate.id===repo.id && candidate.installation===repo.installation);}catch{return;}
     if(!known)return;
-    this.capacityWaiters.set(repo.id,known);
+    this.capacityWaiters.set(repo.id,{repository:known});
     // A reservation may have been released between rejection and registration.
     this.notifyCapacityWaiters();
   }
+  private async waitRunnerCapacity(readyAt:number,deadline:number):Promise<boolean> {
+    // One coalesced scan has at most three parallel reads. These local wake
+    // recipients share the same best-effort hints as repository recipients;
+    // they never hold or grant a reservation. Ordinary requests use no probe.
+    const id='runner:'+crypto.randomUUID(),entry={readyAt,wake:()=>{}};
+    let timer:ReturnType<typeof setTimeout>|undefined;
+    try{
+      for(;;){
+        const now=Date.now();if(now>=deadline)return false;
+        const wake=new Promise<void>(resolve=>entry.wake=resolve);
+        this.capacityWaiters.set(id,entry);
+        if(now>=readyAt){
+          // Only after an actual scoped rejection and its real retry deadline.
+          // While still full, retain this eligible registration instead of
+          // manufacturing another250ms deferral that misses every release.
+          try{if(this.ctx.storage.sql.exec<any>('SELECT COUNT(*) n FROM reservations WHERE expires>?',now).one().n<settings(this.env).concurrency)return true;}
+          catch{return true;} // A failed optional hint falls back to real http.
+        }
+        this.notifyCapacityWaiters();
+        const delay=Math.min(deadline-now,now<readyAt?readyAt-now:250);
+        await Promise.race([wake,new Promise<void>(resolve=>{timer=setTimeout(resolve,delay);})]);
+        if(timer!==undefined){clearTimeout(timer);timer=undefined;}
+      }
+    }finally{if(timer!==undefined)clearTimeout(timer);this.capacityWaiters.delete(id);}
+  }
   private notifyCapacityWaiters():void {
-    if(!this.capacityWaiters.size || !this.capacityReleaseHints || this.capacityNotifying.size)return;
+    if(!this.capacityWaiters.size || !this.capacityReleaseHints)return;
     try{
     const active=this.ctx.storage.sql.exec<any>('SELECT COUNT(*) n FROM reservations WHERE expires>?',Date.now()).one().n;
     this.capacityReleaseHints=Math.min(this.capacityReleaseHints,Math.max(0,settings(this.env).concurrency-active));
-    for(const [id,repo] of this.capacityWaiters) {
+    for(const [id,recipient] of this.capacityWaiters) {
       if(!this.capacityReleaseHints)break;
+      if('wake' in recipient){
+        if(recipient.readyAt>Date.now())continue;
+        this.capacityWaiters.delete(id);this.capacityReleaseHints--;this.capacityWakeStats.runner++;recipient.wake();continue;
+      }
       // Hints cannot occupy all of the Worker's outgoing connections. They do
       // not hold quota reservations, and ordinary requests never await them.
-      if(this.capacityNotifying.size)break;
+      if(this.capacityNotifying.size)continue;
       if(this.capacityNotifying.has(id))continue;
-      this.capacityWaiters.delete(id);this.capacityReleaseHints--;this.capacityNotifying.add(id);
+      const repo=recipient.repository;
+      this.capacityWaiters.delete(id);this.capacityReleaseHints--;this.capacityNotifying.add(id);this.capacityWakeStats.repository++;
       const work=Promise.resolve().then(()=>stub(this.env.REPOSITORIES,id).fetch('https://internal/capacity-ready',{
         method:'POST',body:JSON.stringify({installation:repo.installation}),signal:AbortSignal.timeout(1500)
       })).then(async response=>{const ok=response.ok;await response.body?.cancel();if(!ok)throw Error('capacity wake unavailable');}).catch(()=>{
@@ -547,7 +581,7 @@ export class InstallationScheduler extends DurableObject<Env> {
         this.auditFlight ||= this.audit(repo).finally(()=>{this.auditFlight=undefined;});
         await this.auditFlight;return json({ok:true});
       }
-      if (path==='/health') return json({repository_inflight:[...this.repositoryRequests].map(([repository,requests])=>({repository,requests})),redelivery_failure:await this.ctx.storage.get('last_redelivery_failure') || null,reconciliation_version:2,deployment_id:this.env.CF_VERSION?.id,settings:settings(this.env),inflight:this.ctx.storage.sql.exec('SELECT resource,COUNT(*) requests,SUM(cost) reserved_points FROM reservations WHERE expires>? GROUP BY resource',Date.now()).toArray(),budgets:this.ctx.storage.sql.exec('SELECT * FROM budgets').toArray(),quota_types:this.ctx.storage.sql.exec('SELECT * FROM quota_types').toArray(),...(this.preparedAccounting?{...this.preparedAccounting,stale:Date.now()-this.preparedAccounting.at>180000}:this.accountingMetrics.snapshot()),telemetry_failure:this.accountingFailure,accounting_preparation_failure:this.accountingPreparationFailure ?? null});
+      if (path==='/health') return json({capacity_wakes:{...this.capacityWakeStats},repository_inflight:[...this.repositoryRequests].map(([repository,requests])=>({repository,requests})),redelivery_failure:await this.ctx.storage.get('last_redelivery_failure') || null,reconciliation_version:2,deployment_id:this.env.CF_VERSION?.id,settings:settings(this.env),inflight:this.ctx.storage.sql.exec('SELECT resource,COUNT(*) requests,SUM(cost) reserved_points FROM reservations WHERE expires>? GROUP BY resource',Date.now()).toArray(),budgets:this.ctx.storage.sql.exec('SELECT * FROM budgets').toArray(),quota_types:this.ctx.storage.sql.exec('SELECT * FROM quota_types').toArray(),...(this.preparedAccounting?{...this.preparedAccounting,stale:Date.now()-this.preparedAccounting.at>180000}:this.accountingMetrics.snapshot()),telemetry_failure:this.accountingFailure,accounting_preparation_failure:this.accountingPreparationFailure ?? null});
       return json({error:'not_found'},404);
     } catch (error) {
       if (error instanceof QuotaDeferred) {
@@ -556,7 +590,7 @@ export class InstallationScheduler extends DurableObject<Env> {
       }
       const reason=error instanceof Error && error.message==='malformed_upstream_response'?'malformed_upstream_response':classify(error),request_id=requestId(req);
       try {log('installation_operation_failed',{reason,request_id});}catch {}
-      return json({unavailable:true,reason,request_id,...(reason==='malformed_upstream_response'?{}:{retry_at:Date.now()+60000})},503);
+      return json({unavailable:true,reason,request_id,failure_kind:reason==='malformed_upstream_response'?'transport':'unknown',...(reason==='malformed_upstream_response'?{}:{retry_at:Date.now()+60000})},503);
     } finally {if(tracked) {const remaining=(this.repositoryRequests.get(tracked) || 1)-1;if(remaining)this.repositoryRequests.set(tracked,remaining);else this.repositoryRequests.delete(tracked);}}
   }
 }

@@ -2,6 +2,7 @@ import { Query } from './protocol';
 import { comment, issue, pr, status } from './normalize';
 import catalog from '../../../tauceti_tools/github_catalog.json';
 export interface Recipe { operation?: string; api: 'core' | 'graphql'; path: string; query?: string; variables?: Record<string, unknown>; cost: number; connection?: string[]; normalize: (x: any) => any; collection: boolean }
+export class UpstreamDataError extends Error {}
 const PR = catalog.fields.pr;
 const COMMENT = catalog.fields.comment;
 const PAGE = 'pageInfo{hasNextPage endCursor}';
@@ -70,43 +71,43 @@ export function recipes(repository: string, q: Query, cursor?: string, page = 1)
 const numberIdentity=(v:any)=>typeof v==='number'?Number.isSafeInteger(v) && v>0:typeof v==='string' && /^[1-9][0-9]*$/.test(v);
 const identity=(v:any)=>typeof v==='number'?Number.isSafeInteger(v) && v>0:typeof v==='string' && v.length>0;
 function validateLabels(value:any):void {
-  if(!value || !Number.isSafeInteger(value.totalCount) || value.totalCount<0 || !Array.isArray(value.nodes) || value.nodes.some((n:any)=>!n || typeof n.name!=='string') || value.totalCount<value.nodes.length)throw new Error('malformed labels');
-  if(value.totalCount>value.nodes.length)throw new Error('labels overflow');
+  if(!value || !Number.isSafeInteger(value.totalCount) || value.totalCount<0 || !Array.isArray(value.nodes) || value.nodes.some((n:any)=>!n || typeof n.name!=='string') || value.totalCount<value.nodes.length)throw new UpstreamDataError('malformed labels');
+  if(value.totalCount>value.nodes.length)throw new UpstreamDataError('labels overflow');
 }
 function validateRow(recipe:Recipe,row:any):void {
-  if(!row || typeof row!=='object' || Array.isArray(row))throw new Error('malformed collection row');
+  if(!row || typeof row!=='object' || Array.isArray(row))throw new UpstreamDataError('malformed collection row');
   const operation=recipe.operation || '';
   if(recipe.api==='graphql' && ['open_prs','recent_prs','pr_delta','pr','open_issues','recent_issues','issue_delta'].includes(operation))validateLabels(row.labels);
   if(['open_prs','recent_prs','pr_delta','pr'].includes(operation)) {
-    if(!numberIdentity(row.number) || !['OPEN','CLOSED','MERGED','open','closed'].includes(row.state))throw new Error('malformed PR header');
+    if(!numberIdentity(row.number) || !['OPEN','CLOSED','MERGED','open','closed'].includes(row.state))throw new UpstreamDataError('malformed PR header');
   }else if(['open_issues','recent_issues','issue_delta'].includes(operation)) {
-    if(!numberIdentity(row.number) || !['OPEN','CLOSED','open','closed'].includes(row.state))throw new Error('malformed issue header');
-  }else if(operation==='files') {if(typeof row.filename!=='string')throw new Error('malformed file');}
-  else if(operation==='refs') {if(typeof row.ref!=='string')throw new Error('malformed reference');}
+    if(!numberIdentity(row.number) || !['OPEN','CLOSED','open','closed'].includes(row.state))throw new UpstreamDataError('malformed issue header');
+  }else if(operation==='files') {if(typeof row.filename!=='string')throw new UpstreamDataError('malformed file');}
+  else if(operation==='refs') {if(typeof row.ref!=='string')throw new UpstreamDataError('malformed reference');}
   else if(['issue_comments','review_comments','reviews','reactions','workflow_jobs','workflow_runs','checks','review_threads'].includes(operation)) {
-    if(operation!=='reactions' || recipe.api!=='graphql')if(!identity(row.fullDatabaseId ?? row.id))throw new Error('malformed resource identity');
+    if(operation!=='reactions' || recipe.api!=='graphql')if(!identity(row.fullDatabaseId ?? row.id))throw new UpstreamDataError('malformed resource identity');
     if(['issue_comments','review_comments'].includes(operation)) {
-      if(typeof row.body!=='string')throw new Error('malformed comment body');
-      if(recipe.api==='graphql' && (!numberIdentity(row.fullDatabaseId) || row.replyTo && !numberIdentity(row.replyTo.fullDatabaseId)))throw new Error('upstream_identity_unavailable');
+      if(typeof row.body!=='string')throw new UpstreamDataError('malformed comment body');
+      if(recipe.api==='graphql' && (!numberIdentity(row.fullDatabaseId) || row.replyTo && !numberIdentity(row.replyTo.fullDatabaseId)))throw new UpstreamDataError('upstream_identity_unavailable');
     }
-    if(operation==='reactions' && recipe.api==='graphql' && !numberIdentity(row.databaseId))throw new Error('upstream_identity_unavailable');
+    if(operation==='reactions' && recipe.api==='graphql' && !numberIdentity(row.databaseId))throw new UpstreamDataError('upstream_identity_unavailable');
     if(operation==='review_threads') {
-      if(!Array.isArray(row.comments?.nodes) || typeof row.comments?.pageInfo?.hasNextPage!=='boolean' || row.comments.pageInfo.hasNextPage && (typeof row.comments.pageInfo.endCursor!=='string' || !row.comments.pageInfo.endCursor))throw new Error('malformed thread comments');
+      if(!Array.isArray(row.comments?.nodes) || typeof row.comments?.pageInfo?.hasNextPage!=='boolean' || row.comments.pageInfo.hasNextPage && (typeof row.comments.pageInfo.endCursor!=='string' || !row.comments.pageInfo.endCursor))throw new UpstreamDataError('malformed thread comments');
       for(const comment of row.comments.nodes)validateRow({...recipe,operation:'review_comments'},comment);
     }
   }
 }
 function validateScalar(recipe:Recipe,value:any):void {
-  if(!value || typeof value!=='object' || Array.isArray(value))throw new Error('malformed scalar resource');
+  if(!value || typeof value!=='object' || Array.isArray(value))throw new UpstreamDataError('malformed scalar resource');
   const id=(v:any)=>typeof v==='number'?Number.isSafeInteger(v) && v>0:typeof v==='string' && /^[1-9][0-9]*$/.test(v);
   if(recipe.operation==='pr') {
     validateRow(recipe,value);
   }
-  if(recipe.operation==='repository' && (!id(value.id) || typeof value.full_name!=='string' || !value.full_name.includes('/')))throw new Error('malformed repository header');
+  if(recipe.operation==='repository' && (!id(value.id) || typeof value.full_name!=='string' || !value.full_name.includes('/')))throw new UpstreamDataError('malformed repository header');
   if(recipe.operation==='statuses') {
-    if(recipe.api==='core' && !Array.isArray(value.statuses))throw new Error('malformed status collection');
-    if(recipe.api==='graphql' && (!Object.hasOwn(value,'status') || value.status!==null && !Array.isArray(value.status?.contexts)))throw new Error('malformed status connection');
-    for(const status of recipe.api==='core'?value.statuses:value.status?.contexts || [])if(typeof status?.context!=='string' || typeof status?.state!=='string')throw new Error('malformed status context');
+    if(recipe.api==='core' && !Array.isArray(value.statuses))throw new UpstreamDataError('malformed status collection');
+    if(recipe.api==='graphql' && (!Object.hasOwn(value,'status') || value.status!==null && !Array.isArray(value.status?.contexts)))throw new UpstreamDataError('malformed status connection');
+    for(const status of recipe.api==='core'?value.statuses:value.status?.contexts || [])if(typeof status?.context!=='string' || typeof status?.state!=='string')throw new UpstreamDataError('malformed status context');
   }
 }
 export function extract(recipe: Recipe, payload: any): { rows: any; cursor?: string } {
@@ -114,9 +115,9 @@ export function extract(recipe: Recipe, payload: any): { rows: any; cursor?: str
   if (recipe.api === 'graphql') {
     value = payload.data;
     for (const key of recipe.connection || []) value = value?.[key];
-    if (value == null) throw new Error('missing GraphQL resource');
+    if (value == null) throw new UpstreamDataError('missing GraphQL resource');
     if (recipe.collection) {
-      if (!Array.isArray(value.nodes) || typeof value.pageInfo?.hasNextPage!=='boolean' || value.pageInfo.hasNextPage && (typeof value.pageInfo.endCursor!=='string' || !value.pageInfo.endCursor || value.pageInfo.endCursor===recipe.variables?.cursor))throw new Error('incomplete connection');
+      if (!Array.isArray(value.nodes) || typeof value.pageInfo?.hasNextPage!=='boolean' || value.pageInfo.hasNextPage && (typeof value.pageInfo.endCursor!=='string' || !value.pageInfo.endCursor || value.pageInfo.endCursor===recipe.variables?.cursor))throw new UpstreamDataError('incomplete connection');
       // Do not silently truncate labels or nested thread comments.
       for (const node of value.nodes) {
         validateRow(recipe,node);
@@ -130,7 +131,7 @@ export function extract(recipe: Recipe, payload: any): { rows: any; cursor?: str
     if (payload.check_runs) value = payload.check_runs;
     else if (payload.workflow_runs) value = payload.workflow_runs;
     else if (payload.jobs) value = payload.jobs;
-    if (!Array.isArray(value)) throw new Error('invalid REST collection');
+    if (!Array.isArray(value)) throw new UpstreamDataError('invalid REST collection');
     for(const row of value)validateRow(recipe,row);
     value = value.filter((x:any) => !(recipe.path.includes('/issues?') && x.pull_request));
     return {rows:value.map(recipe.normalize)};

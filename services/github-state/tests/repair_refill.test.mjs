@@ -170,7 +170,7 @@ test('durably backed-off malformed members do not strand a healthy item behind t
   await seed(f,18);const healthy=117;let calls=0;
   f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async(_url,init)=>{
    calls++;const input=JSON.parse(init.body);
-   return Response.json(input.query.args.number===healthy?{api:'core',data:[]}:{unavailable:true,reason:'malformed_upstream_response'});
+   return Response.json(input.query.args.number===healthy?{api:'core',data:[]}:{unavailable:true,reason:'malformed_upstream_response',failure_kind:'member'});
   }})};
   await f.state.runAlarm();await drainRepairs(f.state);
   assert.equal(await f.state.complete(query(healthy)),true,'ordinary completion-driven refill reaches independent valid data');
@@ -178,6 +178,61 @@ test('durably backed-off malformed members do not strand a healthy item behind t
   assert.equal(calls,18);assert.equal(rows.filter(j=>j.attempt===1&&j.due>Date.now()).length,17);
   assert.ok(rows.every(j=>j.lease_id===null));
   assert.equal((await f.store.exec("SELECT COUNT(*) n FROM collections WHERE operation='files' AND complete=1")).one().n,1,'retry settlement is not completed coverage');
+ }finally{await drainRepairs(f.state);await f.close();}
+});
+
+test('a generic apply TypeError backs off without turning a broken backlog into productive quanta',async()=>{
+ const f=await fixture();try{
+  await seed(f,40);let calls=0;const transaction=f.store.transaction.bind(f.store);
+  f.store.transaction=(apply,purpose)=>transaction(tx=>apply(new Proxy(tx,{get(target,name){
+   if(name==='exec')return async(sql,...args)=>{if(sql.includes('INTO collections'))throw new TypeError('fixture normalizer defect');return target.exec(sql,...args);};
+   if(name==='batch')return async statements=>{if(statements.some(s=>s.sql.includes('INTO collections')))throw new TypeError('fixture normalizer defect');return target.batch(statements);};
+   const value=Reflect.get(target,name,target);return typeof value==='function'?value.bind(target):value;
+  }})),purpose);
+  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>{calls++;return Response.json({api:'core',data:[]});}})};
+  await f.state.runAlarm();await drainRepairs(f.state);
+  assert.equal(calls,16);assert.equal(f.state.repairCoordinator.current.memberRetries,0);assert.equal(f.state.repairCoordinator.current.dataProgress,0);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE attempt=1 AND due>?',Date.now())).one().n,16);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM collections WHERE complete=1')).one().n,0);
+ }finally{await drainRepairs(f.state);await f.close();}
+});
+
+test('a truncated-body response receives no member-data continuation credit',async()=>{
+ const f=await fixture();try{
+  await seed(f,40);let calls=0;
+  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>{calls++;return Response.json({unavailable:true,reason:'malformed_upstream_response',failure_kind:'transport'});}})};
+  await f.state.runAlarm();await drainRepairs(f.state);assert.equal(calls,16);assert.equal(f.state.repairCoordinator.current.memberRetries,0);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE attempt=1')).one().n,16);
+ }finally{await drainRepairs(f.state);await f.close();}
+});
+
+test('a failed publication tail is retained across member-retry-only internal chains',async()=>{
+ const f=await fixture();try{
+  await seed(f,24,'issue_comments');await f.store.exec('UPDATE jobs SET due=?',Date.now()-2000);await seed(f,40);
+  const publish=f.state.publishPrepared;let batches=0,files=0;
+  f.state.publishPrepared=async function(input,...args){
+   if(input.some(p=>p.job.key===key(108,'issue_comments')))throw Error('unclassified publication interruption');
+   return publish.call(this,input,...args);
+  };
+  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async(url,init)=>{
+   const input=JSON.parse(init.body);
+   if(url.endsWith('/batch')){batches++;return Response.json({results:input.jobs.map(()=>({api:'graphql',data:[]}))});}
+   files++;return Response.json({unavailable:true,reason:'malformed_upstream_response',failure_kind:'member'});
+  }})};
+  await f.state.runAlarm();await drainRepairs(f.state);assert.equal(files,40);assert.equal(batches,1,'failure-heavy independent work must not refetch an unchanged tail every16launches');
+  assert.ok(f.state.repairCoordinator.current.failed.has(key(123,'issue_comments')));
+  await f.state.runAlarm();await drainRepairs(f.state);assert.equal(batches,2,'a genuine external wake retains ordinary automatic recovery');
+ }finally{await drainRepairs(f.state);await f.close();}
+});
+
+test('a late member retry cannot clear an installation restriction by creating a fresh quantum',async()=>{
+ const f=await fixture();try{
+  const c=f.state.getRepairCoordinator();await c.wake(true);const q=c.current;
+  await seed(f,1);f.state.quotaRestriction={category:'secondary',retry_at:Date.now()-1,installation:'200',quantum:q,dataProgress:q.dataProgress};
+  c.settled([{key:'previous-member',lease_id:'previous-token',lease_until:0}],'member-retry');
+  await c.flight;await flush();assert.equal(c.current,q);assert.equal(c.current.launches,0);
+  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json({api:'core',data:[]})})};
+  await f.state.runAlarm();await drainRepairs(f.state);assert.equal(await f.state.complete(query(100)),true);
  }finally{await drainRepairs(f.state);await f.close();}
 });
 

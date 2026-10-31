@@ -315,7 +315,7 @@ test('malformed upstream JSON stays unavailable, preserves request ID, and retri
   const query={repository,query:{repository:repository.name,operation:'open_prs'},api:'graphql'};
   const first=await stub.fetch('https://internal/read',{method:'POST',headers:{'x-request-id':'malformed-drill'},body:JSON.stringify(query)});
   assert.equal(first.status,503);const error=await first.json();
-  assert.equal(error.unavailable,true);assert.equal(error.reason,'malformed_upstream_response');assert.equal(error.request_id,'malformed-drill');assert.equal(Object.hasOwn(error,'data'),false);
+  assert.equal(error.unavailable,true);assert.equal(error.reason,'malformed_upstream_response');assert.equal(error.failure_kind,'transport');assert.equal(error.request_id,'malformed-drill');assert.equal(Object.hasOwn(error,'data'),false);
   assert.equal(network,1,'no fallback fanout for a malformed response');
   malformed=false;
   const recovered=await (await send(stub,'/read',query)).json();
@@ -344,7 +344,7 @@ test('malformed status/header objects stay unavailable rather than becoming empt
   const ns=await mf.getDurableObjectNamespace('INSTALLATIONS'),stub=ns.get(ns.idFromName(repository.installation));
   for(const query of [{operation:'statuses',args:{sha:'a'.repeat(40)}},{operation:'pr',args:{number:7}},{operation:'repository'}]) {
    const before=network,result=await (await stub.fetch('https://internal/read',{method:'POST',headers:{'x-request-id':'shape-drill'},body:JSON.stringify({repository,query:{repository:repository.name,...query},api:'core'})})).json();
-   assert.equal(result.unavailable,true);assert.equal(result.reason,'malformed_upstream_response');assert.equal(result.request_id,'shape-drill');assert.equal(Object.hasOwn(result,'data'),false);assert.equal(network-before,1);
+   assert.equal(result.unavailable,true);assert.equal(result.reason,'malformed_upstream_response');assert.equal(result.failure_kind,'member');assert.equal(result.request_id,'shape-drill');assert.equal(Object.hasOwn(result,'data'),false);assert.equal(network-before,1);
   }
  }finally{await mf.dispose();}
 });

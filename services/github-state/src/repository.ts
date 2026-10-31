@@ -1,4 +1,4 @@
-import { RepositoryStore, StoreUnavailable, StoreFenced, canReplayPublication, isBackendFailure, WriterPurpose, SQLiteStore, PostgresStore, ReadCacheStore, BufferedStore, SerialLane, columns, collectionJoin } from './repository_store';
+import { RepositoryStore, StoreUnavailable, StoreFenced, canReplayPublication, isBackendFailure, isMemberDataFailure, WriterPurpose, SQLiteStore, PostgresStore, ReadCacheStore, BufferedStore, SerialLane, columns, collectionJoin } from './repository_store';
 import { repositoryHealth } from './repository_health';
 import { DurableObject } from 'cloudflare:workers';
 import { Env, EventPointer, matchesETag, Query, Result, digest, json, queryKey, repository, stub, validateQuery, parseGitHub, CI_EVENTS, NOT_MIRRORED, publicQuery, stagingStateKey, stagedPageKey } from './protocol';
@@ -25,7 +25,7 @@ interface RepairWait {job:any;due:number;attempts:number;reason:string;event:str
 interface PreparedRefresh {job:any;q:Query;repo:any;started:number;response:Response|null;result:any;memberRetryAt?:number;preparedNext?:string;staged?:{key:string,expires:number};objects:Map<string,string>;encodings:Map<string,string>}
 // Explicit per-result parser/identity failures are distinct from quota waits,
 // transport/backend failures, and an unclassified unavailable response.
-const memberUnavailable=(result:any):boolean=>!result.deferred && result.unavailable && ['malformed_upstream_response','upstream_identity_unavailable'].includes(result.reason);
+const memberUnavailable=(result:any):boolean=>!result.deferred && result.unavailable && result.failure_kind==='member';
 const PUBLICATION_ITEMS=8,PUBLICATION_BYTES=256*1024,PUBLICATION_ROWS=128;
 class LeaseLost extends Error {}
 // Retain the attempted chunk and original error. Adapter-classified backend
@@ -2131,7 +2131,8 @@ export class RepositoryState extends DurableObject<Env> {
   async retryJob(job:any,error:unknown):Promise<void> {await this.retryJobs([job],error);}
   private retryWait(job:any,error:unknown):RepairWait & {expired:boolean} {
     const expired=error instanceof Error && /staging page missing/.test(error.message),reason=expired?'staging_expired':'transport_or_parser';
-    return {job,due:Date.now()+Math.min(3600000,60000*2**Math.min(job.attempt || 0,6)),attempts:1,reason,event:'retry',failure:{category:reason},memberFailure:expired || canReplayPublication(error),expired};
+    const named=error instanceof Error && error.constructor===Error && ['staging page missing','repeated upstream cursor','malformed service response'].includes(error.message);
+    return {job,due:Date.now()+Math.min(3600000,60000*2**Math.min(job.attempt || 0,6)),attempts:1,reason,event:'retry',failure:{category:reason},memberFailure:named || isMemberDataFailure(error),expired};
   }
   private async retryJobs(jobs:any[],error:unknown):Promise<Set<string>> {
     const input=jobs.map(job=>this.retryWait(job,error));return this.persistWaits(input,input[0]?.expired || false);
@@ -2345,7 +2346,7 @@ export class RepositoryState extends DurableObject<Env> {
     try{
       if(this.getRepairCoordinator().full){await this.armRepairAlarm();return;}
       // A retry of a known restriction is not another external maintenance pass.
-      if(await this.quotaAllowsRepairClaim(true))await this.getRepairCoordinator().resumeCapacity();
+      if(await this.quotaAllowsRepairClaim(true))await this.getRepairCoordinator().resumeCapacity(true);
       else await this.armRepairAlarm();
     }finally{this.owner.activeOperations--;}
   }
@@ -2499,7 +2500,7 @@ export class RepositoryState extends DurableObject<Env> {
       if(remaining>0){owner.capacityWake.timer=setTimeout(fire,remaining);return;}
       const latest=owner.capacityWake.latest;
       owner.capacityWake=undefined;resolve();
-      void owner.getRepairCoordinator().resumeCapacity();
+      void owner.getRepairCoordinator().resumeCapacity(true);
       if(latest && latest>Date.now())owner.scheduleCapacityDeadline(latest);
     };
     const timer=setTimeout(fire,delay);
@@ -3199,7 +3200,7 @@ export class RepositoryState extends DurableObject<Env> {
         if(restriction?.category==='capacity'){
           owner.scheduleCapacityDeadline(restriction.retry_at);owner.quotaRestriction=undefined;
         }
-        void owner.getRepairCoordinator().capacityWake();return json({ok:true});
+        void owner.getRepairCoordinator().capacityWake(restriction?.category==='capacity');return json({ok:true});
       }
       if (path==='/configure') { await this.configure((await req.json() as any).repository); return json({ok:true}); }
       if (path==='/ci-receipts') {

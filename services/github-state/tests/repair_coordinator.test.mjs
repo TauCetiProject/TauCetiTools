@@ -196,3 +196,10 @@ test('a canceled transport that never acknowledges still has bounded owner recov
  await h.c.wake(true);await reset.promise;const elapsed=Date.now()-start;
  assert.ok(elapsed>=1900&&elapsed<10000);assert.equal(h.c.groups.size,1,'an unacknowledged operation is never silently abandoned');
 });
+
+test('a real cleared restriction can resume an exhausted closed record even without an old capacity path',async()=>{
+ const h=harness(2,{dispatches:1});let attempts=0;
+ h.dispatch=async group=>{h.c.settled(group.jobs,++attempts===1?'defer':'progress');};
+ await h.c.wake(true);await flush();assert.equal(attempts,1);h.c.current.failed.add('old-failed-tail');
+ await h.c.capacityWake(true);await flush();assert.equal(attempts,2);assert.ok(h.c.current.failed.has('old-failed-tail'));
+});
