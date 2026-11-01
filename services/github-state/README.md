@@ -380,7 +380,9 @@ stored head already differs from the reported expectation, `outcome: already-cha
 that committed record without claiming a new validation. Re-select work from current facts;
 a successful refresh does not prevent a later push.
 
-The server bounds its response wait at 15 seconds. Unavailability includes a millisecond
+The response waits for the read and committed publication outcome; there is no separate
+refresh-response deadline. Existing transport and database failures remain explicit.
+Unavailability includes a millisecond
 `retry_at` in the body, never a `Retry-After` header. Clients must keep that deadline separate
 from discovery-wide cooldowns and continue other work. Ordinary reconciliation retains the
 retry obligation; no acknowledgement, disputed state or manual reset is required.
