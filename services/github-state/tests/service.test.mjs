@@ -120,7 +120,7 @@ test('CI records are not mirrored: webhooks are acknowledged unstored and querie
 
 test('GET and batch queries retain unquoted IDs beyond the JavaScript safe range',async()=>{
  const doStub=namespace.get(namespace.idFromName(repo.id)),number='90071992547409931234';
- const key='fixture/exact-pr';await archive.put(key,'{"pull_request":{"number":'+number+',"state":"open","title":"exact ID","head":{"sha":"'+'b'.repeat(40)+'"},"user":{"login":"peer"}}}');
+ const key='fixture/exact-pr';await archive.put(key,'{"action":"opened","pull_request":{"number":'+number+',"state":"open","title":"exact ID","head":{"sha":"'+'b'.repeat(40)+'"},"user":{"login":"peer"}}}');
  assert.equal((await doStub.fetch('https://internal/event',{method:'POST',body:JSON.stringify({key,delivery:'exact-pr',event:'pull_request',repository:repo.name,received:Date.now()})})).status,200);
  const response=await request('/v1/query?repository=org/repo&operation=pr&args='+encodeURIComponent('{"number":'+number+'}'),{headers});
  assert.equal((await response.json()).reason,'coverage_unavailable');

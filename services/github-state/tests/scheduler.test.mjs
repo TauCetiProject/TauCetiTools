@@ -343,7 +343,7 @@ test('head-change webhooks refresh immutable file lists without resetting a quot
   await state.enqueue(q,20,Date.now()+86400000);
   await db.prepare("UPDATE jobs SET due=?,wait_reason='primary:core',attempt=1 WHERE key=?").run(Date.now()+3600000,key);
   const before=(await db.prepare('SELECT * FROM jobs WHERE key=?').get(key));
-  objects.set('head',JSON.stringify({pull_request:{number:7,state:'open',updated_at:'2026-10-12T01:00:00Z',head:{sha:'b'.repeat(40)},user:{login:'peer'}}}));
+  objects.set('head',JSON.stringify({action:'synchronize',pull_request:{number:7,state:'open',updated_at:'2026-10-12T01:00:00Z',head:{sha:'b'.repeat(40)},user:{login:'peer'}}}));
   await state.ingest({key:'head',delivery:'head',event:'pull_request',repository:'org/repo',received:Date.now()});
   const after=(await db.prepare('SELECT * FROM jobs WHERE key=?').get(key));
   assert.equal(after.dirty,1);assert.equal(after.lane,'active');assert.equal(after.due,before.due);assert.ok(after.generation>before.generation);

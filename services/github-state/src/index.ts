@@ -112,6 +112,16 @@ export default {
         if (!Array.isArray(input.numbers) || input.numbers.length>500 || input.numbers.some((n:any)=>!Number.isSafeInteger(n) || n<=0)) return json({error:'invalid_numbers'},400);
         return stub(env.REPOSITORIES,repo.id).fetch('https://internal/activity',{method:'POST',body:JSON.stringify({repository:repo.name,numbers:[...new Set(input.numbers)]})});
       }
+      if(url.pathname==='/v1/refresh-pr' && req.method==='POST'){
+        if(!await authorize(req,env))return json({error:'unauthorized'},401);
+        const text=await req.text();if(text.length>4096)return json({error:'payload_too_large'},413);
+        let input:any;try{input=parseGitHub(text);}catch{return json({error:'invalid_json'},400);}
+        const repo=repository(env,input?.repository);
+        if(!repo || !await authorize(req,env,repo.name))return json({error:'repository_unavailable'},403);
+        if(!Number.isSafeInteger(input.number) || input.number<=0 || !/^[a-f0-9]{40}$/.test(input.expected_head || '') || input.observed_head!==undefined && !/^[a-f0-9]{40}$/.test(input.observed_head))return json({error:'invalid_request'},400);
+        // This optional capability never sets a host-wide Retry-After header.
+        return stub(env.REPOSITORIES,repo.id).fetch('https://internal/refresh-pr',{method:'POST',body:JSON.stringify({...input,repository:repo.name})});
+      }
       if (url.pathname==='/v1/query' && req.method==='GET') {
         let args; try { args=parseGitHub(url.searchParams.get('args') || '{}'); } catch { return json({error:'invalid_args'},400); }
         if (url.searchParams.has('allow_observed') && !['true','false'].includes(url.searchParams.get('allow_observed')!)) return json({error:'invalid_query'},400);
