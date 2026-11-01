@@ -76,6 +76,39 @@ test('LOC uses complete cached files at the exact PR head without scheduling wor
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM jobs').get()).n,0);
  }finally{await db.close();}
 });
+test('removed files use merge-base URLs and old negative LOC caches are recomputed',async()=>{
+ const {db,state}=await fixture();try{
+  const head='a'.repeat(40),base='b'.repeat(40),mergeBase='c'.repeat(40),key='files:{"number":7}';
+  const p={number:7,state:'CLOSED',headRefOid:head,baseRefOid:base,changedFiles:3,additions:12,deletions:20};
+  await db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?,0)').run('pr','7','',JSON.stringify(p),'',Date.now(),1);
+  const files=[
+   {filename:'A.lean',status:'modified',additions:10,deletions:3,raw_url:`https://github.com/org/repo/raw/${head}/A.lean`},
+   {filename:'Removed.lean',status:'removed',additions:0,deletions:17,raw_url:`https://github.com/org/repo/raw/${mergeBase}/Removed.lean`},
+   {filename:'README.md',status:'added',additions:2,deletions:0,raw_url:`https://github.com/org/repo/raw/${head}/README.md`}
+  ];
+  for(const f of files){
+   const id='7:'+f.filename;
+   await db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?,0)').run('files',id,'7',JSON.stringify(f),'',Date.now(),1);
+   await db.prepare('INSERT INTO members VALUES (?,?)').run(key,id);
+  }
+  await db.prepare('INSERT INTO collections VALUES (?,?,?,?,?,?,?)').run(key,'files','{"number":7}',1,Date.now(),1,null);
+  await db.prepare('INSERT INTO activity_loc_cache VALUES (?,?,?)').run('7',JSON.stringify([head,base,3,12,20,1]),'null');
+  assert.deepEqual((await (await query(state,[7])).json()).prs[0].lean_loc,{added:10,deleted:20,head_sha:head});
+  // A wrong surviving-file head remains invalid even when totals match.
+  files[0].raw_url=`https://github.com/org/repo/raw/${mergeBase}/A.lean`;
+  await db.prepare("UPDATE resources SET data=? WHERE kind='files' AND id='7:A.lean'").run(JSON.stringify(files[0]));
+  await db.prepare('UPDATE collections SET revision=revision+1 WHERE key=?').run(key);
+  assert.equal((await (await query(state,[7])).json()).prs[0].lean_loc,null);
+  files[0].raw_url=`https://github.com/org/repo/raw/${head}/A.lean`;
+  files[1].raw_url='https://github.com/org/repo/raw/main/Removed.lean';
+  await db.prepare("UPDATE resources SET data=? WHERE kind='files' AND id='7:A.lean'").run(JSON.stringify(files[0]));
+  await db.prepare("UPDATE resources SET data=? WHERE kind='files' AND id='7:Removed.lean'").run(JSON.stringify(files[1]));
+  await db.prepare('UPDATE collections SET revision=revision+1 WHERE key=?').run(key);
+  assert.equal((await (await query(state,[7])).json()).prs[0].lean_loc,null,'removed file refs must still be immutable');
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM demand').get()).n,0);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM jobs').get()).n,0);
+ }finally{await db.close();}
+});
 test('background Bors receipt import is shared and rate limited; activity reads never fetch',async()=>{
  const {db,state}=(await fixture()),original=globalThis.fetch;
  try{

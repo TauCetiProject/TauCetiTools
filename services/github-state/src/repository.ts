@@ -55,7 +55,7 @@ const SURVEY_ETAG_PREFIX='survey-v1-observed-statuses:';
 // Private to local read scopes; request bodies and RPC arguments cannot set it.
 const ACTIVITY_CLOCK=Symbol('activity clock');
 const decimalArgument=(value:string):number|string=>Number.isSafeInteger(Number(value))?Number(value):value;
-const activityFingerprint=(p:any,revision:number|undefined)=>JSON.stringify([p.headRefOid,p.baseRefOid,p.changedFiles,p.additions,p.deletions,revision]);
+const activityFingerprint=(p:any,revision:number|undefined)=>JSON.stringify([2,p.headRefOid,p.baseRefOid,p.changedFiles,p.additions,p.deletions,revision]);
 const cursorKey=(repo:string,id:string,offset:number)=>`cursors/${repo}/${id}/${offset}.json`;
 function coordinationWindows(history:any,now:number):any {
   if(!history)return null;
@@ -2773,16 +2773,19 @@ export class RepositoryState extends DurableObject<Env> {
       if(!Number.isSafeInteger(file.additions) || file.additions<0 || !Number.isSafeInteger(file.deletions) || file.deletions<0) return remember(null);
       // Cached file URLs carry their immutable commit. A mixed/old-head file
       // collection cannot be credited to the PR's current output.
-      const expected=file.status==='removed'?p.baseRefOid:p.headRefOid;
+      // Removed-file URLs identify the comparison's merge base, which need
+      // not equal the base branch tip. Surviving files still identify the head.
+      const expected=file.status==='removed'?null:p.headRefOid;
       const matches=(raw:any)=>{
         try {
           const url=new URL(raw),parts=url.pathname.split('/').filter(Boolean);
-          if(url.hostname==='github.com') return ['blob','raw'].includes(parts[2]) && parts[3]===expected;
-          if(url.hostname==='raw.githubusercontent.com') return parts[2]===expected;
-          return url.hostname==='api.github.com' && url.searchParams.get('ref')===expected;
+          const ref=url.hostname==='github.com' && ['blob','raw'].includes(parts[2])?parts[3]
+            :url.hostname==='raw.githubusercontent.com'?parts[2]
+            :url.hostname==='api.github.com'?url.searchParams.get('ref'):null;
+          return expected?ref===expected:typeof ref==='string' && /^[0-9a-f]{40}$/i.test(ref);
         } catch {return false;}
       };
-      if(!expected || ![file.blob_url,file.raw_url,file.contents_url].some(matches)) return remember(null);
+      if(![file.blob_url,file.raw_url,file.contents_url].some(matches)) return remember(null);
       totalAdded+=file.additions;totalDeleted+=file.deletions;
       if(typeof file.filename==='string' && file.filename.endsWith('.lean')) {added+=file.additions;deleted+=file.deletions;}
     }
