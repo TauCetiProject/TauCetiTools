@@ -205,7 +205,7 @@ for(const when of ['before','during'])for(const mutation of ['lease','continuati
   if(mutation==='lease'){assert.equal(job.dirty,1);assert.equal(job.lease_id,'another-owner');}
   if(mutation==='continuation'){assert.equal(job.dirty,1);assert.equal(job.cursor,'next-page');assert.equal(job.page,2);}
   if(mutation==='retry'){
-   // Real deferrals retain started; this conservative optimization leaves
+   // Quota deferrals retain started; this conservative optimization leaves
    // their ordinary recovery and quota deadline intact in both cases.
    assert.equal(job.dirty,1);assert.equal(job.wait_reason,'primary:core');assert.ok(job.due>Date.now());
   }
@@ -267,5 +267,18 @@ test('satisfying a PR job preserves an installation-wide quota restriction',asyn
   upstream(f,async()=>({data:record(),api:'core'}));
   assert.equal((await f.state.refreshPR({repository:'org/repo',number:7,expected_head:old})).outcome,'refreshed');
   assert.equal(f.state.quotaRestriction,restriction);assert.equal((await f.store.exec('SELECT dirty FROM jobs WHERE key=?',key)).one().dirty,0);
+ }finally{await f.close();}
+});
+
+test('a full synchronous read satisfies an expired-staging retry after its continuation was reset',async()=>{
+ const f=await fixture();try{
+  await seed(f);const job=await f.state.claim((await f.store.exec('SELECT * FROM jobs WHERE key=?',key)).one());assert.ok(job);
+  await f.state.retryJob(job,Error('staging page missing'));
+  const waiting=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key)).one();
+  assert.equal(waiting.started,null);assert.equal(waiting.lease_id,null);assert.equal(waiting.wait_reason,'staging_expired');assert.ok(waiting.due>Date.now());
+  upstream(f,async()=>({data:record(),api:'core'}));
+  assert.equal((await f.state.refreshPR({repository:'org/repo',number:7,expected_head:old})).outcome,'refreshed');
+  const finished=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key)).one();
+  assert.equal(finished.dirty,0);assert.equal(finished.wait_reason,null);assert.equal(finished.attempt,0);assert.equal(finished.started,null);
  }finally{await f.close();}
 });

@@ -1546,9 +1546,14 @@ export class RepositoryState extends DurableObject<Env> {
       && !row.lease_id && row.lease_until===0 && row.started===null
       && row.page===1 && row.cursor===null && row.nested===null;
     if(!eligible(job))return false;
-    const current=(await this.store.exec<any>('SELECT * FROM jobs WHERE key=?',job.key)).toArray()[0];
+    const [jobs,demand]=await this.store.batch([{sql:'SELECT * FROM jobs WHERE key=?',bindings:[job.key]},{sql:'SELECT at FROM demand WHERE key=?',bindings:[job.key]}]);
+    const current=jobs.toArray()[0];
     if(!eligible(current) || ['generation','created_at','start_generation','attempt','wait_reason','api','due','requested_at'].some(key=>current[key]!==job[key]))return false;
-    const state=Object.create(this) as RepositoryState;
+    // Reuse committed transaction-local facts across the existing completion,
+    // interval and priority rules. No process-wide cache or new scheduling rule.
+    const state=Object.create(this) as RepositoryState,cache=new ReadCacheStore(this.store);state.store=cache;
+    cache.seed('SELECT generation,priority,requested_at,lane FROM jobs WHERE key=?',[job.key],[current]);
+    cache.seed('SELECT at FROM demand WHERE key=?',[job.key],demand.toArray());
     // Keep synchronous completion separate from background requested latency.
     state.metric=(event,query,lane,value)=>this.metric('synchronous_'+event,query,lane,value);
     await state.finishJob({...current,start_generation:job.generation},q);
@@ -1622,8 +1627,8 @@ export class RepositoryState extends DurableObject<Env> {
     if(q.operation==='pr' && !supplied){
       await this.ensurePRValidators();
       // A quota deferral's original job start is not the HTTP observation start.
-      const revision=Number((await this.store.exec<any>("SELECT revision FROM resources WHERE kind='pr' AND id=?",String(q.args?.number))).toArray()[0]?.revision || 0);
-      job={...job,pr_revision:revision,started:Date.now(),etag:(await this.store.exec<any>('SELECT etag FROM jobs WHERE key=?',job.key)).toArray()[0]?.etag};
+      const [resources,validators]=await this.store.batch([{sql:"SELECT revision FROM resources WHERE kind='pr' AND id=?",bindings:[String(q.args?.number)]},{sql:'SELECT etag FROM jobs WHERE key=?',bindings:[job.key]}]);
+      job={...job,pr_revision:Number(resources.toArray()[0]?.revision || 0),started:Date.now(),etag:validators.toArray()[0]?.etag};
       // Preserve the existing standalone write semantics (including migration
       // handling); the operation name only attributes the PostgreSQL admission.
       if(this.store.backend==='postgres')await this.store.transaction(tx=>tx.exec('UPDATE jobs SET started=? WHERE key=?',job.started,job.key),'other','pr_read_start');
