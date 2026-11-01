@@ -13,7 +13,8 @@
     "benchmark:postgres": "node scripts/benchmark-postgres.mjs",
     "benchmark:publication": "node scripts/benchmark-publication.mjs",
     "test:publication-memory": "node --max-old-space-size=96 tests/publication_memory.mjs",
-    "benchmark:history-demand": "node scripts/benchmark-history-demand.mjs"
+    "benchmark:history-demand": "node scripts/benchmark-history-demand.mjs",
+    "benchmark:write-submissions": "node scripts/benchmark-write-submissions.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "latest",
