@@ -109,6 +109,34 @@ test('removed files use merge-base URLs and old negative LOC caches are recomput
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM jobs').get()).n,0);
  }finally{await db.close();}
 });
+test('verified LOC facts remain readable without a complete file collection',async()=>{
+ const {db,state}=await fixture();try{
+  const head='a'.repeat(40),base='b'.repeat(40),p={state:'CLOSED',headRefOid:head,baseRefOid:base,changedFiles:2,additions:10,deletions:3};
+  await db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?,0)').run('pr','7','',JSON.stringify(p),'',Date.now(),1);
+  const loc={added:10,deleted:3,head_sha:head};
+  await db.prepare('INSERT INTO activity_loc_cache VALUES (?,?,?)').run('7',JSON.stringify([2,head,base,2,10,3,null]),JSON.stringify(loc));
+  assert.deepEqual((await (await query(state,[7])).json()).prs[0].lean_loc,loc);
+  p.baseRefOid='c'.repeat(40);
+  await db.prepare("UPDATE resources SET data=? WHERE kind='pr' AND id='7'").run(JSON.stringify(p));
+  assert.equal((await (await query(state,[7])).json()).prs[0].lean_loc,null,'a different comparison cannot reuse the fact');
+ }finally{await db.close();}
+});
+test('removed-only and mixed-merge-base cached lists cannot prove the current head',async()=>{
+ for(const mixed of [false,true]){
+  const {db,state}=await fixture();try{
+   const head='a'.repeat(40),base='b'.repeat(40),key='files:{"number":7}';
+   const files=[{filename:'Deleted.lean',status:'removed',additions:0,deletions:10,raw_url:`https://github.com/org/repo/raw/${base}/Deleted.lean`}];
+   if(mixed)files.push(
+    {filename:'Other.lean',status:'removed',additions:0,deletions:10,raw_url:`https://github.com/org/repo/raw/${'c'.repeat(40)}/Other.lean`},
+    {filename:'Added.lean',status:'added',additions:1,deletions:0,raw_url:`https://github.com/org/repo/raw/${head}/Added.lean`});
+   const p={state:'CLOSED',headRefOid:head,baseRefOid:base,changedFiles:files.length,additions:mixed?1:0,deletions:mixed?20:10};
+   await db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?,0)').run('pr','7','',JSON.stringify(p),'',Date.now(),1);
+   for(const f of files){await db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?,0)').run('files',f.filename,'7',JSON.stringify(f),'',Date.now(),1);await db.prepare('INSERT INTO members VALUES (?,?)').run(key,f.filename);}
+   await db.prepare('INSERT INTO collections VALUES (?,?,?,?,?,?,?)').run(key,'files','{"number":7}',1,Date.now(),1,null);
+   assert.equal((await (await query(state,[7])).json()).prs[0].lean_loc,null);
+  }finally{await db.close();}
+ }
+});
 test('background Bors receipt import is shared and rate limited; activity reads never fetch',async()=>{
  const {db,state}=(await fixture()),original=globalThis.fetch;
  try{

@@ -2282,12 +2282,12 @@ export class RepositoryState extends DurableObject<Env> {
     if(!candidates.length)return [];
     const operation=JSON.parse(candidates[0].query).operation;
     if(!NOT_MIRRORED.has(operation) && !['pr','files','issue_comments','review_comments','review_threads','reviews','reactions','statuses'].includes(operation))return [];
-    const hot=new Set<string>(candidates.filter(job=>job.requested_at!=null).map(job=>job.key)),complete=new Map<string,number>();
+    const hot=new Set<string>(candidates.filter(job=>job.requested_at!=null).map(job=>job.key)),collections=new Map<string,{revision:number,complete:number}>();
     const readBatch=this.store.backend==='sqlite'?80:256;
     for(let offset=0;offset<candidates.length;offset+=readBatch) {
       const keys=candidates.slice(offset,offset+readBatch).map(j=>j.key),where=' WHERE key IN ('+keys.map(()=>'?').join(',')+')';
-      const [ds,cs]=await this.store.batch([{sql:'SELECT key FROM demand'+where+' AND at>?',bindings:[...keys,Date.now()-300000]},...(operation==='files'?[{sql:'SELECT key,revision FROM collections'+where+' AND complete=1',bindings:keys}]:[])]);
-      for(const row of cs?.toArray() || [])complete.set(row.key,row.revision);for(const row of ds.toArray())hot.add(row.key);
+      const [ds,cs]=await this.store.batch([{sql:'SELECT key FROM demand'+where+' AND at>?',bindings:[...keys,Date.now()-300000]},...(operation==='files'?[{sql:'SELECT key,revision,complete FROM collections'+where,bindings:keys}]:[])]);
+      for(const row of cs?.toArray() || [])collections.set(row.key,row);for(const row of ds.toArray())hot.add(row.key);
     }
     const quiet=candidates.filter(j=>!hot.has(j.key));
     const states=new Map<string,string>(),details=new Map<string,any>(),comments=new Map<string,any>(),closedHeads=new Set<string>();
@@ -2331,11 +2331,12 @@ export class RepositoryState extends DurableObject<Env> {
       const state=states.get(String(operation==='reactions'?comment?.parent:args.number));
       if(!['CLOSED','MERGED'].includes(state || ''))return false;
       if(operation==='files') {
-        if(!complete.has(job.key))return false;
         try {
           const p=details.get(String(args.number));
-          const cached=(await this.store.exec<any>('SELECT data FROM activity_loc_cache WHERE number=? AND fingerprint=?',args.number,activityFingerprint(p,complete.get(job.key)))).toArray()[0];
+          const collection=collections.get(job.key);
+          const cached=(await this.store.exec<any>('SELECT data FROM activity_loc_cache WHERE number=? AND fingerprint=?',args.number,activityFingerprint(p,collection?.revision))).toArray()[0];
           if(cached)return Boolean(JSON.parse(cached.data));
+          if(!collection?.complete)return false;
           // Maintenance validates outside the writer; rechecks under the
           // writer use that head/revision-bound cache, never R2 or file scans.
           if(this.store.transactional)return false;
@@ -2755,10 +2756,13 @@ export class RepositoryState extends DurableObject<Env> {
   async activityLOC(number:number,p:any,budget?:{remaining:number}): Promise<any> {
     const key=queryKey({operation:'files',args:{number}});
     const complete=(await this.store.exec<any>('SELECT complete,revision FROM collections WHERE key=?',key)).toArray()[0];
-    if(!complete?.complete || !p.headRefOid || !Number.isSafeInteger(p.changedFiles)) return null;
-    const fingerprint=activityFingerprint(p,complete.revision);
+    if(!p.headRefOid) return null;
+    const fingerprint=activityFingerprint(p,complete?.revision);
     const cached=(await this.store.exec<any>('SELECT data FROM activity_loc_cache WHERE number=? AND fingerprint=?',number,fingerprint)).toArray()[0];
     if(cached) return JSON.parse(cached.data);
+    // A verified fact remains useful without its original file collection.
+    // A new head, base, header or collection revision invalidates it as usual.
+    if(!complete?.complete || !Number.isSafeInteger(p.changedFiles)) return null;
     if(budget && budget.remaining--<=0) return null;
     const remember=async (result:any)=>{
       await this.optionalRead('activity_loc_cache',async ()=>(await this.store.exec('INSERT OR REPLACE INTO activity_loc_cache VALUES (?,?,?)',number,fingerprint,JSON.stringify(result))));
@@ -2766,30 +2770,30 @@ export class RepositoryState extends DurableObject<Env> {
     };
     const stored=await this.scanRows(`SELECT r.data FROM members m ${collectionJoin(this.store)} resources r ON r.kind='files' AND r.id=m.id WHERE m.collection=? AND r.tombstone=0`,key);
     if(stored.length!==p.changedFiles) return remember(null);
-    let added=0,deleted=0,totalAdded=0,totalDeleted=0;
+    let added=0,deleted=0,totalAdded=0,totalDeleted=0,headBound=stored.length===0,removedRef:string|undefined;
     for(const row of stored) {
       const file=await this.decode(row.data);
       if(typeof file.filename!=='string') return remember(null);
       if(!Number.isSafeInteger(file.additions) || file.additions<0 || !Number.isSafeInteger(file.deletions) || file.deletions<0) return remember(null);
-      // Cached file URLs carry their immutable commit. A mixed/old-head file
-      // collection cannot be credited to the PR's current output.
-      // Removed-file URLs identify the comparison's merge base, which need
-      // not equal the base branch tip. Surviving files still identify the head.
+      // Surviving files bind the list to the head. Removed files instead name
+      // one comparison merge base, which need not equal the base branch tip.
       const expected=file.status==='removed'?null:p.headRefOid;
-      const matches=(raw:any)=>{
+      const reference=(raw:any)=>{
         try {
           const url=new URL(raw),parts=url.pathname.split('/').filter(Boolean);
-          const ref=url.hostname==='github.com' && ['blob','raw'].includes(parts[2])?parts[3]
+          return url.hostname==='github.com' && ['blob','raw'].includes(parts[2])?parts[3]
             :url.hostname==='raw.githubusercontent.com'?parts[2]
             :url.hostname==='api.github.com'?url.searchParams.get('ref'):null;
-          return expected?ref===expected:typeof ref==='string' && /^[0-9a-f]{40}$/i.test(ref);
-        } catch {return false;}
+        } catch {return null;}
       };
-      if(![file.blob_url,file.raw_url,file.contents_url].some(matches)) return remember(null);
+      const ref=[file.blob_url,file.raw_url,file.contents_url].map(reference).find(ref=>expected?ref===expected:typeof ref==='string' && /^[0-9a-f]{40}$/i.test(ref));
+      if(!ref) return remember(null);
+      if(file.status==='removed') {if(removedRef && removedRef!==ref)return remember(null);removedRef=ref;}
+      else headBound=true;
       totalAdded+=file.additions;totalDeleted+=file.deletions;
       if(typeof file.filename==='string' && file.filename.endsWith('.lean')) {added+=file.additions;deleted+=file.deletions;}
     }
-    if(Number.isSafeInteger(p.additions) && p.additions!==totalAdded || Number.isSafeInteger(p.deletions) && p.deletions!==totalDeleted) return remember(null);
+    if(!headBound || Number.isSafeInteger(p.additions) && p.additions!==totalAdded || Number.isSafeInteger(p.deletions) && p.deletions!==totalDeleted) return remember(null);
     return remember({added,deleted,head_sha:p.headRefOid});
   }
   // The last time the mirror changed: an applied webhook or a stored repair.
