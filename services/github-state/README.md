@@ -370,6 +370,28 @@ An opaque random `trace` correlates stages of the same job object within a
 dispatch, including concurrent jobs with identical operation/page metadata.
 `publication_encode_pages` records the staged size before the encoding scan.
 
+## Synchronous PR correction
+
+Authenticated consumers can report a selected-head contradiction with `POST /v1/refresh-pr`
+and `{repository, number, expected_head, observed_head?}`. The service coalesces concurrent
+requests for the same PR, performs one installation-owned full read, and commits the canonical
+PR, survey inventory and affected coverage before reporting `outcome: refreshed`. If the
+stored head already differs from the reported expectation, `outcome: already-changed` returns
+that committed record without claiming a new validation. Re-select work from current facts;
+a successful refresh does not prevent a later push.
+
+The server bounds its response wait at 15 seconds. Unavailability includes a millisecond
+`retry_at` in the body, never a `Retry-After` header. Clients must keep that deadline separate
+from discovery-wide cooldowns and continue other work. Ordinary reconciliation retains the
+retry obligation; no acknowledgement, disputed state or manual reset is required.
+
+Non-head PR webhooks patch only their changed fields. Targeted full reads can correct a
+misleading PR source timestamp, but newer stored inputs supersede an in-flight read. Such
+reads re-arm with a fresh start and no validator rather than falsely advancing verification.
+PR writes invalidate saved targeted ETags; an automatic one-time validator reset recovers
+older poisoned records. Head corrections invalidate affected cached PR queries and aggregate
+survey grace entries without decoding unrelated histories.
+
 ## Client behavior
 
 Clients request the newest available service data, including conditional reads.
