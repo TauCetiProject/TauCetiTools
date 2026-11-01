@@ -167,3 +167,105 @@ test('a stalled shared flight expires and its late response cannot overwrite a n
   release();assert.equal((await first).reason,'superseded');assert.equal((await f.state.rows(q)).headRefOid,latest);
  }finally{release?.();globalThis.setTimeout=timeout;await f.close();}
 });
+
+test('synchronous correction completes only PR detail and survives a restart without an immediate refetch',async()=>{
+ const f=await fixture();try{
+  await seed(f);await f.state.setMeta('pr_validator_version',1);let reads=0;
+  upstream(f,async()=>{reads++;return {data:record(),api:'core'};});
+  const before=Date.now();assert.equal((await f.state.refreshPR({repository:'org/repo',number:7,expected_head:old})).outcome,'refreshed');
+  const job=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key)).one();
+  assert.equal(job.dirty,0);assert.equal(job.requested_at,null);assert.equal(job.lease_id,null);assert.equal(job.started,null);assert.ok(job.due>before+300000);
+  for(const dependent of ['files:{"number":7}','statuses:{"sha":"'+head+'"}'])assert.equal((await f.store.exec('SELECT dirty FROM jobs WHERE key=?',dependent)).one().dirty,1);
+  const restarted=new f.state.constructor(f.state.ctx,f.state.env);restarted.store=f.store;
+  assert.equal((await restarted.refreshPR({repository:'org/repo',number:7,expected_head:old})).outcome,'already-changed');assert.equal(reads,1);
+  assert.equal((await f.store.exec('SELECT key FROM jobs WHERE key=? AND due<=?',key,Date.now())).toArray().length,0);
+ }finally{await f.close();}
+});
+
+test('a newer dirty generation survives even when the full read is equivalent',async()=>{
+ const f=await fixture();try{
+  await seed(f);upstream(f,async()=>{await event(f,'synchronize',head);return {data:await f.state.decode((await f.store.exec("SELECT data FROM resources WHERE kind='pr' AND id='7'")).one().data),api:'core'};});
+  const result=await f.state.refreshPR({repository:'org/repo',number:7,expected_head:old});
+  assert.equal(result.outcome,'refreshed');const job=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key)).one();assert.equal(job.dirty,1);assert.ok(job.generation>=2);
+ }finally{await f.close();}
+});
+
+for(const when of ['before','during'])for(const mutation of ['lease','continuation','retry'])test(`synchronous correction retains ${mutation} ${when} its read`,async()=>{
+ const f=await fixture();try{
+  await seed(f);
+  const mutate=async()=>{
+   if(mutation==='lease')await f.store.exec('UPDATE jobs SET lease_id=?,lease_until=? WHERE key=?','another-owner',Date.now()+3600000,key);
+   if(mutation==='continuation')await f.store.exec('UPDATE jobs SET cursor=?,page=2,nested=?,started=? WHERE key=?','next-page','{}',Date.now()-1000,key);
+   if(mutation==='retry')await f.store.exec('UPDATE jobs SET attempt=attempt+1,wait_reason=?,due=?,started=? WHERE key=?','primary:core',Date.now()+3600000,Date.now()-1000,key);
+  };
+  if(when==='before')await mutate();
+  upstream(f,async()=>{if(when==='during')await mutate();return {data:record(),api:'core'};});
+  assert.equal((await f.state.refreshPR({repository:'org/repo',number:7,expected_head:old})).outcome,'refreshed');
+  const job=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key)).one();
+  if(mutation==='lease'){assert.equal(job.dirty,1);assert.equal(job.lease_id,'another-owner');}
+  if(mutation==='continuation'){assert.equal(job.dirty,1);assert.equal(job.cursor,'next-page');assert.equal(job.page,2);}
+  if(mutation==='retry'){
+   // Real deferrals retain started; this conservative optimization leaves
+   // their ordinary recovery and quota deadline intact in both cases.
+   assert.equal(job.dirty,1);assert.equal(job.wait_reason,'primary:core');assert.ok(job.due>Date.now());
+  }
+ }finally{await f.close();}
+});
+
+test('an owner that claims and releases during the read leaves its recovery intact',async()=>{
+ const f=await fixture();try{
+  await seed(f);upstream(f,async()=>{
+   const row=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key)).one(),claimed=await f.state.claim(row);assert.ok(claimed);
+   await f.state.atomic(state=>state.releaseLeases(state.store,[claimed]));return {data:record(),api:'core'};
+  });
+  assert.equal((await f.state.refreshPR({repository:'org/repo',number:7,expected_head:old})).outcome,'refreshed');
+  const job=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key)).one();assert.equal(job.dirty,1);assert.equal(job.lease_id,null);assert.ok(job.started);
+ }finally{await f.close();}
+});
+
+test('failure after job completion rolls back both correction and obligation',async()=>{
+ const f=await fixture();try{
+  await seed(f);upstream(f,async()=>({data:record(),api:'core'}));
+  const finish=f.state.finishSynchronousPR;
+  f.state.finishSynchronousPR=async function(...args){assert.equal(await finish.apply(this,args),true);assert.equal(f.state.repairMetrics.snapshot().filter(row=>row.event.startsWith('synchronous_')).length,0);throw Error('before commit');};
+  const input={repository:'org/repo',number:7,expected_head:old};assert.equal((await f.state.refreshPR(input)).status,'unavailable');
+  assert.equal((await f.state.decode((await f.store.exec("SELECT data FROM resources WHERE kind='pr' AND id='7'")).one().data)).headRefOid,old);assert.equal((await f.store.exec('SELECT dirty FROM jobs WHERE key=?',key)).one().dirty,1);
+  assert.equal(f.state.repairMetrics.snapshot().filter(row=>row.event.startsWith('synchronous_')).length,0);
+  f.state.finishSynchronousPR=finish;assert.equal((await f.state.refreshPR(input)).outcome,'refreshed');assert.equal((await f.store.exec('SELECT dirty FROM jobs WHERE key=?',key)).one().dirty,0);
+  assert.equal(f.state.repairMetrics.snapshot().find(row=>row.event==='synchronous_completion').n,1);
+  assert.deepEqual(f.state.repairMetrics.summary().requested_latency,[],'synchronous latency must not mix with background requested latency');
+ }finally{await f.close();}
+});
+
+test('a lost committed reply is safe to repeat and does not require an acknowledgement',async()=>{
+ const f=await fixture();try{
+  await seed(f);let reads=0;upstream(f,async()=>{reads++;return {data:record(),api:'core'};});
+  const transaction=f.store.transaction.bind(f.store);let lose=true;
+  f.store.transaction=async(apply,purpose,operation)=>{const result=await transaction(apply,purpose,operation);if(lose && operation==='pr_refresh_publish'){lose=false;throw Error('reply lost after commit');}return result;};
+  const input={repository:'org/repo',number:7,expected_head:old};assert.equal((await f.state.refreshPR(input)).status,'unavailable');
+  assert.equal((await f.store.exec('SELECT dirty FROM jobs WHERE key=?',key)).one().dirty,0);
+  assert.equal((await f.state.refreshPR(input)).outcome,'already-changed');assert.equal(reads,1);
+ }finally{await f.close();}
+});
+
+for(const condition of ['expired lease','unknown creation'])test(`uncertain job identity retains recovery: ${condition}`,async()=>{
+ const f=await fixture();try{
+  await seed(f);
+  if(condition==='expired lease')await f.store.exec('UPDATE jobs SET lease_id=?,lease_until=? WHERE key=?','expired-owner',Date.now()-1000,key);
+  else await f.store.exec('UPDATE jobs SET created_at=NULL WHERE key=?',key);
+  upstream(f,async()=>({data:record(),api:'core'}));
+  assert.equal((await f.state.refreshPR({repository:'org/repo',number:7,expected_head:old})).outcome,'refreshed');
+  assert.equal((await f.store.exec('SELECT dirty FROM jobs WHERE key=?',key)).one().dirty,1);
+ }finally{await f.close();}
+});
+
+test('satisfying a PR job preserves an installation-wide quota restriction',async()=>{
+ const f=await fixture();try{
+  await seed(f);f.state.repairGroup={};
+  await f.state.noteQuotaRestriction({scope:{kind:'installation'},category:'secondary',retry_at:Date.now()+3600000});
+  const restriction=f.state.quotaRestriction;assert.equal(restriction.category,'secondary');f.state.repairGroup=undefined;
+  upstream(f,async()=>({data:record(),api:'core'}));
+  assert.equal((await f.state.refreshPR({repository:'org/repo',number:7,expected_head:old})).outcome,'refreshed');
+  assert.equal(f.state.quotaRestriction,restriction);assert.equal((await f.store.exec('SELECT dirty FROM jobs WHERE key=?',key)).one().dirty,0);
+ }finally{await f.close();}
+});
