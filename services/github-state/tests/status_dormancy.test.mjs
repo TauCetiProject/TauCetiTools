@@ -33,7 +33,7 @@ test('shared current heads and missing associated resources keep statuses active
   await f.store.exec('DELETE FROM jobs');await f.store.exec('DELETE FROM collections');
   await f.state.put('pr','2',{number:2,state:'OPEN',headRefOid:sha(99)});assert.equal(await f.state.dormant(query(1)),true);
   await f.store.exec('INSERT INTO head_prs VALUES(?,?)',sha(1),'missing');assert.equal(await f.state.dormant(query(1)),false);
-  assert.equal(await f.state.dormant(query(50)),false);
+  assert.equal(await f.state.dormant(query(50)),true,'unmapped commits do not retain background polling');
   const q=query(1);await f.state.enqueueMany([{q,priority:20}],true);
   assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(q))).one().n,1,'backfill retains a missing associated PR');
   await complete(f,q);const row=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key(q))).one();
@@ -54,7 +54,7 @@ test('head projection tolerates escaped body characters and does not treat JSON 
  }finally{await f.close();}
 });
 
-test('bulk retirement protects dirty incomplete requested demanded and replacement-owned statuses',async()=>{
+test('bulk retirement drops obsolete dirty and incomplete statuses while protecting demand and ownership',async()=>{
  const f=await fixture();try{
   const qs=Array.from({length:7},(_,i)=>query(i+1));
   for(let n=1;n<=7;n++){await parent(f,n,sha(99));if(n!==3)await complete(f,query(n));await job(f,query(n),n===2);}
@@ -66,9 +66,9 @@ test('bulk retirement protects dirty incomplete requested demanded and replaceme
   // The actual coordinator never supplies an owned selection; the explicit
   // selection here proves retirement still fences a stale snapshot itself.
   const retired=await f.state.atomic(state=>state.claimCompanions(rows[0],rows,undefined,true),'repair');
-  assert.deepEqual(retired.map(j=>j.key).sort(),[key(query(1))]);
+  assert.deepEqual(retired.map(j=>j.key).sort(),[1,2,3].map(n=>key(query(n))));
   assert.equal((await f.store.exec('SELECT lease_id FROM jobs WHERE key=?',key(query(6)))).one().lease_id,'replacement');
-  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs')).one().n,6);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs')).one().n,4);
  }finally{await f.close();}
 });
 

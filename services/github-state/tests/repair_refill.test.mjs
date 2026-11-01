@@ -261,7 +261,7 @@ test('a missing staged page drains parallel archive bodies without resetting its
 test('local obsolete work retires while an installation-wide restriction blocks upstream selection',async()=>{
  const f=await fixture();try{
   const q=query(100);await seed(f,1);
-  await f.state.put('pr','100',{number:100,state:'CLOSED'});
+  await f.state.put('pr','100',{number:100,state:'CLOSED',headRefOid:'a'.repeat(40),baseRefOid:'b'.repeat(40),changedFiles:0,additions:0,deletions:0});
   await f.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?)',key(100),'files',JSON.stringify(q.args),1,Date.now(),1,null);
   await f.store.exec('UPDATE jobs SET dirty=0');
   const c=f.state.getRepairCoordinator();
@@ -478,6 +478,32 @@ test('a capacity release after closure does not refetch an unclassified publicat
   await drainRepairs(f.state);
   assert.equal(await f.state.complete(good),true);assert.equal(files,2);assert.equal(batches,1,'a capacity release does not authorize refetch of an unrelated failed tail');
   assert.equal((await f.store.exec('SELECT attempt FROM jobs WHERE key=?',tail)).one().attempt,0);
+ }finally{await drainRepairs(f.state);await f.close();}
+});
+
+test('SQLite keeps an early capacity release when maintenance crosses the retry deadline',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
+ const f=await fixture();try{
+  await seed(f,1);let calls=0,until;
+  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>{
+   if(++calls===1){until=Date.now()+250;
+    await f.state.fetch(new Request('https://internal/capacity-ready',{method:'POST',body:JSON.stringify({installation:'200'})}));
+    return Response.json({deferred:true,category:'capacity',retry_at:until,scope:{kind:'installation'}});
+   }
+   assert.ok(Date.now()>=until);return Response.json({api:'core',data:[]});
+  }})};
+  await f.state.runAlarm();await drainRepairs(f.state);assert.equal(calls,1);
+  // An already scheduled earlier alarm runs before the real retry deadline.
+  // Its maintenance ends after that deadline, when a closed quantum would
+  // otherwise omit the capacity-excluded overdue row while choosing an alarm.
+  f.state.retireQuotaObsolete=async()=>new Promise(resolve=>setTimeout(resolve,Math.max(0,until-Date.now()+30)));
+  await f.ctx.storage.setAlarm(null); // The platform consumes a delivered alarm.
+  await f.state.alarm();await drainRepairs(f.state);
+  const alarm=await f.ctx.storage.getAlarm();
+  assert.ok(typeof alarm==='number' && alarm<=Date.now()+200,'the real release must retain a prompt durable wake');
+  await new Promise(resolve=>setTimeout(resolve,Math.max(0,alarm-Date.now()+1)));
+  await f.ctx.storage.setAlarm(null);
+  await f.state.alarm();await drainRepairs(f.state);
+  assert.equal(calls,2);assert.equal(await f.state.complete(query(100)),true);
  }finally{await drainRepairs(f.state);await f.close();}
 });
 
