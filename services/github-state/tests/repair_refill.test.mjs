@@ -55,8 +55,32 @@ test('PostgreSQL repair turns continue while optional housekeeping is pending or
  }finally{gate.resolve();if(f.state.surveyFlight)await f.state.surveyFlight;if(f.state.storageFlight)await f.state.storageFlight.catch(()=>{});await f.close();}
 });
 
+test('PostgreSQL retirement coalesces independently of selection, hydration and storage maintenance',async()=>{
+ const f=await fixture(),retirement=deferred(),hydration=deferred();try{
+  f.state.store=new Proxy(f.state.store,{get(target,name){if(name==='backend')return 'postgres';const value=Reflect.get(target,name,target);return typeof value==='function'?value.bind(target):value;}});
+  let retirements=0,selections=0,storage=0,fail=false;
+  f.state.retireQuotaObsolete=async()=>{retirements++;await retirement.promise;if(fail)throw Error('temporary cleanup failure');};
+  f.state.maintenance=async()=>hydration.promise;
+  f.state.prepareStorage=async()=>{storage++;};delete f.state.startStorageMaintenance;
+  const c=f.state.getRepairCoordinator();c.hooks.select=async()=>{selections++;};c.hooks.eligible=async()=>false;c.hooks.arm=async()=>{};
+  await bounded(f.state.runAlarm(),'retirement held selection');await flush();
+  await bounded(f.state.runAlarm(),'pending retirement held a later turn');await flush();
+  assert.equal(selections,2);assert.equal(retirements,1);assert.equal(storage,2);
+  assert.ok(f.state.surveyFlight);assert.ok(f.state.retirementFlight);
+  retirement.resolve();await f.state.retirementFlight;
+  fail=true;await bounded(f.state.runAlarm(),'cleanup failure held selection');await flush();
+  if(f.state.retirementFlight)await f.state.retirementFlight;
+  fail=false;await bounded(f.state.runAlarm(),'cleanup did not retry on an ordinary turn');await flush();
+  if(f.state.retirementFlight)await f.state.retirementFlight;
+  assert.equal(retirements,3);assert.equal(selections,4);assert.equal(storage,4);
+  assert.ok(f.state.surveyFlight,'pending hydration does not prevent cleanup retries');
+ }finally{retirement.resolve();hydration.resolve();await f.state.retirementFlight;await f.state.surveyFlight;await f.state.storageFlight;await drainRepairs(f.state);await f.close();}
+});
+
 test('real repair slots refill beyond sixteen launches while one group remains pending',async()=>{
- const f=await fixture(),gate=deferred();try{
+ const f=await fixture(),gate=deferred(),retirement=deferred();try{
+  let retirements=0;
+  if(f.store.backend==='postgres')f.state.retireQuotaObsolete=async()=>{retirements++;await retirement.promise;};
   const queries=await seed(f,21),progress=observeProgress(f.state);let held;
   f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async(_url,init)=>{
    const q=JSON.parse(init.body).query;if(!held){held=key(q.args.number);await gate.promise;}
@@ -70,10 +94,11 @@ test('real repair slots refill beyond sixteen launches while one group remains p
   assert.equal(f.state.repairCoordinator.groups.size,1);assert.ok(f.state.activeOperations>=1);
   const completed=(await f.store.exec("SELECT COUNT(*) n FROM collections WHERE operation='files' AND complete=1")).one().n;
   assert.equal(completed,20,'an independent reader sees fast work committed before the held response');
+  if(f.store.backend==='postgres'){assert.equal(retirements,1);assert.ok(f.state.retirementFlight,'a pending cleanup pass cannot hold useful collection');}
   assert.equal(await f.state.complete(queries.find(q=>key(q.args.number)===held)),false);
-  gate.resolve();await drainRepairs(f.state);assert.equal(f.state.activeOperations,0);
+  gate.resolve();retirement.resolve();await f.state.retirementFlight;await drainRepairs(f.state);assert.equal(f.state.activeOperations,0);
   assert.equal((await f.store.exec("SELECT COUNT(*) n FROM collections WHERE operation='files' AND complete=1")).one().n,21);
- }finally{gate.resolve();await drainRepairs(f.state);await f.close();}
+ }finally{gate.resolve();retirement.resolve();await f.state.retirementFlight;await drainRepairs(f.state);await f.close();}
 });
 
 test('migration freeze drains every complete group launched through a transaction scope',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
