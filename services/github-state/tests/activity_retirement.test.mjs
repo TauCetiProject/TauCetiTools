@@ -170,8 +170,37 @@ test('background retirement validates real R2 files outside the writer and prese
   };
   f.state.startRetirementMaintenance();const flight=f.state.retirementFlight;assert.ok(flight);await flight;
   assert.equal(decoded,2);assert.equal(f.state.retirementFlight,undefined);assert.equal(f.state.activeOperations,0);
-  assert.ok(f.state.retirementAfter,'the background scope advances the owner cursor');
+  assert.equal(f.state.retirementAfter,'','a completed pass resets its disposable position');
   assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(query('files',15)))).one().n,0);
   for(const n of [13,14])assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(query('files',n)))).one().n,1);
+ }finally{await f.state.retirementFlight;await f.close();}
+});
+
+test('one background pass crosses retained batches and completes later obsolete cleanup',async()=>{
+ const f=await fixture();try{
+  const retained=Array.from({length:102},(_,i)=>query('files',1000+i));
+  await f.state.enqueueMany(retained.map(q=>({q,priority:20})),true);
+  await f.state.put('pr','1200',header(1200));const obsolete=query('reviews',1200);await enqueue(f,obsolete);
+  const sweep=f.state.retireQuotaObsolete,positions=[];
+  f.state.retireQuotaObsolete=async function(){await sweep.call(this);positions.push(this.owner.retirementAfter);};
+  f.state.startRetirementMaintenance();const flight=f.state.retirementFlight;
+  f.state.startRetirementMaintenance();assert.equal(f.state.retirementFlight,flight,'ordinary wakes coalesce');
+  await flight;
+  assert.equal(positions.length,3,'two existing batches plus end-of-pass detection');
+  assert.ok(positions[0].startsWith('files:'));assert.ok(positions[1].startsWith('reviews:'));assert.equal(positions[2],'');
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs')).one().n,102);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(obsolete))).one().n,0);
+  assert.equal(f.state.activeOperations,0);assert.equal(f.state.retirementFlight,undefined);
+ }finally{await f.state.retirementFlight;await f.close();}
+});
+
+test('background pass stops between batches when writes are fenced and retries on an ordinary wake',async()=>{
+ const f=await fixture();try{
+  const sweep=f.state.retireQuotaObsolete;let batches=0;
+  f.state.retireQuotaObsolete=async function(){batches++;this.owner.retirementAfter='files:retained';this.owner.mutationState.blocked=true;};
+  f.state.startRetirementMaintenance();await f.state.retirementFlight;assert.equal(batches,1);
+  assert.equal(f.state.activeOperations,0);assert.equal(f.state.retirementFlight,undefined);
+  f.state.mutationState.blocked=false;f.state.retireQuotaObsolete=sweep;
+  f.state.startRetirementMaintenance();await f.state.retirementFlight;assert.equal(f.state.retirementAfter,'');
  }finally{await f.state.retirementFlight;await f.close();}
 });

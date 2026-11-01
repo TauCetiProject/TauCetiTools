@@ -1928,7 +1928,10 @@ export class RepositoryState extends DurableObject<Env> {
     owner.activeOperations++;
     const state=Object.create(owner) as RepositoryState;
     state.env={...owner.env,ARCHIVE:timedBucket(owner.env.ARCHIVE,owner.retirementIOScope)};
-    const flight=Promise.resolve().then(()=>state.retireQuotaObsolete())
+    const flight=Promise.resolve().then(async()=>{
+      do {await state.retireQuotaObsolete();}
+      while(owner.retirementAfter && !owner.degraded && !owner.repairsHeld() && !owner.mutationState.blocked);
+    })
       .catch(error=>{owner.noteFailure('local_retirement',error);})
       .finally(()=>{owner.activeOperations--;if(owner.retirementFlight===flight)owner.retirementFlight=undefined;});
     owner.retirementFlight=flight;
