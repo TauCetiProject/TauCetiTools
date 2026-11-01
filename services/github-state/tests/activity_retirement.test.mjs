@@ -17,7 +17,7 @@ async function files(f,n,current=true){
 
 test('ordinary retirement advances past retained final files and removes obsolete dirty histories',async()=>{
  const f=await fixture();try{
-  // The first sweep batch consists entirely of final-file obligations to keep.
+  // Retained final-file obligations span more than one sweep batch.
   for(let n=1;n<=102;n++){await f.state.put('pr',String(n),header(n));await enqueue(f,query('files',n));}
   await f.state.put('pr','200',header(200));
   const review=query('reviews',200),detail=query('pr',200),stale=query('files',201),hot=query('review_threads',200),owned=query('issue_comments',200);
@@ -32,7 +32,7 @@ test('ordinary retirement advances past retained final files and removes obsolet
   await f.store.exec('UPDATE jobs SET lease_id=?,lease_until=? WHERE key=?','owner',Date.now()+60000,key(owned));
   const resources=(await f.store.exec('SELECT COUNT(*) n FROM resources')).one().n;
   assert.equal(f.state.quotaRestriction,undefined);
-  await f.state.retireQuotaObsolete();assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(review))).one().n,1);
+  await f.state.retireQuotaObsolete();assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(review))).one().n,0);
   for(let i=0;i<3;i++)await f.state.retireQuotaObsolete();
   for(const q of [review,detail,final,reaction,unmapped])assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(q))).one().n,0,key(q));
   for(const q of [stale,missing,hot,owned])assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(q))).one().n,1,key(q));
@@ -176,18 +176,24 @@ test('background retirement validates real R2 files outside the writer and prese
  }finally{await f.state.retirementFlight;await f.close();}
 });
 
-test('one background pass crosses retained batches and completes later obsolete cleanup',async()=>{
+test('one background pass retires histories before final-file proofs and crosses retained batches',async()=>{
  const f=await fixture();try{
   const retained=Array.from({length:102},(_,i)=>query('files',1000+i));
   await f.state.enqueueMany(retained.map(q=>({q,priority:20})),true);
   await f.state.put('pr','1200',header(1200));const obsolete=query('reviews',1200);await enqueue(f,obsolete);
-  const sweep=f.state.retireQuotaObsolete,positions=[];
+  const sweep=f.state.retireQuotaObsolete,predicate=f.state.obsoleteJobs,positions=[];let historyRetiredBeforeFiles;
+  f.state.obsoleteJobs=async function(group){
+   if(!this.store.transactional && JSON.parse(group[0].query).operation==='files' && historyRetiredBeforeFiles===undefined)
+    historyRetiredBeforeFiles=(await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(obsolete))).one().n===0;
+   return predicate.call(this,group);
+  };
   f.state.retireQuotaObsolete=async function(){await sweep.call(this);positions.push(this.owner.retirementAfter);};
   f.state.startRetirementMaintenance();const flight=f.state.retirementFlight;
   f.state.startRetirementMaintenance();assert.equal(f.state.retirementFlight,flight,'ordinary wakes coalesce');
   await flight;
   assert.equal(positions.length,3,'two existing batches plus end-of-pass detection');
-  assert.ok(positions[0].startsWith('files:'));assert.ok(positions[1].startsWith('reviews:'));assert.equal(positions[2],'');
+  assert.equal(historyRetiredBeforeFiles,true,'slow file validation must not delay unrelated history retirement');
+  assert.ok(positions[0]>positions[1]);assert.equal(positions[2],'');
   assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs')).one().n,102);
   assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(obsolete))).one().n,0);
   assert.equal(f.state.activeOperations,0);assert.equal(f.state.retirementFlight,undefined);
@@ -198,7 +204,7 @@ test('background pass stops between batches when writes are fenced and retries o
  const f=await fixture();try{
   await f.state.put('pr','1300',header(1300));const later=query('reviews',1300);await enqueue(f,later);
   const sweep=f.state.retireQuotaObsolete;let batches=0;
-  f.state.retireQuotaObsolete=async function(){batches++;this.owner.retirementAfter='files:retained';this.owner.mutationState.blocked=true;};
+  f.state.retireQuotaObsolete=async function(){batches++;this.owner.retirementAfter='statuses:retained';this.owner.mutationState.blocked=true;};
   f.state.startRetirementMaintenance();await f.state.retirementFlight;assert.equal(batches,1);
   assert.equal(f.state.activeOperations,0);assert.equal(f.state.retirementFlight,undefined);
   assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(later))).one().n,1);
