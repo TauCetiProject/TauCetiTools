@@ -474,7 +474,7 @@ export class ReadCacheStore implements RepositoryStore {
 // identities and non-point updates force a flush to retain SQL statement order.
 export class BufferedStore implements RepositoryStore {
   readonly backend='postgres';readonly transactional=true;
-  private pending:Statement[]=[];private identities=new Set<string>();
+  private pending:Statement[]=[];private identities=new Set<string>();private payloadWrites=0;
   constructor(private source:RepositoryStore){}
   get queryCount():number|undefined{return this.source.queryCount;}
   get queuedOtherWork():number|undefined{return this.source.queuedOtherWork;}
@@ -485,6 +485,8 @@ export class BufferedStore implements RepositoryStore {
       if(!/^\?(?:,\?)*$/.test(insert[3]) || insert[3].split(',').length!==(s.bindings || []).length)return undefined;
       return keys.length?JSON.stringify([table,...keys.map(key=>s.bindings?.[fields.indexOf(key)])]):'metric:'+this.pending.length;
     }
+    const validator=s.sql.match(/^UPDATE (jobs|collections) SET etag=NULL WHERE key IN \(\?,\?\)$/);
+    if(validator)return JSON.stringify([validator[1],...(s.bindings || [])]);
     const pointDelete=s.sql.match(/^DELETE FROM (\w+) WHERE (kind=\? AND id=\?|collection=\? AND id=\?|number=\?)$/);
     if(pointDelete)return JSON.stringify([pointDelete[1],...(s.bindings || [])]);
     if(s.sql==='UPDATE resources SET observed=? WHERE kind=? AND id=?' || s.sql==='UPDATE resources SET data=?,observed=? WHERE kind=? AND id=?' || s.sql==='UPDATE resources SET parent=?,data=?,updated=?,observed=?,revision=?,tombstone=? WHERE kind=? AND id=?')return JSON.stringify(['resources',...s.bindings!.slice(-2)]);
@@ -493,8 +495,13 @@ export class BufferedStore implements RepositoryStore {
   async exec<T=any>(sql:string,...bindings:Bind[]):Promise<Rows<T>> {
     const statement={sql,bindings},identity=this.identity(statement);
     if(!identity || /\bRETURNING\b/.test(sql)){await this.flush();return this.source.exec<T>(sql,...bindings);}
-    if(this.identities.has(identity) || this.pending.length>=200)await this.flush();
-    this.identities.add(identity);this.pending.push(statement);return new Rows<T>([]);
+    const validator=sql.match(/^UPDATE (jobs|collections) SET etag=NULL WHERE key IN \(\?,\?\)$/);
+    const identities=validator?bindings.map(key=>JSON.stringify([validator[1],key])):[identity];
+    // Validator clears carry no row bodies; retain the original payload bound
+    // without shrinking every set-based group when they accompany PR writes.
+    if(identities.some(key=>this.identities.has(key)) || this.payloadWrites>=200 || this.pending.length>=600)await this.flush();
+    if(!validator)this.payloadWrites++;
+    for(const key of identities)this.identities.add(key);this.pending.push(statement);return new Rows<T>([]);
   }
   async batch(statements:Statement[]):Promise<Rows<any>[]> {
     if(statements.some(s=>!this.identity(s) || /\bRETURNING\b/.test(s.sql))){await this.flush();return this.source.batch(statements);}
@@ -502,7 +509,7 @@ export class BufferedStore implements RepositoryStore {
   }
   async flush():Promise<void> {
     if(!this.pending.length)return;
-    const pending=this.pending;this.pending=[];this.identities.clear();
+    const pending=this.pending;this.pending=[];this.identities.clear();this.payloadWrites=0;
     const groups=new Map<string,Statement[]>();
     for(const s of pending){const group=groups.get(s.sql) || [];group.push(s);groups.set(s.sql,group);}
     const writes:Statement[]=[];
@@ -510,6 +517,8 @@ export class BufferedStore implements RepositoryStore {
       if(group.length===1){writes.push(group[0]);continue;}
       const insert=sql.match(/^(INSERT(?: OR IGNORE)? INTO \w+(?:\([^)]+\))? VALUES\s*)(\([^)]+\))([\s\S]*)$/);
       if(insert){writes.push({sql:insert[1]+group.map(()=>insert[2]).join(',')+insert[3],bindings:group.flatMap(s=>s.bindings || [])});continue;}
+      const validator=sql.match(/^UPDATE (jobs|collections) SET etag=NULL WHERE key IN \(\?,\?\)$/);
+      if(validator){writes.push({sql:'UPDATE '+validator[1]+' SET etag=NULL WHERE key IN ('+group.flatMap(s=>s.bindings || []).map(()=>'?').join(',')+')',bindings:group.flatMap(s=>s.bindings || [])});continue;}
       const deletion=sql.match(/^(DELETE FROM \w+ WHERE )(.+)$/);
       if(deletion){writes.push({sql:deletion[1]+group.map(()=>'('+deletion[2]+')').join(' OR '),bindings:group.flatMap(s=>s.bindings || [])});continue;}
       if(sql==='UPDATE resources SET observed=? WHERE kind=? AND id=?'){

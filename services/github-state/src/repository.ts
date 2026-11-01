@@ -693,8 +693,9 @@ export class RepositoryState extends DurableObject<Env> {
     await this.store.batch(writes);
     if(kind==='pr' && data?.number){
       const key=queryKey({operation:'pr',args:{number:data.number}});
-      await this.store.exec('UPDATE jobs SET etag=NULL WHERE key=?',key);
-      await this.store.exec('UPDATE collections SET etag=NULL WHERE key=?',key);
+      const textKey=queryKey({operation:'pr',args:{number:String(data.number)}});
+      await this.store.exec('UPDATE jobs SET etag=NULL WHERE key IN (?,?)',key,textKey);
+      await this.store.exec('UPDATE collections SET etag=NULL WHERE key IN (?,?)',key,textKey);
       if(!fromEvent || oldStored?.headRefOid!==data.headRefOid || oldStored?.state!==data.state)this.prQueriesChanged.add(String(data.number));
     }
     if(this.store instanceof ReadCacheStore)this.store.seed('SELECT data,tombstone FROM resources WHERE kind=? AND id=?',[kind,id],[{data:encoded,tombstone:Number(deleted)}]);
@@ -849,7 +850,7 @@ export class RepositoryState extends DurableObject<Env> {
     if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.enqueue.call(state,q,priority,due,dirty),'enqueue');
     const key=queryKey(q);
     const prior=(await this.store.exec<any>('SELECT * FROM jobs WHERE key=?',key)).toArray()[0];
-    const lane=(await this.lane(q,dirty || Boolean(prior?.dirty),priority)),requested=lane==='requested'?(prior?.requested_at || Date.now()):prior?.requested_at || null;
+    const lane=prior?.lane==='requested' && prior?.requested_at && (dirty || prior?.dirty)?'requested':(await this.lane(q,dirty || Boolean(prior?.dirty),priority)),requested=lane==='requested'?(prior?.requested_at || Date.now()):prior?.requested_at || null;
     await this.store.exec('INSERT INTO jobs(key,query,priority,due,dirty,generation,lane,requested_at,created_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET priority=excluded.priority,lane=excluded.lane,requested_at=excluded.requested_at,dirty=MAX(dirty,excluded.dirty),generation=generation+excluded.generation' + (dirty ? ",due=CASE WHEN wait_reason IS NOT NULL OR attempt>0 THEN due ELSE MIN(due,excluded.due) END" : ''),key,JSON.stringify({...q,allow_observed:undefined}),priority,due,Number(dirty),Number(dirty),lane,requested,Date.now());
     if (!prior) await this.metric('arrival',q,lane);
     const alarm=this.store.backend==='postgres'?null:await this.ctx.storage.getAlarm();
@@ -907,7 +908,7 @@ export class RepositoryState extends DurableObject<Env> {
       // the previous head's collection still carries complete=1.
       const covered=collections.has(key) && !(q.operation==='files' && prior?.dirty);
       if(backfill && (covered || dormant))continue;
-      const lane=(demanded || backfill) && !covered?'requested':dirty || prior?.dirty || priority<=5 || q.operation.endsWith('_delta')?'active':q.operation.startsWith('recent_') || dormant?'archive':'verification';
+      const lane=prior?.lane==='requested' && prior?.requested_at && (dirty || prior?.dirty)?'requested':(demanded || backfill) && !covered?'requested':dirty || prior?.dirty || priority<=5 || q.operation.endsWith('_delta')?'active':q.operation.startsWith('recent_') || dormant?'archive':'verification';
       // Maintenance shares the requested lane without fabricating a user read.
       // NULL sorts behind real demand and stays out of user latency metrics.
       const requested=prior?.requested_at || (backfill && !demanded?null:now);
@@ -949,7 +950,7 @@ export class RepositoryState extends DurableObject<Env> {
     for(const {q,priority,dirty=false,dirtyIfMissing=false,missingOnly=false} of input) {
       const key=queryKey(q),known=complete.has(key);if(missingOnly && known)continue;
       const prior=jobs.get(key),changed=dirty || dirtyIfMissing && !known;
-      const lane:Lane=(demand.get(key) || 0)>now-300000 && !known?'requested':'active';
+      const lane:Lane=prior?.lane==='requested' && prior?.requested_at && (changed || prior?.dirty)?'requested':(demand.get(key) || 0)>now-300000 && !known?'requested':'active';
       const requested=lane==='requested'?(prior?.requested_at || now):prior?.requested_at || null;
       const due=prior?(changed && prior.wait_reason==null && !prior.attempt?Math.min(prior.due,now):prior.due):now;
       const generation=(increments.get(key) || 0)+Number(changed);increments.set(key,generation);
@@ -1054,9 +1055,9 @@ export class RepositoryState extends DurableObject<Env> {
       const accepted=row?await this.put('pr',number,row,pointer.received,false,number,true):false;
       // A webhook describes one PR, not a complete inventory. Never create fake coverage.
       const key=queryKey({operation:'open_prs'});
-      if (accepted) await this.membership(key,number,body.pull_request.state==='open');
+      if (accepted) await this.membership(key,number,row.state==='OPEN');
       const detail={repository:repo.name,operation:'pr',args:{number:snapshot.number}};
-      repairs.push({q:detail,priority:0,dirty:!row || row.mergeable==='UNKNOWN' || prior?.headRefOid!==snapshot.headRefOid,dirtyIfMissing:true},{q:{repository:repo.name,operation:'open_prs'},priority:1,dirtyIfMissing:true});
+      repairs.push({q:detail,priority:0,dirty:!row || row.mergeable==='UNKNOWN' || prior?.headRefOid!==snapshot.headRefOid || prior?.state!==snapshot.state,dirtyIfMissing:true},{q:{repository:repo.name,operation:'open_prs'},priority:1,dirtyIfMissing:true});
       if(accepted && row.headRefOid && prior?.headRefOid!==row.headRefOid){
         const files={repository:repo.name,operation:'files',args:{number:row.number}};
         await this.store.exec('UPDATE collections SET complete=0,etag=NULL WHERE key=?',queryKey(files));
@@ -1490,7 +1491,7 @@ export class RepositoryState extends DurableObject<Env> {
       if(job.page===1 && !job.nested) await this.metric('requested_single_latency_ms',q,'requested',Date.now()-requested);
     }
     const obsolete=!again && (await this.obsoleteJobs([{...job,requested_at:null}])).length>0;
-    await this.store.exec('UPDATE jobs SET due=?,priority=?,lane=?,dirty=?,started=NULL,cursor=NULL,page=1,api=NULL,etag=?,attempt=0,wait_reason=NULL,nested=NULL,requested_at=? WHERE key=?',again?Date.now():Date.now()+(await this.interval(q)),again?current.priority:(await this.priority(q)),(await this.lane(q,again)),Number(again),etag || null,again?current?.requested_at || null:null,job.key);
+    await this.store.exec('UPDATE jobs SET due=?,priority=?,lane=?,dirty=?,started=NULL,cursor=NULL,page=1,api=NULL,etag=?,attempt=0,wait_reason=NULL,nested=NULL,requested_at=? WHERE key=?',again?Date.now():Date.now()+(await this.interval(q)),again?current.priority:(await this.priority(q)),(again && current?.lane==='requested'?'requested':await this.lane(q,again)),Number(again),etag || null,again?current?.requested_at || null:null,job.key);
     if(obsolete)await this.store.exec("DELETE FROM jobs WHERE key=? AND COALESCE(generation,0)=? AND COALESCE(lease_id,'')=?",job.key,current?.generation || 0,job.lease_id || '');
   }
   async nextRefreshCursor(q:Query,result:any,started:number):Promise<string|undefined>{
@@ -1511,7 +1512,7 @@ export class RepositoryState extends DurableObject<Env> {
     await this.atomic(async state=>{
       if(await state.meta('pr_validator_version')===1)return;
       await state.store.exec("UPDATE jobs SET etag=NULL WHERE key LIKE 'pr:%'");
-      await state.store.exec("UPDATE collections SET etag=NULL WHERE operation='pr'");
+      await state.store.exec("UPDATE collections SET etag=NULL,verified=0 WHERE operation='pr'");
       await state.setMeta('pr_validator_version',1);
     });
   }
@@ -1528,7 +1529,7 @@ export class RepositoryState extends DurableObject<Env> {
     // The numeric resource is authoritative. Remove the legacy alias rather
     // than letting two independently ordered snapshots disagree.
     const q={repository:repo.name,operation:'pr',args:{number:data.number}},key=queryKey(q);
-    await this.store.exec("DELETE FROM resources WHERE kind='pr' AND id=?",key);
+    await this.store.exec('DELETE FROM resources WHERE kind=? AND id=?','pr',key);
     await this.membership(queryKey({operation:'open_prs'}),number,data.state==='OPEN');
     if(prior?.headRefOid!==data.headRefOid){
       const files={repository:repo.name,operation:'files',args:{number:data.number}};
@@ -1542,19 +1543,28 @@ export class RepositoryState extends DurableObject<Env> {
     const q={repository:input.repository,operation:'pr',args:{number:input.number}};
     // Failure reporting must still work when reading the database does not.
     const unavailable=(reason:string,retry_at=Date.now()+30000)=>({version:1,repository:input.repository,operation:'pr',status:'unavailable',complete:false,revision:0,reason,retry_at});
-    const current=(await this.store.exec<any>("SELECT data FROM resources WHERE kind='pr' AND id=?",String(input.number))).toArray()[0];
+    const current=(await this.store.exec<any>("SELECT r.data,r.revision,c.verified,c.revision AS checked_revision FROM resources r LEFT JOIN collections c ON c.key=? AND c.complete=1 WHERE r.kind='pr' AND r.id=?",queryKey(q),String(input.number))).toArray()[0];
     if(current){const data=await this.decode(current.data);if(data.headRefOid && data.headRefOid!==input.expected_head)return {version:1,repository:input.repository,operation:'pr',status:'ok',complete:true,outcome:'already-changed',revision:await this.revision(),data};}
+    // Reuse only a full verification that still covers this exact stored
+    // revision. A newer webhook invalidates it even inside the short window.
+    if(current && await this.meta('pr_validator_version')===1){
+      if(current.verified>Date.now()-30000 && Number(current.checked_revision)>=Number(current.revision))return {version:1,repository:input.repository,operation:'pr',status:'ok',complete:true,outcome:'recently-verified',revision:await this.revision(),verified_at:current.verified,data:await this.decode(current.data)};
+    }
     let flight=this.owner.prRefreshes.get(input.number);
     if(!flight){
       flight=(async()=>{
         try{
           await this.ensurePRValidators();
           // Existing jobs provide restart recovery. No network I/O owns a writer.
-          await this.enqueue(q,0,Date.now(),true);
+          await this.atomic(async state=>{
+            await state.enqueue(q,0,Date.now(),true);
+            await state.store.exec("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?) WHERE key=?",Date.now(),queryKey(q));
+          });
           const repo=await this.meta('repository');
           const revision=Number((await this.store.exec<any>("SELECT revision FROM resources WHERE kind='pr' AND id=?",String(input.number))).toArray()[0]?.revision || 0),started=Date.now();
           const response=await stub(this.env.INSTALLATIONS,repo.installation).fetch('https://internal/read',{method:'POST',body:JSON.stringify({repository:repo,query:q,page:1})});
           const result:any=await response.json();
+          if(result.deferred)await this.noteQuotaRestriction(result);
           if(!response.ok || result.deferred || result.unavailable || result.unchanged || !result.data || result.data.number!==input.number || !/^[a-f0-9]{40}$/.test(result.data.headRefOid || ''))return unavailable(result.category || result.reason || 'refresh_unavailable',result.retry_at);
           const committed=await this.atomic(async state=>{
             if(!await state.publishPR(result.data,started,revision))return false;
@@ -1568,7 +1578,11 @@ export class RepositoryState extends DurableObject<Env> {
       const owned=flight,began=Date.now();
       void flight.then(result=>{try{log("pr_refresh",{number:input.number,outcome:result.outcome || result.reason || "failed",elapsed_ms:Date.now()-began});}catch{}},()=>{});
       const cleanup=()=>{if(this.owner.prRefreshes.get(input.number)===owned)this.owner.prRefreshes.delete(input.number);};
-      void flight.then(cleanup,cleanup);
+      // A stalled binding must not make this instance's shared promise the
+      // permanent owner. Late publication still obeys the revision fence.
+      const expiry=setTimeout(cleanup,60000);
+      const settled=()=>{clearTimeout(expiry);cleanup();};
+      void flight.then(settled,settled);
       this.owner.ctx.waitUntil?.(flight);
     }
     let timer:ReturnType<typeof setTimeout>|undefined;
@@ -1577,7 +1591,7 @@ export class RepositoryState extends DurableObject<Env> {
   }
   private async prepareRefresh(job:any,supplied?:any):Promise<PreparedRefresh> {
     const repo=(await this.meta('repository')), q:Query=JSON.parse(job.query);
-    if(q.operation==='pr'){
+    if(q.operation==='pr' && !supplied){
       await this.ensurePRValidators();
       // A quota deferral's original job start is not the HTTP observation start.
       const revision=Number((await this.store.exec<any>("SELECT revision FROM resources WHERE kind='pr' AND id=?",String(q.args?.number))).toArray()[0]?.revision || 0);
@@ -1825,7 +1839,7 @@ export class RepositoryState extends DurableObject<Env> {
     const changedNumbers=new Set<number>(), changedHeads=new Set<number>();
     if (scalar!==undefined || ['pr','repository','statuses'].includes(q.operation)) {
       if(q.operation==='pr'){
-        if(!scalar?.number || scalar.number!==q.args?.number)throw Error('malformed PR response');
+        if(!scalar?.number || String(scalar.number)!==String(q.args?.number))throw Error('malformed PR response');
         if(!await this.publishPR(scalar,started,job.pr_revision)){await this.rearmPR(job);return;}
       }else await this.put(q.operation,job.key,scalar===undefined?rows:scalar,started);
     } else {
@@ -1899,7 +1913,7 @@ export class RepositoryState extends DurableObject<Env> {
         if (q.operation==='open_prs') {
           const itemKey=queryKey({operation:'pr',args:{number:row.number}});
           if(acceptedIDs.has(String(row.number))){
-            await this.store.exec("DELETE FROM resources WHERE kind='pr' AND id=?",itemKey);
+            await this.store.exec('DELETE FROM resources WHERE kind=? AND id=?','pr',itemKey);
             await this.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET complete=1,verified=excluded.verified,revision=excluded.revision,etag=NULL',itemKey,'pr',JSON.stringify({number:row.number}),1,Date.now(),(await this.revision()),null);
           }else repairs.push({q:{repository:repo.name,operation:'pr',args:{number:row.number}},priority:0,dirty:true});
         }

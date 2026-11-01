@@ -401,7 +401,8 @@ pg('grouped publication packs mixed old bodies and preserves duplicate, tombston
   const newer=JSON.parse((await f.store.exec("SELECT data FROM resources WHERE kind='pr' AND id='260'")).one().data);
   assert.equal(newer.body.endsWith('\u0000tail'),true);
   assert.equal((await f.store.exec("SELECT tombstone FROM resources WHERE kind='pr' AND id='261'")).one().tombstone,1);
-  assert.equal(JSON.parse((await f.store.exec("SELECT data FROM resources WHERE kind='pr' AND id=?",'pr:{"number":1}')).one().data).state,'CLOSED');
+  assert.equal(JSON.parse((await f.store.exec("SELECT data FROM resources WHERE kind='pr' AND id='1'")).one().data).state,'CLOSED');
+  assert.equal((await f.store.exec("SELECT COUNT(*) n FROM resources WHERE kind='pr' AND id=?",'pr:{"number":1}')).one().n,0,'canonical PR replaces the legacy alias');
   const delta={repository:repo.name,operation:'pr_delta'};await f.state.enqueue(delta,0);
   const deltaJob=await f.state.claim((await f.store.exec('SELECT * FROM jobs WHERE key=?','pr_delta:{}')).one());
   const changed=rows.slice(0,180).map(row=>({...row,state:row.number===1?'OPEN':'CLOSED',updatedAt:new Date(fixed+2).toISOString()}));
