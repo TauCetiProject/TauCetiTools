@@ -2557,11 +2557,12 @@ export class RepositoryState extends DurableObject<Env> {
   private async retireQuotaObsolete():Promise<void> {
     if(this.degraded || this.repairsHeld())return;
     const omit=this.excludeRepairKeys(undefined,false),now=Date.now();
-    // Scan locally even while upstream is unavailable. Advance past retained
-    // keys so an incomplete final file snapshot cannot starve later cleanup.
+    // Scan locally even while upstream is unavailable. Walk backwards so
+    // histories/statuses retire before potentially slow final-file proofs.
     // This position is disposable: a restart simply rescans cached facts.
-    const candidates=(await this.store.exec<any>("SELECT jobs.* FROM jobs WHERE key>? AND lease_until<=?"+omit.sql+
-      " AND NOT EXISTS (SELECT 1 FROM demand d WHERE d.key=jobs.key AND d.at>?) ORDER BY key LIMIT 100",this.owner.retirementAfter,now,...omit.bindings,now-300000)).toArray();
+    const before=this.owner.retirementAfter;
+    const candidates=(await this.store.exec<any>("SELECT jobs.* FROM jobs WHERE "+(before?'key<? AND ':'')+"lease_until<=?"+omit.sql+
+      " AND NOT EXISTS (SELECT 1 FROM demand d WHERE d.key=jobs.key AND d.at>?) ORDER BY key DESC LIMIT 100",...(before?[before]:[]),now,...omit.bindings,now-300000)).toArray();
     if(!candidates.length){this.owner.retirementAfter='';return;}
     const groups=new Map<string,any[]>();
     for(const job of candidates){const operation=JSON.parse(job.query).operation,group=groups.get(operation)||[];group.push(job);groups.set(operation,group);}
