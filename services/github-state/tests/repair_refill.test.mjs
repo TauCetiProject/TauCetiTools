@@ -261,7 +261,7 @@ test('a missing staged page drains parallel archive bodies without resetting its
 test('local obsolete work retires while an installation-wide restriction blocks upstream selection',async()=>{
  const f=await fixture();try{
   const q=query(100);await seed(f,1);
-  await f.state.put('pr','100',{number:100,state:'CLOSED'});
+  await f.state.put('pr','100',{number:100,state:'CLOSED',headRefOid:'a'.repeat(40),baseRefOid:'b'.repeat(40),changedFiles:0,additions:0,deletions:0});
   await f.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?)',key(100),'files',JSON.stringify(q.args),1,Date.now(),1,null);
   await f.store.exec('UPDATE jobs SET dirty=0');
   const c=f.state.getRepairCoordinator();

@@ -279,7 +279,9 @@ test('closed PR history and CI polling retire, then client demand reactivates th
   await state.noteDemand(q);
   assert.equal((await state.dormant(q)),false);
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM jobs WHERE key=?').get(key)).n,1);
-  assert.equal((await state.dormant({operation:'statuses',args:{sha:'b'.repeat(40)}})),false,'unknown heads are conservative');
+  const unmapped={operation:'statuses',args:{sha:'b'.repeat(40)}};
+  assert.equal((await state.dormant(unmapped)),true,'an unmapped commit needs no background status polling');
+  await state.noteDemand(unmapped);assert.equal(await state.dormant(unmapped),false,'explicit historical consumers still reactivate an unmapped commit');
  }finally{await db.close();}
 });
 test('a webhook arriving during a staged read keeps its repair pending',async()=>{
@@ -641,13 +643,40 @@ test('maintenance promotes bounded missing open-head coverage and preserves retr
   assert.equal(first.length,64);assert.ok(first.every(r=>JSON.parse(r.query).args.number!==1),'closed PRs never get initial-coverage demand');
   const stopped=first.find(r=>r.key==='statuses:'+JSON.stringify(blocked.args));assert.equal(stopped.due,now+3600000);assert.equal(stopped.attempt,3);assert.equal(stopped.wait_reason,'primary:core');
   await state.requestOpenCoverage();
-  assert.equal((await db.prepare("SELECT COUNT(*) n FROM jobs WHERE lane='requested'").get()).n,87,'next turn advances beyond already requested work');
-  await state.requestOpenCoverage();assert.equal((await db.prepare('SELECT COUNT(*) n FROM jobs').get()).n,87,'promotion is idempotent');
+  assert.equal((await db.prepare("SELECT COUNT(*) n FROM jobs WHERE lane='requested'").get()).n,116,'next turn advances beyond already requested work');
+  await state.requestOpenCoverage();assert.equal((await db.prepare('SELECT COUNT(*) n FROM jobs').get()).n,116,'promotion is idempotent');
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM demand').get()).n,0,'maintenance never fabricates recent reads');
   assert.ok(first.every(r=>r.requested_at===null),'backfill has no user-request timestamp');
   const atomic=state.atomic;state.atomic=async()=>{throw Error('empty backfill took writer lock');};
   await state.requestOpenCoverage();state.atomic=atomic;
   const before=await db.prepare('SELECT COUNT(*) n FROM demand').get();state.readOnlyQuery=true;await state.requestOpenCoverage();assert.equal((await db.prepare('SELECT COUNT(*) n FROM demand').get()).n,before.n);
+ }finally{await db.close();}
+});
+
+test('current-head files bypass stale complete coverage without resetting leases generations or retries',async()=>{
+ const {state,db,env}=await fixture();try{
+  await state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
+  const now=Date.now(),head='c'.repeat(40),base='b'.repeat(40),q={repository:'org/repo',operation:'files',args:{number:7}},key='files:{"number":7}';
+  const pr={number:7,state:'OPEN',headRefOid:head,baseRefOid:base,changedFiles:1,additions:7,deletions:0};
+  await state.put('pr','7',pr);await state.membership('open_prs:{}','7',true);
+  await db.prepare('INSERT INTO collections VALUES(?,?,?,?,?,?,?)').run(key,'files','{"number":7}',1,now,0,null);
+  await state.enqueue(q,1,now,true);
+  await db.prepare("UPDATE jobs SET generation=9,start_generation=8,started=35,lease_id='owner',lease_until=?,due=?,attempt=2,wait_reason='core' WHERE key=?").run(now+60000,now+3600000,key);
+  assert.equal(await state.activityLOC(7,pr),null,'old complete metadata is not current file evidence');
+  await state.requestOpenCoverage();
+  const promoted=await db.prepare('SELECT * FROM jobs WHERE key=?').get(key);
+  assert.equal(promoted.lane,'requested');assert.equal(promoted.requested_at,null);
+  assert.equal(promoted.generation,9);assert.equal(promoted.start_generation,8);assert.equal(promoted.started,35);
+  assert.equal(promoted.lease_id,'owner');assert.equal(promoted.lease_until,now+60000);
+  assert.equal(promoted.due,now+3600000);assert.equal(promoted.attempt,2);assert.equal(promoted.wait_reason,'core');
+  await state.requestOpenCoverage();assert.deepEqual(await db.prepare('SELECT * FROM jobs WHERE key=?').get(key),promoted);
+  await db.prepare('UPDATE jobs SET lease_id=NULL,lease_until=0,started=NULL,attempt=0,wait_reason=NULL,due=? WHERE key=?').run(now,key);
+  const job=await state.claim(await db.prepare('SELECT * FROM jobs WHERE key=?').get(key));
+  await state.refresh(job,{api:'core',data:[{filename:'Example.lean',status:'added',additions:7,deletions:0,raw_url:'https://raw.githubusercontent.com/org/repo/'+head+'/Example.lean'}]});
+  assert.deepEqual(await state.activityLOC(7,pr),{added:7,deleted:0,head_sha:head});
+  await state.requestOpenCoverage();
+  const finished=await db.prepare('SELECT * FROM jobs WHERE key=?').get(key);
+  assert.equal(finished.dirty,0);assert.notEqual(finished.lane,'requested');assert.ok(finished.due>now);
  }finally{await db.close();}
 });
 

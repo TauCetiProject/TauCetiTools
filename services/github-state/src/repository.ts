@@ -122,6 +122,7 @@ export class RepositoryState extends DurableObject<Env> {
   private checkpointAt=0;
   private checkpointText='';
   private storageTurn=0;
+  private retirementAfter='';
   private receiptsPinned=true;
   private receiptsChecked=0;
   private observation:any;
@@ -885,8 +886,11 @@ export class RepositoryState extends DurableObject<Env> {
       const dormant=!demanded && (comment?.tombstone || ns.length>0 && ns.every(n=>q.operation==='statuses'
         ?states.get(n)?.kind==='pr' && statusHeadDormant(states.get(n)?.state,states.get(n)?.head,String(q.args?.sha))
         :states.get(n)?.state && states.get(n).state!=='OPEN'));
-      if(backfill && (collections.has(key) || dormant))continue;
-      const lane=(demanded || backfill) && !collections.has(key)?'requested':dirty || prior?.dirty || priority<=5 || q.operation.endsWith('_delta')?'active':q.operation.startsWith('recent_') || dormant?'archive':'verification';
+      // File coverage belongs to a head. A head-change job can be dirty while
+      // the previous head's collection still carries complete=1.
+      const covered=collections.has(key) && !(q.operation==='files' && prior?.dirty);
+      if(backfill && (covered || dormant))continue;
+      const lane=(demanded || backfill) && !covered?'requested':dirty || prior?.dirty || priority<=5 || q.operation.endsWith('_delta')?'active':q.operation.startsWith('recent_') || dormant?'archive':'verification';
       // Maintenance shares the requested lane without fabricating a user read.
       // NULL sorts behind real demand and stays out of user latency metrics.
       const requested=prior?.requested_at || (backfill && !demanded?null:now);
@@ -1410,8 +1414,9 @@ export class RepositoryState extends DurableObject<Env> {
     const candidates=`WITH live AS (${inventory}), wanted AS (`+
       `SELECT number,'statuses' operation,'statuses:{"sha":"'||json_extract(data,'$.headRefOid')||'"}' AS key,json_extract(data,'$.headRefOid') head FROM live WHERE json_extract(data,'$.headRefOid') IS NOT NULL UNION ALL `+
       `SELECT number,'issue_comments','issue_comments:{"number":'||number||'}',NULL FROM live UNION ALL `+
-      `SELECT number,'review_comments','review_comments:{"number":'||number||'}',NULL FROM live) `+
-      `SELECT w.* FROM wanted w LEFT JOIN collections c ON c.key=w.key AND c.complete=1 LEFT JOIN jobs j ON j.key=w.key WHERE c.key IS NULL AND (j.key IS NULL OR j.lane!='requested') ORDER BY CAST(w.number AS INTEGER) DESC,w.operation LIMIT 64`;
+      `SELECT number,'review_comments','review_comments:{"number":'||number||'}',NULL FROM live UNION ALL `+
+      `SELECT number,'files','files:{"number":'||number||'}',NULL FROM live) `+
+      `SELECT w.* FROM wanted w LEFT JOIN collections c ON c.key=w.key AND c.complete=1 LEFT JOIN jobs j ON j.key=w.key WHERE (c.key IS NULL OR (w.operation='files' AND j.dirty=1)) AND (j.key IS NULL OR j.lane!='requested') ORDER BY CAST(w.number AS INTEGER) DESC,w.operation LIMIT 64`;
     const missing=(await this.store.exec<any>(candidates,queryKey({operation:'open_prs'}))).toArray();
     if(!missing.length)return;
     const repo=(await this.meta('repository'))?.name;
@@ -1428,7 +1433,8 @@ export class RepositoryState extends DurableObject<Env> {
     const head="CASE WHEN json_type(r.data,'$.headRefOid')='"+type+"' THEN json_extract(r.data,'$.headRefOid') END";
     const valid=this.store.backend==='postgres'?"head ~ '^[0-9a-fA-F]{40}$'":"length(head)=40 AND head NOT GLOB '*[^0-9a-fA-F]*'";
     const rows=(await this.store.exec<any>("WITH status_heads AS MATERIALIZED (SELECT h.sha,json_extract(r.data,'$.state') state,"+head+" head FROM head_prs h LEFT JOIN resources r ON r.kind='pr' AND r.id=h.number WHERE h.sha IN ("+heads.map(()=>'?').join(',')+")) SELECT sha,COUNT(*) total,SUM(CASE WHEN state IN ('CLOSED','MERGED') OR (state='OPEN' AND "+valid+" AND lower(head)!=lower(sha)) THEN 1 ELSE 0 END) dormant FROM status_heads GROUP BY sha",...heads)).toArray();
-    return new Set(rows.filter(row=>row.total>0 && row.dormant===row.total).map(row=>row.sha));
+    const associated=new Set(rows.map(row=>row.sha));
+    return new Set([...rows.filter(row=>row.total>0 && row.dormant===row.total).map(row=>row.sha),...heads.filter(sha=>!associated.has(sha))]);
   }
   async dormant(q:Query): Promise<boolean> {
     const demand=(await this.store.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q))).toArray()[0];
@@ -1461,8 +1467,9 @@ export class RepositoryState extends DurableObject<Env> {
       await this.metric('requested_latency_ms',q,'requested',Date.now()-requested);
       if(job.page===1 && !job.nested) await this.metric('requested_single_latency_ms',q,'requested',Date.now()-requested);
     }
+    const obsolete=!again && (await this.obsoleteJobs([{...job,requested_at:null}])).length>0;
     await this.store.exec('UPDATE jobs SET due=?,priority=?,lane=?,dirty=?,started=NULL,cursor=NULL,page=1,api=NULL,etag=?,attempt=0,wait_reason=NULL,nested=NULL,requested_at=? WHERE key=?',again?Date.now():Date.now()+(await this.interval(q)),again?current.priority:(await this.priority(q)),(await this.lane(q,again)),Number(again),etag || null,again?current?.requested_at || null:null,job.key);
-    if (!again && (await this.dormant(q))) await this.store.exec('DELETE FROM jobs WHERE key=?',job.key);
+    if(obsolete)await this.store.exec("DELETE FROM jobs WHERE key=? AND COALESCE(generation,0)=? AND COALESCE(lease_id,'')=?",job.key,current?.generation || 0,job.lease_id || '');
   }
   async nextRefreshCursor(q:Query,result:any,started:number):Promise<string|undefined>{
     let next=result.cursor;
@@ -1795,7 +1802,6 @@ export class RepositoryState extends DurableObject<Env> {
       if(q.operation==='open_prs') await this.setMeta('bootstrap_inventory',Date.now());
     }
     if (q.operation==='open_issues') for (const row of rows) repairs.push({q:{repository:repo.name,operation:'issue_comments',args:{number:row.number}},priority:20});
-    if (q.operation==='review_comments') for (const row of rows) repairs.push({q:{repository:repo.name,operation:'reactions',args:{id:String(row.id)}},priority:25});
     if (q.operation==='review_threads') {
       // This complete thread reconciliation also supplies the flat REST-shaped history.
       const comments=rows.flatMap(t=>t.comments.nodes.map(comment));
@@ -1805,7 +1811,6 @@ export class RepositoryState extends DurableObject<Env> {
       let published=0;
       for await (const c of this.publicationRows(flatQuery,comments,publicationStore)) {
         ids.add(String(c.id)); await this.put('review_comments',String(c.id),c,started,false,String(q.args?.number));
-        repairs.push({q:{repository:repo.name,operation:'reactions',args:{id:String(c.id)}},priority:25});
         comments[published++]=undefined;
       }
       const prior=await this.scanRows('SELECT m.id,r.observed FROM members m LEFT JOIN resources r ON r.kind=? AND r.id=m.id WHERE m.collection=?','review_comments',flatKey);
@@ -2167,14 +2172,7 @@ export class RepositoryState extends DurableObject<Env> {
   }
   async retireUnneeded(job:any): Promise<boolean> {
     if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.retireUnneeded.call(state,job));
-    const q:Query=JSON.parse(job.query);
-    // Only statuses widen retirement to superseded heads; explicit requested
-    // work still receives its ordinary reconciliation before retirement.
-    if (!NOT_MIRRORED.has(q.operation) && (job.dirty || q.operation==='statuses' && job.requested_at || !(await this.dormant(q)) || !(await this.complete(q)))) return false;
-    const removed=(await this.store.exec('DELETE FROM jobs WHERE key=? AND COALESCE(generation,0)=? AND lease_until<=? AND COALESCE(started,0)=? AND dirty=? RETURNING key',job.key,job.generation || 0,Date.now(),job.started || 0,job.dirty || 0)).toArray();
-    if(!removed.length)return false;
-    await this.store.exec('DELETE FROM meta WHERE key=?',stagingStateKey(job.key));
-    await this.metric('cancellation',q,job.lane);return true;
+    return (await this.claimCompanions(job,[job],undefined,true)).some(row=>row.key===job.key);
   }
   async claim(job:any): Promise<any> {
     if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.claim.call(state,job));
@@ -2261,21 +2259,19 @@ export class RepositoryState extends DurableObject<Env> {
     this.settleRepairJobs(input.filter(job=>waiting.has(job.key)&&capacity.has(job.key)),'capacity');
     try{this.repairMetrics.merge(metrics);}catch{}
   }
-  private async claimCompanions(first:any,selection?:any[],excluded?:Set<string>,retireOnly=false):Promise<any[]> {
-    const operation=JSON.parse(first.query).operation;
-    const omit=this.excludeRepairKeys(excluded);
-    const candidates=selection || (await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=? AND lane=? AND page=1 AND api IS NULL AND nested IS NULL AND key LIKE ?"+omit.sql+" ORDER BY CASE WHEN lane='requested' AND requested_at IS NULL THEN 1 ELSE 0 END,due,key LIMIT ?",Date.now(),Date.now(),first.lane,operation+':%',...omit.bindings,Math.max(0,batchLimit(operation)-1))).toArray();
+  private async obsoleteJobs(candidates:any[]):Promise<any[]> {
     if(!candidates.length)return [];
-    if(!this.store.transactional)return this.atomic(state=>state.claimCompanions(first,candidates,excluded,retireOnly),'repair');
-    const hot=new Set<string>(),complete=new Set<string>();
+    const operation=JSON.parse(candidates[0].query).operation;
+    if(!NOT_MIRRORED.has(operation) && !['pr','files','issue_comments','review_comments','review_threads','reviews','reactions','statuses'].includes(operation))return [];
+    const hot=new Set<string>(candidates.filter(job=>job.requested_at!=null).map(job=>job.key)),complete=new Map<string,number>();
     const readBatch=this.store.backend==='sqlite'?80:256;
     for(let offset=0;offset<candidates.length;offset+=readBatch) {
       const keys=candidates.slice(offset,offset+readBatch).map(j=>j.key),where=' WHERE key IN ('+keys.map(()=>'?').join(',')+')';
-      const [cs,ds]=await this.store.batch([{sql:'SELECT key FROM collections'+where+' AND complete=1',bindings:keys},{sql:'SELECT key FROM demand'+where+' AND at>?',bindings:[...keys,Date.now()-300000]}]);
-      for(const row of cs.toArray())complete.add(row.key);for(const row of ds.toArray())hot.add(row.key);
+      const [ds,cs]=await this.store.batch([{sql:'SELECT key FROM demand'+where+' AND at>?',bindings:[...keys,Date.now()-300000]},...(operation==='files'?[{sql:'SELECT key,revision FROM collections'+where+' AND complete=1',bindings:keys}]:[])]);
+      for(const row of cs?.toArray() || [])complete.set(row.key,row.revision);for(const row of ds.toArray())hot.add(row.key);
     }
-    const quiet=candidates.filter(j=>!j.dirty && !(operation==='statuses' && j.requested_at) && complete.has(j.key) && !hot.has(j.key));
-    const states=new Map<string,string>(),comments=new Map<string,any>(),closedHeads=new Set<string>();
+    const quiet=candidates.filter(j=>!hot.has(j.key));
+    const states=new Map<string,string>(),details=new Map<string,any>(),comments=new Map<string,any>(),closedHeads=new Set<string>();
     const numbers=new Set<string>();
     if(operation==='statuses') {
       const heads=[...new Set(quiet.map(j=>String(JSON.parse(j.query).args.sha)))];
@@ -2293,19 +2289,59 @@ export class RepositoryState extends DurableObject<Env> {
     const ns=[...numbers],prs=new Set<string>();
     for(let offset=0;offset<ns.length;offset+=readBatch) {
       const chunk=ns.slice(offset,offset+readBatch);
-      for(const row of (await this.store.exec<any>("SELECT id,kind,json_extract(data,'$.state') state FROM resources WHERE kind IN ('pr','issue') AND id IN ("+chunk.map(()=>'?').join(',')+')',...chunk)).toArray())if(!prs.has(row.id)){states.set(row.id,row.state);if(row.kind==='pr')prs.add(row.id);}
+      const fields=['headRefOid','baseRefOid','changedFiles','additions','deletions','mergedAt'],where=" WHERE kind IN ('pr','issue') AND id IN ("+chunk.map(()=>'?').join(',')+')';
+      let sql="SELECT id,kind,json_extract(data,'$.state') state FROM resources"+where;
+      if(['pr','files'].includes(operation)) {
+        if(this.store.backend==='postgres') {
+          // Parse each sanitized body once and transfer only output metadata.
+          const value="regexp_replace(data,'\\\\u(0000|[dD][89a-fA-F][0-9a-fA-F]{2})','\\\\ufffd','g')::jsonb";
+          sql="WITH final_resources AS MATERIALIZED (SELECT id,kind,"+value+" value FROM resources"+where+") SELECT id,kind,value->>'state' state,jsonb_build_object("+fields.map(field=>"'"+field+"',value->'"+field+"'").join(',')+") detail FROM final_resources";
+        } else sql="SELECT id,kind,json_extract(data,'$.state') state,json_object("+fields.map(field=>"'"+field+"',json_extract(data,'$."+field+"')").join(',')+") detail FROM resources"+where;
+      }
+      for(const row of (await this.store.exec<any>(sql,...chunk)).toArray())if(!prs.has(row.id)){
+        states.set(row.id,row.state);details.set(row.id,typeof row.detail==='string'?JSON.parse(row.detail):row.detail);if(row.kind==='pr')prs.add(row.id);
+      }
     }
-    const dormant=(job:any):boolean=>{
+    const dormant=async(job:any):Promise<boolean>=>{
       if(NOT_MIRRORED.has(operation))return true;
-      if(job.dirty || operation==='statuses' && job.requested_at || !complete.has(job.key) || hot.has(job.key))return false;
+      if(hot.has(job.key))return false;
       const args=JSON.parse(job.query).args;
       if(operation==='statuses')return closedHeads.has(String(args.sha));
       const comment=operation==='reactions'?comments.get(String(args.id)):null;
       if(comment?.tombstone)return true;
       const state=states.get(String(operation==='reactions'?comment?.parent:args.number));
-      return Boolean(state && state!=='OPEN');
+      if(!['CLOSED','MERGED'].includes(state || ''))return false;
+      if(operation==='files') {
+        if(!complete.has(job.key))return false;
+        try {
+          const p=details.get(String(args.number));
+          const cached=(await this.store.exec<any>('SELECT data FROM activity_loc_cache WHERE number=? AND fingerprint=?',args.number,activityFingerprint(p,complete.get(job.key)))).toArray()[0];
+          if(cached)return Boolean(JSON.parse(cached.data));
+          // Maintenance validates outside the writer; rechecks under the
+          // writer use that head/revision-bound cache, never R2 or file scans.
+          if(this.store.transactional)return false;
+          return Boolean(await this.activityLOC(args.number,p));
+        }catch(error){this.noteFailure('retirement_files',error);return false;}
+      }
+      if(operation==='pr') {
+        const p=details.get(String(args.number));
+        return Boolean(p && typeof p.headRefOid==='string' && /^[0-9a-f]{40}$/i.test(p.headRefOid) && typeof p.baseRefOid==='string' && /^[0-9a-f]{40}$/i.test(p.baseRefOid)
+          && ['changedFiles','additions','deletions'].every(key=>Number.isSafeInteger(p[key]) && p[key]>=0)
+          && (state!=='MERGED' || typeof p.mergedAt==='string' && Number.isFinite(Date.parse(p.mergedAt))));
+      }
+      return ['issue_comments','review_comments','review_threads','reviews','reactions'].includes(operation);
     };
-    const obsolete=candidates.filter(dormant),deleted=new Set<string>();
+    const obsolete=[];for(const job of candidates)if(await dormant(job))obsolete.push(job);
+    return obsolete;
+  }
+  private async claimCompanions(first:any,selection?:any[],excluded?:Set<string>,retireOnly=false):Promise<any[]> {
+    const operation=JSON.parse(first.query).operation;
+    const omit=this.excludeRepairKeys(excluded);
+    const candidates=selection || (await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=? AND lane=? AND page=1 AND api IS NULL AND nested IS NULL AND key LIKE ?"+omit.sql+" ORDER BY CASE WHEN lane='requested' AND requested_at IS NULL THEN 1 ELSE 0 END,due,key LIMIT ?",Date.now(),Date.now(),first.lane,operation+':%',...omit.bindings,Math.max(0,batchLimit(operation)-1))).toArray();
+    if(!candidates.length)return [];
+    if(!this.store.transactional)return this.atomic(state=>state.claimCompanions(first,candidates,excluded,retireOnly),'repair');
+    const obsolete=await this.obsoleteJobs(candidates);
+    const deleted=new Set<string>(),readBatch=this.store.backend==='sqlite'?80:256;
     // Use the same snapshot predicates as retireUnneeded. Chunking below is
     // solely SQLite's 100-binding SQL limit, not a limit on jobs or batches.
     const deleteBatch=this.store.backend==='sqlite'?24:256;
@@ -2482,7 +2518,7 @@ export class RepositoryState extends DurableObject<Env> {
         if(phase==='before' || !external)try{await owner.requestOpenCoverage();}catch(error){owner.noteFailure('open_coverage',error);}
         if(phase==='after'){
           owner.traceRepair('maintenance');
-          if(owner.quotaRestriction && !owner.migrationHeld())try{await owner.retireQuotaObsolete();}catch(error){owner.noteFailure('quota_local_retirement',error);}
+          if(!owner.migrationHeld())try{await owner.retireQuotaObsolete();}catch(error){owner.noteFailure('local_retirement',error);}
           try{if(owner.store.backend==='sqlite' && !owner.migrationHeld())await owner.maintenance();}catch(error){owner.noteFailure('maintenance',error);}
           if(external){owner.traceRepair('storage_maintenance');owner.startStorageMaintenance();owner.traceRepair('alarm_complete');}
         }
@@ -2499,14 +2535,19 @@ export class RepositoryState extends DurableObject<Env> {
   private async retireQuotaObsolete():Promise<void> {
     if(this.degraded || this.repairsHeld())return;
     const omit=this.excludeRepairKeys(undefined,false),now=Date.now();
-    // A bounded, read-only candidate scan never waits for upstream availability.
-    // The existing bulk dormancy path rechecks current resources/demand under
-    // the writer and deletes only matching, unowned generation snapshots.
-    const candidates=(await this.store.exec<any>("SELECT jobs.* FROM jobs JOIN collections c USING(key) WHERE c.complete=1 AND dirty=0 AND due<=? AND lease_until<=?"+omit.sql+
-      " AND NOT EXISTS (SELECT 1 FROM demand d WHERE d.key=jobs.key AND d.at>?) AND json_extract(query,'$.operation') IN ('pr','files','reviews','review_comments','review_threads','issue_comments') AND EXISTS (SELECT 1 FROM resources r WHERE r.kind IN ('pr','issue') AND r.id=CAST(json_extract(jobs.query,'$.args.number') AS TEXT) AND r.tombstone=0 AND json_extract(r.data,'$.state') IN ('CLOSED','MERGED') AND (r.kind='pr' OR NOT EXISTS (SELECT 1 FROM resources p WHERE p.kind='pr' AND p.id=r.id))) ORDER BY key LIMIT 100",now,now,...omit.bindings,now-300000)).toArray();
-    if(!candidates.length)return;
-    const operation=JSON.parse(candidates[0].query).operation,group=candidates.filter(job=>JSON.parse(job.query).operation===operation);
-    await this.atomic(state=>state.claimCompanions(group[0],group,undefined,true),'repair');
+    // Scan locally even while upstream is unavailable. Advance past retained
+    // keys so an incomplete final file snapshot cannot starve later cleanup.
+    // This position is disposable: a restart simply rescans cached facts.
+    const candidates=(await this.store.exec<any>("SELECT jobs.* FROM jobs WHERE key>? AND lease_until<=?"+omit.sql+
+      " AND NOT EXISTS (SELECT 1 FROM demand d WHERE d.key=jobs.key AND d.at>?) ORDER BY key LIMIT 100",this.owner.retirementAfter,now,...omit.bindings,now-300000)).toArray();
+    if(!candidates.length){this.owner.retirementAfter='';return;}
+    const groups=new Map<string,any[]>();
+    for(const job of candidates){const operation=JSON.parse(job.query).operation,group=groups.get(operation)||[];group.push(job);groups.set(operation,group);}
+    for(const group of groups.values())try{
+      const obsolete=await this.obsoleteJobs(group);
+      if(obsolete.length)await this.atomic(state=>state.claimCompanions(obsolete[0],obsolete,undefined,true),'repair');
+    }catch(error){this.noteFailure('local_retirement',error);}
+    this.owner.retirementAfter=candidates[candidates.length-1].key;
   }
   private async armRepairAlarm():Promise<void> {
     if(this.store.backend==='postgres' || this.degraded || this.migrationHeld())return;

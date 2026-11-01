@@ -159,7 +159,7 @@ test('non-replayable publication failure stops individual members without one co
 for(const unrelated of [false,true])test(`a failed batch is not fetched again or used to rearm an immediate alarm in its turn (unrelated work=${unrelated})`,async()=>{
  const f=await fixture();try{
   await seed(f,100);const other={repository:'org/repo',operation:'statuses',args:{sha:'a'.repeat(40)}};
-  if(unrelated)await f.state.enqueueMany([{q:other,priority:5}],true);
+  if(unrelated){await f.state.put('pr','900',{number:900,state:'OPEN',headRefOid:other.args.sha});await f.state.enqueueMany([{q:other,priority:5}],true);}
   f.state.expire=async()=>({});f.state.maintenance=async()=>{};f.state.startStorageMaintenance=()=>{};
   f.state.ctx.storage.getAlarm=async()=>null; // The current alarm has been consumed.
   const alarms=[];f.state.setAlarm=async at=>alarms.push(at);
