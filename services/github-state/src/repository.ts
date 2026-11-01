@@ -1,4 +1,4 @@
-import { RepositoryStore, StoreUnavailable, StoreFenced, canReplayPublication, isBackendFailure, isMemberDataFailure, WriterPurpose, SQLiteStore, PostgresStore, ReadCacheStore, BufferedStore, SerialLane, columns, collectionJoin } from './repository_store';
+import { RepositoryStore, StoreUnavailable, StoreFenced, canReplayPublication, isBackendFailure, isMemberDataFailure, WriterPurpose, WriterOperation, SQLiteStore, PostgresStore, ReadCacheStore, BufferedStore, SerialLane, columns, collectionJoin } from './repository_store';
 import { repositoryHealth } from './repository_health';
 import { DurableObject } from 'cloudflare:workers';
 import { Env, EventPointer, matchesETag, Query, Result, digest, json, queryKey, repository, stub, validateQuery, parseGitHub, CI_EVENTS, NOT_MIRRORED, publicQuery, stagingStateKey, stagedPageKey } from './protocol';
@@ -366,7 +366,7 @@ export class RepositoryState extends DurableObject<Env> {
     // storage rewrite. Preserve the ordinary intent when that wake is overdue.
     if(at<=now+100 && owner.repairAlarm && owner.repairAlarm.at<=now+100)owner.repairAlarm=undefined;
   }
-  async atomic<T>(apply:(state:RepositoryState)=>Promise<T>,purpose:WriterPurpose='other'):Promise<T> {
+  async atomic<T>(apply:(state:RepositoryState)=>Promise<T>,purpose:WriterPurpose='other',operation?:WriterOperation):Promise<T> {
     if(this.store.transactional)return apply(this);
     if(this.migrationHeld())throw new AdminError('migration_frozen');
     if(this.mutationState.blocked)throw new Error('Repository backend generation fenced');
@@ -380,7 +380,7 @@ export class RepositoryState extends DurableObject<Env> {
         const result=await apply(scoped!);
         if(purpose==='repair' || purpose==='publication')renewed=await scoped!.renewRepairLeases();
         await scoped!.flushChanges();await buffered?.flush();return result;
-      },purpose);
+      },purpose,operation);
       if(scoped?.revisionState.value!==undefined)this.revisionState.value=Math.max(this.revisionState.value ?? 0,scoped.revisionState.value);
       for(const row of renewed){const current=this.owner.repairCoordinator?.owned.get(row.key);if(current?.lease_id===row.lease_id)current.lease_until=row.lease_until;}
       this.owner.renewedLeases+=renewed.length;
@@ -978,7 +978,7 @@ export class RepositoryState extends DurableObject<Env> {
     return q.operation.startsWith('recent_') || (await this.dormant(q))?'archive':'verification';
   }
   async configure(name:string): Promise<void> {
-    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.configure.call(state,name));
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.configure.call(state,name),'other','configure');
     const repo=repository(this.env,name); if (!repo) throw new Error('repository not allowed');
     await this.setMeta('repository',repo);
     for (const operation of ['repository','refs','open_prs','open_issues','recent_prs','recent_issues','pr_delta','issue_delta']) await this.enqueue({repository:repo.name,operation},operation==='open_prs' || operation.endsWith('_delta')?0:10);
@@ -1368,7 +1368,7 @@ export class RepositoryState extends DurableObject<Env> {
     // one refresh per minute, not a write transaction (and SQLite input gate)
     // per reader. Check again inside the transaction to coalesce racing reads.
     if(prior?.at>now-60000 && await this.complete(q))return;
-    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.noteDemand.call(state,q));
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.noteDemand.call(state,q),'other','demand');
     await this.store.exec('INSERT INTO demand VALUES(?,?) ON CONFLICT(key) DO UPDATE SET at=excluded.at',key,now);
     const complete=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',key)).toArray().length>0;
     if (!complete && q.operation!=='progress') {
@@ -1414,7 +1414,7 @@ export class RepositoryState extends DurableObject<Env> {
     return {sql,bindings};
   }
   async nextJob(excluded?:Set<string>): Promise<any> {
-    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.nextJob.call(state,excluded));
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.nextJob.call(state,excluded),'other','job_select');
     const now=Date.now(),counters=(await this.store.exec<any>('SELECT key,value FROM meta WHERE key IN (?,?)','repair_turn','requested_turn')).toArray();
     const turns=new Map(counters.map(row=>[row.key,JSON.parse(row.value)])),turn=turns.get('repair_turn') || 0,requestedTurn=turns.get('requested_turn') || 0;
     const preferred=laneAt(turn,settings(this.env).weights);
@@ -1514,7 +1514,7 @@ export class RepositoryState extends DurableObject<Env> {
       await state.store.exec("UPDATE jobs SET etag=NULL WHERE key LIKE 'pr:%'");
       await state.store.exec("UPDATE collections SET etag=NULL,verified=0 WHERE operation='pr'");
       await state.setMeta('pr_validator_version',1);
-    });
+    },'other','pr_validators');
   }
   private async rearmPR(job:any):Promise<void> {
     await this.store.exec('UPDATE jobs SET started=NULL,etag=NULL,dirty=1,due=?,cursor=NULL,page=1,api=NULL,wait_reason=NULL,attempt=0 WHERE key=?',Date.now(),job.key);
@@ -1563,7 +1563,7 @@ export class RepositoryState extends DurableObject<Env> {
           await measure('enqueue_ms',()=>this.atomic(async state=>{
             await state.enqueue(q,0,Date.now(),true);
             await state.store.exec("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?) WHERE key=?",Date.now(),queryKey(q));
-          }));
+          },'other','pr_refresh_enqueue'));
           const {repo,revision}=await measure('read_start_ms',async()=>({
             repo:await this.meta('repository'),
             revision:Number((await this.store.exec<any>("SELECT revision FROM resources WHERE kind='pr' AND id=?",String(input.number))).toArray()[0]?.revision || 0)
@@ -1579,7 +1579,7 @@ export class RepositoryState extends DurableObject<Env> {
             if(!await state.publishPR(result.data,started,revision))return false;
             await state.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET complete=1,verified=excluded.verified,revision=excluded.revision,etag=NULL',queryKey(q),'pr',JSON.stringify(q.args),1,Date.now(),await state.revision(),null);
             return true;
-          },'other'));
+          },'other','pr_refresh_publish'));
           return committed?{version:1,repository:input.repository,operation:'pr',status:'ok',complete:true,outcome:'refreshed',revision:await measure('reply_ms',()=>this.revision()),verified_at:Date.now(),data:result.data}:unavailable('superseded',Date.now()+1000);
         }catch(error){this.noteFailure('refresh_pr',error);return unavailable('refresh_failed');}
       })().then(result=>({...result,timing_ms:{...timing,total_ms:Date.now()-requestedAt}}));
@@ -1605,7 +1605,10 @@ export class RepositoryState extends DurableObject<Env> {
       // A quota deferral's original job start is not the HTTP observation start.
       const revision=Number((await this.store.exec<any>("SELECT revision FROM resources WHERE kind='pr' AND id=?",String(q.args?.number))).toArray()[0]?.revision || 0);
       job={...job,pr_revision:revision,started:Date.now(),etag:(await this.store.exec<any>('SELECT etag FROM jobs WHERE key=?',job.key)).toArray()[0]?.etag};
-      await this.store.exec('UPDATE jobs SET started=? WHERE key=?',job.started,job.key);
+      // Preserve the existing standalone write semantics (including migration
+      // handling); the operation name only attributes the PostgreSQL admission.
+      if(this.store.backend==='postgres')await this.store.transaction(tx=>tx.exec('UPDATE jobs SET started=? WHERE key=?',job.started,job.key),'other','pr_read_start');
+      else await this.store.exec('UPDATE jobs SET started=? WHERE key=?',job.started,job.key);
     }
     const started=job.started || Date.now();
     if (!job.started) {
@@ -2829,15 +2832,26 @@ export class RepositoryState extends DurableObject<Env> {
     }catch{}finally{if(timer!==undefined)clearTimeout(timer);}
     return true;
   }
+  private async activityLandingsFresh():Promise<boolean> {
+    // One committed read, without an in-memory freshness or ownership cache.
+    const rows=(await this.store.exec<any>('SELECT key,value FROM meta WHERE key IN (?,?)','activity_landings_transport','activity_landings_checked')).toArray();
+    try {
+      const values=new Map(rows.map(row=>[row.key,JSON.parse(row.value)])),checked=values.get('activity_landings_checked'),now=Date.now();
+      return values.get('activity_landings_transport')==='service-binding-v2' && Number.isSafeInteger(checked) && checked>0 && checked<=now && now-checked<300000;
+    }catch{return false;}
+  }
   async refreshActivityLandings(): Promise<void> {
     const configured=await this.meta('repository'),receiptURL=configured?.bors_receipts_url;
     if(!receiptURL && !(configured?.name==='TauCetiProject/TauCeti' && this.env.BORS_ACTIVITY))return;
     if(receiptURL && (!receiptURL.startsWith('https://') || new URL(receiptURL).username || new URL(receiptURL).password))throw Error('Bors receipts require an approved HTTPS URL');
     const now=Date.now(),token=crypto.randomUUID();
+    // A failed speculative read does not replace the authoritative reservation.
+    try{if(await this.activityLandingsFresh())return;}catch{}
     const reserved=await this.atomic(async state=>{
-      if((await state.meta('activity_landings_transport'))==='service-binding-v2' && now-((await state.meta('activity_landings_checked')) || 0)<300000)return false;
+      // Another caller can reserve while this one waits in the writer queue.
+      if(await state.activityLandingsFresh())return false;
       await state.setMeta('activity_landings_checked',now);await state.setMeta('activity_landings_transport','service-binding-v2');await state.setMeta('activity_landings_token',token);return true;
-    });
+    },'other','activity_landings_reserve');
     if(!reserved)return;
     let receipts:Awaited<ReturnType<typeof readPromotionReceipts>>=[],failure:string|null=null;
     try{receipts=await readPromotionReceipts((url,options)=>this.env.BORS_ACTIVITY?this.env.BORS_ACTIVITY.fetch(url,options):fetch(url,options),receiptURL,configured.name,configured.branch || 'main');}
@@ -2849,7 +2863,7 @@ export class RepositoryState extends DurableObject<Env> {
         await state.setMeta('activity_landings_success',now);
       }
       await state.setMeta('activity_landings_error',failure);
-    });
+    },'other','activity_landings_publish');
   }
   async primeActivity(numbers:number[]):Promise<RepositoryState> {
     if(this.store.backend!=='postgres')return this;
