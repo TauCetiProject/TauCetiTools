@@ -63,7 +63,10 @@ test('LOC uses complete cached files at the exact PR head without scheduling wor
   await db.prepare('INSERT INTO collections VALUES (?,?,?,?,?,?,?)').run(key,'files','{"number":7}',0,Date.now(),1,null);
   assert.equal((await (await query(state,[7])).json()).prs[0].lean_loc,null);
   await db.prepare('UPDATE collections SET complete=1 WHERE key=?').run(key);
-  assert.deepEqual((await (await query(state,[7])).json()).prs[0].lean_loc,{added:30,deleted:4,head_sha:head});
+  const measured=(await (await query(state,[7])).json()).prs[0];
+  assert.deepEqual(measured.lean_loc,{added:30,deleted:4,head_sha:head});
+  assert.equal(measured.base_sha,base);
+  assert.deepEqual(measured.diff_totals,{files:2,added:32,deleted:5});
   p.headRefOid='c'.repeat(40);await put();
   assert.equal((await (await query(state,[7])).json()).prs[0].lean_loc,null,'an old-head diff must not count');
   const newer={filename:'TauCeti/A.lean',status:'modified',additions:30,deletions:4,blob_url:`https://github.com/org/repo/blob/${p.headRefOid}/TauCeti/A.lean`};
