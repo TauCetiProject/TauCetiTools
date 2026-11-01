@@ -107,16 +107,17 @@ test('successful repair invalidates the aggregate query grace cache',async()=>{
  }finally{await f.close();}
 });
 
-test('a response timeout does not abandon publication or require a client acknowledgement',async()=>{
- const f=await fixture();const timeout=globalThis.setTimeout;try{
-  await seed(f);let release,entered;const ready=new Promise(r=>entered=r),gate=new Promise(r=>release=r);
+test('a slow correction waits for committed success instead of returning a response timeout',async()=>{
+ const f=await fixture();const timeout=globalThis.setTimeout;let release;try{
+  await seed(f);let entered;const ready=new Promise(r=>entered=r),gate=new Promise(r=>release=r);
   upstream(f,async()=>{entered();await gate;return {data:record(),api:'core'};});
   globalThis.setTimeout=(fn,delay,...args)=>timeout(fn,delay===15000 && String(fn).includes('refresh_timeout')?10:delay,...args);
-  const input={repository:'org/repo',number:7,expected_head:old},request=f.state.refreshPR(input);await ready;
-  assert.equal((await request).reason,'refresh_timeout');assert.equal((await f.store.exec('SELECT dirty FROM jobs WHERE key=?',key)).one().dirty,1);
-  const pending=f.state.prRefreshes.get(7);release();await pending;
+  const input={repository:'org/repo',number:7,expected_head:old};let settled=false;
+  const request=f.state.refreshPR(input).then(result=>{settled=true;return result;});await ready;
+  await new Promise(resolve=>timeout(resolve,30));assert.equal(settled,false,'the response must wait for its correction, even beyond the former response deadline');
+  release();const result=await request;assert.equal(result.outcome,'refreshed');assert.ok(result.timing_ms.github_ms>=0);assert.ok(result.timing_ms.publish_ms>=0);
   assert.equal((await f.state.rows(q)).headRefOid,head);assert.equal((await f.state.refreshPR(input)).outcome,'already-changed');
- }finally{globalThis.setTimeout=timeout;await f.close();}
+ }finally{release?.();globalThis.setTimeout=timeout;await f.close();}
 });
 
 test('text PR query arguments remain compatible and their validators are invalidated',async()=>{

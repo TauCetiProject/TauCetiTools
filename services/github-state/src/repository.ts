@@ -1540,7 +1540,7 @@ export class RepositoryState extends DurableObject<Env> {
     return true;
   }
   async refreshPR(input:{repository:string,number:number,expected_head:string}):Promise<any> {
-    const q={repository:input.repository,operation:'pr',args:{number:input.number}};
+    const requestedAt=Date.now(),q={repository:input.repository,operation:'pr',args:{number:input.number}};
     // Failure reporting must still work when reading the database does not.
     const unavailable=(reason:string,retry_at=Date.now()+30000)=>({version:1,repository:input.repository,operation:'pr',status:'unavailable',complete:false,revision:0,reason,retry_at});
     const current=(await this.store.exec<any>("SELECT r.data,r.revision,c.verified,c.revision AS checked_revision FROM resources r LEFT JOIN collections c ON c.key=? AND c.complete=1 WHERE r.kind='pr' AND r.id=?",queryKey(q),String(input.number))).toArray()[0];
@@ -1552,31 +1552,40 @@ export class RepositoryState extends DurableObject<Env> {
     }
     let flight=this.owner.prRefreshes.get(input.number);
     if(!flight){
+      const timing:Record<string,number>={lookup_ms:Date.now()-requestedAt};
+      const measure=async<T>(phase:string,work:()=>Promise<T>):Promise<T>=>{
+        const start=Date.now();try{return await work();}finally{timing[phase]=Date.now()-start;}
+      };
       flight=(async()=>{
         try{
-          await this.ensurePRValidators();
+          await measure('validators_ms',()=>this.ensurePRValidators());
           // Existing jobs provide restart recovery. No network I/O owns a writer.
-          await this.atomic(async state=>{
+          await measure('enqueue_ms',()=>this.atomic(async state=>{
             await state.enqueue(q,0,Date.now(),true);
             await state.store.exec("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?) WHERE key=?",Date.now(),queryKey(q));
+          }));
+          const {repo,revision}=await measure('read_start_ms',async()=>({
+            repo:await this.meta('repository'),
+            revision:Number((await this.store.exec<any>("SELECT revision FROM resources WHERE kind='pr' AND id=?",String(input.number))).toArray()[0]?.revision || 0)
+          }));
+          const started=Date.now();
+          const {response,result}=await measure('github_ms',async()=>{
+            const response=await stub(this.env.INSTALLATIONS,repo.installation).fetch('https://internal/read',{method:'POST',body:JSON.stringify({repository:repo,query:q,page:1})});
+            return {response,result:await response.json() as any};
           });
-          const repo=await this.meta('repository');
-          const revision=Number((await this.store.exec<any>("SELECT revision FROM resources WHERE kind='pr' AND id=?",String(input.number))).toArray()[0]?.revision || 0),started=Date.now();
-          const response=await stub(this.env.INSTALLATIONS,repo.installation).fetch('https://internal/read',{method:'POST',body:JSON.stringify({repository:repo,query:q,page:1})});
-          const result:any=await response.json();
           if(result.deferred)await this.noteQuotaRestriction(result);
           if(!response.ok || result.deferred || result.unavailable || result.unchanged || !result.data || result.data.number!==input.number || !/^[a-f0-9]{40}$/.test(result.data.headRefOid || ''))return unavailable(result.category || result.reason || 'refresh_unavailable',result.retry_at);
-          const committed=await this.atomic(async state=>{
+          const committed=await measure('publish_ms',()=>this.atomic(async state=>{
             if(!await state.publishPR(result.data,started,revision))return false;
             await state.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET complete=1,verified=excluded.verified,revision=excluded.revision,etag=NULL',queryKey(q),'pr',JSON.stringify(q.args),1,Date.now(),await state.revision(),null);
             return true;
-          },'other');
-          return committed?{version:1,repository:input.repository,operation:'pr',status:'ok',complete:true,outcome:'refreshed',revision:await this.revision(),verified_at:Date.now(),data:result.data}:unavailable('superseded',Date.now()+1000);
+          },'other'));
+          return committed?{version:1,repository:input.repository,operation:'pr',status:'ok',complete:true,outcome:'refreshed',revision:await measure('reply_ms',()=>this.revision()),verified_at:Date.now(),data:result.data}:unavailable('superseded',Date.now()+1000);
         }catch(error){this.noteFailure('refresh_pr',error);return unavailable('refresh_failed');}
-      })();
+      })().then(result=>({...result,timing_ms:{...timing,total_ms:Date.now()-requestedAt}}));
       this.owner.prRefreshes.set(input.number,flight);
       const owned=flight,began=Date.now();
-      void flight.then(result=>{try{log("pr_refresh",{number:input.number,outcome:result.outcome || result.reason || "failed",elapsed_ms:Date.now()-began});}catch{}},()=>{});
+      void flight.then(result=>{try{log("pr_refresh",{number:input.number,outcome:result.outcome || result.reason || "failed",elapsed_ms:Date.now()-began,timing_ms:result.timing_ms});}catch{}},()=>{});
       const cleanup=()=>{if(this.owner.prRefreshes.get(input.number)===owned)this.owner.prRefreshes.delete(input.number);};
       // A stalled binding must not make this instance's shared promise the
       // permanent owner. Late publication still obeys the revision fence.
@@ -1585,9 +1594,9 @@ export class RepositoryState extends DurableObject<Env> {
       void flight.then(settled,settled);
       this.owner.ctx.waitUntil?.(flight);
     }
-    let timer:ReturnType<typeof setTimeout>|undefined;
-    try{return await Promise.race([flight,new Promise(resolve=>{timer=setTimeout(()=>resolve(unavailable('refresh_timeout',Date.now()+1000)),15000);})]);}
-    finally{if(timer!==undefined)clearTimeout(timer);}
+    // Wait for the actual read/publication result. A slow successful correction
+    // must not become an artificial failure while it is still committing.
+    return flight;
   }
   private async prepareRefresh(job:any,supplied?:any):Promise<PreparedRefresh> {
     const repo=(await this.meta('repository')), q:Query=JSON.parse(job.query);
