@@ -56,6 +56,9 @@ const SURVEY_ETAG_PREFIX='survey-v1-observed-statuses:';
 const ACTIVITY_CLOCK=Symbol('activity clock');
 const decimalArgument=(value:string):number|string=>Number.isSafeInteger(Number(value))?Number(value):value;
 const activityFingerprint=(p:any,revision:number|undefined)=>JSON.stringify([2,p.headRefOid,p.baseRefOid,p.changedFiles,p.additions,p.deletions,revision]);
+// Git comparisons are immutable for a head/base pair, independent of mirror files.
+const activityGitFingerprint=(p:any)=>JSON.stringify([2,p.headRefOid,p.baseRefOid]);
+const ACTIVITY_LOC_CACHE_QUERY='SELECT data FROM activity_loc_cache WHERE number=? AND fingerprint IN (?,?)';
 const cursorKey=(repo:string,id:string,offset:number)=>`cursors/${repo}/${id}/${offset}.json`;
 function coordinationWindows(history:any,now:number):any {
   if(!history)return null;
@@ -2334,7 +2337,7 @@ export class RepositoryState extends DurableObject<Env> {
         try {
           const p=details.get(String(args.number));
           const collection=collections.get(job.key);
-          const cached=(await this.store.exec<any>('SELECT data FROM activity_loc_cache WHERE number=? AND fingerprint=?',args.number,activityFingerprint(p,collection?.revision))).toArray()[0];
+          const cached=(await this.store.exec<any>(ACTIVITY_LOC_CACHE_QUERY,args.number,activityFingerprint(p,collection?.revision),activityGitFingerprint(p))).toArray()[0];
           if(cached)return Boolean(JSON.parse(cached.data));
           if(!collection?.complete)return false;
           // Maintenance validates outside the writer; rechecks under the
@@ -2744,7 +2747,8 @@ export class RepositoryState extends DurableObject<Env> {
         if(p){
           cache.seed('SELECT at,source FROM activity_landings WHERE number=? AND head=?',[number,p.headRefOid || ''],landings.filter(r=>r.number===id && r.head===p.headRefOid));
           const fingerprint=activityFingerprint(p,collection[0]?.revision);
-          cache.seed('SELECT data FROM activity_loc_cache WHERE number=? AND fingerprint=?',[number,fingerprint],loc.toArray().filter(r=>r.number===id && r.fingerprint===fingerprint));
+          const gitFingerprint=activityGitFingerprint(p);
+          cache.seed(ACTIVITY_LOC_CACHE_QUERY,[number,fingerprint,gitFingerprint],loc.toArray().filter(r=>r.number===id && [fingerprint,gitFingerprint].includes(r.fingerprint)));
         }
       }
       // Reuse already decoded PR metadata, including occasional R2-backed rows.
@@ -2758,14 +2762,16 @@ export class RepositoryState extends DurableObject<Env> {
     const complete=(await this.store.exec<any>('SELECT complete,revision FROM collections WHERE key=?',key)).toArray()[0];
     if(!p.headRefOid) return null;
     const fingerprint=activityFingerprint(p,complete?.revision);
-    const cached=(await this.store.exec<any>('SELECT data FROM activity_loc_cache WHERE number=? AND fingerprint=?',number,fingerprint)).toArray()[0];
+    const gitFingerprint=activityGitFingerprint(p);
+    const cached=(await this.store.exec<any>(ACTIVITY_LOC_CACHE_QUERY,number,fingerprint,gitFingerprint)).toArray()[0];
     if(cached) return JSON.parse(cached.data);
     // A verified fact remains useful without its original file collection.
-    // A new head, base, header or collection revision invalidates it as usual.
+    // File-derived facts retain snapshot checks; Git facts follow their commits.
     if(!complete?.complete || !Number.isSafeInteger(p.changedFiles)) return null;
     if(budget && budget.remaining--<=0) return null;
     const remember=async (result:any)=>{
-      await this.optionalRead('activity_loc_cache',async ()=>(await this.store.exec('INSERT OR REPLACE INTO activity_loc_cache VALUES (?,?,?)',number,fingerprint,JSON.stringify(result))));
+      // A concurrent file validator must not erase a Git-proven comparison.
+      await this.optionalRead('activity_loc_cache',async ()=>(await this.store.exec('INSERT INTO activity_loc_cache VALUES (?,?,?) ON CONFLICT(number) DO UPDATE SET fingerprint=excluded.fingerprint,data=excluded.data WHERE activity_loc_cache.fingerprint<>?',number,fingerprint,JSON.stringify(result),gitFingerprint)));
       return result;
     };
     const stored=await this.scanRows(`SELECT r.data FROM members m ${collectionJoin(this.store)} resources r ON r.kind='files' AND r.id=m.id WHERE m.collection=? AND r.tombstone=0`,key);

@@ -114,11 +114,28 @@ test('verified LOC facts remain readable without a complete file collection',asy
   const head='a'.repeat(40),base='b'.repeat(40),p={state:'CLOSED',headRefOid:head,baseRefOid:base,changedFiles:2,additions:10,deletions:3};
   await db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?,0)').run('pr','7','',JSON.stringify(p),'',Date.now(),1);
   const loc={added:10,deleted:3,head_sha:head};
-  await db.prepare('INSERT INTO activity_loc_cache VALUES (?,?,?)').run('7',JSON.stringify([2,head,base,2,10,3,null]),JSON.stringify(loc));
+  await db.prepare('INSERT INTO activity_loc_cache VALUES (?,?,?)').run('7',JSON.stringify([2,head,base]),JSON.stringify(loc));
   assert.deepEqual((await (await query(state,[7])).json()).prs[0].lean_loc,loc);
+  await db.prepare('INSERT INTO collections VALUES (?,?,?,?,?,?,?)').run('files:{"number":7}','files','{"number":7}',1,Date.now(),999,null);
+  assert.deepEqual((await (await query(state,[7])).json()).prs[0].lean_loc,loc,'a file refresh cannot invalidate the exact Git comparison');
   p.baseRefOid='c'.repeat(40);
   await db.prepare("UPDATE resources SET data=? WHERE kind='pr' AND id='7'").run(JSON.stringify(p));
   assert.equal((await (await query(state,[7])).json()).prs[0].lean_loc,null,'a different comparison cannot reuse the fact');
+ }finally{await db.close();}
+});
+test('a racing negative file validation cannot replace a Git-proven LOC fact',async()=>{
+ const {db,state}=await fixture();try{
+  const head='a'.repeat(40),base='b'.repeat(40),loc={added:10,deleted:3,head_sha:head};
+  await db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?,0)').run('pr','7','',JSON.stringify({state:'CLOSED',headRefOid:head,baseRefOid:base,changedFiles:1,additions:10,deletions:3}),'',Date.now(),1);
+  await db.prepare('INSERT INTO collections VALUES (?,?,?,?,?,?,?)').run('files:{"number":7}','files','{"number":7}',1,Date.now(),1,null);
+  let inserted=false;
+  state.optionalRead=async function(operation,write){
+   if(operation==='activity_loc_cache' && !inserted){inserted=true;await this.store.exec('INSERT INTO activity_loc_cache VALUES (?,?,?)','7',JSON.stringify([2,head,base]),JSON.stringify(loc));}
+   await write();
+  };
+  await query(state,[7]);
+  assert.ok(inserted);
+  assert.deepEqual((await (await query(state,[7])).json()).prs[0].lean_loc,loc);
  }finally{await db.close();}
 });
 test('removed-only and mixed-merge-base cached lists cannot prove the current head',async()=>{

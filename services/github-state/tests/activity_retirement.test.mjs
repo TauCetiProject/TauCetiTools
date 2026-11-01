@@ -80,8 +80,16 @@ test('merge-base removed files permit retirement while removed-only lists retain
 test('exact cached LOC proofs retire otherwise unnecessary final-file jobs',async()=>{
  const f=await fixture();try{
   const p=header(9),q=query('files',9);await f.state.put('pr','9',p);await enqueue(f,q);
-  const fingerprint=JSON.stringify([2,p.headRefOid,p.baseRefOid,p.changedFiles,p.additions,p.deletions,null]);
+  const fingerprint=JSON.stringify([2,p.headRefOid,p.baseRefOid]);
   await f.store.exec('INSERT INTO activity_loc_cache VALUES (?,?,?)','9',fingerprint,JSON.stringify({added:1,deleted:0,head_sha:p.headRefOid}));
+  await f.store.exec('UPDATE jobs SET requested_at=? WHERE key=?',Date.now()-600000,key(q));
+  await f.state.retireQuotaObsolete();
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(q))).one().n,1);
+  await f.store.exec('UPDATE jobs SET requested_at=NULL WHERE key=?',key(q));
+  await f.store.exec('INSERT INTO demand VALUES (?,?)',key(q),Date.now());
+  await f.state.retireQuotaObsolete();
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(q))).one().n,1);
+  await f.store.exec('DELETE FROM demand WHERE key=?',key(q));
   await f.state.retireQuotaObsolete();
   assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(q))).one().n,0);
   assert.equal((await f.store.exec('SELECT COUNT(*) n FROM activity_loc_cache WHERE number=?','9')).one().n,1);
