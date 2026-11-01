@@ -80,6 +80,7 @@ export class RepositoryState extends DurableObject<Env> {
   private owner:RepositoryState=this;
   private maintenanceIOScope={};
   private transactionIOScope={};
+  private retirementIOScope={};
   private mutationState={active:0,blocked:false};
   private pendingChanges?:{revision:number,at:number,kind:string,id:string,tombstone:number}[];
   private repositoryMemo?:any;
@@ -114,6 +115,7 @@ export class RepositoryState extends DurableObject<Env> {
   private retentionState: Partial<Record<RetentionClass, Checkpoint>> = {};
   private storageFlight?: Promise<void>;
   private surveyFlight?: Promise<void>;
+  private retirementFlight?: Promise<void>;
   private storageLoaded=false;
   private retentionProgressLoaded=false;
   private retentionLoadFlight?:Promise<void>;
@@ -1918,6 +1920,20 @@ export class RepositoryState extends DurableObject<Env> {
     this.surveyFlight=flight;
     if(this.ctx.waitUntil)this.ctx.waitUntil(flight);
   }
+  private startRetirementMaintenance():void {
+    const owner=this.owner;
+    if(owner.retirementFlight || owner.degraded || owner.repairsHeld() || owner.mutationState.blocked)return;
+    // Historical LOC validation can involve remote rows and R2 bodies. One
+    // coalesced pass must not hold repair selection or other housekeeping.
+    owner.activeOperations++;
+    const state=Object.create(owner) as RepositoryState;
+    state.env={...owner.env,ARCHIVE:timedBucket(owner.env.ARCHIVE,owner.retirementIOScope)};
+    const flight=Promise.resolve().then(()=>state.retireQuotaObsolete())
+      .catch(error=>{owner.noteFailure('local_retirement',error);})
+      .finally(()=>{owner.activeOperations--;if(owner.retirementFlight===flight)owner.retirementFlight=undefined;});
+    owner.retirementFlight=flight;
+    if(owner.ctx.waitUntil)owner.ctx.waitUntil(flight);
+  }
   async loadRetentionState():Promise<void> {
     if(this.storageLoaded && this.retentionProgressLoaded)return;
     if(this.retentionLoadFlight)return this.retentionLoadFlight;
@@ -2518,7 +2534,10 @@ export class RepositoryState extends DurableObject<Env> {
         if(phase==='before' || !external)try{await owner.requestOpenCoverage();}catch(error){owner.noteFailure('open_coverage',error);}
         if(phase==='after'){
           owner.traceRepair('maintenance');
-          if(!owner.migrationHeld())try{await owner.retireQuotaObsolete();}catch(error){owner.noteFailure('local_retirement',error);}
+          if(!owner.migrationHeld())try{
+            if(owner.store.backend==='postgres')owner.startRetirementMaintenance();
+            else await owner.retireQuotaObsolete();
+          }catch(error){owner.noteFailure('local_retirement',error);}
           try{if(owner.store.backend==='sqlite' && !owner.migrationHeld())await owner.maintenance();}catch(error){owner.noteFailure('maintenance',error);}
           if(external){owner.traceRepair('storage_maintenance');owner.startStorageMaintenance();owner.traceRepair('alarm_complete');}
         }
