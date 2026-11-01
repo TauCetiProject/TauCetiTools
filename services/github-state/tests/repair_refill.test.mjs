@@ -52,7 +52,7 @@ test('PostgreSQL repair turns continue while optional housekeeping is pending or
   fail=false;await bounded(f.state.runAlarm(),'housekeeping did not retry on a normal wake');await flush();
   if(f.state.surveyFlight)await f.state.surveyFlight;
   assert.equal(selections,4);assert.equal(housekeeping,3);
- }finally{gate.resolve();if(f.state.surveyFlight)await f.state.surveyFlight;if(f.state.storageFlight)await f.state.storageFlight.catch(()=>{});await f.close();}
+ }finally{gate.resolve();await f.state.retirementFlight;if(f.state.surveyFlight)await f.state.surveyFlight;if(f.state.storageFlight)await f.state.storageFlight.catch(()=>{});await f.close();}
 });
 
 test('PostgreSQL retirement coalesces independently of selection, hydration and storage maintenance',async()=>{

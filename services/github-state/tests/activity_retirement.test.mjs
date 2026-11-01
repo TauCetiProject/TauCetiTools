@@ -151,3 +151,27 @@ test('review histories publish cached comments without eager reaction jobs; expl
   assert.ok((await f.store.exec('SELECT * FROM jobs WHERE key=?',key(explicit))).one());
  }finally{await f.close();}
 });
+
+test('background retirement validates real R2 files outside the writer and preserves a racing lease',async()=>{
+ const f=await fixture();try{
+  for(const n of [13,14,15]){await f.state.put('pr',String(n),header(n));await enqueue(f,query('files',n));}
+  for(const n of [14,15]){
+   await files(f,n);
+   const blob='retirement-file-'+n,data=JSON.stringify({filename:'Example.lean',status:'added',additions:1,deletions:0,raw_url:'https://raw.githubusercontent.com/org/repo/'+sha(n)+'/Example.lean'});
+   await f.env.ARCHIVE.put(blob,data);
+   await f.store.exec("UPDATE resources SET data=? WHERE kind='files' AND id=?",JSON.stringify({$r2:blob}),n+':Example.lean');
+  }
+  const decode=f.state.decode,archive=f.env.ARCHIVE,predicate=f.state.obsoleteJobs;let decoded=0,raced=false;
+  f.state.decode=async function(...args){assert.equal(Boolean(this.store.transactional),false);assert.notEqual(this.env.ARCHIVE,archive,'background validation uses its timed R2 scope');decoded++;return decode.apply(this,args);};
+  f.state.obsoleteJobs=async function(group){
+   const result=await predicate.call(this,group);
+   if(!this.store.transactional && !raced){raced=true;await f.store.exec('UPDATE jobs SET lease_id=?,lease_until=? WHERE key=?','new-owner',Date.now()+60000,key(query('files',14)));}
+   return result;
+  };
+  f.state.startRetirementMaintenance();const flight=f.state.retirementFlight;assert.ok(flight);await flight;
+  assert.equal(decoded,2);assert.equal(f.state.retirementFlight,undefined);assert.equal(f.state.activeOperations,0);
+  assert.ok(f.state.retirementAfter,'the background scope advances the owner cursor');
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(query('files',15)))).one().n,0);
+  for(const n of [13,14])assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(query('files',n)))).one().n,1);
+ }finally{await f.state.retirementFlight;await f.close();}
+});
