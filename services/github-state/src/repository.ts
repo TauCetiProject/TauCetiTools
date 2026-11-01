@@ -1539,6 +1539,21 @@ export class RepositoryState extends DurableObject<Env> {
     }
     return true;
   }
+  private async finishSynchronousPR(job:any,q:Query):Promise<boolean> {
+    // Only the unchanged, unowned scalar obligation can be satisfied here.
+    // Even an expired lease belongs to recovery; never complete it for its owner.
+    const eligible=(row:any)=>row && Number.isSafeInteger(row.generation) && row.generation>0 && Number.isSafeInteger(row.created_at) && row.created_at>0
+      && !row.lease_id && row.lease_until===0 && row.started===null
+      && row.page===1 && row.cursor===null && row.nested===null;
+    if(!eligible(job))return false;
+    const current=(await this.store.exec<any>('SELECT * FROM jobs WHERE key=?',job.key)).toArray()[0];
+    if(!eligible(current) || ['generation','created_at','start_generation','attempt','wait_reason','api','due','requested_at'].some(key=>current[key]!==job[key]))return false;
+    const state=Object.create(this) as RepositoryState;
+    // Keep synchronous completion separate from background requested latency.
+    state.metric=(event,query,lane,value)=>this.metric('synchronous_'+event,query,lane,value);
+    await state.finishJob({...current,start_generation:job.generation},q);
+    return true;
+  }
   async refreshPR(input:{repository:string,number:number,expected_head:string}):Promise<any> {
     const requestedAt=Date.now(),q={repository:input.repository,operation:'pr',args:{number:input.number}};
     // Failure reporting must still work when reading the database does not.
@@ -1560,9 +1575,9 @@ export class RepositoryState extends DurableObject<Env> {
         try{
           await measure('validators_ms',()=>this.ensurePRValidators());
           // Existing jobs provide restart recovery. No network I/O owns a writer.
-          await measure('enqueue_ms',()=>this.atomic(async state=>{
+          const recovery=await measure('enqueue_ms',()=>this.atomic(async state=>{
             await state.enqueue(q,0,Date.now(),true);
-            await state.store.exec("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?) WHERE key=?",Date.now(),queryKey(q));
+            return (await state.store.exec<any>("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?) WHERE key=? RETURNING *",Date.now(),queryKey(q))).toArray()[0];
           },'other','pr_refresh_enqueue'));
           const {repo,revision}=await measure('read_start_ms',async()=>({
             repo:await this.meta('repository'),
@@ -1575,12 +1590,16 @@ export class RepositoryState extends DurableObject<Env> {
           });
           if(result.deferred)await this.noteQuotaRestriction(result);
           if(!response.ok || result.deferred || result.unavailable || result.unchanged || !result.data || result.data.number!==input.number || !/^[a-f0-9]{40}$/.test(result.data.headRefOid || ''))return unavailable(result.category || result.reason || 'refresh_unavailable',result.retry_at);
+          const metrics=new RepairMetrics();
           const committed=await measure('publish_ms',()=>this.atomic(async state=>{
-            if(!await state.publishPR(result.data,started,revision))return false;
+            state.repairMetrics=metrics;
+            if(!await state.publishPR(result.data,started,revision))return {accepted:false,completed:false};
             await state.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET complete=1,verified=excluded.verified,revision=excluded.revision,etag=NULL',queryKey(q),'pr',JSON.stringify(q.args),1,Date.now(),await state.revision(),null);
-            return true;
+            return {accepted:true,completed:await state.finishSynchronousPR(recovery,q)};
           },'other','pr_refresh_publish'));
-          return committed?{version:1,repository:input.repository,operation:'pr',status:'ok',complete:true,outcome:'refreshed',revision:await measure('reply_ms',()=>this.revision()),verified_at:Date.now(),data:result.data}:unavailable('superseded',Date.now()+1000);
+          try{this.repairMetrics.merge(metrics);}catch{}
+          try{log('pr_refresh_recovery',{number:input.number,accepted:committed.accepted,completed:committed.completed});}catch{}
+          return committed.accepted?{version:1,repository:input.repository,operation:'pr',status:'ok',complete:true,outcome:'refreshed',revision:await measure('reply_ms',()=>this.revision()),verified_at:Date.now(),data:result.data}:unavailable('superseded',Date.now()+1000);
         }catch(error){this.noteFailure('refresh_pr',error);return unavailable('refresh_failed');}
       })().then(result=>({...result,timing_ms:{...timing,total_ms:Date.now()-requestedAt}}));
       this.owner.prRefreshes.set(input.number,flight);
