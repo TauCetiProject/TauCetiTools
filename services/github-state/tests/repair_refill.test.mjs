@@ -292,10 +292,10 @@ test('local obsolete work retires while an installation-wide restriction blocks 
   const c=f.state.getRepairCoordinator();
   f.state.quotaRestriction={category:'secondary',retry_at:Date.now()+60000,installation:'200',quantum:c.current,dataProgress:c.current.dataProgress};
   let calls=0;f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>{calls++;throw Error('local retirement attempted upstream');}})};
-  await f.state.runAlarm();await drainRepairs(f.state);
+  await f.state.runAlarm();await drainRepairs(f.state);await f.state.retirementFlight;
   assert.equal(calls,0);assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs')).one().n,0);
   assert.equal(await f.state.complete(q),true,'retirement retains canonical completed coverage');
- }finally{await drainRepairs(f.state);await f.close();}
+ }finally{await f.state.retirementFlight;await drainRepairs(f.state);await f.close();}
 });
 
 test('durably backed-off malformed members do not strand a healthy item behind the dispatch cap',async()=>{
