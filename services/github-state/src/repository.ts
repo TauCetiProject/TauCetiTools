@@ -2757,7 +2757,7 @@ export class RepositoryState extends DurableObject<Env> {
     }
     return state;
   }
-  async activityLOC(number:number,p:any,budget?:{remaining:number}): Promise<any> {
+  async activityLOC(number:number,p:any,budget?:{remaining:number},source?:string): Promise<any> {
     const key=queryKey({operation:'files',args:{number}});
     const complete=(await this.store.exec<any>('SELECT complete,revision FROM collections WHERE key=?',key)).toArray()[0];
     if(!p.headRefOid) return null;
@@ -2770,8 +2770,10 @@ export class RepositoryState extends DurableObject<Env> {
     if(!complete?.complete || !Number.isSafeInteger(p.changedFiles)) return null;
     if(budget && budget.remaining--<=0) return null;
     const remember=async (result:any)=>{
-      // A concurrent file validator must not erase a Git-proven comparison.
-      await this.optionalRead('activity_loc_cache',async ()=>(await this.store.exec('INSERT INTO activity_loc_cache VALUES (?,?,?) ON CONFLICT(number) DO UPDATE SET fingerprint=excluded.fingerprint,data=excluded.data WHERE activity_loc_cache.fingerprint<>?',number,fingerprint,JSON.stringify(result),gitFingerprint)));
+      // Check the source at write time too: an old read must not overwrite a
+      // newer head's Git fact. Raw source equality also covers archived PRs.
+      const identity=source===undefined?{sql:"json_extract(data,'$.headRefOid')=? AND json_extract(data,'$.baseRefOid') IS ?",bindings:[p.headRefOid,p.baseRefOid ?? null]}:{sql:'data=?',bindings:[source]};
+      await this.optionalRead('activity_loc_cache',async ()=>(await this.store.exec("INSERT INTO activity_loc_cache SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM resources WHERE kind='pr' AND id=? AND "+identity.sql+") ON CONFLICT(number) DO UPDATE SET fingerprint=excluded.fingerprint,data=excluded.data WHERE activity_loc_cache.fingerprint<>?",number,fingerprint,JSON.stringify(result),String(number),...identity.bindings,gitFingerprint)));
       return result;
     };
     const stored=await this.scanRows(`SELECT r.data FROM members m ${collectionJoin(this.store)} resources r ON r.kind='files' AND r.id=m.id WHERE m.collection=? AND r.tombstone=0`,key);
@@ -3455,7 +3457,7 @@ export class RepositoryState extends DurableObject<Env> {
           const landing=(await state.store.exec<any>('SELECT at,source FROM activity_landings WHERE number=? AND head=?',number,p.headRefOid || '')).toArray()[0];
           prs.push({number,state:p.state,created_at:p.createdAt || null,landed_at:p.mergedAt || (landing?new Date(landing.at/1000).toISOString():null),
             head_sha:p.headRefOid || null,observed_at:row.observed,
-            landing_source:p.mergedAt?'github-merged':landing?.source || null,lean_loc:await state.activityLOC(number,p,locBudget)});
+            landing_source:p.mergedAt?'github-merged':landing?.source || null,lean_loc:await state.activityLOC(number,p,locBudget,row.data)});
         }
         // Normal responses retain their completion-time clock. A migration
         // shadow supplies the same private clock to both local read scopes.
