@@ -62,6 +62,39 @@ test('final file publication keeps ordinary cadence and retires after header cor
  }finally{await f.close();}
 });
 
+test('merge-base removed files permit retirement while removed-only lists retain refetch work',async()=>{
+ const f=await fixture();try{
+  for(const n of [7,8]){
+   const q=query('files',n),p={...header(n),changedFiles:n===7?2:1,additions:n===7?1:0,deletions:10};
+   await f.state.put('pr',String(n),p);
+   if(n===7)await files(f,n);
+   else await f.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?)',key(q),'files',JSON.stringify(q.args),1,Date.now(),0,null);
+   await f.state.put('files',n+':Removed.lean',{filename:'Removed.lean',status:'removed',additions:0,deletions:10,raw_url:`https://raw.githubusercontent.com/org/repo/${sha(998)}/Removed.lean`});
+   await f.state.membership(key(q),n+':Removed.lean',true);await enqueue(f,q);
+  }
+  await f.state.retireQuotaObsolete();
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(query('files',7)))).one().n,0);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(query('files',8)))).one().n,1);
+ }finally{await f.close();}
+});
+test('exact cached LOC proofs retire otherwise unnecessary final-file jobs',async()=>{
+ const f=await fixture();try{
+  const p=header(9),q=query('files',9);await f.state.put('pr','9',p);await enqueue(f,q);
+  const fingerprint=JSON.stringify([2,p.headRefOid,p.baseRefOid]);
+  await f.store.exec('INSERT INTO activity_loc_cache VALUES (?,?,?)','9',fingerprint,JSON.stringify({added:1,deleted:0,head_sha:p.headRefOid}));
+  await f.store.exec('UPDATE jobs SET requested_at=? WHERE key=?',Date.now()-600000,key(q));
+  await f.state.retireQuotaObsolete();
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(q))).one().n,1);
+  await f.store.exec('UPDATE jobs SET requested_at=NULL WHERE key=?',key(q));
+  await f.store.exec('INSERT INTO demand VALUES (?,?)',key(q),Date.now());
+  await f.state.retireQuotaObsolete();
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(q))).one().n,1);
+  await f.store.exec('DELETE FROM demand WHERE key=?',key(q));
+  await f.state.retireQuotaObsolete();
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(q))).one().n,0);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM activity_loc_cache WHERE number=?','9')).one().n,1);
+ }finally{await f.close();}
+});
 test('aged explicit demand survives retirement until its reconciliation finishes',async()=>{
  const f=await fixture();try{
   const q=query('reviews',8);await f.state.put('pr','8',header(8));await enqueue(f,q);
