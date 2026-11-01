@@ -196,11 +196,14 @@ test('one background pass crosses retained batches and completes later obsolete 
 
 test('background pass stops between batches when writes are fenced and retries on an ordinary wake',async()=>{
  const f=await fixture();try{
+  await f.state.put('pr','1300',header(1300));const later=query('reviews',1300);await enqueue(f,later);
   const sweep=f.state.retireQuotaObsolete;let batches=0;
   f.state.retireQuotaObsolete=async function(){batches++;this.owner.retirementAfter='files:retained';this.owner.mutationState.blocked=true;};
   f.state.startRetirementMaintenance();await f.state.retirementFlight;assert.equal(batches,1);
   assert.equal(f.state.activeOperations,0);assert.equal(f.state.retirementFlight,undefined);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(later))).one().n,1);
   f.state.mutationState.blocked=false;f.state.retireQuotaObsolete=sweep;
   f.state.startRetirementMaintenance();await f.state.retirementFlight;assert.equal(f.state.retirementAfter,'');
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(later))).one().n,0,'ordinary wake resumes at the saved position and retires later work');
  }finally{await f.state.retirementFlight;await f.close();}
 });
