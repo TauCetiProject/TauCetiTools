@@ -2618,8 +2618,10 @@ export class RepositoryState extends DurableObject<Env> {
   }
   private scheduleCapacityDeadline(at:number):void {
     const owner=this.owner;
-    // Native SQLite already has the exact quota deadline in its durable alarm.
-    if(owner.store.backend!=='postgres')return;
+    // A real release can arrive before its rejected job's retry deadline.
+    // Preserve that ordinary wake when maintenance runs past the deadline;
+    // otherwise the paused quantum excludes the now-overdue job from arming.
+    if(owner.store.backend==='sqlite'){owner.noteOrdinaryAlarm(at);return;}
     const delay=at-Date.now();
     if(delay<=0 || delay>settings(owner.env).lease_ms)return;
     if(owner.capacityWake?.at===at)return;

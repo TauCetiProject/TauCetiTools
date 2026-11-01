@@ -481,6 +481,32 @@ test('a capacity release after closure does not refetch an unclassified publicat
  }finally{await drainRepairs(f.state);await f.close();}
 });
 
+test('SQLite keeps an early capacity release when maintenance crosses the retry deadline',{skip:Boolean(process.env.TEST_POSTGRES_URL)},async()=>{
+ const f=await fixture();try{
+  await seed(f,1);let calls=0,until;
+  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>{
+   if(++calls===1){until=Date.now()+250;
+    await f.state.fetch(new Request('https://internal/capacity-ready',{method:'POST',body:JSON.stringify({installation:'200'})}));
+    return Response.json({deferred:true,category:'capacity',retry_at:until,scope:{kind:'installation'}});
+   }
+   assert.ok(Date.now()>=until);return Response.json({api:'core',data:[]});
+  }})};
+  await f.state.runAlarm();await drainRepairs(f.state);assert.equal(calls,1);
+  // An already scheduled earlier alarm runs before the real retry deadline.
+  // Its maintenance ends after that deadline, when a closed quantum would
+  // otherwise omit the capacity-excluded overdue row while choosing an alarm.
+  f.state.retireQuotaObsolete=async()=>new Promise(resolve=>setTimeout(resolve,Math.max(0,until-Date.now()+30)));
+  await f.ctx.storage.setAlarm(null); // The platform consumes a delivered alarm.
+  await f.state.alarm();await drainRepairs(f.state);
+  const alarm=await f.ctx.storage.getAlarm();
+  assert.ok(typeof alarm==='number' && alarm<=Date.now()+200,'the real release must retain a prompt durable wake');
+  await new Promise(resolve=>setTimeout(resolve,Math.max(0,alarm-Date.now()+1)));
+  await f.ctx.storage.setAlarm(null);
+  await f.state.alarm();await drainRepairs(f.state);
+  assert.equal(calls,2);assert.equal(await f.state.complete(query(100)),true);
+ }finally{await drainRepairs(f.state);await f.close();}
+});
+
 test('PostgreSQL coalesced release deadlines preserve both early and late wakes',{skip:!process.env.TEST_POSTGRES_URL},async()=>{
  const f=await fixture();try{
   const c=f.state.getRepairCoordinator(),wakes=[],start=Date.now();
