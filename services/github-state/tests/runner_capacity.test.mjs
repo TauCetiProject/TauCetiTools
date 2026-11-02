@@ -95,7 +95,7 @@ test('hourly allowance and lost responses survive refresh and cannot be bypassed
  values.set('runner-capacity-attempts',Array(2400).fill(Date.now()));
  let result=await (await scheduler.runnerCapacity({name:'org/repo',installation:'200'})).json();
  assert.equal(result.reason,'capacity_hourly_budget');assert.equal(calls,0);
- values.delete('runner-capacity:org:20');values.delete('runner-capacity-attempts');
+ values.delete('runner-capacity:org');values.delete('runner-capacity-attempts');
  result=await (await scheduler.runnerCapacity({name:'org/repo',installation:'200'})).json();
  assert.equal(result.complete,false);assert.equal(calls,1);
  assert.equal(values.get('runner-capacity-attempts').length,1);
@@ -249,8 +249,8 @@ test('missing queued placement data preserves running capacity; missing running 
  await assert.rejects(()=>scanHostedCapacity('org',path=>path.includes('/jobs?')?Promise.resolve({status:403,body:{}}):read(path)),/capacity_inventory_unavailable/);
 });
 
-test('configured targets below and above twenty retain independent caches without concurrent scans',async()=>{
- const {scheduler}=schedulerFixture();let calls=0,active=0,peak=0;
+test('mixed configured targets share the most informative organization snapshot without overlapping scans',async()=>{
+ const {scheduler,values}=schedulerFixture();let calls=0,active=0,peak=0;
  scheduler.http=async path=>{
   calls++;active++;peak=Math.max(peak,active);
   try {
@@ -262,11 +262,15 @@ test('configured targets below and above twenty retain independent caches withou
   }finally{active--;}
  };
  const get=async namespace_cap=>(await scheduler.runnerCapacity({name:'org/repo',installation:'200',namespace_cap})).json();
- const [small,large]=await Promise.all([get(8),get(30)]);
+ const [small,large,coalesced]=await Promise.all([get(8),get(30),get(30)]);
  assert.equal(small.namespace_discovery_target,8);assert.equal(small.namespace_busy_lower_bound,20);
  assert.equal(large.namespace_discovery_target,30);assert.equal(large.routing_version,2);assert.equal(large.namespace_busy,20);
+ assert.deepEqual(coalesced,large);
  assert.equal(peak,1,'different target scans serialize through the shared installation budget');assert.equal(calls,7);
- assert.equal((await get(8)).cached,true);assert.equal((await get(30)).cached,true);assert.equal(calls,7);
+ assert.equal((await get(8)).cached,true);assert.equal((await get(30)).cached,true);assert.equal((await get(10000)).cached,true);assert.equal(calls,7);
+ const saved=values.get('runner-capacity:org');values.set('runner-capacity:org',{...saved,retry_at:0});
+ const refreshed=await get(8);assert.equal(refreshed.namespace_discovery_target,30);assert.equal(refreshed.namespace_busy,20);
+ assert.equal((await get(30)).cached,true);assert.equal(calls,11,'mixed caps add no scans after the first target upgrade');
  for(const namespace_cap of [0,-1,true,1.5,10001,'20'])assert.equal((await scheduler.runnerCapacity({name:'org/repo',installation:'200',namespace_cap})).status,400);
 });
 test('endpoint validates requested caps before starting discovery',async()=>{
@@ -291,4 +295,30 @@ test('partial scan retains observed fleet reservations and never certifies offse
  });
  assert.equal(value.routing_version,1);assert.equal(value.namespace_busy_lower_bound,1);
  assert.deepEqual(value.queued_fleet,[labels]);assert.equal(value.placement_unavailable,'capacity_queue_pagination');
+});
+
+test('valid endpoint targets reach discovery and complete snapshots serve every cap',async()=>{
+ const {read}=readFixture();let reads=0;
+ const mf=await runtime(async(req,u)=>{
+  reads++;const path=u.pathname+u.search;
+  const r=path.includes('/jobs?')?envelope('jobs',Array.from({length:20},(_,i)=>ns(i+1,'in_progress'))):await read(path);
+  return response(r.body,'core',4999,r.status);
+ });
+ try {
+  const get=async cap=>{
+   const r=await mf.dispatchFetch('https://state/v1/runner-capacity?repository=org/repo'+(cap===undefined?'':'&namespace_cap='+cap),{headers:{Authorization:'Bearer client'}});
+   assert.equal(r.status,200);return r.json();
+  };
+  const first=await get(8);assert.equal(first.namespace_discovery_target,8);assert.equal(first.namespace_busy_lower_bound,20);
+  const larger=await get(30);assert.equal(larger.namespace_discovery_target,30);assert.equal(larger.routing_version,2);assert.equal(larger.namespace_busy,20);
+  const count=reads;assert.equal((await get()).cached,true);assert.equal((await get(10000)).cached,true);assert.equal(reads,count);
+ }finally{await mf.dispose();}
+});
+test('partial discovery failures share the same cooldown across different caps',async()=>{
+ const {scheduler}=schedulerFixture();let calls=0;
+ scheduler.http=async()=>{calls++;throw Error('lost response');};
+ const get=async namespace_cap=>(await scheduler.runnerCapacity({name:'org/repo',installation:'200',namespace_cap})).json();
+ const [one,two,three]=await Promise.all([get(8),get(30),get(30)]);
+ assert.equal(one.complete,false);assert.equal(two.complete,false);assert.equal(three.complete,false);assert.equal(calls,1);
+ assert.equal((await get(10000)).cached,true);assert.equal(calls,1);
 });

@@ -535,8 +535,11 @@ repositories and workflows already using Namespace, with older runs first on eac
 page. It stops after observing at least the requested `namespace_cap` distinct
 Namespace builds, or at the existing scan limit. The positive integer target
 (default twenty, maximum 10,000) follows the picker's configured admission cap.
-Results are cached per organization and target; different targets serialize
-through the same installation scan and quota budget. Incomplete queued
+One organization snapshot is shared across targets: a complete inventory answers
+all caps, a sufficient lower bound answers smaller caps, and failures share one
+cooldown. Only a larger cap needing more evidence upgrades discovery; that
+larger target remains in use after cache expiry so mixed caps do not multiply
+refresh scans. All scans serialize under the same installation quota budget. Incomplete queued
 discovery preserves the complete running GitHub count as routing version 1,
 plus `namespace_busy_lower_bound`, observed `queued_fleet` reservations, and
 `placement_unavailable`. Distinct job IDs
