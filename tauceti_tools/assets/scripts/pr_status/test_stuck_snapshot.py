@@ -74,14 +74,16 @@ class SnapshotTests(unittest.TestCase):
             def graphql(self, query, variables):
                 self.calls += 1
                 return dict(repository=dict(pr1=dict(state="CLOSED", headRefOid="head"),
-                                            pr2=dict(state="OPEN", headRefOid="head"), pr3=None))
+                                            pr2=dict(state="OPEN", headRefOid="head"), pr3=None,
+                                            pr4=dict(state="MERGED", headRefOid="head")))
 
         client = ReviewClient()
         snapshot = Snapshot("owner/repo", client)
-        snapshot.load_review_prs([1, 2, 3, 1])
+        snapshot.load_review_prs([1, 2, 3, 1, 4])
         self.assertEqual(snapshot.review_prs[1]["state"], "closed")
         self.assertEqual(snapshot.review_prs[2]["state"], "open")
         self.assertEqual(snapshot.review_prs[3], {})
+        self.assertEqual(snapshot.review_prs[4]["state"], "closed")
         self.assertEqual(client.calls, 1)
 
 

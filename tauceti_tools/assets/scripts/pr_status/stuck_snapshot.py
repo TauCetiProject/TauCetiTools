@@ -110,5 +110,6 @@ class Snapshot:
             data = self.client.graphql(query, dict(owner=owner, name=name))["repository"]
             for number in batch:
                 node = data[f"pr{number}"]
-                self.review_prs[number] = (dict(state=node["state"].lower(), head=node["headRefOid"])
+                self.review_prs[number] = (dict(state="closed" if node["state"] == "MERGED" else node["state"].lower(),
+                                               head=node["headRefOid"])
                                            if node else {})
