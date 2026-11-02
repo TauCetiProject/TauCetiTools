@@ -78,8 +78,9 @@ def ranked_runners(pages, *, kind, machines, reserved=()):
             if (runner.get("status") == "online" and runner.get("busy") is False
                     and runner["id"] not in reserved and required <= labels and len(instances) == 1):
                 ready.append(dict(machine=machine["name"], machine_id=identity, runner_id=runner["id"],
+                                  staging_only=kind == "staging" and "tauceti-fleet-pr" not in labels,
                                   labels=sorted(required | {instances[0]})))
-        result.extend(sorted(ready, key=lambda r: r["runner_id"])[:room])
+        result.extend(sorted(ready, key=lambda r: (not r["staging_only"], r["runner_id"]))[:room])
     return result
 
 
@@ -347,6 +348,12 @@ def route(*, kind, order, machines, runner_pages, observed, github_budget, names
             return dict(pool="namespace")
         candidates = [r for r in ranked if r["machine"] == name]
         if candidates:
+            # Spread concurrent jobs within the preferred tier. Hashing across
+            # every eligible guest could strand a reserved staging slot while
+            # consuming the host's general-purpose PR capacity.
+            staging_only = [r for r in candidates if r["staging_only"]]
+            if staging_only:
+                candidates = staging_only
             offset = int(hashlib.sha256(selection_key.encode()).hexdigest(), 16) if selection_key else 0
             return dict(candidates[offset % len(candidates)], pool=name)
     return dict(pool="github", waiting=True)

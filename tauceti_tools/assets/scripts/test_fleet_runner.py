@@ -66,6 +66,34 @@ class Selection(unittest.TestCase):
         self.assertEqual({select(str(n), [])["runner_id"] for n in range(8)}, {2, 3})
         self.assertEqual(select("1", None)["pool"], "chris")
 
+    def test_staging_uses_reserved_guest_before_shared_guest_for_every_selection_key(self):
+        machines, pages = self.ranked_fixture()
+        machine = dict(machines[1], max_jobs=2)
+        shared, dedicated = pages[0]["runners"][0], pages[0]["runners"][2]
+        # The shared guest has the older/lower ID, matching the production case.
+        shared["id"], dedicated["id"] = 2, 3
+        dedicated["labels"] = [label for label in dedicated["labels"] if label["name"] != "tauceti-fleet-pr"]
+        pages = [dict(total_count=2, runners=[shared, dedicated])]
+        def select(kind="staging", key="", queued=()):
+            return route(kind=kind, order=["chris", "namespace"], machines={"chris": machine},
+                         runner_pages=pages, observed=dict(github_busy=0, namespace_busy=0, queued_fleet=list(queued)),
+                         github_budget=18, namespace_cap=20, selection_key=key)
+        for key in map(str, range(32)):
+            self.assertEqual(select(key=key)["runner_id"], 3)
+        self.assertEqual(select("pr")["runner_id"], 2)
+        # Enforce the preference before truncating at the shared machine ceiling.
+        machine["max_jobs"] = 1
+        self.assertEqual(select()["runner_id"], 3)
+        machine["max_jobs"] = 2
+        dedicated["busy"] = True
+        self.assertEqual(select()["runner_id"], 2)
+        dedicated["busy"] = False
+        dedicated["status"] = "offline"
+        self.assertEqual(select()["runner_id"], 2)
+        dedicated["status"] = "online"
+        target = {label["name"] for label in dedicated["labels"]}
+        self.assertEqual(select(queued=[target])["runner_id"], 2)
+
     def test_legacy_labels_partial_inventories_and_ambiguous_instances_cannot_authorize_a_slot(self):
         machines, pages = self.ranked_fixture()
         pages[0]["runners"][1]["labels"] = [dict(name=n) for n in ["self-hosted", "linux", "x64", "tauceti-fleet", "fleet-" + "a" * 32]]
