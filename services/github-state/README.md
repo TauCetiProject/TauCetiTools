@@ -15,6 +15,15 @@ Authenticated clients retain background demand.
 
 Public queries require the `PUBLIC_QUERY_LIMIT` binding (1,200 queries per minute per client IP, including individual batch queries). Identical reads share preparation and public reads use a separate page cache bounded at sixteen entries and 12 MiB of serialized results. Shared-IP fleets have room for normal survey, dispatch and continuation bursts; public reads have no separate concurrency refusal or total-snapshot size cutoff. Set `PUBLIC_READ_REPOSITORIES = "[]"` explicitly to revoke public access; `keep_vars` preserves omitted deployment variables.
 
+Authenticated reporting clients can read
+`GET /v1/runner-capacity?repository=OWNER/REPO&cached_only=true` without initiating
+discovery, token acquisition, or provider requests. This returns `read_only: true`
+with the saved snapshot and its original observation time, even after expiry;
+an empty cache reports `capacity_not_prepared`. Normal scheduler discovery also
+prepares `running_jobs` by hosted pool and fleet machine identity using job rows
+it already fetched. These counts require an assigned runner, exclude queued
+destinations, and include all workflow jobs. Reporting adds no GitHub reads.
+
 
 Reporting clients can use authenticated `POST /v1/activity` with
 `{"repository":"TauCetiProject/TauCeti","numbers":[1,2]}` (maximum 500 numbers).

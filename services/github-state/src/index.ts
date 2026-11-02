@@ -98,6 +98,10 @@ export default {
       if (url.pathname==='/v1/runner-capacity' && req.method==='GET') {
         const repo=repository(env,url.searchParams.get('repository') || '');
         if(!repo || !await authorize(req,env,repo.name))return json({error:'unauthorized'},401);
+        const cachedOnly=url.searchParams.get('cached_only');
+        if(cachedOnly!==null && cachedOnly!=='true')return json({error:'invalid_cached_only'},400);
+        if(cachedOnly==='true')return stub(env.INSTALLATIONS,repo.installation).fetch('https://internal/runner-capacity-cached',{
+          method:'POST',body:JSON.stringify(repo)});
         const rawCap=url.searchParams.get('namespace_cap');
         if(rawCap!==null && !/^[1-9]\d{0,4}$/.test(rawCap))return json({error:'invalid_namespace_cap'},400);
         const namespaceCap=rawCap===null?20:Number(rawCap);

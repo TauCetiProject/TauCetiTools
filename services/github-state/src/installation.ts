@@ -439,6 +439,13 @@ export class InstallationScheduler extends DurableObject<Env> {
       this.accountingPreparationFailure=null;
     }catch(error) {this.accountingPreparationFailure={at:Date.now(),reason:classify(error)};log('installation_health_prepare_failed',this.accountingPreparationFailure);}
   }
+  async cachedRunnerCapacity(repo:Repository):Promise<Response> {
+    // Status collectors may read an old snapshot, but never cause discovery,
+    // token acquisition, retry scheduling, or GitHub requests.
+    const organization=repo.name.split('/')[0];
+    const saved=await this.ctx.storage.get<any>('runner-capacity:'+organization);
+    return json(saved?{...saved,cached:true,read_only:true}:{complete:false,organization,reason:'capacity_not_prepared',cached:true,read_only:true});
+  }
   async runnerCapacity(repo:Repository & {namespace_cap?:number}):Promise<Response> {
     const namespaceTarget=repo.namespace_cap ?? 20;
     if(!Number.isSafeInteger(namespaceTarget) || namespaceTarget<1 || namespaceTarget>10000)return json({error:'invalid_namespace_cap'},400);
@@ -597,6 +604,7 @@ export class InstallationScheduler extends DurableObject<Env> {
         return this.availability(repo);
       }
       if (path==='/runner-capacity') return await this.runnerCapacity(await req.json() as Repository);
+      if (path==='/runner-capacity-cached') return await this.cachedRunnerCapacity(await req.json() as Repository);
       if (path==='/read') return await this.read({...input,request_id:requestId(req)});
       if (path==='/batch') return await this.batch({...input,request_id:requestId(req)});
       if (path==='/measure') return await this.measure({...input,request_id:requestId(req)});
