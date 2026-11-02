@@ -36,6 +36,14 @@ def manual_runs(client, now):
     # workflow's fixed run-name instead, including requests still queued.
     cutoff = (now - COOLDOWN).strftime("%Y-%m-%dT%H:%M:%SZ")
     result = []
+    # A run can remain queued longer than the cooldown. Its age never
+    # authorizes displacing it with another run in the same concurrency group.
+    for status in ("queued", "in_progress", "waiting", "pending", "requested"):
+        data = client.request("GET", f"repos/{REPO}/actions/workflows/pr-build.yml/runs"
+                              f"?event=workflow_dispatch&status={status}&per_page=100")
+        if data["total_count"] > len(data["workflow_runs"]):
+            raise RuntimeError("Active maintenance build history truncated")
+        result.extend(data["workflow_runs"])
     for page in range(1, 11):
         data = client.request("GET", f"repos/{REPO}/actions/workflows/pr-build.yml/runs"
                               f"?event=workflow_dispatch&created=%3E{cutoff}&per_page=100&page={page}")
