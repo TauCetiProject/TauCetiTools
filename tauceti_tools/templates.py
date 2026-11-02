@@ -18,6 +18,7 @@ from .project import CANONICAL, ConfigError, Project, bootstrap, checkout_root
 
 HERE = Path(__file__).resolve().parent
 ASSETS = HERE / "assets"
+MAINTENANCE_CONTROL_RUNNER = '${{ fromJSON(format(\'["nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=0","namespace-features:github.run-id={0}"]\', github.run_id)) }}'
 
 # Resolve tags when updating Tools, never when generating a downstream setup PR.
 # Verified against each action's GitHub commits API on 2026-10-21.
@@ -42,7 +43,7 @@ def pin_actions(text: str) -> str:
     return text
 
 
-def guard_app_jobs(text: str) -> str:
+def guard_app_jobs(text: str, *, runner: str = "ubuntu-latest") -> str:
     """Skip App-dependent jobs during setup; preserve their event filters."""
     heading = re.search(r"(?m)^jobs:\n", text)
     if not heading or "\n  app-credentials:\n" in text:
@@ -114,7 +115,7 @@ def guard_app_jobs(text: str) -> str:
     preflight_if = "" if "true" in filters else "    if: >-\n      " + " || ".join("(" + value + ")" for value in sorted(filters)) + "\n"
     preflight = (
         "  app-credentials:\n" + preflight_if +
-        "    runs-on: ubuntu-latest\n"
+        "    runs-on: " + runner + "\n"
         "    permissions: {}\n"
         "    outputs:\n"
         "      ready: ${{ steps.check.outputs.ready }}\n"
@@ -144,6 +145,7 @@ def substitutions(project: Project) -> list[tuple[str, str]]:
             "This release's build harness supports one Lean library root; split the library or keep its existing custom build workflow"
         )
     pairs = [
+        ("__MAINTENANCE_RUNNER__", MAINTENANCE_CONTROL_RUNNER if project.legacy else "ubuntu-latest"),
         ("TauCetiProject/TauCetiRoadmap", project.repos["roadmap"]),
         ("TauCetiProject/TauCetiReview", project.tool("review").get("repo", "TauCetiProject/TauCetiReview")),
         ("TauCetiProject/TauCetiProgress", project.tool("progress").get("repo", "TauCetiProject/TauCetiProgress")),
@@ -407,7 +409,10 @@ def write_project(project: Project, checkout: Path, role: str = "content") -> li
             text = re.sub(r"(?m)^(        ref: )[0-9a-f]{40}$", lambda m, ref=review["ref"]: m[1] + ref, text)
         if relative.suffix in (".yml", ".yaml"):
             if relative.name not in ("pr-build.yml", "retry-ci-status.yml"):
-                text = guard_app_jobs(text)
+                runner = (MAINTENANCE_CONTROL_RUNNER
+                          if project.legacy and relative.name in ("update.yml", "stuck-alerts.yml")
+                          else "ubuntu-latest")
+                text = guard_app_jobs(text, runner=runner)
             text = pin_actions(text)
         target.write_text(text)
         target.chmod(source.stat().st_mode & 0o777)
