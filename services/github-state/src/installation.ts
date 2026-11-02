@@ -433,13 +433,25 @@ export class InstallationScheduler extends DurableObject<Env> {
       this.accountingPreparationFailure=null;
     }catch(error) {this.accountingPreparationFailure={at:Date.now(),reason:classify(error)};log('installation_health_prepare_failed',this.accountingPreparationFailure);}
   }
-  async runnerCapacity(repo:Repository):Promise<Response> {
+  async runnerCapacity(repo:Repository & {namespace_cap?:number}):Promise<Response> {
+    const namespaceTarget=repo.namespace_cap ?? 20;
+    if(!Number.isSafeInteger(namespaceTarget) || namespaceTarget<1 || namespaceTarget>10000)return json({error:'invalid_namespace_cap'},400);
     const organization=repo.name.split('/')[0],key='runner-capacity:'+organization;
+    const answers=(value:any)=>value.namespace_discovery_target!==undefined && (value.complete!==true || value.routing_version===2 || value.placement_unavailable!=='capacity_namespace_target' || value.namespace_busy_lower_bound>=namespaceTarget);
+    // Reuse complete inventories and sufficient lower bounds across caps. An
+    // upgrade to a larger target uses the same organization cache and budget.
+    while(this.capacityFlight) {
+      const value=await this.capacityFlight;
+      if(value.organization===organization && answers(value))return json({cached:false,...value},value.complete?200:503);
+    }
     // Install the flight before the first storage await, so a finishing scan
     // cannot race a caller that already read an expired value.
     this.capacityFlight ||= (async()=>{
       const saved=await this.ctx.storage.get<any>(key);
-      if(saved?.retry_at>Date.now())return {...saved,cached:true};
+      if(saved?.retry_at>Date.now() && answers(saved))return {...saved,cached:true};
+      // Retain the most informative requested target across refreshes, so mixed
+      // caps cannot multiply scans on every two-minute cache expiry.
+      const target=Math.max(namespaceTarget,saved?.namespace_discovery_target || 0);
       const deadline=Date.now()+15000;
       const attempts=await this.ctx.storage.get<number[]>('runner-capacity-attempts') || [];
       try {
@@ -460,13 +472,13 @@ export class InstallationScheduler extends DurableObject<Env> {
               }else await new Promise(resolve=>setTimeout(resolve,250));
             }
           }
-        });
-        // At most 30 scans/hour x 80 requests/scan fits the hourly allowance.
-        // Share observations on demand without adding a polling task.
-        const value={complete:true,organization,...snapshot,retry_at:Date.now()+120000,coverage:snapshot.routing_version===2?'organization_repository_inventory':'organization_running_inventory'};
+        },target);
+        // Shared two-minute snapshots normally need thirty refreshes per hour.
+        // Target upgrades also charge the same hard hourly attempt allowance.
+        const value={complete:true,organization,namespace_discovery_target:target,...snapshot,retry_at:Date.now()+120000,coverage:snapshot.routing_version===2?'organization_repository_inventory':'organization_running_inventory'};
         await this.ctx.storage.put(key,value);return value;
       } catch(error) {
-        const value={complete:false,organization,reason:error instanceof QuotaDeferred?'capacity_deferred':error instanceof Error && error.message.startsWith('capacity_')?error.message:classify(error),retry_at:Math.max(Date.now()+120000,error instanceof QuotaDeferred?error.result.retry_at || 0:0)};
+        const value={complete:false,organization,namespace_discovery_target:target,reason:error instanceof QuotaDeferred?'capacity_deferred':error instanceof Error && error.message.startsWith('capacity_')?error.message:classify(error),retry_at:Math.max(Date.now()+120000,error instanceof QuotaDeferred?error.result.retry_at || 0:0)};
         await this.ctx.storage.put(key,value);return value;
       }
     })().finally(()=>{this.capacityFlight=undefined;});

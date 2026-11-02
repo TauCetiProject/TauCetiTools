@@ -513,7 +513,7 @@ Source verification does not select PostgreSQL or constitute a release receipt.
 
 ### Shared runner-capacity discovery
 
-`GET /v1/runner-capacity?repository=OWNER/REPO` requires an existing client token
+`GET /v1/runner-capacity?repository=OWNER/REPO&namespace_cap=20` requires an existing client token
 authorized for that configured repository. Its installation owner performs one
 bounded organization inventory and shares the result for two minutes, coalescing
 concurrent requests. It counts running GitHub-hosted jobs, excluding Namespace
@@ -523,12 +523,33 @@ repositories requires granting the installation visibility to those repositories
 
 The response includes `complete`, `organization`, `busy`, `observed_at`, `retry_at`,
 and refresh request counts. This is an advisory observation, not a reserved slot
-or an atomic snapshot. Missing pages or quota rejection produce HTTP 503 with
-`complete:false`, never a partial count. Failed refreshes are cached for two minutes
-(or a longer instructed cooldown). Routing version 2 also reports queued/running
-Namespace build jobs and queued fleet targets from the same bounded scan, shared
-by all pickers. Picker, recovery, publication, and finalizer control jobs are
-excluded from the build count.
+or an atomic snapshot. Missing running-inventory pages or quota rejection produce
+HTTP 503 with `complete:false`. Failed refreshes are cached for two minutes (or a
+longer instructed cooldown). Routing version 2 also reports a complete observed
+inventory of queued/running Namespace build jobs and queued fleet targets.
+Picker, recovery, publication, and finalizer control jobs are excluded from the
+build count.
+
+Queued discovery inspects jobs as each workflow page arrives, starting with
+repositories and workflows already using Namespace, with older runs first on each
+page. It stops after observing at least the requested `namespace_cap` distinct
+Namespace builds, or at the existing scan limit. The positive integer target
+(default twenty, maximum 10,000) follows the picker's configured admission cap.
+One organization snapshot is shared across targets: a complete inventory answers
+all caps, a sufficient lower bound answers smaller caps, and failures share one
+cooldown. Only a larger cap needing more evidence upgrades discovery; that
+larger target remains in use after cache expiry so mixed caps do not multiply
+refresh scans. All scans serialize under the same installation quota budget. Incomplete queued
+discovery preserves the complete running GitHub count as routing version 1,
+plus `namespace_busy_lower_bound`, observed `queued_fleet` reservations, and
+`placement_unavailable`. Distinct job IDs
+are counted once, and completed pages remain useful if a later page fails.
+All counts are advisory observations over the scan window. A lower bound at or
+above a picker's cap is evidence of saturation. Offset-based queued pagination
+stays partial, because starting workflows can shift between pages. An incomplete
+count below that cap does not establish spare capacity: the picker continues
+through its configured destinations and native GitHub fallback. Logs show the
+lower bound, inventory coverage, cap state, and partial-scan reason.
 
 Refresh uses existing installation quota accounting, honors secondary cooldowns,
 leaves at least 1,500 core requests for repository work, and spends at most 2,400
@@ -537,5 +558,6 @@ contention yields within the scan deadline rather than invalidating the snapshot
 80 requests, at most three simultaneous reads, and a 15-second launch window; individual requests retain their
 existing timeout. There is no alarm, CI event storage, or new polling task.
 
-Pickers retain bounded direct discovery when this view is unavailable. Visiting
-ordinary reports/status does not invoke capacity discovery.
+Pickers without a configured shared service retain bounded direct discovery.
+Shared-service failure or partial coverage never fans out into a direct scan
+from every picker. Visiting ordinary reports/status does not invoke capacity discovery.
