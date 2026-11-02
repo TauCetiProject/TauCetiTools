@@ -1107,7 +1107,7 @@ export class RepositoryState extends DurableObject<Env> {
       }
       if(event==='push' && !body.deleted && String(body.ref).startsWith('refs/heads/')) {
         const branch=String(body.ref).slice('refs/heads/'.length);
-        const base=branch===body.repository?.default_branch || (await this.store.exec(`SELECT number FROM survey_inventory WHERE json_extract(data,'$.state')='OPEN' AND json_extract(data,'$.baseRefName')=? LIMIT 1`,branch)).toArray().length>0;
+        const base=branch===body.repository?.default_branch || (await this.store.exec(`SELECT s.number FROM members m ${collectionJoin(this.store)} survey_inventory s ON s.number=m.id WHERE m.collection=? AND json_extract(s.data,'$.state')='OPEN' AND json_extract(s.data,'$.baseRefName')=? LIMIT 1`,queryKey({operation:'open_prs'}),branch)).toArray().length>0;
         if(base) {
           const inventory={repository:repo.name,operation:'open_prs'};
           const job=(await this.store.exec<any>('SELECT dirty,started FROM jobs WHERE key=?',queryKey(inventory))).toArray()[0];
@@ -1352,7 +1352,10 @@ export class RepositoryState extends DurableObject<Env> {
   }
   async interval(q:Query): Promise<number> {
     if (q.operation==='pr_delta' || q.operation==='issue_delta') return 60000;
-    if (q.operation==='open_prs') return 300000;
+    if (q.operation==='open_prs') {
+      const unknown=(await this.store.exec("SELECT s.number FROM members m "+collectionJoin(this.store)+" survey_inventory s ON s.number=m.id WHERE m.collection=? AND json_extract(s.data,'$.state')='OPEN' AND json_extract(s.data,'$.mergeable')='UNKNOWN' LIMIT 1",queryKey(q))).toArray().length>0;
+      return unknown?60000:300000;
+    }
     if (q.operation==='open_issues') return 3600000;
     if (q.operation==='files') return 365*86400000; // head-change webhook dirties this immutable-by-head read
     if (q.operation==='reactions') {
@@ -1436,7 +1439,7 @@ export class RepositoryState extends DurableObject<Env> {
     // One full weighted cycle in four keeps oldest-first ordering in every
     // lane, including installations whose cycle length is divisible by four.
     const omit=this.excludeRepairKeys(excluded);
-    const job=(await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=?"+omit.sql+" ORDER BY CASE WHEN lane=? AND (lane!='requested' OR requested_at IS NOT NULL) THEN 0 WHEN lane='requested' AND (requested_at IS NOT NULL OR ?='requested') THEN 1 WHEN lane='active' THEN 2 WHEN lane='requested' THEN 3 WHEN lane='verification' THEN 4 ELSE 5 END,CASE WHEN ? AND lane='requested' THEN COALESCE(requested_at,0) ELSE 0 END DESC,CASE WHEN ? AND (lane!='requested' OR requested_at IS NULL) THEN CASE WHEN key='open_prs:{}' THEN -1 ELSE priority END ELSE 0 END,due,key LIMIT 1",now,now,...omit.bindings,preferred,preferred,Number(fresh),Number(Math.floor(turn/settings(this.env).weights.reduce((a,b)=>a+b,0))%4!==0))).toArray()[0];
+    const job=(await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=?"+omit.sql+" ORDER BY CASE WHEN lane=? AND (lane!='requested' OR requested_at IS NOT NULL) THEN 0 WHEN lane='requested' AND (requested_at IS NOT NULL OR ?='requested') THEN 1 WHEN lane='active' THEN 2 WHEN lane='requested' THEN 3 WHEN lane='verification' THEN 4 ELSE 5 END,CASE WHEN ? AND lane='requested' THEN COALESCE(requested_at,0) ELSE 0 END DESC,CASE WHEN ? AND (lane!='requested' OR requested_at IS NULL) THEN CASE WHEN key='open_prs:{}' THEN -2 WHEN key LIKE 'pr:%' THEN -1 ELSE 0 END ELSE 0 END,due,key LIMIT 1",now,now,...omit.bindings,preferred,preferred,Number(fresh),Number(Math.floor(turn/settings(this.env).weights.reduce((a,b)=>a+b,0))%4!==0))).toArray()[0];
     if(job)await this.setMeta('repair_turn',turn+1);
     if(job?.lane==='requested' && job.requested_at)await this.setMeta('requested_turn',requestedTurn+1);
     return job;
@@ -1446,7 +1449,7 @@ export class RepositoryState extends DurableObject<Env> {
     // Public discovery never creates demand. The existing maintenance owner
     // independently backfills bounded missing coverage for current open heads.
     // Already requested jobs leave this selection, so each tick advances it.
-    await this.requestOpenPRHeaders();
+    try{await this.requestOpenPRHeaders();}catch(error){this.noteFailure('open_pr_headers',error);}
     const join=collectionJoin(this.store);
     const inventory=`SELECT s.number,s.data FROM members m ${join} survey_inventory s ON s.number=m.id ${join} resources r ON r.kind='pr' AND r.id=m.id WHERE m.collection=? AND r.tombstone=0 AND json_extract(s.data,'$.state')='OPEN'`;
     const candidates=`WITH live AS (${inventory}), wanted AS (`+
@@ -1464,13 +1467,13 @@ export class RepositoryState extends DurableObject<Env> {
     await this.enqueueMany(missing.map(row=>{const args:Record<string,string|number>=row.operation==='statuses'?{sha:row.head}:{number:decimalArgument(row.number)};return {q:{repository:repo,operation:row.operation,args},priority:5};}),true);
   }
   private async requestOpenPRHeaders(numbers?:string[]):Promise<void> {
-    const now=Date.now(),join=collectionJoin(this.store);
+    const now=Date.now(),join=collectionJoin(this.store),rest=(await this.meta('pr_inventory_api'))==='core';
     // Complete coverage does not imply a current head/base or mergeability.
     // Use upstream verification, not webhook observation time: label/comment
     // activity must not postpone a mergeability refresh indefinitely.
     const filter=numbers?' AND r.number IN ('+numbers.map(()=>'?').join(',')+')':'';
-    const candidates=`SELECT r.number id FROM members m ${join} survey_inventory r ON r.number=m.id LEFT JOIN collections c ON c.key='pr:{"number":'||r.number||'}' LEFT JOIN jobs j ON j.key='pr:{"number":'||r.number||'}' WHERE m.collection=? AND json_extract(r.data,'$.state')='OPEN' AND (c.key IS NULL OR (json_extract(r.data,'$.mergeable')='UNKNOWN' AND c.verified<?)) AND (j.key IS NULL OR (j.lane!='requested' AND j.started IS NULL))`+filter+' ORDER BY COALESCE(c.verified,0),r.number LIMIT 64';
-    const rows=(await this.store.exec<any>(candidates,queryKey({operation:'open_prs'}),now-60000,...(numbers || []))).toArray();
+    const candidates=`SELECT r.number id FROM members m ${join} survey_inventory r ON r.number=m.id LEFT JOIN collections c ON c.key='pr:{"number":'||r.number||'}' LEFT JOIN jobs j ON j.key='pr:{"number":'||r.number||'}' WHERE m.collection=? AND json_extract(r.data,'$.state')='OPEN' AND (c.key IS NULL OR (?=1 AND json_extract(r.data,'$.mergeable')='UNKNOWN' AND c.verified<?)) AND (j.key IS NULL OR (j.lane!='requested' AND j.started IS NULL))`+filter+' ORDER BY COALESCE(c.verified,0),r.number LIMIT 64';
+    const rows=(await this.store.exec<any>(candidates,queryKey({operation:'open_prs'}),Number(rest),now-60000,...(numbers || []))).toArray();
     if(!rows.length)return;
     // Recheck the bounded selection under the existing writer, as coverage
     // promotion does. Preserve leases, retry deadlines and real demand.
@@ -1478,7 +1481,7 @@ export class RepositoryState extends DurableObject<Env> {
     const repo=(await this.meta('repository'))?.name;if(!repo)return;
     const requests=rows.map(row=>({q:{repository:repo,operation:'pr',args:{number:decimalArgument(row.id)}},priority:0,dirty:true}));
     await this.enqueueMany(requests);
-    await this.store.exec("UPDATE jobs SET lane='requested' WHERE key IN ("+requests.map(()=>'?').join(',')+')',...requests.map(row=>queryKey(row.q)));
+    await this.store.exec("UPDATE jobs SET lane='requested',requested_at=CASE WHEN EXISTS (SELECT 1 FROM demand d WHERE d.key=jobs.key AND d.at>?) THEN requested_at ELSE NULL END WHERE key IN ("+requests.map(()=>'?').join(',')+')',now-300000,...requests.map(row=>queryKey(row.q)));
   }
   private async dormantStatusHeads(heads:string[]):Promise<Set<string>> {
     if(!heads.length)return new Set();
@@ -1950,6 +1953,7 @@ export class RepositoryState extends DurableObject<Env> {
     await this.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET complete=1,verified=excluded.verified,revision=excluded.revision,etag=excluded.etag',job.key,q.operation,JSON.stringify(q.args || {}),1,Date.now(),(await this.revision()),job.page===1?result.etag || null:null);
     if(this.store instanceof ReadCacheStore)this.store.seed('SELECT key FROM collections WHERE key=? AND complete=1',[job.key],[{key:job.key}]);
     await this.store.exec('DELETE FROM meta WHERE key=?',stagingStateKey(job.key));
+    if(q.operation==='open_prs')await this.setMeta('pr_inventory_api',result.api);
     await this.finishJob(job,q,job.page===1?result.etag || null:null);
     // These paths now need only repair identities. Release payload strings
     // before building a large fan-out, while keeping detail/thread rows until

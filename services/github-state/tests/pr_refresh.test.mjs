@@ -286,6 +286,7 @@ test('a full synchronous read satisfies an expired-staging retry after its conti
 test('maintenance retries unknown headers centrally, retaining quota waits and serving stored data',async()=>{
  const f=await fixture();try{
   const now=Date.now();
+  await f.state.setMeta('pr_inventory_api','core');
   for(const [number,mergeable,verified,state] of [[7,'UNKNOWN',now-3600000,'OPEN'],[8,'UNKNOWN',now-61000,'OPEN'],[9,'MERGEABLE',now,'OPEN'],[10,'UNKNOWN',now,'OPEN'],[11,'UNKNOWN',0,'CLOSED']]) {
    await f.state.put('pr',String(number),{...record(),number,state,mergeable});await f.state.membership('open_prs:{}',String(number),true);
    await f.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?)',`pr:{"number":${number}}`,'pr',JSON.stringify({number}),1,verified,1,null);
@@ -305,7 +306,7 @@ test('maintenance retries unknown headers centrally, retaining quota waits and s
 test('base pushes coalesce one inventory refresh, preserving pages and in-flight generations',async()=>{
  const f=await fixture();try{
   const inventory={repository:'org/repo',operation:'open_prs'},inventoryKey='open_prs:{}';
-  await f.state.put('pr','7',{...record(),baseRefName:'release'});
+  await f.state.put('pr','7',{...record(),baseRefName:'release'});await f.state.membership('open_prs:{}','7',true);
   const push=async(id,branch='main')=>{f.objects.set(id,JSON.stringify({ref:'refs/heads/'+branch,after:latest,repository:{default_branch:'main'}}));await f.state.ingest({repository:'org/repo',key:id,delivery:id,event:'push',received:Date.now()});};
   await f.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?)',inventoryKey,'open_prs','{}',1,Date.now(),1,null);
   await f.state.enqueue(inventory);await push('base-1');
@@ -320,6 +321,10 @@ test('base pushes coalesce one inventory refresh, preserving pages and in-flight
   const pending=(await f.store.exec('SELECT * FROM jobs WHERE key=?',inventoryKey)).one();assert.equal(pending.dirty,1);assert.ok(pending.generation>active.start_generation);assert.ok(pending.due<=Date.now());
   const generation=pending.generation;await push('feature','unrelated-feature');assert.equal((await f.store.exec('SELECT generation FROM jobs WHERE key=?',inventoryKey)).one().generation,generation);
   assert.equal(await f.state.interval(inventory),300000);
+  await f.state.put('pr','7',{...record(),baseRefName:'release',mergeable:'UNKNOWN'});
+  assert.equal(await f.state.interval(inventory),60000,'unresolved headers coalesce into a bulk retry');
+  await f.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?)',key,'pr','{"number":7}',1,0,1,null);
+  await f.state.requestOpenCoverage();assert.equal((await f.store.exec('SELECT key FROM jobs WHERE key=?',key)).toArray().length,0,'GraphQL unknowns do not fan out per-PR background reads');
  }finally{await f.close();}
 });
 

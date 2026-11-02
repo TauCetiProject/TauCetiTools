@@ -301,7 +301,7 @@ export class InstallationScheduler extends DurableObject<Env> {
     const limit=batchLimit(operation);
     const predicted=this.estimate(operation+'_batch','graphql',undefined,operation==='review_threads'?Math.max(1,Math.round(input.jobs.length*11/100)):1);
     const core=this.usable('core'),graphql=this.usable('graphql');
-    if(operation!=='review_threads' && core>=input.jobs.length && predicted/Math.max(1,graphql)>1.2*input.jobs.length/Math.max(1,core)) return json({deferred:true,category:'routing:core',retry_at:Date.now()});
+    if(!['pr','review_threads'].includes(operation) && core>=input.jobs.length && predicted/Math.max(1,graphql)>1.2*input.jobs.length/Math.max(1,core)) return json({deferred:true,category:'routing:core',retry_at:Date.now()});
     const deferred=this.deferral('graphql',predicted);if(deferred) return json(deferred);
     if (input.jobs.length>limit || !['pr','issue_comments','review_threads','statuses','reactions'].includes(operation)) throw new Error('invalid batch operation');
     const request=batchQuery(input.repository.name,input.jobs);
