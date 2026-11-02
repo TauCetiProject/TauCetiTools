@@ -17,6 +17,20 @@ async function fixture(){
  return {db,state};
 }
 const query=async (state,numbers)=>(await state.fetch(new Request('https://internal/activity',{method:'POST',body:JSON.stringify({repository:'org/repo',numbers})})));
+test('staging duration reporting uses retained job clocks without demand, alarms or provider access',async()=>{
+ const {db,state}=await fixture();try {
+  const now=Date.now(),started=new Date(now-660000).toISOString(),finished=new Date(now-60000).toISOString();
+  const title=`bors branch=main batch=7 head=${'a'.repeat(40)} base=${'b'.repeat(40)}`;
+  for(const [kind,id,parent,data] of [['workflow_runs','20','',{display_title:title}],['workflow_jobs','30','20',{name:'sandboxed-build',status:'completed',started_at:started,completed_at:finished}]])
+   await db.prepare('INSERT INTO resources VALUES(?,?,?,?,?,?,?,0)').run(kind,id,parent,JSON.stringify(data),'',now,1);
+  const result=await (await state.fetch(new Request('https://internal/ci-statistics',{method:'POST'}))).json();
+  assert.equal(result.schema,'tauceti-ci.staging-durations/v1');assert.equal(result.read_only,true);
+  assert.equal(result.windows[0].mean_seconds,600);assert.equal(result.windows[0].samples,1);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM demand').get()).n,0);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM jobs').get()).n,0);
+  assert.equal(await state.meta('repository'),undefined);
+ } finally {await db.close();}
+});
 test('reporting missing/never-configured resources creates no demand, jobs, alarms or upstream calls',async()=>{
  const {db,state}=(await fixture());try{
   for(let i=0;i<3;i++){

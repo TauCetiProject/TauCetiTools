@@ -10,6 +10,7 @@ import { RepairCoordinator, RepairGroup, RepairIdentity, RepairQuantum, RepairEf
 import { repairHop, RepairTransportTimeout, REPAIR_HOP_MS } from './repair_io';
 import { SURVEY_CONTRACT, SURVEY_INDEX_VERSION, compactPR, issueFragment, reviewFragment, summarizeFragments, inScope, roadmapFocuses } from './survey';
 import { readPromotionReceipts } from './activity_landings';
+import { STAGING_DURATION_SQL, stagingDurations } from './staging_statistics';
 import { queueMetrics } from './queue_monitoring';
 import { ageProvider, providerObservation, providerAlarms } from './provider_monitoring';
 import { targetConfig, targetOwner } from './migration_target';
@@ -3551,7 +3552,7 @@ export class RepositoryState extends DurableObject<Env> {
     if(this.migrationState?.phase==='replaying' && !this.migrationState.cutover?.replay_complete && ['/repair','/configure','/activity-refresh'].includes(path))return json({error:'migration_replaying',parkable:true},503);
     if(this.migrationHeld()) {
       if(path==='/event') return json({error:'migration_frozen',parkable:true},503);
-      if(!['/query','/activity','/health','/changes','/retained-object','/storage/summary','/storage/scan','/storage/deliveries'].includes(path)) return json({error:'migration_frozen',parkable:true},503);
+      if(!['/query','/activity','/ci-statistics','/health','/changes','/retained-object','/storage/summary','/storage/scan','/storage/deliveries'].includes(path)) return json({error:'migration_frozen',parkable:true},503);
       if(path==='/retained-object') return json({retained:true});
     }
     const tracked=!this.migrationHeld();
@@ -3653,6 +3654,11 @@ export class RepositoryState extends DurableObject<Env> {
         return json({retained:true,reason:'recovery_reference_index_required'});
       }
       if(path==='/refresh-pr')return json(await this.refreshPR(await req.json() as any));
+      if(path==='/ci-statistics') {
+        const now=Date.now(), since=new Date(now-7*86400000).toISOString();
+        const rows=(await this.store.exec<any>(STAGING_DURATION_SQL,since)).toArray();
+        return json(stagingDurations(rows,now));
+      }
       if (path==='/activity') {
         const input:any=await req.json();
         const prs=[],missing=[],locBudget={remaining:32},state=await this.primeActivity(input.numbers);

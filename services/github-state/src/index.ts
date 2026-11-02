@@ -109,6 +109,11 @@ export default {
         return stub(env.INSTALLATIONS,repo.installation).fetch('https://internal/runner-capacity',{
           method:'POST',body:JSON.stringify({...repo,namespace_cap:namespaceCap})});
       }
+      if(url.pathname==='/v1/ci-statistics/cached' && req.method==='GET') {
+        const repo=repository(env,url.searchParams.get('repository') || '');
+        if(!repo || !await authorize(req,env,repo.name))return json({error:'unauthorized'},401);
+        return stub(env.REPOSITORIES,repo.id).fetch('https://internal/ci-statistics',{method:'POST'});
+      }
       if (url.pathname==='/v1/activity' && req.method==='POST') {
         if (!await authorize(req,env)) return json({error:'unauthorized'},401);
         if (Number(req.headers.get('content-length') || 0)>16384) return json({error:'payload_too_large'},413);
