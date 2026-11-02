@@ -54,6 +54,6 @@ export function summarize(issues:any[],reviews:any[]): any {return summarizeFrag
 export function compactPR(row:any): any {
   const {body,statusCheckRollup,...rest}=row;
   // Only fields consumed by PRInfo; exclude history, descriptions and diff data.
-  const keys=['number','headRefOid','headRefName','headRepositoryOwner','headRepository','isDraft','mergeable','author','title','labels','updatedAt','state'];
+  const keys=['number','baseRefName','headRefOid','headRefName','headRepositoryOwner','headRepository','isDraft','mergeable','author','title','labels','updatedAt','state'];
   return {...Object.fromEntries(keys.filter(k=>Object.hasOwn(rest,k)).map(k=>[k,rest[k]])),target_focuses:row.target_focuses || targetFocuses(body),statusCheckRollup:statusCheckRollup || []};
 }

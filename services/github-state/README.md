@@ -86,8 +86,8 @@ entire inventory.
 Concurrent queries at the same revision share a snapshot.
 
 PR and issue headers and commit statuses update from webhook payloads. A
-changed PR does not start a full repository survey. Full inventories reconcile
-hourly; overlapping deltas catch missed updates.
+changed PR does not start a full repository survey. Open PR headers reconcile every five minutes; other full inventories reconcile
+hourly, and overlapping deltas catch missed updates.
 
 Repository-wide discovery batches the compact fragments needed by dirty review
 projections alongside its related metadata. Changed summaries retain exact stored
@@ -150,6 +150,24 @@ requests in four-request waves during a ten-second launch window. Network
 calls run outside installation-wide locks; atomic quota reservations and
 expiring job leases protect concurrent requests. Large nested thread histories
 checkpoint one comment page per quantum instead of monopolizing a turn.
+
+Open PR headers refresh through the existing paginated inventory every five
+minutes and after base-branch pushes. Queued pushes coalesce; pushes during a
+scan retain its pages and a newer generation for the next pass. GraphQL is
+preferred for this inventory because REST lists omit mergeability, with REST
+remaining available during GraphQL quota exhaustion. Maintenance independently
+promotes at most 64 missing PR headers per turn. Unresolved `UNKNOWN` results
+coalesce into another bulk inventory after one minute. When that inventory had
+to use REST lists, which omit mergeability, maintenance also promotes unresolved
+PR details so available REST quota can recover them. Up to eight PR details share one GraphQL
+request and results use the existing bounded grouped publication path. Keeping
+a detail group within one publication chunk lets bulk headers and histories
+regain scheduler slots promptly. Label
+overflow falls back to REST per member. No freshness requirement blocks stored
+reads or worker admission. Within the existing lane shares, background headers
+precede backfills for three weighted cycles out of four, with inventory headers
+first; the remaining cycle serves oldest work. Real requested reads
+retain their existing fresh/oldest ordering.
 
 Maintenance independently promotes at most 64 missing status/comment collections
 for current open PRs into the requested lane per turn. Already requested work is
