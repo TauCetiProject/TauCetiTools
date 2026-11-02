@@ -20,6 +20,8 @@ except ImportError:
     import tomli as tomllib
 
 LABELS = {"self-hosted", "linux", "x64", "tauceti-fleet"}
+# Match TauCetiFleet.capacity.MAX_JOBS; hosts still enforce resource admission.
+MAX_MACHINE_JOBS = 4096
 
 
 def inventory(pages):
@@ -56,7 +58,7 @@ def ranked_runners(pages, *, kind, machines, reserved=()):
         if not re.fullmatch(r"[a-f0-9]{32}", identity) or identity in seen:
             raise ValueError("invalid or duplicate machine identity")
         seen.add(identity)
-        if type(maximum) is not int or not 1 <= maximum <= 16:
+        if type(maximum) is not int or not 1 <= maximum <= MAX_MACHINE_JOBS:
             raise ValueError("invalid shared machine limit")
         if not isinstance(machine["kinds"], list) or not machine["kinds"] or any(k not in ("pr", "staging") for k in machine["kinds"]):
             raise ValueError("invalid machine job classes")
