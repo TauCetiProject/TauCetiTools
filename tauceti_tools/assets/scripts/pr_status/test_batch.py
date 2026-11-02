@@ -46,6 +46,37 @@ class ResumeTests(unittest.TestCase):
         self.assertTrue(runs.called)
         self.assertEqual({call.args[0] for call in runs.call_args_list}, {'pr-build.yml'})
 
+    def test_dispatched_builds_recheck_prs_without_trusting_the_workflow_head(self):
+        head = "a" * 40
+        def discover(row, *, completed=None):
+            row = {**dict(head_sha="b" * 40, head_branch="main", event="workflow_dispatch",
+                          display_title="pr-build 7", updated_at="2026-10-19T09:00:00Z"), **row}
+            with patch.object(batch, 'lines', return_value=['.github/workflows/pr-build.yml']), \
+                    patch.object(batch, 'workflow_runs', side_effect=lambda w, q:
+                                 [row] if q.startswith('status=completed') else []):
+                return REAL_TOUCHED('2026-10-19T08:00:00Z', {head: [7]}, completed)
+        self.assertEqual(discover({}), ({7}, set()))
+        self.assertEqual(discover({}, completed={'7': '2026-10-19T09:01:00Z'}), (set(), set()))
+        self.assertEqual(discover({'display_title': 'pr-build 8'}), (set(), set()))
+        self.assertEqual(discover({'event': 'push'}), (set(), set()))
+        self.assertEqual(discover({'event': 'repository_dispatch',
+                                  'display_title': f'pr-build pr=7 head={head}'}), ({7}, set()))
+        self.assertEqual(discover({'event': 'repository_dispatch',
+                                  'display_title': 'pr-build pr=7 head=' + 'c' * 40}), (set(), set()))
+
+    def test_only_an_exact_dispatched_head_can_be_painted_running(self):
+        head = "a" * 40
+        def discover(title):
+            row = dict(head_sha="b" * 40, event="workflow_dispatch", display_title=title,
+                       updated_at="2026-10-19T09:00:00Z")
+            with patch.object(batch, 'lines', return_value=['.github/workflows/pr-build.yml']), \
+                    patch.object(batch, 'workflow_runs', side_effect=lambda w, q:
+                                 [row] if q == 'status=in_progress' else []):
+                return REAL_TOUCHED('2026-10-19T08:00:00Z', {head: [7]})
+        self.assertEqual(discover('pr-build 7'), ({7}, set()))
+        self.assertEqual(discover(f'pr-build pr=7 head={head}'), ({7}, {head}))
+        self.assertEqual(discover('pr-build pr=7 head=' + 'c' * 40), (set(), set()))
+
     def test_labels_only_needs_no_zulip_credentials_or_client(self):
         with patch.dict(os.environ, {}, clear=True), \
                 patch.object(batch.zulip, 'Zulip', side_effect=AssertionError('Zulip is off')):

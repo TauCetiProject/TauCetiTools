@@ -44,6 +44,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import math
 from pathlib import Path
 import threading
@@ -126,7 +127,7 @@ def workflow_runs(workflow: str, query: str) -> list[dict]:
     if total >= 1000:
         raise core.RateLimited(f"{workflow} {query}: {total} runs, past the listing's 1,000-result cap")
     rows = lines(f"/repos/{REPO}/actions/workflows/{workflow}/runs?{query}&per_page=100",
-                 jq='.workflow_runs[] | {head_sha, status, created_at, updated_at} | tojson', paginate=True)
+                 jq='.workflow_runs[] | {head_sha, head_branch, display_title, event, status, created_at, updated_at} | tojson', paginate=True)
     return [json.loads(r) for r in rows]
 
 
@@ -144,24 +145,47 @@ def touched_by_runs(since: str, heads: dict[str, list[int]], completed=None) -> 
     installed = set(lines(f"/repos/{REPO}/actions/workflows?per_page=100",
                           jq=".workflows[].path", paginate=True))
     lookback = iso(dt.datetime.fromisoformat(since.replace("Z", "+00:00")) - RUN_LOOKBACK)
-    # pr-build runs for PRs are pull_request_target runs; Review is started by workflow_run and
-    # issue_comment events, so its runs are listed whatever their event.
-    for workflow, event in (("pr-build.yml", "&event=pull_request_target"), ("review.yml", "")):
+    # A dispatched maintenance build runs from main, so its run head is not the PR head.
+    # Discover its PR from the canonical title; this schedules a recheck, never authorizes a merge.
+    open_prs = {n for numbers in heads.values() for n in numbers}
+    for workflow in ("pr-build.yml", "review.yml"):
         if f".github/workflows/{workflow}" not in installed:
             continue
         for status in ACTIVE + ("completed",):
             # Completed runs by completion (updated_at), not creation: a long build created before
             # `since` may finish after it.
-            query = f"status={status}{event}" + (f"&created=>={lookback}" if status == "completed" else "")
+            query = f"status={status}" + (f"&created=>={lookback}" if status == "completed" else "")
             runs = workflow_runs(workflow, query)
             for r in runs:
                 if status == "completed" and r["updated_at"] < since:
                     continue
-                if r["head_sha"] in heads:
-                    prs.update(n for n in heads[r["head_sha"]]
-                               if not completed or r['updated_at'] >= completed.get(str(n), ''))
-                    if workflow == "pr-build.yml" and status != "completed":
-                        running.add(r["head_sha"])
+                sha = r["head_sha"]
+                numbers = heads.get(sha, [])
+                exact_head = bool(numbers)
+                if workflow == "pr-build.yml":
+                    event = r.get("event", "pull_request_target")
+                    if event not in {"pull_request_target", "workflow_dispatch", "repository_dispatch"}:
+                        continue
+                    title = r.get("display_title", "")
+                    identity = re.fullmatch(r"pr-build pr=([1-9][0-9]*) head=([0-9a-f]{40})", title)
+                    if identity:
+                        number, sha = int(identity[1]), identity[2]
+                        numbers = [number] if number in heads.get(sha, []) else []
+                        exact_head = bool(numbers)
+                    elif event == "workflow_dispatch":
+                        # Legacy manual titles omit H. Recheck the open PR without claiming
+                        # that its current head is the one the queued/running job is testing.
+                        identity = re.fullmatch(r"pr-build ([1-9][0-9]*)", title)
+                        number = int(identity[1]) if identity else None
+                        numbers = [number] if number in open_prs else []
+                        exact_head = False
+                    elif event == "repository_dispatch":
+                        # Staging batches and malformed dispatch identities are not PR runs.
+                        numbers, exact_head = [], False
+                prs.update(n for n in numbers
+                           if not completed or r['updated_at'] >= completed.get(str(n), ''))
+                if workflow == "pr-build.yml" and status != "completed" and exact_head:
+                    running.add(sha)
     return prs, running
 
 
