@@ -439,6 +439,14 @@ export class InstallationScheduler extends DurableObject<Env> {
       this.accountingPreparationFailure=null;
     }catch(error) {this.accountingPreparationFailure={at:Date.now(),reason:classify(error)};log('installation_health_prepare_failed',this.accountingPreparationFailure);}
   }
+  async cachedRunnerCapacity(repo:Repository):Promise<Response> {
+    // Status collectors may read an old snapshot, but never cause discovery,
+    // token acquisition, retry scheduling, or GitHub requests.
+    const organization=repo.name.split('/')[0];
+    let saved=await this.ctx.storage.get<any>('runner-capacity:'+organization);
+    if(saved?.complete!==true) saved=await this.ctx.storage.get<any>('runner-capacity-last-good:'+organization) || saved;
+    return json(saved?{...saved,cached:true,read_only:true}:{complete:false,organization,reason:'capacity_not_prepared',cached:true,read_only:true});
+  }
   async runnerCapacity(repo:Repository & {namespace_cap?:number}):Promise<Response> {
     const namespaceTarget=repo.namespace_cap ?? 20;
     if(!Number.isSafeInteger(namespaceTarget) || namespaceTarget<1 || namespaceTarget>10000)return json({error:'invalid_namespace_cap'},400);
@@ -482,7 +490,9 @@ export class InstallationScheduler extends DurableObject<Env> {
         // Shared two-minute snapshots normally need thirty refreshes per hour.
         // Target upgrades also charge the same hard hourly attempt allowance.
         const value={complete:true,organization,namespace_discovery_target:target,...snapshot,retry_at:Date.now()+120000,coverage:snapshot.routing_version===2?'organization_repository_inventory':'organization_running_inventory'};
-        await this.ctx.storage.put(key,value);return value;
+        await this.ctx.storage.put(key,value);
+        await this.ctx.storage.put('runner-capacity-last-good:'+organization,value);
+        return value;
       } catch(error) {
         const value={complete:false,organization,namespace_discovery_target:target,reason:error instanceof QuotaDeferred?'capacity_deferred':error instanceof Error && error.message.startsWith('capacity_')?error.message:classify(error),retry_at:Math.max(Date.now()+120000,error instanceof QuotaDeferred?error.result.retry_at || 0:0)};
         await this.ctx.storage.put(key,value);return value;
@@ -597,6 +607,7 @@ export class InstallationScheduler extends DurableObject<Env> {
         return this.availability(repo);
       }
       if (path==='/runner-capacity') return await this.runnerCapacity(await req.json() as Repository);
+      if (path==='/runner-capacity-cached') return await this.cachedRunnerCapacity(await req.json() as Repository);
       if (path==='/read') return await this.read({...input,request_id:requestId(req)});
       if (path==='/batch') return await this.batch({...input,request_id:requestId(req)});
       if (path==='/measure') return await this.measure({...input,request_id:requestId(req)});

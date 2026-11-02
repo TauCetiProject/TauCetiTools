@@ -3,7 +3,7 @@ export async function scanHostedCapacity(
   organization:string,
   read:(path:string)=>Promise<{status:number;body:any;link?:string;deferred?:boolean}>,
   namespaceTarget=20,
-):Promise<{routing_version:number;busy:number;namespace_busy?:number;namespace_busy_lower_bound?:number;queued_fleet?:string[][];placement_unavailable?:string;requests:number;repositories:number;runs:number;observed_at:number}> {
+):Promise<{routing_version:number;busy:number;running_jobs:Record<string,number>;namespace_busy?:number;namespace_busy_lower_bound?:number;queued_fleet?:string[][];placement_unavailable?:string;requests:number;repositories:number;runs:number;observed_at:number}> {
   let requests=0;const deadline=Date.now()+15000;
   if(!Number.isSafeInteger(namespaceTarget) || namespaceTarget<1 || namespaceTarget>10000)throw new Error('capacity_invalid_namespace_target');
   let queuedPagination=false;
@@ -39,6 +39,7 @@ export async function scanHostedCapacity(
     if(failure)throw failure;
   }
   let busy=0,namespace_busy=0;
+  const running_jobs:Record<string,number>={github:0,namespace:0};
   const queued_fleet:string[][]=[];
   const controls=new Set(['pick','recover','retry-status','publish','finalize-merge-group-build','finalize-batch']);
   const seenRuns=new Set<string>(),seenJobs=new Set<string>();
@@ -66,6 +67,14 @@ export async function scanHostedCapacity(
           if(seenJobs.has(key))continue;
           seenJobs.add(key);
           const namespace=job.labels.some((l:string)=>l.startsWith('nscloud-') || l.startsWith('namespace-profile-'));
+          // Reporting reuses this already-required running inventory. An assigned
+          // runner is evidence of execution; queued labels are only a destination.
+          if(job.status==='in_progress' && job.runner_id && job.runner_name) {
+            const machine=job.labels.find((label:string)=>/^fleet-[a-f0-9]{32}$/.test(label))
+              || /^fleet-[a-f0-9]{12}-/.exec(job.runner_name)?.[0].slice(0,-1);
+            const pool=namespace?'namespace':machine || (job.labels.includes('self-hosted')?'self-hosted':'github');
+            running_jobs[pool]=(running_jobs[pool] || 0)+1;
+          }
           if(['queued','in_progress'].includes(job.status) && namespace && !controls.has(String(job.name || '').split(' / ').at(-1)!) && !job.labels.some((l:string)=>l.includes('-2x4-'))) {
             namespace_busy++;
             namespaceByRepo.set(run.prefix,(namespaceByRepo.get(run.prefix) || 0)+1);
@@ -113,7 +122,7 @@ export async function scanHostedCapacity(
     if(queuedPagination)throw new Error('capacity_queue_pagination');
   } catch(error) {
     // Retain distinct jobs from every completed page, including a partial scan.
-    return {routing_version:1,busy:running,namespace_busy_lower_bound:namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:Date.now(),placement_unavailable:error instanceof Error && error.message.startsWith('capacity_')?error.message:'capacity_inventory_unavailable'};
+    return {routing_version:1,busy:running,running_jobs,namespace_busy_lower_bound:namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:Date.now(),placement_unavailable:error instanceof Error && error.message.startsWith('capacity_')?error.message:'capacity_inventory_unavailable'};
   }
-  return {routing_version:2,busy:running,namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:Date.now()};
+  return {routing_version:2,busy:running,running_jobs,namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:Date.now()};
 }

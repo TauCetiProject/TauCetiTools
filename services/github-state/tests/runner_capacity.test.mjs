@@ -27,6 +27,41 @@ test('counts running hosted jobs across repositories, excluding archived repos a
  assert.ok(calls.some(p=>p.includes('status=in_progress&')));
  assert.ok(!calls.some(p=>p.includes('/old/')));
 });
+test('running pool reporting reuses assigned jobs and excludes queued destinations',async()=>{
+ const {read,calls}=readFixture();
+ const machine='fleet-'+ 'a'.repeat(32);
+ const value=await scanHostedCapacity('org',async path=>{
+  if(!path.includes('/jobs?'))return read(path);
+  calls.push(path);
+  return envelope('jobs',[
+   {status:'in_progress',labels:['ubuntu-latest'],runner_id:1,runner_name:'hosted'},
+   {status:'in_progress',labels:['nscloud-ubuntu-test'],runner_id:2,runner_name:'nsc-runner'},
+   {status:'in_progress',labels:['self-hosted',machine],runner_id:3,runner_name:'fleet-runner'},
+   {status:'queued',labels:['self-hosted',machine],runner_id:4,runner_name:'not-started'},
+   {status:'in_progress',labels:['ubuntu-latest'],runner_id:0,runner_name:''},
+   {status:'in_progress',labels:['tauceti-fleet'],runner_id:5,runner_name:'fleet-'+ 'b'.repeat(12)+'-instance'},
+  ]);
+ });
+ assert.deepEqual(value.running_jobs,{github:1,namespace:1,[machine]:1,['fleet-'+ 'b'.repeat(12)]:1});
+ assert.equal(calls.length,6,'reporting adds no discovery requests');
+});
+test('cached-only HTTP reads never initiate discovery, including an empty cache',async()=>{
+ let reads=0;
+ const mf=await runtime(async()=>{reads++;throw new Error('status must not scan GitHub');});
+ try {
+  const url='https://state/v1/runner-capacity?repository=org/repo&cached_only=true';
+  for(let i=0;i<3;i++){
+   const response=await mf.dispatchFetch(url,{headers:{Authorization:'Bearer client'}});
+   assert.equal(response.status,200);
+   const value=await response.json();assert.equal(value.read_only,true);assert.equal(value.reason,'capacity_not_prepared');
+  }
+  assert.equal(reads,0);
+  const dedicated=await mf.dispatchFetch(url.replace('/runner-capacity?','/runner-capacity/cached?'),{headers:{Authorization:'Bearer client'}});
+  assert.equal((await dedicated.json()).read_only,true);assert.equal(reads,0);
+  assert.equal((await mf.dispatchFetch(url)).status,401);
+  assert.equal((await mf.dispatchFetch(url.replace('cached_only=true','cached_only=other'),{headers:{Authorization:'Bearer client'}})).status,400);
+ }finally{await mf.dispose();}
+});
 test('routing snapshot counts queued/running Namespace builds and fleet targets, excluding controls',async()=>{
  const {read}=readFixture();
  const snapshot=await scanHostedCapacity('org',async path=>{
@@ -89,6 +124,24 @@ function schedulerFixture(){
  const scheduler=new InstallationScheduler({storage},{});scheduler.token=async()=> 'token';scheduler.usable=()=>5000;
  return {scheduler,values,setSlots:n=>{slots=n}};
 }
+test('cached-only reads retain expired snapshots without token or provider work',async()=>{
+ const {scheduler,values}=schedulerFixture();
+ scheduler.token=async()=>{throw new Error('must not mint a token');};
+ scheduler.http=async()=>{throw new Error('must not contact GitHub');};
+ const saved={complete:true,organization:'org',observed_at:1000,retry_at:2000,running_jobs:{github:3,namespace:8}};
+ values.set('runner-capacity:org',saved);
+ const response=await scheduler.cachedRunnerCapacity({name:'org/repo'});
+ const value=await response.json();assert.equal(value.read_only,true);
+ assert.equal(value.observed_at,1000);assert.deepEqual(value.running_jobs,saved.running_jobs);
+ assert.deepEqual(values.get('runner-capacity:org'),saved);
+ assert.equal(values.has('runner-capacity-attempts'),false);
+ values.set('runner-capacity:org',{complete:false,reason:'capacity_deferred'});
+ values.set('runner-capacity-last-good:org',saved);
+ const retained=await(await scheduler.cachedRunnerCapacity({name:'org/repo'})).json();
+ assert.deepEqual(retained.running_jobs,saved.running_jobs);
+ assert.equal(retained.observed_at,1000);
+ assert.equal(values.get('runner-capacity:org').complete,false,'reporting must not change routing failure state');
+});
 test('hourly allowance and lost responses survive refresh and cannot be bypassed by another caller',async()=>{
  const {scheduler,values}=schedulerFixture();let calls=0;
  scheduler.http=async()=>{calls++;throw new Error('connection lost')};
