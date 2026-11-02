@@ -25,14 +25,27 @@ class MaintenanceControlRunnersTests(unittest.TestCase):
                 alerts = (root / ".github/workflows/stuck-alerts.yml").read_text()
                 self.assertNotIn("__MAINTENANCE_RUNNER__", alerts)
                 alert_runner = yaml.safe_load(alerts)["jobs"]["stuck-alerts"]["runs-on"]
+                status_text = (root / ".github/workflows/pr-status.yml").read_text()
+                self.assertNotIn("__MAINTENANCE_RUNNER__", status_text)
+                status = yaml.safe_load(status_text)
+                condition = status["jobs"]["reconcile"]["if"]
+                self.assertIn('"workflow_dispatch"', condition)
+                self.assertIn('"repository_dispatch"', condition)
+                status_runners = [job["runs-on"] for job in status["jobs"].values()]
+                merge_text = (root / ".github/workflows/auto-merge.yml").read_text()
+                merge = yaml.safe_load(merge_text)
+                events = merge.get("on", merge.get(True))
+                self.assertIn("labeled", events["pull_request_target"]["types"])
+                self.assertIn("github.event.label.name == 'ready-to-merge'", merge_text)
                 if repository == "TauCetiProject/TauCeti":
                     update = yaml.safe_load((root / ".github/workflows/update.yml").read_text())
-                    runners = [alert_runner] + [job["runs-on"] for job in update["jobs"].values()]
+                    runners = [alert_runner] + status_runners + [job["runs-on"] for job in update["jobs"].values()]
                     for runner in runners:
                         self.assertIn("2x4-with-features;job.priority=0", runner)
                         self.assertIn("github.run_id", runner)
                 else:
                     self.assertEqual(alert_runner, "ubuntu-latest")
+                    self.assertTrue(all(runner == "ubuntu-latest" for runner in status_runners))
                     self.assertFalse((root / ".github/workflows/update.yml").exists())
 
 
