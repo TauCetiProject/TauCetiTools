@@ -40,7 +40,7 @@ concurrency:
 jobs:
   stuck-alerts:
     if: github.repository == 'TauCetiProject/TauCeti'
-    runs-on: ubuntu-latest
+    runs-on: __MAINTENANCE_RUNNER__
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
