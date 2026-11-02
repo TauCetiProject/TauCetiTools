@@ -35,6 +35,15 @@ export class InstallationScheduler extends DurableObject<Env> {
     this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS redelivery_retries(id TEXT PRIMARY KEY,due INTEGER,attempt INTEGER);');
     const columns=new Set(this.ctx.storage.sql.exec<any>('PRAGMA table_info(accounting)').toArray().map(c=>c.name));
     for(const [name,type] of Object.entries({shape:'TEXT',batch_size:'INTEGER DEFAULT 1',predicted:'INTEGER'})) if(!columns.has(name)) this.ctx.storage.sql.exec('ALTER TABLE accounting ADD COLUMN '+name+' '+type);
+    // Both shaped and unshaped estimates (and latency lookups) filter by time.
+    // Keep at before shape so either query can skip the retained older ledger.
+    try {
+      this.ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS accounting_estimate ON accounting(api,operation,at,shape,points)');
+    } catch(error) {
+      // An optional index must not prevent reads or quota enforcement, e.g. if
+      // storage is full. The unchanged lookup remains correct without it.
+      log('installation_accounting_index_failed',{reason:classify(error)});
+    }
     // Health must survive ordinary object eviction without rescanning the
     // accounting log or resetting the report's original observation time.
     try {
