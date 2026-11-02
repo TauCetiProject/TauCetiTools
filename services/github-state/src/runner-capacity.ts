@@ -2,10 +2,11 @@
 export async function scanHostedCapacity(
   organization:string,
   read:(path:string)=>Promise<{status:number;body:any;link?:string;deferred?:boolean}>,
+  namespaceTarget=20,
 ):Promise<{routing_version:number;busy:number;namespace_busy?:number;namespace_busy_lower_bound?:number;queued_fleet?:string[][];placement_unavailable?:string;requests:number;repositories:number;runs:number;observed_at:number}> {
   let requests=0;const deadline=Date.now()+15000;
-  // A stopping target, not admission policy: consumers keep their configured caps.
-  const namespaceTarget=20;
+  if(!Number.isSafeInteger(namespaceTarget) || namespaceTarget<1 || namespaceTarget>10000)throw new Error('capacity_invalid_namespace_target');
+  let queuedPagination=false;
   async function pages(path:string,key?:string,visit?:(rows:any[])=>Promise<void>):Promise<any[]> {
     const rows:any[]=[];
     for(let page=1;page<=20;page++) {
@@ -14,6 +15,7 @@ export async function scanHostedCapacity(
       const response=await read(path+(path.includes('?')?'&':'?')+'per_page=100&page='+page);
       const values=key?response.body?.[key]:response.body;
       if(response.deferred || response.status!==200 || !Array.isArray(values))throw new Error('capacity_inventory_unavailable');
+      if(path.includes('/actions/runs?status=queued') && response.link?.includes('rel="next"'))queuedPagination=true;
       if(visit)await visit(values);else rows.push(...values);
       // GitHub's live Actions total_count can disagree with the returned rows
       // even on a single page. Follow Link, as the ordinary picker does; the
@@ -107,9 +109,11 @@ export async function scanHostedCapacity(
         await jobs(queued,true);
       });
     }
+    // Offset pages can skip jobs as queued workflows start between requests.
+    if(queuedPagination)throw new Error('capacity_queue_pagination');
   } catch(error) {
     // Retain distinct jobs from every completed page, including a partial scan.
-    return {routing_version:1,busy:running,namespace_busy_lower_bound:namespace_busy,requests,repositories:all.length,runs:activeRuns.length,observed_at:Date.now(),placement_unavailable:error instanceof Error && error.message.startsWith('capacity_')?error.message:'capacity_inventory_unavailable'};
+    return {routing_version:1,busy:running,namespace_busy_lower_bound:namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:Date.now(),placement_unavailable:error instanceof Error && error.message.startsWith('capacity_')?error.message:'capacity_inventory_unavailable'};
   }
   return {routing_version:2,busy:running,namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:Date.now()};
 }

@@ -151,12 +151,12 @@ class APIPage:
         self.body, self.next_page = body, next_page
 
 
-def shared_capacity(repository, token):
+def shared_capacity(repository, token, namespace_cap=20):
     """Read the existing shared discovery endpoint, accepting only fresh coverage."""
     if not token:
         return None
     request = urllib.request.Request(
-        "https://github-state.taucetiproject.org/v1/runner-capacity?" + urllib.parse.urlencode(dict(repository=repository)),
+        "https://github-state.taucetiproject.org/v1/runner-capacity?" + urllib.parse.urlencode(dict(repository=repository, namespace_cap=namespace_cap)),
         headers={"Authorization": "Bearer " + token, "User-Agent": "TauCetiFleetPicker/2.0"})
     # Cold shared scans have a 15-second discovery deadline and drain their
     # in-flight requests. Let that single scan finish before direct fallback.
@@ -175,18 +175,23 @@ def shared_capacity(repository, token):
             or not numeric(value.get("observed_at")) or not -5000 <= now - value["observed_at"] <= 150000
             or not numeric(value.get("retry_at")) or value["retry_at"] <= now):
         raise ObservationError("incomplete or stale shared capacity")
-    result = dict(github_busy=value["busy"], namespace_busy=None, queued_fleet=None,
-                  placement_unavailable=value.get("placement_unavailable"))
+    reason = value.get("placement_unavailable")
+    if reason is not None and (not isinstance(reason, str) or not re.fullmatch(r"capacity_[a-z_]{1,64}", reason)):
+        reason = None
+    result = dict(github_busy=value["busy"], namespace_busy=None, queued_fleet=None, placement_unavailable=reason)
     lower = value.get("namespace_busy_lower_bound")
     if type(lower) is int and 0 <= lower <= 10000:
         result["namespace_busy_lower_bound"] = lower
-    if value.get("routing_version") == 2:
-        queued = value.get("queued_fleet")
-        if (type(value.get("namespace_busy")) is not int or not 0 <= value["namespace_busy"] <= 10000
-                or not isinstance(queued, list) or len(queued) > 10000
+    queued = value.get("queued_fleet")
+    if queued is not None:
+        if (not isinstance(queued, list) or len(queued) > 10000
                 or any(not isinstance(labels, list) or len(labels) > 100 or any(not isinstance(v, str) for v in labels) for labels in queued)):
+            raise ObservationError("invalid shared fleet reservations")
+        result["queued_fleet"] = [set(labels) for labels in queued]
+    if value.get("routing_version") == 2:
+        if type(value.get("namespace_busy")) is not int or not 0 <= value["namespace_busy"] <= 10000 or queued is None:
             raise ObservationError("invalid shared placement capacity")
-        result.update(namespace_busy=value["namespace_busy"], queued_fleet=[set(labels) for labels in queued])
+        result["namespace_busy"] = value["namespace_busy"]
     return result
 
 
@@ -396,7 +401,7 @@ def route_main():
     if fallback and fallback != token:
         readers.append((fallback, int(environment.get("REPOSITORY_API_RESERVE") or "250")))
     try:
-        observed = shared_capacity(repository, environment.get("GITHUB_STATE_TOKEN", "")) or observed
+        observed = shared_capacity(repository, environment.get("GITHUB_STATE_TOKEN", ""), namespace_cap) or observed
     except (OSError, ValueError, KeyError, TypeError):
         print("::warning::Shared capacity unavailable; retaining native runner fallback")
     order = config.get("staging_order" if kind == "staging" else "pr_order", ["github", "namespace"])
@@ -482,7 +487,7 @@ def route_main():
         namespace_state = "cap reached" if observed["namespace_busy"] >= namespace_cap else "capacity available"
     else:
         namespace_count = f">={lower}" if lower is not None else "unknown"
-        namespace_inventory = "partial"
+        namespace_inventory = "partial" if lower is not None else "unavailable"
         namespace_state = "cap reached" if lower is not None and lower >= namespace_cap else "capacity unknown"
     message = (f"CI class={kind}; pool={selected['pool']}; GitHub busy={observed['github_busy']}/{budget}; "
                f"Namespace builds queued/running={namespace_count}/{namespace_cap}; "

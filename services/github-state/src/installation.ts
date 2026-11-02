@@ -433,8 +433,16 @@ export class InstallationScheduler extends DurableObject<Env> {
       this.accountingPreparationFailure=null;
     }catch(error) {this.accountingPreparationFailure={at:Date.now(),reason:classify(error)};log('installation_health_prepare_failed',this.accountingPreparationFailure);}
   }
-  async runnerCapacity(repo:Repository):Promise<Response> {
-    const organization=repo.name.split('/')[0],key='runner-capacity:'+organization;
+  async runnerCapacity(repo:Repository & {namespace_cap?:number}):Promise<Response> {
+    const namespaceTarget=repo.namespace_cap ?? 20;
+    if(!Number.isSafeInteger(namespaceTarget) || namespaceTarget<1 || namespaceTarget>10000)return json({error:'invalid_namespace_cap'},400);
+    const organization=repo.name.split('/')[0],key='runner-capacity:'+organization+':'+namespaceTarget;
+    // Different cap requests share the installation budget and never run scans
+    // concurrently. Identical targets reuse the existing single flight.
+    while(this.capacityFlight) {
+      const value=await this.capacityFlight;
+      if(value.organization===organization && value.namespace_discovery_target===namespaceTarget)return json({cached:false,...value},value.complete?200:503);
+    }
     // Install the flight before the first storage await, so a finishing scan
     // cannot race a caller that already read an expired value.
     this.capacityFlight ||= (async()=>{
@@ -460,13 +468,13 @@ export class InstallationScheduler extends DurableObject<Env> {
               }else await new Promise(resolve=>setTimeout(resolve,250));
             }
           }
-        });
+        },namespaceTarget);
         // At most 30 scans/hour x 80 requests/scan fits the hourly allowance.
         // Share observations on demand without adding a polling task.
-        const value={complete:true,organization,...snapshot,retry_at:Date.now()+120000,coverage:snapshot.routing_version===2?'organization_repository_inventory':'organization_running_inventory'};
+        const value={complete:true,organization,namespace_discovery_target:namespaceTarget,...snapshot,retry_at:Date.now()+120000,coverage:snapshot.routing_version===2?'organization_repository_inventory':'organization_running_inventory'};
         await this.ctx.storage.put(key,value);return value;
       } catch(error) {
-        const value={complete:false,organization,reason:error instanceof QuotaDeferred?'capacity_deferred':error instanceof Error && error.message.startsWith('capacity_')?error.message:classify(error),retry_at:Math.max(Date.now()+120000,error instanceof QuotaDeferred?error.result.retry_at || 0:0)};
+        const value={complete:false,organization,namespace_discovery_target:namespaceTarget,reason:error instanceof QuotaDeferred?'capacity_deferred':error instanceof Error && error.message.startsWith('capacity_')?error.message:classify(error),retry_at:Math.max(Date.now()+120000,error instanceof QuotaDeferred?error.result.retry_at || 0:0)};
         await this.ctx.storage.put(key,value);return value;
       }
     })().finally(()=>{this.capacityFlight=undefined;});

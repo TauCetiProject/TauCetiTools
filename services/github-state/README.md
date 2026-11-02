@@ -513,7 +513,7 @@ Source verification does not select PostgreSQL or constitute a release receipt.
 
 ### Shared runner-capacity discovery
 
-`GET /v1/runner-capacity?repository=OWNER/REPO` requires an existing client token
+`GET /v1/runner-capacity?repository=OWNER/REPO&namespace_cap=20` requires an existing client token
 authorized for that configured repository. Its installation owner performs one
 bounded organization inventory and shares the result for two minutes, coalescing
 concurrent requests. It counts running GitHub-hosted jobs, excluding Namespace
@@ -532,13 +532,18 @@ build count.
 
 Queued discovery inspects jobs as each workflow page arrives, starting with
 repositories and workflows already using Namespace, with older runs first on each
-page. It stops after observing at least twenty
-Namespace builds, or at the existing scan limit. Twenty is a discovery stopping
-target; each picker retains its configured admission cap. Incomplete queued
+page. It stops after observing at least the requested `namespace_cap` distinct
+Namespace builds, or at the existing scan limit. The positive integer target
+(default twenty, maximum 10,000) follows the picker's configured admission cap.
+Results are cached per organization and target; different targets serialize
+through the same installation scan and quota budget. Incomplete queued
 discovery preserves the complete running GitHub count as routing version 1,
-plus `namespace_busy_lower_bound` and `placement_unavailable`. Distinct job IDs
+plus `namespace_busy_lower_bound`, observed `queued_fleet` reservations, and
+`placement_unavailable`. Distinct job IDs
 are counted once, and completed pages remain useful if a later page fails.
-A lower bound at or above a picker's cap proves the pool is full. An incomplete
+All counts are advisory observations over the scan window. A lower bound at or
+above a picker's cap is evidence of saturation. Offset-based queued pagination
+stays partial, because starting workflows can shift between pages. An incomplete
 count below that cap does not establish spare capacity: the picker continues
 through its configured destinations and native GitHub fallback. Logs show the
 lower bound, inventory coverage, cap state, and partial-scan reason.
@@ -550,5 +555,6 @@ contention yields within the scan deadline rather than invalidating the snapshot
 80 requests, at most three simultaneous reads, and a 15-second launch window; individual requests retain their
 existing timeout. There is no alarm, CI event storage, or new polling task.
 
-Pickers retain bounded direct discovery when this view is unavailable. Visiting
-ordinary reports/status does not invoke capacity discovery.
+Pickers without a configured shared service retain bounded direct discovery.
+Shared-service failure or partial coverage never fans out into a direct scan
+from every picker. Visiting ordinary reports/status does not invoke capacity discovery.

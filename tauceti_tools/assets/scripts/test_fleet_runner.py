@@ -194,6 +194,7 @@ class RoutingEntrypoint(unittest.TestCase):
 
     def pick(self, fixtures, *, config=None, **overrides):
         calls = []
+        shared_urls = []
         class Response(io.BytesIO):
             headers = {}
         class Opener:
@@ -201,6 +202,8 @@ class RoutingEntrypoint(unittest.TestCase):
                 token = request.get_header("Authorization").removeprefix("Bearer ")
                 path = "shared" if request.full_url.startswith("https://github-state.taucetiproject.org/") else request.full_url.removeprefix("https://api.github.com/")
                 calls.append((token, path))
+                if path == "shared":
+                    shared_urls.append(request.full_url)
                 value = fixtures[token][path]
                 if callable(value):
                     value = value()
@@ -225,6 +228,7 @@ class RoutingEntrypoint(unittest.TestCase):
                 with patch.dict(os.environ, environment, clear=True), patch.object(fleet_runner.urllib.request, "build_opener", return_value=Opener()), redirect_stdout(io.StringIO()) as captured:
                     fleet_runner.route_main()
                     self.last_log = captured.getvalue()
+                    self.last_shared_urls = shared_urls
             finally:
                 os.chdir(before)
             return dict(line.split("=", 1) for line in output.read_text().splitlines()), calls
@@ -401,7 +405,7 @@ class RoutingEntrypoint(unittest.TestCase):
                     self.assertEqual(output["pool"], pool)
                     self.assertEqual(output["namespace_busy"], "")
                     self.assertEqual(calls, [("state", "shared")])
-                    self.assertIn("inventory=partial", self.last_log)
+                    self.assertIn("inventory=partial" if lower is not None else "inventory=unavailable", self.last_log)
                     self.assertIn("cap reached" if lower == 20 else "capacity unknown", self.last_log)
                     self.assertIn(f">={lower}/20" if lower is not None else "unknown/20", self.last_log)
 
@@ -432,6 +436,32 @@ class RoutingEntrypoint(unittest.TestCase):
         self.assertEqual(output["placement_unavailable"], "capacity_namespace_target")
         self.assertIn(">=22/20; inventory=partial; cap reached; reason=capacity_namespace_target", self.last_log)
         self.assertFalse(any(token in ("app", "repository") for token, _ in calls))
+
+    def test_requested_cap_is_used_for_discovery_and_admission(self):
+        for cap, count, expected in [(8, 7, "namespace"), (8, 8, "github"), (30, 20, "namespace"), (30, 30, "github")]:
+            snapshot = self.shared(busy=20, routing_version=2, namespace_busy=count, queued_fleet=[])
+            output, _ = self.pick(dict(state=dict(shared=snapshot)), GITHUB_STATE_TOKEN="state", BUDGET="12", NAMESPACE_BUILD_CAP=str(cap))
+            self.assertEqual(output["pool"], expected)
+            self.assertIn(f"namespace_cap={cap}", self.last_shared_urls[0])
+            self.assertIn(f"{count}/{cap}; inventory=complete", self.last_log)
+
+    def test_partial_fleet_reservations_exclude_observed_targets(self):
+        config, inventory = self.staging_fixture()
+        queued = [[v["name"] for v in inventory["runners"][1]["labels"]]]
+        snapshot = self.shared(namespace_busy_lower_bound=20, queued_fleet=queued)
+        output, _ = self.pick(dict(state=dict(shared=snapshot),
+            fleet={"orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1": inventory}), config=config,
+            FLEET_JOB_KIND="staging", FLEET_CI_ENABLED="true", FLEET_READ_TOKEN="fleet", FLEET_RUNNER_GROUP_ID="3", GITHUB_STATE_TOKEN="state")
+        self.assertEqual(output["pool"], "chris")
+
+    def test_partial_reason_cannot_inject_workflow_outputs(self):
+        for reason in ["capacity_scan_limit\nrunner=wrong", "::warning::bad", {"message": "failure"}, 1, "capacity_" + "x" * 65]:
+            snapshot = self.shared(namespace_busy_lower_bound=20, placement_unavailable=reason)
+            output, _ = self.pick(dict(state=dict(shared=snapshot)), GITHUB_STATE_TOKEN="state", BUDGET="12")
+            self.assertEqual(output["pool"], "github")
+            self.assertEqual(output["placement_unavailable"], "")
+            self.assertNotIn("reason=", self.last_log)
+            self.assertNotEqual(output["runner"], "wrong")
 
     def test_invalid_shared_values_keep_native_fallback_without_duplicate_scans(self):
         for changes in [dict(observed_at=0), dict(observed_at=time.time()*1000-160000), dict(organization="Other"), dict(busy=True),

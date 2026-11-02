@@ -95,7 +95,7 @@ test('hourly allowance and lost responses survive refresh and cannot be bypassed
  values.set('runner-capacity-attempts',Array(2400).fill(Date.now()));
  let result=await (await scheduler.runnerCapacity({name:'org/repo',installation:'200'})).json();
  assert.equal(result.reason,'capacity_hourly_budget');assert.equal(calls,0);
- values.delete('runner-capacity:org');values.delete('runner-capacity-attempts');
+ values.delete('runner-capacity:org:20');values.delete('runner-capacity-attempts');
  result=await (await scheduler.runnerCapacity({name:'org/repo',installation:'200'})).json();
  assert.equal(result.complete,false);assert.equal(calls,1);
  assert.equal(values.get('runner-capacity-attempts').length,1);
@@ -161,7 +161,7 @@ test('many empty queued workflows preserve running capacity within the existing 
   return envelope('jobs',path.includes('/runs/1/jobs')?[hosted,{name:'sandboxed-build',status:'in_progress',labels:['nscloud-ubuntu-test']}]:[]);
  });
  assert.equal(value.routing_version,1);assert.equal(value.busy,1);assert.equal(value.requests,80);
- assert.equal(value.namespace_busy,undefined);assert.equal(value.queued_fleet,undefined);
+ assert.equal(value.namespace_busy,undefined);assert.deepEqual(value.queued_fleet,[]);
  assert.equal(value.namespace_busy_lower_bound,1);
  assert.equal(value.placement_unavailable,'capacity_scan_limit');assert.equal(calls.length,80);
 });
@@ -247,4 +247,48 @@ test('missing queued placement data preserves running capacity; missing running 
  const value=await scanHostedCapacity('org',path=>path.includes('status=queued')?Promise.resolve({status:403,body:{}}):read(path));
  assert.equal(value.routing_version,1);assert.equal(value.busy,1);assert.equal(value.namespace_busy,undefined);
  await assert.rejects(()=>scanHostedCapacity('org',path=>path.includes('/jobs?')?Promise.resolve({status:403,body:{}}):read(path)),/capacity_inventory_unavailable/);
+});
+
+test('configured targets below and above twenty retain independent caches without concurrent scans',async()=>{
+ const {scheduler}=schedulerFixture();let calls=0,active=0,peak=0;
+ scheduler.http=async path=>{
+  calls++;active++;peak=Math.max(peak,active);
+  try {
+   await new Promise(resolve=>setTimeout(resolve,1));
+   if(path.startsWith('/orgs/'))return envelope(null,[{name:'repo',archived:false}]);
+   if(path.includes('status=in_progress'))return envelope('workflow_runs',[{id:1}]);
+   if(path.includes('status=queued'))return envelope('workflow_runs',[]);
+   return envelope('jobs',Array.from({length:20},(_,i)=>ns(i+1,'in_progress')));
+  }finally{active--;}
+ };
+ const get=async namespace_cap=>(await scheduler.runnerCapacity({name:'org/repo',installation:'200',namespace_cap})).json();
+ const [small,large]=await Promise.all([get(8),get(30)]);
+ assert.equal(small.namespace_discovery_target,8);assert.equal(small.namespace_busy_lower_bound,20);
+ assert.equal(large.namespace_discovery_target,30);assert.equal(large.routing_version,2);assert.equal(large.namespace_busy,20);
+ assert.equal(peak,1,'different target scans serialize through the shared installation budget');assert.equal(calls,7);
+ assert.equal((await get(8)).cached,true);assert.equal((await get(30)).cached,true);assert.equal(calls,7);
+ for(const namespace_cap of [0,-1,true,1.5,10001,'20'])assert.equal((await scheduler.runnerCapacity({name:'org/repo',installation:'200',namespace_cap})).status,400);
+});
+test('endpoint validates requested caps before starting discovery',async()=>{
+ let calls=0;const mf=await runtime(async()=>{calls++;throw Error('must not read');});
+ try {
+  for(const cap of ['0','-1','1.5','true','10001','020','']) {
+   const r=await mf.dispatchFetch('https://state/v1/runner-capacity?repository=org/repo&namespace_cap='+cap,{headers:{Authorization:'Bearer client'}});
+   assert.equal(r.status,400,cap);
+  }
+  assert.equal(calls,0);
+ }finally{await mf.dispose();}
+});
+test('partial scan retains observed fleet reservations and never certifies offset queued pagination',async()=>{
+ const labels=['self-hosted','fleet-'+ 'a'.repeat(32),'fleet-instance-'+ 'b'.repeat(16)];
+ const value=await scanHostedCapacity('org',async path=>{
+  if(path.startsWith('/orgs/'))return envelope(null,[{name:'code',archived:false}]);
+  if(path.includes('status=in_progress'))return envelope('workflow_runs',[{id:1}]);
+  if(path.includes('status=queued'))return path.endsWith('page=1')?
+   {...envelope('workflow_runs',[{id:2}]),link:'<https://api.github.com/next>; rel="next"'}:envelope('workflow_runs',[]);
+  if(path.includes('/runs/1/jobs'))return envelope('jobs',[hosted]);
+  return envelope('jobs',[ns(2),{id:3,name:'sandboxed-build',status:'queued',labels}]);
+ });
+ assert.equal(value.routing_version,1);assert.equal(value.namespace_busy_lower_bound,1);
+ assert.deepEqual(value.queued_fleet,[labels]);assert.equal(value.placement_unavailable,'capacity_queue_pagination');
 });
