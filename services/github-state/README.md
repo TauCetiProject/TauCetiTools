@@ -523,12 +523,25 @@ repositories requires granting the installation visibility to those repositories
 
 The response includes `complete`, `organization`, `busy`, `observed_at`, `retry_at`,
 and refresh request counts. This is an advisory observation, not a reserved slot
-or an atomic snapshot. Missing pages or quota rejection produce HTTP 503 with
-`complete:false`, never a partial count. Failed refreshes are cached for two minutes
-(or a longer instructed cooldown). Routing version 2 also reports queued/running
-Namespace build jobs and queued fleet targets from the same bounded scan, shared
-by all pickers. Picker, recovery, publication, and finalizer control jobs are
-excluded from the build count.
+or an atomic snapshot. Missing running-inventory pages or quota rejection produce
+HTTP 503 with `complete:false`. Failed refreshes are cached for two minutes (or a
+longer instructed cooldown). Routing version 2 also reports a complete observed
+inventory of queued/running Namespace build jobs and queued fleet targets.
+Picker, recovery, publication, and finalizer control jobs are excluded from the
+build count.
+
+Queued discovery inspects jobs as each workflow page arrives, starting with
+repositories and workflows already using Namespace, with older runs first on each
+page. It stops after observing at least twenty
+Namespace builds, or at the existing scan limit. Twenty is a discovery stopping
+target; each picker retains its configured admission cap. Incomplete queued
+discovery preserves the complete running GitHub count as routing version 1,
+plus `namespace_busy_lower_bound` and `placement_unavailable`. Distinct job IDs
+are counted once, and completed pages remain useful if a later page fails.
+A lower bound at or above a picker's cap proves the pool is full. An incomplete
+count below that cap does not establish spare capacity: the picker continues
+through its configured destinations and native GitHub fallback. Logs show the
+lower bound, inventory coverage, cap state, and partial-scan reason.
 
 Refresh uses existing installation quota accounting, honors secondary cooldowns,
 leaves at least 1,500 core requests for repository work, and spends at most 2,400

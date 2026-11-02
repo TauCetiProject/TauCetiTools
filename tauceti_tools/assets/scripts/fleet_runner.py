@@ -175,7 +175,8 @@ def shared_capacity(repository, token):
             or not numeric(value.get("observed_at")) or not -5000 <= now - value["observed_at"] <= 150000
             or not numeric(value.get("retry_at")) or value["retry_at"] <= now):
         raise ObservationError("incomplete or stale shared capacity")
-    result = dict(github_busy=value["busy"], namespace_busy=None, queued_fleet=None)
+    result = dict(github_busy=value["busy"], namespace_busy=None, queued_fleet=None,
+                  placement_unavailable=value.get("placement_unavailable"))
     lower = value.get("namespace_busy_lower_bound")
     if type(lower) is int and 0 <= lower <= 10000:
         result["namespace_busy_lower_bound"] = lower
@@ -313,8 +314,8 @@ def route(*, kind, order, machines, runner_pages, observed, github_budget, names
     """Choose in the configured preference order using one bounded observation.
 
     Limits are approximate: simultaneous pickers can observe the same spare slot.
-    Partial Namespace observations can use its native queue in preference order.
-    Known-full pools keep their caps; unknown pools without an observation are skipped.
+    Only a complete Namespace count below its cap establishes spare capacity.
+    Partial counts retain evidence of saturation; unknown capacity is skipped.
     """
     if type(github_budget) is not int or github_budget < 1 or type(namespace_cap) is not int or namespace_cap < 1:
         raise ObservationError("invalid capacity budgets")
@@ -330,8 +331,6 @@ def route(*, kind, order, machines, runner_pages, observed, github_budget, names
         print("::warning::Fleet configuration or inventory invalid; retaining cloud choices")
         resolved, ranked = {}, []
     namespace_busy = observed.get("namespace_busy")
-    if namespace_busy is None:
-        namespace_busy = observed.get("namespace_busy_lower_bound")
     for name in order:
         if name in excluded or name in resolved and resolved[name]["machine_id"] in excluded:
             continue
@@ -471,12 +470,26 @@ def route_main():
     values = dict(runner=json.dumps(target, separators=(",", ":")), pool=selected["pool"],
                   fleet=str(selected["pool"] not in ("github", "namespace")).lower(),
                   github=str(selected["pool"] == "github").lower(), busy=observed["github_busy"],
-                  namespace_busy=observed["namespace_busy"], budget=budget, namespace_cap=namespace_cap,
+                  namespace_busy=observed["namespace_busy"], namespace_busy_lower_bound=observed.get("namespace_busy_lower_bound"),
+                  placement_unavailable=observed.get("placement_unavailable"), budget=budget, namespace_cap=namespace_cap,
                   attempt=environment["GITHUB_RUN_ATTEMPT"])
     with open(environment["GITHUB_OUTPUT"], "a") as out:
         out.write("".join(f"{k}={v if v is not None else ''}\n" for k, v in values.items()))
+    lower = observed.get("namespace_busy_lower_bound")
+    if observed["namespace_busy"] is not None:
+        namespace_count = str(observed["namespace_busy"])
+        namespace_inventory = "complete"
+        namespace_state = "cap reached" if observed["namespace_busy"] >= namespace_cap else "capacity available"
+    else:
+        namespace_count = f">={lower}" if lower is not None else "unknown"
+        namespace_inventory = "partial"
+        namespace_state = "cap reached" if lower is not None and lower >= namespace_cap else "capacity unknown"
     message = (f"CI class={kind}; pool={selected['pool']}; GitHub busy={observed['github_busy']}/{budget}; "
-               f"Namespace builds queued/running={observed['namespace_busy']}/{namespace_cap} (approximate cap).")
+               f"Namespace builds queued/running={namespace_count}/{namespace_cap}; "
+               f"inventory={namespace_inventory}; {namespace_state}")
+    if observed.get("placement_unavailable"):
+        message += f"; reason={observed['placement_unavailable']}"
+    message += " (approximate cap)."
     print(message)
     if environment.get("GITHUB_STEP_SUMMARY"):
         with open(environment["GITHUB_STEP_SUMMARY"], "a") as out:

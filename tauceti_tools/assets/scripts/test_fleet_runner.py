@@ -222,8 +222,9 @@ class RoutingEntrypoint(unittest.TestCase):
             before = Path.cwd()
             try:
                 os.chdir(root)
-                with patch.dict(os.environ, environment, clear=True), patch.object(fleet_runner.urllib.request, "build_opener", return_value=Opener()), redirect_stdout(io.StringIO()):
+                with patch.dict(os.environ, environment, clear=True), patch.object(fleet_runner.urllib.request, "build_opener", return_value=Opener()), redirect_stdout(io.StringIO()) as captured:
                     fleet_runner.route_main()
+                    self.last_log = captured.getvalue()
             finally:
                 os.chdir(before)
             return dict(line.split("=", 1) for line in output.read_text().splitlines()), calls
@@ -391,15 +392,18 @@ class RoutingEntrypoint(unittest.TestCase):
         self.assertEqual(output["namespace_busy"], "20")
         self.assertEqual(calls, [("state", "shared")])
 
-    def test_partial_shared_capacity_uses_namespace_queue_without_duplicate_scan(self):
+    def test_partial_shared_capacity_never_asserts_namespace_spare_capacity(self):
         for kind, busy in [("pr", 20), ("staging", 0), ("other", 20)]:
-            for lower, pool in [(0, "namespace"), (20, "github"), (None, "github")]:
+            for lower, pool in [(0, "github"), (16, "github"), (20, "github"), (None, "github")]:
                 with self.subTest(kind=kind, lower=lower):
                     value = self.shared(busy=busy, namespace_busy_lower_bound=lower)
                     output, calls = self.pick(dict(state=dict(shared=value)), GITHUB_STATE_TOKEN="state", BUDGET="12", FLEET_JOB_KIND=kind)
                     self.assertEqual(output["pool"], pool)
                     self.assertEqual(output["namespace_busy"], "")
                     self.assertEqual(calls, [("state", "shared")])
+                    self.assertIn("inventory=partial", self.last_log)
+                    self.assertIn("cap reached" if lower == 20 else "capacity unknown", self.last_log)
+                    self.assertIn(f">={lower}/20" if lower is not None else "unknown/20", self.last_log)
 
         for lower in [True, "0", -1, 10001]:
             with self.subTest(invalid_lower=lower):
@@ -407,6 +411,27 @@ class RoutingEntrypoint(unittest.TestCase):
                 self.assertEqual(output["pool"], "github")
                 self.assertEqual(output["busy"], "20")
                 self.assertEqual(calls, [("state", "shared")])
+
+    def test_complete_namespace_count_below_configured_cap_keeps_preference_order(self):
+        for count in (0, 16, 19):
+            snapshot = self.shared(busy=20, routing_version=2, namespace_busy=count, queued_fleet=[])
+            output, calls = self.pick(dict(state=dict(shared=snapshot)), GITHUB_STATE_TOKEN="state", BUDGET="12")
+            self.assertEqual(output["pool"], "namespace")
+            self.assertIn(f"{count}/20; inventory=complete; capacity available", self.last_log)
+            self.assertEqual(calls, [("state", "shared")])
+
+    def test_saturated_lower_bound_reports_reason_and_keeps_later_idle_machine(self):
+        config, inventory = self.staging_fixture()
+        config = config.replace('[services.fleet]\n', '[services.fleet]\npr_order=["namespace","chris","github"]\n')
+        snapshot = self.shared(busy=20, namespace_busy_lower_bound=22, placement_unavailable="capacity_namespace_target")
+        output, calls = self.pick(dict(state=dict(shared=snapshot),
+            fleet={"orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1": inventory}),
+            config=config, FLEET_CI_ENABLED="true", FLEET_READ_TOKEN="fleet", FLEET_RUNNER_GROUP_ID="3", GITHUB_STATE_TOKEN="state")
+        self.assertEqual(output["pool"], "chris")
+        self.assertEqual(output["namespace_busy_lower_bound"], "22")
+        self.assertEqual(output["placement_unavailable"], "capacity_namespace_target")
+        self.assertIn(">=22/20; inventory=partial; cap reached; reason=capacity_namespace_target", self.last_log)
+        self.assertFalse(any(token in ("app", "repository") for token, _ in calls))
 
     def test_invalid_shared_values_keep_native_fallback_without_duplicate_scans(self):
         for changes in [dict(observed_at=0), dict(observed_at=time.time()*1000-160000), dict(organization="Other"), dict(busy=True),
