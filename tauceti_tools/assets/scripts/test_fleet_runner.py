@@ -94,6 +94,37 @@ class Selection(unittest.TestCase):
         self.assertEqual(select("pr", 19, 19)["pool"], "namespace")
         self.assertEqual(select("pr", 19, 20), dict(pool="github", waiting=True))
 
+    def test_expanded_brett_capacity_keeps_other_ready_machines_available(self):
+        machines, pages = self.ranked_fixture()
+        machines[1].update(name="brett", max_jobs=24)
+        for guest in pages[0]["runners"]:
+            if guest["id"] in (2, 3):
+                guest["labels"].append(dict(name="fleet-host-brett-server"))
+        config = {"tauchonki": machines[0], "brett": dict(enrollment_name="brett-server", max_jobs=24, kinds=["pr", "staging"])}
+        def select():
+            return route(kind="staging", order=["tauchonki", "brett", "namespace", "github"], machines=config,
+                         runner_pages=pages, observed=dict(github_busy=20, namespace_busy=20, queued_fleet=[]),
+                         github_budget=12, namespace_cap=20)
+        self.assertEqual(select()["pool"], "tauchonki")
+        pages[0]["runners"][1]["busy"] = True
+        self.assertEqual(select()["pool"], "brett")
+
+    def test_expanded_limits_still_enforce_shared_occupancy_and_reject_invalid_caps(self):
+        machines, _ = self.ranked_fixture()
+        machine = dict(machines[1], name="brett", max_jobs=24)
+        def guest(identity, busy):
+            return dict(runner(busy=busy, labels=["self-hosted", "linux", "x64", "fleet-" + machine["machine_id"],
+                "fleet-instance-" + f"{identity:016x}", "tauceti-fleet-pr", "tauceti-fleet-staging"]), id=identity)
+        rows = [guest(n, n <= 23) for n in range(1, 26)]
+        pages = [dict(total_count=len(rows), runners=rows)]
+        self.assertEqual(len(ranked_runners(pages, kind="pr", machines=[machine])), 1)
+        rows[23]["busy"] = True
+        self.assertEqual(ranked_runners(pages, kind="staging", machines=[machine]), [])
+        self.assertTrue(ranked_runners(pages, kind="pr", machines=[dict(machine, max_jobs=4096)]))
+        for cap in [0, -1, True, 4097, "24"]:
+            with self.subTest(cap=cap), self.assertRaises(ValueError):
+                ranked_runners(pages, kind="pr", machines=[dict(machine, max_jobs=cap)])
+
     def test_queued_exact_targets_count_against_shared_machine_capacity(self):
         machines, pages = self.ranked_fixture()
         queued = [{label["name"] for label in r["labels"]} for r in pages[0]["runners"] if r["id"] in (2, 3)]
