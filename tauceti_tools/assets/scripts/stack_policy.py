@@ -7,6 +7,7 @@ All mutation is opt-in; JSONL is the audit record (including gaps, never a safet
 
 import argparse
 import base64
+from contextlib import redirect_stdout
 from collections import defaultdict
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
@@ -44,6 +45,25 @@ class UnsupportedCommit(Gap):
 
 class BudgetGap(Gap):
     """The sweep cannot continue observing within its global budget."""
+
+
+class RateLimitGap(BudgetGap):
+    """GitHub throttled observation; defer without failing CI before mutations."""
+
+
+class AuditOutput:
+    """Keep the JSONL artifact and the executing step's log identical."""
+
+    def __init__(self, console, report):
+        self.console, self.report = console, report
+
+    def write(self, value):
+        self.console.write(value)
+        return self.report.write(value)
+
+    def flush(self):
+        self.console.flush()
+        self.report.flush()
 
 
 class RaceGap(Gap):
@@ -102,7 +122,7 @@ class API:
                      or any(word in message for word in
                             ("rate limit", "abuse detection", "creating content too quickly",
                              "was submitted too quickly")))):
-                raise BudgetGap("API rate limit refused; sweep stopped") from error
+                raise RateLimitGap("GitHub API rate limit reached; audit deferred") from error
             raise
         self.bytes += len(raw)
         if self.bytes > 64 * MAX_BYTES:
@@ -141,7 +161,7 @@ class API:
             })
             if data.get("errors"):
                 if any(e.get("type") == "RATE_LIMITED" for e in data["errors"]):
-                    raise BudgetGap("GraphQL API rate limit refused; sweep stopped")
+                    raise RateLimitGap("GitHub GraphQL rate limit reached; audit deferred")
                 raise Gap("live branch metadata unavailable")
             ref = data["data"]["repository"]["pullRequest"]["headRef"]
             if not ref or ref["target"]["oid"] != p.head:
@@ -609,6 +629,10 @@ class Detector:
                         provenance_gap = "cross-repository parent provenance unproved; possible copied prefix"
                     elif not child.author_id or parent.author_id != child.author_id:
                         provenance_gap = "parent has unknown/different author; possible third-party branch PR"
+                # This candidate cannot authorize enforcement. Do not fetch blobs
+                # and search main history merely to arrive at the same unknown.
+                if provenance_gap:
+                    raise Gap(provenance_gap)
                 base, paths, patch = self.source.patch(parent)
                 if not patch:
                     reasons.append(f"#{number}: empty parent delta")
@@ -642,8 +666,6 @@ class Detector:
                             and not self.source.landed(parent, cb, cp, delta, head=commit)):
                         if commit not in commits and self.source.present_at_fork(child, cb, cp, delta, commit):
                             raise Gap("matched content already present at child's main fork point; base drift")
-                        if provenance_gap:
-                            raise Gap(provenance_gap)
                         if parent.state == "closed":
                             if parent.landing_claim:
                                 raise Gap("closed parent reports landing but exact source equivalence is unproved")
@@ -900,13 +922,26 @@ def main():
         raise Gap("--pr is a focused canary; do not combine with --prs or --state-out")
     if (args.state_in or args.sweep) and not args.state_out:
         raise Gap("--state-in and --sweep require --state-out")
-    return audit(args)
+    if args.report:
+        with args.report.open("w") as report, redirect_stdout(AuditOutput(sys.stdout, report)):
+            return run_audit(args)
+    return run_audit(args)
+
+
+def run_audit(args):
+    try:
+        return audit(args)
+    except RateLimitGap as error:
+        # Before per-child enforcement, no writes have started. Keep any previous
+        # checkpoint authoritative if discovery could not finish.
+        emit(classification="unknown", deferred=True, gap=str(error))
+        return False
+    except Exception as error:
+        emit(classification="unknown", gap=str(error))
+        raise
 
 
 def audit(args):
-    if args.report:
-        # Never accept an API/PR-supplied report path.
-        sys.stdout = args.report.open("w")
     api = API()
     event = json.loads(args.github_event.read_text()) if args.github_event else {}
     prs = []
@@ -923,7 +958,6 @@ def audit(args):
             emit(index_pr=number, classification="unknown", gap=str(error))
             metadata_gaps.add(number)
             incomplete_index = True
-    main_sha = api.main()
     targets = ({args.pr} if args.pr else set(args.prs))
     if not targets:
         try:
@@ -959,6 +993,7 @@ def audit(args):
         selected.sort(key=lambda p: order[p.number])
     else:
         selected.sort(key=lambda p: p.number, reverse=True)
+    main_sha = api.main()
     emit(scope="batch" if progress else "backlog" if targets is None else "focused", selected=[p.number for p in selected])
     # Inspect a bounded recent closed index without interpreting descriptions.
     # Older closed parents remain outside coverage; never infer landing from state.
@@ -1046,12 +1081,16 @@ def audit(args):
                         emit(pr=child.number, mutation="obsolete blocking label removed")
                 success = True
             except BudgetGap as error:
-                if not progress:
+                limited = isinstance(error, RateLimitGap)
+                if not progress and not limited:
                     raise
-                failures += int(mutation_started or not progress.completed)
-                progress.finish(child.number, False, retry_soon=True, first=progress.completed > 0)
-                progress.save(args.state_out)
-                emit(pr=child.number, deferred=True, gap=str(error))
+                unknowns += 1
+                failures += int(mutation_started or (not limited and not progress.completed))
+                if progress:
+                    progress.finish(child.number, False, retry_soon=True, first=progress.completed > 0)
+                    progress.save(args.state_out)
+                emit(pr=child.number, classification="unknown", deferred=True,
+                     mutation_started=mutation_started, gap=str(error))
                 break
             except Exception as e:
                 unknowns += 1

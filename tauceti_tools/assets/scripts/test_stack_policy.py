@@ -220,15 +220,17 @@ class GitFixtures(unittest.TestCase):
         self.assertNotEqual(parent.head, copied)
         self.assertIsNone(self.detector().detect(child)[0])
 
-    def test_cross_principal_ancestor_landed_by_squash_is_not_closed(self):
+    def test_cross_principal_ancestor_defers_without_landing_source_reads(self):
         parent, child = self.parent_child()
         self.prs[0] = sp.PR(**{**sp.asdict(parent), "head_repo": "other/TauCeti", "author_id": 2})
         git(self.root, "checkout", "main")
         git(self.root, "merge", "--squash", "parent")
         self.commit("land parent through independent squash")
-        evidence, reasons = self.detector().detect(child)
-        self.assertIsNone(evidence)
-        self.assertTrue(any("source equivalent landed" in reason for reason in reasons))
+        detector = self.detector()
+        with patch.object(detector.source, "patch") as source_patch:
+            with self.assertRaisesRegex(sp.Gap, "cross-repository parent provenance"):
+                detector.detect(child)
+            source_patch.assert_not_called()
 
     def test_nested_stack(self):
         self.parent_child()
@@ -923,9 +925,12 @@ class MainTests(unittest.TestCase):
                 patch.object(sp, "run", return_value=SimpleNamespace(stdout=b"/tmp/policy-fixture")), \
                 patch("bors_observation.observation", return_value=empty_bors), \
                 patch.dict(os.environ, {"STACK_ACTOR": "trusted[bot]"}), \
-                patch.object(sp.sys, "argv", ["stack_policy.py", *args]), redirect_stdout(io.StringIO()):
+                patch.object(sp.sys, "argv", ["stack_policy.py", *args]), redirect_stdout(io.StringIO()) as output:
             self.last_constructor = constructor
-            return sp.main()
+            try:
+                return sp.main()
+            finally:
+                self.last_output = output.getvalue()
 
     def test_dry_run_confirmed_has_no_mutations(self):
         self.detector.detect = lambda _: (self.evidence, [])
