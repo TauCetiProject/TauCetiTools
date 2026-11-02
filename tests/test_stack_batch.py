@@ -311,8 +311,93 @@ class BatchIntegration(fixtures.MainTests):
         self.assertEqual(state['pending'], [1])
         self.assertEqual(state['failed'], {})
 
+    def test_rate_limited_discovery_passes_and_preserves_previous_checkpoint(self):
+        self.assertFalse(self.batch())
+        previous = self.state.read_text()
+        with patch.object(self.api, 'pages', side_effect=sp.RateLimitGap('GitHub quota exhausted')):
+            self.assertFalse(self.batch())
+        self.assertEqual(self.state.read_text(), previous)
+        self.assertIn('"deferred": true', self.last_output)
+        self.assertNotIn('no-confirmed-stack', self.last_output)
+
+    def test_rate_limit_before_any_progress_keeps_all_work_pending(self):
+        self.detector.detect = lambda p: (_ for _ in ()).throw(sp.RateLimitGap('GitHub quota exhausted'))
+        self.assertFalse(self.batch('--apply'))
+        state = json.loads(self.state.read_text())
+        self.assertEqual(set(state['pending']), {1, 2})
+        self.assertEqual(state['checked'], {})
+        self.assertEqual(state['failed'], {})
+        self.assertFalse(any(method != 'GET' for _, method, _ in self.api.calls))
+
+    def test_rate_limit_during_preparation_retains_discovered_work(self):
+        original = self.api.call
+        def stop(path, *args, **kwargs):
+            if path.startswith('pulls?state=closed'):
+                raise sp.RateLimitGap('GitHub quota exhausted')
+            return original(path, *args, **kwargs)
+        with patch.object(self.api, 'call', side_effect=stop):
+            self.assertFalse(self.batch())
+        self.assertEqual(json.loads(self.state.read_text())['pending'], [1, 2])
+
+    def test_rate_limit_after_mutation_starts_still_fails(self):
+        for args in (('--pr', '2'), ('--state-in', str(self.state), '--state-out', str(self.state))):
+            with self.subTest(args=args):
+                self.detector.detect = lambda p: (self.evidence if p.number == 2 else None, [])
+                original = self.api.call
+                def stop(path, method='GET', data=None):
+                    if path == 'issues/2/comments' and method == 'POST':
+                        raise sp.RateLimitGap('GitHub quota during explanation')
+                    return original(path, method, data)
+                with patch.object(self.api, 'call', side_effect=stop):
+                    self.assertTrue(self.main('--apply', *args))
+                self.assertFalse(any(path == 'pulls/2' and method == 'PATCH'
+                                     for path, method, _ in self.api.calls))
+
+    def test_focused_rate_limit_passes_without_mutation(self):
+        self.detector.detect = lambda p: (_ for _ in ()).throw(sp.RateLimitGap('GitHub quota exhausted'))
+        self.assertFalse(self.main('--pr', '2', '--apply'))
+        self.assertIn('"deferred": true', self.last_output)
+
+    def test_report_and_executing_step_both_show_rate_limit(self):
+        report = Path(self.tmp.name) / 'audit.jsonl'
+        with patch.object(self.api, 'pages', side_effect=sp.RateLimitGap('GitHub quota exhausted')):
+            self.assertFalse(self.main('--report', str(report)))
+        self.assertEqual(report.read_text(), self.last_output)
+        self.assertIn('"deferred": true', report.read_text())
+
+    def test_report_and_executing_step_both_show_other_failures(self):
+        report = Path(self.tmp.name) / 'audit.jsonl'
+        with patch.object(self.api, 'pages', side_effect=sp.Gap('permission denied')):
+            with self.assertRaises(sp.Gap):
+                self.main('--report', str(report))
+        self.assertEqual(report.read_text(), self.last_output)
+        self.assertIn('permission denied', report.read_text())
+
+    def test_idle_batch_avoids_main_and_source_reads(self):
+        # Eventless calls without --sweep still request a full audit. Supply a
+        # superseded event to exercise the automatic consumer's idle path.
+        self.assertFalse(self.batch())
+        with patch.object(self.api, 'main') as main_read:
+            self.assertFalse(self.event({'pull_request': {'number': 999}},
+                '--state-in', str(self.state), '--state-out', str(self.state)))
+        main_read.assert_not_called()
+        self.last_source.fetch.assert_not_called()
+
 
 class RateLimitTests(unittest.TestCase):
+    def test_primary_limit_and_429_are_distinct_from_permission_denial(self):
+        from urllib.error import HTTPError
+        for status, headers in ((403, {'x-ratelimit-remaining': '0'}),
+                                (403, {'retry-after': '60'}), (429, {})):
+            with self.subTest(status=status, headers=headers):
+                api = object.__new__(sp.API)
+                api.token, api.calls, api.bytes = 'fixture', 0, 0
+                api.deadline = sp.time.monotonic() + 1200
+                error = HTTPError('https://api.github.com', status, 'throttled', headers, io.BytesIO(b'{}'))
+                with patch.object(sp, 'urlopen', side_effect=error):
+                    with self.assertRaises(sp.RateLimitGap):
+                        api.request('https://api.github.com/repos/owner/repo/pulls')
+
     def test_headerless_secondary_limit_stops_instead_of_failing_each_child(self):
         from urllib.error import HTTPError
         for message in ('secondary rate limit', 'abuse detection', 'creating content too quickly'):
@@ -322,7 +407,7 @@ class RateLimitTests(unittest.TestCase):
             error = HTTPError('https://api.github.com', 403, 'Forbidden', {},
                               io.BytesIO(json.dumps({'message': message}).encode()))
             with patch.object(sp, 'urlopen', side_effect=error):
-                with self.assertRaises(sp.BudgetGap):
+                with self.assertRaises(sp.RateLimitGap):
                     api.request('https://api.github.com/repos/owner/repo/pulls')
 
     def test_permission_denial_is_not_successful_quota_deferral(self):
