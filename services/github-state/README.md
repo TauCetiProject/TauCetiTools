@@ -151,6 +151,20 @@ calls run outside installation-wide locks; atomic quota reservations and
 expiring job leases protect concurrent requests. Large nested thread histories
 checkpoint one comment page per quantum instead of monopolizing a turn.
 
+Open PR headers refresh through the existing paginated inventory every five
+minutes and after base-branch pushes. Queued pushes coalesce; pushes during a
+scan retain its pages and a newer generation for the next pass. GraphQL is
+preferred for this inventory because REST lists omit mergeability, with REST
+remaining available during GraphQL quota exhaustion. Maintenance independently
+promotes at most 64 missing or unresolved `UNKNOWN` PR headers per turn,
+rechecking unknowns after one minute. Up to fifty PR details share one GraphQL
+request and results use the existing bounded grouped publication path. Label
+overflow falls back to REST per member. No freshness requirement blocks stored
+reads or worker admission. Within the existing lane shares, numeric priority
+applies to background work for three weighted cycles out of four, with inventory
+headers first; the remaining cycle serves oldest work. Real requested reads
+retain their existing fresh/oldest ordering.
+
 Maintenance independently promotes at most 64 missing status/comment collections
 for current open PRs into the requested lane per turn. Already requested work is
 excluded so successive turns advance through the inventory. Existing attempts,

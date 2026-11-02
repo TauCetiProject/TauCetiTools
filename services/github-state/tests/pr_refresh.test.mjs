@@ -282,3 +282,57 @@ test('a full synchronous read satisfies an expired-staging retry after its conti
   assert.equal(finished.dirty,0);assert.equal(finished.wait_reason,null);assert.equal(finished.attempt,0);assert.equal(finished.started,null);
  }finally{await f.close();}
 });
+
+test('maintenance retries unknown headers centrally, retaining quota waits and serving stored data',async()=>{
+ const f=await fixture();try{
+  const now=Date.now();
+  for(const [number,mergeable,verified,state] of [[7,'UNKNOWN',now-3600000,'OPEN'],[8,'UNKNOWN',now-61000,'OPEN'],[9,'MERGEABLE',now,'OPEN'],[10,'UNKNOWN',now,'OPEN'],[11,'UNKNOWN',0,'CLOSED']]) {
+   await f.state.put('pr',String(number),{...record(),number,state,mergeable});await f.state.membership('open_prs:{}',String(number),true);
+   await f.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?)',`pr:{"number":${number}}`,'pr',JSON.stringify({number}),1,verified,1,null);
+  }
+  await f.state.enqueue(q);const retry=now+3600000;
+  await f.store.exec("UPDATE jobs SET due=?,attempt=2,wait_reason='primary:graphql' WHERE key=?",retry,key);
+  await f.state.requestOpenCoverage();
+  const jobs=(await f.store.exec("SELECT * FROM jobs WHERE key LIKE 'pr:%' ORDER BY key")).toArray();
+  assert.deepEqual(jobs.map(j=>JSON.parse(j.query).args.number),[7,8]);
+  assert.ok(jobs.every(j=>j.lane==='requested' && j.requested_at===null));
+  assert.equal(jobs[0].due,retry);assert.equal(jobs[0].attempt,2);assert.equal(jobs[0].wait_reason,'primary:graphql');
+  assert.equal((await f.state.rows(q)).mergeable,'UNKNOWN','background freshness is not a read guard');
+  await f.state.requestOpenCoverage();assert.deepEqual((await f.store.exec("SELECT * FROM jobs WHERE key LIKE 'pr:%' ORDER BY key")).toArray(),jobs);
+ }finally{await f.close();}
+});
+
+test('base pushes coalesce one inventory refresh, preserving pages and in-flight generations',async()=>{
+ const f=await fixture();try{
+  const inventory={repository:'org/repo',operation:'open_prs'},inventoryKey='open_prs:{}';
+  await f.state.put('pr','7',{...record(),baseRefName:'release'});
+  const push=async(id,branch='main')=>{f.objects.set(id,JSON.stringify({ref:'refs/heads/'+branch,after:latest,repository:{default_branch:'main'}}));await f.state.ingest({repository:'org/repo',key:id,delivery:id,event:'push',received:Date.now()});};
+  await f.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?)',inventoryKey,'open_prs','{}',1,Date.now(),1,null);
+  await f.state.enqueue(inventory);await push('base-1');
+  const queued=(await f.store.exec('SELECT * FROM jobs WHERE key=?',inventoryKey)).one();
+  await push('base-2');assert.deepEqual((await f.store.exec('SELECT * FROM jobs WHERE key=?',inventoryKey)).one(),queued);
+  assert.equal((await f.store.exec("SELECT key FROM jobs WHERE key LIKE 'pr:%'")).toArray().length,0,'base changes never fan out per-PR jobs in ingestion');
+  const active=await f.state.claim(queued);
+  await f.store.exec('UPDATE jobs SET page=2,cursor=? WHERE key=?','saved-page',inventoryKey);
+  await push('base-3','release');
+  const paging=(await f.store.exec('SELECT * FROM jobs WHERE key=?',inventoryKey)).one();assert.equal(paging.page,2);assert.equal(paging.cursor,'saved-page');
+  await f.state.finishJob(active,inventory);
+  const pending=(await f.store.exec('SELECT * FROM jobs WHERE key=?',inventoryKey)).one();assert.equal(pending.dirty,1);assert.ok(pending.generation>active.start_generation);assert.ok(pending.due<=Date.now());
+  const generation=pending.generation;await push('feature','unrelated-feature');assert.equal((await f.store.exec('SELECT generation FROM jobs WHERE key=?',inventoryKey)).one().generation,generation);
+  assert.equal(await f.state.interval(inventory),300000);
+ }finally{await f.close();}
+});
+
+test('batched PR reads publish independent members and cannot overwrite a newer webhook',async()=>{
+ const f=await fixture();try{
+  for(const number of [7,8]) {await f.state.put('pr',String(number),{...record(old),number,mergeable:'UNKNOWN'});await f.state.enqueue({...q,args:{number}},0);}
+  let requests=0;upstream(f,async input=>{
+   requests++;assert.equal(input.jobs.length,2);await event(f,'synchronize',latest);
+   return {results:input.jobs.map(j=>({key:j.key,api:'graphql',data:{...record(),number:j.query.args.number,mergeable:'CONFLICTING'}}))};
+  });
+  await f.state.dispatch(await f.state.claim(await f.state.nextJob()));
+  assert.equal(requests,1);assert.equal(f.state.groupedPublication.members,2);assert.equal(f.state.groupedPublication.admissions,1);assert.equal((await f.state.rows({...q,args:{number:8}})).mergeable,'CONFLICTING');
+  const current=JSON.parse((await f.store.exec("SELECT data FROM resources WHERE kind='pr' AND id='7'")).one().data);assert.equal(current.headRefOid,latest);
+  assert.equal((await f.store.exec('SELECT dirty FROM jobs WHERE key=?',key)).one().dirty,1);
+ }finally{await f.close();}
+});

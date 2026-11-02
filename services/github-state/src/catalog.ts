@@ -12,7 +12,7 @@ export function batchLimit(operation:string): number {
 export function batchQuery(repository:string,jobs:any[],options:{threadPage?:number,commentPage?:number,allowLarge?:boolean}={}) {
   if (!jobs.length) throw new Error('empty batch');
   const operation=jobs[0].query.operation,limit=options.allowLarge?100:batchLimit(operation);
-  if (jobs.length>limit || !['issue_comments','review_threads','statuses','reactions'].includes(operation)) throw new Error('invalid batch operation');
+  if (jobs.length>limit || !['pr','issue_comments','review_threads','statuses','reactions'].includes(operation)) throw new Error('invalid batch operation');
   const threadPage=options.threadPage || 10,commentPage=options.commentPage || 20;
   if (![threadPage,commentPage].every(n=>Number.isInteger(n) && n>=1 && n<=100)) throw new Error('invalid connection size');
   const [owner,name]=repository.split('/');
@@ -28,6 +28,7 @@ export function batchQuery(repository:string,jobs:any[],options:{threadPage?:num
       return `q${i}:object(expression:${JSON.stringify(j.query.args.sha)}){... on Commit{status{contexts{context state createdAt}}}}`;
     }
     if (!/^[1-9][0-9]*$/.test(String(number))) throw new Error('invalid history number');
+    if (operation==='pr') return `q${i}:pullRequest(number:${number}){${PR}}`;
     if (operation==='review_threads') return `q${i}:pullRequest(number:${number}){reviewThreads(first:${threadPage}){${PAGE} nodes{id isResolved isOutdated comments(first:${commentPage}){${PAGE} nodes{${catalog.fields.review_comment}}}}}}`;
     const fields=`comments(first:100){${PAGE} nodes{${COMMENT}}}`;
     return `q${i}:issueOrPullRequest(number:${number}){... on Issue{${fields}} ... on PullRequest{${fields}}}`;

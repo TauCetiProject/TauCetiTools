@@ -442,3 +442,16 @@ test('malformed label connections stay unavailable and overflow waits for the RE
   assert.equal(result.deferred,true);assert.match(result.category,/primary/);assert.ok(result.retry_at>Date.now()+60000);assert.equal(network-before,1);
  }finally {await mf.dispose();}
 });
+
+test('PR header batches normalize scalars and isolate malformed members',async()=>{
+ const mf=await runtime(async req=>{
+  const payload=await req.json();assert.match(payload.query,/q0:pullRequest\(number:7\).*mergeable.*baseRefOid/);
+  const row={number:7,state:'OPEN',headRefOid:'a'.repeat(40),baseRefOid:'b'.repeat(40),mergeable:'CONFLICTING',labels:{totalCount:0,nodes:[]},author:{login:'author'}};
+  return response({data:{rateLimit:{cost:1,remaining:4999,resetAt:new Date(Date.now()+300000).toISOString()},repository:{q0:row,q1:{...row,number:8,labels:{totalCount:1,nodes:[]}}}}});
+ });try{
+  const ns=await mf.getDurableObjectNamespace('INSTALLATIONS'),stub=ns.get(ns.idFromName('200'));
+  const result=await (await send(stub,'/batch',{repository,jobs:[7,8].map(number=>({key:String(number),query:{operation:'pr',args:{number}}}))})).json();
+  assert.equal(result.results[0].data.mergeable,'CONFLICTING');assert.deepEqual(result.results[0].data.labels,[]);
+  assert.equal(result.results[1].restart,true);assert.equal(result.results[1].api,'core');assert.equal(Object.hasOwn(result.results[1],'data'),false);
+ }finally{await mf.dispose();}
+});

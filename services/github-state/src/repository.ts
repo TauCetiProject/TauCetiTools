@@ -1105,11 +1105,22 @@ export class RepositoryState extends DurableObject<Env> {
         const removed=Boolean(body.deleted) || /^0+$/.test(body.after || '');
         if (await this.put('refs',body.ref,row,pointer.received,removed,'',true)) await this.membership(queryKey({operation:'refs'}),body.ref,!removed);
       }
+      if(event==='push' && !body.deleted && String(body.ref).startsWith('refs/heads/')) {
+        const branch=String(body.ref).slice('refs/heads/'.length);
+        const base=branch===body.repository?.default_branch || (await this.store.exec(`SELECT number FROM survey_inventory WHERE json_extract(data,'$.state')='OPEN' AND json_extract(data,'$.baseRefName')=? LIMIT 1`,branch)).toArray().length>0;
+        if(base) {
+          const inventory={repository:repo.name,operation:'open_prs'};
+          const job=(await this.store.exec<any>('SELECT dirty,started FROM jobs WHERE key=?',queryKey(inventory))).toArray()[0];
+          // One bulk refresh, preserving pages. Coalesce queued pushes; retain
+          // a newer generation when a base moves during an in-flight scan.
+          repairs.push({q:inventory,priority:0,dirty:!job?.dirty || job.started!=null});
+        }
+      }
       // Header and CI webhooks already update the indexed records. A single
       // changed PR must not trigger a repository-wide survey at fleet scale.
       for (const operation of ['open_prs','open_issues','refs','repository']) {
         const q={repository:repo.name,operation};
-        repairs.push({q,priority:2,dirtyIfMissing:true,dirty:operation==='repository' && event==='repository' || operation==='refs' && ['create','delete'].includes(event)});
+        repairs.push({q,priority:operation==='open_prs'?0:2,dirtyIfMissing:true,dirty:operation==='repository' && event==='repository' || operation==='refs' && ['create','delete'].includes(event)});
       }
     }
     await this.enqueueIngest(repairs);
@@ -1341,7 +1352,8 @@ export class RepositoryState extends DurableObject<Env> {
   }
   async interval(q:Query): Promise<number> {
     if (q.operation==='pr_delta' || q.operation==='issue_delta') return 60000;
-    if (q.operation==='open_prs' || q.operation==='open_issues') return 3600000;
+    if (q.operation==='open_prs') return 300000;
+    if (q.operation==='open_issues') return 3600000;
     if (q.operation==='files') return 365*86400000; // head-change webhook dirties this immutable-by-head read
     if (q.operation==='reactions') {
       const active=(await this.store.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q))).toArray()[0];
@@ -1354,7 +1366,7 @@ export class RepositoryState extends DurableObject<Env> {
     return 3600000;
   }
   async priority(q:Query): Promise<number> {
-    if (q.operation.endsWith('_delta')) return 0;
+    if (q.operation==='open_prs' || q.operation.endsWith('_delta')) return 0;
     const demand=(await this.store.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q))).toArray()[0];
     if (demand?.at>Date.now()-300000) return 5;
     if (['open_prs','open_issues','repository','refs'].includes(q.operation)) return 10;
@@ -1421,8 +1433,10 @@ export class RepositoryState extends DurableObject<Env> {
     // Real reads precede maintenance in the requested lane. Give fresh real
     // demand three turns out of four, retaining one oldest-first turn.
     const fresh=requestedTurn%4!==0;
+    // One full weighted cycle in four keeps oldest-first ordering in every
+    // lane, including installations whose cycle length is divisible by four.
     const omit=this.excludeRepairKeys(excluded);
-    const job=(await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=?"+omit.sql+" ORDER BY CASE WHEN lane=? AND (lane!='requested' OR requested_at IS NOT NULL) THEN 0 WHEN lane='requested' AND (requested_at IS NOT NULL OR ?='requested') THEN 1 WHEN lane='active' THEN 2 WHEN lane='requested' THEN 3 WHEN lane='verification' THEN 4 ELSE 5 END,CASE WHEN ? AND lane='requested' THEN COALESCE(requested_at,0) ELSE 0 END DESC,due,key LIMIT 1",now,now,...omit.bindings,preferred,preferred,Number(fresh))).toArray()[0];
+    const job=(await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=?"+omit.sql+" ORDER BY CASE WHEN lane=? AND (lane!='requested' OR requested_at IS NOT NULL) THEN 0 WHEN lane='requested' AND (requested_at IS NOT NULL OR ?='requested') THEN 1 WHEN lane='active' THEN 2 WHEN lane='requested' THEN 3 WHEN lane='verification' THEN 4 ELSE 5 END,CASE WHEN ? AND lane='requested' THEN COALESCE(requested_at,0) ELSE 0 END DESC,CASE WHEN ? AND (lane!='requested' OR requested_at IS NULL) THEN CASE WHEN key='open_prs:{}' THEN -1 ELSE priority END ELSE 0 END,due,key LIMIT 1",now,now,...omit.bindings,preferred,preferred,Number(fresh),Number(Math.floor(turn/settings(this.env).weights.reduce((a,b)=>a+b,0))%4!==0))).toArray()[0];
     if(job)await this.setMeta('repair_turn',turn+1);
     if(job?.lane==='requested' && job.requested_at)await this.setMeta('requested_turn',requestedTurn+1);
     return job;
@@ -1432,6 +1446,7 @@ export class RepositoryState extends DurableObject<Env> {
     // Public discovery never creates demand. The existing maintenance owner
     // independently backfills bounded missing coverage for current open heads.
     // Already requested jobs leave this selection, so each tick advances it.
+    await this.requestOpenPRHeaders();
     const join=collectionJoin(this.store);
     const inventory=`SELECT s.number,s.data FROM members m ${join} survey_inventory s ON s.number=m.id ${join} resources r ON r.kind='pr' AND r.id=m.id WHERE m.collection=? AND r.tombstone=0 AND json_extract(s.data,'$.state')='OPEN'`;
     const candidates=`WITH live AS (${inventory}), wanted AS (`+
@@ -1447,6 +1462,23 @@ export class RepositoryState extends DurableObject<Env> {
     // Scan outside the writer transaction. enqueueMany rechecks completion,
     // demand and job state atomically before promoting the bounded selection.
     await this.enqueueMany(missing.map(row=>{const args:Record<string,string|number>=row.operation==='statuses'?{sha:row.head}:{number:decimalArgument(row.number)};return {q:{repository:repo,operation:row.operation,args},priority:5};}),true);
+  }
+  private async requestOpenPRHeaders(numbers?:string[]):Promise<void> {
+    const now=Date.now(),join=collectionJoin(this.store);
+    // Complete coverage does not imply a current head/base or mergeability.
+    // Use upstream verification, not webhook observation time: label/comment
+    // activity must not postpone a mergeability refresh indefinitely.
+    const filter=numbers?' AND r.number IN ('+numbers.map(()=>'?').join(',')+')':'';
+    const candidates=`SELECT r.number id FROM members m ${join} survey_inventory r ON r.number=m.id LEFT JOIN collections c ON c.key='pr:{"number":'||r.number||'}' LEFT JOIN jobs j ON j.key='pr:{"number":'||r.number||'}' WHERE m.collection=? AND json_extract(r.data,'$.state')='OPEN' AND (c.key IS NULL OR (json_extract(r.data,'$.mergeable')='UNKNOWN' AND c.verified<?)) AND (j.key IS NULL OR (j.lane!='requested' AND j.started IS NULL))`+filter+' ORDER BY COALESCE(c.verified,0),r.number LIMIT 64';
+    const rows=(await this.store.exec<any>(candidates,queryKey({operation:'open_prs'}),now-60000,...(numbers || []))).toArray();
+    if(!rows.length)return;
+    // Recheck the bounded selection under the existing writer, as coverage
+    // promotion does. Preserve leases, retry deadlines and real demand.
+    if(!this.store.transactional)return this.atomic(state=>state.requestOpenPRHeaders(rows.map(row=>row.id)),'enqueue');
+    const repo=(await this.meta('repository'))?.name;if(!repo)return;
+    const requests=rows.map(row=>({q:{repository:repo,operation:'pr',args:{number:decimalArgument(row.id)}},priority:0,dirty:true}));
+    await this.enqueueMany(requests);
+    await this.store.exec("UPDATE jobs SET lane='requested' WHERE key IN ("+requests.map(()=>'?').join(',')+')',...requests.map(row=>queryKey(row.q)));
   }
   private async dormantStatusHeads(heads:string[]):Promise<Set<string>> {
     if(!heads.length)return new Set();
@@ -1781,8 +1813,9 @@ export class RepositoryState extends DurableObject<Env> {
       const job=jobs[index],result=results[index] || {unavailable:true};
       if(result.deferred || result.unavailable){await flushFailures();await flush();waits.push({job,result});results[index]=undefined;continue;}
       await flushWaits();
-      const flat=['issue_comments','statuses','reactions'].includes(JSON.parse(job.query).operation) && job.page===1 && !job.nested && !result.cursor && !result.continuation && !result.restart && !result.deferred && !result.unavailable && !result.error && !result.unchanged && Array.isArray(result.data);
-      const size=flat?new TextEncoder().encode(JSON.stringify(result.data)).length:0,count=flat?result.data.length:0;
+      const scalarPR=JSON.parse(job.query).operation==='pr';
+      const flat=(scalarPR || ['issue_comments','statuses','reactions'].includes(JSON.parse(job.query).operation)) && job.page===1 && !job.nested && !result.cursor && !result.continuation && !result.restart && !result.deferred && !result.unavailable && !result.error && !result.unchanged && (scalarPR?result.data && typeof result.data==='object' && !Array.isArray(result.data):Array.isArray(result.data));
+      const size=flat?new TextEncoder().encode(JSON.stringify(result.data)).length:0,count=flat?(scalarPR?1:result.data.length):0;
       if(!flat || size>PUBLICATION_BYTES || count>PUBLICATION_ROWS) {
         await flush();
         let prepared:PreparedRefresh;
@@ -2551,7 +2584,7 @@ export class RepositoryState extends DurableObject<Env> {
     let jobs=claimedGroup || [first];
     try {
       if(preparationError)throw preparationError;
-      if (['issue_comments','review_threads','statuses','reactions'].includes(operation) && first.page===1 && !first.api && !first.nested) {
+      if (['pr','issue_comments','review_threads','statuses','reactions'].includes(operation) && first.page===1 && !first.api && !first.nested) {
         if(!claimedGroup)jobs.push(...await this.claimCompanions(first));
         if (operation==='reactions') {
           const supported=[];
@@ -2562,6 +2595,12 @@ export class RepositoryState extends DurableObject<Env> {
           }
           if (supported.length!==jobs.length) { await this.refresh(first);return; }
           jobs=supported;
+        }
+        if(operation==='pr') {
+          const ids=jobs.map(j=>String(JSON.parse(j.query).args.number));
+          const rows=(await this.store.exec<any>("SELECT id,revision FROM resources WHERE kind='pr' AND id IN ("+ids.map(()=>'?').join(',')+')',...ids)).toArray();
+          const revisions=new Map(rows.map(row=>[row.id,Number(row.revision)])),started=Date.now();
+          jobs=jobs.map((job,i)=>({...job,pr_revision:revisions.get(ids[i]) || 0,started}));
         }
         const response=await stub(this.env.INSTALLATIONS,repo.installation).fetch('https://internal/batch',{method:'POST',headers:{'x-request-id':crypto.randomUUID()},body:JSON.stringify({repository:repo,jobs:jobs.map(j=>({key:j.key,query:JSON.parse(j.query),node_id:j.node_id}))})});
         const result:any=await response.json();
@@ -2664,7 +2703,7 @@ export class RepositoryState extends DurableObject<Env> {
           if(await state.retireUnneeded(next))return {retired:true};
           const first=await state.claim(next);if(!first)return undefined;
           const operation=JSON.parse(first.query).operation;
-          const batchable=['issue_comments','review_threads','statuses','reactions'].includes(operation) && first.page===1 && !first.api && !first.nested;
+          const batchable=['pr','issue_comments','review_threads','statuses','reactions'].includes(operation) && first.page===1 && !first.api && !first.nested;
           const jobs=[first];if(batchable)jobs.push(...await state.claimCompanions(first,undefined,q.failed));
           return {jobs};
         },'repair');}catch(error){

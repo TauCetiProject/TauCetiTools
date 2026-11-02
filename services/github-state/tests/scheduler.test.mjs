@@ -639,12 +639,12 @@ test('maintenance promotes bounded missing open-head coverage and preserves retr
   }
   await state.enqueue(blocked,1);await db.prepare("UPDATE jobs SET due=?,attempt=3,wait_reason='primary:core' WHERE key=?").run(now+3600000,'statuses:'+JSON.stringify(blocked.args));
   await state.requestOpenCoverage();
-  const first=await db.prepare("SELECT key,query,lane,requested_at,due,attempt,wait_reason FROM jobs WHERE lane='requested'").all();
+  const first=await db.prepare("SELECT key,query,lane,requested_at,due,attempt,wait_reason FROM jobs WHERE lane='requested' AND key NOT LIKE 'pr:%'").all();
   assert.equal(first.length,64);assert.ok(first.every(r=>JSON.parse(r.query).args.number!==1),'closed PRs never get initial-coverage demand');
   const stopped=first.find(r=>r.key==='statuses:'+JSON.stringify(blocked.args));assert.equal(stopped.due,now+3600000);assert.equal(stopped.attempt,3);assert.equal(stopped.wait_reason,'primary:core');
   await state.requestOpenCoverage();
-  assert.equal((await db.prepare("SELECT COUNT(*) n FROM jobs WHERE lane='requested'").get()).n,116,'next turn advances beyond already requested work');
-  await state.requestOpenCoverage();assert.equal((await db.prepare('SELECT COUNT(*) n FROM jobs').get()).n,116,'promotion is idempotent');
+  assert.equal((await db.prepare("SELECT COUNT(*) n FROM jobs WHERE lane='requested' AND key NOT LIKE 'pr:%'").get()).n,116,'next turn advances beyond already requested work');
+  await state.requestOpenCoverage();assert.equal((await db.prepare("SELECT COUNT(*) n FROM jobs WHERE key NOT LIKE 'pr:%'").get()).n,116,'promotion is idempotent');
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM demand').get()).n,0,'maintenance never fabricates recent reads');
   assert.ok(first.every(r=>r.requested_at===null),'backfill has no user-request timestamp');
   const atomic=state.atomic;state.atomic=async()=>{throw Error('empty backfill took writer lock');};
@@ -823,4 +823,13 @@ test('slow preparation cannot consume the entire repair launch window',async()=>
   state.nextJob=async()=>{selected++;return undefined;};state.maintenance=async()=>{};state.startStorageMaintenance=()=>{};
   await state.runAlarm();await drainRepairs(state);assert.equal(selected,1,'due work is considered after preparation even when preparation exceeds launch_ms');
  }finally{Date.now=real;await db.close();}
+});
+
+test('header priorities progress ahead of active backfills while oldest work retains turns',async()=>{
+ const {state,db,insert}=await fixture();try{
+  const now=Date.now();await insert('issue_comments',1,5,now-3600000);await state.enqueue({operation:'open_prs'},20,now-1000);
+  const choices=[];for(let i=0;i<60;i++)choices.push((await state.nextJob()).key);
+  assert.ok(choices.some(key=>key==='open_prs:{}'),'cheap current headers cannot starve behind older active histories');
+  assert.ok(choices.some(key=>key.startsWith('issue_comments:')),'continuous priority work cannot starve older histories');
+ }finally{await db.close();}
 });

@@ -216,6 +216,9 @@ export class InstallationScheduler extends DurableObject<Env> {
     // Prefer latency when quota pressure is similar. Large pressure differences
     // still preserve the scarcer pool for operations with no alternative API.
     available.sort((a,b)=>{
+      // REST list responses omit mergeability. Prefer the complete inventory
+      // recipe while its pool is usable; exhaustion still falls back to REST.
+      if(input.query.operation==='open_prs' && a.api!==b.api)return a.api==='graphql'?-1:1;
       const pa=this.pressure(a),pb=this.pressure(b);
       if (pa<=minimum*1.2 && pb<=minimum*1.2) {
         const stats=(r:Recipe)=>this.ctx.storage.sql.exec<any>('SELECT COUNT(*) n,AVG(latency) latency FROM accounting WHERE api=? AND operation=? AND status IN (200,304) AND at>?',r.api,input.query.operation,Date.now()-3600000).one();
@@ -300,7 +303,7 @@ export class InstallationScheduler extends DurableObject<Env> {
     const core=this.usable('core'),graphql=this.usable('graphql');
     if(operation!=='review_threads' && core>=input.jobs.length && predicted/Math.max(1,graphql)>1.2*input.jobs.length/Math.max(1,core)) return json({deferred:true,category:'routing:core',retry_at:Date.now()});
     const deferred=this.deferral('graphql',predicted);if(deferred) return json(deferred);
-    if (input.jobs.length>limit || !['issue_comments','review_threads','statuses','reactions'].includes(operation)) throw new Error('invalid batch operation');
+    if (input.jobs.length>limit || !['pr','issue_comments','review_threads','statuses','reactions'].includes(operation)) throw new Error('invalid batch operation');
     const request=batchQuery(input.repository.name,input.jobs);
     let token=await this.token(input.repository.installation);
     let result=await this.http('/graphql',token,'POST',request,operation+'_batch','graphql');
@@ -315,14 +318,17 @@ export class InstallationScheduler extends DurableObject<Env> {
       if (!item) return {key:j.key,unavailable:true,retry_at:Date.now()+60000};
       try {
         const normalize=operation==='statuses'?(value:any)=>(value.status===null?[]:value.status.contexts.map((c:any)=>({context:c.context,state:c.state,startedAt:c.createdAt})))
-          :operation==='issue_comments'?recipes(input.repository.name,j.query).find(r=>r.api==='graphql')!.normalize
+          :['pr','issue_comments'].includes(operation)?recipes(input.repository.name,j.query).find(r=>r.api==='graphql')!.normalize
           :operation==='reactions'?(node:any)=>{if(!emojis[node.content])throw new Error('unsupported reaction');return {id:String(node.databaseId),content:emojis[node.content],created_at:node.createdAt,user:node.user || {}};}:(value:any)=>value;
         const field=operation==='review_threads'?'reviewThreads':operation==='reactions'?'reactions':'comments';
-        const recipe:Recipe={operation,api:'graphql',path:'/graphql',cost:1,collection:operation!=='statuses',connection:operation==='statuses'?['item']:['item',field],normalize};
+        const recipe:Recipe={operation,api:'graphql',path:'/graphql',cost:1,collection:!['pr','statuses'].includes(operation),connection:['pr','statuses'].includes(operation)?['item']:['item',field],normalize};
         const data=extract(recipe,{data:{item}});
         if(operation==='review_threads' && data.rows.some((thread:any)=>thread.comments.pageInfo.hasNextPage))return {key:j.key,continuation:{rows:data.rows,cursor:data.cursor},api:'graphql'};
         return {key:j.key,data:data.rows,api:'graphql',cursor:data.cursor};
-      }catch(error) {return {key:j.key,...this.unavailableResponse(input,operation,'graphql',error)};}
+      }catch(error) {
+        if(operation==='pr' && error instanceof Error && error.message==='labels overflow')return {key:j.key,restart:true,api:'core'};
+        return {key:j.key,...this.unavailableResponse(input,operation,'graphql',error)};
+      }
 
     })});
   }
