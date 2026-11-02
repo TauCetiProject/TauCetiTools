@@ -159,8 +159,10 @@ remaining available during GraphQL quota exhaustion. Maintenance independently
 promotes at most 64 missing PR headers per turn. Unresolved `UNKNOWN` results
 coalesce into another bulk inventory after one minute. When that inventory had
 to use REST lists, which omit mergeability, maintenance also promotes unresolved
-PR details so available REST quota can recover them. Up to fifty PR details share one GraphQL
-request and results use the existing bounded grouped publication path. Label
+PR details so available REST quota can recover them. Up to eight PR details share one GraphQL
+request and results use the existing bounded grouped publication path. Keeping
+a detail group within one publication chunk lets bulk headers and histories
+regain scheduler slots promptly. Label
 overflow falls back to REST per member. No freshness requirement blocks stored
 reads or worker admission. Within the existing lane shares, background headers
 precede backfills for three weighted cycles out of four, with inventory headers

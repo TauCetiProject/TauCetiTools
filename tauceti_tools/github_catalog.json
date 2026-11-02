@@ -11,7 +11,7 @@
     "review_comments": "/pulls/{number}/comments",
     "reactions": "/pulls/comments/{id}/reactions"
   },
-  "batch_limits": {"pr": 50, "issue_comments": 100, "review_threads": 10, "statuses": 100, "reactions": 100},
+  "batch_limits": {"pr": 8, "issue_comments": 100, "review_threads": 10, "statuses": 100, "reactions": 100},
   "measured_costs": {"issue_comments_batch_100": 1, "review_threads_batch_10": 1, "statuses_batch_100": 1, "reactions_batch_100": 1},
   "measurement_note": "2026-10-12 live samples: 100 issue histories, status reads, or reaction reads cost 1 point; 10 PRs with first 10 threads and first 20 comments cost 1 point, versus 2 with first 20 threads. Charges vary with density and overflow; always record rateLimit.cost."
 }
