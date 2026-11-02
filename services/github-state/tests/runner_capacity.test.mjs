@@ -133,6 +133,12 @@ test('cached-only reads retain expired snapshots without token or provider work'
  assert.equal(value.observed_at,1000);assert.deepEqual(value.running_jobs,saved.running_jobs);
  assert.deepEqual(values.get('runner-capacity:org'),saved);
  assert.equal(values.has('runner-capacity-attempts'),false);
+ values.set('runner-capacity:org',{complete:false,reason:'capacity_deferred'});
+ values.set('runner-capacity-last-good:org',saved);
+ const retained=await(await scheduler.cachedRunnerCapacity({name:'org/repo'})).json();
+ assert.deepEqual(retained.running_jobs,saved.running_jobs);
+ assert.equal(retained.observed_at,1000);
+ assert.equal(values.get('runner-capacity:org').complete,false,'reporting must not change routing failure state');
 });
 test('hourly allowance and lost responses survive refresh and cannot be bypassed by another caller',async()=>{
  const {scheduler,values}=schedulerFixture();let calls=0;

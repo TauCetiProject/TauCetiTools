@@ -443,7 +443,8 @@ export class InstallationScheduler extends DurableObject<Env> {
     // Status collectors may read an old snapshot, but never cause discovery,
     // token acquisition, retry scheduling, or GitHub requests.
     const organization=repo.name.split('/')[0];
-    const saved=await this.ctx.storage.get<any>('runner-capacity:'+organization);
+    let saved=await this.ctx.storage.get<any>('runner-capacity:'+organization);
+    if(saved?.complete!==true) saved=await this.ctx.storage.get<any>('runner-capacity-last-good:'+organization) || saved;
     return json(saved?{...saved,cached:true,read_only:true}:{complete:false,organization,reason:'capacity_not_prepared',cached:true,read_only:true});
   }
   async runnerCapacity(repo:Repository & {namespace_cap?:number}):Promise<Response> {
@@ -489,7 +490,9 @@ export class InstallationScheduler extends DurableObject<Env> {
         // Shared two-minute snapshots normally need thirty refreshes per hour.
         // Target upgrades also charge the same hard hourly attempt allowance.
         const value={complete:true,organization,namespace_discovery_target:target,...snapshot,retry_at:Date.now()+120000,coverage:snapshot.routing_version===2?'organization_repository_inventory':'organization_running_inventory'};
-        await this.ctx.storage.put(key,value);return value;
+        await this.ctx.storage.put(key,value);
+        await this.ctx.storage.put('runner-capacity-last-good:'+organization,value);
+        return value;
       } catch(error) {
         const value={complete:false,organization,namespace_discovery_target:target,reason:error instanceof QuotaDeferred?'capacity_deferred':error instanceof Error && error.message.startsWith('capacity_')?error.message:classify(error),retry_at:Math.max(Date.now()+120000,error instanceof QuotaDeferred?error.result.retry_at || 0:0)};
         await this.ctx.storage.put(key,value);return value;
