@@ -1084,6 +1084,7 @@ def audit(args):
                 limited = isinstance(error, RateLimitGap)
                 if not progress and not limited:
                     raise
+                unknowns += 1
                 failures += int(mutation_started or (not limited and not progress.completed))
                 if progress:
                     progress.finish(child.number, False, retry_soon=True, first=progress.completed > 0)

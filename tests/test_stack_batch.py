@@ -328,6 +328,10 @@ class BatchIntegration(fixtures.MainTests):
         self.assertEqual(state['checked'], {})
         self.assertEqual(state['failed'], {})
         self.assertFalse(any(method != 'GET' for _, method, _ in self.api.calls))
+        summary = next(json.loads(line) for line in self.last_output.splitlines()
+                       if json.loads(line).get('summary'))
+        self.assertEqual(summary['unknowns'], 1)
+        self.assertEqual(summary['failures'], 0)
 
     def test_rate_limit_during_preparation_retains_discovered_work(self):
         original = self.api.call
