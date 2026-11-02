@@ -225,7 +225,13 @@ def gh_lines(path, jq, paginate=True):
 # (state, updated_at) of the newest commit status for a context, shared with the
 # `core` derivation (per_page=100 there so a status burst cannot hide `build` /
 # `bump-guard`); alias so this module's detectors read as before.
-newest_status = core.newest_status
+_snapshot = None
+
+
+def newest_status(head, context):
+    if _snapshot is not None:
+        return _snapshot.status(head, context)
+    return core.newest_status(head, context)
 
 
 # ----- detectors --------------------------------------------------------------
@@ -303,6 +309,8 @@ def is_automerge_scope(files):
 
 def open_prs():
     """Every open PR against main, with the fields the PR-shaped detectors below need."""
+    if _snapshot is not None:
+        return _snapshot.pulls()
     return gh_stream(
         f"/repos/{REPO}/pulls?state=open&base=main&per_page=100",
         jq='.[] | {number, head: .head.sha, draft, updated_at, '
@@ -400,10 +408,18 @@ def detect_missing_required_status():
         # (a concurrency cancellation when the head is re-dispatched, or a manual cancel) never
         # reaches its reporting step by design -- neither is a wedge, and alerting on either
         # would make this detector fire on routine CI churn.
-        runs = gh_stream(
-            f"/repos/{REPO}/actions/workflows/pr-build.yml/runs?head_sha={head}&per_page=20",
-            jq='.workflow_runs[] | {status: (.status // ""), conclusion: (.conclusion // ""), '
-               'updated_at: (.updated_at // "")}', paginate=False)
+        if "checks" in pr and not pr["checks_truncated"]:
+            runs = [dict(status="completed" if c["status"] == "COMPLETED" else "in_progress",
+                         conclusion=(c.get("conclusion") or "").lower(),
+                         updated_at=c.get("completedAt") or "")
+                    for c in pr["checks"] if c.get("__typename") == "CheckRun"
+                    and c.get("name") == "sandboxed-build"]
+            runs.sort(key=lambda r: r["updated_at"], reverse=True)
+        else:
+            runs = gh_stream(
+                f"/repos/{REPO}/actions/workflows/pr-build.yml/runs?head_sha={head}&per_page=20",
+                jq='.workflow_runs[] | {status: (.status // ""), conclusion: (.conclusion // ""), '
+                   'updated_at: (.updated_at // "")}', paginate=False)
         if any(r.get("status") != "completed" for r in runs):
             continue
         # Newest run first, so this is the latest run that actually reported a verdict.
@@ -462,7 +478,8 @@ def detect_diverged_head():
         repo, ref = pr.get("head_repo"), pr.get("head_ref")
         if not repo or not ref:
             continue  # head repo deleted; a different problem, and not one a retry fixes
-        tip = gh_scalar(f"/repos/{repo}/branches/{ref}", jq='.commit.sha // ""')
+        tip = (pr["branch_tip"] if "branch_tip" in pr else
+               gh_scalar(f"/repos/{repo}/branches/{ref}", jq='.commit.sha // ""'))
         if not tip or tip == pr["head"]:
             continue
         out.append({
@@ -480,13 +497,12 @@ def detect_diverged_head():
 
 
 def detect_stranded_prs():
-    prs = gh_stream(
-        f"/repos/{REPO}/pulls?state=open&base=main&per_page=100",
-        jq='.[] | {number, head: .head.sha, draft, updated_at, '
-           'author: .user.login, labels: [.labels[].name]}')
+    prs = open_prs()
     out = []
     for pr in prs:
         if pr.get("draft"):
+            continue
+        if "ready-to-merge" not in pr.get("labels", []):
             continue
         if HOLD_LABELS.intersection(n.lower() for n in pr.get("labels", [])):
             continue
@@ -559,7 +575,8 @@ def flagged_pr_has_recovered(number, issue):
     silenced by a lookup that did not work.
     """
     try:
-        pr = gh_obj(f"/repos/{REPO}/pulls/{number}", jq='{state, head: .head.sha}') or {}
+        pr = (_snapshot.review_prs[int(number)] if _snapshot is not None else
+              gh_obj(f"/repos/{REPO}/pulls/{number}", jq='{state, head: .head.sha}') or {})
         if pr.get("state") == "closed":
             return True
         if pr.get("state") != "open" or not pr.get("head"):
@@ -600,6 +617,9 @@ def detect_review_stuck():
         f"/repos/{REPO}/issues?state=open&per_page=100",
         jq='.[] | select(.pull_request == null) '
            '| select(.title | test("^Review stuck: PR #[0-9]+$")) | {number, title, body, created_at}')
+    if _snapshot is not None:
+        _snapshot.load_review_prs(m.group(1) for issue in issues
+                                 if (m := REVIEW_STUCK_TITLE_RE.fullmatch(issue.get("title") or "")))
     out = []
     for i in issues:
         # Tracking issues can outlive their failure. Check public evidence without
@@ -909,6 +929,9 @@ def _title_of(content, key):
 
 
 def main(argv):
+    global _snapshot
+    from stuck_snapshot import Snapshot
+    _snapshot = Snapshot(REPO)
     dry_run = "--dry-run" in argv[1:]
     alerts, failed = collect_alerts()
     zp.log(f"{len(alerts)} active alert(s): {sorted(a['key'] for a in alerts)}"
