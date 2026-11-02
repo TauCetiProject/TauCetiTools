@@ -101,7 +101,7 @@ def recover(client, *, dry_run=False, now=None):
         print(f"{'Would rebuild' if dry_run else 'Rebuilding'} maintenance PR #{number} at {head}", flush=True)
         if not dry_run:
             client.request("POST", f"repos/{REPO}/actions/workflows/pr-build.yml/dispatches",
-                           {"ref": "main", "inputs": {"pr": str(number)}})
+                           {"ref": "main", "inputs": {"pr": str(number), "maintenance": "true"}})
         requested.append(number)
     return requested
 

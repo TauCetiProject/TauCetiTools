@@ -36,6 +36,7 @@ class Snapshot:
         self.repo = repo
         self.client = client or GitHub(max_wait=0)
         self._rows = None
+        self.review_prs = {}
         self.error = None
 
     def pulls(self):
@@ -91,3 +92,23 @@ class Snapshot:
         contexts = [item for item in rows[0]["statuses"] if item["context"] == context]
         newest = max(contexts, key=lambda item: item["createdAt"], default=None)
         return (newest["state"].lower(), newest["createdAt"]) if newest else (None, None)
+
+    def load_review_prs(self, numbers):
+        """Tracking issues outlive closed PRs; batch their explicit state reads.
+
+        Absence from the main-branch inventory is insufficient: it could be an
+        open PR against another branch, or a number that never named a PR.
+        """
+        owner, name = self.repo.split("/", 1)
+        numbers = sorted(set(int(number) for number in numbers))
+        for start in range(0, len(numbers), 50):
+            batch = numbers[start:start + 50]
+            if any(number <= 0 for number in batch):
+                raise ValueError("Invalid review tracking PR number")
+            fields = " ".join(f"pr{number}:pullRequest(number:{number}) {{ state headRefOid }}" for number in batch)
+            query = "query($owner:String!, $name:String!) { repository(owner:$owner,name:$name) { " + fields + " } }"
+            data = self.client.graphql(query, dict(owner=owner, name=name))["repository"]
+            for number in batch:
+                node = data[f"pr{number}"]
+                self.review_prs[number] = (dict(state=node["state"].lower(), head=node["headRefOid"])
+                                           if node else {})

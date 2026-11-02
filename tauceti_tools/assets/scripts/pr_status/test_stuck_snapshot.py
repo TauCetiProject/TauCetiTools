@@ -66,6 +66,24 @@ class SnapshotTests(unittest.TestCase):
         with patch.object(sa, "open_prs", return_value=[record]), patch.object(sa, "newest_status", return_value=(None, None)):
             self.assertEqual(sa.detect_missing_required_status()[0]["key"], "missing-status/8")
 
+    def test_review_tracking_state_is_batched_without_assuming_absent_prs_closed(self):
+        class ReviewClient:
+            def __init__(self):
+                self.calls = 0
+
+            def graphql(self, query, variables):
+                self.calls += 1
+                return dict(repository=dict(pr1=dict(state="CLOSED", headRefOid="head"),
+                                            pr2=dict(state="OPEN", headRefOid="head"), pr3=None))
+
+        client = ReviewClient()
+        snapshot = Snapshot("owner/repo", client)
+        snapshot.load_review_prs([1, 2, 3, 1])
+        self.assertEqual(snapshot.review_prs[1]["state"], "closed")
+        self.assertEqual(snapshot.review_prs[2]["state"], "open")
+        self.assertEqual(snapshot.review_prs[3], {})
+        self.assertEqual(client.calls, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

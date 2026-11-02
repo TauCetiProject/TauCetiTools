@@ -575,7 +575,8 @@ def flagged_pr_has_recovered(number, issue):
     silenced by a lookup that did not work.
     """
     try:
-        pr = gh_obj(f"/repos/{REPO}/pulls/{number}", jq='{state, head: .head.sha}') or {}
+        pr = (_snapshot.review_prs[int(number)] if _snapshot is not None else
+              gh_obj(f"/repos/{REPO}/pulls/{number}", jq='{state, head: .head.sha}') or {})
         if pr.get("state") == "closed":
             return True
         if pr.get("state") != "open" or not pr.get("head"):
@@ -616,6 +617,9 @@ def detect_review_stuck():
         f"/repos/{REPO}/issues?state=open&per_page=100",
         jq='.[] | select(.pull_request == null) '
            '| select(.title | test("^Review stuck: PR #[0-9]+$")) | {number, title, body, created_at}')
+    if _snapshot is not None:
+        _snapshot.load_review_prs(m.group(1) for issue in issues
+                                 if (m := REVIEW_STUCK_TITLE_RE.fullmatch(issue.get("title") or "")))
     out = []
     for i in issues:
         # Tracking issues can outlive their failure. Check public evidence without

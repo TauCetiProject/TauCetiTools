@@ -51,7 +51,7 @@ class RecoveryTests(unittest.TestCase):
         client = Client()
         self.assertEqual(mb.recover(client, now=NOW), [19872])
         self.assertEqual(client.writes, [(f"repos/{mb.REPO}/actions/workflows/pr-build.yml/dispatches",
-                                         dict(ref="main", inputs=dict(pr="19872")))])
+                                         dict(ref="main", inputs=dict(pr="19872", maintenance="true")))])
 
     def test_existing_build_red_green_pending_and_active_runs_are_left_alone(self):
         for state in ("failure", "success", "pending", "error"):

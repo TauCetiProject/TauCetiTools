@@ -19,6 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       pr: { description: "PR number to build", required: true, type: string }
+      maintenance: { description: "Prioritized maintenance recovery build", type: boolean, default: false }
 
 permissions:
   contents: read
