@@ -32,6 +32,11 @@ class MaintenanceControlRunnersTests(unittest.TestCase):
                 self.assertIn('"workflow_dispatch"', condition)
                 self.assertIn('"repository_dispatch"', condition)
                 status_runners = [job["runs-on"] for job in status["jobs"].values()]
+                merge_text = (root / ".github/workflows/auto-merge.yml").read_text()
+                merge = yaml.safe_load(merge_text)
+                events = merge.get("on", merge.get(True))
+                self.assertIn("labeled", events["pull_request_target"]["types"])
+                self.assertIn("github.event.label.name == 'ready-to-merge'", merge_text)
                 if repository == "TauCetiProject/TauCeti":
                     update = yaml.safe_load((root / ".github/workflows/update.yml").read_text())
                     runners = [alert_runner] + status_runners + [job["runs-on"] for job in update["jobs"].values()]
