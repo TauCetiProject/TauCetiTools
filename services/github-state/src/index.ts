@@ -95,10 +95,10 @@ export default {
         return json({accepted:true},202);
       }
       // Reporting never enters query(), noteDemand(), configure(), or the scheduler.
-      if (url.pathname==='/v1/runner-capacity' && req.method==='GET') {
+      if (['/v1/runner-capacity','/v1/runner-capacity/cached'].includes(url.pathname) && req.method==='GET') {
         const repo=repository(env,url.searchParams.get('repository') || '');
         if(!repo || !await authorize(req,env,repo.name))return json({error:'unauthorized'},401);
-        const cachedOnly=url.searchParams.get('cached_only');
+        const cachedOnly=url.pathname.endsWith('/cached')?'true':url.searchParams.get('cached_only');
         if(cachedOnly!==null && cachedOnly!=='true')return json({error:'invalid_cached_only'},400);
         if(cachedOnly==='true')return stub(env.INSTALLATIONS,repo.installation).fetch('https://internal/runner-capacity-cached',{
           method:'POST',body:JSON.stringify(repo)});

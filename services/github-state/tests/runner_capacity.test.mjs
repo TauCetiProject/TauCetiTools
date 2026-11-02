@@ -56,6 +56,8 @@ test('cached-only HTTP reads never initiate discovery, including an empty cache'
    const value=await response.json();assert.equal(value.read_only,true);assert.equal(value.reason,'capacity_not_prepared');
   }
   assert.equal(reads,0);
+  const dedicated=await mf.dispatchFetch(url.replace('/runner-capacity?','/runner-capacity/cached?'),{headers:{Authorization:'Bearer client'}});
+  assert.equal((await dedicated.json()).read_only,true);assert.equal(reads,0);
   assert.equal((await mf.dispatchFetch(url)).status,401);
   assert.equal((await mf.dispatchFetch(url.replace('cached_only=true','cached_only=other'),{headers:{Authorization:'Bearer client'}})).status,400);
  }finally{await mf.dispose();}
