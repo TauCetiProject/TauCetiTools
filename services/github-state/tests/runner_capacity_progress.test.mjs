@@ -141,10 +141,10 @@ test('partial metadata failures still prune freshly listed sparse search ranges'
  const recovered=await scanHostedCapacity('org',f.read,20,f.cache);
  assert.equal(recovered.routing_version,2);assert.equal(recovered.namespace_busy,4);
 });
-test('fresh execution/completion statuses reuse metadata only after runner assignment is known',async()=>{
+test('fresh execution/completion statuses count the routed pool without refetching runner identity',async()=>{
  const f=fixture(4);await scanHostedCapacity('org',f.read,20,f.cache);f.reads.clear();
  f.promoted.add(100);let v=await scanHostedCapacity('org',f.read,20,f.cache);
- assert.equal(f.reads.get(100),1);assert.equal(v.namespace_busy,4);
+ assert.equal(f.reads.get(100),undefined);assert.equal(v.namespace_busy,4);assert.equal(v.running_jobs.namespace,2);
  f.reads.clear();await scanHostedCapacity('org',f.read,20,f.cache);assert.equal(f.reads.size,0);
  f.completed.add(100);v=await scanHostedCapacity('org',f.read,20,f.cache);
  assert.equal(v.namespace_busy,3);assert.equal(f.reads.size,0);

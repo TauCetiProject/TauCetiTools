@@ -176,21 +176,22 @@ export async function scanHostedCapacity(
       const active=run.proof?.filter(job=>job.status!=='completed');
       const reusable=active?.every(job=>{
         const saved=metadata.get(String(job.id));
-        return saved && (saved.status==='completed' || job.status!=='in_progress' || Boolean(saved.runner_id && saved.runner_name));
+        return Boolean(saved);
       });
       const observed:CapacityJob[]=[];
-      const visit=async(rows:CapacityJob[])=>{
+      const visit=async(rows:CapacityJob[],freshExecution=false)=>{
         for(const job of rows) {
           if(!/^\d+$/.test(String(job.id)) || typeof job.status!=='string' || !Array.isArray(job.labels) || job.labels.some((l:unknown)=>typeof l!=='string'))throw new Error('capacity_invalid_job');
           const key=run.prefix+'/'+job.id;
           if(seenJobs.has(key))continue;
           seenJobs.add(key);
           const namespace=job.labels.some((l:string)=>l.startsWith('nscloud-') || l.startsWith('namespace-profile-'));
-          // Reporting reuses this already-required running inventory. An assigned
-          // runner is evidence of execution; queued labels are only a destination.
-          if(job.status==='in_progress' && job.runner_id && job.runner_name) {
+          // Fresh check-run execution state or an assigned REST runner proves
+          // execution. Immutable labels identify its pool; queued labels alone
+          // remain only a destination.
+          if(job.status==='in_progress' && (freshExecution || job.runner_id && job.runner_name)) {
             const machine=job.labels.find((label:string)=>/^fleet-[a-f0-9]{32}$/.test(label))
-              || /^fleet-[a-f0-9]{12}-/.exec(job.runner_name)?.[0].slice(0,-1);
+              || /^fleet-[a-f0-9]{12}-/.exec(job.runner_name || '')?.[0].slice(0,-1);
             const pool=namespace?'namespace':machine || (job.labels.includes('self-hosted')?'self-hosted':'github');
             running_jobs[pool]=(running_jobs[pool] || 0)+1;
           }
@@ -209,7 +210,7 @@ export async function scanHostedCapacity(
       if(reusable){
         job_cache_hits++;
         await visit(active!.map(job=>{const saved=metadata.get(String(job.id))!;
-          return {...saved,status:saved.status==='completed'?'completed':job.status};}));
+          return {...saved,status:saved.status==='completed'?'completed':job.status};}),true);
       }
       else {
         await pages(run.prefix+'/actions/runs/'+run.id+'/jobs','jobs',visit);

@@ -21,7 +21,8 @@ discovery, token acquisition, or provider requests. This returns `read_only: tru
 with the saved snapshot and its original observation time, even after expiry;
 an empty cache reports `capacity_not_prepared`. Normal scheduler discovery also
 prepares `running_jobs` by hosted pool and fleet machine identity using job rows
-it already fetched. These counts require an assigned runner, exclude queued
+it already fetched. These counts require an assigned runner or fresh check-run
+execution state, exclude queued
 destinations, and include all workflow jobs. Reporting adds no GitHub reads.
 The discovery endpoint also accepts `cached_only=true`; new collectors should
 use the dedicated path so an older server returns 404 rather than ignoring a
@@ -573,8 +574,9 @@ repositories and workflows already using Namespace, with older runs first on eac
 page. Batched GraphQL check-suite reads supply fresh job IDs and execution states.
 Only immutable job labels and already-assigned runner identities are reused from
 a compact SQLite cache. A new job ID (including a matrix expansion or rerun)
-requires fresh REST details; a queued job starting without a known runner refreshes
-its assignment. Missing or paginated check-suite data uses ordinary REST discovery.
+requires fresh REST details. Fresh check-run execution states and immutable routing
+labels identify the running pool without refetching a newly assigned runner's
+identity. Missing or paginated check-suite data uses ordinary REST discovery.
 Completed REST job receipts cannot be resurrected by a delayed check-suite status.
 Inactive metadata entries expire after an hour; cached metadata is never an
 activity count. Parallel GraphQL batches request at most 50 suites and 200 job
