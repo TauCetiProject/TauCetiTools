@@ -20,8 +20,6 @@ except ImportError:
     import tomli as tomllib
 
 LABELS = {"self-hosted", "linux", "x64", "tauceti-fleet"}
-# Match TauCetiFleet.capacity.MAX_JOBS; hosts still enforce resource admission.
-MAX_MACHINE_JOBS = 4096
 
 
 def inventory(pages):
@@ -42,8 +40,8 @@ def inventory(pages):
 def ranked_runners(pages, *, kind, machines, reserved=()):
     """Extend the existing picker with ordered, class-safe machine candidates.
 
-    Each machine has one shared ceiling across PR and staging work. Queued jobs
-    already targeting an instance count against that machine's observed capacity.
+    Hosts advertise capacity through registered runners and their class labels.
+    Busy runners and instances already targeted by queued jobs are unavailable.
     """
     if kind not in ("pr", "staging"):
         raise ValueError("unknown CI job class")
@@ -54,25 +52,13 @@ def ranked_runners(pages, *, kind, machines, reserved=()):
     reserved = set(reserved)
     result, seen = [], set()
     for machine in machines:
-        identity, maximum = machine["machine_id"], machine["max_jobs"]
+        identity = machine["machine_id"]
         if not re.fullmatch(r"[a-f0-9]{32}", identity) or identity in seen:
             raise ValueError("invalid or duplicate machine identity")
         seen.add(identity)
-        if type(maximum) is not int or not 1 <= maximum <= MAX_MACHINE_JOBS:
-            raise ValueError("invalid shared machine limit")
-        if not isinstance(machine["kinds"], list) or not machine["kinds"] or any(k not in ("pr", "staging") for k in machine["kinds"]):
-            raise ValueError("invalid machine job classes")
-        if kind not in machine["kinds"]:
-            continue
-        matching = []
+        ready = []
         for runner in found:
             labels = {str(label.get("name", "")).lower() for label in runner.get("labels", [])}
-            if "fleet-" + identity in labels:
-                matching.append((runner, labels))
-        occupied = {r["id"] for r, _ in matching if r.get("busy") is not False or r["id"] in reserved}
-        room = max(0, maximum - len(occupied))
-        ready = []
-        for runner, labels in matching:
             instances = [label for label in labels if re.fullmatch(r"fleet-instance-[a-f0-9]{16}", label)]
             required = {"self-hosted", "linux", "x64", "fleet-" + identity, "tauceti-fleet-" + kind}
             if (runner.get("status") == "online" and runner.get("busy") is False
@@ -80,7 +66,7 @@ def ranked_runners(pages, *, kind, machines, reserved=()):
                 ready.append(dict(machine=machine["name"], machine_id=identity, runner_id=runner["id"],
                                   staging_only=kind == "staging" and "tauceti-fleet-pr" not in labels,
                                   labels=sorted(required | {instances[0]})))
-        result.extend(sorted(ready, key=lambda r: (not r["staging_only"], r["runner_id"]))[:room])
+        result.extend(sorted(ready, key=lambda r: (not r["staging_only"], r["runner_id"])))
     return result
 
 
