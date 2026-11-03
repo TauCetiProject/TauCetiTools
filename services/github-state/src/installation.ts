@@ -489,17 +489,63 @@ export class InstallationScheduler extends DurableObject<Env> {
       const target=Math.max(namespaceTarget,saved?.namespace_discovery_target || 0);
       const deadline=Date.now()+15000;
       const attempts=await this.ctx.storage.get<number[]>('runner-capacity-attempts') || [];
+      const bootstrapKey='runner-capacity-label-bootstrap-v2:'+organization;
+      const bootstrap=await this.ctx.storage.get<{spent:number;done:boolean}>(bootstrapKey) || {spent:0,done:false};
       try {
+        // Only immutable job labels and already-assigned identities are reused;
+        // every scan still gets live job IDs/statuses. This is not job history.
+        this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS runner_capacity_jobs(key TEXT PRIMARY KEY,revision TEXT NOT NULL,jobs TEXT NOT NULL,seen_at INTEGER NOT NULL)');
+        this.ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS runner_capacity_jobs_seen ON runner_capacity_jobs(seen_at)');
+        this.ctx.storage.sql.exec('DELETE FROM runner_capacity_jobs WHERE seen_at<?',Date.now()-3600000);
+        this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS runner_capacity_ranges(key TEXT PRIMARY KEY,boundaries TEXT NOT NULL,seen_at INTEGER NOT NULL)');
+        this.ctx.storage.sql.exec('DELETE FROM runner_capacity_ranges WHERE seen_at<?',Date.now()-3600000);
+        const queuedCache={
+          getRanges:(key:string)=>{
+            const row=this.ctx.storage.sql.exec<any>('SELECT boundaries FROM runner_capacity_ranges WHERE key=?',key).toArray()[0];
+            if(!row)return undefined;
+            try {const values=JSON.parse(row.boundaries);return Array.isArray(values)?values:undefined;}
+            catch {return undefined;}
+          },
+          putRanges:(key:string,boundaries:number[])=>{
+            if(!boundaries.length){this.ctx.storage.sql.exec('DELETE FROM runner_capacity_ranges WHERE key=?',key);return;}
+            this.ctx.storage.sql.exec('INSERT INTO runner_capacity_ranges VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET boundaries=excluded.boundaries,seen_at=excluded.seen_at',key,JSON.stringify(boundaries),Date.now());
+          },
+          get:(key:string,revision:string)=>{
+            const row=this.ctx.storage.sql.exec<any>('SELECT jobs FROM runner_capacity_jobs WHERE key=? AND revision=?',key,revision).toArray()[0];
+            if(!row)return undefined;
+            let jobs:any;
+            try {
+              jobs=JSON.parse(row.jobs);
+              if(!Array.isArray(jobs) || !jobs.every(job=>
+                job && /^\d+$/.test(String(job.id)) && typeof job.status==='string' &&
+                Array.isArray(job.labels) && job.labels.every((label:unknown)=>typeof label==='string')))throw new Error('invalid cache');
+            }catch {
+              this.ctx.storage.sql.exec('DELETE FROM runner_capacity_jobs WHERE key=?',key);return undefined;
+            }
+            this.ctx.storage.sql.exec('UPDATE runner_capacity_jobs SET seen_at=? WHERE key=?',Date.now(),key);
+            return jobs;
+          },
+          put:(key:string,revision:string,jobs:any[])=>{
+            this.ctx.storage.sql.exec('INSERT INTO runner_capacity_jobs VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET revision=excluded.revision,jobs=excluded.jobs,seen_at=excluded.seen_at',key,revision,JSON.stringify(jobs),Date.now());
+          },
+        };
         const token=await this.token(repo.installation);
-        const snapshot=await scanHostedCapacity(organization,async path=>{
+        const snapshot=await scanHostedCapacity(organization,async (path,body)=>{
+          const api=body?'graphql':'core';
           const until=await this.ctx.storage.get<number>('secondary_until') || 0;
           if(until>Date.now() || this.usable('core')<=1500)throw new Error('capacity_quota_reserve');
+          if(api==='graphql' && this.usable('graphql')<=1000)throw new Error('capacity_graphql_reserve');
           while(attempts.length && attempts[0]<Date.now()-3600000)attempts.shift();
           if(attempts.length>=2400)throw new Error('capacity_hourly_budget');
           // Persist before launching: a lost network response still consumes allowance.
           attempts.push(Date.now());await this.ctx.storage.put('runner-capacity-attempts',attempts);
+          if(!bootstrap.done) {
+            bootstrap.spent=Math.min(800,bootstrap.spent+1);
+            if(bootstrap.spent>=800)bootstrap.done=true;
+            await this.ctx.storage.put(bootstrapKey,bootstrap);
+          }
           for(;;) {
-            try {return await this.http(path,token,'GET',undefined,'runner_capacity','core');}
+            try {return await this.http(path,token,body?'POST':'GET',body,'runner_capacity',api);}
             catch(error) {
               if(!(error instanceof QuotaDeferred) || error.result.category!=='capacity' || Date.now()+250>deadline)throw error;
               if(error.result.scope?.kind==='installation' && Number.isSafeInteger(error.result.retry_at)){
@@ -507,10 +553,16 @@ export class InstallationScheduler extends DurableObject<Env> {
               }else await new Promise(resolve=>setTimeout(resolve,250));
             }
           }
-        },target);
+        },target,queuedCache);
+        if(snapshot.routing_version===2 && !bootstrap.done){bootstrap.done=true;await this.ctx.storage.put(bootstrapKey,bootstrap);}
         // Shared two-minute snapshots normally need thirty refreshes per hour.
         // Target upgrades also charge the same hard hourly attempt allowance.
-        const value={complete:true,organization,namespace_discovery_target:target,...snapshot,retry_at:Date.now()+120000,coverage:snapshot.routing_version===2?'organization_repository_inventory':'organization_running_inventory'};
+        // Active pickers can continue a productive partial pass after a shared
+        // cooldown. Keep both the per-pass and hourly provider budgets intact.
+        const continuing=snapshot.placement_unavailable==='capacity_scan_limit' && snapshot.job_cache_writes>0 &&
+          (!saved || snapshot.job_cache_hits>(saved.job_cache_hits || 0)) &&
+          (attempts.length<900 || !bootstrap.done && attempts.length<2240);
+        const value={complete:true,organization,namespace_discovery_target:target,...snapshot,retry_at:Date.now()+(continuing?30000:120000),coverage:snapshot.routing_version===2?'organization_repository_inventory':'organization_running_inventory'};
         await this.ctx.storage.put(key,value);
         await this.ctx.storage.put('runner-capacity-last-good:'+organization,value);
         return value;
