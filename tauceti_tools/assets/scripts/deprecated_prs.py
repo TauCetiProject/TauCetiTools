@@ -147,7 +147,7 @@ def matches(source, names):
             prefix = ".".join(parts[:i + 1])
             if prefix in names:
                 found.add(prefix)
-            if len(leaf) >= 16 and "_" in leaf and len(leaves.get(leaf, [])) == 1:
+            if len(leaf) >= 24 and "_" in leaf and len(leaves.get(leaf, [])) == 1:
                 found.add(leaves[leaf][0])
     return sorted(found)
 

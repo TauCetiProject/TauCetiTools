@@ -100,6 +100,7 @@ f.add_apply
 '''
         self.assertEqual(sweep.matches(source, NAMES), sorted(NAMES))
         self.assertEqual(sweep.matches("add_apply f g x\nf.add_apply", NAMES), [])
+        self.assertEqual(sweep.matches("algebraMap_apply x", {"AbsoluteValue.Completion.algebraMap_apply"}), [])
         self.assertEqual(sweep.matches('r#"BoundedContinuousFunction.add_apply"#', NAMES), [])
         ambiguous = NAMES | {"Other.exists_eventuallyEq_pow_smul_nonzero_iff"}
         self.assertEqual(sweep.matches("hA.exists_eventuallyEq_pow_smul_nonzero_iff", ambiguous), [])
