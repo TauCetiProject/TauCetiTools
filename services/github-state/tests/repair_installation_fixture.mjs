@@ -11,6 +11,7 @@ export function installationFixture(Scheduler=InstallationScheduler){
  values.set('token',{token:'fixture-token',expires:Date.now()+3600000});
  const ctx={waitUntil:work=>{background.push(work);work.catch(()=>{});},storage:{
   async get(key){return values.get(key);},async put(key,value){values.set(key,value);},
+  async sync(){},
   sql:{exec(sql,...args){let rows=[];if(!args.length&&sql.includes(';'))db.exec(sql);else{const statement=db.prepare(sql);rows=statement.columns().length?statement.all(...args):(statement.run(...args),[]);}return {toArray:()=>rows,one:()=>rows[0]};}}
  }};
  const env={ALLOWED_REPOSITORIES:JSON.stringify(repos),ARCHIVE:{get:async()=>null},REPOSITORIES:{idFromName:id=>id,get:id=>({fetch:async(_url,init)=>{

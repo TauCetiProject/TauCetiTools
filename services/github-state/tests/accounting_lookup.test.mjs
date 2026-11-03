@@ -1,9 +1,11 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {installationFixture,InstallationScheduler} from './repair_installation_fixture.mjs';
+import {runtime,send} from './runtime.mjs';
 
 test('accounting estimates preserve exact results and use a recent covering range',async(t)=>{
  const f=installationFixture();t.after(()=>f.close());
+ assert.equal(f.db.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE name='accounting_estimate'").get().n,0,'startup does not build the optional index');
  const now=Date.now();t.mock.method(Date,'now',()=>now);
  const insert=f.db.prepare('INSERT INTO accounting(at,operation,api,points,shape,status,latency) VALUES(?,?,?,?,?,200,10)');
  f.db.exec('BEGIN');
@@ -18,6 +20,8 @@ test('accounting estimates preserve exact results and use a recent covering rang
   [now-1,'issue_comments','core',300,'a'],
  ])insert.run(...row);
  f.db.exec('COMMIT');
+ const maintenance=await f.scheduler.fetch(new Request('https://internal/maintenance',{method:'POST'}));
+ assert.equal(maintenance.status,200);
  const queries=[],exec=f.ctx.storage.sql.exec;
  f.ctx.storage.sql.exec=(sql,...args)=>{queries.push({sql,args});return exec(sql,...args);};
  for(const [operation,api,shape,fallback] of [
@@ -57,6 +61,7 @@ test('legacy accounting columns upgrade before the index and restarts preserve l
  }
  const f=installationFixture(Legacy);t.after(()=>f.close());
  assert.equal(f.scheduler.estimate('issue_comments','graphql'),4);
+ await f.scheduler.ensureAccountingIndex();
  const writes=f.db.prepare('SELECT total_changes() n').get().n;
  const restarted=new InstallationScheduler(f.ctx,f.env);
  assert.equal(restarted.estimate('issue_comments','graphql'),4);
@@ -64,23 +69,106 @@ test('legacy accounting columns upgrade before the index and restarts preserve l
  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM accounting').get().n,1);
 });
 
-test('optional index failure preserves estimates and the next startup can recover',async(t)=>{
- class IndexUnavailable extends InstallationScheduler {
-  constructor(ctx,env) {
-   const exec=ctx.storage.sql.exec;
-   ctx.storage.sql.exec=(sql,...args)=>{
-    if(sql.startsWith('CREATE INDEX IF NOT EXISTS accounting_estimate'))throw new Error('database is full');
-    return exec(sql,...args);
-   };
-   super(ctx,env);
-   ctx.storage.sql.exec=exec;
-  }
- }
- const f=installationFixture(IndexUnavailable);t.after(()=>f.close());
+test('index failure backs off durably across restarts while estimates remain available',async(t)=>{
+ const f=installationFixture();t.after(()=>f.close());
+ let now=Date.now();t.mock.method(Date,'now',()=>now);
  f.db.prepare('INSERT INTO accounting(at,operation,api,points) VALUES(?,?,?,?)').run(Date.now(),'issue_comments','graphql',6);
+ let builds=0,durable=false;
+ f.ctx.storage.sync=async()=>{
+  assert.equal(await f.ctx.storage.get('accounting_index_retry_after'),now+86400000);
+  durable=true;
+ };
+ const exec=f.ctx.storage.sql.exec;
+ f.ctx.storage.sql.exec=(sql,...args)=>{
+  if(sql.startsWith('CREATE INDEX IF NOT EXISTS accounting_estimate')) {
+   assert.ok(durable,'commit the backoff before entering uncatchable DDL');builds++;
+   throw new Error('database is full');
+  }
+  return exec(sql,...args);
+ };
+ await f.scheduler.ensureAccountingIndex();
+ assert.equal(builds,1);
  assert.equal(f.scheduler.estimate('issue_comments','graphql'),6);
  assert.equal(f.db.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE name='accounting_estimate'").get().n,0);
  const restarted=new InstallationScheduler(f.ctx,f.env);
  assert.equal(restarted.estimate('issue_comments','graphql'),6);
+ await restarted.ensureAccountingIndex();
+ assert.equal(builds,1,'eviction does not restart a failed or interrupted build');
+ f.ctx.storage.sql.exec=exec;
+ now+=86400001;
+ await restarted.ensureAccountingIndex();
+ assert.equal(restarted.estimate('issue_comments','graphql'),1,'the one-hour query window is still enforced');
  assert.equal(f.db.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE name='accounting_estimate'").get().n,1);
+});
+
+test('maintenance does not build an index until its retry guard is durably flushed',async(t)=>{
+ const f=installationFixture();t.after(()=>f.close());
+ let release,entered,builds=0;
+ const paused=new Promise(resolve=>{entered=resolve;}),resume=new Promise(resolve=>{release=resolve;});
+ f.ctx.storage.sync=async()=>{entered();await resume;};
+ const exec=f.ctx.storage.sql.exec;
+ f.ctx.storage.sql.exec=(sql,...args)=>{if(sql.startsWith('CREATE INDEX IF NOT EXISTS accounting_estimate'))builds++;return exec(sql,...args);};
+ const work=f.scheduler.ensureAccountingIndex();
+ await paused;
+ try {
+  assert.equal(builds,0);
+  const cold=new InstallationScheduler(f.ctx,f.env);
+  assert.equal(builds,0,'another startup also performs no build');
+  assert.equal(cold.estimate('missing','graphql'),1,'ordinary reads use their existing fallback during maintenance');
+ } finally {release();await work;}
+ assert.equal(builds,1);
+});
+
+test('an unavailable durable retry guard prevents optional DDL without failing reads',async(t)=>{
+ const f=installationFixture();t.after(()=>f.close());
+ f.ctx.storage.sync=async()=>{throw new Error('storage unavailable');};
+ await f.scheduler.ensureAccountingIndex();
+ assert.equal(f.db.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE name='accounting_estimate'").get().n,0);
+ assert.equal(f.scheduler.estimate('missing','graphql',undefined,3),3);
+});
+
+test('a native object reset at index creation preserves the retry guard and working reads',async()=>{
+ const mf=await runtime(async()=>{assert.fail('index maintenance must not read GitHub');},{},{installationExtension:`
+  constructor(ctx,env){
+   super(ctx,env);
+   const exec=ctx.storage.sql.exec.bind(ctx.storage.sql);
+   ctx.storage.sql.exec=(sql,...args)=>{
+    if(this.abortNextIndex && sql.startsWith('CREATE INDEX IF NOT EXISTS accounting_estimate')){
+     this.abortNextIndex=false;ctx.abort('test: reset during optional index creation');
+    }
+    return exec(sql,...args);
+   };
+  }
+  async fetch(req){
+   const path=new URL(req.url).pathname;
+   if(path==='/test/index-reset'){
+    this.abortNextIndex=true;
+    return super.fetch(new Request('https://internal/maintenance',{method:'POST'}));
+   }
+   if(path==='/test/index-status'){
+    this.abortNextIndex=false;
+    return Response.json({indexed:this.ctx.storage.sql.exec('PRAGMA index_list(accounting)').toArray().some(i=>i.name==='accounting_estimate'),
+     retry_after:await this.ctx.storage.get('accounting_index_retry_after'),estimate:this.estimate('missing','graphql')});
+   }
+   if(path==='/test/index-retry'){
+    await this.ctx.storage.put('accounting_index_retry_after',Date.now()-1);
+    await this.ctx.storage.sync();
+    return super.fetch(new Request('https://internal/maintenance',{method:'POST'}));
+   }
+   return super.fetch(req);
+  }`});
+ try {
+  const ns=await mf.getDurableObjectNamespace('INSTALLATIONS');
+  // Production obtains a fresh stub for each hop; an aborted stub stays broken.
+  const call=path=>send(ns.get(ns.idFromName('200')),path,{});
+  await call('/test/index-reset').catch(()=>{});
+  const status=await(await call('/test/index-status')).json();
+  assert.equal(status.indexed,false);
+  assert.ok(status.retry_after>Date.now());
+  assert.equal(status.estimate,1);
+  assert.equal((await call('/maintenance')).status,200);
+  assert.equal((await(await call('/test/index-status')).json()).indexed,false);
+  assert.equal((await call('/test/index-retry')).status,200);
+  assert.equal((await(await call('/test/index-status')).json()).indexed,true);
+ }finally{await mf.dispose();}
 });

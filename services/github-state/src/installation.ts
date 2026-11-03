@@ -21,6 +21,7 @@ export class InstallationScheduler extends DurableObject<Env> {
   private accountingMetrics=new AccountingMetrics();
   private accountingFailure:any;
   private accountingPreparationFailure:any;
+  private accountingIndexReady=false;
   private preparedAccounting:any;
   private capacityWaiters=new Map<string,CapacityWaiter>();
   private capacityNotifying=new Set<string>();
@@ -35,15 +36,6 @@ export class InstallationScheduler extends DurableObject<Env> {
     this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS redelivery_retries(id TEXT PRIMARY KEY,due INTEGER,attempt INTEGER);');
     const columns=new Set(this.ctx.storage.sql.exec<any>('PRAGMA table_info(accounting)').toArray().map(c=>c.name));
     for(const [name,type] of Object.entries({shape:'TEXT',batch_size:'INTEGER DEFAULT 1',predicted:'INTEGER'})) if(!columns.has(name)) this.ctx.storage.sql.exec('ALTER TABLE accounting ADD COLUMN '+name+' '+type);
-    // Both shaped and unshaped estimates (and latency lookups) filter by time.
-    // Keep at before shape so either query can skip the retained older ledger.
-    try {
-      this.ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS accounting_estimate ON accounting(api,operation,at,shape,points)');
-    } catch(error) {
-      // An optional index must not prevent reads or quota enforcement, e.g. if
-      // storage is full. The unchanged lookup remains correct without it.
-      log('installation_accounting_index_failed',{reason:classify(error)});
-    }
     // Health must survive ordinary object eviction without rescanning the
     // accounting log or resetting the report's original observation time.
     try {
@@ -55,6 +47,26 @@ export class InstallationScheduler extends DurableObject<Env> {
         this.preparedAccounting={version:1,at:report.at,window_start:report.at-3600000,scope:report.scope,window_complete:report.window_complete,scanned_limit:report.scanned_limit,hour:report.hour,recipes:report.recipes,prepared_deployment:typeof report.prepared_deployment==='string'?report.prepared_deployment:null};
       }
     }catch(error) {this.accountingPreparationFailure={at:Date.now(),reason:classify(error)};log('installation_health_load_failed',this.accountingPreparationFailure);}
+  }
+  private async ensureAccountingIndex():Promise<void> {
+    if(this.accountingIndexReady)return;
+    try {
+      if(this.ctx.storage.sql.exec<{name:string}>('PRAGMA index_list(accounting)').toArray().some(index=>index.name==='accounting_estimate')) {
+        this.accountingIndexReady=true;return;
+      }
+      const now=Date.now(),retryAfter=await this.ctx.storage.get<number>('accounting_index_retry_after');
+      if(typeof retryAfter==='number' && retryAfter>now)return;
+      // Commit the backoff before DDL: a CPU-limit reset cannot be caught and
+      // must not turn the next cold start or minute tick into another build.
+      await this.ctx.storage.put('accounting_index_retry_after',now+86400000);
+      await this.ctx.storage.sync();
+      // Keep time before shape so shaped/unshaped estimates and latency
+      // lookups can all skip the older ledger. Queries remain unchanged.
+      this.ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS accounting_estimate ON accounting(api,operation,at,shape,points)');
+      this.accountingIndexReady=true;
+    } catch(error) {
+      log('installation_accounting_index_failed',{reason:classify(error)});
+    }
   }
   async jwt(): Promise<string> {
     const b64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_');
@@ -621,7 +633,7 @@ export class InstallationScheduler extends DurableObject<Env> {
       if (path==='/batch') return await this.batch({...input,request_id:requestId(req)});
       if (path==='/measure') return await this.measure({...input,request_id:requestId(req)});
       if (path==='/maintenance') {
-        this.expireAccounting();this.prepareAccounting();return json({ok:true,telemetry_failure:this.accountingFailure,accounting_preparation_failure:this.accountingPreparationFailure ?? null});
+        this.expireAccounting();this.prepareAccounting();await this.ensureAccountingIndex();return json({ok:true,telemetry_failure:this.accountingFailure,accounting_preparation_failure:this.accountingPreparationFailure ?? null});
       }
       if (path==='/audit') {
         this.expireAccounting();
