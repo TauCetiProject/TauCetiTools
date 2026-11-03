@@ -109,6 +109,7 @@ import json
 import os
 import re
 import sys
+import time
 
 # Reuse the proven Zulip client + helpers. Because ZULIP_TOPIC is read at import
 # time, the workflow sets it to "Stuck PRs" and every send/narrow below targets
@@ -325,11 +326,18 @@ def ready_label_applied_at(number):
     re-added reports the latest application. Merge-queue enqueue/eviction events do not touch
     the label, which is what makes this a stable readiness anchor (see detect_stranded_prs).
     """
-    events = gh_stream(
-        f"/repos/{REPO}/issues/{number}/timeline?per_page=100",
-        jq='.[] | select(.event == "labeled" or .event == "unlabeled")'
-           ' | select(.label.name == "ready-to-merge")'
-           ' | {event, at: (.created_at // "")}')
+    if _snapshot is not None:
+        events = [dict(event="labeled" if event["__typename"] == "LabeledEvent" else "unlabeled",
+                       at=event["createdAt"])
+                  for event in _snapshot.timeline_events(number)
+                  if event["__typename"] in {"LabeledEvent", "UnlabeledEvent"}
+                  and (event.get("label") or {}).get("name") == "ready-to-merge"]
+    else:
+        events = gh_stream(
+            f"/repos/{REPO}/issues/{number}/timeline?per_page=100",
+            jq='.[] | select(.event == "labeled" or .event == "unlabeled")'
+               ' | select(.label.name == "ready-to-merge")'
+               ' | {event, at: (.created_at // "")}')
     applied = None
     for e in events:
         applied = e.get("at") if e.get("event") == "labeled" else None
@@ -361,9 +369,13 @@ def detect_eviction_loops():
         if not applied:
             continue
         # An OPEN PR that left the queue never merged, so every removal here is an eviction.
-        removals = gh_stream(
-            f"/repos/{REPO}/issues/{pr['number']}/timeline?per_page=100",
-            jq='.[] | select(.event == "removed_from_merge_queue") | {at: (.created_at // "")}')
+        if _snapshot is not None:
+            removals = [dict(at=event["createdAt"]) for event in _snapshot.timeline_events(pr["number"])
+                        if event["__typename"] == "RemovedFromMergeQueueEvent"]
+        else:
+            removals = gh_stream(
+                f"/repos/{REPO}/issues/{pr['number']}/timeline?per_page=100",
+                jq='.[] | select(.event == "removed_from_merge_queue") | {at: (.created_at // "")}')
         recent = [r for r in removals
                   if r.get("at") and hours_since(r["at"]) < EVICTION_WINDOW_HOURS
                   and parse_ts(r["at"]) > parse_ts(applied)]
@@ -499,6 +511,7 @@ def detect_diverged_head():
 def detect_stranded_prs():
     prs = open_prs()
     out = []
+    candidates = []
     for pr in prs:
         if pr.get("draft"):
             continue
@@ -529,13 +542,22 @@ def detect_stranded_prs():
         ready_since = min(hours_since(updated), hours_since(applied))
         if ready_since < STRANDED_HOURS:
             continue
+        candidates.append(pr)
+    if _snapshot is not None:
+        _snapshot.load_readiness([pr["number"] for pr in candidates])
+    for pr in candidates:
+        head = pr["head"]
         # Use the same newest-any-author scoreboard as the ready-to-merge label and auto-merge. This
         # detector only alerts; unlike housekeeping, it performs no destructive PR action.
-        if core.review_state(core.scoreboard_meta(pr["number"]), head) != "approved":
+        evidence = _snapshot.readiness_prs[pr["number"]] if _snapshot is not None else None
+        meta = (core.scoreboard_meta_from([dict(body=c["body"], updated=c["updatedAt"])
+                                          for c in evidence["comments"]]) if evidence is not None
+                else core.scoreboard_meta(pr["number"]))
+        if core.review_state(meta, head) != "approved":
             continue
         # Filenames are bare strings, not JSON -- gh_lines, not gh_stream.
-        files = gh_lines(f"/repos/{REPO}/pulls/{pr['number']}/files?per_page=300",
-                         jq='.[].filename')
+        files = ([item["path"] for item in evidence["files"]] if evidence is not None else
+                 gh_lines(f"/repos/{REPO}/pulls/{pr['number']}/files?per_page=300", jq='.[].filename'))
         if not files:
             continue
         touches_pin = any(
@@ -548,7 +570,9 @@ def detect_stranded_prs():
         # true|false|null; do NOT use jq `//` (it maps false->the default too). A
         # conflicting PR (false) is not being wrongly withheld; an as-yet-uncomputed
         # PR (null) we skip this run and recheck next hour (a real strand persists).
-        if gh_scalar(f"/repos/{REPO}/pulls/{pr['number']}", jq='.mergeable') != "true":
+        mergeable = (evidence.get("mergeable") == "MERGEABLE" if evidence is not None else
+                     gh_scalar(f"/repos/{REPO}/pulls/{pr['number']}", jq='.mergeable') == "true")
+        if not mergeable:
             continue
         out.append({
             "key": f"stranded-pr/{pr['number']}",
@@ -832,11 +856,16 @@ def collect_alerts():
     instead of resolving live emergencies during an API blip."""
     alerts, failed = [], set()
     for prefix, det in DETECTORS:
+        started = time.monotonic()
+        zp.log(f"checking detector {prefix}")
         try:
             alerts.extend(det() or [])
         except Exception as exc:
             zp.log(f"detector {det.__name__} [{prefix}] failed (non-fatal): {exc}")
             failed.add(prefix)
+        finally:
+            zp.log(f"checked detector {prefix} in {time.monotonic() - started:.1f}s"
+                   + (" (unknown)" if prefix in failed else ""))
     return alerts, failed
 
 

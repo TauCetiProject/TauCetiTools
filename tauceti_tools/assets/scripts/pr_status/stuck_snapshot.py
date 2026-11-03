@@ -4,6 +4,8 @@ Fetching statuses and branch tips separately for every PR made the watchdog
 exceed its ten-minute job timeout before it could reconcile any alerts.
 """
 
+import json
+
 from github_api import GitHub
 
 QUERY = """query($owner:String!, $name:String!, $cursor:String) {
@@ -38,6 +40,114 @@ class Snapshot:
         self._rows = None
         self.review_prs = {}
         self.error = None
+        self._timelines = None
+        self._timeline_error = None
+        self.readiness_prs = {}
+
+    def _connections(self, numbers, selections, scalars=""):
+        """Batch complete PR connections, binding every page to the observed head.
+
+        Each alias has independent cursors; partial pages and moving heads fail
+        closed rather than turning absent evidence into a cleared alert.
+        """
+        owner, name = self.repo.split("/", 1)
+        heads = {row["number"]: row["head"] for row in self.pulls()}
+        numbers = sorted(set(numbers))
+        if any(type(number) is not int or number <= 0 or number not in heads for number in numbers):
+            raise ValueError("Unknown watchdog PR identity")
+        pending = {number: dict.fromkeys(selections) for number in numbers}
+        seen = {(number, field): set() for number in numbers for field in selections}
+        result = {number: {field: [] for field in selections} for number in numbers}
+        for _ in range(100):
+            # Freeze this round's aliases: deleting completed connections must
+            # not shift later chunks past an unobserved PR.
+            batch_numbers = list(pending)
+            for start in range(0, len(batch_numbers), 20):
+                batch = batch_numbers[start:start + 20]
+                aliases = []
+                for number in batch:
+                    fields = []
+                    for field, cursor in pending[number].items():
+                        arguments = "first:100" + (",after:" + json.dumps(cursor) if cursor else "")
+                        if field == "timelineItems":
+                            arguments += ",itemTypes:[LABELED_EVENT,UNLABELED_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT]"
+                        fields.append(f"{field}({arguments}) {{ nodes {{ {selections[field]} }} "
+                                      "pageInfo { hasNextPage endCursor } }")
+                    aliases.append(f"pr{number}:pullRequest(number:{number}) {{ number state headRefOid "
+                                   + scalars + " " + " ".join(fields) + " }")
+                query = ("query($owner:String!, $name:String!) { repository(owner:$owner,name:$name) { "
+                         + " ".join(aliases) + " } }")
+                data = self.client.graphql(query, dict(owner=owner, name=name))["repository"]
+                if not isinstance(data, dict) or any(f"pr{number}" not in data for number in batch):
+                    raise RuntimeError("Incomplete watchdog evidence batch")
+                for number in batch:
+                    node = data[f"pr{number}"]
+                    if (not isinstance(node, dict) or node.get("number") != number
+                            or node.get("state") not in {"OPEN", "CLOSED", "MERGED"}):
+                        raise RuntimeError("Missing watchdog PR evidence")
+                    if node["state"] != "OPEN":
+                        result[number] = {**{field: [] for field in selections}, "state": "closed"}
+                        del pending[number]
+                        continue
+                    if node.get("headRefOid") != heads[number]:
+                        raise RuntimeError("Watchdog PR head changed during evidence collection")
+                    result[number]["state"] = "open"
+                    if scalars:
+                        if node.get("mergeable") not in {"MERGEABLE", "CONFLICTING", "UNKNOWN"}:
+                            raise RuntimeError("Missing watchdog mergeability")
+                        result[number]["mergeable"] = node["mergeable"]
+                    for field in list(pending[number]):
+                        connection = node.get(field)
+                        if not isinstance(connection, dict):
+                            raise RuntimeError("Missing watchdog evidence connection")
+                        rows, page = connection.get("nodes"), connection.get("pageInfo")
+                        if (not isinstance(rows, list) or not isinstance(page, dict)
+                                or type(page.get("hasNextPage")) is not bool):
+                            raise RuntimeError("Incomplete watchdog evidence page")
+                        result[number][field].extend(rows)
+                        if not page["hasNextPage"]:
+                            del pending[number][field]
+                            continue
+                        cursor = page.get("endCursor")
+                        if not isinstance(cursor, str) or not cursor or cursor in seen[number, field]:
+                            raise RuntimeError("Watchdog evidence pagination did not advance")
+                        seen[number, field].add(cursor)
+                        pending[number][field] = cursor
+                    if not pending[number]:
+                        del pending[number]
+            if not pending:
+                return result
+        raise RuntimeError("Watchdog evidence was truncated")
+
+    def timeline_events(self, number):
+        """Reuse complete ready-PR label/eviction histories across both detectors."""
+        if self._timeline_error:
+            raise RuntimeError("Watchdog timelines unavailable") from self._timeline_error
+        if self._timelines is None:
+            try:
+                numbers = [row["number"] for row in self.pulls()
+                           if not row.get("draft") and "ready-to-merge" in row.get("labels", [])]
+                selection = ("__typename ... on LabeledEvent { createdAt label { name } } "
+                             "... on UnlabeledEvent { createdAt label { name } } "
+                             "... on RemovedFromMergeQueueEvent { createdAt }")
+                self._timelines = self._connections(numbers, {"timelineItems": selection})
+                for record in self._timelines.values():
+                    for event in record["timelineItems"]:
+                        if (event.get("__typename") not in {"LabeledEvent", "UnlabeledEvent",
+                                                            "RemovedFromMergeQueueEvent"}
+                                or not isinstance(event.get("createdAt"), str) or not event["createdAt"]):
+                            raise RuntimeError("Incomplete watchdog timeline event")
+            except Exception as error:
+                self._timeline_error = error
+                raise
+        return self._timelines[number]["timelineItems"]
+
+    def load_readiness(self, numbers):
+        """Fetch complete comments, paths and mergeability for aged green candidates."""
+        self.readiness_prs.update(self._connections(numbers, {
+            "comments": "body updatedAt",
+            "files": "path",
+        }, "mergeable"))
 
     def pulls(self):
         if self.error:
