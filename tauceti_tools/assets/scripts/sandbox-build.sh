@@ -64,7 +64,13 @@ fi
 phase build
 # `--output-error=warn` keeps tee passing the build's output through even if writing the copy fails,
 # and `|| true` drops tee's own status, so `pipefail` reports exactly Lake's.
-lake build "${LAKE_BUILD_FLAGS[@]}" 2>&1 | { tee --output-error=warn "$TELEMETRY/lake-build.log" 2>/dev/null || true; }
+set +e
+lake build "${LAKE_BUILD_FLAGS[@]}" 2>&1 \
+  | { tee --output-error=warn "$TELEMETRY/lake-build.log" 2>/dev/null || true; } \
+  | { python3 "$TRUSTED_SCRIPTS/ci_log_filter.py" build || { echo '::warning::build log summary failed; showing remaining output'; cat; }; }
+build_status=${PIPESTATUS[0]}
+set -e
+if [ "$build_status" != 0 ]; then exit "$build_status"; fi
 
 # One workflow-pinned native driver imports all artifact parts once. Its first check reads
 # per-module ownership (compatible duplicates must not disappear in merged constants), then
