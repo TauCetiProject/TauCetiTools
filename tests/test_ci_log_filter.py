@@ -90,6 +90,43 @@ class LogFilterTests(unittest.TestCase):
                         capture_output=True, text=True)
                     self.assertEqual(result.returncode, status, result.stdout+result.stderr)
 
+    def test_cache_retries_reuse_verified_artifacts_and_preserve_fallback(self):
+        for scenario, count in [("success", 1), ("miss", 1), ("retry", 2), ("failure", 3)]:
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                (root / 'pr/.lake/cache').mkdir(parents=True)
+                (root / 'bin').mkdir()
+                (root / 'pr/.lake/cache/verified').write_text('valid artifact')
+                lake = root / 'bin/lake'
+                lake.write_text("#!/usr/bin/env bash\n"
+                    "n=$(cat \"$RUNNER_TEMP/calls\" 2>/dev/null || echo 0); n=$((n+1)); echo $n > \"$RUNNER_TEMP/calls\"\n"
+                    "test -f .lake/cache/verified || exit 20\n"
+                    "echo 'info: TauCetiProject/TauCeti: downloaded artifact 1234567890abcdef'\n"
+                    "echo '  local path: /cache/archive'; echo '  remote URL: https://cache.test/a'\n"
+                    "case $SCENARIO in\n"
+                    "success) exit 0;; miss) echo 'error: no outputs found'; exit 1;;\n"
+                    "retry) if [ $n -gt 1 ]; then exit 0; fi;; esac\n"
+                    "echo 'error: hash mismatch'; exit 1\n")
+                lake.chmod(0o755)
+                sleep = root / 'bin/sleep'
+                sleep.write_text('#!/bin/sh\nexit 0\n'); sleep.chmod(0o755)
+                result = subprocess.run(['bash', str(SCRIPT.with_name('lake-cache-get.sh')), 'pr'], cwd=root,
+                    env={**os.environ, 'PATH': str(root/'bin')+':'+os.environ['PATH'], 'RUNNER_TEMP': str(root),
+                         'GITHUB_ENV': str(root/'github_env'), 'SCENARIO': scenario}, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(int((root/'calls').read_text()), count)
+                self.assertNotIn('downloaded artifact 1234', result.stdout)
+                self.assertNotIn('remote URL:', result.stdout)
+                if scenario in ('miss', 'failure'):
+                    self.assertIn('LAKE_ARTIFACT_CACHE=false', (root/'github_env').read_text())
+                    self.assertFalse((root/'pr/.lake/cache').exists())
+                else:
+                    self.assertTrue((root/'pr/.lake/cache/verified').exists())
+                    self.assertIn('incremental build enabled', result.stdout)
+                if scenario in ('retry', 'failure'):
+                    self.assertIn('hash mismatch', result.stdout)
+                    self.assertIn('retaining verified artifacts', result.stdout)
+
     def test_raw_artifact_copy_rejects_symlinks_and_special_files(self):
         spec = importlib.util.spec_from_file_location('failure_logs', SCRIPT.with_name('ci_failure_logs.py'))
         failure_logs = importlib.util.module_from_spec(spec)
