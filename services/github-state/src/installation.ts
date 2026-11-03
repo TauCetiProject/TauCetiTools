@@ -497,7 +497,18 @@ export class InstallationScheduler extends DurableObject<Env> {
         this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS runner_capacity_jobs(key TEXT PRIMARY KEY,revision TEXT NOT NULL,jobs TEXT NOT NULL,seen_at INTEGER NOT NULL)');
         this.ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS runner_capacity_jobs_seen ON runner_capacity_jobs(seen_at)');
         this.ctx.storage.sql.exec('DELETE FROM runner_capacity_jobs WHERE seen_at<?',Date.now()-3600000);
+        this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS runner_capacity_ranges(key TEXT PRIMARY KEY,boundaries TEXT NOT NULL,seen_at INTEGER NOT NULL)');
+        this.ctx.storage.sql.exec('DELETE FROM runner_capacity_ranges WHERE seen_at<?',Date.now()-3600000);
         const queuedCache={
+          getRanges:(key:string)=>{
+            const row=this.ctx.storage.sql.exec<any>('SELECT boundaries FROM runner_capacity_ranges WHERE key=?',key).toArray()[0];
+            if(!row)return undefined;
+            try {const values=JSON.parse(row.boundaries);return Array.isArray(values)?values:undefined;}
+            catch {return undefined;}
+          },
+          putRanges:(key:string,boundaries:number[])=>{
+            this.ctx.storage.sql.exec('INSERT INTO runner_capacity_ranges VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET boundaries=excluded.boundaries,seen_at=excluded.seen_at',key,JSON.stringify(boundaries),Date.now());
+          },
           get:(key:string,revision:string)=>{
             const row=this.ctx.storage.sql.exec<any>('SELECT jobs FROM runner_capacity_jobs WHERE key=? AND revision=?',key,revision).toArray()[0];
             if(!row)return undefined;

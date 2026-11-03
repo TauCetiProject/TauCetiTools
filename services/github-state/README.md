@@ -584,6 +584,11 @@ Large queued listings use overlapping creation-time ranges instead of shifting
 offset pages. Their split instant belongs to both children, avoiding sub-second
 boundary gaps; job IDs deduplicate overlaps. An overfull single second or missing
 creation metadata remains explicitly unknown.
+Discovered split timestamps (at most sixteen per repository) persist for an hour
+of inactivity. Later scans read those ranges in parallel instead of locating the
+same older pages through a serial chain. These are search hints only: each scan
+freshly reads the whole overlapping partition, including both unbounded ends,
+and subdivides any newly overfull range. No coverage or activity is cached.
 
 Each pass retains the existing eighty-request/fifteen-second ceiling, counting
 REST and GraphQL calls. A productive partial pass has one shared thirty-second

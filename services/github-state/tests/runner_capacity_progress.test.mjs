@@ -11,8 +11,10 @@ function fixture(count=400,{sameSecond=false,repositories=1,runningCount=1,activ
   ...(fractional?{actualCreated:base+Math.floor(i/perSecond)*1000+(i%perSecond)*120}:{}),
   path:'.github/workflows/build.yml'})).reverse();
  const saved=new Map(),reads=new Map(),extraNamespace=new Set(),extraJobs=new Map(),completed=new Set(),promoted=new Set(),generation=new Map(),historical=new Map();
+ const ranges=new Map();
  const cache={get:(key,revision)=>saved.get(key)?.revision===revision?structuredClone(saved.get(key).jobs):undefined,
-  put:(key,revision,jobs)=>saved.set(key,{revision,jobs:structuredClone(jobs)})};
+  put:(key,revision,jobs)=>saved.set(key,{revision,jobs:structuredClone(jobs)}),
+  getRanges:key=>structuredClone(ranges.get(key)),putRanges:(key,boundaries)=>ranges.set(key,structuredClone(boundaries))};
  const envelope=(key,values)=>({status:200,body:key?{[key]:values}:values});
  function jobRows(id) {
   let jobs;
@@ -57,7 +59,7 @@ function fixture(count=400,{sameSecond=false,repositories=1,runningCount=1,activ
   const id=Number(/\/runs\/(\d+)\/jobs/.exec(path)?.[1]);reads.set(id,(reads.get(id)||0)+1);
   return envelope('jobs',jobRows(id));
  };
- return {read,cache,rows,saved,reads,extraNamespace,extraJobs,completed,promoted,generation,historical};
+ return {read,cache,rows,saved,ranges,reads,extraNamespace,extraJobs,completed,promoted,generation,historical};
 }
 test('a 400-run mostly hosted queue converges under the unchanged 80-request bound',async()=>{
  const f=fixture();let value,total=0,passes=0;
@@ -83,6 +85,25 @@ test('new job IDs and matrix growth invalidate metadata reuse without any run ti
  f.reads.clear();f.generation.set(103,1);f.extraNamespace.add(103);
  v=await scanHostedCapacity('org',f.read,20,f.cache);assert.equal(v.namespace_busy,6);assert.equal(f.reads.get(103),1);
  assert.equal(f.rows.find(r=>r.id===103).updated_at,revision);
+});
+test('persisted search boundaries freshly cover new head/tail arrivals and departed queued jobs',async()=>{
+ const f=fixture();let value;
+ for(let i=0;i<15;i++){value=await scanHostedCapacity('org',f.read,20,f.cache);if(value.routing_version===2)break;}
+ assert.equal(value.routing_version,2);assert.ok(f.ranges.get('/repos/org/repo').length>0);
+ f.rows.splice(f.rows.findIndex(run=>run.id===100),1);
+ for(const [id,when] of [[1000,10000],[1001,-3600]]){
+  f.rows.push({...f.rows[0],id,check_suite_node_id:'CS_'+id,created_at:iso(when),updated_at:iso(when)});
+  f.extraNamespace.add(id);
+ }
+ f.rows.sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at));
+ value=await scanHostedCapacity('org',f.read,20,f.cache);
+ assert.equal(value.routing_version,2);assert.equal(value.namespace_busy,5);
+ assert.ok(f.ranges.get('/repos/org/repo').length<=16);
+});
+test('invalid saved search boundaries cannot replace fresh queue discovery',async()=>{
+ const f=fixture(4);f.ranges.set('/repos/org/repo',['invalid',null,-1,Infinity,NaN]);
+ const value=await scanHostedCapacity('org',f.read,20,f.cache);
+ assert.equal(value.routing_version,2);assert.equal(value.namespace_busy,4);
 });
 test('fresh execution/completion statuses reuse metadata only after runner assignment is known',async()=>{
  const f=fixture(4);await scanHostedCapacity('org',f.read,20,f.cache);f.reads.clear();
@@ -181,7 +202,7 @@ test('productive passes survive owner replacement, coalesce callers, respect coo
 });
 
 test('warm production-sized discovery completes with measured provider-like latency and at most four reads',async()=>{
- const f=fixture(400,{repositories:14,runningCount:45,activeCount:30});let initial;
+ const f=fixture(500,{repositories:14,runningCount:45,activeCount:30});let initial;
  for(let i=0;i<20;i++){initial=await scanHostedCapacity('org',f.read,20,f.cache);if(initial.routing_version===2)break;}
  assert.equal(initial.routing_version,2);
  // Live scans also refresh newly assigned runners and reruns; a completely
@@ -192,7 +213,7 @@ test('warm production-sized discovery completes with measured provider-like late
  const read=async(path,body)=>{
   active++;peak=Math.max(peak,active);
   try {
-   const delay=path==='/graphql'?350+Object.keys(body.variables).length*15:path.startsWith('/orgs/')?550:path.includes('/repo/actions/runs?')?1450:300;
+   const delay=path==='/graphql'?350+Object.keys(body.variables).length*18:path.startsWith('/orgs/')?550:path.includes('/repo/actions/runs?')?1750:350;
    await new Promise(resolve=>setTimeout(resolve,delay));return await f.read(path,body);
   }finally{active--;}
  };

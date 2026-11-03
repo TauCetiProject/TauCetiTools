@@ -3,6 +3,8 @@ type CapacityJob={id:number|string;name?:string;status:string;labels:string[];ru
 export type JobLabelCache={
   get:(key:string,revision:string)=>CapacityJob[]|undefined;
   put:(key:string,revision:string,jobs:CapacityJob[])=>void;
+  getRanges?:(key:string)=>number[]|undefined;
+  putRanges?:(key:string,boundaries:number[])=>void;
 };
 export async function scanHostedCapacity(
   organization:string,
@@ -37,7 +39,7 @@ export async function scanHostedCapacity(
     const results=await Promise.allSettled(work);
     for(const result of results)if(result.status==='rejected')throw result.reason;
   }
-  async function pages(path:string,key?:string,visit?:(rows:any[])=>Promise<void>,range?:Range):Promise<any[]> {
+  async function pages(path:string,key?:string,visit?:(rows:any[])=>Promise<void>,range?:Range,onSplit?:(at:number)=>void):Promise<any[]> {
     if(key==='workflow_runs') {
       const url=new URL(path,'https://api.github.com');url.searchParams.set('exclude_pull_requests','true');
       path=url.pathname+url.search;
@@ -61,14 +63,14 @@ export async function scanHostedCapacity(
           if(range.upper!==undefined && split>=range.upper)split=range.upper-1;
           if(range.lower!==undefined && split<=range.lower)split=range.lower+1;
           unsplittable=range.lower!==undefined && split<=range.lower || range.upper!==undefined && split>=range.upper;
-          if(!unsplittable)children=[{lower:range.lower,upper:split},{lower:split,upper:range.upper}];
+          if(!unsplittable){children=[{lower:range.lower,upper:split},{lower:split,upper:range.upper}];onSplit?.(split);}
         }else queuedPagination=true;
       }
       // Parent visitation synchronously records its run IDs before awaiting
       // witnesses. Child listings can overlap that latency without recounting
       // boundary jobs; the one request gate still limits all work to four.
       if(children && visit && cache && namespaceTarget-namespace_busy>5) {
-        await settle([visit(values),...children.map(child=>pages(ranged(path,child),key,visit,child))]);
+        await settle([visit(values),...children.map(child=>pages(ranged(path,child),key,visit,child,onSplit))]);
         return rows;
       }
       if(visit)await visit(values);else rows.push(...values);
@@ -76,7 +78,7 @@ export async function scanHostedCapacity(
       // establish coverage; overlapping split instants retain fractional dates.
       if(!more)return rows;
       if(unsplittable)throw new Error('capacity_queue_pagination');
-      if(children){await settle(children.map(child=>pages(ranged(path,child),key,visit,child)));return rows;}
+      if(children){await settle(children.map(child=>pages(ranged(path,child),key,visit,child,onSplit)));return rows;}
     }
     throw new Error('capacity_scan_limit');
   }
@@ -232,7 +234,16 @@ export async function scanHostedCapacity(
     // establish a full pool instead of consuming every request just listing runs.
     const inspect=async(repo:{name:string})=>{
       const repoPrefix=prefix(repo.name);
-      await pages(repoPrefix+'/actions/runs?status=queued','workflow_runs',async rows=>{
+      const path=repoPrefix+'/actions/runs?status=queued';
+      const saved=cache?.getRanges?.(repoPrefix) || [];
+      const boundaries=[...new Set(saved.filter(at=>Number.isSafeInteger(at) && at>=0 && at<=8640000000000))].sort((a,b)=>a-b).slice(0,16);
+      const learned=new Set(boundaries);
+      const ranges:Range[]=boundaries.length?[
+        {upper:boundaries[0]},
+        ...boundaries.slice(1).map((at,i)=>({lower:boundaries[i],upper:at})),
+        {lower:boundaries.at(-1)},
+      ]:[{}];
+      const visit=async(rows:any[])=>{
         const queued:typeof activeRuns=[];
         // Older builds on this page are more likely to have finished placement.
         // Inspect workflows already using Namespace before control-only runs.
@@ -247,7 +258,17 @@ export async function scanHostedCapacity(
           }
         }
         await jobs(queued,true);
-      },{});
+      };
+      try {
+        await each(ranges,range=>pages(boundaries.length?ranged(path,range):path,'workflow_runs',visit,range,at=>learned.add(at)).then(()=>{}));
+      }finally {
+        // Only search boundaries survive a scan, never activity or coverage.
+        // Every next scan freshly reads the entire overlapping partition of
+        // (-infinity,+infinity), including empty or newly populated ranges.
+        const sorted=[...learned].sort((a,b)=>a-b);
+        const compact=sorted.length<=16?sorted:Array.from({length:16},(_,i)=>sorted[Math.floor(i*(sorted.length-1)/15)]);
+        if(compact.length)cache?.putRanges?.(repoPrefix,compact);
+      }
     };
     // Prove saturation in known Namespace workflows before spending requests
     // on quiet repositories. Independent quiet listings may then run together.
