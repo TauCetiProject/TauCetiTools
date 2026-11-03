@@ -49,7 +49,7 @@ class Selection(unittest.TestCase):
         self.assertTrue(all("tauceti-fleet-pr" in r["labels"] and "fleet-" + "b" * 32 in r["labels"] for r in pr))
         self.assertEqual(pr[0]["runner_id"], 2)
 
-    def test_pr_and_staging_share_machine_capacity_and_reservations_are_not_double_counted(self):
+    def test_busy_and_reserved_instances_are_unavailable(self):
         machines, pages = self.ranked_fixture()
         pages[0]["runners"][0]["busy"] = True
         result = ranked_runners(pages, kind="staging", machines=machines, reserved=[3])
@@ -81,10 +81,9 @@ class Selection(unittest.TestCase):
         for key in map(str, range(32)):
             self.assertEqual(select(key=key)["runner_id"], 3)
         self.assertEqual(select("pr")["runner_id"], 2)
-        # Enforce the preference before truncating at the shared machine ceiling.
-        machine["max_jobs"] = 1
+        # Old dispatcher settings cannot hide a registered staging reservation.
+        machine.update(max_jobs=1, kinds=["pr"])
         self.assertEqual(select()["runner_id"], 3)
-        machine["max_jobs"] = 2
         dedicated["busy"] = True
         self.assertEqual(select()["runner_id"], 2)
         dedicated["busy"] = False
@@ -137,23 +136,22 @@ class Selection(unittest.TestCase):
         pages[0]["runners"][1]["busy"] = True
         self.assertEqual(select()["pool"], "brett")
 
-    def test_expanded_limits_still_enforce_shared_occupancy_and_reject_invalid_caps(self):
+    def test_registered_capacity_and_classes_override_stale_or_missing_dispatcher_limits(self):
         machines, _ = self.ranked_fixture()
-        machine = dict(machines[1], name="brett", max_jobs=24)
-        def guest(identity, busy):
+        machine = dict(machines[1], name="brett", max_jobs=2, kinds=["staging"])
+        def guest(identity, busy=False):
             return dict(runner(busy=busy, labels=["self-hosted", "linux", "x64", "fleet-" + machine["machine_id"],
                 "fleet-instance-" + f"{identity:016x}", "tauceti-fleet-pr", "tauceti-fleet-staging"]), id=identity)
-        rows = [guest(n, n <= 23) for n in range(1, 26)]
+        rows = [guest(n, n <= 2) for n in range(1, 25)]
         pages = [dict(total_count=len(rows), runners=rows)]
-        self.assertEqual(len(ranked_runners(pages, kind="pr", machines=[machine])), 1)
-        rows[23]["busy"] = True
-        self.assertEqual(ranked_runners(pages, kind="staging", machines=[machine]), [])
-        self.assertTrue(ranked_runners(pages, kind="pr", machines=[dict(machine, max_jobs=4096)]))
-        for cap in [0, -1, True, 4097, "24"]:
-            with self.subTest(cap=cap), self.assertRaises(ValueError):
-                ranked_runners(pages, kind="pr", machines=[dict(machine, max_jobs=cap)])
+        # Both classes use all 21 idle, unreserved runners though the old cap is full
+        # and the old class list says staging only.
+        for config in [machine, {k: machine[k] for k in ("name", "machine_id")}]:
+            for kind in ("pr", "staging"):
+                ready = ranked_runners(pages, kind=kind, machines=[config], reserved=[3])
+                self.assertEqual([r["runner_id"] for r in ready], list(range(4, 25)))
 
-    def test_queued_exact_targets_count_against_shared_machine_capacity(self):
+    def test_queued_exact_targets_exclude_their_registered_instances(self):
         machines, pages = self.ranked_fixture()
         queued = [{label["name"] for label in r["labels"]} for r in pages[0]["runners"] if r["id"] in (2, 3)]
         selected = route(kind="pr", order=["github", "chris", "namespace"], machines={m["name"]: m for m in machines},
