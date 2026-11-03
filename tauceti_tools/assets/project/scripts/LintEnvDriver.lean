@@ -19,7 +19,8 @@ Lean's task manager. Userspace instructions differ by only about 10%.
 project's pinned Batteries by path. In the sandboxed PR build that happens on the host before any
 candidate code runs, and the executable is mounted read-only; see `lint-env.sh`.
 
-Usage: `lint-env-driver [--only-listed] <tag> <marker-file> <modules-file> <linter>...`
+Usage: `lint-env-driver [--only-listed [--downstream-unused-arguments <all-modules-file>]]
+<tag> <marker-file> <modules-file> <linter>...`
 
 * Imports Mathlib's standard lint support and every project module listed in `<modules-file>`. `importModules` loads the closure
   at the `private` olean level, as the legacy (non-module) `#lint` driver did; see PRIVATE
@@ -27,6 +28,9 @@ Usage: `lint-env-driver [--only-listed] <tag> <marker-file> <modules-file> <lint
 * Runs exactly the named linters on the declarations of the `TauCeti` package, or, with
   `--only-listed`, on just the declarations defined in the listed modules (the TauCeti modules
   they import are not linted). `lint-env.sh` uses that to lint only what a change touched.
+* With `--downstream-unused-arguments`, additionally runs only `unusedArguments` on transitive
+  importers of those modules, using Lean's compiled import graph. Other linters retain their
+  original declarations and imported environment. Both passes produce one normal report.
 * Prints the report `#lint` would print. With violations, the header line carries the
   `<tag>:1:0: error: ` prefix that Lean gives an error diagnostic from a driver file named `<tag>`,
   and the exit code is 1. Without violations, the report is printed bare and the exit code is 0.
@@ -46,6 +50,29 @@ open Lean Core Batteries.Tactic.Lint
 
 /-- The package whose declarations are linted. -/
 def lintedPackage : Name := `TauCeti
+
+/-- Transitive importers, including the seeds, from the actual compiled module graph. -/
+def downstreamModules (env : Environment) (seeds : Array Name) : Std.HashSet Name := Id.run do
+  let mut importers : Std.HashMap Name (Array Name) := {}
+  for i in [:env.header.moduleNames.size] do
+    let mod := env.header.moduleNames[i]!
+    for imp in env.header.moduleData[i]!.imports do
+      importers := importers.insert imp.module ((importers[imp.module]?.getD #[]).push mod)
+  let mut seen : Std.HashSet Name := {}
+  let mut pending := #[]
+  for mod in seeds do
+    if !seen.contains mod then
+      seen := seen.insert mod
+      pending := pending.push mod
+  let mut i := 0
+  while i < pending.size do
+    let mod := pending[i]!
+    i := i + 1
+    for importer in importers[mod]?.getD #[] do
+      if !seen.contains importer then
+        seen := seen.insert importer
+        pending := pending.push importer
+  return seen
 
 /-- Optional, bounded retry hints. Never use these to decide whether lint passed. -/
 def linterOrigins (modules : Array Name)
@@ -91,6 +118,11 @@ unsafe def main (args : List String) : IO UInt32 := do
   let (onlyListed, args) := match args with
     | "--only-listed" :: rest => (true, rest)
     | _ => (false, args)
+  let (downstreamFile, args) := match args with
+    | "--downstream-unused-arguments" :: file :: rest => (some file, rest)
+    | _ => (none, args)
+  if downstreamFile.isSome && !onlyListed then
+    IO.eprintln "lint-env-driver: downstream scope requires --only-listed"; return 2
   let tag :: markerFile :: modulesFile :: linterNames := args
     | IO.eprintln "usage: lint-env-driver [--only-listed] <tag> <marker-file> <modules-file> \
         <linter>..."; return 2
@@ -107,13 +139,16 @@ unsafe def main (args : List String) : IO UInt32 := do
     (loadExts := true)
   let opts : Options := ({} : Options).setBool `trace.Batteries.Lint true
   let ctx : Core.Context := { fileName := tag, fileMap := default, options := opts }
-  let (failed, report, origins) ← Prod.fst <$> (CoreM.toIO · ctx { env }) do
-    let decls ← getDeclsInPackage lintedPackage
+  let (decls, linters, results) ← Prod.fst <$> (CoreM.toIO · ctx { env }) do
+    let allDecls ← getDeclsInPackage lintedPackage
     let decls ← if onlyListed then
         let env ← getEnv
+        for mod in modules do
+          unless (env.getModuleIdx? mod).isSome do
+            throwError "lint module not loaded: {mod}"
         let idxs := modules.filterMap env.getModuleIdx?
-        pure <| decls.filter fun d => (env.getModuleIdxFor? d).any idxs.contains
-      else pure decls
+        pure <| allDecls.filter fun d => (env.getModuleIdxFor? d).any idxs.contains
+      else pure allDecls
     let linters ← getChecks (slow := true) (runOnly := some (linterNames.map String.toName))
       (runAlways := none)
     -- `getChecks` silently drops an unknown name; `#lint only` rejected it. Keep that behaviour.
@@ -121,11 +156,47 @@ unsafe def main (args : List String) : IO UInt32 := do
       unless linters.any (·.name == n.toName) do
         throwError "not a linter: {n}"
     let results ← lintCore decls linters (inIO := true)
+    return (decls, linters, results)
+  let mut reportEnv := env
+  let mut reportModules := modules
+  let mut reportDecls := decls
+  let mut results := results
+  if let some file := downstreamFile then
+    let allModules := (← IO.FS.lines file).filter (!·.isEmpty) |>.map String.toName
+    unless modules.all allModules.contains do
+      IO.eprintln "lint-env-driver: downstream inventory omits a selected module"; return 2
+    unless linters.any (·.name == `unusedArguments) do
+      IO.eprintln "lint-env-driver: downstream scope requires unusedArguments"; return 2
+    -- Preserve the original environment for the other linters. Import every project module
+    -- only for the additional unused-argument pass and the combined report's rendering.
+    let imports := #[`Mathlib.Init, `Mathlib.Tactic.SetNotationForOrder] ++ allModules
+    enableInitializersExecution
+    reportEnv ← importModules (imports.map ({ module := · })) {} (trustLevel := 1024)
+      (loadExts := true)
+    let downstream := downstreamModules reportEnv modules
+    let (extraDecls, extraResults) ← Prod.fst <$> (CoreM.toIO · ctx { env := reportEnv }) do
+      let env ← getEnv
+      let allDecls ← getDeclsInPackage lintedPackage
+      let extraDecls := allDecls.filter fun d => (env.getModuleIdxFor? d).any fun idx =>
+        let mod := env.header.moduleNames[idx.toNat]!
+        downstream.contains mod && !modules.contains mod
+      let results ← lintCore extraDecls (linters.filter (·.name == `unusedArguments)) (inIO := true)
+      return (extraDecls, results)
+    reportModules := allModules
+    reportDecls := decls ++ extraDecls
+    for (linter, findings) in extraResults do
+      results := results.map fun (original, messages) =>
+        if original.name == linter.name then
+          (original, findings.fold (fun acc name msg => acc.insert name msg) messages)
+        else (original, messages)
+    IO.println s!"lint-env: unusedArguments additionally checked {extraDecls.size} declarations \
+      in transitive downstream modules"
+  let (failed, report, origins) ← Prod.fst <$> (CoreM.toIO · ctx { env := reportEnv }) do
     let failed := results.any (!·.2.isEmpty)
-    let fmt ← formatLinterResults results decls (groupByFilename := true)
+    let fmt ← formatLinterResults results reportDecls (groupByFilename := true)
       s!"in {lintedPackage}" (runSlowLinters := true) .medium linters.size
     let report ← (← addMessageContext fmt).toString
-    let origins ← try linterOrigins modules results catch _ =>
+    let origins ← try linterOrigins reportModules results catch _ =>
       pure <| Json.mkObj [("unknown", toJson "collection_failed")]
     return (failed, report, origins)
   -- Before the report region: existing report/nonce parsing is unchanged.
