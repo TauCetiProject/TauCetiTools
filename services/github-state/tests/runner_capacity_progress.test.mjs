@@ -179,3 +179,47 @@ test('productive passes survive owner replacement, coalesce callers, respect coo
   assert.equal(blocked.complete,false);assert.equal(blocked.reason,'capacity_hourly_budget');assert.equal(calls,count);
  }finally{Date.now=original;db.close();}
 });
+
+test('warm production-sized discovery completes with measured provider-like latency and at most three reads',async()=>{
+ const f=fixture(400,{repositories:14,runningCount:45,activeCount:30});let initial;
+ for(let i=0;i<20;i++){initial=await scanHostedCapacity('org',f.read,20,f.cache);if(initial.routing_version===2)break;}
+ assert.equal(initial.routing_version,2);
+ let active=0,peak=0;
+ const read=async(path,body)=>{
+  active++;peak=Math.max(peak,active);
+  try {
+   const delay=path.startsWith('/orgs/')?550:path.includes('/repo/actions/runs?')?1450:300;
+   await new Promise(resolve=>setTimeout(resolve,delay));return await f.read(path,body);
+  }finally{active--;}
+ };
+ const v=await scanHostedCapacity('org',read,20,f.cache);
+ assert.equal(v.routing_version,2);assert.equal(v.namespace_busy,4);assert.ok(v.requests<=80);
+ assert.ok(v.elapsed_ms<15000);assert.ok(peak<=3);assert.equal(active,0);
+ console.log(JSON.stringify({provider_latency_test_ms:v.elapsed_ms,requests:v.requests,peak_reads:peak}));
+});
+
+test('initial recovery can progress behind historical scan spending without changing the hourly ceiling',async()=>{
+ const f=fixture(400,{repositories:14,runningCount:45,activeCount:30}),db=new DatabaseSync(':memory:'),values=new Map();let calls=0;
+ const original=Date.now;let clock=original();const started=clock;Date.now=()=>clock;
+ values.set('runner-capacity-attempts',Array.from({length:1840},(_,i)=>started-3600000+i*3600000/1840));
+ const storage={get:async key=>values.get(key),put:async(key,value)=>values.set(key,structuredClone(value)),sql:{exec(q,...args){
+  let rows=[];if(!args.length && q.includes(';'))db.exec(q);else {const s=db.prepare(q);if(s.columns().length)rows=s.all(...args);else s.run(...args);}
+  return {toArray:()=>rows,one:()=>{assert.equal(rows.length,1);return rows[0];}};
+ }}};
+ try {
+  let result,sawQuick=false;
+  for(let i=0;i<25;i++) {
+   const owner=new InstallationScheduler({storage},{});owner.token=async()=> 'token';owner.usable=()=>5000;
+   owner.http=async(path,token,method,body)=>{calls++;return f.read(path,body);};
+   result=await(await owner.runnerCapacity({name:'org/repo',installation:'200'})).json();
+   assert.ok(values.get('runner-capacity-attempts').length<=2400);
+   if(result.routing_version===2)break;
+   if(result.retry_at-clock<=31000)sawQuick=true;
+   clock=result.retry_at+1;
+  }
+  assert.equal(result.routing_version,2);assert.equal(result.namespace_busy,4);assert.equal(sawQuick,true);
+  const bootstrap=values.get('runner-capacity-label-bootstrap-v2:org');assert.equal(bootstrap.done,true);assert.ok(bootstrap.spent<=800);
+  assert.ok(clock-started<15*60000);
+  console.log(JSON.stringify({old_hour_requests:1840,new_requests:calls,bootstrap_ms:clock-started}));
+ }finally{Date.now=original;db.close();}
+});

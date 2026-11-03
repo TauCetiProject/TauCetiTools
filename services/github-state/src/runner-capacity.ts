@@ -9,14 +9,20 @@ export async function scanHostedCapacity(
   read:(path:string,body?:unknown)=>Promise<{status:number;body:any;link?:string;deferred?:boolean}>,
   namespaceTarget=20,
   cache?:JobLabelCache,
-):Promise<{routing_version:number;busy:number;running_jobs:Record<string,number>;namespace_busy?:number;namespace_busy_lower_bound?:number;queued_fleet?:string[][];placement_unavailable?:string;requests:number;repositories:number;runs:number;observed_at:number;job_cache_hits:number;job_cache_writes:number}> {
-  let requests=0;const deadline=Date.now()+15000;
+):Promise<{routing_version:number;busy:number;running_jobs:Record<string,number>;namespace_busy?:number;namespace_busy_lower_bound?:number;queued_fleet?:string[][];placement_unavailable?:string;requests:number;repositories:number;runs:number;observed_at:number;job_cache_hits:number;job_cache_writes:number;elapsed_ms:number;running_requests:number}> {
+  let requests=0;const started=Date.now(),deadline=started+15000;
   let job_cache_hits=0,job_cache_writes=0;
   if(!Number.isSafeInteger(namespaceTarget) || namespaceTarget<1 || namespaceTarget>10000)throw new Error('capacity_invalid_namespace_target');
   let queuedPagination=false;
+  let active=0;const waiters:(()=>void)[]=[];
   async function request(path:string,body?:unknown) {
-    if(requests>=80 || Date.now()>deadline)throw new Error('capacity_scan_limit');
-    requests++;return read(path,body);
+    if(active<3)active++;else await new Promise<void>(resolve=>waiters.push(resolve));
+    try {
+      if(requests>=80 || Date.now()>deadline)throw new Error('capacity_scan_limit');
+      requests++;return await read(path,body);
+    }finally {
+      const next=waiters.shift();if(next)next();else active--;
+    }
   }
   type Range={lower?:number;upper?:number};
   function ranged(path:string,range:Range):string {
@@ -56,8 +62,10 @@ export async function scanHostedCapacity(
           // Overlap at the split instant: this also covers providers retaining
           // sub-second precision behind second-resolution created_at values.
           const older={lower:range.lower,upper:split},newer={lower:split,upper:range.upper};
-          await pages(ranged(path,older),key,visit,older);
-          await pages(ranged(path,newer),key,visit,newer);
+          const children=await Promise.allSettled([
+            pages(ranged(path,older),key,visit,older),pages(ranged(path,newer),key,visit,newer),
+          ]);
+          for(const child of children)if(child.status==='rejected')throw child.reason;
           return rows;
         }
         // Legacy/incomplete provider metadata cannot establish range coverage.
@@ -203,13 +211,14 @@ export async function scanHostedCapacity(
   await discover('in_progress');
   await jobs(activeRuns);
   const running=busy;
+  const running_requests=requests;
   const prefix=(name:string)=>'/repos/'+encodeURIComponent(organization)+'/'+encodeURIComponent(name);
   const queuedRepos=[...repos].sort((a,b)=>(namespaceByRepo.get(prefix(b.name)) || 0)-(namespaceByRepo.get(prefix(a.name)) || 0));
   try {
     if(namespace_busy>=namespaceTarget)throw new Error('capacity_namespace_target');
     // Inspect each queued page before fetching another. A large queue must help
     // establish a full pool instead of consuming every request just listing runs.
-    for(const repo of queuedRepos) {
+    const inspect=async(repo:{name:string})=>{
       const repoPrefix=prefix(repo.name);
       await pages(repoPrefix+'/actions/runs?status=queued','workflow_runs',async rows=>{
         const queued:typeof activeRuns=[];
@@ -227,12 +236,17 @@ export async function scanHostedCapacity(
         }
         await jobs(queued,true);
       },{});
-    }
+    };
+    // Prove saturation in known Namespace workflows before spending requests
+    // on quiet repositories. Independent quiet listings may then run together.
+    const preferred=queuedRepos.filter(repo=>(namespaceByRepo.get(prefix(repo.name)) || 0)>0);
+    await each(preferred,inspect);
+    await each(queuedRepos.filter(repo=>!preferred.includes(repo)),inspect);
     // Offset pages can skip jobs as queued workflows start between requests.
     if(queuedPagination)throw new Error('capacity_queue_pagination');
   } catch(error) {
     // Retain distinct jobs from every completed page, including a partial scan.
-    return {routing_version:1,busy:running,running_jobs,namespace_busy_lower_bound:namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:Date.now(),job_cache_hits,job_cache_writes,placement_unavailable:error instanceof Error && error.message.startsWith('capacity_')?error.message:'capacity_inventory_unavailable'};
+    return {routing_version:1,busy:running,running_jobs,namespace_busy_lower_bound:namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:Date.now(),job_cache_hits,job_cache_writes,elapsed_ms:Date.now()-started,running_requests,placement_unavailable:error instanceof Error && error.message.startsWith('capacity_')?error.message:'capacity_inventory_unavailable'};
   }
-  return {routing_version:2,busy:running,running_jobs,namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:Date.now(),job_cache_hits,job_cache_writes};
+  return {routing_version:2,busy:running,running_jobs,namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:Date.now(),job_cache_hits,job_cache_writes,elapsed_ms:Date.now()-started,running_requests};
 }

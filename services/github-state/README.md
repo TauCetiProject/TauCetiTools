@@ -586,11 +586,18 @@ creation metadata remains explicitly unknown.
 
 Each pass retains the existing eighty-request/fifteen-second ceiling, counting
 REST and GraphQL calls. A productive partial pass has one shared thirty-second
-cooldown only while its cache-hit frontier advances and fewer than 1200 attempts
+cooldown only while its cache-hit frontier advances and fewer than 900 attempts
 have been spent in the rolling hour. Active pickers continue unseen work after an
 owner restart; no extra poller is added. Normal successful scans and other failures
 keep the two-minute cache. The 2400-attempt hourly ceiling and 1500 core reserve
 are unchanged; GraphQL observation also preserves a 1000-point reserve.
+Initial cache bootstrap may use up to 800 attempts of that same hourly allowance
+when prior scans have already spent more than 900 calls. It never raises the
+2400-call ceiling, preserves 160 attempts before admitting a continuation, and
+closes durably on the first full inventory or after the bootstrap allowance.
+Queued repositories and range branches progress concurrently under one global
+three-request gate. Snapshots expose elapsed time and the running-inventory
+request subtotal to distinguish request exhaustion from slow provider responses.
 
 Discovery stops after observing at least the requested `namespace_cap` distinct
 Namespace builds, or at the existing scan limit. The positive integer target
