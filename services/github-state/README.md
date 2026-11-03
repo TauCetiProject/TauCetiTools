@@ -570,7 +570,29 @@ build count.
 
 Queued discovery inspects jobs as each workflow page arrives, starting with
 repositories and workflows already using Namespace, with older runs first on each
-page. It stops after observing at least the requested `namespace_cap` distinct
+page. Batched GraphQL check-suite reads supply fresh job IDs and execution states.
+Only immutable job labels and already-assigned runner identities are reused from
+a compact SQLite cache. A new job ID (including a matrix expansion or rerun)
+requires fresh REST details; a queued job starting without a known runner refreshes
+its assignment. Missing or paginated check-suite data uses ordinary REST discovery.
+Completed REST job receipts cannot be resurrected by a delayed check-suite status.
+Inactive metadata entries expire after an hour; cached metadata is never an
+activity count. GraphQL batches request at most 200 job nodes to bound point cost.
+
+Large queued listings use overlapping creation-time ranges instead of shifting
+offset pages. Their split instant belongs to both children, avoiding sub-second
+boundary gaps; job IDs deduplicate overlaps. An overfull single second or missing
+creation metadata remains explicitly unknown.
+
+Each pass retains the existing eighty-request/fifteen-second ceiling, counting
+REST and GraphQL calls. A productive partial pass has one shared thirty-second
+cooldown only while its cache-hit frontier advances and fewer than 1200 attempts
+have been spent in the rolling hour. Active pickers continue unseen work after an
+owner restart; no extra poller is added. Normal successful scans and other failures
+keep the two-minute cache. The 2400-attempt hourly ceiling and 1500 core reserve
+are unchanged; GraphQL observation also preserves a 1000-point reserve.
+
+Discovery stops after observing at least the requested `namespace_cap` distinct
 Namespace builds, or at the existing scan limit. The positive integer target
 (default twenty, maximum 10,000) follows the picker's configured admission cap.
 One organization snapshot is shared across targets: a complete inventory answers
@@ -583,8 +605,8 @@ plus `namespace_busy_lower_bound`, observed `queued_fleet` reservations, and
 `placement_unavailable`. Distinct job IDs
 are counted once, and completed pages remain useful if a later page fails.
 All counts are advisory observations over the scan window. A lower bound at or
-above a picker's cap is evidence of saturation. Offset-based queued pagination
-stays partial, because starting workflows can shift between pages. An incomplete
+above a picker's cap is evidence of saturation. Legacy offset-based queued
+pagination stays partial, because starting workflows can shift between pages. An incomplete
 count below that cap does not establish spare capacity: the picker continues
 through its configured destinations and native GitHub fallback. Logs show the
 lower bound, inventory coverage, cap state, and partial-scan reason.
