@@ -3,6 +3,7 @@
 import copy
 import datetime
 import json
+import os
 import re
 import unittest
 from unittest.mock import patch
@@ -155,6 +156,15 @@ class BatchedEvidenceTests(unittest.TestCase):
         self.assertEqual({a["key"] for a in stranded}, {f"stranded-pr/{n}" for n in range(1, 731)})
         self.assertLess(len(client.calls), 100)
 
+    def test_explicit_timeline_subset_skips_ordinary_queued_heads(self):
+        client = EvidenceClient()
+        snapshot = prepared(client, 730)
+        snapshot.load_timelines([1, 730])
+        snapshot.timeline_events(1)
+        snapshot.timeline_events(730)
+        self.assertEqual(len(client.calls), 1)
+        self.assertNotIn("pr2:pullRequest", client.calls[0])
+
     def test_timeline_pages_preserve_current_cycle_and_are_shared(self):
         client = EvidenceClient([
             {"pr1": evidence(timelineItems=connection([timeline(), timeline("RemovedFromMergeQueueEvent", "2026-11-02T06:00:00Z")], "next"))},
@@ -229,6 +239,89 @@ class BatchedEvidenceTests(unittest.TestCase):
         now = datetime.datetime(2026, 11, 2, 12, tzinfo=datetime.timezone.utc)
         with patch.object(sa, "_snapshot", snapshot), patch.object(sa, "now_utc", return_value=now):
             self.assertEqual(sa.detect_stranded_prs(), [])
+
+
+class BorsEvidenceTests(unittest.TestCase):
+    def queue(self):
+        return dict(schema="tauceti-bors.observation/v1", repo="TauCetiProject/TauCeti", base="main",
+                    batch_ids=[7], batches=[dict(id=7, state="waiting", base="main",
+                                                members=[dict(pr=1, head_sha="a" * 40)])])
+
+    def test_exact_bors_queue_and_branch_progress_are_scoped_and_cached(self):
+        class MainClient:
+            def __init__(self): self.calls = []
+            def graphql(self, query, variables):
+                self.calls.append(variables)
+                return dict(repository=dict(ref=dict(target=dict(oid="b" * 40, committedDate="2026-11-02T11:00:00Z"))))
+        client = MainClient()
+        snapshot = Snapshot("TauCetiProject/TauCeti", client, backend="bors")
+        with patch("bors_observation.observation", return_value=self.queue()) as observe:
+            data = snapshot.bors_state()
+            self.assertIs(snapshot.bors_state(), data)
+        self.assertEqual(data["heads"], {(1, "a" * 40)})
+        observe.assert_called_once_with(branch="main")
+        self.assertEqual(client.calls[0]["ref"], "refs/heads/main")
+
+    def test_incomplete_or_wrong_scope_bors_inventory_is_not_empty_queue_evidence(self):
+        variants = [dict(self.queue(), schema="unknown"), dict(self.queue(), repo="other/repo"),
+                    dict(self.queue(), batch_ids=[7, 8]), dict(self.queue(), batch_ids=[7, 7]),
+                    dict(self.queue(), batches=[])]
+        bad = self.queue()
+        bad["batches"][0]["members"][0]["head_sha"] = "short"
+        variants.append(bad)
+        for response in variants:
+            with self.subTest(response=response):
+                snapshot = Snapshot("TauCetiProject/TauCeti", EvidenceClient(), backend="bors")
+                with patch("bors_observation.observation", return_value=response) as observe:
+                    with self.assertRaises(RuntimeError):
+                        snapshot.bors_state()
+                    with self.assertRaises(RuntimeError):
+                        snapshot.bors_state()
+                self.assertEqual(observe.call_count, 1)
+
+    def test_configured_base_branch_is_used_by_the_inventory(self):
+        client = Client([page([node()])])
+        with patch.dict(os.environ, {"TAUCETI_BASE_BRANCH": "release"}):
+            Snapshot("owner/repo", client).pulls()
+        self.assertEqual(client.calls[0]["base"], "release")
+
+
+class BorsAlertTests(unittest.TestCase):
+    def setUp(self):
+        self.client = EvidenceClient()
+        self.snapshot = prepared(self.client, 2)
+        self.snapshot.merge_backend = "bors"
+        self.now = datetime.datetime(2026, 11, 2, 12, tzinfo=datetime.timezone.utc)
+
+    def check(self, queue):
+        with (patch.object(sa, "_snapshot", self.snapshot), patch.object(sa, "now_utc", return_value=self.now),
+              patch.object(self.snapshot, "bors_state", return_value=queue),
+              patch.object(sa.core, "gh_api", side_effect=AssertionError("per-PR REST request"))):
+            return sa.detect_stranded_prs()
+
+    def test_current_queued_heads_with_recent_main_progress_are_normal_backlog(self):
+        alerts = self.check(dict(heads={(1, "head"), (2, "head")}, committed_at="2026-11-02T11:00:00Z"))
+        self.assertEqual(alerts, [])
+        self.assertEqual(self.client.calls, [])
+        with patch.object(sa, "_snapshot", self.snapshot):
+            self.assertEqual(sa.detect_eviction_loops(), [])
+
+    def test_old_queued_head_does_not_hide_the_current_unclaimed_head(self):
+        alerts = self.check(dict(heads={(1, "old-head"), (2, "head")}, committed_at="2026-11-02T11:00:00Z"))
+        self.assertEqual([a["key"] for a in alerts], ["stranded-pr/1"])
+
+    def test_stalled_merge_train_remains_one_real_incident(self):
+        alerts = self.check(dict(heads={(1, "head"), (2, "head")}, committed_at="2026-11-01T00:00:00Z"))
+        self.assertEqual([a["key"] for a in alerts], ["stranded-pr/bors-progress"])
+        self.assertIn("has not advanced", alerts[0]["body"])
+
+    def test_missing_queue_or_future_main_clock_cannot_clear_stranded_alerts(self):
+        with (patch.object(sa, "_snapshot", self.snapshot), patch.object(sa, "now_utc", return_value=self.now),
+              patch.object(sa, "DETECTORS", [("stranded-pr", sa.detect_stranded_prs)])):
+            with patch.object(self.snapshot, "bors_state", side_effect=RuntimeError("unknown queue")):
+                self.assertEqual(sa.collect_alerts(), ([], {"stranded-pr"}))
+            with patch.object(self.snapshot, "bors_state", return_value=dict(heads=set(), committed_at="2026-11-03T00:00:00Z")):
+                self.assertEqual(sa.collect_alerts(), ([], {"stranded-pr"}))
 
 
 if __name__ == "__main__":

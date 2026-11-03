@@ -1,16 +1,19 @@
-"""One complete, head-bound PR snapshot for the hourly watchdog.
+"""Head-bound batched observations for one watchdog run.
 
-Fetching statuses and branch tips separately for every PR made the watchdog
-exceed its ten-minute job timeout before it could reconcile any alerts.
+Inventory, label/eviction histories, scoreboard comments, changed paths and
+mergeability are read in batches and cached. Connections are fully paginated;
+missing evidence or a moving head fails closed. Bors observations additionally
+bind queued heads and recent base-branch progress to their configured authority.
 """
 
 import json
+import os
 
 from github_api import GitHub
 
-QUERY = """query($owner:String!, $name:String!, $cursor:String) {
+QUERY = """query($owner:String!, $name:String!, $base:String!, $cursor:String) {
   repository(owner:$owner, name:$name) {
-    pullRequests(states:OPEN, baseRefName:"main", first:50, after:$cursor) {
+    pullRequests(states:OPEN, baseRefName:$base, first:50, after:$cursor) {
       pageInfo { hasNextPage endCursor }
       nodes {
         number headRefOid headRefName isDraft updatedAt
@@ -34,15 +37,71 @@ QUERY = """query($owner:String!, $name:String!, $cursor:String) {
 
 
 class Snapshot:
-    def __init__(self, repo, client=None):
+    """Cache read-only evidence using TAUCETI_MERGE_BACKEND and TAUCETI_BASE_BRANCH."""
+
+    def __init__(self, repo, client=None, backend=None):
         self.repo = repo
         self.client = client or GitHub(max_wait=0)
+        self.merge_backend = os.environ.get("TAUCETI_MERGE_BACKEND", "github-queue") if backend is None else backend
+        if self.merge_backend not in {"github-queue", "bors"}:
+            raise ValueError("Unknown watchdog merge backend")
+        self.branch = os.environ.get("TAUCETI_BASE_BRANCH", "main")
         self._rows = None
         self.review_prs = {}
         self.error = None
         self._timelines = None
         self._timeline_error = None
         self.readiness_prs = {}
+        self._bors = None
+        self._bors_error = None
+
+    def bors_state(self):
+        """Observe exact queued heads and main progress from configured Bors authority.
+
+        A partial queue cannot prove a PR is absent; missing evidence therefore
+        fails the detector closed instead of generating false stranded alerts.
+        """
+        if self.merge_backend != "bors":
+            return None
+        if self._bors_error:
+            raise RuntimeError("Watchdog Bors evidence unavailable") from self._bors_error
+        if self._bors is None:
+            try:
+                from bors_observation import observation, sha, valid_observation
+                data = observation(branch=self.branch)
+                batches, identities = data.get("batches"), data.get("batch_ids")
+                if (not valid_observation(data, self.branch) or data.get("repo") != self.repo
+                        or not isinstance(batches, list) or not isinstance(identities, list)
+                        or any(type(i) is not int or i <= 0 for i in identities)
+                        or len(identities) != len(set(identities))):
+                    raise RuntimeError("Incomplete watchdog Bors inventory")
+                heads, observed = set(), []
+                for batch in batches:
+                    if (not isinstance(batch, dict) or type(batch.get("id")) is not int
+                            or batch.get("base") != self.branch or batch.get("state") not in {"waiting", "running"}
+                            or not isinstance(batch.get("members"), list)):
+                        raise RuntimeError("Incomplete watchdog Bors batch")
+                    observed.append(batch["id"])
+                    for member in batch["members"]:
+                        if (not isinstance(member, dict) or type(member.get("pr")) is not int
+                                or member["pr"] <= 0 or not sha(member.get("head_sha"))):
+                            raise RuntimeError("Incomplete watchdog Bors member")
+                        heads.add((member["pr"], member["head_sha"]))
+                if len(observed) != len(identities) or set(observed) != set(identities):
+                    raise RuntimeError("Truncated watchdog Bors inventory")
+                owner, name = self.repo.split("/", 1)
+                query = ("query($owner:String!, $name:String!, $ref:String!) { "
+                         "repository(owner:$owner,name:$name) { ref(qualifiedName:$ref) { "
+                         "target { ... on Commit { oid committedDate } } } } }")
+                result = self.client.graphql(query, dict(owner=owner, name=name, ref="refs/heads/" + self.branch))
+                commit = result["repository"]["ref"]["target"]
+                if not sha(commit.get("oid")) or not isinstance(commit.get("committedDate"), str):
+                    raise RuntimeError("Missing watchdog main progress evidence")
+                self._bors = dict(heads=heads, committed_at=commit["committedDate"])
+            except Exception as error:
+                self._bors_error = error
+                raise
+        return self._bors
 
     def _connections(self, numbers, selections, scalars=""):
         """Batch complete PR connections, binding every page to the observed head.
@@ -119,27 +178,36 @@ class Snapshot:
                 return result
         raise RuntimeError("Watchdog evidence was truncated")
 
-    def timeline_events(self, number):
-        """Reuse complete ready-PR label/eviction histories across both detectors."""
+    def load_timelines(self, numbers):
+        """Batch missing complete histories for the detector's candidate PRs."""
         if self._timeline_error:
             raise RuntimeError("Watchdog timelines unavailable") from self._timeline_error
         if self._timelines is None:
-            try:
-                numbers = [row["number"] for row in self.pulls()
-                           if not row.get("draft") and "ready-to-merge" in row.get("labels", [])]
-                selection = ("__typename ... on LabeledEvent { createdAt label { name } } "
-                             "... on UnlabeledEvent { createdAt label { name } } "
-                             "... on RemovedFromMergeQueueEvent { createdAt }")
-                self._timelines = self._connections(numbers, {"timelineItems": selection})
-                for record in self._timelines.values():
-                    for event in record["timelineItems"]:
-                        if (event.get("__typename") not in {"LabeledEvent", "UnlabeledEvent",
-                                                            "RemovedFromMergeQueueEvent"}
-                                or not isinstance(event.get("createdAt"), str) or not event["createdAt"]):
-                            raise RuntimeError("Incomplete watchdog timeline event")
-            except Exception as error:
-                self._timeline_error = error
-                raise
+            self._timelines = {}
+        try:
+            numbers = [number for number in numbers if number not in self._timelines]
+            selection = ("__typename ... on LabeledEvent { createdAt label { name } } "
+                         "... on UnlabeledEvent { createdAt label { name } } "
+                         "... on RemovedFromMergeQueueEvent { createdAt }")
+            records = self._connections(numbers, {"timelineItems": selection})
+            for record in records.values():
+                for event in record["timelineItems"]:
+                    if (event.get("__typename") not in {"LabeledEvent", "UnlabeledEvent",
+                                                        "RemovedFromMergeQueueEvent"}
+                            or not isinstance(event.get("createdAt"), str) or not event["createdAt"]):
+                        raise RuntimeError("Incomplete watchdog timeline event")
+            self._timelines.update(records)
+        except Exception as error:
+            self._timeline_error = error
+            raise
+
+    def timeline_events(self, number):
+        """Reuse complete label/eviction histories across both detectors."""
+        if self._timelines is None:
+            self.load_timelines([row["number"] for row in self.pulls()
+                                 if not row.get("draft") and "ready-to-merge" in row.get("labels", [])])
+        else:
+            self.load_timelines([number])
         return self._timelines[number]["timelineItems"]
 
     def load_readiness(self, numbers):
@@ -164,7 +232,7 @@ class Snapshot:
         owner, name = self.repo.split("/", 1)
         cursor, seen, rows = None, set(), []
         for _ in range(100):
-            data = self.client.graphql(QUERY, dict(owner=owner, name=name, cursor=cursor))
+            data = self.client.graphql(QUERY, dict(owner=owner, name=name, base=self.branch, cursor=cursor))
             connection = data["repository"]["pullRequests"]
             for node in connection["nodes"]:
                 if node["labels"]["pageInfo"]["hasNextPage"]:

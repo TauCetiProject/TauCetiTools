@@ -147,6 +147,7 @@ class Project:
             "TAUCETI_CI_REPO": self.repos.get("ci", "") if self.feature("ci_archive") else "",
             "TAUCETI_CLAIMS_REPO": self.repos.get("claims", "") if self.feature("claims") else "",
             "TAUCETI_BASE_BRANCH": self.branch,
+            "TAUCETI_MERGE_BACKEND": self.raw.get("merge", {}).get("backend", "github-queue"),
             "TAUCETI_LEAN_ROOT": self.roots[0],
             "TAUCETI_LEAN_ROOTS": json.dumps(self.roots),
             "TAUCETI_ROADMAP_DIR": self.roadmap_dir,
