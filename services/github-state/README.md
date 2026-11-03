@@ -134,6 +134,14 @@ for ownership, prepared status, release evidence, and rollback requirements.
 The installation object owns token refresh, all GitHub read requests,
 per-resource quotas, API selection, and accounting. Every GraphQL query asks
 for `rateLimit.cost`; concurrent header differences are not point accounting.
+Recent cost estimates and API latency lookups share an accounting index ordered
+by API, operation and observation time. This avoids repeatedly scanning the
+seven-day ledger and preserves existing cost, quota and routing decisions. The
+index is built by the existing minute maintenance path and maintained with that
+ledger. Startup and ordinary reads never build it. Before attempting creation,
+maintenance durably flushes a one-day retry deadline, so a storage failure or
+CPU-limit reset cannot cause repeated builds on subsequent startups or ticks.
+The existing queries remain available while the optimization is absent.
 REST 304 responses record zero primary points. Similar quota pressure permits
 selection by measured latency; scarce pools are preserved for operations with
 no alternative API. Batch histories and reactions reduce request cost. Nested
