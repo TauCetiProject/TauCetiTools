@@ -23,7 +23,7 @@ export async function scanHostedCapacity(
   async function request(path:string,body?:unknown) {
     if(active<concurrency)active++;else await new Promise<void>(resolve=>waiters.push(resolve));
     try {
-      if(requests>=80 || Date.now()>deadline)throw new Error('capacity_scan_limit');
+      if(requests>=96 || Date.now()>deadline)throw new Error('capacity_scan_limit');
       requests++;return await read(path,body);
     }finally {
       const next=waiters.shift();if(next)next();else active--;

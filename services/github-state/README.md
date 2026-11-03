@@ -554,7 +554,7 @@ Source verification does not select PostgreSQL or constitute a release receipt.
 
 `GET /v1/runner-capacity?repository=OWNER/REPO&namespace_cap=20` requires an existing client token
 authorized for that configured repository. Its installation owner performs one
-bounded organization inventory and shares the result for two minutes, coalescing
+bounded organization inventory and shares the result for 145 seconds, coalescing
 concurrent requests. It counts running GitHub-hosted jobs, excluding Namespace
 and self-hosted labels, across the repositories visible to the installation.
 The current deployment organization has only public repositories. Adding private
@@ -563,7 +563,7 @@ repositories requires granting the installation visibility to those repositories
 The response includes `complete`, `organization`, `busy`, `observed_at`, `retry_at`,
 and refresh request counts. This is an advisory observation, not a reserved slot
 or an atomic snapshot. Missing running-inventory pages or quota rejection produce
-HTTP 503 with `complete:false`. Failed refreshes are cached for two minutes (or a
+HTTP 503 with `complete:false`. Failed refreshes are cached for 145 seconds (or a
 longer instructed cooldown). Routing version 2 also reports a complete observed
 inventory of queued/running Namespace build jobs and queued fleet targets.
 Picker, recovery, publication, and finalizer control jobs are excluded from the
@@ -594,17 +594,19 @@ and subdivides any newly overfull range. No coverage or activity is cached.
 Fresh leaf counts merge sparse neighboring ranges and remove all splits when a
 queue drains, so old bursts do not permanently multiply listing requests.
 
-Each pass retains the existing eighty-request ceiling, counting REST and GraphQL
+Each pass has a ninety-six-request ceiling, counting REST and GraphQL
 calls, with a twenty-second launch window inside the picker's existing 25-second
 timeout. Cached-only status reads never wait for that discovery. A productive partial pass has one shared thirty-second
 cooldown only while its cache-hit frontier advances and fewer than 900 attempts
 have been spent in the rolling hour. Active pickers continue unseen work after an
 owner restart; no extra poller is added. Normal successful scans and other failures
-keep the two-minute cache. The 2400-attempt hourly ceiling and 1500 core reserve
+keep the 145-second cache. The 2400-attempt hourly ceiling and 1500 core reserve
 are unchanged; GraphQL observation also preserves a 1000-point reserve.
+At most twenty-five full scans fit in a rolling hour; 25 × 96 stays within the
+same 2400-attempt ceiling while leaving enough room to finish each inventory.
 Initial cache bootstrap may use up to 800 attempts of that same hourly allowance
 when prior scans have already spent more than 900 calls. It never raises the
-2400-call ceiling, preserves 160 attempts before admitting a continuation, and
+2400-call ceiling, preserves 192 attempts before admitting a continuation, and
 closes durably on the first full inventory or after the bootstrap allowance.
 Queued repositories and range branches progress concurrently under one global
 four-request gate. Snapshots expose elapsed time and the running-inventory
@@ -633,7 +635,7 @@ Refresh uses existing installation quota accounting, honors secondary cooldowns,
 leaves at least 1,500 core requests for repository work, and spends at most 2,400
 read attempts per rolling hour, including lost network responses on this operation. Brief request-slot
 contention yields within the scan deadline rather than invalidating the snapshot. A scan is bounded to
-80 requests, at most four simultaneous reads, and a 20-second launch window; individual requests retain their
+96 requests, at most four simultaneous reads, and a 20-second launch window; individual requests retain their
 existing timeout. There is no alarm, CI event storage, or new polling task.
 
 Pickers without a configured shared service retain bounded direct discovery.

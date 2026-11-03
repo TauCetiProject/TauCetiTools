@@ -154,8 +154,8 @@ test('hourly allowance and lost responses survive refresh and cannot be bypassed
  assert.equal(values.get('runner-capacity-attempts').length,1);
  await scheduler.runnerCapacity({name:'org/repo',installation:'200'});assert.equal(calls,1);
 });
-test('continuous callers reuse two-minute snapshots within the rolling hourly allowance',async()=>{
- for(const repositories of [17,26]){
+test('continuous callers fit up to 96 requests per scan within the unchanged hourly allowance',async()=>{
+ for(const repositories of [17,26,31]){
  const {scheduler,values}=schedulerFixture();let calls=0,clock=Date.now();const original=Date.now;
  Date.now=()=>clock;
  scheduler.http=async path=>{
@@ -165,15 +165,19 @@ test('continuous callers reuse two-minute snapshots within the rolling hourly al
   return envelope('jobs',[hosted]);
  };
  try {
-  // 52 requests per scan matches production; 79 exercises the 80-call bound.
-  for(let minute=0;minute<60;minute++){
+  let scans=0;
+  for(let elapsed=0;elapsed<3600000;elapsed+=5000){
+   const fresh=values.get('runner-capacity:org')?.retry_at>clock;
    const result=await (await scheduler.runnerCapacity({name:'org/repo',installation:'200'})).json();
    assert.equal(result.complete,true);assert.equal(result.busy,repositories);
-   assert.equal(result.cached===true,minute%2===1);
-   assert.ok(result.retry_at>clock);
-   clock+=60000;
+   assert.equal(result.cached===true,fresh);
+   assert.ok(result.retry_at>clock);assert.ok(result.retry_at-result.observed_at<150000);
+   if(!fresh)scans++;
+   assert.ok(calls<=2400);
+   clock+=5000;
   }
-  assert.equal(calls,30*(1+3*repositories));assert.equal(values.get('runner-capacity-attempts').length,calls);
+  assert.equal(scans,25);assert.equal(calls,scans*(1+3*repositories));
+  assert.equal(values.get('runner-capacity-attempts').length,calls);
  }finally{Date.now=original;}
  }
 });
@@ -213,10 +217,10 @@ test('many empty queued workflows preserve running capacity within the existing 
   if(path.includes('status=queued'))return envelope('workflow_runs',Array.from({length:100},(_,i)=>({id:i+2})));
   return envelope('jobs',path.includes('/runs/1/jobs')?[hosted,{name:'sandboxed-build',status:'in_progress',labels:['nscloud-ubuntu-test']}]:[]);
  });
- assert.equal(value.routing_version,1);assert.equal(value.busy,1);assert.equal(value.requests,80);
+ assert.equal(value.routing_version,1);assert.equal(value.busy,1);assert.equal(value.requests,96);
  assert.equal(value.namespace_busy,undefined);assert.deepEqual(value.queued_fleet,[]);
  assert.equal(value.namespace_busy_lower_bound,1);
- assert.equal(value.placement_unavailable,'capacity_scan_limit');assert.equal(calls.length,80);
+ assert.equal(value.placement_unavailable,'capacity_scan_limit');assert.equal(calls.length,96);
 });
 const ns=(id,status='queued')=>({id,name:'sandboxed-build',status,labels:['nscloud-ubuntu-test']});
 test('a thousand queued workflows establish saturation from their first page, busiest repository first',async()=>{

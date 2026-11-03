@@ -61,11 +61,11 @@ function fixture(count=400,{sameSecond=false,repositories=1,runningCount=1,activ
  };
  return {read,cache,rows,saved,ranges,reads,extraNamespace,extraJobs,completed,promoted,generation,historical};
 }
-test('a 400-run mostly hosted queue converges under the unchanged 80-request bound',async()=>{
+test('a 400-run mostly hosted queue converges under the 96-request bound',async()=>{
  const f=fixture();let value,total=0,passes=0;
  do {
   value=await scanHostedCapacity('org',f.read,20,f.cache);total+=value.requests;passes++;
-  assert.ok(value.requests<=80);
+  assert.ok(value.requests<=96);
   if(value.routing_version!==2){assert.equal(value.placement_unavailable,'capacity_scan_limit');assert.ok(value.job_cache_writes>0);}
  }while(value.routing_version!==2 && passes<12);
  assert.equal(value.routing_version,2);assert.equal(value.namespace_busy,4);assert.equal(value.busy,1);
@@ -175,7 +175,7 @@ test('overlapping ranges retain hidden fractional-second boundary jobs',async()=
 test('an overfull single second stays unknown instead of falsely certifying paginated coverage',async()=>{
  const f=fixture(101,{sameSecond:true});let v;
  for(let i=0;i<3;i++)v=await scanHostedCapacity('org',f.read,20,f.cache);
- assert.equal(v.routing_version,1);assert.equal(v.placement_unavailable,'capacity_queue_pagination');assert.ok(v.requests<=80);
+ assert.equal(v.routing_version,1);assert.equal(v.placement_unavailable,'capacity_queue_pagination');assert.ok(v.requests<=96);
 });
 test('only a complete job-page traversal can populate durable queued observations',async()=>{
  const f=fixture(1);
@@ -222,16 +222,16 @@ test('productive passes survive owner replacement, coalesce callers, respect coo
    clock+=31000;
    const current=await(await make().runnerCapacity({name:'org/repo',installation:'200'})).json();
    assert.equal(current.complete,true);assert.equal(current.routing_version,2);assert.equal(current.namespace_busy,4);
-   assert.ok(current.requests<=80);assert.ok(calls<2400);
+   assert.ok(current.requests<=96);assert.ok(calls<2400);
   }
   console.log(JSON.stringify({repos:14,running_runs:45,queued_runs:400,cold_passes:passes,cold_requests:coldCalls,hour_requests:calls}));
   let count=calls;assert.equal((await(await make().runnerCapacity({name:'org/repo',installation:'200'})).json()).cached,true);assert.equal(calls,count);
   const key=db.prepare('SELECT key FROM runner_capacity_jobs LIMIT 1').get().key;
-  db.prepare('UPDATE runner_capacity_jobs SET jobs=? WHERE key=?').run('invalid json',key);clock+=121000;
+  db.prepare('UPDATE runner_capacity_jobs SET jobs=? WHERE key=?').run('invalid json',key);clock+=146000;
   const recovered=await(await make().runnerCapacity({name:'org/repo',installation:'200'})).json();
   assert.equal(recovered.routing_version,2);assert.equal(recovered.namespace_busy,4);assert.equal(recovered.job_cache_writes,1);
   assert.doesNotThrow(()=>JSON.parse(db.prepare('SELECT jobs FROM runner_capacity_jobs WHERE key=?').get(key).jobs));count=calls;
-  values.set('runner-capacity-attempts',Array(2400).fill(clock));clock+=121000;
+  values.set('runner-capacity-attempts',Array(2400).fill(clock));clock+=146000;
   const blocked=await(await make().runnerCapacity({name:'org/repo',installation:'200'})).json();
   assert.equal(blocked.complete,false);assert.equal(blocked.reason,'capacity_hourly_budget');assert.equal(calls,count);
  }finally{Date.now=original;db.close();}
@@ -254,7 +254,7 @@ test('warm production-sized discovery completes with measured provider-like late
   }finally{active--;}
  };
  const v=await scanHostedCapacity('org',read,20,f.cache);
- assert.equal(v.routing_version,2);assert.equal(v.namespace_busy,4);assert.ok(v.requests<=80);
+ assert.equal(v.routing_version,2);assert.equal(v.namespace_busy,4);assert.ok(v.requests<=96);
  assert.ok(v.elapsed_ms<20000);assert.ok(peak<=4);assert.equal(active,0);
  console.log(JSON.stringify({provider_latency_test_ms:v.elapsed_ms,requests:v.requests,peak_reads:peak}));
 });
