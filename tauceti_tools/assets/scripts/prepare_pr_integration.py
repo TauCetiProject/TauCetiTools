@@ -17,6 +17,8 @@ import shutil
 import subprocess
 import tempfile
 
+from lake_config_policy import allows_tactic_linter
+
 PINS = ("lake-manifest.json", "lean-toolchain")
 LAKEFILES = ("lakefile.toml", "lakefile.lean")
 MODES = ("pr-integration", "frozen-candidate")
@@ -157,16 +159,26 @@ def prepare(candidate, base_checkout, head, base, mode, pins_changed=False, bump
                     run("update-index", "--add", "--cacheinfo", f"100644,{raw[2]},{path}")
                 tree = run("write-tree").stdout.decode().strip()
                 resolution = "validated-head-pins"
-            # The executable Lake configuration must come from captured trusted B.
+            # Lake configuration comes from B, except for the same data-only
+            # linter change allowed by raw-head and integrated attestation.
             # No reset/overlay of candidate infrastructure: all other candidate
             # content remains in the tested tree, but the harness is workflow-pinned.
             for path in LAKEFILES + PINS:
                 expected = head if pins_changed and path in PINS else base
                 actual = entry(tree, path)
-                if actual != entry(expected, path):
-                    raise ValueError(f"integrated {path} differs from its authorized configuration")
                 if actual and not actual.startswith(b"100644 blob "):
                     raise ValueError(f"integrated {path} is not an ordinary file")
+                if actual != entry(expected, path):
+                    # Validate both raw H and T against captured B. An upstream
+                    # config change must not make an unapproved candidate delta
+                    # disappear into a merge or discard any existing B setting.
+                    if (path != "lakefile.toml" or not entry(base, path).startswith(b"100644 blob ")
+                            or not entry(head, path).startswith(b"100644 blob ")
+                            or not allows_tactic_linter(run("show", f"{base}:{path}").stdout,
+                                                        run("show", f"{head}:{path}").stdout)
+                            or not allows_tactic_linter(run("show", f"{base}:{path}").stdout,
+                                                        run("show", f"{tree}:{path}").stdout)):
+                        raise ValueError(f"integrated {path} differs from its authorized configuration")
             tested = run("commit-tree", tree, "-p", base, "-p", head,
                          data=f"CI integration of {head} into {base}\n".encode()).stdout.decode().strip()
             # Materialize using only our clean repository/config. Keep raw objects

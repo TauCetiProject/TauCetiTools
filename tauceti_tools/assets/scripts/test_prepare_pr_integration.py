@@ -276,6 +276,32 @@ else:
         _, candidate = self.prepare(base=base)
         self.assertEqual((candidate / 'lakefile.toml').read_text(), 'trusted new main config\n')
 
+    def test_enabling_tactic_linter_survives_integration_and_attestation(self):
+        config = ('name = "TauCeti"\n[[lean_lib]]\nname = "TauCeti"\n'
+                  'leanOptions = { warningAsError = true }\n')
+        self.write('lakefile.toml', config)
+        base = self.commit('trusted library configuration')
+        self.write('lakefile.toml', config.replace('warningAsError = true',
+                   'warningAsError = true, weak.linter.unusedVariables.analyzeTactics = true'))
+        head = self.commit('enable tactic linting')
+        record, candidate = self.prepare(head=head, base=base)
+        self.assertIn('analyzeTactics = true', (candidate / 'lakefile.toml').read_text())
+        attested = subprocess.run(['bash', str(ROOT / 'scripts/attest-pr-config.sh'),
+                                  str(self.root / 'base'), str(candidate), record['tested_sha'],
+                                  'pull_request_target', '1', '0'], capture_output=True, text=True)
+        self.assertEqual(attested.returncode, 0, attested.stderr)
+
+    def test_linter_cannot_smuggle_other_config_changes_into_integration(self):
+        config = ('name = "TauCeti"\n[[lean_lib]]\nname = "TauCeti"\n'
+                  'leanOptions = { warningAsError = true }\n')
+        self.write('lakefile.toml', config)
+        base = self.commit('trusted library configuration')
+        self.write('lakefile.toml', config.replace('warningAsError = true',
+                   'warningAsError = false, weak.linter.unusedVariables.analyzeTactics = true'))
+        head = self.commit('also disable warning errors')
+        with self.assertRaisesRegex(ValueError, 'lakefile.toml'):
+            self.prepare(head=head, base=base)
+
     def test_git_config_hooks_filters_and_replacements_cannot_run(self):
         self.git('checkout', '-q', 'author')
         self.write('.gitattributes', '* filter=evil\n')
