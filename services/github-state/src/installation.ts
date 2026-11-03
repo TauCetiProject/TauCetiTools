@@ -505,7 +505,7 @@ export class InstallationScheduler extends DurableObject<Env> {
             try {
               jobs=JSON.parse(row.jobs);
               if(!Array.isArray(jobs) || !jobs.every(job=>
-                job && /^\d+$/.test(String(job.id)) && ['queued','in_progress','completed'].includes(job.status) &&
+                job && /^\d+$/.test(String(job.id)) && typeof job.status==='string' &&
                 Array.isArray(job.labels) && job.labels.every((label:unknown)=>typeof label==='string')))throw new Error('invalid cache');
             }catch {
               this.ctx.storage.sql.exec('DELETE FROM runner_capacity_jobs WHERE key=?',key);return undefined;

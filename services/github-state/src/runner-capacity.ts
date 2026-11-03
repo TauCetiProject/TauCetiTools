@@ -1,5 +1,5 @@
 // On-demand advisory discovery. No job history, CI webhook mirror, or periodic poller.
-type CapacityJob={id:number|string;name?:string;status:string;labels:string[];runner_id?:number;runner_name?:string};
+type CapacityJob={id:number|string;name?:string;status:string;labels:string[];runner_id?:number;runner_name?:string;inventory_size?:number};
 export type JobLabelCache={
   get:(key:string,revision:string)=>CapacityJob[]|undefined;
   put:(key:string,revision:string,jobs:CapacityJob[])=>void;
@@ -32,7 +32,15 @@ export async function scanHostedCapacity(
       range.upper===undefined?'>='+iso(range.lower):iso(range.lower)+'..'+iso(range.upper));
     return url.pathname+url.search;
   }
+  async function settle(work:Promise<unknown>[]):Promise<void> {
+    const results=await Promise.allSettled(work);
+    for(const result of results)if(result.status==='rejected')throw result.reason;
+  }
   async function pages(path:string,key?:string,visit?:(rows:any[])=>Promise<void>,range?:Range):Promise<any[]> {
+    if(key==='workflow_runs') {
+      const url=new URL(path,'https://api.github.com');url.searchParams.set('exclude_pull_requests','true');
+      path=url.pathname+url.search;
+    }
     const rows:any[]=[];
     for(let page=1;page<=20;page++) {
       const response=await request(path+(path.includes('?')?'&':'?')+'per_page=100&page='+page);
@@ -42,36 +50,32 @@ export async function scanHostedCapacity(
         const at=typeof run.created_at==='string'?Date.parse(run.created_at)/1000:NaN;
         return !Number.isSafeInteger(at) || range.lower!==undefined && at<range.lower || range.upper!==undefined && at>range.upper;
       }))queuedPagination=true;
-      if(visit)await visit(values);else rows.push(...values);
-      // GitHub's live Actions total_count can disagree with the returned rows
-      // even on a single page. Follow Link, as the ordinary picker does; the
-      // count is not a transactionally consistent pagination boundary.
-      if(!response.link?.includes('rel="next"'))return rows;
-      if(range!==undefined) {
+      const more=Boolean(response.link?.includes('rel="next"'));
+      let children:Range[]|undefined,unsplittable=false;
+      if(more && range!==undefined) {
         const times=values.map((run:any)=>typeof run.created_at==='string'?Date.parse(run.created_at)/1000:NaN);
         if(times.length && times.every((at:number)=>Number.isSafeInteger(at) &&
           (range.lower===undefined || at>=range.lower) && (range.upper===undefined || at<=range.upper))) {
-          // Creation-time ranges avoid unstable offset pagination.
-          // Visit parent observations first for saturation/progress, then prove
-          // coverage using single-page leaves; job/run IDs deduplicate overlap.
           let split=Math.min(...times);
           if(range.upper!==undefined && split>=range.upper)split=range.upper-1;
           if(range.lower!==undefined && split<=range.lower)split=range.lower+1;
-          if(range.lower!==undefined && split<=range.lower || range.upper!==undefined && split>=range.upper)
-            throw new Error('capacity_queue_pagination');
-          // Overlap at the split instant: this also covers providers retaining
-          // sub-second precision behind second-resolution created_at values.
-          const older={lower:range.lower,upper:split},newer={lower:split,upper:range.upper};
-          const children=await Promise.allSettled([
-            pages(ranged(path,older),key,visit,older),pages(ranged(path,newer),key,visit,newer),
-          ]);
-          for(const child of children)if(child.status==='rejected')throw child.reason;
-          return rows;
-        }
-        // Legacy/incomplete provider metadata cannot establish range coverage.
-        // Retain useful observations, but never advertise spare capacity.
-        queuedPagination=true;
+          unsplittable=range.lower!==undefined && split<=range.lower || range.upper!==undefined && split>=range.upper;
+          if(!unsplittable)children=[{lower:range.lower,upper:split},{lower:split,upper:range.upper}];
+        }else queuedPagination=true;
       }
+      // Parent visitation synchronously records its run IDs before awaiting
+      // witnesses. Child listings can overlap that latency without recounting
+      // boundary jobs; the one request gate still limits all work to three.
+      if(children && visit && cache && namespaceTarget-namespace_busy>5) {
+        await settle([visit(values),...children.map(child=>pages(ranged(path,child),key,visit,child))]);
+        return rows;
+      }
+      if(visit)await visit(values);else rows.push(...values);
+      // Follow Link rather than drifting total_count. Single-page range leaves
+      // establish coverage; overlapping split instants retain fractional dates.
+      if(!more)return rows;
+      if(unsplittable)throw new Error('capacity_queue_pagination');
+      if(children){await settle(children.map(child=>pages(ranged(path,child),key,visit,child)));return rows;}
     }
     throw new Error('capacity_scan_limit');
   }
@@ -96,7 +100,7 @@ export async function scanHostedCapacity(
   const seenRuns=new Set<string>(),seenJobs=new Set<string>();
   const namespaceByRepo=new Map<string,number>();
   const namespaceWorkflows=new Set<string>();
-  type Run={prefix:string;id:string;path?:string;suite?:string;known?:CapacityJob[];proof?:CapacityJob[]};
+  type Run={prefix:string;id:string;path?:string;suite?:string;known?:CapacityJob[];proof?:CapacityJob[];inventorySize?:number};
   const activeRuns:Run[]=[];
   function entry(prefix:string,run:any):Run {
     return {prefix,id:String(run.id),path:run.path,
@@ -111,7 +115,8 @@ export async function scanHostedCapacity(
     while(at<known.length) {
       const batch:Run[]=[],limits:number[]=[];let slots=0;
       while(at<known.length && batch.length<100) {
-        const run=known[at],limit=Math.max(2,Math.min(100,run.known?.length || 2));
+        const run=known[at],hint=run.known?.[0]?.inventory_size;
+        const limit=Math.max(2,Math.min(100,Math.max(run.known?.length || 2,Number.isSafeInteger(hint)?hint!:0)));
         if(batch.length && slots+limit>200)break;
         batch.push(run);limits.push(limit);slots+=limit;at++;
       }
@@ -127,6 +132,7 @@ export async function scanHostedCapacity(
       if(response.status!==200 || response.deferred || !response.body?.data){witnessUnavailable=true;return;}
       batch.forEach((run,i)=>{
         const connection=response.body.data['q'+i]?.checkRuns,nodes=connection?.nodes;
+        if(Number.isSafeInteger(connection?.totalCount) && connection.totalCount>=0)run.inventorySize=connection.totalCount;
         if(connection?.pageInfo?.hasNextPage!==false || !Array.isArray(nodes) || nodes.length!==connection.totalCount ||
           !nodes.every(node=>node && /^\d+$/.test(String(node.databaseId)) && typeof node.name==='string' &&
             ['QUEUED','IN_PROGRESS','COMPLETED'].includes(node.status)))return;
@@ -191,7 +197,7 @@ export async function scanHostedCapacity(
       if(reusable){
         job_cache_hits++;
         await visit(active!.map(job=>{const saved=metadata.get(String(job.id))!;
-          return {...saved,name:job.name,status:saved.status==='completed'?'completed':job.status};}));
+          return {...saved,status:saved.status==='completed'?'completed':job.status};}));
       }
       else {
         await pages(run.prefix+'/actions/runs/'+run.id+'/jobs','jobs',visit);
@@ -200,6 +206,7 @@ export async function scanHostedCapacity(
         // that a previously observed job list was the whole current inventory.
         if(cache && observed.length &&
           JSON.stringify(observed).length<=65536){
+          if(run.inventorySize!==undefined)observed[0].inventory_size=Math.min(100,run.inventorySize);
           cache.put(key,'job-labels-v2',observed);job_cache_writes++;
         }
       }

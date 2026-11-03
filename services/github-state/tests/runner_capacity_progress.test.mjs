@@ -10,7 +10,7 @@ function fixture(count=400,{sameSecond=false,repositories=1,runningCount=1,activ
   check_suite_node_id:'CS_'+(i+100),updated_at:iso(i),created_at:iso(sameSecond?0:Math.floor(i/perSecond)),
   ...(fractional?{actualCreated:base+Math.floor(i/perSecond)*1000+(i%perSecond)*120}:{}),
   path:'.github/workflows/build.yml'})).reverse();
- const saved=new Map(),reads=new Map(),extraNamespace=new Set(),extraJobs=new Map(),completed=new Set(),promoted=new Set(),generation=new Map();
+ const saved=new Map(),reads=new Map(),extraNamespace=new Set(),extraJobs=new Map(),completed=new Set(),promoted=new Set(),generation=new Map(),historical=new Map();
  const cache={get:(key,revision)=>saved.get(key)?.revision===revision?structuredClone(saved.get(key).jobs):undefined,
   put:(key,revision,jobs)=>saved.set(key,{revision,jobs:structuredClone(jobs)})};
  const envelope=(key,values)=>({status:200,body:key?{[key]:values}:values});
@@ -32,7 +32,7 @@ function fixture(count=400,{sameSecond=false,repositories=1,runningCount=1,activ
    for(const [key,suite] of Object.entries(body.variables)) {
     const i=Number(key.slice(2)),id=Number(suite.slice(3));
     const limit=Number(new RegExp('q'+i+':node.*?checkRuns\\(first:(\\d+)').exec(body.query)?.[1]);
-    const all=jobRows(id),jobs=all.slice(0,limit);
+    const all=[...jobRows(id),...(historical.get(id)||[])],jobs=all.slice(0,limit);
     data['q'+i]={checkRuns:{totalCount:all.length,pageInfo:{hasNextPage:all.length>limit},
      nodes:jobs.map(job=>({databaseId:job.id,name:job.name,status:job.status.toUpperCase()}))}};
    }
@@ -57,7 +57,7 @@ function fixture(count=400,{sameSecond=false,repositories=1,runningCount=1,activ
   const id=Number(/\/runs\/(\d+)\/jobs/.exec(path)?.[1]);reads.set(id,(reads.get(id)||0)+1);
   return envelope('jobs',jobRows(id));
  };
- return {read,cache,rows,saved,reads,extraNamespace,extraJobs,completed,promoted,generation};
+ return {read,cache,rows,saved,reads,extraNamespace,extraJobs,completed,promoted,generation,historical};
 }
 test('a 400-run mostly hosted queue converges under the unchanged 80-request bound',async()=>{
  const f=fixture();let value,total=0,passes=0;
@@ -237,4 +237,12 @@ test('one inaccessible check suite does not discard valid sibling witnesses',asy
  const v=await scanHostedCapacity('org',read,20,f.cache);
  assert.equal(v.routing_version,2);assert.equal(v.namespace_busy,4);
  assert.equal(f.reads.get(103),2);assert.equal(f.reads.get(100),1);assert.equal(f.reads.get(1),1);
+});
+
+
+test('a rerun learns its full check-suite size without repeatedly reading REST job details',async()=>{
+ const f=fixture(1);f.historical.set(100,[{id:901,status:'completed',name:'old-build',labels:[]},{id:902,status:'completed',name:'old-pick',labels:[]}]);
+ await scanHostedCapacity('org',f.read,20,f.cache);f.reads.clear();
+ const value=await scanHostedCapacity('org',f.read,20,f.cache);
+ assert.equal(value.routing_version,2);assert.equal(value.namespace_busy,2);assert.equal(f.reads.size,0);
 });
