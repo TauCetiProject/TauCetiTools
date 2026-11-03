@@ -840,10 +840,11 @@ def collect_alerts():
     for prefix, det in DETECTORS:
         try:
             alerts.extend(det() or [])
+            failed.update(_unknown_alert_keys)
         except Exception as exc:
             zp.log(f"detector {det.__name__} [{prefix}] failed (non-fatal): {exc}")
             failed.add(prefix)
-    return alerts, failed | _unknown_alert_keys
+    return alerts, failed
 
 
 # ----- reconcile against the topic -------------------------------------------
