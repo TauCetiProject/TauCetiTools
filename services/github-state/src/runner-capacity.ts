@@ -124,7 +124,7 @@ export async function scanHostedCapacity(
         if(!(error instanceof Error) || error.message!=='capacity_graphql_reserve')throw error;
         witnessUnavailable=true;return;
       }
-      if(response.status!==200 || response.deferred || response.body?.errors || !response.body?.data){witnessUnavailable=true;return;}
+      if(response.status!==200 || response.deferred || !response.body?.data){witnessUnavailable=true;return;}
       batch.forEach((run,i)=>{
         const connection=response.body.data['q'+i]?.checkRuns,nodes=connection?.nodes;
         if(connection?.pageInfo?.hasNextPage!==false || !Array.isArray(nodes) || nodes.length!==connection.totalCount ||

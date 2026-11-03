@@ -223,3 +223,18 @@ test('initial recovery can progress behind historical scan spending without chan
   console.log(JSON.stringify({old_hour_requests:1840,new_requests:calls,bootstrap_ms:clock-started}));
  }finally{Date.now=original;db.close();}
 });
+
+test('one inaccessible check suite does not discard valid sibling witnesses',async()=>{
+ const f=fixture(4);
+ const read=async(path,body)=>{
+  const v=await f.read(path,body);
+  if(path==='/graphql')for(const [key,id] of Object.entries(body.variables))if(id==='CS_103'){
+   v.body.data['q'+key.slice(2)]=null;v.body.errors=[{type:'NOT_FOUND',message:'one suite unavailable'}];
+  }
+  return v;
+ };
+ await scanHostedCapacity('org',read,20,f.cache);
+ const v=await scanHostedCapacity('org',read,20,f.cache);
+ assert.equal(v.routing_version,2);assert.equal(v.namespace_busy,4);
+ assert.equal(f.reads.get(103),2);assert.equal(f.reads.get(100),1);assert.equal(f.reads.get(1),1);
+});
