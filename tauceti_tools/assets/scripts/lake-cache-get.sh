@@ -87,9 +87,17 @@ clean=0
 for attempt in $(seq 1 $ATTEMPTS); do
   LOG="${RUNNER_TEMP:-/tmp}/cache-get-$attempt.log"
   rc=0
+  started=$SECONDS
   ( cd "$PROJECT_DIR" && LAKE_CONFIG="$CFG" lake cache get --service tauceti-public \
       --repo TauCetiProject/TauCeti --max-revs="$LAKE_CACHE_MAX_REVS" ) > "$LOG" 2>&1 || rc=$?
-  cat "$LOG"
+# Native --quiet/--log-level still replay informational logs on cache failure
+  # (Lake v4.36.0-rc2 LogConfig). Keep complete raw attempts and filter only
+  # recognized success records so partial-failure retries are quiet too.
+  if ! python3 "$(dirname -- "${BASH_SOURCE[0]}")/ci_log_filter.py" cache "$LOG"; then
+    echo '::warning::cache log summary failed; showing the original output'
+    cat "$LOG" || true
+  fi
+  echo "Lake cache attempt $attempt: exit=$rc, elapsed=$((SECONDS-started))s"
   if [ "$rc" = 0 ]; then clean=1; break; fi
   if grep -qE "$MISS_RE" "$LOG"; then break; fi
   # `[ ... ] && sleep` would abort the script under `bash -e` on the last attempt, when the
@@ -101,6 +109,10 @@ for attempt in $(seq 1 $ATTEMPTS); do
     sleep 2
   fi
 done
+
+if [ "$clean" = 1 ]; then
+  echo 'Lake cache: verified artifacts available; incremental build enabled'
+fi
 
 if [ "$clean" != 1 ]; then
   # Purge on ANY unclean outcome, not just a recognised download failure: an earlier attempt may
