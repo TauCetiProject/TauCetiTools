@@ -140,10 +140,14 @@ def TauCeti.changedUnused (n m : Nat) : Nat := n
         trusted.mkdir()
         scripts = Path(__file__).resolve().parent
         for source in scripts.iterdir():
-            if source.is_file() and source.name not in ("lint-baseline.txt", "lint-nolints-allowlist.txt"):
+            if source.is_file() and source.name not in (
+                    "lint-baseline.txt", "lint-nolints-allowlist.txt", "lint-docscan-sentinels.txt"):
                 (trusted / source.name).symlink_to(source)
         (trusted / "lint-baseline.txt").write_text("")
         (trusted / "lint-nolints-allowlist.txt").write_text("")
+        # Materialized CI tooling includes the production project's coverage policy.
+        # This isolated five-declaration library needs its own floor and sentinel.
+        (trusted / "lint-docscan-sentinels.txt").write_text("5\nTauCeti.choose\n")
         lint_env = {**env, "TAUCETI_PROJECT_ROOT": str(root),
                     "TAUCETI_TRUSTED_SCRIPTS": str(trusted), "LINT_DRIVER_EXE": str(driver),
                     "LINT_ONLY_MODULES": str(root / "changed")}
