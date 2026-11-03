@@ -592,8 +592,9 @@ and subdivides any newly overfull range. No coverage or activity is cached.
 Fresh leaf counts merge sparse neighboring ranges and remove all splits when a
 queue drains, so old bursts do not permanently multiply listing requests.
 
-Each pass retains the existing eighty-request/fifteen-second ceiling, counting
-REST and GraphQL calls. A productive partial pass has one shared thirty-second
+Each pass retains the existing eighty-request ceiling, counting REST and GraphQL
+calls, with a twenty-second launch window inside the picker's existing 25-second
+timeout. Cached-only status reads never wait for that discovery. A productive partial pass has one shared thirty-second
 cooldown only while its cache-hit frontier advances and fewer than 900 attempts
 have been spent in the rolling hour. Active pickers continue unseen work after an
 owner restart; no extra poller is added. Normal successful scans and other failures
@@ -630,7 +631,7 @@ Refresh uses existing installation quota accounting, honors secondary cooldowns,
 leaves at least 1,500 core requests for repository work, and spends at most 2,400
 read attempts per rolling hour, including lost network responses on this operation. Brief request-slot
 contention yields within the scan deadline rather than invalidating the snapshot. A scan is bounded to
-80 requests, at most four simultaneous reads, and a 15-second launch window; individual requests retain their
+80 requests, at most four simultaneous reads, and a 20-second launch window; individual requests retain their
 existing timeout. There is no alarm, CI event storage, or new polling task.
 
 Pickers without a configured shared service retain bounded direct discovery.

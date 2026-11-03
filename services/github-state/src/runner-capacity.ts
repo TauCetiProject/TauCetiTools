@@ -12,7 +12,9 @@ export async function scanHostedCapacity(
   namespaceTarget=20,
   cache?:JobLabelCache,
 ):Promise<{routing_version:number;busy:number;running_jobs:Record<string,number>;namespace_busy?:number;namespace_busy_lower_bound?:number;queued_fleet?:string[][];placement_unavailable?:string;requests:number;repositories:number;runs:number;observed_at:number;job_cache_hits:number;job_cache_writes:number;elapsed_ms:number;running_requests:number}> {
-  let requests=0;const started=Date.now(),deadline=started+15000;
+  // Warm production scans exceed fifteen seconds during ordinary queue churn.
+  // Keep five seconds of drain headroom inside the existing 25-second client.
+  let requests=0;const started=Date.now(),deadline=started+20000;
   let job_cache_hits=0,job_cache_writes=0;
   if(!Number.isSafeInteger(namespaceTarget) || namespaceTarget<1 || namespaceTarget>10000)throw new Error('capacity_invalid_namespace_target');
   let queuedPagination=false;

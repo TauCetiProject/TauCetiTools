@@ -487,7 +487,7 @@ export class InstallationScheduler extends DurableObject<Env> {
       // Retain the most informative requested target across refreshes, so mixed
       // caps cannot multiply scans on every two-minute cache expiry.
       const target=Math.max(namespaceTarget,saved?.namespace_discovery_target || 0);
-      const deadline=Date.now()+15000;
+      const deadline=Date.now()+20000;
       const attempts=await this.ctx.storage.get<number[]>('runner-capacity-attempts') || [];
       const bootstrapKey='runner-capacity-label-bootstrap-v2:'+organization;
       const bootstrap=await this.ctx.storage.get<{spent:number;done:boolean}>(bootstrapKey) || {spent:0,done:false};
