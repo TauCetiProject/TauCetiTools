@@ -198,7 +198,7 @@ UPDATE=0
 # Scoped mode: LINT_ONLY_MODULES names a file listing modules, one per line (in pr-build.yml a
 # trusted, read-only file computed from the PR's changed files). The #lint driver then imports and
 # lints those TauCeti modules. Only unusedArguments also checks their transitive importers:
-# upstream changes can remove arguments from elaborated downstream declarations. The
+# project API changes can remove arguments from elaborated downstream declarations. The
 # daily full lint (lint-full.yml) covers the rest. The docstring scan and the nolint ratchet stay
 # library-wide: they are cheap, and their coverage guards need the whole library.
 ONLY_MODULES="${LINT_ONLY_MODULES:-}"

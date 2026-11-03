@@ -40,7 +40,7 @@ public import TauCeti.Upstream
 public section
 namespace TauCeti
 /-- The API whose instance parameter is removed. -/
-def choose {α : Type} [Inhabited α] (x : α) : α := x
+def choose {α : Type} [Inhabited α] (x : α) : α := if True then x else default
 end TauCeti
 """,
             "Bridge": "module\npublic import TauCeti.Changed\n",
@@ -101,12 +101,12 @@ end TauCeti
         # Downstream instance arguments were used by the old API. Other known
         # debt in upstream/unrelated modules stays outside the selected scope.
         initial = run("--only-listed", "--downstream-unused-arguments", str(root / "all"))
-        initial_records = findings(initial, 1)  # choose's own unused instance, only
-        assert initial_records[0]["declaration"] == "TauCeti.choose", initial_records
+        findings(initial, 0)
 
         # Only this file changes. Leaf and Sibling must now fail unusedArguments.
         changed = root / "TauCeti/Changed.lean"
-        changed.write_text(sources["Changed"].replace(" [Inhabited α]", ""))
+        changed.write_text(sources["Changed"].replace(" [Inhabited α]", "")
+                           .replace("if True then x else default", "x"))
         build()
         findings(run("--only-listed"), 0)  # reproduces the old false green
         result = run("--only-listed", "--downstream-unused-arguments", str(root / "all"))

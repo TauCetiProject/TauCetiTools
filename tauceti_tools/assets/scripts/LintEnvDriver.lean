@@ -30,7 +30,7 @@ Usage: `lint-env-driver [--only-listed [--downstream-unused-arguments <all-modul
   they import are not linted). `lint-env.sh` uses that to lint only what a change touched.
 * With `--downstream-unused-arguments`, additionally runs only `unusedArguments` on transitive
   importers of those modules, using Lean's compiled import graph. Other linters retain their
-  original declarations and imported environment. Both passes produce one normal report.
+  changed-module declarations. Both passes produce one normal report.
 * Prints the report `#lint` would print. With violations, the header line carries the
   `<tag>:1:0: error: ` prefix that Lean gives an error diagnostic from a driver file named `<tag>`,
   and the exit code is 1. Without violations, the report is printed bare and the exit code is 0.
@@ -124,22 +124,29 @@ unsafe def main (args : List String) : IO UInt32 := do
   if downstreamFile.isSome && !onlyListed then
     IO.eprintln "lint-env-driver: downstream scope requires --only-listed"; return 2
   let tag :: markerFile :: modulesFile :: linterNames := args
-    | IO.eprintln "usage: lint-env-driver [--only-listed] <tag> <marker-file> <modules-file> \
-        <linter>..."; return 2
+    | IO.eprintln "usage: lint-env-driver [--only-listed \
+        [--downstream-unused-arguments <all-modules-file>]] \
+        <tag> <marker-file> <modules-file> <linter>..."; return 2
   if linterNames.isEmpty then
     IO.eprintln "lint-env-driver: no linters requested"; return 2
   let modules := (← IO.FS.lines modulesFile).filter (!·.isEmpty) |>.map String.toName
   if modules.isEmpty then
     IO.eprintln "lint-env-driver: no modules to import"; return 2
+  let importModulesList ← if let some file := downstreamFile then do
+      let inventory := (← IO.FS.lines file).filter (!·.isEmpty) |>.map String.toName
+      unless modules.all inventory.contains do
+        IO.eprintln "lint-env-driver: downstream inventory omits a selected module"; return 2
+      pure inventory
+    else pure modules
   initSearchPath (← findSysroot)
   -- The legacy `#lint` driver ran imported initializers too (`lean` always does).
   enableInitializersExecution
-  let lintImports := #[`Mathlib.Init, `Mathlib.Tactic.SetNotationForOrder] ++ modules
+  let lintImports := #[`Mathlib.Init, `Mathlib.Tactic.SetNotationForOrder] ++ importModulesList
   let env ← importModules (lintImports.map ({ module := · })) {} (trustLevel := 1024)
     (loadExts := true)
   let opts : Options := ({} : Options).setBool `trace.Batteries.Lint true
   let ctx : Core.Context := { fileName := tag, fileMap := default, options := opts }
-  let (decls, linters, results) ← Prod.fst <$> (CoreM.toIO · ctx { env }) do
+  let (failed, report, origins) ← Prod.fst <$> (CoreM.toIO · ctx { env }) do
     let allDecls ← getDeclsInPackage lintedPackage
     let decls ← if onlyListed then
         let env ← getEnv
@@ -155,48 +162,29 @@ unsafe def main (args : List String) : IO UInt32 := do
     for n in linterNames do
       unless linters.any (·.name == n.toName) do
         throwError "not a linter: {n}"
-    let results ← lintCore decls linters (inIO := true)
-    return (decls, linters, results)
-  let mut reportEnv := env
-  let mut reportModules := modules
-  let mut reportDecls := decls
-  let mut results := results
-  if let some file := downstreamFile then
-    let allModules := (← IO.FS.lines file).filter (!·.isEmpty) |>.map String.toName
-    unless modules.all allModules.contains do
-      IO.eprintln "lint-env-driver: downstream inventory omits a selected module"; return 2
-    unless linters.any (·.name == `unusedArguments) do
-      IO.eprintln "lint-env-driver: downstream scope requires unusedArguments"; return 2
-    -- Preserve the original environment for the other linters. Import every project module
-    -- only for the additional unused-argument pass and the combined report's rendering.
-    let imports := #[`Mathlib.Init, `Mathlib.Tactic.SetNotationForOrder] ++ allModules
-    enableInitializersExecution
-    reportEnv ← importModules (imports.map ({ module := · })) {} (trustLevel := 1024)
-      (loadExts := true)
-    let downstream := downstreamModules reportEnv modules
-    let (extraDecls, extraResults) ← Prod.fst <$> (CoreM.toIO · ctx { env := reportEnv }) do
-      let env ← getEnv
-      let allDecls ← getDeclsInPackage lintedPackage
+    let mut results ← lintCore decls linters (inIO := true)
+    let mut reportDecls := decls
+    if downstreamFile.isSome then
+      unless linters.any (·.name == `unusedArguments) do
+        throwError "downstream scope requires unusedArguments"
+      let downstream := downstreamModules env modules
       let extraDecls := allDecls.filter fun d => (env.getModuleIdxFor? d).any fun idx =>
         let mod := env.header.moduleNames[idx.toNat]!
         downstream.contains mod && !modules.contains mod
-      let results ← lintCore extraDecls (linters.filter (·.name == `unusedArguments)) (inIO := true)
-      return (extraDecls, results)
-    reportModules := allModules
-    reportDecls := decls ++ extraDecls
-    for (linter, findings) in extraResults do
-      results := results.map fun (original, messages) =>
-        if original.name == linter.name then
-          (original, findings.fold (fun acc name msg => acc.insert name msg) messages)
-        else (original, messages)
-    IO.println s!"lint-env: unusedArguments additionally checked {extraDecls.size} declarations \
-      in transitive downstream modules"
-  let (failed, report, origins) ← Prod.fst <$> (CoreM.toIO · ctx { env := reportEnv }) do
+      let extraResults ← lintCore extraDecls (linters.filter (·.name == `unusedArguments)) (inIO := true)
+      reportDecls := decls ++ extraDecls
+      for (linter, findings) in extraResults do
+        results := results.map fun (original, messages) =>
+          if original.name == linter.name then
+            (original, findings.fold (fun acc name msg => acc.insert name msg) messages)
+          else (original, messages)
+      IO.println s!"lint-env: unusedArguments additionally checked {extraDecls.size} declarations \
+        in transitive downstream modules"
     let failed := results.any (!·.2.isEmpty)
     let fmt ← formatLinterResults results reportDecls (groupByFilename := true)
       s!"in {lintedPackage}" (runSlowLinters := true) .medium linters.size
     let report ← (← addMessageContext fmt).toString
-    let origins ← try linterOrigins reportModules results catch _ =>
+    let origins ← try linterOrigins importModulesList results catch _ =>
       pure <| Json.mkObj [("unknown", toJson "collection_failed")]
     return (failed, report, origins)
   -- Before the report region: existing report/nonce parsing is unchanged.
