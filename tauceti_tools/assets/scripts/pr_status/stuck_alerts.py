@@ -76,7 +76,8 @@ There are no @-mentions (the topic is watched, not pinged).
 FAIL CLOSED, never fail open. A detector may raise, e.g. on a GitHub outage, a rate
 limit, or a bug. When it does, its alerts are NOT cleared: its key-prefix is marked
 "unknown" for the run and existing messages under that prefix are left exactly as
-they are. The alternative
+they are. When only one scheduler's read fails, its exact key stays unknown while
+other observed schedulers can still update. The alternative
 -- treating "the check failed" as "the emergency is over" -- is the worst possible
 behaviour for a watchdog. Only a genuinely-absent alert from a detector that ran
 cleanly is resolved.
@@ -232,6 +233,7 @@ def gh_lines(path, jq, paginate=True):
 # `core` derivation (per_page=100 there so a status burst cannot hide `build` /
 # `bump-guard`); alias so this module's detectors read as before.
 _snapshot = None
+_unknown_alert_keys = set()
 
 
 def newest_status(head, context):
@@ -717,6 +719,7 @@ def detect_dead_schedulers():
             # the whole detector -- that would mark ALL schedulers "unknown" and skip
             # the ones that are genuinely stalled. Log and move on.
             zp.log(f"scheduler check for {wf} failed (non-fatal): {exc}")
+            _unknown_alert_keys.add(f"dead-scheduler/{wf}")
     return out
 
 
@@ -785,6 +788,7 @@ def detect_failing_schedulers():
             # As in detect_dead_schedulers: one workflow's transient error must not mark every
             # other scheduler unknown for the run.
             zp.log(f"scheduler health check for {wf} failed (non-fatal): {exc}")
+            _unknown_alert_keys.add(f"failing-scheduler/{wf}")
     return out
 
 
@@ -888,11 +892,13 @@ def key_prefix(key):
 
 
 def collect_alerts():
-    """Run every detector. Returns (alerts, failed_prefixes). A detector that
-    raises contributes no alerts AND has its prefix recorded as failed, so the
-    reconcile step leaves that prefix's existing messages untouched (fail closed)
-    instead of resolving live emergencies during an API blip."""
+    """Return alerts and unknown prefixes or exact scheduler keys.
+
+    A failed detector preserves its whole prefix. A failed per-workflow read
+    preserves that scheduler's key while other observed workflows still update.
+    """
     alerts, failed = [], set()
+    _unknown_alert_keys.clear()
     for prefix, det in DETECTORS:
         started = time.monotonic()
         zp.log(f"checking detector {prefix}")
@@ -903,8 +909,9 @@ def collect_alerts():
             failed.add(prefix)
         finally:
             zp.log(f"checked detector {prefix} in {time.monotonic() - started:.1f}s"
-                   + (" (unknown)" if prefix in failed else ""))
-    return alerts, failed
+                   + (" (unknown)" if prefix in failed else " (partly unknown)"
+                      if any(key_prefix(key) == prefix for key in _unknown_alert_keys) else ""))
+    return alerts, failed | _unknown_alert_keys
 
 
 # ----- reconcile against the topic -------------------------------------------
@@ -977,7 +984,7 @@ def reconcile(z, alerts, failed, dry_run):
     for key, msg in existing.items():
         if key in active or is_resolved(msg):
             continue
-        if key_prefix(key) in failed:
+        if key in failed or key_prefix(key) in failed:
             zp.log(f"detector for {key} failed this run; NOT resolving (fail closed)")
             continue
         zp.log(f"RESOLVED alert {key}")
