@@ -56,6 +56,9 @@ export async function scanHostedCapacity(
         return !Number.isSafeInteger(at) || range.lower!==undefined && at<range.lower || range.upper!==undefined && at>range.upper;
       }))queuedPagination=true;
       const more=Boolean(response.link?.includes('rel="next"'));
+      // Search hints need fresh listing counts, not successful job-detail
+      // discovery. Retain these even when later metadata reads exhaust a pass.
+      if(!more && range)onLeaf?.(range,values.length);
       let children:Range[]|undefined,unsplittable=false;
       if(more && range!==undefined) {
         const times=values.map((run:any)=>typeof run.created_at==='string'?Date.parse(run.created_at)/1000:NaN);
@@ -78,7 +81,7 @@ export async function scanHostedCapacity(
       if(visit)await visit(values);else rows.push(...values);
       // Follow Link rather than drifting total_count. Single-page range leaves
       // establish coverage; overlapping split instants retain fractional dates.
-      if(!more){if(range)onLeaf?.(range,values.length);return rows;}
+      if(!more)return rows;
       if(unsplittable)throw new Error('capacity_queue_pagination');
       if(children){await settle(children.map(child=>pages(ranged(path,child),key,visit,child,onSplit,onLeaf)));return rows;}
     }
@@ -272,19 +275,23 @@ export async function scanHostedCapacity(
         // Every next scan freshly reads the entire overlapping partition of
         // (-infinity,+infinity), including empty or newly populated ranges.
         let compact:number[];
-        if(complete) {
+        const removed=new Set<number>();
+        {
           // Fresh leaf counts only optimize next scan's search. Merge sparse
           // neighbors (including drained queues), leaving arrival headroom.
           leaves.sort((a,b)=>(a.range.lower ?? -Infinity)-(b.range.lower ?? -Infinity));
           while(leaves.length>1) {
-            let at=0;
-            for(let i=1;i<leaves.length-1;i++)if(leaves[i].count+leaves[i+1].count<leaves[at].count+leaves[at+1].count)at=i;
+            let at=-1;
+            for(let i=0;i<leaves.length-1;i++)if(leaves[i].range.upper===leaves[i+1].range.lower &&
+              (leaves[i].count+leaves[i+1].count<=80 || complete && leaves.length>17) &&
+              (at<0 || leaves[i].count+leaves[i+1].count<leaves[at].count+leaves[at+1].count))at=i;
+            if(at<0)break;
             const count=leaves[at].count+leaves[at+1].count;
-            if(count>80 && leaves.length<=17)break;
+            removed.add(leaves[at+1].range.lower!);
             leaves.splice(at,2,{range:{lower:leaves[at].range.lower,upper:leaves[at+1].range.upper},count});
           }
-          compact=leaves.slice(1).map(leaf=>leaf.range.lower!);
-        }else compact=[...learned].sort((a,b)=>a-b).slice(-16);
+          compact=complete?leaves.slice(1).map(leaf=>leaf.range.lower!):[...learned].filter(at=>!removed.has(at)).sort((a,b)=>a-b).slice(-16);
+        }
         if(complete || compact.length!==saved.length || compact.some((at,i)=>at!==saved[i]))cache?.putRanges?.(repoPrefix,compact);
       }
     };

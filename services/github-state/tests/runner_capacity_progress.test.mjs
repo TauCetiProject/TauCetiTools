@@ -126,6 +126,21 @@ test('several queued repositories discard obsolete partitions as their queues dr
  queuedReads=0;value=await scanHostedCapacity('org',read,20,cache);
  assert.equal(value.routing_version,2);assert.equal(queuedReads,3,'drained repositories need one fresh listing each');
 });
+test('partial metadata failures still prune freshly listed sparse search ranges',async()=>{
+ const f=fixture(4);await scanHostedCapacity('org',f.read,20,f.cache);
+ f.ranges.set('/repos/org/repo',Array.from({length:16},(_,i)=>base/1000+(i+1)*300));
+ const read=async(path,body)=>{
+  if(path.includes('/runs/100/jobs'))return {status:503,body:{}};
+  const value=await f.read(path,body);
+  if(path==='/graphql')for(const [key,id] of Object.entries(body.variables))if(id==='CS_100')value.body.data['q'+key.slice(2)]=null;
+  return value;
+ };
+ const partial=await scanHostedCapacity('org',read,20,f.cache);
+ assert.equal(partial.routing_version,1);assert.equal(partial.placement_unavailable,'capacity_inventory_unavailable');
+ assert.ok((f.ranges.get('/repos/org/repo') || []).length<16,'a failed metadata tail cannot preserve every obsolete search split');
+ const recovered=await scanHostedCapacity('org',f.read,20,f.cache);
+ assert.equal(recovered.routing_version,2);assert.equal(recovered.namespace_busy,4);
+});
 test('fresh execution/completion statuses reuse metadata only after runner assignment is known',async()=>{
  const f=fixture(4);await scanHostedCapacity('org',f.read,20,f.cache);f.reads.clear();
  f.promoted.add(100);let v=await scanHostedCapacity('org',f.read,20,f.cache);
