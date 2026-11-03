@@ -19,7 +19,10 @@ Detectors (each names the infra failure it implies):
   3. stranded-pr     A PR that is in-scope (TauCeti/ + allowed roots, bump-guard
                      green for any pin change), `build` green, every blocking
                      rubric green at HEAD, not draft/hold, mergeable, and quiet for
-                     the grace window. auto-merge / the queue / merge-sweep broke.
+                     the grace window. With Bors, an exact queued head is normal
+                     backlog while the base branch makes progress; a train that
+                     stops advancing produces one shared incident. Unclaimed
+                     green heads retain the per-PR readiness checks.
   4. review-stuck    A worker exhausted its review-command failure budget. An
                      open tracking issue remains active until the PR finishes or
                      a later completed review proves recovery. The issue
@@ -90,6 +93,8 @@ Usage:
 
 Environment:
     ZULIP_API_KEY, ZULIP_EMAIL, ZULIP_SITE   bot credentials (required unless --dry-run)
+    TAUCETI_MERGE_BACKEND                  github-queue (default) or bors; exported from project config
+    TAUCETI_BASE_BRANCH                    observed base branch (default main)
     ZULIP_CHANNEL                            default "Tau Ceti"
     ZULIP_TOPIC                              default "Stuck PRs"
     GH_REPO                                  default "TauCetiProject/TauCeti"
@@ -109,6 +114,7 @@ import json
 import os
 import re
 import sys
+import time
 
 # Reuse the proven Zulip client + helpers. Because ZULIP_TOPIC is read at import
 # time, the workflow sets it to "Stuck PRs" and every send/narrow below targets
@@ -325,11 +331,18 @@ def ready_label_applied_at(number):
     re-added reports the latest application. Merge-queue enqueue/eviction events do not touch
     the label, which is what makes this a stable readiness anchor (see detect_stranded_prs).
     """
-    events = gh_stream(
-        f"/repos/{REPO}/issues/{number}/timeline?per_page=100",
-        jq='.[] | select(.event == "labeled" or .event == "unlabeled")'
-           ' | select(.label.name == "ready-to-merge")'
-           ' | {event, at: (.created_at // "")}')
+    if _snapshot is not None:
+        events = [dict(event="labeled" if event["__typename"] == "LabeledEvent" else "unlabeled",
+                       at=event["createdAt"])
+                  for event in _snapshot.timeline_events(number)
+                  if event["__typename"] in {"LabeledEvent", "UnlabeledEvent"}
+                  and (event.get("label") or {}).get("name") == "ready-to-merge"]
+    else:
+        events = gh_stream(
+            f"/repos/{REPO}/issues/{number}/timeline?per_page=100",
+            jq='.[] | select(.event == "labeled" or .event == "unlabeled")'
+               ' | select(.label.name == "ready-to-merge")'
+               ' | {event, at: (.created_at // "")}')
     applied = None
     for e in events:
         applied = e.get("at") if e.get("event") == "labeled" else None
@@ -345,13 +358,18 @@ def detect_eviction_loops():
     only way to see it. The build log distinguishes a PR integration defect from
     shared infrastructure trouble; the eviction count alone cannot diagnose either.
 
-    Only PRs the pipeline currently calls ready can be in the queue, so that label bounds the
-    per-PR timeline reads to a handful.
+    Only PRs the pipeline currently calls ready can be in the queue; their batched
+    histories are shared with the stranded-PR detector.
     """
+    # These events belong to GitHub's merge queue. Bors progress is checked by
+    # detect_stranded_prs, not by interpreting historical GitHub queue removals.
+    if _snapshot is not None and _snapshot.merge_backend == "bors":
+        return []
     out = []
-    for pr in open_prs():
-        if pr.get("draft") or "ready-to-merge" not in pr.get("labels", []):
-            continue
+    prs = [pr for pr in open_prs() if not pr.get("draft") and "ready-to-merge" in pr.get("labels", [])]
+    if _snapshot is not None:
+        _snapshot.load_timelines([pr["number"] for pr in prs])
+    for pr in prs:
         # Count only the CURRENT readiness cycle. Evictions from an earlier cycle -- before the
         # author pushed a fix, or before the label came back -- say nothing about whether this
         # PR is bouncing now, and counting them would alert on a PR that has since settled.
@@ -361,9 +379,13 @@ def detect_eviction_loops():
         if not applied:
             continue
         # An OPEN PR that left the queue never merged, so every removal here is an eviction.
-        removals = gh_stream(
-            f"/repos/{REPO}/issues/{pr['number']}/timeline?per_page=100",
-            jq='.[] | select(.event == "removed_from_merge_queue") | {at: (.created_at // "")}')
+        if _snapshot is not None:
+            removals = [dict(at=event["createdAt"]) for event in _snapshot.timeline_events(pr["number"])
+                        if event["__typename"] == "RemovedFromMergeQueueEvent"]
+        else:
+            removals = gh_stream(
+                f"/repos/{REPO}/issues/{pr['number']}/timeline?per_page=100",
+                jq='.[] | select(.event == "removed_from_merge_queue") | {at: (.created_at // "")}')
         recent = [r for r in removals
                   if r.get("at") and hours_since(r["at"]) < EVICTION_WINDOW_HOURS
                   and parse_ts(r["at"]) > parse_ts(applied)]
@@ -497,8 +519,16 @@ def detect_diverged_head():
 
 
 def detect_stranded_prs():
+    """Find unclaimed green heads, or one stalled Bors train rather than its backlog."""
     prs = open_prs()
     out = []
+    candidates = []
+    bors = _snapshot.bors_state() if _snapshot is not None else None
+    progress_age = hours_since(bors["committed_at"]) if bors is not None else None
+    if progress_age is not None and progress_age < -0.1:
+        raise RuntimeError("Bors main progress is ahead of the local clock")
+    stalled_queued = False
+    eligible = []
     for pr in prs:
         if pr.get("draft"):
             continue
@@ -510,6 +540,13 @@ def detect_stranded_prs():
         state, updated = newest_status(head, "build")
         if state != "success" or not updated:
             continue
+        queued = bors is not None and (pr["number"], head) in bors["heads"]
+        if queued and progress_age < STRANDED_HOURS:
+            continue  # Exact head accepted by a merge train that is making progress.
+        eligible.append((pr, updated))
+    if _snapshot is not None:
+        _snapshot.load_timelines([pr["number"] for pr, _updated in eligible])
+    for pr, updated in eligible:
         # Readiness clock: the LATER of the build going green and the pipeline declaring the
         # PR ready. Starting only from the build time would fire instantly when a review
         # approves a PR whose build passed yesterday (the merge path has had no chance yet).
@@ -529,13 +566,22 @@ def detect_stranded_prs():
         ready_since = min(hours_since(updated), hours_since(applied))
         if ready_since < STRANDED_HOURS:
             continue
+        candidates.append(pr)
+    if _snapshot is not None:
+        _snapshot.load_readiness([pr["number"] for pr in candidates])
+    for pr in candidates:
+        head = pr["head"]
         # Use the same newest-any-author scoreboard as the ready-to-merge label and auto-merge. This
         # detector only alerts; unlike housekeeping, it performs no destructive PR action.
-        if core.review_state(core.scoreboard_meta(pr["number"]), head) != "approved":
+        evidence = _snapshot.readiness_prs[pr["number"]] if _snapshot is not None else None
+        meta = (core.scoreboard_meta_from([dict(body=c["body"], updated=c["updatedAt"])
+                                          for c in evidence["comments"]]) if evidence is not None
+                else core.scoreboard_meta(pr["number"]))
+        if core.review_state(meta, head) != "approved":
             continue
         # Filenames are bare strings, not JSON -- gh_lines, not gh_stream.
-        files = gh_lines(f"/repos/{REPO}/pulls/{pr['number']}/files?per_page=300",
-                         jq='.[].filename')
+        files = ([item["path"] for item in evidence["files"]] if evidence is not None else
+                 gh_lines(f"/repos/{REPO}/pulls/{pr['number']}/files?per_page=300", jq='.[].filename'))
         if not files:
             continue
         touches_pin = any(
@@ -548,7 +594,12 @@ def detect_stranded_prs():
         # true|false|null; do NOT use jq `//` (it maps false->the default too). A
         # conflicting PR (false) is not being wrongly withheld; an as-yet-uncomputed
         # PR (null) we skip this run and recheck next hour (a real strand persists).
-        if gh_scalar(f"/repos/{REPO}/pulls/{pr['number']}", jq='.mergeable') != "true":
+        mergeable = (evidence.get("mergeable") == "MERGEABLE" if evidence is not None else
+                     gh_scalar(f"/repos/{REPO}/pulls/{pr['number']}", jq='.mergeable') == "true")
+        if not mergeable:
+            continue
+        if bors is not None and (pr["number"], head) in bors["heads"]:
+            stalled_queued = True
             continue
         out.append({
             "key": f"stranded-pr/{pr['number']}",
@@ -560,6 +611,17 @@ def detect_stranded_prs():
                 f"**Fix:** the merge path is broken — check `auto-merge.yml`, the merge "
                 f"queue, and `merge-sweep.yml` (and the pinned TauCetiReview merge-only "
                 f"/ merge-sweep workflow) for why a ready PR is not being taken."),
+        })
+    if stalled_queued:
+        out.append({
+            "key": "stranded-pr/bors-progress",
+            "title": "Bors merge train is not making progress",
+            "body": (
+                f"https://github.com/{REPO}/commits/{_snapshot.branch} has not advanced for over "
+                f"{STRANDED_HOURS}h, although Bors holds current heads of merge-ready PRs.\n\n"
+                "**Diagnose:** inspect the active Bors batches, their integration builds, "
+                "cache publication and runner capacity. Queued PRs share this incident; "
+                "they are not separate failures to enqueue."),
         })
     return out
 
@@ -832,11 +894,16 @@ def collect_alerts():
     instead of resolving live emergencies during an API blip."""
     alerts, failed = [], set()
     for prefix, det in DETECTORS:
+        started = time.monotonic()
+        zp.log(f"checking detector {prefix}")
         try:
             alerts.extend(det() or [])
         except Exception as exc:
             zp.log(f"detector {det.__name__} [{prefix}] failed (non-fatal): {exc}")
             failed.add(prefix)
+        finally:
+            zp.log(f"checked detector {prefix} in {time.monotonic() - started:.1f}s"
+                   + (" (unknown)" if prefix in failed else ""))
     return alerts, failed
 
 
