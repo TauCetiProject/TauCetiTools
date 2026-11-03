@@ -14,7 +14,7 @@ function fixture(count=400,{sameSecond=false,repositories=1,runningCount=1,activ
  const ranges=new Map();
  const cache={get:(key,revision)=>saved.get(key)?.revision===revision?structuredClone(saved.get(key).jobs):undefined,
   put:(key,revision,jobs)=>saved.set(key,{revision,jobs:structuredClone(jobs)}),
-  getRanges:key=>structuredClone(ranges.get(key)),putRanges:(key,boundaries)=>ranges.set(key,structuredClone(boundaries))};
+  getRanges:key=>structuredClone(ranges.get(key)),putRanges:(key,boundaries)=>boundaries.length?ranges.set(key,structuredClone(boundaries)):ranges.delete(key)};
  const envelope=(key,values)=>({status:200,body:key?{[key]:values}:values});
  function jobRows(id) {
   let jobs;
@@ -101,9 +101,30 @@ test('persisted search boundaries freshly cover new head/tail arrivals and depar
  assert.ok(f.ranges.get('/repos/org/repo').length<=16);
 });
 test('invalid saved search boundaries cannot replace fresh queue discovery',async()=>{
- const f=fixture(4);f.ranges.set('/repos/org/repo',['invalid',null,-1,Infinity,NaN]);
- const value=await scanHostedCapacity('org',f.read,20,f.cache);
+ const f=fixture(4);f.ranges.set('/repos/org/repo',['invalid',null,-1,Infinity,NaN,8640000000000,1e12]);
+ const read=async(path,body)=>{
+  assert.ok(!/\+\d{6}-/.test(decodeURIComponent(path)),'expanded-year hints must never reach the provider');
+  return f.read(path,body);
+ };
+ const value=await scanHostedCapacity('org',read,20,f.cache);
  assert.equal(value.routing_version,2);assert.equal(value.namespace_busy,4);
+});
+test('several queued repositories discard obsolete partitions as their queues drain',async()=>{
+ const fixtures=Array.from({length:3},()=>fixture(160)),cache=fixtures[0].cache;let queuedReads=0,value;
+ const read=async(path,body)=>{
+  if(path.startsWith('/orgs/'))return {status:200,body:fixtures.map((_,i)=>({name:'r'+i,archived:false}))};
+  if(path==='/graphql')return fixtures[0].read(path,body);
+  if(path.includes('status=queued'))queuedReads++;
+  const i=Number(/\/r(\d+)\//.exec(path)[1]);
+  return fixtures[i].read(path.replace('/r'+i+'/','/repo/'),body);
+ };
+ for(let i=0;i<20;i++){value=await scanHostedCapacity('org',read,20,cache);if(value.routing_version===2)break;}
+ assert.equal(value.routing_version,2);assert.equal(value.namespace_busy,12);assert.equal(fixtures[0].ranges.size,3);
+ for(const f of fixtures)f.rows.splice(0);
+ value=await scanHostedCapacity('org',read,20,cache);
+ assert.equal(value.routing_version,2);assert.equal(value.namespace_busy,3);assert.equal(fixtures[0].ranges.size,0);
+ queuedReads=0;value=await scanHostedCapacity('org',read,20,cache);
+ assert.equal(value.routing_version,2);assert.equal(queuedReads,3,'drained repositories need one fresh listing each');
 });
 test('fresh execution/completion statuses reuse metadata only after runner assignment is known',async()=>{
  const f=fixture(4);await scanHostedCapacity('org',f.read,20,f.cache);f.reads.clear();

@@ -507,6 +507,7 @@ export class InstallationScheduler extends DurableObject<Env> {
             catch {return undefined;}
           },
           putRanges:(key:string,boundaries:number[])=>{
+            if(!boundaries.length){this.ctx.storage.sql.exec('DELETE FROM runner_capacity_ranges WHERE key=?',key);return;}
             this.ctx.storage.sql.exec('INSERT INTO runner_capacity_ranges VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET boundaries=excluded.boundaries,seen_at=excluded.seen_at',key,JSON.stringify(boundaries),Date.now());
           },
           get:(key:string,revision:string)=>{

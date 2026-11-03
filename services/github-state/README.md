@@ -589,6 +589,8 @@ of inactivity. Later scans read those ranges in parallel instead of locating the
 same older pages through a serial chain. These are search hints only: each scan
 freshly reads the whole overlapping partition, including both unbounded ends,
 and subdivides any newly overfull range. No coverage or activity is cached.
+Fresh leaf counts merge sparse neighboring ranges and remove all splits when a
+queue drains, so old bursts do not permanently multiply listing requests.
 
 Each pass retains the existing eighty-request/fifteen-second ceiling, counting
 REST and GraphQL calls. A productive partial pass has one shared thirty-second
