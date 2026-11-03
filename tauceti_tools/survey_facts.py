@@ -125,6 +125,21 @@ def rebase_heads(comments):
     return sorted(set(heads))
 
 
+def deprecation_repair_finished(comments, head):
+    """Only our old authenticated request may clear after a new head passes CI.
+
+    A current-head request from any existing trusted producer takes precedence.
+    The caller supplies fresh PR/label/CI state; this function is pure bookkeeping.
+    """
+    if head in rebase_heads(comments):
+        return False
+    for comment in comments or []:
+        for old in rebase_heads([comment]):
+            if old != head and f"<!--tauceti-deprecation:v1 {old}-->" in comment["body"].splitlines():
+                return True
+    return False
+
+
 def summarize(issue_comments, review_comments):
     return {
         "meta": compact_meta(scoreboard(issue_comments)),
