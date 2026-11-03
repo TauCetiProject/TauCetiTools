@@ -5,7 +5,9 @@
 #   attest-pr-config.sh <merge-base-dir> <candidate-dir> <head-sha> \
 #     <event-name> <merge-base-exact:0|1> <pins-changed:0|1>
 #
-# The lakefile must be inherited byte-for-byte from the merge base. The two pins must be
+# The lakefile must be inherited byte-for-byte from the merge base, except for the
+# data-only linter change recognized by workflow-pinned lake_config_policy.py. Merge
+# permission for that restricted path still requires exact-head human approval. The two pins must be
 # ordinary files, and their observed local delta must agree with the immutable GitHub tree check
 # performed by pr-build.yml. A changed pin is authorized only after this script returns; the
 # separate workflow-pinned check-bump.sh then validates it as a forward move before Lake runs.
@@ -51,7 +53,12 @@ for FILE in lakefile.toml lakefile.lean; do
   if [ -e "$MB" ] || [ -L "$MB" ]; then
     ordinary_file "$MB" || fail "$FILE is not an ordinary file at the merge base"
     ordinary_file "$HEAD" || fail "$FILE is missing or not an ordinary file at the candidate head"
-    cmp -s "$MB" "$HEAD" || fail "$FILE differs from the PR merge base"
+    if ! cmp -s "$MB" "$HEAD"; then
+      if [ "$FILE" != lakefile.toml ] || ! python3 "$(dirname "$0")/lake_config_policy.py" "$MB" "$HEAD"; then
+        fail "$FILE differs from the PR merge base"
+      fi
+      echo "config-attestation: only built-in unused-variable tactic linting was enabled"
+    fi
   elif [ -e "$HEAD" ] || [ -L "$HEAD" ]; then
     fail "$FILE was introduced by the candidate"
   fi
