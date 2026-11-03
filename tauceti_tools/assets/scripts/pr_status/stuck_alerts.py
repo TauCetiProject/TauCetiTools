@@ -227,6 +227,8 @@ def gh_lines(path, jq, paginate=True):
 # `core` derivation (per_page=100 there so a status burst cannot hide `build` /
 # `bump-guard`); alias so this module's detectors read as before.
 _snapshot = None
+# Exact keys with unreadable evidence this run: scheduler checks add them and
+# collect_alerts clears them before collecting a new observation.
 _unknown_alert_keys = set()
 
 
@@ -240,7 +242,8 @@ def newest_status(head, context):
 # Each returns a list of alert dicts {key, title, body}. `key` is stable across
 # runs (so the same ongoing situation reconciles to the same message) and its
 # prefix (the part before the first "/") names the detector, so a detector that
-# errors marks exactly its own keys "unknown" and never clears them.
+# errors marks exactly its own keys "unknown" and never clears them. Scheduler
+# detectors also record individual unreadable workflows in _unknown_alert_keys.
 
 def detect_stuck_lint_repair():
     prs = gh_stream(
@@ -655,7 +658,8 @@ def detect_dead_schedulers():
         except Exception as exc:
             # A transient error on one workflow (or an ambiguous 404) must not abort
             # the whole detector -- that would mark ALL schedulers "unknown" and skip
-            # the ones that are genuinely stalled. Log and move on.
+            # the ones that are genuinely stalled. Log and mark this workflow
+            # unknown so reconciliation preserves its warning while others are checked.
             zp.log(f"scheduler check for {wf} failed (non-fatal): {exc}")
             _unknown_alert_keys.add(f"dead-scheduler/{wf}")
     return out
@@ -724,7 +728,8 @@ def detect_failing_schedulers():
             out.extend(_check_scheduler_health(wf, name))
         except Exception as exc:
             # As in detect_dead_schedulers: one workflow's transient error must not mark every
-            # other scheduler unknown for the run.
+            # other scheduler unknown for the run. Log and record just this
+            # workflow's unknown key so reconciliation keeps its existing warning.
             zp.log(f"scheduler health check for {wf} failed (non-fatal): {exc}")
             _unknown_alert_keys.add(f"failing-scheduler/{wf}")
     return out
