@@ -571,7 +571,9 @@ build count.
 
 Queued discovery inspects jobs as each workflow page arrives, starting with
 repositories and workflows already using Namespace, with older runs first on each
-page. Batched GraphQL check-suite reads supply fresh job IDs and execution states.
+page. Batched GraphQL check-suite reads supply fresh queued/running job IDs and
+execution states. Completed attempts are filtered upstream and cannot inflate the
+live-inventory pagination or query batch size.
 Only immutable job labels and already-assigned runner identities are reused from
 a compact SQLite cache. A new job ID (including a matrix expansion or rerun)
 requires fresh REST details. Fresh check-run execution states and immutable routing

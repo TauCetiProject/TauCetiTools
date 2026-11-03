@@ -34,7 +34,7 @@ function fixture(count=400,{sameSecond=false,repositories=1,runningCount=1,activ
    for(const [key,suite] of Object.entries(body.variables)) {
     const i=Number(key.slice(2)),id=Number(suite.slice(3));
     const limit=Number(new RegExp('q'+i+':node.*?checkRuns\\(first:(\\d+)').exec(body.query)?.[1]);
-    const all=[...jobRows(id),...(historical.get(id)||[])],jobs=all.slice(0,limit);
+    const all=[...jobRows(id),...(historical.get(id)||[])].filter(job=>!body.query.includes('statuses:[QUEUED,IN_PROGRESS]') || ['queued','in_progress'].includes(job.status)),jobs=all.slice(0,limit);
     data['q'+i]={checkRuns:{totalCount:all.length,pageInfo:{hasNextPage:all.length>limit},
      nodes:jobs.map(job=>({databaseId:job.id,name:job.name,status:job.status.toUpperCase()}))}};
    }
@@ -301,8 +301,8 @@ test('one inaccessible check suite does not discard valid sibling witnesses',asy
 });
 
 
-test('a rerun learns its full check-suite size without repeatedly reading REST job details',async()=>{
- const f=fixture(1);f.historical.set(100,[{id:901,status:'completed',name:'old-build',labels:[]},{id:902,status:'completed',name:'old-pick',labels:[]}]);
+test('completed rerun history never inflates the live inventory or forces repeated REST reads',async()=>{
+ const f=fixture(1);f.historical.set(100,Array.from({length:200},(_,i)=>({id:900+i,status:'completed',name:'old-build',labels:[]})));
  await scanHostedCapacity('org',f.read,20,f.cache);f.reads.clear();
  const value=await scanHostedCapacity('org',f.read,20,f.cache);
  assert.equal(value.routing_version,2);assert.equal(value.namespace_busy,2);assert.equal(f.reads.size,0);
