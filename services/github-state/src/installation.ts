@@ -487,7 +487,7 @@ export class InstallationScheduler extends DurableObject<Env> {
       // Retain the most informative requested target across refreshes, so mixed
       // caps cannot multiply scans on every two-minute cache expiry.
       const target=Math.max(namespaceTarget,saved?.namespace_discovery_target || 0);
-      const deadline=Date.now()+15000;
+      const deadline=Date.now()+20000;
       const attempts=await this.ctx.storage.get<number[]>('runner-capacity-attempts') || [];
       const bootstrapKey='runner-capacity-label-bootstrap-v2:'+organization;
       const bootstrap=await this.ctx.storage.get<{spent:number;done:boolean}>(bootstrapKey) || {spent:0,done:false};
@@ -555,19 +555,20 @@ export class InstallationScheduler extends DurableObject<Env> {
           }
         },target,queuedCache);
         if(snapshot.routing_version===2 && !bootstrap.done){bootstrap.done=true;await this.ctx.storage.put(bootstrapKey,bootstrap);}
-        // Shared two-minute snapshots normally need thirty refreshes per hour.
+        // A 145-second cache permits at most 25 full scans per rolling hour:
+        // 25 * 96 attempts fits the unchanged 2400-attempt ceiling.
         // Target upgrades also charge the same hard hourly attempt allowance.
         // Active pickers can continue a productive partial pass after a shared
         // cooldown. Keep both the per-pass and hourly provider budgets intact.
         const continuing=snapshot.placement_unavailable==='capacity_scan_limit' && snapshot.job_cache_writes>0 &&
           (!saved || snapshot.job_cache_hits>(saved.job_cache_hits || 0)) &&
-          (attempts.length<900 || !bootstrap.done && attempts.length<2240);
-        const value={complete:true,organization,namespace_discovery_target:target,...snapshot,retry_at:Date.now()+(continuing?30000:120000),coverage:snapshot.routing_version===2?'organization_repository_inventory':'organization_running_inventory'};
+          (attempts.length<900 || !bootstrap.done && attempts.length<2208);
+        const value={complete:true,organization,namespace_discovery_target:target,...snapshot,retry_at:Date.now()+(continuing?30000:145000),coverage:snapshot.routing_version===2?'organization_repository_inventory':'organization_running_inventory'};
         await this.ctx.storage.put(key,value);
         await this.ctx.storage.put('runner-capacity-last-good:'+organization,value);
         return value;
       } catch(error) {
-        const value={complete:false,organization,namespace_discovery_target:target,reason:error instanceof QuotaDeferred?'capacity_deferred':error instanceof Error && error.message.startsWith('capacity_')?error.message:classify(error),retry_at:Math.max(Date.now()+120000,error instanceof QuotaDeferred?error.result.retry_at || 0:0)};
+        const value={complete:false,organization,namespace_discovery_target:target,reason:error instanceof QuotaDeferred?'capacity_deferred':error instanceof Error && error.message.startsWith('capacity_')?error.message:classify(error),retry_at:Math.max(Date.now()+145000,error instanceof QuotaDeferred?error.result.retry_at || 0:0)};
         await this.ctx.storage.put(key,value);return value;
       }
     })().finally(()=>{this.capacityFlight=undefined;});

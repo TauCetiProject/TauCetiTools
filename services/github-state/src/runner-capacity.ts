@@ -11,9 +11,12 @@ export async function scanHostedCapacity(
   read:(path:string,body?:unknown)=>Promise<{status:number;body:any;link?:string;deferred?:boolean}>,
   namespaceTarget=20,
   cache?:JobLabelCache,
-):Promise<{routing_version:number;busy:number;running_jobs:Record<string,number>;namespace_busy?:number;namespace_busy_lower_bound?:number;queued_fleet?:string[][];placement_unavailable?:string;requests:number;repositories:number;runs:number;observed_at:number;job_cache_hits:number;job_cache_writes:number;elapsed_ms:number;running_requests:number}> {
-  let requests=0;const started=Date.now(),deadline=started+15000;
+):Promise<{routing_version:number;busy:number;running_jobs:Record<string,number>;namespace_busy?:number;namespace_busy_lower_bound?:number;queued_fleet?:string[][];placement_unavailable?:string;requests:number;repositories:number;runs:number;observed_at:number;job_cache_hits:number;job_cache_writes:number;elapsed_ms:number;running_requests:number;request_types:Record<string,number>;cache_fallbacks:Record<string,{count:number;run:string}>}> {
+  // Warm production scans exceed fifteen seconds during ordinary queue churn.
+  // Keep five seconds of drain headroom inside the existing 25-second client.
+  let requests=0;const started=Date.now(),deadline=started+20000;
   let job_cache_hits=0,job_cache_writes=0;
+  const request_types:Record<string,number>={},cache_fallbacks:Record<string,{count:number;run:string}>={};
   if(!Number.isSafeInteger(namespaceTarget) || namespaceTarget<1 || namespaceTarget>10000)throw new Error('capacity_invalid_namespace_target');
   let queuedPagination=false;
   const concurrency=4;
@@ -21,8 +24,11 @@ export async function scanHostedCapacity(
   async function request(path:string,body?:unknown) {
     if(active<concurrency)active++;else await new Promise<void>(resolve=>waiters.push(resolve));
     try {
-      if(requests>=80 || Date.now()>deadline)throw new Error('capacity_scan_limit');
-      requests++;return await read(path,body);
+      if(requests>=96 || Date.now()>deadline)throw new Error('capacity_scan_limit');
+      requests++;
+      const kind=path==='/graphql'?'check_suites':path.includes('/jobs')?'job_details':path.includes('/actions/runs')?'run_listings':'repositories';
+      request_types[kind]=(request_types[kind] || 0)+1;
+      return await read(path,body);
     }finally {
       const next=waiters.shift();if(next)next();else active--;
     }
@@ -54,6 +60,9 @@ export async function scanHostedCapacity(
         return !Number.isSafeInteger(at) || range.lower!==undefined && at<range.lower || range.upper!==undefined && at>range.upper;
       }))queuedPagination=true;
       const more=Boolean(response.link?.includes('rel="next"'));
+      // Search hints need fresh listing counts, not successful job-detail
+      // discovery. Retain these even when later metadata reads exhaust a pass.
+      if(!more && range)onLeaf?.(range,values.length);
       let children:Range[]|undefined,unsplittable=false;
       if(more && range!==undefined) {
         const times=values.map((run:any)=>typeof run.created_at==='string'?Date.parse(run.created_at)/1000:NaN);
@@ -76,7 +85,7 @@ export async function scanHostedCapacity(
       if(visit)await visit(values);else rows.push(...values);
       // Follow Link rather than drifting total_count. Single-page range leaves
       // establish coverage; overlapping split instants retain fractional dates.
-      if(!more){if(range)onLeaf?.(range,values.length);return rows;}
+      if(!more)return rows;
       if(unsplittable)throw new Error('capacity_queue_pagination');
       if(children){await settle(children.map(child=>pages(ranged(path,child),key,visit,child,onSplit,onLeaf)));return rows;}
     }
@@ -103,7 +112,7 @@ export async function scanHostedCapacity(
   const seenRuns=new Set<string>(),seenJobs=new Set<string>();
   const namespaceByRepo=new Map<string,number>();
   const namespaceWorkflows=new Set<string>();
-  type Run={prefix:string;id:string;path?:string;suite?:string;known?:CapacityJob[];proof?:CapacityJob[];inventorySize?:number};
+  type Run={prefix:string;id:string;path?:string;suite?:string;known?:CapacityJob[];proof?:CapacityJob[]};
   const activeRuns:Run[]=[];
   function entry(prefix:string,run:any):Run {
     return {prefix,id:String(run.id),path:run.path,
@@ -117,9 +126,9 @@ export async function scanHostedCapacity(
     let at=0;const batches:{batch:Run[];limits:number[]}[]=[];
     while(at<known.length) {
       const batch:Run[]=[],limits:number[]=[];let slots=0;
-      while(at<known.length && batch.length<50) {
-        const run=known[at],hint=run.known?.[0]?.inventory_size;
-        const limit=Math.max(2,Math.min(100,Math.max(run.known?.length || 2,Number.isSafeInteger(hint)?hint!:0)));
+      while(at<known.length && batch.length<100) {
+        const run=known[at];
+        const limit=Math.max(2,Math.min(100,run.known?.filter(job=>job.status!=='completed').length || 2));
         if(batch.length && slots+limit>200)break;
         batch.push(run);limits.push(limit);slots+=limit;at++;
       }
@@ -128,7 +137,9 @@ export async function scanHostedCapacity(
     await each(batches,async({batch,limits})=>{
       if(witnessUnavailable)return;
       const variables=Object.fromEntries(batch.map((run,i)=>['id'+i,run.suite]));
-      const fields=batch.map((_,i)=>`q${i}:node(id:$id${i}){... on CheckSuite{checkRuns(first:${limits[i]},filterBy:{checkType:ALL}){totalCount pageInfo{hasNextPage} nodes{databaseId name status}}}}`).join(' ');
+      // Include every supported nonterminal state. Waiting/requested/pending
+      // retain the ordinary REST fallback rather than being silently omitted.
+      const fields=batch.map((_,i)=>`q${i}:node(id:$id${i}){... on CheckSuite{checkRuns(first:${limits[i]},filterBy:{checkType:ALL,statuses:[QUEUED,IN_PROGRESS,WAITING,PENDING,REQUESTED]}){totalCount pageInfo{hasNextPage} nodes{databaseId name status}}}}`).join(' ');
       const query='query('+batch.map((_,i)=>'$id'+i+':ID!').join(',')+'){'+fields+' rateLimit{cost remaining resetAt}}';
       let response;
       try {response=await request('/graphql',{query,variables});}
@@ -139,7 +150,6 @@ export async function scanHostedCapacity(
       if(response.status!==200 || response.deferred || !response.body?.data){witnessUnavailable=true;return;}
       batch.forEach((run,i)=>{
         const connection=response.body.data['q'+i]?.checkRuns,nodes=connection?.nodes;
-        if(Number.isSafeInteger(connection?.totalCount) && connection.totalCount>=0)run.inventorySize=connection.totalCount;
         if(connection?.pageInfo?.hasNextPage!==false || !Array.isArray(nodes) || nodes.length!==connection.totalCount ||
           !nodes.every(node=>node && /^\d+$/.test(String(node.databaseId)) && typeof node.name==='string' &&
             ['QUEUED','IN_PROGRESS','COMPLETED'].includes(node.status)))return;
@@ -171,21 +181,22 @@ export async function scanHostedCapacity(
       const active=run.proof?.filter(job=>job.status!=='completed');
       const reusable=active?.every(job=>{
         const saved=metadata.get(String(job.id));
-        return saved && (saved.status==='completed' || job.status!=='in_progress' || Boolean(saved.runner_id && saved.runner_name));
+        return Boolean(saved && (saved.status==='completed' || saved.labels.length));
       });
       const observed:CapacityJob[]=[];
-      const visit=async(rows:CapacityJob[])=>{
+      const visit=async(rows:CapacityJob[],freshExecution=false)=>{
         for(const job of rows) {
           if(!/^\d+$/.test(String(job.id)) || typeof job.status!=='string' || !Array.isArray(job.labels) || job.labels.some((l:unknown)=>typeof l!=='string'))throw new Error('capacity_invalid_job');
           const key=run.prefix+'/'+job.id;
           if(seenJobs.has(key))continue;
           seenJobs.add(key);
           const namespace=job.labels.some((l:string)=>l.startsWith('nscloud-') || l.startsWith('namespace-profile-'));
-          // Reporting reuses this already-required running inventory. An assigned
-          // runner is evidence of execution; queued labels are only a destination.
-          if(job.status==='in_progress' && job.runner_id && job.runner_name) {
+          // Fresh check-run execution state or an assigned REST runner proves
+          // execution. Immutable labels identify its pool; queued labels alone
+          // remain only a destination.
+          if(job.status==='in_progress' && (freshExecution || job.runner_id && job.runner_name)) {
             const machine=job.labels.find((label:string)=>/^fleet-[a-f0-9]{32}$/.test(label))
-              || /^fleet-[a-f0-9]{12}-/.exec(job.runner_name)?.[0].slice(0,-1);
+              || /^fleet-[a-f0-9]{12}-/.exec(job.runner_name || '')?.[0].slice(0,-1);
             const pool=namespace?'namespace':machine || (job.labels.includes('self-hosted')?'self-hosted':'github');
             running_jobs[pool]=(running_jobs[pool] || 0)+1;
           }
@@ -204,16 +215,19 @@ export async function scanHostedCapacity(
       if(reusable){
         job_cache_hits++;
         await visit(active!.map(job=>{const saved=metadata.get(String(job.id))!;
-          return {...saved,status:saved.status==='completed'?'completed':job.status};}));
+          return {...saved,status:saved.status==='completed'?'completed':job.status};}),true);
       }
       else {
+        const unresolved=active?.some(job=>{const saved=metadata.get(String(job.id));return saved && saved.status!=='completed' && !saved.labels.length;});
+        const reason=!run.proof?'no_live_inventory':!run.known?'cold_metadata':unresolved?'unresolved_labels':'new_job_ids';
+        const bucket=run.prefix+':'+reason;
+        const fallback=cache_fallbacks[bucket] ||= {count:0,run:run.id};fallback.count++;
         await pages(run.prefix+'/actions/runs/'+run.id+'/jobs','jobs',visit);
         // This is metadata, never a cached activity count. Incomplete GraphQL
         // pages still use the ordinary live REST traversal without certifying
         // that a previously observed job list was the whole current inventory.
         if(cache && observed.length &&
           JSON.stringify(observed).length<=65536){
-          if(run.inventorySize!==undefined)observed[0].inventory_size=Math.min(100,run.inventorySize);
           cache.put(key,'job-labels-v2',observed);job_cache_writes++;
         }
       }
@@ -270,19 +284,23 @@ export async function scanHostedCapacity(
         // Every next scan freshly reads the entire overlapping partition of
         // (-infinity,+infinity), including empty or newly populated ranges.
         let compact:number[];
-        if(complete) {
+        const removed=new Set<number>();
+        {
           // Fresh leaf counts only optimize next scan's search. Merge sparse
           // neighbors (including drained queues), leaving arrival headroom.
           leaves.sort((a,b)=>(a.range.lower ?? -Infinity)-(b.range.lower ?? -Infinity));
           while(leaves.length>1) {
-            let at=0;
-            for(let i=1;i<leaves.length-1;i++)if(leaves[i].count+leaves[i+1].count<leaves[at].count+leaves[at+1].count)at=i;
+            let at=-1;
+            for(let i=0;i<leaves.length-1;i++)if(leaves[i].range.upper===leaves[i+1].range.lower &&
+              (leaves[i].count+leaves[i+1].count<=(leaves[i+1].range.upper===undefined?80:100) || complete && leaves.length>17) &&
+              (at<0 || leaves[i].count+leaves[i+1].count<leaves[at].count+leaves[at+1].count))at=i;
+            if(at<0)break;
             const count=leaves[at].count+leaves[at+1].count;
-            if(count>80 && leaves.length<=17)break;
+            removed.add(leaves[at+1].range.lower!);
             leaves.splice(at,2,{range:{lower:leaves[at].range.lower,upper:leaves[at+1].range.upper},count});
           }
-          compact=leaves.slice(1).map(leaf=>leaf.range.lower!);
-        }else compact=[...learned].sort((a,b)=>a-b).slice(-16);
+          compact=complete?leaves.slice(1).map(leaf=>leaf.range.lower!):[...learned].filter(at=>!removed.has(at)).sort((a,b)=>a-b).slice(-16);
+        }
         if(complete || compact.length!==saved.length || compact.some((at,i)=>at!==saved[i]))cache?.putRanges?.(repoPrefix,compact);
       }
     };
@@ -295,7 +313,7 @@ export async function scanHostedCapacity(
     if(queuedPagination)throw new Error('capacity_queue_pagination');
   } catch(error) {
     // Retain distinct jobs from every completed page, including a partial scan.
-    return {routing_version:1,busy:running,running_jobs,namespace_busy_lower_bound:namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:Date.now(),job_cache_hits,job_cache_writes,elapsed_ms:Date.now()-started,running_requests,placement_unavailable:error instanceof Error && error.message.startsWith('capacity_')?error.message:'capacity_inventory_unavailable'};
+    return {routing_version:1,busy:running,running_jobs,namespace_busy_lower_bound:namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:Date.now(),job_cache_hits,job_cache_writes,elapsed_ms:Date.now()-started,running_requests,request_types,cache_fallbacks,placement_unavailable:error instanceof Error && error.message.startsWith('capacity_')?error.message:'capacity_inventory_unavailable'};
   }
-  return {routing_version:2,busy:running,running_jobs,namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:Date.now(),job_cache_hits,job_cache_writes,elapsed_ms:Date.now()-started,running_requests};
+  return {routing_version:2,busy:running,running_jobs,namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:Date.now(),job_cache_hits,job_cache_writes,elapsed_ms:Date.now()-started,running_requests,request_types,cache_fallbacks};
 }
