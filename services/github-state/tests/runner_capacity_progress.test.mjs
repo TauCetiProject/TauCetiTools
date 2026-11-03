@@ -34,7 +34,7 @@ function fixture(count=400,{sameSecond=false,repositories=1,runningCount=1,activ
    for(const [key,suite] of Object.entries(body.variables)) {
     const i=Number(key.slice(2)),id=Number(suite.slice(3));
     const limit=Number(new RegExp('q'+i+':node.*?checkRuns\\(first:(\\d+)').exec(body.query)?.[1]);
-    const all=[...jobRows(id),...(historical.get(id)||[])].filter(job=>!body.query.includes('statuses:[QUEUED,IN_PROGRESS]') || ['queued','in_progress'].includes(job.status)),jobs=all.slice(0,limit);
+    const all=[...jobRows(id),...(historical.get(id)||[])].filter(job=>!body.query.includes('statuses:[') || job.status!=='completed'),jobs=all.slice(0,limit);
     data['q'+i]={checkRuns:{totalCount:all.length,pageInfo:{hasNextPage:all.length>limit},
      nodes:jobs.map(job=>({databaseId:job.id,name:job.name,status:job.status.toUpperCase()}))}};
    }
@@ -141,6 +141,21 @@ test('partial metadata failures still prune freshly listed sparse search ranges'
  const recovered=await scanHostedCapacity('org',f.read,20,f.cache);
  assert.equal(recovered.routing_version,2);assert.equal(recovered.namespace_busy,4);
 });
+test('older range compaction uses full provider pages while retaining arrival headroom at the newest end',async()=>{
+ const f=fixture(160);let value;
+ for(let i=0;i<10;i++){value=await scanHostedCapacity('org',f.read,20,f.cache);if(value.routing_version===2)break;}
+ assert.equal(value.routing_version,2);
+ f.ranges.set('/repos/org/repo',[39,79,119,159].map(at=>base/1000+at));
+ value=await scanHostedCapacity('org',f.read,20,f.cache);
+ assert.equal(value.routing_version,2);assert.equal(value.namespace_busy,4);
+ assert.equal(f.ranges.get('/repos/org/repo').length,2);
+ let listings=0;
+ value=await scanHostedCapacity('org',async(path,body)=>{
+  if(path.includes('status=queued'))listings++;
+  return f.read(path,body);
+ },20,f.cache);
+ assert.equal(value.routing_version,2);assert.equal(value.namespace_busy,4);assert.equal(listings,3);
+});
 test('fresh execution/completion statuses count the routed pool without refetching runner identity',async()=>{
  const f=fixture(4);await scanHostedCapacity('org',f.read,20,f.cache);f.reads.clear();
  f.promoted.add(100);let v=await scanHostedCapacity('org',f.read,20,f.cache);
@@ -148,6 +163,14 @@ test('fresh execution/completion statuses count the routed pool without refetchi
  f.reads.clear();await scanHostedCapacity('org',f.read,20,f.cache);assert.equal(f.reads.size,0);
  f.completed.add(100);v=await scanHostedCapacity('org',f.read,20,f.cache);
  assert.equal(v.namespace_busy,3);assert.equal(f.reads.size,0);
+});
+test('empty routing labels are refreshed until the target has resolved',async()=>{
+ const f=fixture(1);await scanHostedCapacity('org',f.read,20,f.cache);
+ f.saved.get('/repos/org/repo/100').jobs[0].labels=[];f.reads.clear();
+ const value=await scanHostedCapacity('org',f.read,20,f.cache);
+ assert.equal(value.routing_version,2);assert.equal(value.namespace_busy,2);assert.equal(f.reads.get(100),1);
+ assert.equal(value.cache_fallbacks['/repos/org/repo:unresolved_labels'].count,1);
+ f.reads.clear();await scanHostedCapacity('org',f.read,20,f.cache);assert.equal(f.reads.size,0);
 });
 test('missing, incomplete or quota-blocked live witnesses retain full REST discovery',async()=>{
  for(const mode of ['missing','truncated','quota']) {
@@ -306,4 +329,21 @@ test('completed rerun history never inflates the live inventory or forces repeat
  await scanHostedCapacity('org',f.read,20,f.cache);f.reads.clear();
  const value=await scanHostedCapacity('org',f.read,20,f.cache);
  assert.equal(value.routing_version,2);assert.equal(value.namespace_busy,2);assert.equal(f.reads.size,0);
+});
+test('other nonterminal check states retain REST fallback instead of hiding queued Actions jobs',async()=>{
+ const f=fixture(1);
+ const read=async(path,body)=>{
+  const value=await f.read(path,body);
+  if(path==='/graphql')for(const [key,id] of Object.entries(body.variables))if(id==='CS_100'){
+   const c=value.body.data['q'+key.slice(2)].checkRuns;
+   if(body.query.includes('WAITING'))c.nodes[0].status='WAITING';
+   else {c.nodes=[];c.totalCount=0;}
+  }
+  return value;
+ };
+ for(let i=0;i<2;i++){
+  const value=await scanHostedCapacity('org',read,20,f.cache);
+  assert.equal(value.routing_version,2);assert.equal(value.namespace_busy,2);
+ }
+ assert.equal(f.reads.get(100),2);
 });

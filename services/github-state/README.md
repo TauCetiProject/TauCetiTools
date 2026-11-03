@@ -581,7 +581,7 @@ labels identify the running pool without refetching a newly assigned runner's
 identity. Missing or paginated check-suite data uses ordinary REST discovery.
 Completed REST job receipts cannot be resurrected by a delayed check-suite status.
 Inactive metadata entries expire after an hour; cached metadata is never an
-activity count. Parallel GraphQL batches request at most 50 suites and 200 job
+activity count. Parallel GraphQL batches request at most 100 suites and 200 job
 nodes each to bound latency and point cost under the same four-request gate.
 
 Large queued listings use overlapping creation-time ranges instead of shifting

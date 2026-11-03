@@ -126,7 +126,7 @@ export async function scanHostedCapacity(
     let at=0;const batches:{batch:Run[];limits:number[]}[]=[];
     while(at<known.length) {
       const batch:Run[]=[],limits:number[]=[];let slots=0;
-      while(at<known.length && batch.length<50) {
+      while(at<known.length && batch.length<100) {
         const run=known[at];
         const limit=Math.max(2,Math.min(100,run.known?.filter(job=>job.status!=='completed').length || 2));
         if(batch.length && slots+limit>200)break;
@@ -137,7 +137,9 @@ export async function scanHostedCapacity(
     await each(batches,async({batch,limits})=>{
       if(witnessUnavailable)return;
       const variables=Object.fromEntries(batch.map((run,i)=>['id'+i,run.suite]));
-      const fields=batch.map((_,i)=>`q${i}:node(id:$id${i}){... on CheckSuite{checkRuns(first:${limits[i]},filterBy:{checkType:ALL,statuses:[QUEUED,IN_PROGRESS]}){totalCount pageInfo{hasNextPage} nodes{databaseId name status}}}}`).join(' ');
+      // Include every supported nonterminal state. Waiting/requested/pending
+      // retain the ordinary REST fallback rather than being silently omitted.
+      const fields=batch.map((_,i)=>`q${i}:node(id:$id${i}){... on CheckSuite{checkRuns(first:${limits[i]},filterBy:{checkType:ALL,statuses:[QUEUED,IN_PROGRESS,WAITING,PENDING,REQUESTED]}){totalCount pageInfo{hasNextPage} nodes{databaseId name status}}}}`).join(' ');
       const query='query('+batch.map((_,i)=>'$id'+i+':ID!').join(',')+'){'+fields+' rateLimit{cost remaining resetAt}}';
       let response;
       try {response=await request('/graphql',{query,variables});}
@@ -179,7 +181,7 @@ export async function scanHostedCapacity(
       const active=run.proof?.filter(job=>job.status!=='completed');
       const reusable=active?.every(job=>{
         const saved=metadata.get(String(job.id));
-        return Boolean(saved);
+        return Boolean(saved && (saved.status==='completed' || saved.labels.length));
       });
       const observed:CapacityJob[]=[];
       const visit=async(rows:CapacityJob[],freshExecution=false)=>{
@@ -216,7 +218,8 @@ export async function scanHostedCapacity(
           return {...saved,status:saved.status==='completed'?'completed':job.status};}),true);
       }
       else {
-        const reason=!run.proof?'no_live_inventory':!run.known?'cold_metadata':'new_job_ids';
+        const unresolved=active?.some(job=>{const saved=metadata.get(String(job.id));return saved && saved.status!=='completed' && !saved.labels.length;});
+        const reason=!run.proof?'no_live_inventory':!run.known?'cold_metadata':unresolved?'unresolved_labels':'new_job_ids';
         const bucket=run.prefix+':'+reason;
         const fallback=cache_fallbacks[bucket] ||= {count:0,run:run.id};fallback.count++;
         await pages(run.prefix+'/actions/runs/'+run.id+'/jobs','jobs',visit);
@@ -289,7 +292,7 @@ export async function scanHostedCapacity(
           while(leaves.length>1) {
             let at=-1;
             for(let i=0;i<leaves.length-1;i++)if(leaves[i].range.upper===leaves[i+1].range.lower &&
-              (leaves[i].count+leaves[i+1].count<=80 || complete && leaves.length>17) &&
+              (leaves[i].count+leaves[i+1].count<=(leaves[i+1].range.upper===undefined?80:100) || complete && leaves.length>17) &&
               (at<0 || leaves[i].count+leaves[i+1].count<leaves[at].count+leaves[at+1].count))at=i;
             if(at<0)break;
             const count=leaves[at].count+leaves[at+1].count;
