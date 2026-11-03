@@ -197,7 +197,8 @@ UPDATE=0
 [ "${1:-}" = "--update" ] && UPDATE=1
 # Scoped mode: LINT_ONLY_MODULES names a file listing modules, one per line (in pr-build.yml a
 # trusted, read-only file computed from the PR's changed files). The #lint driver then imports and
-# lints only those TauCeti modules, not the ones they import or the ones that import them; the
+# lints those TauCeti modules. Only unusedArguments also checks their transitive importers:
+# project API changes can remove arguments from elaborated downstream declarations. The
 # daily full lint (lint-full.yml) covers the rest. The docstring scan and the nolint ratchet stay
 # library-wide: they are cheap, and their coverage guards need the whole library.
 ONLY_MODULES="${LINT_ONLY_MODULES:-}"
@@ -542,7 +543,8 @@ if [ "$lint_mods" -eq 0 ]; then
   status=0
 else
   driver_flags=()
-  [ -n "$ONLY_MODULES" ] && driver_flags=(--only-listed)
+  [ -n "$ONLY_MODULES" ] && \
+    driver_flags=(--only-listed --downstream-unused-arguments "$MODULE_IMPORT_LIST")
   if run_driver "$DRIVER_EXE" "${driver_flags[@]}" "$DRIVER" "$TMP/marker.txt" "$LINT_LIST" \
       $LINTERS > "$TMP/out.txt" 2>&1; then
     status=0
@@ -683,7 +685,7 @@ fi
 LC_ALL=C sort -u "$TMP/violations-lint.txt" "$TMP/violations-docscan.txt" > "$TMP/violations.txt"
 total=$(wc -l < "$TMP/violations.txt")
 if [ -n "$ONLY_MODULES" ]; then
-  echo "lint-env: linted $lint_mods changed module(s) of $mods (docstrings: all $mods); $total (linter, declaration) violation(s)."
+  echo "lint-env: linted $lint_mods changed module(s) of $mods (unusedArguments: also transitive importers; docstrings: all $mods); $total (linter, declaration) violation(s)."
 else
   echo "lint-env: linted $mods modules; $total (linter, declaration) violation(s)."
 fi
