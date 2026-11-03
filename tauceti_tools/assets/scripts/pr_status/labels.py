@@ -121,6 +121,8 @@ def remove_label(pr, name):
 
 def reconcile(pr):
     status = readiness.assess(pr)
+    if status.get("clear_deprecation_request"):
+        remove_label(pr, "needs-rebase")
     desired = status["category"]          # one of STATUS_LABELS, or None (terminal)
     current = set(current_status_labels(pr))
 

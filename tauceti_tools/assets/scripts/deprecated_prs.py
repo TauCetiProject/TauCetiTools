@@ -221,7 +221,7 @@ def handoff(api, repo, pr, branch, findings, *, dry_run):
     comments = api.items(f"repos/{repo}/issues/{number}/comments")
     if head not in rebase_heads(comments):
         body = (f"Merge-queue recovery for head `{head[:7]}`: Mathlib dependency changed.\n\n"
-                f"<!--tauceti-rebase:v1 {head}-->")
+                f"<!--tauceti-rebase:v1 {head}-->\n<!--tauceti-deprecation:v1 {head}-->")
         api.request("POST", f"repos/{repo}/issues/{number}/comments", {"body": body})
     # Comment creation can wake another actor: recheck immediately before label.
     live = api.request("GET", f"repos/{repo}/pulls/{number}")

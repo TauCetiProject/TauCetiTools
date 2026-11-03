@@ -13,7 +13,7 @@ import yaml
 SCRIPTS = Path(__file__).resolve().parents[1] / "tauceti_tools/assets/scripts"
 sys.path.insert(0, str(SCRIPTS))
 import deprecated_prs as sweep
-from tauceti_tools.survey_facts import rebase_heads
+from tauceti_tools.survey_facts import deprecation_repair_finished, rebase_heads
 
 HEAD, MAIN, OLD, NEW = (c * 40 for c in "abcd")
 REPO = "TauCetiProject/TauCeti"
@@ -168,6 +168,52 @@ f.add_apply
         api.request = changed
         self.assertEqual(sweep.handoff(api, REPO, pr(), "main", [], dry_run=False), "stale_or_parked")
         self.assertFalse(any(c[1].endswith("/labels") for c in api.calls))
+
+    def test_only_an_old_authenticated_deprecation_request_can_resolve(self):
+        comment = dict(user=dict(login="tauceti-review-bot[bot]"), body=(
+            f"Merge-queue recovery for head `{HEAD[:7]}`: Mathlib dependency changed.\n\n"
+            f"<!--tauceti-rebase:v1 {HEAD}-->\n<!--tauceti-deprecation:v1 {HEAD}-->"))
+        self.assertFalse(deprecation_repair_finished([comment], HEAD))
+        self.assertTrue(deprecation_repair_finished([comment], MAIN))
+        self.assertFalse(deprecation_repair_finished([comment | {"user": dict(login="untrusted")}], MAIN))
+        ordinary = comment | {"body": comment["body"].split("\n<!--tauceti-deprecation:")[0]}
+        self.assertFalse(deprecation_repair_finished([ordinary], MAIN))
+        current = dict(user=dict(login="tau-ceti-bors[bot]"), body=(
+            f"Merge-queue recovery for head `{MAIN[:7]}`: existing request.\n<!--tauceti-rebase:v1 {MAIN}-->"))
+        self.assertFalse(deprecation_repair_finished([comment, current], MAIN))
+
+    def test_existing_status_reconciliation_clears_only_after_stable_fresh_head_ci(self):
+        sys.path.insert(0, str(SCRIPTS / "pr_status"))
+        import readiness
+        import labels
+        comment = dict(user=dict(login="tauceti-review-bot[bot]"), body=(
+            f"Merge-queue recovery for head `{HEAD[:7]}`: Mathlib dependency changed.\n\n"
+            f"<!--tauceti-rebase:v1 {HEAD}-->\n<!--tauceti-deprecation:v1 {HEAD}-->"))
+        current = live() | {"number": 17, "head": {"sha": MAIN}, "labels": [{"name": "needs-rebase"}]}
+        statuses = {k: "success" for k in ["build", "scope", "bump-guard"]}
+        for change in ["none", "new-head", "hold", "red", "same-head"]:
+            before, after = copy.deepcopy(current), copy.deepcopy(current)
+            checks = statuses.copy()
+            if change == "new-head":
+                after["head"]["sha"] = OLD
+            if change == "hold":
+                before["labels"].append({"name": "keep"})
+                after["labels"].append({"name": "keep"})
+            if change == "red":
+                checks["build"] = "failure"
+            if change == "same-head":
+                before["head"]["sha"] = after["head"]["sha"] = HEAD
+            with patch.object(readiness, "evidence", side_effect=[(before, [comment], checks), (after, [], {})]), \
+                 patch.object(readiness, "classify", return_value=dict(head=before["head"]["sha"], category="ready-to-merge", eligible=True)), \
+                 patch.object(readiness, "sweep_engine", return_value=Mock(KEEP_LABELS={"keep"})), \
+                 patch.object(readiness.core, "gh_api", return_value=OLD):
+                result = readiness.assess(17)
+            self.assertEqual(result.get("clear_deprecation_request", False), change == "none")
+        with patch.object(labels.readiness, "assess", return_value=dict(head=MAIN, category="ready-to-merge", reason="ready", clear_deprecation_request=True)), \
+             patch.object(labels, "current_status_labels", return_value=["ready-to-merge"]), \
+             patch.object(labels, "remove_label") as remove:
+            labels.reconcile(17)
+            remove.assert_called_once_with(17, "needs-rebase")
 
     def test_eligibility_respects_holds_drafts_other_branches_and_truncated_labels(self):
         self.assertTrue(sweep.eligible(pr(), "main"))
