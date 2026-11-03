@@ -70,7 +70,7 @@ test('a 400-run mostly hosted queue converges under the unchanged 80-request bou
  assert.equal(f.saved.size,401);assert.ok(passes>1);assert.ok(total<700);
  f.reads.clear();const warm=await scanHostedCapacity('org',f.read,20,f.cache);
  assert.equal(warm.routing_version,2);assert.equal(warm.namespace_busy,4);assert.equal(warm.job_cache_hits,401);
- assert.equal(warm.job_cache_writes,0);assert.ok(warm.requests<20);
+ assert.equal(warm.job_cache_writes,0);assert.ok(warm.requests<25);
  assert.equal(f.reads.size,0,'fresh GraphQL statuses reuse immutable labels and assigned runner metadata');
  console.log(JSON.stringify({queue:400,cold_passes:passes,cold_requests:total,warm_requests:warm.requests}));
 });
@@ -188,7 +188,7 @@ test('warm production-sized discovery completes with measured provider-like late
  const read=async(path,body)=>{
   active++;peak=Math.max(peak,active);
   try {
-   const delay=path.startsWith('/orgs/')?550:path.includes('/repo/actions/runs?')?1450:300;
+   const delay=path==='/graphql'?350+Object.keys(body.variables).length*15:path.startsWith('/orgs/')?550:path.includes('/repo/actions/runs?')?1450:300;
    await new Promise(resolve=>setTimeout(resolve,delay));return await f.read(path,body);
   }finally{active--;}
  };

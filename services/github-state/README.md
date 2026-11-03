@@ -577,7 +577,8 @@ requires fresh REST details; a queued job starting without a known runner refres
 its assignment. Missing or paginated check-suite data uses ordinary REST discovery.
 Completed REST job receipts cannot be resurrected by a delayed check-suite status.
 Inactive metadata entries expire after an hour; cached metadata is never an
-activity count. GraphQL batches request at most 200 job nodes to bound point cost.
+activity count. Parallel GraphQL batches request at most 50 suites and 200 job
+nodes each to bound latency and point cost under the same three-request gate.
 
 Large queued listings use overlapping creation-time ranges instead of shifting
 offset pages. Their split instant belongs to both children, avoiding sub-second

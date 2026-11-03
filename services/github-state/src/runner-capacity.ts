@@ -111,15 +111,19 @@ export async function scanHostedCapacity(
     if(!cache || witnessUnavailable)return;
     const known=runs.filter(run=>run.suite);
     for(const run of known)run.known=cache.get(run.prefix+'/'+run.id,'job-labels-v2');
-    let at=0;
+    let at=0;const batches:{batch:Run[];limits:number[]}[]=[];
     while(at<known.length) {
       const batch:Run[]=[],limits:number[]=[];let slots=0;
-      while(at<known.length && batch.length<100) {
+      while(at<known.length && batch.length<50) {
         const run=known[at],hint=run.known?.[0]?.inventory_size;
         const limit=Math.max(2,Math.min(100,Math.max(run.known?.length || 2,Number.isSafeInteger(hint)?hint!:0)));
         if(batch.length && slots+limit>200)break;
         batch.push(run);limits.push(limit);slots+=limit;at++;
       }
+      batches.push({batch,limits});
+    }
+    await each(batches,async({batch,limits})=>{
+      if(witnessUnavailable)return;
       const variables=Object.fromEntries(batch.map((run,i)=>['id'+i,run.suite]));
       const fields=batch.map((_,i)=>`q${i}:node(id:$id${i}){... on CheckSuite{checkRuns(first:${limits[i]},filterBy:{checkType:ALL}){totalCount pageInfo{hasNextPage} nodes{databaseId name status}}}}`).join(' ');
       const query='query('+batch.map((_,i)=>'$id'+i+':ID!').join(',')+'){'+fields+' rateLimit{cost remaining resetAt}}';
@@ -139,7 +143,7 @@ export async function scanHostedCapacity(
         if(new Set(nodes.map(node=>String(node.databaseId))).size!==nodes.length)return;
         run.proof=nodes.map(node=>({id:node.databaseId,name:node.name,status:node.status.toLowerCase(),labels:[]}));
       });
-    }
+    });
   }
   const repos=all.filter(r=>!r.archived);
   async function discover(status:string):Promise<void> {
