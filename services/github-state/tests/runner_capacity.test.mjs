@@ -186,7 +186,7 @@ test('brief contention for existing request slots yields and completes instead o
   const v=await result.json();assert.equal(result.status,200);assert.equal(v.busy,1);
  }finally{clearTimeout(timer);globalThis.fetch=original;}
 });
-test('a busy organization inventory uses at most three reads at once and drains in-flight reads on failure',async()=>{
+test('a busy organization inventory uses at most four reads at once and drains in-flight reads on failure',async()=>{
  let active=0,peak=0;
  const reader=(fail=false)=>async path=>{
   active++;peak=Math.max(peak,active);
@@ -199,7 +199,7 @@ test('a busy organization inventory uses at most three reads at once and drains 
   }finally{active--;}
  };
  const value=await scanHostedCapacity('org',reader());assert.equal(value.busy,24);assert.equal(value.requests,37);
- assert.equal(peak,3);assert.equal(active,0);
+ assert.equal(peak,4);assert.equal(active,0);
  await assert.rejects(()=>scanHostedCapacity('org',reader(true)),/fixture request rejected/);
  assert.equal(active,0,'refresh must settle all started requests before releasing the single flight');
 });
@@ -237,9 +237,9 @@ test('a thousand queued workflows establish saturation from their first page, bu
   }finally{active--;}
  });
  assert.equal(value.busy,1);assert.equal(value.routing_version,1);
- assert.ok(value.namespace_busy_lower_bound>=20 && value.namespace_busy_lower_bound<=22);
+ assert.ok(value.namespace_busy_lower_bound>=20 && value.namespace_busy_lower_bound<=23);
  assert.equal(value.placement_unavailable,'capacity_namespace_target');
- assert.ok(calls.length<=11);assert.ok(peak<=3);assert.equal(active,0,'all started reads settle before the snapshot returns');
+ assert.ok(calls.length<=12);assert.ok(peak<=4);assert.equal(active,0,'all started reads settle before the snapshot returns');
 });
 test('production-sized running inventory leaves budget to prove saturation behind queued controls',async()=>{
  const calls=[];

@@ -14,9 +14,10 @@ export async function scanHostedCapacity(
   let job_cache_hits=0,job_cache_writes=0;
   if(!Number.isSafeInteger(namespaceTarget) || namespaceTarget<1 || namespaceTarget>10000)throw new Error('capacity_invalid_namespace_target');
   let queuedPagination=false;
+  const concurrency=4;
   let active=0;const waiters:(()=>void)[]=[];
   async function request(path:string,body?:unknown) {
-    if(active<3)active++;else await new Promise<void>(resolve=>waiters.push(resolve));
+    if(active<concurrency)active++;else await new Promise<void>(resolve=>waiters.push(resolve));
     try {
       if(requests>=80 || Date.now()>deadline)throw new Error('capacity_scan_limit');
       requests++;return await read(path,body);
@@ -65,7 +66,7 @@ export async function scanHostedCapacity(
       }
       // Parent visitation synchronously records its run IDs before awaiting
       // witnesses. Child listings can overlap that latency without recounting
-      // boundary jobs; the one request gate still limits all work to three.
+      // boundary jobs; the one request gate still limits all work to four.
       if(children && visit && cache && namespaceTarget-namespace_busy>5) {
         await settle([visit(values),...children.map(child=>pages(ranged(path,child),key,visit,child))]);
         return rows;
@@ -90,7 +91,7 @@ export async function scanHostedCapacity(
       }
     };
     // Finish already-started requests before returning an unavailable snapshot.
-    await Promise.all(Array.from({length:Math.min(3,values.length)},worker));
+    await Promise.all(Array.from({length:Math.min(concurrency,values.length)},worker));
     if(failure)throw failure;
   }
   let busy=0,namespace_busy=0;

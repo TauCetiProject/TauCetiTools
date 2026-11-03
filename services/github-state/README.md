@@ -578,7 +578,7 @@ its assignment. Missing or paginated check-suite data uses ordinary REST discove
 Completed REST job receipts cannot be resurrected by a delayed check-suite status.
 Inactive metadata entries expire after an hour; cached metadata is never an
 activity count. Parallel GraphQL batches request at most 50 suites and 200 job
-nodes each to bound latency and point cost under the same three-request gate.
+nodes each to bound latency and point cost under the same four-request gate.
 
 Large queued listings use overlapping creation-time ranges instead of shifting
 offset pages. Their split instant belongs to both children, avoiding sub-second
@@ -597,7 +597,7 @@ when prior scans have already spent more than 900 calls. It never raises the
 2400-call ceiling, preserves 160 attempts before admitting a continuation, and
 closes durably on the first full inventory or after the bootstrap allowance.
 Queued repositories and range branches progress concurrently under one global
-three-request gate. Snapshots expose elapsed time and the running-inventory
+four-request gate. Snapshots expose elapsed time and the running-inventory
 request subtotal to distinguish request exhaustion from slow provider responses.
 
 Discovery stops after observing at least the requested `namespace_cap` distinct
@@ -623,7 +623,7 @@ Refresh uses existing installation quota accounting, honors secondary cooldowns,
 leaves at least 1,500 core requests for repository work, and spends at most 2,400
 read attempts per rolling hour, including lost network responses on this operation. Brief request-slot
 contention yields within the scan deadline rather than invalidating the snapshot. A scan is bounded to
-80 requests, at most three simultaneous reads, and a 15-second launch window; individual requests retain their
+80 requests, at most four simultaneous reads, and a 15-second launch window; individual requests retain their
 existing timeout. There is no alarm, CI event storage, or new polling task.
 
 Pickers without a configured shared service retain bounded direct discovery.
