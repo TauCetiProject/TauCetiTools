@@ -32,7 +32,10 @@ def source_location(record, root, modules):
     resolves to its defining file alone.
     """
     if "unknown" in record:
-        return {"unknown": "unsupported_origin"}
+        # Keep the driver's own reason visible (sanitised to the consumer's [a-z_] alphabet)
+        # so an unlocated finding says which origin branch it took.
+        reason = re.sub(r"[^a-z_]", "_", str(record["unknown"]).lower())[:48] or "unsupported"
+        return {"unknown": "origin_" + reason}
     module = record.get("module")
     ranged = "line" in record or "column" in record
     line, column = record.get("line"), record.get("column")
