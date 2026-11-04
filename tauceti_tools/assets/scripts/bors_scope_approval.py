@@ -109,7 +109,8 @@ def verify(data, head, base, *, pr=None, batch_id=None, combined_paths=None, api
     except ValueError:
         return False
     members = batch.get("members")
-    if not isinstance(members, list) or not 0 < len(members) <= 128:
+    # The queue seals batches of any size; every member is still verified below.
+    if not isinstance(members, list) or not members:
         return False
     if not isinstance(combined_paths, list) or not combined_paths or not all(isinstance(p, str) and p for p in combined_paths):
         return False

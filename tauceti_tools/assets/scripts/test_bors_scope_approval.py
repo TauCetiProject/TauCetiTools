@@ -158,6 +158,20 @@ class ScopeApprovalTests(unittest.TestCase):
                 self.data['requested_batch'].update(change)
                 self.assertFalse(self.batch())
 
+    def test_batches_larger_than_the_old_bors_limit_are_verified(self):
+        count = 1200
+        for number in range(3, count + 1):
+            self.prs[number] = dict(number=number, state='open', draft=False, head=dict(sha=SECOND),
+                                    base=dict(ref='main', sha=BASE), changed_files=1)
+            self.files[number] = [dict(filename=f'TauCeti/Member{number}.lean', status='modified')]
+            self.data['requested_batch']['members'].append(dict(pr=number, head_sha=SECOND))
+        self.assertEqual(len(self.data['requested_batch']['members']), count)
+        self.assertTrue(self.batch())
+        self.files[count] = [dict(filename='scripts/late.sh', status='added')]
+        self.assertFalse(self.batch())
+        self.data['scope_approvals'].append(approval(count, SECOND))
+        self.assertTrue(self.batch())
+
     def test_other_pr_cannot_smuggle_restricted_paths(self):
         self.files[2] = [dict(filename='scripts/evil.sh', status='added')]
         self.assertFalse(self.batch())
