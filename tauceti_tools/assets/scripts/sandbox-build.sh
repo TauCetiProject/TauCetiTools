@@ -59,6 +59,9 @@ phase() { printf '%s\t%s\n' "$1" "$(date +%s.%N)" >> "$TELEMETRY/phases.tsv" 2>/
 # another round: measured on 2026-11-03, about 3.3 failed rounds per landed large batch. The extra
 # runner minutes of a complete build buy the controller every attributable culprit at once.
 LAKE_BUILD_FLAGS=(--iofail)
+# Keep each changed module's restored main header for the declaration-names record below.
+# Advisory: a failure here only means no record.
+bash "$TRUSTED_SCRIPTS/declaration-names.sh" save || true
 phase build
 # `--output-error=warn` keeps tee passing the build's output through even if writing the copy fails,
 # and `|| true` drops tee's own status, so `pipefail` reports exactly Lake's.
@@ -105,6 +108,14 @@ bash "$TRUSTED_SCRIPTS/lint-env.sh"
 # text-linter import root under .lake/ without relying on TauCeti.lean's imports.
 phase lint-style
 bash "$TRUSTED_SCRIPTS/lint-style.sh"
+
+# Declaration names the PR adds, read from the compiled headers (TauCeti
+# scripts/env-declaration-names.md). The merge queue uses the record to keep two batch-mates
+# that add the same name apart before a staging build. Never affects the exit status.
+phase declaration-names
+set +e
+bash "$TRUSTED_SCRIPTS/declaration-names.sh" record || true
+set -e
 
 # A merge-group commit that passes every audit is the exact commit GitHub will land. Pack its
 # root-package outputs while still inside the bwrap sandbox, after the final operation that executes
