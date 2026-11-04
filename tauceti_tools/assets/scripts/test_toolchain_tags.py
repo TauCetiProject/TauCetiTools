@@ -43,6 +43,26 @@ class VersionNames(unittest.TestCase):
         self.assertIsNone(tt.release_of_toolchain(""))
 
 
+class MathlibReleaseCommits(unittest.TestCase):
+    def test_annotated_tags_are_peeled_and_other_names_ignored(self):
+        listing = "\n".join([f"{'a' * 40}\trefs/tags/v4.36.0-rc1",
+                             f"{'b' * 40}\trefs/tags/v4.36.0-rc2",
+                             f"{'c' * 40}\trefs/tags/v4.36.0-rc2^{{}}",
+                             f"{'d' * 40}\trefs/tags/nightly-testing-2026-01-01"])
+        done = subprocess.CompletedProcess([], 0, stdout=listing + "\n", stderr="")
+        with patch.object(tt.subprocess, "run", return_value=done) as run:
+            self.assertEqual(tt.mathlib_release_commits(),
+                             {"v4.36.0-rc1": "a" * 40, "v4.36.0-rc2": "c" * 40})
+        self.assertEqual(run.call_args.args[0][:3], ["git", "ls-remote", "--tags"])
+        self.assertEqual(run.call_args.kwargs["cwd"], tt.tempfile.gettempdir())
+
+    def test_a_failed_listing_is_an_error_not_an_empty_answer(self):
+        failed = subprocess.CompletedProcess([], 128, stdout="", stderr="no network")
+        with patch.object(tt.subprocess, "run", return_value=failed), \
+                self.assertRaisesRegex(RuntimeError, "no network"):
+            tt.mathlib_release_commits()
+
+
 class TagMessage(unittest.TestCase):
     ROW = {"release": "v4.33.0-rc2", "toolchain": "leanprover/lean4:v4.33.0-rc2",
            "commit": "f" * 40, "mathlib_rev": "9" * 40, "status": "ready", "reason": None}
@@ -53,11 +73,24 @@ class TagMessage(unittest.TestCase):
         self.assertIn("9" * 40, message)
         self.assertIn("f" * 40, message)
 
-    def test_it_does_not_claim_the_pin_is_exact(self):
-        # The rule deliberately does not chase exact pins, so the message must not imply it.
+    def test_it_does_not_claim_an_unchecked_pin_is_exact(self):
         message = tt.tag_message(self.ROW)
         self.assertIn("at or after", message)
-        self.assertNotIn("exactly", message)
+        self.assertNotIn("release commit", message)
+
+    def test_it_says_when_the_pin_is_mathlibs_release_commit(self):
+        row = dict(self.ROW, mathlib_release_commit="9" * 40)
+        row["mathlib_pin"] = tt.pin_relation(row)
+        message = tt.tag_message(row)
+        self.assertIn("mathlib's own v4.33.0-rc2 release commit", message)
+        self.assertNotIn("at or after", message)
+
+    def test_it_names_mathlibs_release_commit_when_the_pin_differs(self):
+        row = dict(self.ROW, mathlib_release_commit="8" * 40)
+        row["mathlib_pin"] = tt.pin_relation(row)
+        message = tt.tag_message(row)
+        self.assertIn("after mathlib's", message)
+        self.assertIn("8" * 40, message)
 
     def test_an_unknown_pin_is_said_rather_than_shown_as_none(self):
         self.assertIn("unknown", tt.tag_message(dict(self.ROW, mathlib_rev=None)))
@@ -246,11 +279,12 @@ class UnreachableReleases(unittest.TestCase):
 
     def test_the_audit_covers_releases_main_never_ran_on(self):
         original = {name: getattr(tt, name)
-                    for name in ("mathlib_releases", "eras", "existing_tags",
+                    for name in ("mathlib_release_commits", "eras", "existing_tags",
                                  "mathlib_pin", "ci_passed", "cache_published", "security_snapshot")}
         for name, value in original.items():
             self.addCleanup(setattr, tt, name, value)
-        tt.mathlib_releases = lambda: ["v4.33.0-rc1", "v4.33.0", "v4.34.0-rc1"]
+        tt.mathlib_release_commits = lambda: {"v4.33.0-rc1": "c" * 40, "v4.33.0": "e" * 40,
+                                              "v4.34.0-rc1": "f" * 40}
         tt.eras = lambda ref=None: [
             {"release": "v4.33.0-rc1", "toolchain": "leanprover/lean4:v4.33.0-rc1",
              "commit": "a" * 40, "index": 1},
@@ -262,9 +296,14 @@ class UnreachableReleases(unittest.TestCase):
         tt.ci_passed = lambda sha: "success"
         tt.cache_published = lambda toolchain, sha: True
         tt.security_snapshot = lambda: ("b" * 40, {"a" * 40, "b" * 40})
-        rows = {r["release"]: r["status"] for r in tt.audit()}
+        audited = {r["release"]: r for r in tt.audit()}
+        rows = {release: r["status"] for release, r in audited.items()}
         self.assertEqual(rows, {"v4.33.0-rc1": "tagged", "v4.33.0": "unreachable",
                                 "v4.34.0-rc1": "ready"})
+        self.assertEqual(audited["v4.33.0-rc1"]["mathlib_pin"], "exact")
+        self.assertIn("pins mathlib's v4.33.0-rc1 commit", audited["v4.33.0-rc1"]["reason"])
+        self.assertEqual(audited["v4.34.0-rc1"]["mathlib_pin"], "other")
+        self.assertIn("not mathlib's v4.34.0-rc1 commit ffffffff", audited["v4.34.0-rc1"]["reason"])
 
 
 class Digest(unittest.TestCase):
@@ -604,7 +643,7 @@ class SecurityCursor(unittest.TestCase):
 
     def test_audit_waits_for_cursor_without_querying_ci(self):
         era = {"release": "v4.35.0", "toolchain": "leanprover/lean4:v4.35.0", "commit": "c" * 40, "index": 3}
-        with patch.object(tt, "mathlib_releases", return_value=[era["release"]]), \
+        with patch.object(tt, "mathlib_release_commits", return_value={era["release"]: "d" * 40}), \
                 patch.object(tt, "eras", return_value=[era]), patch.object(tt, "existing_tags", return_value={}), \
                 patch.object(tt, "mathlib_pin", return_value="d" * 40), \
                 patch.object(tt, "security_snapshot", return_value=("b" * 40, {"a" * 40, "b" * 40})), \
@@ -616,7 +655,7 @@ class SecurityCursor(unittest.TestCase):
 
     def test_existing_tags_are_retained_without_claiming_coverage(self):
         era = {"release": "v4.35.0", "toolchain": "leanprover/lean4:v4.35.0", "commit": "c" * 40, "index": 3}
-        with patch.object(tt, "mathlib_releases", return_value=[era["release"]]), \
+        with patch.object(tt, "mathlib_release_commits", return_value={era["release"]: "d" * 40}), \
                 patch.object(tt, "eras", return_value=[era]), \
                 patch.object(tt, "existing_tags", return_value={era["release"]: era["commit"]}), \
                 patch.object(tt, "mathlib_pin", return_value="d" * 40), \

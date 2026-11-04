@@ -1,5 +1,25 @@
 #!/usr/bin/env python3
-"""Maintain one fixed-target Mathlib bump, selected by upstream cache availability."""
+"""Maintain one fixed-target Mathlib bump, selected by upstream cache availability.
+
+The target is normally the newest master commit with a complete Mathlib cache. When a
+Mathlib release commit lies on master between the current pin and that commit, the bump
+stops there first, so the first TauCeti commit on the new toolchain, which
+`toolchain_tags.py` tags, pins exactly Mathlib's own release commit. A project depending
+on both TauCeti and another library at the same release tag then gets one Mathlib
+revision. The next scheduled run bumps past the release as usual.
+
+A release commit is a first-parent master commit that moves `lean-toolchain` to a Lean
+release (`v4.36.0-rc2`, ...). Mathlib puts its `vX` tag on exactly that commit, but the
+commit exists before the tag is pushed, so the bump cannot step past a release while its
+tag is still missing. Mathlib's tags, read with `git ls-remote`, are also treated as
+release commits and name the bump.
+
+If the release commit is not selectable yet (its upstream build has not finished, or its
+cache is incomplete), the bump waits for it rather than opening an extra bump to a commit
+just before it. After `RELEASE_GRACE_SECONDS` it steps over that release, so a broken
+upstream release cannot stall freshness for longer than that. A release whose bump PR was
+closed without merging is stepped over at once.
+"""
 
 import argparse
 import base64
@@ -9,6 +29,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from bump_manifest import problems
@@ -17,6 +38,10 @@ from pr_status.core import KEEP_LABELS, automatic_bump
 REPO = "TauCetiProject/TauCeti"
 MATHLIB = "leanprover-community/mathlib4"
 BOT = "tauceti-review-bot[bot]"
+TOOLCHAIN_PREFIX = "leanprover/lean4:"
+RELEASE_RE = re.compile(r"\Av\d+\.\d+\.\d+(?:-rc\d+)?\Z")
+# How long a release tag commit may stay unselectable before the bump steps over it.
+RELEASE_GRACE_SECONDS = 24 * 3600
 
 
 def command(args, *, cwd=None, env=None, combined=False):
@@ -133,6 +158,90 @@ def verify_cache(checkout, target):
     return True
 
 
+def release_tags(remote=f"https://github.com/{MATHLIB}", cwd=None):
+    """{commit: [release names]} for Mathlib's Lean release tags, peeled to commits.
+
+    Read with `git ls-remote`, which costs no GitHub API quota. Outside an explicit `cwd`
+    it runs from the temporary directory, so a credential-bearing checkout's repository
+    configuration never sends its token to Mathlib."""
+    output = command(
+        ["git", "ls-remote", "--tags", remote, "refs/tags/v*"], cwd=cwd or tempfile.gettempdir()
+    )
+    direct, peeled = {}, {}
+    for line in output.splitlines():
+        commit, ref = line.split("\t")
+        name = ref.removeprefix("refs/tags/")
+        found = peeled if name.endswith("^{}") else direct
+        name = name.removesuffix("^{}")
+        if RELEASE_RE.match(name):
+            found[name] = sha(commit)
+    by_commit = {}
+    for name, commit in sorted((direct | peeled).items()):
+        by_commit.setdefault(commit, []).append(name)
+    return by_commit
+
+
+def toolchain_entries(checkout, current):
+    """{commit: [release]} for first-parent master commits after `current` that move
+    `lean-toolchain` to a Lean release. Only the oldest entry per release counts."""
+    commits = command(
+        ["git", "log", "--first-parent", "--reverse", "--format=%H",
+         f"{sha(current)}..origin/master", "--", "lean-toolchain"],
+        cwd=checkout,
+    ).split()
+    entries, seen = {}, set()
+    for commit in commits:
+        toolchain = command(["git", "show", f"{sha(commit)}:lean-toolchain"], cwd=checkout).strip()
+        release = toolchain.removeprefix(TOOLCHAIN_PREFIX)
+        if toolchain.startswith(TOOLCHAIN_PREFIX) and RELEASE_RE.match(release) and release not in seen:
+            seen.add(release)
+            entries[commit] = [release]
+    return entries
+
+
+def declined(commit):
+    """Whether a bump PR to this exact target was closed without merging."""
+    prs = api(f"repos/{REPO}/pulls?state=closed&head=TauCetiProject:bump-mathlib/{sha(commit)}&per_page=100")
+    return any(not pr.get("merged_at") for pr in prs)
+
+
+def choose(runs, newer, releases, verify, age, refused=lambda commit: False):
+    """The run to target, or None to wait. `newer` is newest first.
+
+    Release commits in `newer` are visited oldest first. The bump stops at the oldest one
+    if it verifies. Otherwise it waits, unless the release is older than the grace period,
+    in which case it is stepped over and the next one considered. A release whose bump was
+    `refused` (closed without merging) is stepped over at once."""
+    verified = {}
+
+    def first_verified(window):
+        for run in ordered_runs(runs, window):
+            target = run["head_sha"]
+            if target not in verified:
+                verified[target] = verify(target)
+            if verified[target]:
+                return run
+        return None
+
+    for index in reversed(range(len(newer))):
+        commit = newer[index]
+        if commit not in releases:
+            continue
+        names = ", ".join(releases[commit])
+        if refused(commit):
+            print(f"Stepping over Mathlib release {names} ({commit}): its bump PR was closed unmerged.")
+            continue
+        run = first_verified([commit])
+        if run:
+            print(f"Stopping at Mathlib release {names} ({commit}).")
+            return run
+        if age(commit) < RELEASE_GRACE_SECONDS:
+            print(f"Waiting for Mathlib release {names} ({commit}) to become selectable.")
+            return None
+        print(f"Stepping over Mathlib release {names} ({commit}): unselectable past the grace period.")
+    return first_verified(newer)
+
+
 def select_target(current):
     with tempfile.TemporaryDirectory(prefix="tauceti-bump-") as tmp:
         checkout = Path(tmp) / "mathlib"
@@ -172,10 +281,27 @@ def select_target(current):
                 break
         else:
             raise RuntimeError("Upstream workflow history was truncated")
-        for run in ordered_runs(runs, newer):
-            if verify_cache(checkout, run["head_sha"]):
-                return run
-        return None
+        releases = toolchain_entries(checkout, current)
+        for commit, names in release_tags(cwd=checkout).items():
+            if commit in newer:
+                releases[commit] = sorted(set(releases.get(commit, [])) | set(names))
+        for commit in releases:
+            # Ask for each release commit's runs directly: the paginated listing above is
+            # capped upstream and can miss an old release on a busy master.
+            runs.extend(
+                api(
+                    f"repos/{MATHLIB}/actions/workflows/build.yml/runs"
+                    f"?head_sha={commit}&branch=master&event=push&status=success&per_page=100"
+                )["workflow_runs"]
+            )
+
+        def age(commit):
+            stamp = command(["git", "show", "-s", "--format=%ct", sha(commit)], cwd=checkout)
+            return time.time() - int(stamp)
+
+        return choose(
+            runs, newer, releases, lambda target: verify_cache(checkout, target), age, declined
+        )
 
 
 def derive_manifest(base, upstream, target):
@@ -226,6 +352,16 @@ def publish(target, run_id):
     if previous:
         print(f"Leaving existing PR #{previous[0]['number']} in its current state.")
         return
+    releases = release_tags().get(target, [])
+    subject = f"chore: bump Mathlib to {' / '.join(releases)} ({target[:8]})" if releases else (
+        f"chore: bump Mathlib to {target[:8]}"
+    )
+    release_note = (
+        f"This target is Mathlib's {' / '.join(releases)} release commit, so the first TauCeti "
+        "commit on this toolchain pins the same Mathlib revision as Mathlib's release tag.\n\n"
+        if releases
+        else ""
+    )
     upstream = json.loads(upstream_file(target, "lake-manifest.json"))
     manifest = derive_manifest(json.loads(Path("lake-manifest.json").read_text()), upstream, target)
     toolchain = upstream_file(target, "lean-toolchain")
@@ -253,7 +389,7 @@ def publish(target, run_id):
                 GIT_COMMITTER_EMAIL="290224625+tauceti-review-bot[bot]@users.noreply.github.com",
             )
             command(
-                ["git", "commit", "-m", f"chore: bump Mathlib to {target[:8]}"],
+                ["git", "commit", "-m", subject],
                 cwd=candidate,
                 env=git_env,
             )
@@ -281,6 +417,7 @@ def publish(target, run_id):
                 f"with its matching Lean toolchain and dependency manifest.\n\n"
                 f"The full canonical Mathlib cache was verified before selecting this target. "
                 f"Upstream build: {run['html_url']}.\n\n"
+                f"{release_note}"
                 "Workers repair TauCeti against this fixed target and may checkpoint partial "
                 "source repairs. Full CI, audits, and current-head review are required to merge.\n\n"
                 "Roadmap: none\n"
@@ -297,7 +434,7 @@ def publish(target, run_id):
                     "--head",
                     branch,
                     "--title",
-                    f"chore: bump Mathlib to {target[:8]}",
+                    subject,
                     "--body-file",
                     str(body),
                 ]
