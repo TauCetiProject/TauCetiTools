@@ -64,6 +64,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 
 from lake_cache_probe import exact_map_url
@@ -237,8 +238,10 @@ def mathlib_release_commits():
     or could never have pinned, has no era here and would otherwise be missing from a report
     whose entire job is to say which releases have no tag. The commits say whether a tag's
     mathlib pin is exactly mathlib's own release commit."""
+    # From the temporary directory: this checkout's repository configuration may carry a
+    # token for github.com, and a public listing of mathlib must not send it.
     out = subprocess.run(["git", "ls-remote", "--tags", MATHLIB_REMOTE, "refs/tags/v*"],
-                         capture_output=True, text=True)
+                         capture_output=True, text=True, cwd=tempfile.gettempdir())
     if out.returncode != 0:
         raise RuntimeError(f"could not list mathlib's tags: {out.stderr.strip()}")
     direct, peeled = {}, {}

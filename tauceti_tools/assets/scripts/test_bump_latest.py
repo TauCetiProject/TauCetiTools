@@ -177,24 +177,81 @@ class BumpTests(unittest.TestCase):
             bl.choose(self.runs(), self.NEWER, {OLD: ["v4.35.0"]}, lambda c: True, lambda c: 0), run(TIP)
         )
 
-    def test_selector_stops_at_a_release_tag_on_master(self):
+    def selector_commands(self, tags="", entries=(), toolchains=None):
         def cmd(args, **kwargs):
             if "rev-list" in args:
                 return "\n".join([*self.NEWER, OLD])
             if "ls-remote" in args:
-                return f"{TAG1}\trefs/tags/v4.36.0-rc1"
-            if "show" in args:
+                return tags
+            if args[:2] == ["git", "log"]:
+                return "\n".join(entries)
+            if args[:2] == ["git", "show"] and args[2].endswith(":lean-toolchain"):
+                return (toolchains or {})[args[2].split(":")[0]]
+            if args[:2] == ["git", "show"]:
                 raise AssertionError("a selectable release needs no age check")
             return ""
 
+        return cmd
+
+    def test_selector_stops_at_a_toolchain_entry_before_its_tag_exists(self):
+        toolchains = {NEXT: "leanprover/lean4:nightly-2026-11-01\n",
+                      TAG1: "leanprover/lean4:v4.36.0-rc1\n",
+                      TAG2: "leanprover/lean4:v4.36.0-rc1\n"}
+        listing = self.runs()[:1]  # a busy master: the listing misses older successes
+        direct = {c: [run(c)] for c in self.NEWER}
+
+        def api(path):
+            if "head_sha=" in path:
+                return {"workflow_runs": direct[path.split("head_sha=")[1].split("&")[0]]}
+            return {"workflow_runs": listing}
+
         with (
-            patch.object(bl, "command", side_effect=cmd),
-            patch.object(bl, "api", return_value={"workflow_runs": self.runs()}),
+            patch.object(bl, "command", side_effect=self.selector_commands(
+                entries=[NEXT, TAG1, TAG2], toolchains=toolchains)),
+            patch.object(bl, "api", side_effect=api),
             patch.object(bl, "verify_cache", return_value=True) as probe,
+            patch.object(bl, "declined", return_value=False),
         ):
             self.assertEqual(bl.select_target(OLD), run(TAG1))
             self.assertEqual([c.args[1] for c in probe.call_args_list], [TAG1])
 
+    def test_selector_stops_at_a_release_tag_on_master(self):
+        with (
+            patch.object(bl, "command", side_effect=self.selector_commands(
+                tags=f"{TAG1}\trefs/tags/v4.36.0-rc1")),
+            patch.object(bl, "api", return_value={"workflow_runs": self.runs()}),
+            patch.object(bl, "verify_cache", return_value=True) as probe,
+            patch.object(bl, "declined", return_value=False),
+        ):
+            self.assertEqual(bl.select_target(OLD), run(TAG1))
+            self.assertEqual([c.args[1] for c in probe.call_args_list], [TAG1])
+
+    def test_a_release_whose_bump_was_closed_unmerged_is_stepped_over(self):
+        chosen = bl.choose(
+            self.runs(), self.NEWER, self.TAGS, lambda c: True, lambda c: 0,
+            refused=lambda c: c == TAG1,
+        )
+        self.assertEqual(chosen, run(TAG2))
+
+    def test_only_an_unmerged_closure_declines_a_release(self):
+        for prs, expected in [([], False), ([{"merged_at": "2026-11-01T00:00:00Z"}], False),
+                              ([{"merged_at": None}], True)]:
+            with self.subTest(prs=prs), patch.object(bl, "api", return_value=prs) as api:
+                self.assertEqual(bl.declined(TAG1), expected)
+                self.assertIn(f"head=TauCetiProject:bump-mathlib/{TAG1}", api.call_args.args[0])
+
+    def test_toolchain_entries_keep_the_first_commit_per_release(self):
+        toolchains = {NEXT: "leanprover/lean4:nightly-2026-11-01", TAG1: "leanprover/lean4:v4.36.0-rc1",
+                      MID: "leanprover/lean4:v4.36.0-rc1", TAG2: "leanprover/lean4:v4.36.0-rc2"}
+        with patch.object(bl, "command", side_effect=self.selector_commands(
+                entries=[NEXT, TAG1, MID, TAG2], toolchains=toolchains)):
+            self.assertEqual(bl.toolchain_entries("checkout", OLD),
+                             {TAG1: ["v4.36.0-rc1"], TAG2: ["v4.36.0-rc2"]})
+
+    def test_release_tags_are_read_outside_the_credentialed_checkout(self):
+        with patch.object(bl, "command", return_value="") as cmd:
+            bl.release_tags()
+        self.assertEqual(cmd.call_args.kwargs["cwd"], bl.tempfile.gettempdir())
 
     def test_selector_skips_missing_cache_but_not_transport_failures(self):
         def cmd(args, **kwargs):

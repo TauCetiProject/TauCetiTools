@@ -54,6 +54,7 @@ class MathlibReleaseCommits(unittest.TestCase):
             self.assertEqual(tt.mathlib_release_commits(),
                              {"v4.36.0-rc1": "a" * 40, "v4.36.0-rc2": "c" * 40})
         self.assertEqual(run.call_args.args[0][:3], ["git", "ls-remote", "--tags"])
+        self.assertEqual(run.call_args.kwargs["cwd"], tt.tempfile.gettempdir())
 
     def test_a_failed_listing_is_an_error_not_an_empty_answer(self):
         failed = subprocess.CompletedProcess([], 128, stdout="", stderr="no network")

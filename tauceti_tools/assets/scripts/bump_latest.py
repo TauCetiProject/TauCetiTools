@@ -2,16 +2,23 @@
 """Maintain one fixed-target Mathlib bump, selected by upstream cache availability.
 
 The target is normally the newest master commit with a complete Mathlib cache. When a
-Mathlib release tag (`v4.36.0-rc2`, ...) lies on master between the current pin and that
-commit, the bump stops at the tag commit first, so the first TauCeti commit on the new
-toolchain, which `toolchain_tags.py` tags, pins exactly Mathlib's own release commit. A
-project depending on both TauCeti and another library at the same release tag then gets
-one Mathlib revision. The next scheduled run bumps past the tag as usual.
+Mathlib release commit lies on master between the current pin and that commit, the bump
+stops there first, so the first TauCeti commit on the new toolchain, which
+`toolchain_tags.py` tags, pins exactly Mathlib's own release commit. A project depending
+on both TauCeti and another library at the same release tag then gets one Mathlib
+revision. The next scheduled run bumps past the release as usual.
 
-If the tag commit is not selectable yet (its upstream build has not finished, or its cache
-is incomplete), the bump waits for it rather than opening an extra bump to a commit just
-before it. After `RELEASE_GRACE_SECONDS` it steps over that release, so a broken upstream
-tag cannot stall freshness for longer than that.
+A release commit is a first-parent master commit that moves `lean-toolchain` to a Lean
+release (`v4.36.0-rc2`, ...). Mathlib puts its `vX` tag on exactly that commit, but the
+commit exists before the tag is pushed, so the bump cannot step past a release while its
+tag is still missing. Mathlib's tags, read with `git ls-remote`, are also treated as
+release commits and name the bump.
+
+If the release commit is not selectable yet (its upstream build has not finished, or its
+cache is incomplete), the bump waits for it rather than opening an extra bump to a commit
+just before it. After `RELEASE_GRACE_SECONDS` it steps over that release, so a broken
+upstream release cannot stall freshness for longer than that. A release whose bump PR was
+closed without merging is stepped over at once.
 """
 
 import argparse
@@ -31,6 +38,7 @@ from pr_status.core import KEEP_LABELS, automatic_bump
 REPO = "TauCetiProject/TauCeti"
 MATHLIB = "leanprover-community/mathlib4"
 BOT = "tauceti-review-bot[bot]"
+TOOLCHAIN_PREFIX = "leanprover/lean4:"
 RELEASE_RE = re.compile(r"\Av\d+\.\d+\.\d+(?:-rc\d+)?\Z")
 # How long a release tag commit may stay unselectable before the bump steps over it.
 RELEASE_GRACE_SECONDS = 24 * 3600
@@ -153,8 +161,12 @@ def verify_cache(checkout, target):
 def release_tags(remote=f"https://github.com/{MATHLIB}", cwd=None):
     """{commit: [release names]} for Mathlib's Lean release tags, peeled to commits.
 
-    Read with `git ls-remote`, which costs no GitHub API quota."""
-    output = command(["git", "ls-remote", "--tags", remote, "refs/tags/v*"], cwd=cwd)
+    Read with `git ls-remote`, which costs no GitHub API quota. Outside an explicit `cwd`
+    it runs from the temporary directory, so a credential-bearing checkout's repository
+    configuration never sends its token to Mathlib."""
+    output = command(
+        ["git", "ls-remote", "--tags", remote, "refs/tags/v*"], cwd=cwd or tempfile.gettempdir()
+    )
     direct, peeled = {}, {}
     for line in output.splitlines():
         commit, ref = line.split("\t")
@@ -169,12 +181,37 @@ def release_tags(remote=f"https://github.com/{MATHLIB}", cwd=None):
     return by_commit
 
 
-def choose(runs, newer, tags, verify, age):
+def toolchain_entries(checkout, current):
+    """{commit: [release]} for first-parent master commits after `current` that move
+    `lean-toolchain` to a Lean release. Only the oldest entry per release counts."""
+    commits = command(
+        ["git", "log", "--first-parent", "--reverse", "--format=%H",
+         f"{sha(current)}..origin/master", "--", "lean-toolchain"],
+        cwd=checkout,
+    ).split()
+    entries, seen = {}, set()
+    for commit in commits:
+        toolchain = command(["git", "show", f"{sha(commit)}:lean-toolchain"], cwd=checkout).strip()
+        release = toolchain.removeprefix(TOOLCHAIN_PREFIX)
+        if toolchain.startswith(TOOLCHAIN_PREFIX) and RELEASE_RE.match(release) and release not in seen:
+            seen.add(release)
+            entries[commit] = [release]
+    return entries
+
+
+def declined(commit):
+    """Whether a bump PR to this exact target was closed without merging."""
+    prs = api(f"repos/{REPO}/pulls?state=closed&head=TauCetiProject:bump-mathlib/{sha(commit)}&per_page=100")
+    return any(not pr.get("merged_at") for pr in prs)
+
+
+def choose(runs, newer, releases, verify, age, refused=lambda commit: False):
     """The run to target, or None to wait. `newer` is newest first.
 
-    Release tag commits in `newer` are visited oldest first. The bump stops at the oldest
-    one if it verifies. Otherwise it waits, unless the tag is older than the grace period,
-    in which case that release is stepped over and the next one considered."""
+    Release commits in `newer` are visited oldest first. The bump stops at the oldest one
+    if it verifies. Otherwise it waits, unless the release is older than the grace period,
+    in which case it is stepped over and the next one considered. A release whose bump was
+    `refused` (closed without merging) is stepped over at once."""
     verified = {}
 
     def first_verified(window):
@@ -188,9 +225,12 @@ def choose(runs, newer, tags, verify, age):
 
     for index in reversed(range(len(newer))):
         commit = newer[index]
-        if commit not in tags:
+        if commit not in releases:
             continue
-        names = ", ".join(tags[commit])
+        names = ", ".join(releases[commit])
+        if refused(commit):
+            print(f"Stepping over Mathlib release {names} ({commit}): its bump PR was closed unmerged.")
+            continue
         run = first_verified([commit])
         if run:
             print(f"Stopping at Mathlib release {names} ({commit}).")
@@ -241,13 +281,27 @@ def select_target(current):
                 break
         else:
             raise RuntimeError("Upstream workflow history was truncated")
-        tags = release_tags(cwd=checkout)
+        releases = toolchain_entries(checkout, current)
+        for commit, names in release_tags(cwd=checkout).items():
+            if commit in newer:
+                releases[commit] = sorted(set(releases.get(commit, [])) | set(names))
+        for commit in releases:
+            # Ask for each release commit's runs directly: the paginated listing above is
+            # capped upstream and can miss an old release on a busy master.
+            runs.extend(
+                api(
+                    f"repos/{MATHLIB}/actions/workflows/build.yml/runs"
+                    f"?head_sha={commit}&branch=master&event=push&status=success&per_page=100"
+                )["workflow_runs"]
+            )
 
         def age(commit):
             stamp = command(["git", "show", "-s", "--format=%ct", sha(commit)], cwd=checkout)
             return time.time() - int(stamp)
 
-        return choose(runs, newer, tags, lambda target: verify_cache(checkout, target), age)
+        return choose(
+            runs, newer, releases, lambda target: verify_cache(checkout, target), age, declined
+        )
 
 
 def derive_manifest(base, upstream, target):
