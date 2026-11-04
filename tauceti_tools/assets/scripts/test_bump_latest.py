@@ -12,6 +12,8 @@ from unittest.mock import patch
 import bump_latest as bl
 
 OLD, NEW, TIP = (c * 40 for c in "abc")
+# Newest first, as `git rev-list --first-parent` prints them: TIP, TAG2, MID, TAG1, NEXT, then OLD.
+NEXT, TAG1, MID, TAG2 = (c * 40 for c in "d123")
 
 
 def run(target, **kwargs):
@@ -119,6 +121,81 @@ class BumpTests(unittest.TestCase):
                 self.assertTrue(bl.verify_cache(checkout, NEW))
                 self.assertIn("--rehash", cmd.call_args.args[0])
 
+    def test_release_tags_peel_annotated_tags_and_ignore_other_names(self):
+        listing = "\n".join(
+            [
+                f"{TAG1}\trefs/tags/v4.36.0-rc1",
+                f"{MID}\trefs/tags/v4.36.0-rc2",
+                f"{TAG2}\trefs/tags/v4.36.0-rc2^{{}}",
+                f"{TIP}\trefs/tags/v4.36.0-nightly",
+                f"{NEXT}\trefs/tags/vfoo",
+            ]
+        )
+        with patch.object(bl, "command", return_value=listing) as cmd:
+            self.assertEqual(bl.release_tags(), {TAG1: ["v4.36.0-rc1"], TAG2: ["v4.36.0-rc2"]})
+            self.assertEqual(cmd.call_args.args[0][:3], ["git", "ls-remote", "--tags"])
+
+    NEWER = [TIP, TAG2, MID, TAG1, NEXT]
+    TAGS = {TAG1: ["v4.36.0-rc1"], TAG2: ["v4.36.0-rc2"]}
+
+    def runs(self):
+        return [run(c) for c in self.NEWER]
+
+    def test_the_oldest_release_tag_beats_a_newer_cached_commit(self):
+        probed = []
+        chosen = bl.choose(
+            self.runs(), self.NEWER, self.TAGS, lambda c: probed.append(c) or True, lambda c: 0
+        )
+        self.assertEqual(chosen, run(TAG1))
+        self.assertEqual(probed, [TAG1])
+
+    def test_an_unselectable_young_release_waits_rather_than_bumping_around_it(self):
+        for runs, verify in [
+            ([run(c) for c in self.NEWER if c != TAG1], lambda c: True),  # build unfinished
+            (self.runs(), lambda c: c != TAG1),  # cache incomplete
+        ]:
+            with self.subTest():
+                self.assertIsNone(bl.choose(runs, self.NEWER, self.TAGS, verify, lambda c: 3600))
+
+    def test_an_unselectable_old_release_is_stepped_over_to_the_next_one(self):
+        chosen = bl.choose(
+            self.runs(), self.NEWER, self.TAGS, lambda c: c != TAG1,
+            lambda c: bl.RELEASE_GRACE_SECONDS,
+        )
+        self.assertEqual(chosen, run(TAG2))
+
+    def test_after_every_release_is_stepped_over_the_newest_cache_wins(self):
+        chosen = bl.choose(
+            self.runs(), self.NEWER, self.TAGS, lambda c: c not in self.TAGS,
+            lambda c: bl.RELEASE_GRACE_SECONDS,
+        )
+        self.assertEqual(chosen, run(TIP))
+
+    def test_without_a_release_in_range_the_newest_cache_wins(self):
+        self.assertEqual(bl.choose(self.runs(), self.NEWER, {}, lambda c: True, lambda c: 0), run(TIP))
+        self.assertEqual(
+            bl.choose(self.runs(), self.NEWER, {OLD: ["v4.35.0"]}, lambda c: True, lambda c: 0), run(TIP)
+        )
+
+    def test_selector_stops_at_a_release_tag_on_master(self):
+        def cmd(args, **kwargs):
+            if "rev-list" in args:
+                return "\n".join([*self.NEWER, OLD])
+            if "ls-remote" in args:
+                return f"{TAG1}\trefs/tags/v4.36.0-rc1"
+            if "show" in args:
+                raise AssertionError("a selectable release needs no age check")
+            return ""
+
+        with (
+            patch.object(bl, "command", side_effect=cmd),
+            patch.object(bl, "api", return_value={"workflow_runs": self.runs()}),
+            patch.object(bl, "verify_cache", return_value=True) as probe,
+        ):
+            self.assertEqual(bl.select_target(OLD), run(TAG1))
+            self.assertEqual([c.args[1] for c in probe.call_args_list], [TAG1])
+
+
     def test_selector_skips_missing_cache_but_not_transport_failures(self):
         def cmd(args, **kwargs):
             return "\n".join([TIP, NEW, OLD]) if "rev-list" in args else ""
@@ -214,12 +291,14 @@ class BumpTests(unittest.TestCase):
                 side_effect=[json.dumps(upstream), "leanprover/lean4:v4.35.0\n"],
             ),
             patch.object(bl.Path, "write_text"),
+            patch.object(bl, "release_tags", return_value={NEW: ["v4.36.0-rc2"]}),
         ):
             bl.publish(NEW, 42)
             self.assertFalse(any("push" in c.args[0] for c in commands.call_args_list))
-            self.assertTrue(
-                any(c.args[0][:3] == ["gh", "pr", "create"] for c in commands.call_args_list)
-            )
+            created = [c.args[0] for c in commands.call_args_list if c.args[0][:3] == ["gh", "pr", "create"]]
+            self.assertEqual(len(created), 1)
+            title = created[0][created[0].index("--title") + 1]
+            self.assertEqual(title, f"chore: bump Mathlib to v4.36.0-rc2 ({NEW[:8]})")
 
 
 if __name__ == "__main__":

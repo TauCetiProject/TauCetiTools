@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-"""Maintain one fixed-target Mathlib bump, selected by upstream cache availability."""
+"""Maintain one fixed-target Mathlib bump, selected by upstream cache availability.
+
+The target is normally the newest master commit with a complete Mathlib cache. When a
+Mathlib release tag (`v4.36.0-rc2`, ...) lies on master between the current pin and that
+commit, the bump stops at the tag commit first, so the first TauCeti commit on the new
+toolchain, which `toolchain_tags.py` tags, pins exactly Mathlib's own release commit. A
+project depending on both TauCeti and another library at the same release tag then gets
+one Mathlib revision. The next scheduled run bumps past the tag as usual.
+
+If the tag commit is not selectable yet (its upstream build has not finished, or its cache
+is incomplete), the bump waits for it rather than opening an extra bump to a commit just
+before it. After `RELEASE_GRACE_SECONDS` it steps over that release, so a broken upstream
+tag cannot stall freshness for longer than that.
+"""
 
 import argparse
 import base64
@@ -9,6 +22,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from bump_manifest import problems
@@ -17,6 +31,9 @@ from pr_status.core import KEEP_LABELS, automatic_bump
 REPO = "TauCetiProject/TauCeti"
 MATHLIB = "leanprover-community/mathlib4"
 BOT = "tauceti-review-bot[bot]"
+RELEASE_RE = re.compile(r"\Av\d+\.\d+\.\d+(?:-rc\d+)?\Z")
+# How long a release tag commit may stay unselectable before the bump steps over it.
+RELEASE_GRACE_SECONDS = 24 * 3600
 
 
 def command(args, *, cwd=None, env=None, combined=False):
@@ -133,6 +150,58 @@ def verify_cache(checkout, target):
     return True
 
 
+def release_tags(remote=f"https://github.com/{MATHLIB}", cwd=None):
+    """{commit: [release names]} for Mathlib's Lean release tags, peeled to commits.
+
+    Read with `git ls-remote`, which costs no GitHub API quota."""
+    output = command(["git", "ls-remote", "--tags", remote, "refs/tags/v*"], cwd=cwd)
+    direct, peeled = {}, {}
+    for line in output.splitlines():
+        commit, ref = line.split("\t")
+        name = ref.removeprefix("refs/tags/")
+        found = peeled if name.endswith("^{}") else direct
+        name = name.removesuffix("^{}")
+        if RELEASE_RE.match(name):
+            found[name] = sha(commit)
+    by_commit = {}
+    for name, commit in sorted((direct | peeled).items()):
+        by_commit.setdefault(commit, []).append(name)
+    return by_commit
+
+
+def choose(runs, newer, tags, verify, age):
+    """The run to target, or None to wait. `newer` is newest first.
+
+    Release tag commits in `newer` are visited oldest first. The bump stops at the oldest
+    one if it verifies. Otherwise it waits, unless the tag is older than the grace period,
+    in which case that release is stepped over and the next one considered."""
+    verified = {}
+
+    def first_verified(window):
+        for run in ordered_runs(runs, window):
+            target = run["head_sha"]
+            if target not in verified:
+                verified[target] = verify(target)
+            if verified[target]:
+                return run
+        return None
+
+    for index in reversed(range(len(newer))):
+        commit = newer[index]
+        if commit not in tags:
+            continue
+        names = ", ".join(tags[commit])
+        run = first_verified([commit])
+        if run:
+            print(f"Stopping at Mathlib release {names} ({commit}).")
+            return run
+        if age(commit) < RELEASE_GRACE_SECONDS:
+            print(f"Waiting for Mathlib release {names} ({commit}) to become selectable.")
+            return None
+        print(f"Stepping over Mathlib release {names} ({commit}): unselectable past the grace period.")
+    return first_verified(newer)
+
+
 def select_target(current):
     with tempfile.TemporaryDirectory(prefix="tauceti-bump-") as tmp:
         checkout = Path(tmp) / "mathlib"
@@ -172,10 +241,13 @@ def select_target(current):
                 break
         else:
             raise RuntimeError("Upstream workflow history was truncated")
-        for run in ordered_runs(runs, newer):
-            if verify_cache(checkout, run["head_sha"]):
-                return run
-        return None
+        tags = release_tags(cwd=checkout)
+
+        def age(commit):
+            stamp = command(["git", "show", "-s", "--format=%ct", sha(commit)], cwd=checkout)
+            return time.time() - int(stamp)
+
+        return choose(runs, newer, tags, lambda target: verify_cache(checkout, target), age)
 
 
 def derive_manifest(base, upstream, target):
@@ -226,6 +298,16 @@ def publish(target, run_id):
     if previous:
         print(f"Leaving existing PR #{previous[0]['number']} in its current state.")
         return
+    releases = release_tags().get(target, [])
+    subject = f"chore: bump Mathlib to {' / '.join(releases)} ({target[:8]})" if releases else (
+        f"chore: bump Mathlib to {target[:8]}"
+    )
+    release_note = (
+        f"This target is Mathlib's {' / '.join(releases)} release commit, so the first TauCeti "
+        "commit on this toolchain pins the same Mathlib revision as Mathlib's release tag.\n\n"
+        if releases
+        else ""
+    )
     upstream = json.loads(upstream_file(target, "lake-manifest.json"))
     manifest = derive_manifest(json.loads(Path("lake-manifest.json").read_text()), upstream, target)
     toolchain = upstream_file(target, "lean-toolchain")
@@ -253,7 +335,7 @@ def publish(target, run_id):
                 GIT_COMMITTER_EMAIL="290224625+tauceti-review-bot[bot]@users.noreply.github.com",
             )
             command(
-                ["git", "commit", "-m", f"chore: bump Mathlib to {target[:8]}"],
+                ["git", "commit", "-m", subject],
                 cwd=candidate,
                 env=git_env,
             )
@@ -281,6 +363,7 @@ def publish(target, run_id):
                 f"with its matching Lean toolchain and dependency manifest.\n\n"
                 f"The full canonical Mathlib cache was verified before selecting this target. "
                 f"Upstream build: {run['html_url']}.\n\n"
+                f"{release_note}"
                 "Workers repair TauCeti against this fixed target and may checkpoint partial "
                 "source repairs. Full CI, audits, and current-head review are required to merge.\n\n"
                 "Roadmap: none\n"
@@ -297,7 +380,7 @@ def publish(target, run_id):
                     "--head",
                     branch,
                     "--title",
-                    f"chore: bump Mathlib to {target[:8]}",
+                    subject,
                     "--body-file",
                     str(body),
                 ]

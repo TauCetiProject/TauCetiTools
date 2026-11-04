@@ -14,7 +14,10 @@ requires repository-admin permission. The tool reads recorded results without re
 Mathlib puts its `vX` tag on the commit that bumps its own `lean-toolchain` to X, and
 `scripts/check-bump.sh` requires Tau Ceti's toolchain to match mathlib's at whatever it
 pins. The first `main` commit on toolchain X therefore pins mathlib at or after mathlib's
-`vX` tag. The pin is usually a little past it; the tag message gives it.
+`vX` tag. The daily bump (`bump_latest.py`) stops at mathlib's release commit before
+moving past it, so normally the pin is exactly mathlib's `vX` commit, and a project can
+depend on Tau Ceti and another library at the same release tag with one mathlib revision.
+The report and the tag message say whether the pin is exact.
 
 ## What it leaves to a human
 
@@ -69,6 +72,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "pr_
 import zulip as zp  # noqa: E402
 
 REPO = os.environ.get("GH_REPO", "TauCetiProject/TauCeti")
+MATHLIB_REMOTE = "https://github.com/leanprover-community/mathlib4"
 REVISIONS = os.environ.get("LAKE_CACHE_REVISION_ENDPOINT_PUBLIC",
                            "https://cache.taucetiproject.org/revisions")
 
@@ -225,16 +229,27 @@ def cache_published(toolchain, sha):
     raise RuntimeError(f"the cache answered HTTP {code} for {url}; that is not a verdict")
 
 
-def mathlib_releases():
-    """Every Lean release mathlib has tagged, oldest first.
+def mathlib_release_commits():
+    """{release: commit} for every Lean release mathlib has tagged, peeled to commits.
 
-    One request, and the only thing this tool asks mathlib. It is needed because the set of
-    toolchains `main` ran on is not the set of releases: a release main stepped over, or
-    could never have pinned, has no era here and would otherwise be missing from a report
-    whose entire job is to say which releases have no tag."""
-    raw = gh("repos/leanprover-community/mathlib4/git/matching-refs/tags/v", jq=".[].ref")
-    names = {ref.rsplit("/", 1)[-1] for ref in raw.splitlines()}
-    return sorted((n for n in names if parse_release(n)), key=release_key)
+    One `git ls-remote`, and the only thing this tool asks mathlib. It is needed because the
+    set of toolchains `main` ran on is not the set of releases: a release main stepped over,
+    or could never have pinned, has no era here and would otherwise be missing from a report
+    whose entire job is to say which releases have no tag. The commits say whether a tag's
+    mathlib pin is exactly mathlib's own release commit."""
+    out = subprocess.run(["git", "ls-remote", "--tags", MATHLIB_REMOTE, "refs/tags/v*"],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        raise RuntimeError(f"could not list mathlib's tags: {out.stderr.strip()}")
+    direct, peeled = {}, {}
+    for line in out.stdout.splitlines():
+        commit, ref = line.split("\t")
+        name = ref[len("refs/tags/"):]
+        found = peeled if name.endswith("^{}") else direct
+        name = name[:-3] if name.endswith("^{}") else name
+        if parse_release(name):
+            found[name] = commit
+    return direct | peeled
 
 
 def existing_tags():
@@ -261,7 +276,9 @@ Tau Ceti toolchain tags
 
 Mathlib puts its `vX` tag on the commit that bumps its own toolchain to X, and
 check-bump.sh requires this repository's toolchain to match mathlib's at whatever it pins,
-so such a commit pins mathlib at or after mathlib's `vX` tag. The tag message gives the pin.
+so such a commit pins mathlib at or after mathlib's `vX` tag. The daily bump stops at
+mathlib's release commit first, so normally the pin is exactly that commit. The report and
+the tag message say whether it is.
 
 A tag is created once that commit's post-merge CI has passed and its oleans are in the Lake
 artifact cache, so a checkout builds without recompiling the library. The tool reads both
@@ -337,7 +354,8 @@ def audit(ref=None):
     except RuntimeError as exc:
         cursor, covered, security_error = None, set(), str(exc)
 
-    for release in sorted(set(mathlib_releases()) | set(by_release), key=release_key):
+    mathlib_commits = mathlib_release_commits()
+    for release in sorted(set(mathlib_commits) | set(by_release), key=release_key):
         if release_key(release) < release_key(oldest):
             continue          # predates this repository entirely; not our business
         era = by_release.get(release)
@@ -350,7 +368,9 @@ def audit(ref=None):
             continue
         sha = era["commit"]
         row = dict(era, status=None, reason=None, mathlib_rev=mathlib_pin(sha),
-                   tagged_at=tags.get(release), security_audit_cursor=cursor)
+                   tagged_at=tags.get(release), security_audit_cursor=cursor,
+                   mathlib_release_commit=mathlib_commits.get(release))
+        row["mathlib_pin"] = pin_relation(row)
         if release_key(release) < release_key(EARLIEST_RELEASE):
             row["status"] = "out-of-scope"
             row["reason"] = f"predates {EARLIEST_RELEASE}, before the Lake cache existed"
@@ -398,7 +418,30 @@ def audit(ref=None):
             continue
         row["status"] = "ready"
         rows.append(row)
+    for row in rows:
+        note = pin_note(row)
+        if note and row["status"] in ("tagged", "ready"):
+            row["reason"] = f"{row['reason']}; {note}" if row["reason"] else note
     return rows
+
+
+def pin_relation(row):
+    """`exact` when the pin is mathlib's own release commit, `other` when it is not,
+    None when either side is unknown."""
+    pin, release_commit = row.get("mathlib_rev"), row.get("mathlib_release_commit")
+    if not pin or not release_commit:
+        return None
+    return "exact" if pin == release_commit else "other"
+
+
+def pin_note(row):
+    relation = row.get("mathlib_pin")
+    if relation == "exact":
+        return f"pins mathlib's {row['release']} commit"
+    if relation == "other":
+        return (f"pins mathlib {row['mathlib_rev'][:8]}, not mathlib's {row['release']} "
+                f"commit {row['mathlib_release_commit'][:8]}")
+    return None
 
 
 def _unreachable_row(release, tags, newest_era=None):
@@ -529,8 +572,19 @@ def tag_message(row):
             f"Commit:         {row['commit']} (first commit on main with this toolchain)\n\n"
             f"Its post-merge CI passed and its oleans are published to the Lake artifact\n"
             f"cache, so a checkout of this tag builds without recompiling the library.\n"
-            f"The mathlib pin is whatever main carried here, which is at or after mathlib's\n"
-            f"own {row['release']} tag.\n")
+            + pin_sentence(row))
+
+
+def pin_sentence(row):
+    release = row["release"]
+    if row.get("mathlib_pin") == "exact":
+        return (f"The mathlib pin is mathlib's own {release} release commit, so this tag\n"
+                f"combines with other projects pinned to mathlib's {release} tag.\n")
+    if row.get("mathlib_pin") == "other":
+        return (f"The mathlib pin is whatever main carried here, which is after mathlib's\n"
+                f"own {release} commit {row['mathlib_release_commit']}.\n")
+    return (f"The mathlib pin is whatever main carried here, which is at or after mathlib's\n"
+            f"own {release} tag.\n")
 
 
 def create_tag(row, dry_run=False):
