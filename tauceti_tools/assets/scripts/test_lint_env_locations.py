@@ -54,6 +54,21 @@ class LocationsTest(unittest.TestCase):
         self.assertNotIn("path", self.emit([self.record, self.record])["findings"][0])
         self.assertNotIn("path", self.emit([{"unknown": "unsupported_name"}])["findings"][0])
 
+    def test_module_only_origin_resolves_to_its_file_without_a_range(self):
+        private = {k: v for k, v in self.record.items() if k not in ("line", "column")}
+        private.update(declaration="_private.TauCeti.Probe.0.TauCeti.probeSetoid",
+                       report_name="TauCeti.probeSetoid")
+        result = self.emit([private], "simpNF TauCeti.probeSetoid\n")
+        self.assertEqual(result["findings"], [dict(linter="simpNF", path="TauCeti/Probe.lean",
+                          declaration="_private.TauCeti.Probe.0.TauCeti.probeSetoid")])
+        for change in [dict(line=1), dict(column=9), dict(module="Mathlib.Probe"),
+                       dict(module="TauCeti.Other")]:
+            record = {**private, **change}
+            with self.subTest(change=change):
+                self.assertNotIn("path", self.emit([record], "simpNF TauCeti.probeSetoid\n")["findings"][0])
+        (self.root / "TauCeti/Probe.lean").unlink()
+        self.assertNotIn("path", self.emit([private], "simpNF TauCeti.probeSetoid\n")["findings"][0])
+
     def test_external_traversal_missing_source_symlink_and_bad_ranges(self):
         for change in [dict(module="Mathlib.Probe"), dict(module="TauCeti.Other"),
                        dict(module="TauCeti...Probe"), dict(module="TauCeti./Probe"),
