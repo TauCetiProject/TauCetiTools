@@ -8,7 +8,7 @@
 #   declaration-names.sh record   after the lint phases: run the workflow-pinned
 #                                 DeclarationNames.lean and print its single record line.
 # Inputs come from the sandbox environment: IS_BATCH, LINT_ONLY_MODULES (one module name per
-# line), TRUSTED_SCRIPTS, WATCHDOG_TOOLCHAIN and CI_RESOURCE_TESTED_{HEAD,BASE,COMMIT}.
+# line), TAUCETI_TRUSTED_SCRIPTS (or TRUSTED_SCRIPTS), WATCHDOG_TOOLCHAIN and CI_RESOURCE_TESTED_{HEAD,BASE,COMMIT}.
 # Staging batches (IS_BATCH=true) and builds without a changed-module list record nothing.
 set -u
 mode="${1:-}"
@@ -30,7 +30,8 @@ case "$mode" in
     done < "$LINT_ONLY_MODULES"
     ;;
   record)
-    script="${TRUSTED_SCRIPTS:-}/DeclarationNames.lean"
+    # sandbox-build.sh keeps TRUSTED_SCRIPTS unexported; the sandbox exports TAUCETI_TRUSTED_SCRIPTS.
+    script="${TAUCETI_TRUSTED_SCRIPTS:-${TRUSTED_SCRIPTS:-}}/DeclarationNames.lean"
     [ -f "$script" ] || exit 0
     for v in "${CI_RESOURCE_TESTED_HEAD:-}" "${CI_RESOURCE_TESTED_BASE:-}" "${CI_RESOURCE_TESTED_COMMIT:-}"; do
       [ -n "$v" ] || exit 0

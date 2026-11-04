@@ -39,7 +39,7 @@ class DeclarationNamesStepTest(unittest.TestCase):
             **os.environ,
             "PATH": f"{fake}:{os.environ['PATH']}",
             "LINT_ONLY_MODULES": str(self.root / "modules"),
-            "TRUSTED_SCRIPTS": str(trusted),
+            "TAUCETI_TRUSTED_SCRIPTS": str(trusted),
             "CI_RESOURCE_TESTED_HEAD": "h" * 40,
             "CI_RESOURCE_TESTED_BASE": "b" * 40,
             "CI_RESOURCE_TESTED_COMMIT": "t" * 40,
@@ -83,7 +83,7 @@ class DeclarationNamesStepTest(unittest.TestCase):
         result = self.run_helper("record", FAKE_STATUS="1")
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout.count("DECLARATION-NAMES"), 1)
-        result = self.run_helper("record", TRUSTED_SCRIPTS=str(self.root / "absent"))
+        result = self.run_helper("record", TAUCETI_TRUSTED_SCRIPTS=str(self.root / "absent"))
         self.assertEqual((result.returncode, result.stdout), (0, ""))
         result = self.run_helper("record", CI_RESOURCE_TESTED_COMMIT="")
         self.assertEqual((result.returncode, result.stdout), (0, ""))
