@@ -8,8 +8,13 @@ The properties that matter:
   the content repository, in the order given (positional, then `REPAIR_OUTPUTS_REVS`);
 * outputs from several candidates combine: an artifact shared by several mappings is
   downloaded once, and a record placed by an earlier candidate is kept over a later one;
+* a head with no published outputs, in either of Lake's wordings, is a miss asked about once,
+  not a transfer failure retried;
 * a head with no published outputs, or a fetch that never completes, leaves the cache's output
   records exactly as the base cache left them and does not fail the job;
+* when the base cache was discarded, the fetch still runs, into an empty cache, and turns the
+  artifact cache back on only when it contributed;
+* an unconfigured repair cache says so with a warning naming the services file;
 * a completed fetch reports how many module outputs it contributed.
 """
 
@@ -36,7 +41,9 @@ printf '%s\n' "$*" >> "$FAKE_LAKE_ARGV"
 printf '%s\n' "$LAKE_CONFIG" >> "$FAKE_LAKE_ARGV.config"
 out="$LAKE_CACHE_DIR/outputs/Project"
 case "$FAKE_LAKE_MODE" in
-  absent) echo 'error: no outputs found for revision'; exit 1 ;;
+  # Lake's wording for an exact `--rev` lookup with no mapping, and for a walk with none.
+  absent) echo "error: one/Project: outputs not found for revision ${*: -1}"; exit 1 ;;
+  absent-walk) echo 'error: one/Project: no outputs found in 1 revisions from HEAD'; exit 1 ;;
   used)
     mkdir -p "$out"
     echo '{"repair": 1}' > "$out/1111111111111111.json"
@@ -53,7 +60,7 @@ case "$FAKE_LAKE_MODE" in
     # One mapping file per published revision, lines `<record> <artifact> <content>`; Lake
     # downloads only the artifacts not already in the cache.
     rev="${*: -1}"; rev="${rev#--rev=}"
-    [ -f "$FAKE_REPAIR/$rev" ] || { echo 'error: no outputs found for revision'; exit 1; }
+    [ -f "$FAKE_REPAIR/$rev" ] || { echo "error: one/Project: outputs not found for revision $rev"; exit 1; }
     mkdir -p "$out" "$LAKE_CACHE_DIR/artifacts"
     while read -r record artifact content; do
       if [ ! -e "$LAKE_CACHE_DIR/artifacts/$artifact" ]; then
@@ -175,14 +182,50 @@ class RepairCacheFetch(FetchHarness):
         self.assertIn("reused 2 module outputs", out)
         self.assertIn("1 artifacts downloaded", out)
 
-    def test_discarded_base_cache_or_no_service_skips_lake(self):
-        out, env = self.fetch("used", LAKE_ARTIFACT_CACHE="false")
-        self.assertEqual(env["REPAIR_OUTPUTS_STATE"], "off")
-        self.assertFalse((self.root / "argv").exists())
+    def test_both_miss_wordings_are_asked_once(self):
+        for mode in ("absent", "absent-walk"):
+            with self.subTest(mode=mode):
+                (self.root / "argv").unlink(missing_ok=True)
+                out, env = self.fetch(mode)
+                self.assertEqual(env["REPAIR_OUTPUTS_STATE"], "absent")
+                self.assertEqual(len((self.root / "argv").read_text().splitlines()), 1)
+                self.assertNotIn("::warning::", out)
+                self.assertNotIn("retrying", out)
+
+    def test_no_service_skips_lake_with_a_warning(self):
         materialize(project(None), self.root / "off")
         out, env = self.fetch("used", script="off/repair-cache-get.sh")
+        self.assertEqual(env["REPAIR_OUTPUTS_STATE"], "off")
         self.assertIn("no repair cache configured", out)
+        self.assertRegex(out, r"::warning::repair cache fetch is off: .*off/lake-cache-services\.sh.*services\.repair_cache")
         self.assertFalse((self.root / "argv").exists())
+
+
+class DiscardedBaseCache(FetchHarness):
+    """lake-cache-get.sh discarded the base cache (a miss or an incomplete fetch)."""
+
+    OFF = {"LAKE_ARTIFACT_CACHE": "false", "LAKE_RESTORE_ARTIFACTS": "false", "LAKE_CACHE_DIR": ""}
+
+    def test_used_outputs_turn_the_artifact_cache_back_on(self):
+        out, env = self.fetch("used", **self.OFF)
+        self.assertEqual(env["REPAIR_OUTPUTS_STATE"], "used")
+        self.assertEqual(env["LAKE_ARTIFACT_CACHE"], "true")
+        self.assertEqual(env["LAKE_RESTORE_ARTIFACTS"], "true")
+        self.assertEqual(env["LAKE_CACHE_DIR"], str((self.root / "pr/.lake/cache").resolve()))
+        # The leftover base record is gone; only the repair worker's records remain.
+        self.assertEqual(self.records(), {"0000000000000000.json": '{"repair": 2}\n',
+                                          "1111111111111111.json": '{"repair": 1}\n'})
+        self.assertIn("starts from these outputs alone", out)
+
+    def test_miss_or_failure_leaves_the_cache_off_and_empty(self):
+        for mode in ("absent", "partial"):
+            with self.subTest(mode=mode):
+                self.outputs.mkdir(parents=True, exist_ok=True)
+                out, env = self.fetch(mode, **self.OFF)
+                self.assertIn(env["REPAIR_OUTPUTS_STATE"], ("absent", "failed"))
+                self.assertNotIn("LAKE_ARTIFACT_CACHE", env)
+                self.assertFalse((self.root / "pr/.lake/cache").exists())
+                self.assertIn("building from scratch", out)
 
     def test_rejects_a_non_sha_head(self):
         result = subprocess.run(["bash", str(self.root / "scripts/repair-cache-get.sh"), "pr", "main"],

@@ -75,7 +75,9 @@ discard_cache() {
 # safe to retain for the next attempt.
 # A revision with no cached build at all is deterministic: retrying cannot change it, and there
 # is nothing partial to discard.
-MISS_RE='no outputs found'
+# Lake words it "no outputs found in N revisions" for a walk and "outputs not found for revision
+# <sha>" for a single lookup.
+MISS_RE='no outputs found|outputs not found for revision'
 # Three attempts are enough now that each retry fetches only artifacts still missing rather than
 # throwing away and redownloading the whole cache.
 ATTEMPTS=3
