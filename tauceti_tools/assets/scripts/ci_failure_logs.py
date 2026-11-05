@@ -41,6 +41,10 @@ def main():
     logs = [(".", [args.candidate, ".lake", "telemetry", "lake-build.log"], "lake-build.log.gz")]
     logs.extend((args.runner_temp, [f"cache-get-{attempt}.log"], f"cache-get-{attempt}.log.gz")
                 for attempt in range(1, 4))
+    # lake-cache-get.sh numbers its logs across an explicit base-revision lookup and the walk
+    # after it, so a run may leave up to six; the extra ones are collected only when present.
+    logs.extend((args.runner_temp, [f"cache-get-{attempt}.log"], f"cache-get-{attempt}.log.gz")
+                for attempt in range(4, 7) if (Path(args.runner_temp) / f"cache-get-{attempt}.log").exists())
     for root, parts, name in logs:
         try:
             copy_log(root, parts, out / name)

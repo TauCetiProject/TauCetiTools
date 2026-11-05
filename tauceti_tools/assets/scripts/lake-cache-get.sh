@@ -4,6 +4,7 @@
 # same logic. Both callers want identical final semantics: a clean whole cache, or none at all.
 #
 # Usage: bash scripts/lake-cache-get.sh <project-dir>
+#        LAKE_CACHE_BASE_REV=<sha> bash scripts/lake-cache-get.sh <project-dir>
 #
 # Reads PUBLIC_ARTIFACT_ENDPOINT / PUBLIC_REVISION_ENDPOINT from the environment (the
 # LAKE_CACHE_*_PUBLIC repo variables), defaulting to the public cache both this project's CI and
@@ -81,32 +82,67 @@ MISS_RE='no outputs found|outputs not found for revision'
 # Three attempts are enough now that each retry fetches only artifacts still missing rather than
 # throwing away and redownloading the whole cache.
 ATTEMPTS=3
+LOG_INDEX=0
+
+# lookup LABEL LAKE-ARG...: run `lake cache get` with up to $ATTEMPTS attempts and set $outcome
+# to clean, miss or failed. A miss stops at once; a transfer failure retries over the same cache.
+lookup() {
+  local label="$1" attempt rc started
+  shift
+  outcome=failed
+  for attempt in $(seq 1 $ATTEMPTS); do
+    # Numbered across both lookups, as ci_failure_logs.py collects cache-get-<n>.log.
+    LOG_INDEX=$((LOG_INDEX + 1))
+    LOG="${RUNNER_TEMP:-/tmp}/cache-get-$LOG_INDEX.log"
+    rc=0
+    started=$SECONDS
+    ( cd "$PROJECT_DIR" && LAKE_CONFIG="$CFG" lake cache get --service tauceti-public \
+        --repo TauCetiProject/TauCeti "$@" ) > "$LOG" 2>&1 || rc=$?
+    # Native --quiet/--log-level still replay informational logs on cache failure
+    # (Lake v4.36.0-rc2 LogConfig). Keep complete raw attempts and filter only
+    # recognized success records so partial-failure retries are quiet too.
+    if ! python3 "$(dirname -- "${BASH_SOURCE[0]}")/ci_log_filter.py" cache "$LOG"; then
+      echo '::warning::cache log summary failed; showing the original output'
+      cat "$LOG" || true
+    fi
+    echo "Lake cache attempt $attempt ($label): exit=$rc, elapsed=$((SECONDS-started))s"
+    if [ "$rc" = 0 ]; then outcome=clean; return 0; fi
+    if grep -qE "$MISS_RE" "$LOG"; then outcome=miss; return 0; fi
+    # `[ ... ] && sleep` would abort the script under `bash -e` on the last attempt, when the
+    # test is false and the whole list returns nonzero. Use a plain `if`.
+    if [ "$attempt" != "$ATTEMPTS" ]; then
+      echo "::notice::lake cache get attempt $attempt of $ATTEMPTS did not complete cleanly; retaining verified artifacts and retrying missing ones"
+      # Give a transient connection failure a brief backoff. Lake has waited for curl to exit and
+      # has removed or left uninstalled any invalid temporary artifacts before returning.
+      sleep 2
+    fi
+  done
+}
+
+# An explicit base revision (LAKE_CACHE_BASE_REV, a full commit SHA) is asked about first and
+# exactly. A staging candidate can sit more than LAKE_CACHE_MAX_REVS first-parent commits above
+# the main commit that has published outputs, so the walk alone would miss it. Only a miss for
+# the base falls back to the walk; a transfer failure is unclean like any other.
+BASE_REV="${LAKE_CACHE_BASE_REV:-}"
+case "$BASE_REV" in
+  '') ;;
+  *[!0-9a-f]*) echo "::warning::ignoring LAKE_CACHE_BASE_REV '$BASE_REV', which is not a full commit SHA"; BASE_REV="" ;;
+  *) [ "${#BASE_REV}" = 40 ] || { echo "::warning::ignoring LAKE_CACHE_BASE_REV '$BASE_REV', which is not a full commit SHA"; BASE_REV=""; } ;;
+esac
+outcome=miss
+if [ -n "$BASE_REV" ]; then
+  lookup base --rev="$BASE_REV"
+  case "$outcome" in
+    clean) echo "Lake cache: fetched the outputs of base revision $BASE_REV" ;;
+    miss) echo "Lake cache: no outputs for base revision $BASE_REV; walking up to $LAKE_CACHE_MAX_REVS revisions from HEAD" ;;
+  esac
+fi
+if [ "$outcome" = miss ]; then
+  lookup walk --max-revs="$LAKE_CACHE_MAX_REVS"
+  if [ "$outcome" = clean ]; then echo "Lake cache: fetched outputs found by walking up to $LAKE_CACHE_MAX_REVS revisions from HEAD"; fi
+fi
 clean=0
-for attempt in $(seq 1 $ATTEMPTS); do
-  LOG="${RUNNER_TEMP:-/tmp}/cache-get-$attempt.log"
-  rc=0
-  started=$SECONDS
-  ( cd "$PROJECT_DIR" && LAKE_CONFIG="$CFG" lake cache get --service tauceti-public \
-      --repo TauCetiProject/TauCeti --max-revs="$LAKE_CACHE_MAX_REVS" ) > "$LOG" 2>&1 || rc=$?
-# Native --quiet/--log-level still replay informational logs on cache failure
-  # (Lake v4.36.0-rc2 LogConfig). Keep complete raw attempts and filter only
-  # recognized success records so partial-failure retries are quiet too.
-  if ! python3 "$(dirname -- "${BASH_SOURCE[0]}")/ci_log_filter.py" cache "$LOG"; then
-    echo '::warning::cache log summary failed; showing the original output'
-    cat "$LOG" || true
-  fi
-  echo "Lake cache attempt $attempt: exit=$rc, elapsed=$((SECONDS-started))s"
-  if [ "$rc" = 0 ]; then clean=1; break; fi
-  if grep -qE "$MISS_RE" "$LOG"; then break; fi
-  # `[ ... ] && sleep` would abort the script under `bash -e` on the last attempt, when the
-  # test is false and the whole list returns nonzero. Use a plain `if`.
-  if [ "$attempt" != "$ATTEMPTS" ]; then
-    echo "::notice::lake cache get attempt $attempt of $ATTEMPTS did not complete cleanly; retaining verified artifacts and retrying missing ones"
-    # Give a transient connection failure a brief backoff. Lake has waited for curl to exit and
-    # has removed or left uninstalled any invalid temporary artifacts before returning.
-    sleep 2
-  fi
-done
+if [ "$outcome" = clean ]; then clean=1; fi
 
 if [ "$clean" = 1 ]; then
   echo 'Lake cache: verified artifacts available; incremental build enabled'
