@@ -75,6 +75,13 @@ mode = "off"
 # artifact_url = "https://cache.example.org/artifacts"
 # revision_url = "https://cache.example.org/revisions"
 
+# The queue repair worker's published build outputs, which staging CI fetches for the exact
+# staging head before building. Read-only and anonymous: url holds artifacts/ and revisions/.
+[services.repair_cache]
+mode = "off"
+# name = "tauceti-repair"
+# url = "https://repair-cache.example.org"
+
 [publication]
 # docs_url = "https://taucetiproject.github.io/TauCeti/docs"
 # zulip_site = "https://leanprover.zulipchat.com"

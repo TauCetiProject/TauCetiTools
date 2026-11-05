@@ -137,6 +137,14 @@ def guard_app_jobs(text: str, *, runner: str = "ubuntu-latest") -> str:
     return before + "jobs:\n" + preflight + jobs
 
 
+def repair_cache_url(project: Project) -> str:
+    """The repair cache's public read base, or empty when ``[services.repair_cache]`` is off."""
+    service = project.service("repair_cache")
+    if service.get("mode", "off") == "off":
+        return ""
+    return str(service.get("url", "")).rstrip("/")
+
+
 def substitutions(project: Project) -> list[tuple[str, str]]:
     """Render only trusted tool templates, never contributor/agent content."""
     root = project.roots[0]
@@ -158,6 +166,11 @@ def substitutions(project: Project) -> list[tuple[str, str]]:
         ("repositories: tauceti-claims\n", "repositories: " + project.repos.get("claims", "/").split("/")[1] + "\n"),
         ("https://bors.taucetiproject.org", project.service("bors").get("url", "")),
         ("/repositories/1/active-batches", "/repositories/" + str(project.service("bors").get("repository_id", 1 if project.legacy else "")) + "/active-batches"),
+        # The repair worker's cache, read by staging CI (lake-cache-services.sh). Off renders an
+        # empty URL, which leaves the service undefined and the fetch a logged no-op.
+        ("https://repair-cache.taucetiproject.org", repair_cache_url(project)),
+        ('REPAIR_CACHE_SERVICE="tauceti-repair"',
+         'REPAIR_CACHE_SERVICE=' + json.dumps(project.service("repair_cache").get("name", "tauceti-repair"))),
         ("https://taucetiproject.github.io/TauCeti/docs", project.raw.get("publication", {}).get("docs_url", "")),
         ("roadmap_dir: TauCetiRoadmap", "roadmap_dir: " + project.roadmap_dir),
         ("lean_root: TauCeti", "lean_root: " + project.roots[0]),

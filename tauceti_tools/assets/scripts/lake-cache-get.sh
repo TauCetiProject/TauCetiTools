@@ -45,17 +45,13 @@ case "$LAKE_CACHE_MAX_REVS" in
   ''|*[!0-9]*) echo "::error::LAKE_CACHE_MAX_REVS must be a natural number"; exit 1 ;;
 esac
 
-# Define the public read service in a Lake system config and select it with `--service`
+# Define the read services in a Lake system config and select one with `--service`
 # (the env-var form of endpoint config is deprecated). Anonymous GETs, so no key here.
+# lake-cache-services.sh is shared with repair-cache-get.sh, which reads the same file.
+# shellcheck source=lake-cache-services.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/lake-cache-services.sh"
 CFG="${RUNNER_TEMP:-/tmp}/lake-cache.toml"
-cat > "$CFG" <<TOML
-cache.defaultService = "tauceti-public"
-[[cache.service]]
-name = "tauceti-public"
-kind = "s3"
-artifactEndpoint = "$PUBLIC_ARTIFACT_ENDPOINT"
-revisionEndpoint = "$PUBLIC_REVISION_ENDPOINT"
-TOML
+write_lake_cache_config "$CFG" "$PUBLIC_ARTIFACT_ENDPOINT" "$PUBLIC_REVISION_ENDPOINT"
 
 # Discarding the cache must never fail. A plain `rm -rf` on a directory that Lake's stragglers
 # are still writing into exits 1 with "Directory not empty", and under `set -e` that killed the
