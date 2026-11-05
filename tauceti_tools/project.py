@@ -281,6 +281,10 @@ def _validate(raw: dict, source: str) -> Project:
                     raise ConfigError(f"services.{name}.{key} must be an HTTPS URL without credentials")
         if name == "bors" and value.get("deployment", "docker") not in ("docker", "cloudflare"):
             raise ConfigError("services.bors.deployment must be docker or cloudflare")
+        if name == "repair_cache" and "name" in value and (
+            not isinstance(value["name"], str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", value["name"])
+        ):
+            raise ConfigError("services.repair_cache.name must be a Lake cache service name (letters, digits, - and _)")
     for upstream in raw.get("upstreams", []):
         if not isinstance(upstream, dict):
             raise ConfigError("upstreams must be an array of tables")
