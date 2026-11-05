@@ -35,6 +35,10 @@
 # those the base cache restored. Artifacts Lake verified and installed meanwhile are
 # content-addressed and unreferenced by the restored records, so they are harmless.
 #
+# When lake-cache-get.sh discarded the base cache (LAKE_ARTIFACT_CACHE=false), the fetch starts
+# from an empty cache and, if any revision contributes, appends LAKE_ARTIFACT_CACHE=true,
+# LAKE_RESTORE_ARTIFACTS=true and LAKE_CACHE_DIR to $GITHUB_ENV so the build reads them.
+#
 # Reports through $GITHUB_ENV:
 #   REPAIR_OUTPUTS_STATE     used | absent | failed | off
 #   REPAIR_OUTPUTS_REUSED    the number of module output records the repair cache added or
@@ -84,14 +88,33 @@ report() {
   printf -- '- Repair outputs: %s\n' "$line" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 }
 
+SERVICES_FILE="$(dirname -- "${BASH_SOURCE[0]}")/lake-cache-services.sh"
 if [ -z "$REPAIR_CACHE_URL" ]; then
+  echo "::warning::repair cache fetch is off: REPAIR_CACHE_URL is empty in $SERVICES_FILE, which materialize renders from [services.repair_cache] in tauceti.toml (mode hosted or custom, with url); repair outputs for $REV_LIST are not fetched"
   report off 0 "no repair cache configured (services.repair_cache), building from the base cache"
   exit 0
 fi
+
+# lake-cache-get.sh discards the base cache and turns the artifact cache off for the job on any
+# outcome other than a clean fetch, a plain miss included. The repair outputs are the complete
+# outputs of a green build, so they serve on their own: start from an empty cache and, when a
+# revision contributes, turn the artifact cache back on for the build. When none does, the
+# cache stays off and its directory is removed again, exactly as lake-cache-get.sh left it.
+BASE_OFF=0
+FALLBACK="building from the base cache"
 if [ "${LAKE_ARTIFACT_CACHE:-}" = "false" ]; then
-  report off 0 "the base cache was discarded for this run, so repair outputs for $REV_LIST are not fetched"
-  exit 0
+  BASE_OFF=1
+  FALLBACK="building from scratch, as the base cache was discarded"
+  echo "The base cache was discarded for this run; fetching repair outputs into an empty cache"
 fi
+
+discard_cache_dir() {
+  local d="$PROJECT_DIR/.lake/cache"
+  [ -e "$d" ] || return 0
+  mv "$d" "$d.discard.$$" 2>/dev/null || rm -rf "$d" 2>/dev/null || true
+  rm -rf "$d.discard.$$" 2>/dev/null || true
+}
+if [ "$BASE_OFF" = 1 ]; then discard_cache_dir; fi
 
 mkdir -p "$PROJECT_DIR/.lake/cache"
 CACHE="$(cd "$PROJECT_DIR/.lake/cache" && pwd)"
@@ -151,8 +174,9 @@ restore_records() {
 }
 
 # Same retry policy as lake-cache-get.sh: a deterministic miss stops at once, a transfer failure
-# retries, keeping the artifacts Lake already verified.
-MISS_RE='no outputs found'
+# retries, keeping the artifacts Lake already verified. Lake words a miss for an exact `--rev` as
+# "outputs not found for revision <sha>" and a miss over a walk as "no outputs found in ...".
+MISS_RE='no outputs found|outputs not found for revision'
 ATTEMPTS=3
 USED=()
 FAILED=()
@@ -200,11 +224,19 @@ if [ "${#USED[@]}" -gt 0 ]; then
   downloaded="$(cat "${RUNNER_TEMP:-/tmp}"/repair-cache-get-*.log 2>/dev/null | grep -cE 'downloaded artifact [0-9a-f]+' || true)"
   extra=""
   if [ "${#FAILED[@]}" -gt 0 ]; then extra="; the fetch for ${FAILED[*]} did not complete and was discarded"; fi
+  if [ "$BASE_OFF" = 1 ]; then
+    extra="$extra; the base cache was discarded, so the build starts from these outputs alone"
+    {
+      echo "LAKE_ARTIFACT_CACHE=true"
+      echo "LAKE_RESTORE_ARTIFACTS=true"
+      echo "LAKE_CACHE_DIR=$CACHE"
+    } >> "${GITHUB_ENV:-/dev/null}"
+  fi
   report used "$reused" "reused $reused module outputs from the repair cache for $used (${downloaded:-0} artifacts downloaded)$extra; Lake checks their traces and rebuilds what differs" "$used"
 elif [ "${#FAILED[@]}" -gt 0 ]; then
-  restore_records "$BEFORE"
-  report failed 0 "repair outputs for ${FAILED[*]} could not be fetched completely, building from the base cache"
+  if [ "$BASE_OFF" = 1 ]; then discard_cache_dir; else restore_records "$BEFORE"; fi
+  report failed 0 "repair outputs for ${FAILED[*]} could not be fetched completely, $FALLBACK"
 else
-  restore_records "$BEFORE"
-  report absent 0 "no repair outputs for $REV_LIST, building from the base cache"
+  if [ "$BASE_OFF" = 1 ]; then discard_cache_dir; else restore_records "$BEFORE"; fi
+  report absent 0 "no repair outputs for $REV_LIST, $FALLBACK"
 fi
