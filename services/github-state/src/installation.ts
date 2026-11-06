@@ -473,19 +473,30 @@ export class InstallationScheduler extends DurableObject<Env> {
     if(!Number.isSafeInteger(namespaceTarget) || namespaceTarget<1 || namespaceTarget>10000)return json({error:'invalid_namespace_cap'},400);
     const organization=repo.name.split('/')[0],key='runner-capacity:'+organization;
     const answers=(value:any)=>value.namespace_discovery_target!==undefined && (value.complete!==true || value.routing_version===2 || value.placement_unavailable!=='capacity_namespace_target' || value.namespace_busy_lower_bound>=namespaceTarget);
-    // Reuse complete inventories and sufficient lower bounds across caps. An
-    // upgrade to a larger target uses the same organization cache and budget.
+    const fresh=(value:any,now=Date.now())=>value?.refresh_version===2 && value.complete===true &&
+      Number.isFinite(value.observed_at) && now-value.observed_at>=-5000 && now-value.observed_at<150000 && answers(value);
+    const refreshDue=(value:any,now=Date.now())=>now>=Math.max(value.observed_at,
+      Math.min(Number.isFinite(value.retry_at)?value.retry_at:Infinity,value.observed_at+145000)-Math.max(0,Number(value.elapsed_ms) || 0));
+    const serveFresh=(value:any)=>json({...value,cached:true,refreshing:!!this.capacityFlight,
+      // This is the client's real remaining freshness, not the refresh schedule.
+      retry_at:value.observed_at+150000});
+    let cached=await this.ctx.storage.get<any>(key);
+    if(cached?.complete!==true)cached=await this.ctx.storage.get<any>('runner-capacity-last-good:'+organization) || cached;
+    if(fresh(cached) && (this.capacityFlight || !refreshDue(cached)))return serveFresh(cached);
+    // Valid observations remain available while one demand-triggered refresh
+    // works in the background. Cold/expired observations still await that work.
     while(this.capacityFlight) {
       const value=await this.capacityFlight;
       if(value.organization===organization && answers(value))return json({cached:false,...value},value.complete?200:503);
     }
-    // Install the flight before the first storage await, so a finishing scan
-    // cannot race a caller that already read an expired value.
+    // Re-read storage after installing the flight. A caller that saw an old
+    // snapshot before another refresh finished must not repeat its discovery.
     this.capacityFlight ||= (async()=>{
       const saved=await this.ctx.storage.get<any>(key);
       // Earlier refresh policies could cache an artificial allowance failure
       // for almost an hour. Ignore those decisions, retaining label/range caches.
-      if(saved?.refresh_version===2 && saved.retry_at>Date.now() && answers(saved))return {...saved,cached:true};
+      if(saved?.refresh_version===2 && saved.retry_at>Date.now() && answers(saved) &&
+        (saved.complete!==true || fresh(saved) && !refreshDue(saved)))return {...saved,cached:true};
       const target=Math.max(namespaceTarget,saved?.namespace_discovery_target || 0);
       try {
         // Only immutable job labels and already-assigned identities are reused;
@@ -556,6 +567,7 @@ export class InstallationScheduler extends DurableObject<Env> {
     // Pickers retain their ordinary HTTP wait. A disconnect must not discard
     // a valid shared scan just before it can publish the complete pool count.
     this.ctx.waitUntil(this.capacityFlight);
+    if(fresh(cached))return serveFresh(cached);
     const value=await this.capacityFlight;return json({cached:false,...value},value.complete?200:503);
   }
   private releaseCapacityHints(count:number):void {

@@ -154,23 +154,21 @@ test('legacy hourly counters cannot disable critical discovery and failed reads 
 
 test('continuous callers share the normal fresh-cache cadence',async()=>{
  for(const repositories of [17,26,31]){
- const {scheduler,values}=schedulerFixture();let calls=0,clock=Date.now();const original=Date.now;
+ const {scheduler,values,background}=schedulerFixture();let calls=0,scans=0,clock=Date.now();const original=Date.now;
  Date.now=()=>clock;
  scheduler.http=async path=>{
   calls++;
-  if(path.startsWith('/orgs/'))return envelope(null,Array.from({length:repositories},(_,i)=>({name:'repo'+i,archived:false})));
+  if(path.startsWith('/orgs/')){scans++;return envelope(null,Array.from({length:repositories},(_,i)=>({name:'repo'+i,archived:false})));}
   if(path.includes('/actions/runs?'))return envelope('workflow_runs',[{id:'1'}]);
   return envelope('jobs',[hosted]);
  };
  try {
-  let scans=0;
   for(let elapsed=0;elapsed<3600000;elapsed+=5000){
-   const fresh=values.get('runner-capacity:org')?.retry_at>clock;
    const result=await (await scheduler.runnerCapacity({name:'org/repo',installation:'200'})).json();
    assert.equal(result.complete,true);assert.equal(result.busy,repositories);
-   assert.equal(result.cached===true,fresh);
-   assert.ok(result.retry_at>clock);assert.ok(result.retry_at-result.observed_at<150000);
-   if(!fresh)scans++;
+   assert.ok(clock-result.observed_at<150000);
+   assert.ok(result.retry_at>clock);assert.ok(result.retry_at-result.observed_at<=150000);
+   await Promise.all(background.splice(0));
    clock+=5000;
   }
   assert.equal(scans,25);assert.equal(calls,scans*(1+3*repositories));
@@ -302,7 +300,7 @@ test('missing queued placement data preserves running capacity; missing running 
 });
 
 test('mixed configured targets share the most informative organization snapshot without overlapping scans',async()=>{
- const {scheduler,values}=schedulerFixture();let calls=0,active=0,peak=0;
+ const {scheduler,values,background}=schedulerFixture();let calls=0,active=0,peak=0;
  scheduler.http=async path=>{
   calls++;active++;peak=Math.max(peak,active);
   try {
@@ -322,7 +320,7 @@ test('mixed configured targets share the most informative organization snapshot 
  assert.equal((await get(8)).cached,true);assert.equal((await get(30)).cached,true);assert.equal((await get(10000)).cached,true);assert.equal(calls,7);
  const saved=values.get('runner-capacity:org');values.set('runner-capacity:org',{...saved,retry_at:0});
  const refreshed=await get(8);assert.equal(refreshed.namespace_discovery_target,30);assert.equal(refreshed.namespace_busy,20);
- assert.equal((await get(30)).cached,true);assert.equal(calls,11,'mixed caps add no scans after the first target upgrade');
+ assert.equal((await get(30)).cached,true);await Promise.all(background.splice(0));assert.equal(calls,11,'mixed caps add no scans after the first target upgrade');
  for(const namespace_cap of [0,-1,true,1.5,10001,'20'])assert.equal((await scheduler.runnerCapacity({name:'org/repo',installation:'200',namespace_cap})).status,400);
 });
 test('endpoint validates requested caps before starting discovery',async()=>{

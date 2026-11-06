@@ -600,8 +600,13 @@ Discovery has no separate per-pass or rolling-hour request allowance. It uses
 actual shared installation quota accounting, the provider's secondary cooldowns,
 and the existing core/GraphQL reserves. Old cached allowance failures are ignored
 on upgrade without discarding immutable job labels or search boundaries.
-Normal refreshes target 145 seconds from the running observation. No cooldown
-is derived from a previous scan's cost. Cached-only reports never start a scan.
+Normal refreshes target 145 seconds from the running observation. A routing
+request starts one background refresh early enough to allow the previous measured
+scan duration before that point. Other callers immediately reuse the existing
+observation while it remains within the client's unchanged 150-second freshness
+window. The returned timestamp is never advanced; response validity ends at that
+observation's true freshness boundary. Cold or expired callers await the shared
+refresh. Cached-only reports never start a scan.
 Queued repositories and range branches progress concurrently under one global
 three-request gate. Snapshot freshness is dated when running discovery begins,
 so queued discovery cannot make an old running count appear current. Snapshots expose elapsed time and the running-inventory
