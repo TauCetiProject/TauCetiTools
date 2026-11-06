@@ -208,7 +208,7 @@ test('a busy organization inventory uses at most four reads at once and drains i
  assert.equal(active,0,'refresh must settle all started requests before releasing the single flight');
 });
 
-test('many empty queued workflows preserve running capacity within the existing request budget',async()=>{
+test('a complete cold inventory can exceed 96 requests without losing useful capacity',async()=>{
  const calls=[];
  const value=await scanHostedCapacity('org',async path=>{
   calls.push(path);
@@ -217,10 +217,9 @@ test('many empty queued workflows preserve running capacity within the existing 
   if(path.includes('status=queued'))return envelope('workflow_runs',Array.from({length:100},(_,i)=>({id:i+2})));
   return envelope('jobs',path.includes('/runs/1/jobs')?[hosted,{name:'sandboxed-build',status:'in_progress',labels:['nscloud-ubuntu-test']}]:[]);
  });
- assert.equal(value.routing_version,1);assert.equal(value.busy,1);assert.equal(value.requests,96);
- assert.equal(value.namespace_busy,undefined);assert.deepEqual(value.queued_fleet,[]);
- assert.equal(value.namespace_busy_lower_bound,1);
- assert.equal(value.placement_unavailable,'capacity_scan_limit');assert.equal(calls.length,96);
+ assert.equal(value.routing_version,2);assert.equal(value.busy,1);assert.equal(value.requests,104);
+ assert.equal(value.namespace_busy,1);assert.deepEqual(value.queued_fleet,[]);
+ assert.equal(value.placement_unavailable,undefined);assert.equal(calls.length,104);
 });
 const ns=(id,status='queued')=>({id,name:'sandboxed-build',status,labels:['nscloud-ubuntu-test']});
 test('a thousand queued workflows establish saturation from their first page, busiest repository first',async()=>{

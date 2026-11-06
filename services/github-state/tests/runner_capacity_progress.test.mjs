@@ -61,15 +61,14 @@ function fixture(count=400,{sameSecond=false,repositories=1,runningCount=1,activ
  };
  return {read,cache,rows,saved,ranges,reads,extraNamespace,extraJobs,completed,promoted,generation,historical};
 }
-test('a 400-run mostly hosted queue converges under the 96-request bound',async()=>{
+test('a cold 400-run mostly hosted queue completes without an independent pass cutoff',async()=>{
  const f=fixture();let value,total=0,passes=0;
  do {
   value=await scanHostedCapacity('org',f.read,20,f.cache);total+=value.requests;passes++;
-  assert.ok(value.requests<=96);
   if(value.routing_version!==2){assert.equal(value.placement_unavailable,'capacity_scan_limit');assert.ok(value.job_cache_writes>0);}
  }while(value.routing_version!==2 && passes<12);
  assert.equal(value.routing_version,2);assert.equal(value.namespace_busy,4);assert.equal(value.busy,1);
- assert.equal(f.saved.size,401);assert.ok(passes>1);assert.ok(total<700);
+ assert.equal(f.saved.size,401);assert.equal(passes,1);assert.ok(total<700);
  f.reads.clear();const warm=await scanHostedCapacity('org',f.read,20,f.cache);
  assert.equal(warm.routing_version,2);assert.equal(warm.namespace_busy,4);assert.equal(warm.job_cache_hits,401);
  assert.equal(warm.job_cache_writes,0);assert.ok(warm.requests<25);
@@ -245,7 +244,7 @@ test('productive passes survive owner replacement, coalesce callers, respect coo
    clock+=31000;
    const current=await(await make().runnerCapacity({name:'org/repo',installation:'200'})).json();
    assert.equal(current.complete,true);assert.equal(current.routing_version,2);assert.equal(current.namespace_busy,4);
-   assert.ok(current.requests<=96);assert.ok(calls<2400);
+   assert.ok(calls<2400);
   }
   console.log(JSON.stringify({repos:14,running_runs:45,queued_runs:400,cold_passes:passes,cold_requests:coldCalls,hour_requests:calls}));
   let count=calls;assert.equal((await(await make().runnerCapacity({name:'org/repo',installation:'200'})).json()).cached,true);assert.equal(calls,count);
@@ -291,17 +290,16 @@ test('initial recovery can progress behind historical scan spending without chan
   return {toArray:()=>rows,one:()=>{assert.equal(rows.length,1);return rows[0];}};
  }}};
  try {
-  let result,sawQuick=false;
+  let result;
   for(let i=0;i<25;i++) {
    const owner=new InstallationScheduler({storage,waitUntil(promise){promise.catch(()=>{});}},{});owner.token=async()=> 'token';owner.usable=()=>5000;
    owner.http=async(path,token,method,body)=>{calls++;return f.read(path,body);};
    result=await(await owner.runnerCapacity({name:'org/repo',installation:'200'})).json();
    assert.ok(values.get('runner-capacity-attempts').length<=2400);
    if(result.routing_version===2)break;
-   if(result.retry_at-clock<=31000)sawQuick=true;
    clock=result.retry_at+1;
   }
-  assert.equal(result.routing_version,2);assert.equal(result.namespace_busy,4);assert.equal(sawQuick,true);
+  assert.equal(result.routing_version,2);assert.equal(result.namespace_busy,4);
   const bootstrap=values.get('runner-capacity-label-bootstrap-v2:org');assert.equal(bootstrap.done,true);assert.ok(bootstrap.spent<=800);
   assert.ok(clock-started<15*60000);
   console.log(JSON.stringify({old_hour_requests:1840,new_requests:calls,bootstrap_ms:clock-started}));

@@ -24,7 +24,6 @@ export async function scanHostedCapacity(
   async function request(path:string,body?:unknown) {
     if(active<concurrency)active++;else await new Promise<void>(resolve=>waiters.push(resolve));
     try {
-      if(requests>=96)throw new Error('capacity_scan_limit');
       requests++;
       const kind=path==='/graphql'?'check_suites':path.includes('/jobs')?'job_details':path.includes('/actions/runs')?'run_listings':'repositories';
       request_types[kind]=(request_types[kind] || 0)+1;

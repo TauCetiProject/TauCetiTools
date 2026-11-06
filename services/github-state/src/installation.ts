@@ -555,15 +555,15 @@ export class InstallationScheduler extends DurableObject<Env> {
           }
         },target,queuedCache);
         if(snapshot.routing_version===2 && !bootstrap.done){bootstrap.done=true;await this.ctx.storage.put(bootstrapKey,bootstrap);}
-        // A 145-second cache permits at most 25 full scans per rolling hour:
-        // 25 * 96 attempts fits the unchanged 2400-attempt ceiling.
-        // Target upgrades also charge the same hard hourly attempt allowance.
+        // Pace refreshes by their actual cost against the unchanged hourly
+        // allowance; every attempt is still durably charged before launch.
+        const cooldown=Math.max(145000,snapshot.requests*1500);
         // Active pickers can continue a productive partial pass after a shared
-        // cooldown. Keep both the per-pass and hourly provider budgets intact.
+        // cooldown. Keep provider reserves and hourly accounting intact.
         const continuing=snapshot.placement_unavailable==='capacity_scan_limit' && snapshot.job_cache_writes>0 &&
           (!saved || snapshot.job_cache_hits>(saved.job_cache_hits || 0)) &&
           (attempts.length<900 || !bootstrap.done && attempts.length<2208);
-        const value={complete:true,organization,namespace_discovery_target:target,...snapshot,retry_at:Date.now()+(continuing?30000:145000),coverage:snapshot.routing_version===2?'organization_repository_inventory':'organization_running_inventory'};
+        const value={complete:true,organization,namespace_discovery_target:target,...snapshot,retry_at:Date.now()+(continuing?30000:cooldown),coverage:snapshot.routing_version===2?'organization_repository_inventory':'organization_running_inventory'};
         await this.ctx.storage.put(key,value);
         await this.ctx.storage.put('runner-capacity-last-good:'+organization,value);
         return value;
