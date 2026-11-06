@@ -190,7 +190,7 @@ test('brief contention for existing request slots yields and completes instead o
   const v=await result.json();assert.equal(result.status,200);assert.equal(v.busy,1);
  }finally{clearTimeout(timer);globalThis.fetch=original;}
 });
-test('a busy organization inventory uses at most four reads at once and drains in-flight reads on failure',async()=>{
+test('a busy organization inventory uses at most three reads at once and drains in-flight reads on failure',async()=>{
  let active=0,peak=0;
  const reader=(fail=false)=>async path=>{
   active++;peak=Math.max(peak,active);
@@ -203,7 +203,7 @@ test('a busy organization inventory uses at most four reads at once and drains i
   }finally{active--;}
  };
  const value=await scanHostedCapacity('org',reader());assert.equal(value.busy,24);assert.equal(value.requests,37);
- assert.equal(peak,4);assert.equal(active,0);
+ assert.equal(peak,3);assert.equal(active,0);
  await assert.rejects(()=>scanHostedCapacity('org',reader(true)),/fixture request rejected/);
  assert.equal(active,0,'refresh must settle all started requests before releasing the single flight');
 });
@@ -385,6 +385,7 @@ test('valid cold capacity discovery can finish after twenty seconds within the u
  const snapshot=await scanHostedCapacity('org',async(path,body)=>{clock+=5000;return read(path,body);});
  assert.equal(snapshot.routing_version,2);
  assert.ok(snapshot.elapsed_ms>20000);
+ assert.ok(snapshot.observed_at<Date.now(),'queued discovery cannot refresh the age of the running observation');
  assert.equal(snapshot.requests,calls.length);
  assert.ok(snapshot.requests<=96);
  assert.equal(snapshot.namespace_busy,2);
@@ -420,7 +421,8 @@ test('large passes finish beyond 96 calls but cannot exceed remaining hourly all
   assert.ok(spent+calls<=2400);
   if(!spent){
    assert.equal(result.routing_version,2);assert.equal(result.busy,repositories);assert.ok(calls>96);
-   assert.ok(result.retry_at-result.observed_at>=calls*1500);
+   assert.ok(result.retry_at-result.observed_at>=145000);
+   assert.ok(result.retry_at-result.observed_at<150000,'headroom must not create a stale-routing interval');
   }else{
    assert.equal(result.complete,false);assert.equal(result.reason,'capacity_hourly_budget');assert.equal(calls,100);
   }
@@ -428,4 +430,27 @@ test('large passes finish beyond 96 calls but cannot exceed remaining hourly all
   assert.equal((await(await scheduler.runnerCapacity({name:'org/repo',installation:'200'})).json()).cached,true);
   assert.equal(calls,previous);
  }
+});
+
+test('a valid slow scan can acquire a temporarily occupied slot after its first twenty seconds',async t=>{
+ const {scheduler,setSlots}=schedulerFixture(),{read}=readFixture();let clock=Date.now(),first=true,timer;
+ t.mock.method(Date,'now',()=>clock);const original=globalThis.fetch;
+ globalThis.fetch=async url=>{
+  if(first){first=false;clock+=21000;setSlots(4);timer=setTimeout(()=>{clock+=300;setSlots(0);},100);}
+  const u=new URL(url),value=await read(u.pathname+u.search);return Response.json(value.body);
+ };
+ try{
+  const result=await(await scheduler.runnerCapacity({name:'org/repo',installation:'200'})).json();
+  assert.equal(result.complete,true);assert.equal(result.routing_version,2);assert.equal(result.busy,1);
+ }finally{clearTimeout(timer);globalThis.fetch=original;}
+});
+
+test('queued discovery time does not push refresh beyond the client freshness window',async t=>{
+ const {scheduler}=schedulerFixture(),{read}=readFixture();let clock=Date.now();
+ t.mock.method(Date,'now',()=>clock);
+ scheduler.http=async(path,token,method,body)=>{clock+=5000;return read(path,body);};
+ const result=await(await scheduler.runnerCapacity({name:'org/repo',installation:'200'})).json();
+ assert.equal(result.routing_version,2);assert.ok(result.observed_at<clock);
+ assert.equal(result.retry_at-result.observed_at,145000);
+ assert.ok(result.retry_at<result.observed_at+150000);
 });

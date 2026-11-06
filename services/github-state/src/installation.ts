@@ -487,10 +487,14 @@ export class InstallationScheduler extends DurableObject<Env> {
       // Retain the most informative requested target across refreshes, so mixed
       // caps cannot multiply scans on every two-minute cache expiry.
       const target=Math.max(namespaceTarget,saved?.namespace_discovery_target || 0);
-      const deadline=Date.now()+20000;
       const attempts=await this.ctx.storage.get<number[]>('runner-capacity-attempts') || [];
-      const bootstrapKey='runner-capacity-label-bootstrap-v2:'+organization;
-      const bootstrap=await this.ctx.storage.get<{spent:number;done:boolean}>(bootstrapKey) || {spent:0,done:false};
+      let used=0,metadataReads=0,metadataWrites=0;
+      const priorWarmNeed=Math.max(0,(saved?.requests || 0)-(saved?.job_cache_writes || 0));
+      const retryAt=(need:number,observedAt=Date.now())=>{
+        const now=Date.now(),recent=attempts.filter(at=>at>=now-3600000);
+        const shortage=Math.max(0,recent.length+Math.max(1,Math.min(2400,need))-2400);
+        return Math.max(now+1,observedAt+145000,shortage?recent[shortage-1]+3600001:0);
+      };
       try {
         // Only immutable job labels and already-assigned identities are reused;
         // every scan still gets live job IDs/statuses. This is not job history.
@@ -526,24 +530,25 @@ export class InstallationScheduler extends DurableObject<Env> {
             return jobs;
           },
           put:(key:string,revision:string,jobs:any[])=>{
-            this.ctx.storage.sql.exec('INSERT INTO runner_capacity_jobs VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET revision=excluded.revision,jobs=excluded.jobs,seen_at=excluded.seen_at',key,revision,JSON.stringify(jobs),Date.now());
+            this.ctx.storage.sql.exec('INSERT INTO runner_capacity_jobs VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET revision=excluded.revision,jobs=excluded.jobs,seen_at=excluded.seen_at',key,revision,JSON.stringify(jobs),Date.now());metadataWrites++;
           },
         };
         const token=await this.token(repo.installation);
-        const snapshot=await scanHostedCapacity(organization,async (path,body)=>{
+        const snapshot=await scanHostedCapacity(organization,async (path,body,phase)=>{
           const api=body?'graphql':'core';
           const until=await this.ctx.storage.get<number>('secondary_until') || 0;
           if(until>Date.now() || this.usable('core')<=1500)throw new Error('capacity_quota_reserve');
           if(api==='graphql' && this.usable('graphql')<=1000)throw new Error('capacity_graphql_reserve');
           while(attempts.length && attempts[0]<Date.now()-3600000)attempts.shift();
           if(attempts.length>=2400)throw new Error('capacity_hourly_budget');
+          const metadata=path.includes('/jobs');
+          // Cold label fills must leave enough allowance for a warm refresh.
+          // Running discovery and live listings/witnesses can use that reserve.
+          if(phase==='queued' && metadata && 2400-attempts.length<=Math.max(1,priorWarmNeed,used-metadataReads))throw new Error('capacity_metadata_reserve');
           // Persist before launching: a lost network response still consumes allowance.
           attempts.push(Date.now());await this.ctx.storage.put('runner-capacity-attempts',attempts);
-          if(!bootstrap.done) {
-            bootstrap.spent=Math.min(800,bootstrap.spent+1);
-            if(bootstrap.spent>=800)bootstrap.done=true;
-            await this.ctx.storage.put(bootstrapKey,bootstrap);
-          }
+          used++;if(metadata)metadataReads++;
+          const deadline=Date.now()+20000;
           for(;;) {
             try {return await this.http(path,token,body?'POST':'GET',body,'runner_capacity',api);}
             catch(error) {
@@ -554,21 +559,14 @@ export class InstallationScheduler extends DurableObject<Env> {
             }
           }
         },target,queuedCache);
-        if(snapshot.routing_version===2 && !bootstrap.done){bootstrap.done=true;await this.ctx.storage.put(bootstrapKey,bootstrap);}
-        // Pace refreshes by their actual cost against the unchanged hourly
-        // allowance; every attempt is still durably charged before launch.
-        const cooldown=Math.max(145000,snapshot.requests*1500);
-        // Active pickers can continue a productive partial pass after a shared
-        // cooldown. Keep provider reserves and hourly accounting intact.
-        const continuing=snapshot.placement_unavailable==='capacity_scan_limit' && snapshot.job_cache_writes>0 &&
-          (!saved || snapshot.job_cache_hits>(saved.job_cache_hits || 0)) &&
-          (attempts.length<900 || !bootstrap.done && attempts.length<2208);
-        const value={complete:true,organization,namespace_discovery_target:target,...snapshot,retry_at:Date.now()+(continuing?30000:cooldown),coverage:snapshot.routing_version===2?'organization_repository_inventory':'organization_running_inventory'};
+        const warmNeed=Math.max(1,snapshot.requests-snapshot.job_cache_writes);
+        const need=snapshot.placement_unavailable==='capacity_metadata_reserve'?2*warmNeed+1:warmNeed;
+        const value={complete:true,organization,namespace_discovery_target:target,...snapshot,retry_at:retryAt(need,snapshot.observed_at),coverage:snapshot.routing_version===2?'organization_repository_inventory':'organization_running_inventory'};
         await this.ctx.storage.put(key,value);
         await this.ctx.storage.put('runner-capacity-last-good:'+organization,value);
         return value;
       } catch(error) {
-        const value={complete:false,organization,namespace_discovery_target:target,reason:error instanceof QuotaDeferred?'capacity_deferred':error instanceof Error && error.message.startsWith('capacity_')?error.message:classify(error),retry_at:Math.max(Date.now()+145000,error instanceof QuotaDeferred?error.result.retry_at || 0:0)};
+        const value={complete:false,organization,namespace_discovery_target:target,reason:error instanceof QuotaDeferred?'capacity_deferred':error instanceof Error && error.message.startsWith('capacity_')?error.message:classify(error),retry_at:Math.max(retryAt(Math.max(priorWarmNeed,used-metadataWrites)),error instanceof QuotaDeferred?error.result.retry_at || 0:0)};
         await this.ctx.storage.put(key,value);return value;
       }
     })().finally(()=>{this.capacityFlight=undefined;});

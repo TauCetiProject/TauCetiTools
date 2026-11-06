@@ -234,7 +234,7 @@ test('productive passes survive owner replacement, coalesce callers, respect coo
    const [first,second]=await Promise.all([get(),get()]);last=first;passes++;
    assert.equal(first.requests,second.requests);assert.equal(first.job_cache_writes,second.job_cache_writes);
    const count=calls;assert.equal((await get()).cached,true);assert.equal(calls,count);
-   if(first.routing_version!==2){assert.ok(first.retry_at>=clock+30000 && first.retry_at<=clock+31000);clock+=31000;}
+   if(first.routing_version!==2)clock=first.retry_at+1;
   }while(last.routing_version!==2 && passes<20);
   assert.equal(last.routing_version,2);assert.equal(last.namespace_busy,4);
   assert.equal(db.prepare('SELECT COUNT(*) n FROM runner_capacity_jobs').get().n,430);
@@ -300,7 +300,6 @@ test('initial recovery can progress behind historical scan spending without chan
    clock=result.retry_at+1;
   }
   assert.equal(result.routing_version,2);assert.equal(result.namespace_busy,4);
-  const bootstrap=values.get('runner-capacity-label-bootstrap-v2:org');assert.equal(bootstrap.done,true);assert.ok(bootstrap.spent<=800);
   assert.ok(clock-started<15*60000);
   console.log(JSON.stringify({old_hour_requests:1840,new_requests:calls,bootstrap_ms:clock-started}));
  }finally{Date.now=original;db.close();}
@@ -344,4 +343,22 @@ test('other nonterminal check states retain REST fallback instead of hiding queu
   assert.equal(value.routing_version,2);assert.equal(value.namespace_busy,2);
  }
  assert.equal(f.reads.get(100),2);
+});
+
+test('cold queued metadata preserves allowance for a warm refresh instead of spending the whole hour',async()=>{
+ const f=fixture(4),db=new DatabaseSync(':memory:'),values=new Map();let calls=0;
+ values.set('runner-capacity-attempts',Array(2390).fill(Date.now()));
+ const storage={get:async key=>values.get(key),put:async(key,value)=>values.set(key,structuredClone(value)),sql:{exec(q,...args){
+  let rows=[];if(!args.length && q.includes(';'))db.exec(q);else{const s=db.prepare(q);if(s.columns().length)rows=s.all(...args);else s.run(...args);}
+  return {toArray:()=>rows,one:()=>{assert.equal(rows.length,1);return rows[0];}};
+ }}};
+ try{
+  const owner=new InstallationScheduler({storage,waitUntil(promise){promise.catch(()=>{});}},{});owner.token=async()=> 'token';owner.usable=()=>5000;
+  owner.http=async(path,token,method,body)=>{calls++;return f.read(path,body);};
+  const result=await(await owner.runnerCapacity({name:'org/repo',installation:'200'})).json();
+  assert.equal(result.complete,true);assert.equal(result.busy,1);assert.equal(result.routing_version,1);
+  assert.equal(result.placement_unavailable,'capacity_metadata_reserve');assert.equal(result.namespace_busy,undefined);
+  assert.ok(values.get('runner-capacity-attempts').length<2400);assert.equal(values.get('runner-capacity-attempts').length,2390+calls);
+  assert.ok(result.retry_at>Date.now()+150000,'wait for actual allowance instead of repeating a doomed scan');
+ }finally{db.close();}
 });

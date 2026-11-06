@@ -582,7 +582,7 @@ identity. Missing or paginated check-suite data uses ordinary REST discovery.
 Completed REST job receipts cannot be resurrected by a delayed check-suite status.
 Inactive metadata entries expire after an hour; cached metadata is never an
 activity count. Parallel GraphQL batches request at most 100 suites and 200 job
-nodes each to bound latency and point cost under the same four-request gate.
+nodes each to bound latency and point cost under the same three-request gate.
 
 Large queued listings use overlapping creation-time ranges instead of shifting
 offset pages. Their split instant belongs to both children, avoiding sub-second
@@ -599,12 +599,15 @@ queue drains, so old bursts do not permanently multiply listing requests.
 A discovery pass has no independent request-count or scan-clock cutoff. The
 installation charges every provider attempt durably against the existing 2400
 attempts per rolling hour, preserving the 1500 core and 1000 GraphQL reserves.
-Normal refreshes wait at least 145 seconds, or 1.5 seconds per actual provider
-request when that is longer. Existing client freshness guards still reject
-stale snapshots during a longer cooldown. Productive partial page
-traversals retain the existing guarded continuation and bootstrap accounting.
+Normal refreshes target 145 seconds from the running observation while the rolling hour has enough room for
+another warm inventory. Near exhaustion they wait until enough actual attempts
+age out of that hour. Cold queued-job label fills preserve allowance for one
+warm refresh; live running discovery can use that reserve. Existing freshness
+guards still reject stale snapshots during quota exhaustion. No activity or
+coverage is inferred from the immutable-label cache.
 Queued repositories and range branches progress concurrently under one global
-four-request gate. Snapshots expose elapsed time and the running-inventory
+three-request gate. Snapshot freshness is dated when running discovery finishes,
+so queued discovery cannot make an old running count appear current. Snapshots expose elapsed time and the running-inventory
 request subtotal to distinguish request exhaustion from slow provider responses.
 
 Discovery stops after observing at least the requested `namespace_cap` distinct
@@ -629,13 +632,13 @@ lower bound, inventory coverage, cap state, and partial-scan reason.
 Refresh uses existing installation quota accounting, honors secondary cooldowns,
 leaves at least 1,500 core requests for repository work, and spends at most 2,400
 read attempts per rolling hour, including lost network responses on this operation. Brief request-slot
-contention yields within the scan deadline rather than invalidating the snapshot. At most four reads run simultaneously; individual requests retain their existing timeout. There is no alarm, CI event storage, or new polling task.
+contention yields within each request's acquisition window rather than invalidating the snapshot. At most three reads run simultaneously; individual requests retain their existing timeout. There is no alarm, CI event storage, or new polling task.
 
 Pickers without a configured shared service retain bounded direct discovery.
 Shared-service failure or partial coverage never fans out into a direct scan
 from every picker. Visiting ordinary reports/status does not invoke capacity discovery.
 
-Capacity discovery has no independent pass cutoff. The existing four concurrent
+Capacity discovery has no independent pass cutoff. The existing three concurrent
 reads and hourly provider allowance still apply.
 A picker may stop waiting on its HTTP request; the installation object retains
 the shared scan with `waitUntil`, so a complete result can serve later pickers.

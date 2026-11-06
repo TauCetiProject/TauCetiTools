@@ -147,8 +147,8 @@ def shared_capacity(repository, token, namespace_cap=20):
     request = urllib.request.Request(
         "https://github-state.taucetiproject.org/v1/runner-capacity?" + urllib.parse.urlencode(dict(repository=repository, namespace_cap=namespace_cap)),
         headers={"Authorization": "Bearer " + token, "User-Agent": "TauCetiFleetPicker/2.0"})
-    # Cold shared scans have a 15-second discovery deadline and drain their
-    # in-flight requests. Let that single scan finish before direct fallback.
+    # The shared service retains discovery after a caller stops waiting.
+    # Keep the existing HTTP wait; later callers can reuse a completed scan.
     with urllib.request.build_opener(NoRedirect()).open(request, timeout=25) as response:
         raw = response.read(4 * 1024 * 1024 + 1)
     if len(raw) > 4 * 1024 * 1024:

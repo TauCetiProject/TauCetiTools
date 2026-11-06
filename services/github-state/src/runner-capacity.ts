@@ -8,7 +8,7 @@ export type JobLabelCache={
 };
 export async function scanHostedCapacity(
   organization:string,
-  read:(path:string,body?:unknown)=>Promise<{status:number;body:any;link?:string;deferred?:boolean}>,
+  read:(path:string,body?:unknown,phase?:'running'|'queued')=>Promise<{status:number;body:any;link?:string;deferred?:boolean}>,
   namespaceTarget=20,
   cache?:JobLabelCache,
 ):Promise<{routing_version:number;busy:number;running_jobs:Record<string,number>;namespace_busy?:number;namespace_busy_lower_bound?:number;queued_fleet?:string[][];placement_unavailable?:string;requests:number;repositories:number;runs:number;observed_at:number;job_cache_hits:number;job_cache_writes:number;elapsed_ms:number;running_requests:number;request_types:Record<string,number>;cache_fallbacks:Record<string,{count:number;run:string}>}> {
@@ -19,7 +19,8 @@ export async function scanHostedCapacity(
   const request_types:Record<string,number>={},cache_fallbacks:Record<string,{count:number;run:string}>={};
   if(!Number.isSafeInteger(namespaceTarget) || namespaceTarget<1 || namespaceTarget>10000)throw new Error('capacity_invalid_namespace_target');
   let queuedPagination=false;
-  const concurrency=4;
+  const concurrency=3;
+  let phase:'running'|'queued'='running';
   let active=0;const waiters:(()=>void)[]=[];
   async function request(path:string,body?:unknown) {
     if(active<concurrency)active++;else await new Promise<void>(resolve=>waiters.push(resolve));
@@ -27,7 +28,7 @@ export async function scanHostedCapacity(
       requests++;
       const kind=path==='/graphql'?'check_suites':path.includes('/jobs')?'job_details':path.includes('/actions/runs')?'run_listings':'repositories';
       request_types[kind]=(request_types[kind] || 0)+1;
-      return await read(path,body);
+      return await read(path,body,phase);
     }finally {
       const next=waiters.shift();if(next)next();else active--;
     }
@@ -237,7 +238,7 @@ export async function scanHostedCapacity(
   // discard that useful answer or force every caller to repeat the scan.
   await discover('in_progress');
   await jobs(activeRuns);
-  const running=busy;
+  const running=busy,observedAt=Date.now();phase='queued';
   const running_requests=requests;
   const prefix=(name:string)=>'/repos/'+encodeURIComponent(organization)+'/'+encodeURIComponent(name);
   const queuedRepos=[...repos].sort((a,b)=>(namespaceByRepo.get(prefix(b.name)) || 0)-(namespaceByRepo.get(prefix(a.name)) || 0));
@@ -312,7 +313,7 @@ export async function scanHostedCapacity(
     if(queuedPagination)throw new Error('capacity_queue_pagination');
   } catch(error) {
     // Retain distinct jobs from every completed page, including a partial scan.
-    return {routing_version:1,busy:running,running_jobs,namespace_busy_lower_bound:namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:Date.now(),job_cache_hits,job_cache_writes,elapsed_ms:Date.now()-started,running_requests,request_types,cache_fallbacks,placement_unavailable:error instanceof Error && error.message.startsWith('capacity_')?error.message:'capacity_inventory_unavailable'};
+    return {routing_version:1,busy:running,running_jobs,namespace_busy_lower_bound:namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:observedAt,job_cache_hits,job_cache_writes,elapsed_ms:Date.now()-started,running_requests,request_types,cache_fallbacks,placement_unavailable:error instanceof Error && error.message.startsWith('capacity_')?error.message:'capacity_inventory_unavailable'};
   }
-  return {routing_version:2,busy:running,running_jobs,namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:Date.now(),job_cache_hits,job_cache_writes,elapsed_ms:Date.now()-started,running_requests,request_types,cache_fallbacks};
+  return {routing_version:2,busy:running,running_jobs,namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:observedAt,job_cache_hits,job_cache_writes,elapsed_ms:Date.now()-started,running_requests,request_types,cache_fallbacks};
 }
