@@ -643,3 +643,9 @@ existing timeout. There is no alarm, CI event storage, or new polling task.
 Pickers without a configured shared service retain bounded direct discovery.
 Shared-service failure or partial coverage never fans out into a direct scan
 from every picker. Visiting ordinary reports/status does not invoke capacity discovery.
+
+Capacity discovery has no independent scan-clock cutoff. The existing 96-request
+pass budget, four concurrent reads and hourly provider allowance still apply.
+A picker may stop waiting on its HTTP request; the installation object retains
+the shared scan with `waitUntil`, so a complete result can serve later pickers.
+Freshness checks and incomplete-inventory handling remain in force.

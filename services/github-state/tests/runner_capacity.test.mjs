@@ -119,10 +119,10 @@ const shim={name:'capacity-fixture',setup(b){b.onResolve({filter:/^cloudflare:wo
 const bundle=await build({entryPoints:['src/installation.ts'],bundle:true,format:'esm',platform:'node',write:false,plugins:[shim]});
 const {InstallationScheduler}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
 function schedulerFixture(){
- const values=new Map();let slots=0;
+ const values=new Map(),background=[];let slots=0;
  const storage={get:async k=>values.get(k),put:async(k,v)=>values.set(k,structuredClone(v)),sql:{exec(q){return {toArray:()=>[],one:()=>({n:q.includes('COUNT(*)')?slots:0,cost:0})};}}};
- const scheduler=new InstallationScheduler({storage},{});scheduler.token=async()=> 'token';scheduler.usable=()=>5000;
- return {scheduler,values,setSlots:n=>{slots=n}};
+ const scheduler=new InstallationScheduler({storage,waitUntil(promise){background.push(promise);}},{});scheduler.token=async()=> 'token';scheduler.usable=()=>5000;
+ return {scheduler,values,background,setSlots:n=>{slots=n}};
 }
 test('cached-only reads retain expired snapshots without token or provider work',async()=>{
  const {scheduler,values}=schedulerFixture();
@@ -378,4 +378,30 @@ test('partial discovery failures share the same cooldown across different caps',
  const [one,two,three]=await Promise.all([get(8),get(30),get(30)]);
  assert.equal(one.complete,false);assert.equal(two.complete,false);assert.equal(three.complete,false);assert.equal(calls,1);
  assert.equal((await get(10000)).cached,true);assert.equal(calls,1);
+});
+
+test('valid cold capacity discovery can finish after twenty seconds within the unchanged request budget',async t=>{
+ let clock=Date.parse('2026-11-06T21:00:00Z');t.mock.method(Date,'now',()=>clock);
+ const {read,calls}=readFixture();
+ const snapshot=await scanHostedCapacity('org',async(path,body)=>{clock+=5000;return read(path,body);});
+ assert.equal(snapshot.routing_version,2);
+ assert.ok(snapshot.elapsed_ms>20000);
+ assert.equal(snapshot.requests,calls.length);
+ assert.ok(snapshot.requests<=96);
+ assert.equal(snapshot.namespace_busy,2);
+});
+
+test('a shared scan retains its lifetime and publishes for later callers without a waiting HTTP client',async()=>{
+ const {scheduler,values,background}=schedulerFixture();
+ const {read}=readFixture();let release;
+ const held=new Promise(resolve=>{release=resolve;});
+ scheduler.http=async(path,token,method,body)=>{await held;return read(path,body);};
+ const abandoned=scheduler.runnerCapacity({name:'org/repo',installation:'200'});
+ for(let i=0;i<20 && background.length===0;i++)await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(background.length,1,'the owner retains the scan independently of the HTTP response');
+ release();await Promise.all(background);
+ const saved=values.get('runner-capacity:org');assert.equal(saved.routing_version,2);
+ assert.equal(saved.namespace_busy,2);
+ assert.equal((await(await scheduler.runnerCapacity({name:'org/repo',installation:'200'})).json()).cached,true);
+ await abandoned;
 });
