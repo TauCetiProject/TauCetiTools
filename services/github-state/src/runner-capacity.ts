@@ -2,33 +2,33 @@
 type CapacityJob={id:number|string;name?:string;status:string;labels:string[];runner_id?:number;runner_name?:string;inventory_size?:number};
 export type JobLabelCache={
   get:(key:string,revision:string)=>CapacityJob[]|undefined;
-  put:(key:string,revision:string,jobs:CapacityJob[])=>void;
+  put:(key:string,revision:string,jobs:CapacityJob[],reusable?:boolean)=>void;
   getRanges?:(key:string)=>number[]|undefined;
   putRanges?:(key:string,boundaries:number[])=>void;
 };
 export async function scanHostedCapacity(
   organization:string,
-  read:(path:string,body?:unknown)=>Promise<{status:number;body:any;link?:string;deferred?:boolean}>,
+  read:(path:string,body?:unknown,context?:{phase:'running'|'queued';reusableFill:boolean})=>Promise<{status:number;body:any;link?:string;deferred?:boolean}>,
   namespaceTarget=20,
   cache?:JobLabelCache,
-):Promise<{routing_version:number;busy:number;running_jobs:Record<string,number>;namespace_busy?:number;namespace_busy_lower_bound?:number;queued_fleet?:string[][];placement_unavailable?:string;requests:number;repositories:number;runs:number;observed_at:number;job_cache_hits:number;job_cache_writes:number;elapsed_ms:number;running_requests:number;request_types:Record<string,number>;cache_fallbacks:Record<string,{count:number;run:string}>}> {
+):Promise<{routing_version:number;busy:number;running_jobs:Record<string,number>;namespace_busy?:number;namespace_busy_lower_bound?:number;queued_fleet?:string[][];placement_unavailable?:string;requests:number;repositories:number;runs:number;observed_at:number;job_cache_hits:number;job_cache_writes:number;job_cache_reusable_writes:number;elapsed_ms:number;running_requests:number;request_types:Record<string,number>;cache_fallbacks:Record<string,{count:number;run:string}>}> {
   // Provider request/concurrency/hourly budgets bound discovery. Valid cold
   // scans may outlive the caller; the owner retains their background lifetime.
   let requests=0;const started=Date.now();
-  let job_cache_hits=0,job_cache_writes=0;
+  let job_cache_hits=0,job_cache_writes=0,job_cache_reusable_writes=0;
   const request_types:Record<string,number>={},cache_fallbacks:Record<string,{count:number;run:string}>={};
   if(!Number.isSafeInteger(namespaceTarget) || namespaceTarget<1 || namespaceTarget>10000)throw new Error('capacity_invalid_namespace_target');
   let queuedPagination=false;
-  const concurrency=4;
+  const concurrency=3;
+  let phase:'running'|'queued'='running';
   let active=0;const waiters:(()=>void)[]=[];
-  async function request(path:string,body?:unknown) {
+  async function request(path:string,body?:unknown,reusableFill=false) {
     if(active<concurrency)active++;else await new Promise<void>(resolve=>waiters.push(resolve));
     try {
-      if(requests>=96)throw new Error('capacity_scan_limit');
       requests++;
-      const kind=path==='/graphql'?'check_suites':path.includes('/jobs')?'job_details':path.includes('/actions/runs')?'run_listings':'repositories';
+      const kind=path==='/graphql'?'check_suites':/\/actions\/runs\/\d+\/jobs(?:\?|$)/.test(path)?'job_details':path.includes('/actions/runs')?'run_listings':'repositories';
       request_types[kind]=(request_types[kind] || 0)+1;
-      return await read(path,body);
+      return await read(path,body,{phase,reusableFill});
     }finally {
       const next=waiters.shift();if(next)next();else active--;
     }
@@ -45,14 +45,14 @@ export async function scanHostedCapacity(
     const results=await Promise.allSettled(work);
     for(const result of results)if(result.status==='rejected')throw result.reason;
   }
-  async function pages(path:string,key?:string,visit?:(rows:any[])=>Promise<void>,range?:Range,onSplit?:(at:number)=>void,onLeaf?:(range:Range,count:number)=>void):Promise<any[]> {
+  async function pages(path:string,key?:string,visit?:(rows:any[])=>Promise<void>,range?:Range,onSplit?:(at:number)=>void,onLeaf?:(range:Range,count:number)=>void,reusableFill=false):Promise<any[]> {
     if(key==='workflow_runs') {
       const url=new URL(path,'https://api.github.com');url.searchParams.set('exclude_pull_requests','true');
       path=url.pathname+url.search;
     }
     const rows:any[]=[];
     for(let page=1;page<=20;page++) {
-      const response=await request(path+(path.includes('?')?'&':'?')+'per_page=100&page='+page);
+      const response=await request(path+(path.includes('?')?'&':'?')+'per_page=100&page='+page,undefined,reusableFill);
       const values=key?response.body?.[key]:response.body;
       if(response.deferred || response.status!==200 || !Array.isArray(values))throw new Error('capacity_inventory_unavailable');
       if(range && (range.lower!==undefined || range.upper!==undefined) && values.some((run:any)=>{
@@ -77,7 +77,7 @@ export async function scanHostedCapacity(
       }
       // Parent visitation synchronously records its run IDs before awaiting
       // witnesses. Child listings can overlap that latency without recounting
-      // boundary jobs; the one request gate still limits all work to four.
+      // boundary jobs; the one request gate still limits all work to three.
       if(children && visit && cache && namespaceTarget-namespace_busy>5) {
         await settle([visit(values),...children.map(child=>pages(ranged(path,child),key,visit,child,onSplit,onLeaf))]);
         return rows;
@@ -222,13 +222,15 @@ export async function scanHostedCapacity(
         const reason=!run.proof?'no_live_inventory':!run.known?'cold_metadata':unresolved?'unresolved_labels':'new_job_ids';
         const bucket=run.prefix+':'+reason;
         const fallback=cache_fallbacks[bucket] ||= {count:0,run:run.id};fallback.count++;
-        await pages(run.prefix+'/actions/runs/'+run.id+'/jobs','jobs',visit);
+        await pages(run.prefix+'/actions/runs/'+run.id+'/jobs','jobs',visit,undefined,undefined,undefined,Boolean(run.proof));
         // This is metadata, never a cached activity count. Incomplete GraphQL
         // pages still use the ordinary live REST traversal without certifying
         // that a previously observed job list was the whole current inventory.
         if(cache && observed.length &&
           JSON.stringify(observed).length<=65536){
-          cache.put(key,'job-labels-v2',observed);job_cache_writes++;
+          const ready=new Map(observed.map(job=>[String(job.id),job]));
+          const warmed=Boolean(active && active.every(job=>{const saved=ready.get(String(job.id));return saved && (saved.status==='completed' || saved.labels.length);}));
+          cache.put(key,'job-labels-v2',observed,warmed);job_cache_writes++;if(warmed)job_cache_reusable_writes++;
         }
       }
     });
@@ -236,9 +238,10 @@ export async function scanHostedCapacity(
   // The ordinary picker needs the complete running GitHub inventory. Queued
   // workflow discovery is extra placement data: old empty queued runs must not
   // discard that useful answer or force every caller to repeat the scan.
+  const observedAt=Date.now();
   await discover('in_progress');
   await jobs(activeRuns);
-  const running=busy;
+  const running=busy;phase='queued';
   const running_requests=requests;
   const prefix=(name:string)=>'/repos/'+encodeURIComponent(organization)+'/'+encodeURIComponent(name);
   const queuedRepos=[...repos].sort((a,b)=>(namespaceByRepo.get(prefix(b.name)) || 0)-(namespaceByRepo.get(prefix(a.name)) || 0));
@@ -313,7 +316,7 @@ export async function scanHostedCapacity(
     if(queuedPagination)throw new Error('capacity_queue_pagination');
   } catch(error) {
     // Retain distinct jobs from every completed page, including a partial scan.
-    return {routing_version:1,busy:running,running_jobs,namespace_busy_lower_bound:namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:Date.now(),job_cache_hits,job_cache_writes,elapsed_ms:Date.now()-started,running_requests,request_types,cache_fallbacks,placement_unavailable:error instanceof Error && error.message.startsWith('capacity_')?error.message:'capacity_inventory_unavailable'};
+    return {routing_version:1,busy:running,running_jobs,namespace_busy_lower_bound:namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:observedAt,job_cache_hits,job_cache_writes,job_cache_reusable_writes,elapsed_ms:Date.now()-started,running_requests,request_types,cache_fallbacks,placement_unavailable:error instanceof Error && error.message.startsWith('capacity_')?error.message:'capacity_inventory_unavailable'};
   }
-  return {routing_version:2,busy:running,running_jobs,namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:Date.now(),job_cache_hits,job_cache_writes,elapsed_ms:Date.now()-started,running_requests,request_types,cache_fallbacks};
+  return {routing_version:2,busy:running,running_jobs,namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:observedAt,job_cache_hits,job_cache_writes,job_cache_reusable_writes,elapsed_ms:Date.now()-started,running_requests,request_types,cache_fallbacks};
 }
