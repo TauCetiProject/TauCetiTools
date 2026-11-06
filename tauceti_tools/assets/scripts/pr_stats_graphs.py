@@ -47,7 +47,7 @@ from typing import Iterable
 
 from arxiv_categories import ARXIV_MATH, read_topic
 from chart_style import (
-    BAR_BG, BG, MUTED, PALETTE, REFERENCE_WIDTH, SUBTITLE_SIZE, TEXT, base_css, card_rect, css_px,
+    BAR_BG, BG, MUTED, PALETTE, REFERENCE_WIDTH, SUBTITLE_SIZE, TEXT, base_css, card_rect, css_px, hover_metadata,
 )
 # The lifecycle rules live in one module because two readers of the same label
 # timelines have to agree about what they mean, and once did not.
@@ -1221,11 +1221,18 @@ def render_rolling(path: Path, rolling: list[dict]) -> None:
         css=f'.panel{{font-size:{css_px(width, 15)};font-weight:600}}'
         f'.latest{{font-size:{css_px(width, 24)};font-weight:700}}',
     )
+    plots = []
     for (title, key, color, formatter), (ox, oy) in zip(panels, origins):
         values = [row[key] or 0 for row in rolling]
         axis_max = nice_axis_max(max(values, default=0))
         left, right = ox + 44, ox + panel_width - 15
         top, bottom = oy + 68, oy + panel_height - 26
+        plots.append({"bounds": [left, top, right - left, bottom - top],
+                      "x": [left + i * (right - left) / max(len(rolling) - 1, 1) for i in range(len(rolling))],
+                      "labels": [row["date"] for row in rolling],
+                      "series": [{"label": title, "unit": "hours" if key.endswith("hours") else "",
+                                  "digits": 1 if key.endswith("hours") else 0,
+                                  "values": [row[key] for row in rolling]}]})
         parts.append(f'<text x="{ox}" y="{oy+20}" class="panel">{html.escape(title)}</text>')
         parts.append(f'<text x="{ox+panel_width-20}" y="{oy+25}" text-anchor="end" class="latest" style="fill:{color}">{formatter(values[-1])}</text>')
         for index in range(5):
@@ -1250,6 +1257,7 @@ def render_rolling(path: Path, rolling: list[dict]) -> None:
             day = date.fromisoformat(row["date"])
             parts.append(f'<text x="{x:.1f}" y="{bottom+18}" text-anchor="middle" class="tick">{day:%b} {day.day}</text>')
             last_tick_x = x
+    parts.append(hover_metadata(plots))
     parts.append("</svg>")
     atomic_write(path, "".join(parts) + "\n")
 
@@ -1542,6 +1550,12 @@ def render_cumulative_contributors(
         day = date.fromisoformat(value)
         parts.append(f'<text x="{x:.1f}" y="{bottom+24}" text-anchor="middle" class="tick">{day:%b} {day.day}</text>')
         last_tick_x = x
+    parts.append(hover_metadata([{
+        "bounds": [left, top, right - left, bottom - top],
+        "x": [left + i * (right - left) / max(len(dates) - 1, 1) for i in range(len(dates))],
+        "labels": dates,
+        "series": [{"label": name, "unit": noun, "values": series[name]} for name in names],
+    }]))
     parts.append("</svg>")
     atomic_write(path, "".join(parts) + "\n")
 
