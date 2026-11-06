@@ -241,18 +241,33 @@ class StatusIntentTests(unittest.TestCase):
             self.assertEqual(kwargs['api']('pulls/7'), {'number': 7})
             self.assertEqual(kwargs['api']('/user/123'), {'id': 123})
             return True
-        with patch.object(ci_status.bors_scope_approval, 'observation', return_value={}), patch.object(ci_status.bors_scope_approval, 'verify', side_effect=verify):
+        with patch.object(ci_status.bors_scope_approval, 'observation_with_admission', return_value=({}, None)), patch.object(ci_status.bors_scope_approval, 'verify', side_effect=verify):
             self.assertTrue(ci_status.scope_approved(fake, record))
         self.assertEqual([call[1] for call in fake.calls], ['repos/TauCetiProject/TauCeti/pulls/7', '/user/123'])
         limited = ci_status.Deferred('read', ci_status.time.time() + 3600)
-        with patch.object(ci_status.bors_scope_approval, 'observation', return_value={}), patch.object(ci_status.bors_scope_approval, 'verify', side_effect=limited), self.assertRaises(ci_status.Deferred):
+        with patch.object(ci_status.bors_scope_approval, 'observation_with_admission', return_value=({}, None)), patch.object(ci_status.bors_scope_approval, 'verify', side_effect=limited), self.assertRaises(ci_status.Deferred):
             ci_status.scope_approved(fake, record)
+
+    def test_frozen_scope_capability_and_refresh_reach_verifier(self):
+        with patch.dict(os.environ, {'GITHUB_REPOSITORY': 'TauCetiProject/TauCeti'}):
+            _, record = self.approved_scope()
+        capability = ci_status.bors_scope_approval.FROZEN_ADMISSION
+        observed = ({'authority': 'first'}, capability)
+        with patch.object(ci_status.bors_scope_approval, 'observation_with_admission', return_value=observed) as observe:
+            def verify(data, head, base, **kwargs):
+                self.assertEqual(data, observed[0])
+                self.assertEqual(kwargs['admission'], capability)
+                self.assertEqual(kwargs['refresh'](), observed)
+                return True
+            with patch.object(ci_status.bors_scope_approval, 'verify', side_effect=verify):
+                self.assertTrue(ci_status.scope_approved(FakeGitHub([]), record))
+            self.assertEqual(observe.call_count, 2)
 
     def test_queue_cannot_replay_a_bors_scope_waiver(self):
         with patch.dict(os.environ, {'GITHUB_REPOSITORY': 'TauCetiProject/TauCeti'}):
             _, record = self.approved_scope()
         with patch.dict(os.environ, {'CI_STATUS_MERGE_BACKEND': 'queue'}), \
-                patch.object(ci_status.bors_scope_approval, 'observation') as observation:
+                patch.object(ci_status.bors_scope_approval, 'observation_with_admission') as observation:
             self.assertFalse(ci_status.scope_approved(FakeGitHub([]), record))
             observation.assert_not_called()
 
@@ -286,7 +301,7 @@ class StatusIntentTests(unittest.TestCase):
     def test_scope_observation_network_failure_is_not_a_valid_revocation(self):
         with patch.dict(os.environ, {'GITHUB_REPOSITORY': 'TauCetiProject/TauCeti'}):
             _, record = self.approved_scope()
-        with patch.object(ci_status.bors_scope_approval, 'observation', side_effect=OSError('network')), self.assertRaises(OSError):
+        with patch.object(ci_status.bors_scope_approval, 'observation_with_admission', side_effect=OSError('network')), self.assertRaises(OSError):
             ci_status.scope_approved(FakeGitHub([]), record)
 
     def test_newer_run_skips_only_its_exact_context(self):

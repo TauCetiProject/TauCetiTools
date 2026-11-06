@@ -166,9 +166,12 @@ def scope_approved(api, record):
         endpoint = path if path.startswith("/") else f"repos/{record['repo']}/{path}"
         return api.request("GET", endpoint)
     try:
+        observe = lambda: bors_scope_approval.observation_with_admission(approval.get("batch_id"))
+        data, admission = observe()
         return bors_scope_approval.verify(
-            bors_scope_approval.observation(approval.get("batch_id")), approval["head"], approval["base"],
-            pr=approval.get("pr"), batch_id=approval.get("batch_id"), combined_paths=approval.get("paths"), api=read)
+            data, approval["head"], approval["base"], pr=approval.get("pr"),
+            batch_id=approval.get("batch_id"), combined_paths=approval.get("paths"),
+            api=read, admission=admission, refresh=observe)
     except (KeyError, TypeError, ValueError) as error:
         print(f"ci-status: scope approval unavailable: {type(error).__name__}", file=sys.stderr)
         return False
