@@ -32,6 +32,11 @@ class SetupFixture(unittest.TestCase):
 
 
 class SetupTemplateTests(SetupFixture):
+    def test_runtime_environment_exports_the_configured_merge_backend(self):
+        self.assertEqual(self.project.environment()["TAUCETI_MERGE_BACKEND"], "github-queue")
+        self.project.raw["merge"] = {"backend": "bors"}
+        self.assertEqual(self.project.environment()["TAUCETI_MERGE_BACKEND"], "bors")
+
     def test_generated_content_and_roadmap_ignore_lake_without_replacing_rules(self):
         for role in ("content", "roadmap"):
             with self.subTest(role=role):

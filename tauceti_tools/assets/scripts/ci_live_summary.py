@@ -200,6 +200,7 @@ def main():
                     github(f"actions/artifacts/{artifact['id']}/zip", binary=True)
                 )
                 break
+        summary.setdefault("telemetry", {})["coverage"] = "complete"
     except (RuntimeError, ValueError, KeyError, zipfile.BadZipFile):
         print("Phase telemetry unavailable; retaining step timing")
     for job in jobs:

@@ -1,0 +1,297 @@
+"""The staging fetch of the repair worker's outputs: its configuration and its fallbacks.
+
+The properties that matter:
+
+* `[services.repair_cache]` renders into the Lake cache services file every cache script reads,
+  with its name and public URL, and an installation without it renders no repair service;
+* the fetch asks Lake for exactly each candidate revision (`--rev`), from the repair service, for
+  the content repository, in the order given (positional, then `REPAIR_OUTPUTS_REVS`);
+* outputs from several candidates combine: an artifact shared by several mappings is
+  downloaded once, and a record placed by an earlier candidate is kept over a later one;
+* a head with no published outputs, in either of Lake's wordings, is a miss asked about once,
+  not a transfer failure retried;
+* a head with no published outputs, or a fetch that never completes, leaves the cache's output
+  records exactly as the base cache left them and does not fail the job;
+* when the base cache was discarded, the fetch still runs, into an empty cache, and turns the
+  artifact cache back on only when it contributed;
+* an unconfigured repair cache says so with a warning naming the services file;
+* a completed fetch reports how many module outputs it contributed.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+from tauceti_tools.project import ConfigError, parse
+from tauceti_tools.scaffold import initial_configuration
+from tauceti_tools.templates import materialize
+
+HEAD = "0123456789abcdef0123456789abcdef01234567"
+REV_B = "b" * 40
+REV_C = "c" * 40
+
+# A stand-in `lake`: records its argv, then behaves as FAKE_LAKE_MODE says. `used` adds one new
+# output record and replaces one; `partial` writes a record and then fails as a transfer would.
+FAKE_LAKE = r"""#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_LAKE_ARGV"
+printf '%s\n' "$LAKE_CONFIG" >> "$FAKE_LAKE_ARGV.config"
+out="$LAKE_CACHE_DIR/outputs/Project"
+case "$FAKE_LAKE_MODE" in
+  # Lake's wording for an exact `--rev` lookup with no mapping, and for a walk with none.
+  absent) echo "error: one/Project: outputs not found for revision ${*: -1}"; exit 1 ;;
+  absent-walk) echo 'error: one/Project: no outputs found in 1 revisions from HEAD'; exit 1 ;;
+  used)
+    mkdir -p "$out"
+    echo '{"repair": 1}' > "$out/1111111111111111.json"
+    echo '{"repair": 2}' > "$out/0000000000000000.json"
+    echo 'info: Project: downloaded artifact 2222222222222222'
+    exit 0 ;;
+  partial)
+    mkdir -p "$out"
+    echo '{"partial": true}' > "$out/3333333333333333.json"
+    echo '{"partial": true}' > "$out/0000000000000000.json"
+    echo 'error: failed to download artifact'
+    exit 1 ;;
+  revs)
+    # One mapping file per published revision, lines `<record> <artifact> <content>`; Lake
+    # downloads only the artifacts not already in the cache.
+    rev="${*: -1}"; rev="${rev#--rev=}"
+    [ -f "$FAKE_REPAIR/$rev" ] || { echo "error: one/Project: outputs not found for revision $rev"; exit 1; }
+    mkdir -p "$out" "$LAKE_CACHE_DIR/artifacts"
+    while read -r record artifact content; do
+      if [ ! -e "$LAKE_CACHE_DIR/artifacts/$artifact" ]; then
+        echo "$artifact" > "$LAKE_CACHE_DIR/artifacts/$artifact"
+        echo "$artifact" >> "$FAKE_LAKE_ARGV.downloads"
+        echo "info: Project: downloaded artifact $artifact"
+      fi
+      echo "$content" > "$out/$record.json"
+    done < "$FAKE_REPAIR/$rev"
+    exit 0 ;;
+esac
+"""
+
+
+def project(repair: dict | None):
+    config = parse(initial_configuration("one/Project", "human").encode())
+    if repair is not None:
+        config.raw["services"]["repair_cache"] = repair
+    return config
+
+
+class RepairCacheConfig(unittest.TestCase):
+    def services(self, repair):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            materialize(project(repair), root / "scripts")
+            cfg = root / "lake-cache.toml"
+            subprocess.run(
+                ["bash", "-c", '. "$1"; write_lake_cache_config "$2" https://c.invalid/a https://c.invalid/r',
+                 "-", str(root / "scripts/lake-cache-services.sh"), str(cfg)],
+                check=True)
+            return cfg.read_text(), (root / "scripts/repair-cache-get.sh").read_text()
+
+    def test_configured_service_renders_name_and_url(self):
+        cfg, script = self.services({"mode": "custom", "name": "project-repair", "url": "https://repair.example.org/"})
+        self.assertIn('cache.defaultService = "tauceti-public"', cfg)
+        self.assertIn('name = "project-repair"', cfg)
+        self.assertIn('artifactEndpoint = "https://repair.example.org/artifacts"', cfg)
+        self.assertIn('revisionEndpoint = "https://repair.example.org/revisions"', cfg)
+        self.assertIn("--repo one/Project", script)
+
+    def test_default_name_and_absent_service(self):
+        cfg, _ = self.services({"mode": "hosted", "url": "https://repair.example.org"})
+        self.assertIn('name = "tauceti-repair"', cfg)
+        for repair in (None, {"mode": "off", "url": "https://repair.example.org"}):
+            with self.subTest(repair=repair):
+                cfg, _ = self.services(repair)
+                self.assertEqual(cfg.count("[[cache.service]]"), 1)
+                self.assertNotIn("repair", cfg)
+
+    def test_invalid_settings_are_rejected(self):
+        base = initial_configuration("one/Project", "human")
+        for table in ('mode = "custom"\nurl = "http://repair.example.org"\n',
+                      'mode = "custom"\nname = "bad name"\nurl = "https://repair.example.org"\n'):
+            with self.subTest(table=table), self.assertRaises(ConfigError):
+                parse((base + "\n[services.repair_cache]\n" + table).encode())
+
+
+class FetchHarness(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        materialize(project({"mode": "custom", "url": "https://repair.example.org"}), self.root / "scripts")
+        self.outputs = self.root / "pr/.lake/cache/outputs/Project"
+        self.outputs.mkdir(parents=True)
+        (self.outputs / "0000000000000000.json").write_text('{"base": true}\n')
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "lake").write_text(FAKE_LAKE)
+        (bin_dir / "lake").chmod(0o755)
+        (self.root / "tmp").mkdir()
+        self.env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}",
+                        RUNNER_TEMP=str(self.root / "tmp"), FAKE_LAKE_ARGV=str(self.root / "argv"),
+                        GITHUB_ENV=str(self.root / "env"), GITHUB_STEP_SUMMARY=str(self.root / "summary"),
+                        FAKE_REPAIR=str(self.root / "published"))
+        self.env.pop("LAKE_ARTIFACT_CACHE", None)
+        self.env.pop("REPAIR_OUTPUTS_REVS", None)
+        (self.root / "published").mkdir()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def fetch(self, mode, *, script="scripts/repair-cache-get.sh", revs=(HEAD,), **env):
+        result = subprocess.run(["bash", str(self.root / script), "pr", *revs], cwd=self.root,
+                                env=dict(self.env, FAKE_LAKE_MODE=mode, **env),
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        github_env = dict(line.split("=", 1) for line in (self.root / "env").read_text().splitlines())
+        return result.stdout, github_env
+
+    def records(self):
+        return {p.name: p.read_text() for p in self.outputs.iterdir()}
+
+
+class RepairCacheFetch(FetchHarness):
+    def test_absent_outputs_leave_the_base_cache(self):
+        before = self.records()
+        out, env = self.fetch("absent")
+        self.assertIn(f"no repair outputs for {HEAD}, building from the base cache", out)
+        self.assertEqual(env, {"REPAIR_OUTPUTS_STATE": "absent", "REPAIR_OUTPUTS_REUSED": "0"})
+        self.assertEqual(self.records(), before)
+        argv = (self.root / "argv").read_text().splitlines()
+        self.assertEqual(argv, [f"cache get --service tauceti-repair --repo one/Project --rev={HEAD}"])
+        config = Path((self.root / "argv.config").read_text().strip()).read_text()
+        self.assertIn('artifactEndpoint = "https://repair.example.org/artifacts"', config)
+        self.assertIn("no repair outputs", (self.root / "summary").read_text())
+
+    def test_incomplete_fetch_restores_the_base_records(self):
+        before = self.records()
+        out, env = self.fetch("partial")
+        self.assertEqual(env["REPAIR_OUTPUTS_STATE"], "failed")
+        self.assertEqual(self.records(), before)
+        self.assertEqual(len((self.root / "argv").read_text().splitlines()), 3)
+
+    def test_completed_fetch_counts_contributed_outputs(self):
+        out, env = self.fetch("used")
+        self.assertEqual(env, {"REPAIR_OUTPUTS_STATE": "used", "REPAIR_OUTPUTS_REUSED": "2",
+                               "REPAIR_OUTPUTS_REVS_USED": HEAD})
+        self.assertIn("reused 2 module outputs", out)
+        self.assertIn("1 artifacts downloaded", out)
+
+    def test_both_miss_wordings_are_asked_once(self):
+        for mode in ("absent", "absent-walk"):
+            with self.subTest(mode=mode):
+                (self.root / "argv").unlink(missing_ok=True)
+                out, env = self.fetch(mode)
+                self.assertEqual(env["REPAIR_OUTPUTS_STATE"], "absent")
+                self.assertEqual(len((self.root / "argv").read_text().splitlines()), 1)
+                self.assertNotIn("::warning::", out)
+                self.assertNotIn("retrying", out)
+
+    def test_no_service_skips_lake_with_a_warning(self):
+        materialize(project(None), self.root / "off")
+        out, env = self.fetch("used", script="off/repair-cache-get.sh")
+        self.assertEqual(env["REPAIR_OUTPUTS_STATE"], "off")
+        self.assertIn("no repair cache configured", out)
+        self.assertRegex(out, r"::warning::repair cache fetch is off: .*off/lake-cache-services\.sh.*services\.repair_cache")
+        self.assertFalse((self.root / "argv").exists())
+
+
+class DiscardedBaseCache(FetchHarness):
+    """lake-cache-get.sh discarded the base cache (a miss or an incomplete fetch)."""
+
+    OFF = {"LAKE_ARTIFACT_CACHE": "false", "LAKE_RESTORE_ARTIFACTS": "false", "LAKE_CACHE_DIR": ""}
+
+    def test_used_outputs_turn_the_artifact_cache_back_on(self):
+        out, env = self.fetch("used", **self.OFF)
+        self.assertEqual(env["REPAIR_OUTPUTS_STATE"], "used")
+        self.assertEqual(env["LAKE_ARTIFACT_CACHE"], "true")
+        self.assertEqual(env["LAKE_RESTORE_ARTIFACTS"], "true")
+        self.assertEqual(env["LAKE_CACHE_DIR"], str((self.root / "pr/.lake/cache").resolve()))
+        # The leftover base record is gone; only the repair worker's records remain.
+        self.assertEqual(self.records(), {"0000000000000000.json": '{"repair": 2}\n',
+                                          "1111111111111111.json": '{"repair": 1}\n'})
+        self.assertIn("starts from these outputs alone", out)
+
+    def test_miss_or_failure_leaves_the_cache_off_and_empty(self):
+        for mode in ("absent", "partial"):
+            with self.subTest(mode=mode):
+                self.outputs.mkdir(parents=True, exist_ok=True)
+                out, env = self.fetch(mode, **self.OFF)
+                self.assertIn(env["REPAIR_OUTPUTS_STATE"], ("absent", "failed"))
+                self.assertNotIn("LAKE_ARTIFACT_CACHE", env)
+                self.assertFalse((self.root / "pr/.lake/cache").exists())
+                self.assertIn("building from scratch", out)
+
+    def test_rejects_a_non_sha_head(self):
+        result = subprocess.run(["bash", str(self.root / "scripts/repair-cache-get.sh"), "pr", "main"],
+                                cwd=self.root, env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+
+
+class RepairCacheCandidates(FetchHarness):
+    """Several candidate revisions: the staging head, the queue's earlier tips, the base."""
+
+    def publish(self, rev, *mapping):
+        (self.root / "published" / rev).write_text("".join(" ".join(m) + "\n" for m in mapping))
+
+    def requested(self):
+        return [line.rsplit("--rev=", 1)[1] for line in (self.root / "argv").read_text().splitlines()]
+
+    def downloads(self):
+        path = self.root / "argv.downloads"
+        return path.read_text().splitlines() if path.exists() else []
+
+    def test_two_revisions_both_present(self):
+        self.publish(HEAD, ("1111111111111111", "aaaa", "head-1"))
+        self.publish(REV_B, ("2222222222222222", "bbbb", "b-2"))
+        out, env = self.fetch("revs", revs=(HEAD, REV_B))
+        self.assertEqual(env, {"REPAIR_OUTPUTS_STATE": "used", "REPAIR_OUTPUTS_REUSED": "2",
+                               "REPAIR_OUTPUTS_REVS_USED": f"{HEAD} {REV_B}"})
+        self.assertEqual(self.requested(), [HEAD, REV_B])
+        self.assertEqual(self.records()["1111111111111111.json"], "head-1\n")
+        self.assertEqual(self.records()["2222222222222222.json"], "b-2\n")
+        self.assertIn("2 artifacts downloaded", out)
+
+    def test_first_absent_second_present_from_the_environment(self):
+        self.publish(REV_B, ("2222222222222222", "bbbb", "b-2"))
+        out, env = self.fetch("revs", revs=(HEAD,), REPAIR_OUTPUTS_REVS=f" {REV_B}  {HEAD} ")
+        self.assertEqual(env, {"REPAIR_OUTPUTS_STATE": "used", "REPAIR_OUTPUTS_REUSED": "1",
+                               "REPAIR_OUTPUTS_REVS_USED": REV_B})
+        self.assertEqual(self.requested(), [HEAD, REV_B])
+        self.assertEqual(self.records()["0000000000000000.json"], '{"base": true}\n')
+
+    def test_none_present_leaves_the_base_cache(self):
+        before = self.records()
+        out, env = self.fetch("revs", revs=(), REPAIR_OUTPUTS_REVS=f"{HEAD} {REV_B} {REV_C}")
+        self.assertEqual(env, {"REPAIR_OUTPUTS_STATE": "absent", "REPAIR_OUTPUTS_REUSED": "0"})
+        self.assertEqual(self.requested(), [HEAD, REV_B, REV_C])
+        self.assertEqual(self.records(), before)
+
+    def test_duplicate_artifact_is_fetched_once_and_earlier_records_win(self):
+        self.publish(HEAD, ("1111111111111111", "aaaa", "head-1"), ("2222222222222222", "5eed", "head-2"))
+        self.publish(REV_B, ("2222222222222222", "5eed", "b-2"), ("3333333333333333", "cccc", "b-3"))
+        out, env = self.fetch("revs", revs=(HEAD, REV_B))
+        self.assertEqual(sorted(self.downloads()), ["5eed", "aaaa", "cccc"])
+        self.assertEqual(env["REPAIR_OUTPUTS_REUSED"], "3")
+        records = self.records()
+        self.assertEqual(records["2222222222222222.json"], "head-2\n")
+        self.assertEqual(records["3333333333333333.json"], "b-3\n")
+        self.assertIn("3 artifacts downloaded", out)
+
+    def test_invalid_environment_entry_is_skipped_and_none_at_all_is_an_error(self):
+        out, env = self.fetch("revs", revs=(), REPAIR_OUTPUTS_REVS=f"main {HEAD}")
+        self.assertIn("ignoring REPAIR_OUTPUTS_REVS entry 'main'", out)
+        self.assertEqual(self.requested(), [HEAD])
+        result = subprocess.run(["bash", str(self.root / "scripts/repair-cache-get.sh"), "pr"],
+                                cwd=self.root, env=dict(self.env, REPAIR_OUTPUTS_REVS=""),
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -26,7 +26,6 @@ OTHER_ASSETS = [
     "pipeline-health.json",   # scripts/pipeline_health.py
     "ci-fleet-72h.svg",       # scripts/ci_stats_graphs.py
     "ci-fleet-30d.svg",       # scripts/ci_stats_graphs.py
-    "ci-stats.json",          # scripts/ci_stats_graphs.py
     "ci-freshness.json",      # independent CI chart coverage/status
 ]
 

@@ -158,6 +158,8 @@ def scope_approved(api, record):
     approval = record.get("approval")
     if approval is None:
         return True
+    if os.environ.get("CI_STATUS_MERGE_BACKEND") != "bors":
+        return False
     if record["repo"] != bors_scope_approval.REPO:
         return False
     def read(path):
@@ -254,12 +256,14 @@ def publish(records, *, max_wait=600):
                     if not approval_ok:
                         # Clear an older green waiver on the same SHA. Revocation
                         # cannot be represented by silently skipping publication.
-                        payload = dict(payload, state="failure", description="no valid current bors scope approval")
+                        description = ("no valid current bors scope approval" if os.environ.get("CI_STATUS_MERGE_BACKEND") == "bors"
+                                       else "restricted paths need an administrator's admin merge")
+                        payload = dict(payload, state="failure", description=description)
                     api.request("POST", f"repos/{record['repo']}/statuses/{record['sha']}",
                                 payload, idempotent=True)
                     path.unlink(missing_ok=True)
-                    if not approval_ok:
-                        failures += 1
+                    # A delivered policy rejection is a successful publication.
+                    # Merge eligibility is carried by the posted status, not this exit code.
                     print(f"ci-status: posted {payload['context']}={payload['state']}")
                     break
                 except Deferred as error:

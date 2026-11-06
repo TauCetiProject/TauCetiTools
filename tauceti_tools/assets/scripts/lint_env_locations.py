@@ -26,14 +26,23 @@ def unique_object(pairs):
 
 
 def source_location(record, root, modules):
-    """Resolve only an exact imported module origin, never a declaration name."""
+    """Resolve only an exact imported module origin, never a declaration name.
+
+    A record with a module and no range (a private or generated declaration)
+    resolves to its defining file alone.
+    """
     if "unknown" in record:
-        return {"unknown": "unsupported_origin"}
+        # Keep the driver's own reason visible (sanitised to the consumer's [a-z_] alphabet)
+        # so an unlocated finding says which origin branch it took.
+        reason = re.sub(r"[^a-z_]", "_", str(record["unknown"]).lower())[:48] or "unsupported"
+        return {"unknown": "origin_" + reason}
     module = record.get("module")
+    ranged = "line" in record or "column" in record
     line, column = record.get("line"), record.get("column")
     if (not isinstance(module, str) or not MODULE.fullmatch(module)
-            or module not in modules or type(line) is not int or type(column) is not int
-            or not 1 <= line <= 10_000_000 or not 1 <= column <= 10_000_000):
+            or module not in modules
+            or (ranged and (type(line) is not int or type(column) is not int
+                            or not 1 <= line <= 10_000_000 or not 1 <= column <= 10_000_000))):
         return {"unknown": "invalid_origin"}
     path = module.replace(".", "/") + ".lean"
     if len(path) > 512:
@@ -45,6 +54,8 @@ def source_location(record, root, modules):
     try:
         if not source.is_file() or not source.resolve().is_relative_to(root.resolve()):
             return {"unknown": "invalid_path"}
+        if not ranged:
+            return {"path": path}
         # A range outside the candidate source is not a usable location. Source
         # contents are not searched for declaration names or ownership guesses.
         with source.open(encoding="utf-8") as stream:

@@ -1,0 +1,4954 @@
+{
+  "baseline": "38ec297668d30095b41dd67d8d44f1306519b8ef",
+  "implementation_sha256": "552ad49d7675d29481f9c978856c1fb0aaee31bd84991fd8f4678e94d707c9cc",
+  "scope": "isolated real PostgreSQL; ordinary runAlarm leased scheduler; eight histories plus eight issue-comment deliveries to a warm complete collection, burst and steady500ms spacing, three alternating trials each; requested limits interleaved (benchmark-only constant substitution for4/8); separate100memberemptyfullbatch once/version; fixture upstream only, zero GitHub requests; not a production fleet throughput claim",
+  "trials": 3,
+  "candidate_limits": [
+    2,
+    4,
+    8
+  ],
+  "before": [
+    {
+      "histories_completed": 8,
+      "committed_ingress": 8,
+      "ingress_interval_ms": 0,
+      "elapsed_ms": 13131.095015,
+      "transactions": 21,
+      "application_sql_round_trips": 358,
+      "upstream_batches": 1,
+      "github_requests": 0,
+      "ingress_ms": [
+        894.8232990000006,
+        1426.5788009999997,
+        1955.6063080000004,
+        2571.8357669999996,
+        3240.381228,
+        3770.333697,
+        4297.242986,
+        5777.443562999999
+      ],
+      "ingress_p95_ms": 5777.443562999999,
+      "ingress_admission_p95_ms": 4933,
+      "publication_transactions": 8,
+      "publication_max_hold_ms": 972.3753099999994,
+      "writers": [
+        {
+          "purpose": "other",
+          "queue_wait_ms": 0,
+          "transaction_ms": 255.715776,
+          "application_sql_round_trips": 1,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "queue_wait_ms": 0,
+          "transaction_ms": 332.568941,
+          "application_sql_round_trips": 7,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "queue_wait_ms": 0,
+          "transaction_ms": 283.2493290000002,
+          "application_sql_round_trips": 2,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "queue_wait_ms": 0,
+          "transaction_ms": 339.82103800000004,
+          "application_sql_round_trips": 3,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 310,
+          "transaction_ms": 553.9690710000004,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 824,
+          "transaction_ms": 532.2938389999999,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 1335,
+          "transaction_ms": 529.1313319999999,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 1860,
+          "transaction_ms": 616.1331870000004,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 2465,
+          "transaction_ms": 668.6015639999996,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 3108,
+          "transaction_ms": 530.2463639999996,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 3522,
+          "transaction_ms": 526.7052270000004,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 4040,
+          "transaction_ms": 919.8359380000002,
+          "application_sql_round_trips": 27,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 4933,
+          "transaction_ms": 560.4370870000002,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 322,
+          "transaction_ms": 776.6718419999997,
+          "application_sql_round_trips": 27,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 775.7182489999996,
+          "application_sql_round_trips": 27,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 776.2528710000006,
+          "application_sql_round_trips": 27,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 972.3753099999994,
+          "application_sql_round_trips": 27,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 785.0530030000009,
+          "application_sql_round_trips": 27,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 760.1617439999991,
+          "application_sql_round_trips": 27,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 961.3749380000008,
+          "application_sql_round_trips": 27,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "queue_wait_ms": 0,
+          "transaction_ms": 200.53025200000047,
+          "application_sql_round_trips": 1,
+          "failed": false
+        }
+      ]
+    },
+    {
+      "histories_completed": 8,
+      "committed_ingress": 8,
+      "ingress_interval_ms": 0,
+      "elapsed_ms": 12717.082670000003,
+      "transactions": 21,
+      "application_sql_round_trips": 358,
+      "upstream_batches": 1,
+      "github_requests": 0,
+      "ingress_ms": [
+        844.726954999991,
+        1518.8904560000228,
+        2057.40481800001,
+        2623.1667610000004,
+        3158.4550210000016,
+        3693.4228569999977,
+        5183.221099999995,
+        5766.15915599998
+      ],
+      "ingress_p95_ms": 5766.15915599998,
+      "ingress_admission_p95_ms": 5020,
+      "publication_transactions": 8,
+      "publication_max_hold_ms": 965.9217350000108,
+      "writers": [
+        {
+          "purpose": "other",
+          "queue_wait_ms": 0,
+          "transaction_ms": 250.2107890000043,
+          "application_sql_round_trips": 1,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "queue_wait_ms": 0,
+          "transaction_ms": 341.01020300001255,
+          "application_sql_round_trips": 7,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "queue_wait_ms": 0,
+          "transaction_ms": 246.5373949999921,
+          "application_sql_round_trips": 2,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "queue_wait_ms": 0,
+          "transaction_ms": 306.9253000000026,
+          "application_sql_round_trips": 3,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 278,
+          "transaction_ms": 537.3244479999994,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 815,
+          "transaction_ms": 674.2433099999907,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 1453,
+          "transaction_ms": 538.4962140000134,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 1990,
+          "transaction_ms": 565.8189469999925,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 2535,
+          "transaction_ms": 535.1678820000088,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 3069,
+          "transaction_ms": 535.1381589999946,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 3602,
+          "transaction_ms": 826.6993089999887,
+          "application_sql_round_trips": 27,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 4417,
+          "transaction_ms": 662.9846749999851,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 5020,
+          "transaction_ms": 582.9675010000065,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 1180,
+          "transaction_ms": 836.6760240000149,
+          "application_sql_round_trips": 27,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 758.2358760000207,
+          "application_sql_round_trips": 27,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 772.542878999986,
+          "application_sql_round_trips": 27,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 850.0854359999939,
+          "application_sql_round_trips": 27,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 765.2618089999887,
+          "application_sql_round_trips": 27,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 965.9217350000108,
+          "application_sql_round_trips": 27,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 762.3896020000102,
+          "application_sql_round_trips": 27,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "queue_wait_ms": 0,
+          "transaction_ms": 219.32401499999105,
+          "application_sql_round_trips": 1,
+          "failed": false
+        }
+      ]
+    },
+    {
+      "histories_completed": 8,
+      "committed_ingress": 8,
+      "ingress_interval_ms": 0,
+      "elapsed_ms": 12735.794163999992,
+      "transactions": 21,
+      "application_sql_round_trips": 358,
+      "upstream_batches": 1,
+      "github_requests": 0,
+      "ingress_ms": [
+        799.874656,
+        1467.5946089999925,
+        1999.4099130000104,
+        2559.6173239999916,
+        3222.0137270000123,
+        3749.140222999995,
+        4406.420836000005,
+        5752.7749069999845
+      ],
+      "ingress_p95_ms": 5752.7749069999845,
+      "ingress_admission_p95_ms": 5131,
+      "publication_transactions": 8,
+      "publication_max_hold_ms": 897.8006900000037,
+      "writers": [
+        {
+          "purpose": "other",
+          "queue_wait_ms": 0,
+          "transaction_ms": 255.4141210000089,
+          "application_sql_round_trips": 1,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "queue_wait_ms": 0,
+          "transaction_ms": 354.73188900001696,
+          "application_sql_round_trips": 7,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "queue_wait_ms": 0,
+          "transaction_ms": 224.1552860000229,
+          "application_sql_round_trips": 2,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "queue_wait_ms": 0,
+          "transaction_ms": 259.66730400000233,
+          "application_sql_round_trips": 3,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 235,
+          "transaction_ms": 539.7454969999962,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 770,
+          "transaction_ms": 667.7992609999783,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 1401,
+          "transaction_ms": 531.941581000021,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 1932,
+          "transaction_ms": 560.126099999994,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 2492,
+          "transaction_ms": 662.2709479999903,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 3151,
+          "transaction_ms": 527.2223079999967,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 3677,
+          "transaction_ms": 656.9802169999748,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 4328,
+          "transaction_ms": 812.966757999995,
+          "application_sql_round_trips": 27,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 5131,
+          "transaction_ms": 533.5082829999737,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 468,
+          "transaction_ms": 775.7968019999971,
+          "application_sql_round_trips": 27,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 814.2845209999941,
+          "application_sql_round_trips": 27,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 766.4622479999962,
+          "application_sql_round_trips": 27,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 863.1394429999928,
+          "application_sql_round_trips": 27,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 814.6681390000158,
+          "application_sql_round_trips": 27,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 788.6559290000005,
+          "application_sql_round_trips": 27,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 897.8006900000037,
+          "application_sql_round_trips": 27,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "queue_wait_ms": 0,
+          "transaction_ms": 251.55759599999874,
+          "application_sql_round_trips": 1,
+          "failed": false
+        }
+      ]
+    }
+  ],
+  "after": [
+    {
+      "histories_completed": 8,
+      "committed_ingress": 8,
+      "ingress_interval_ms": 0,
+      "elapsed_ms": 11002.505636000002,
+      "transactions": 18,
+      "application_sql_round_trips": 298,
+      "upstream_batches": 1,
+      "github_requests": 0,
+      "ingress_ms": [
+        1500.3833700000032,
+        2076.119770999998,
+        2650.4202730000034,
+        3320.797838999999,
+        3980.007605999999,
+        4506.368782999998,
+        5031.181605999998,
+        5738.154485999999
+      ],
+      "ingress_p95_ms": 5738.154485999999,
+      "ingress_admission_p95_ms": 4854,
+      "publication_transactions": 5,
+      "publication_max_hold_ms": 1251.298170999995,
+      "writers": [
+        {
+          "purpose": "other",
+          "queue_wait_ms": 0,
+          "transaction_ms": 203.83593100000144,
+          "application_sql_round_trips": 1,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "queue_wait_ms": 0,
+          "transaction_ms": 349.9827179999993,
+          "application_sql_round_trips": 7,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "queue_wait_ms": 0,
+          "transaction_ms": 251.2930520000009,
+          "application_sql_round_trips": 2,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "queue_wait_ms": 0,
+          "transaction_ms": 252.61487999999372,
+          "application_sql_round_trips": 3,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 249,
+          "transaction_ms": 652.915528000005,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 879,
+          "transaction_ms": 594.3226240000004,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 1469,
+          "transaction_ms": 575.4139629999991,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 2007,
+          "transaction_ms": 574.6109320000032,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 2578,
+          "transaction_ms": 670.4612599999964,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 3238,
+          "transaction_ms": 659.268333999993,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 3867,
+          "transaction_ms": 526.5143150000004,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 4377,
+          "transaction_ms": 524.6538870000004,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 4854,
+          "transaction_ms": 707.0830140000035,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 4831,
+          "transaction_ms": 869.629144999999,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 996.5745549999992,
+          "application_sql_round_trips": 38,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 1251.298170999995,
+          "application_sql_round_trips": 38,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 1014.9978379999957,
+          "application_sql_round_trips": 38,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "queue_wait_ms": 0,
+          "transaction_ms": 231.60839000000124,
+          "application_sql_round_trips": 1,
+          "failed": false
+        }
+      ]
+    },
+    {
+      "histories_completed": 8,
+      "committed_ingress": 8,
+      "ingress_interval_ms": 0,
+      "elapsed_ms": 11232.484383000003,
+      "transactions": 18,
+      "application_sql_round_trips": 298,
+      "upstream_batches": 1,
+      "github_requests": 0,
+      "ingress_ms": [
+        1641.284301000007,
+        2170.8754880000197,
+        2733.211463000014,
+        3260.24031199998,
+        3784.521189000021,
+        4321.586163,
+        4851.197909999988,
+        5765.657747999998
+      ],
+      "ingress_p95_ms": 5765.657747999998,
+      "ingress_admission_p95_ms": 4765,
+      "publication_transactions": 5,
+      "publication_max_hold_ms": 1261.579414000007,
+      "writers": [
+        {
+          "purpose": "other",
+          "queue_wait_ms": 0,
+          "transaction_ms": 218.27093500000774,
+          "application_sql_round_trips": 1,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "queue_wait_ms": 0,
+          "transaction_ms": 358.76617599997553,
+          "application_sql_round_trips": 7,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "queue_wait_ms": 0,
+          "transaction_ms": 279.54766599999857,
+          "application_sql_round_trips": 2,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "queue_wait_ms": 0,
+          "transaction_ms": 249.08636300000944,
+          "application_sql_round_trips": 3,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 246,
+          "transaction_ms": 797.1530499999935,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 1020,
+          "transaction_ms": 594.3433789999981,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 1615,
+          "transaction_ms": 529.5832150000206,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 2104,
+          "transaction_ms": 562.4435850000009,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 2663,
+          "transaction_ms": 527.3714369999943,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 3189,
+          "transaction_ms": 524.342398000008,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 3711,
+          "transaction_ms": 536.582527999999,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 4240,
+          "transaction_ms": 529.6751109999896,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 4765,
+          "transaction_ms": 914.4848150000034,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 4718,
+          "transaction_ms": 813.5550670000084,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 1261.579414000007,
+          "application_sql_round_trips": 38,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 1096.0974620000052,
+          "application_sql_round_trips": 38,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 1132.9112500000047,
+          "application_sql_round_trips": 38,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "queue_wait_ms": 0,
+          "transaction_ms": 216.95088799999212,
+          "application_sql_round_trips": 1,
+          "failed": false
+        }
+      ]
+    },
+    {
+      "histories_completed": 8,
+      "committed_ingress": 8,
+      "ingress_interval_ms": 0,
+      "elapsed_ms": 11860.545186000003,
+      "transactions": 18,
+      "application_sql_round_trips": 298,
+      "upstream_batches": 1,
+      "github_requests": 0,
+      "ingress_ms": [
+        1596.8717680000118,
+        2251.27577800001,
+        2812.99413799998,
+        3340.882952999964,
+        3872.517380000005,
+        4403.765725000005,
+        4930.978028999991,
+        6401.53549900002
+      ],
+      "ingress_p95_ms": 6401.53549900002,
+      "ingress_admission_p95_ms": 4850,
+      "publication_transactions": 5,
+      "publication_max_hold_ms": 1485.1723599999677,
+      "writers": [
+        {
+          "purpose": "other",
+          "queue_wait_ms": 0,
+          "transaction_ms": 258.10345600001165,
+          "application_sql_round_trips": 1,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "queue_wait_ms": 0,
+          "transaction_ms": 342.80662499999744,
+          "application_sql_round_trips": 7,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "queue_wait_ms": 0,
+          "transaction_ms": 224.85315000000992,
+          "application_sql_round_trips": 2,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "queue_wait_ms": 0,
+          "transaction_ms": 268.6624849999789,
+          "application_sql_round_trips": 3,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 266,
+          "transaction_ms": 663.7939460000489,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 908,
+          "transaction_ms": 663.6547489999793,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 1566,
+          "transaction_ms": 654.6404710000497,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 2185,
+          "transaction_ms": 561.7441790000303,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 2747,
+          "transaction_ms": 528.0343109999667,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 3274,
+          "transaction_ms": 531.423283000011,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 3804,
+          "transaction_ms": 531.3542709999601,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 4334,
+          "transaction_ms": 527.1225700000068,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "ingest",
+          "queue_wait_ms": 4850,
+          "transaction_ms": 1470.4837209999678,
+          "application_sql_round_trips": 16,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 5467,
+          "transaction_ms": 640.4900899999775,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 1101.6511360000004,
+          "application_sql_round_trips": 38,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 1097.6033269999898,
+          "application_sql_round_trips": 38,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 1485.1723599999677,
+          "application_sql_round_trips": 38,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "queue_wait_ms": 0,
+          "transaction_ms": 206.03105599997798,
+          "application_sql_round_trips": 1,
+          "failed": false
+        }
+      ]
+    }
+  ],
+  "steady": {
+    "before": [
+      {
+        "histories_completed": 8,
+        "committed_ingress": 8,
+        "ingress_interval_ms": 500,
+        "elapsed_ms": 13731.071649000001,
+        "transactions": 21,
+        "application_sql_round_trips": 358,
+        "upstream_batches": 1,
+        "github_requests": 0,
+        "ingress_ms": [
+          1789.9154990000025,
+          1864.6152729999994,
+          1889.2932450000008,
+          2878.7406870000013,
+          2915.566772000002,
+          3121.3806950000035,
+          3205.1801140000025,
+          3341.550322000003
+        ],
+        "ingress_p95_ms": 3341.550322000003,
+        "ingress_admission_p95_ms": 2676,
+        "publication_transactions": 8,
+        "publication_max_hold_ms": 1200.2342740000022,
+        "writers": [
+          {
+            "purpose": "other",
+            "queue_wait_ms": 0,
+            "transaction_ms": 202.98463900000206,
+            "application_sql_round_trips": 1,
+            "failed": false
+          },
+          {
+            "purpose": "repair",
+            "queue_wait_ms": 0,
+            "transaction_ms": 332.9848070000007,
+            "application_sql_round_trips": 7,
+            "failed": false
+          },
+          {
+            "purpose": "repair",
+            "queue_wait_ms": 0,
+            "transaction_ms": 280.39607100000285,
+            "application_sql_round_trips": 2,
+            "failed": false
+          },
+          {
+            "purpose": "repair",
+            "queue_wait_ms": 0,
+            "transaction_ms": 307.08719700000074,
+            "application_sql_round_trips": 3,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 283,
+            "transaction_ms": 898.3468619999985,
+            "application_sql_round_trips": 27,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 1176,
+            "transaction_ms": 583.8134800000007,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 1263,
+            "transaction_ms": 574.3888929999994,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 1321,
+            "transaction_ms": 525.0358029999989,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 1655,
+            "transaction_ms": 824.5200829999994,
+            "application_sql_round_trips": 27,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 2187,
+            "transaction_ms": 664.5623890000024,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 2351,
+            "transaction_ms": 537.1830150000023,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 2388,
+            "transaction_ms": 705.8894140000011,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 2594,
+            "transaction_ms": 583.672681,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 2676,
+            "transaction_ms": 636.0890010000003,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 3099,
+            "transaction_ms": 989.9873320000006,
+            "application_sql_round_trips": 27,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 0,
+            "transaction_ms": 779.8255069999977,
+            "application_sql_round_trips": 27,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 0,
+            "transaction_ms": 951.9239329999982,
+            "application_sql_round_trips": 27,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 0,
+            "transaction_ms": 894.4538040000007,
+            "application_sql_round_trips": 27,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 0,
+            "transaction_ms": 764.4573510000009,
+            "application_sql_round_trips": 27,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 0,
+            "transaction_ms": 1200.2342740000022,
+            "application_sql_round_trips": 27,
+            "failed": false
+          },
+          {
+            "purpose": "other",
+            "queue_wait_ms": 0,
+            "transaction_ms": 211.5359929999977,
+            "application_sql_round_trips": 1,
+            "failed": false
+          }
+        ]
+      },
+      {
+        "histories_completed": 8,
+        "committed_ingress": 8,
+        "ingress_interval_ms": 500,
+        "elapsed_ms": 13406.560085000005,
+        "transactions": 21,
+        "application_sql_round_trips": 358,
+        "upstream_batches": 1,
+        "github_requests": 0,
+        "ingress_ms": [
+          940.1240929999913,
+          2010.1538240000082,
+          2070.250417000003,
+          2232.7615769999975,
+          3217.5218389999936,
+          3324.9602019999875,
+          3491.534633000003,
+          3577.770182999986
+        ],
+        "ingress_p95_ms": 3577.770182999986,
+        "ingress_admission_p95_ms": 2969,
+        "publication_transactions": 8,
+        "publication_max_hold_ms": 1050.0661549999786,
+        "writers": [
+          {
+            "purpose": "other",
+            "queue_wait_ms": 0,
+            "transaction_ms": 203.11952099998598,
+            "application_sql_round_trips": 1,
+            "failed": false
+          },
+          {
+            "purpose": "repair",
+            "queue_wait_ms": 0,
+            "transaction_ms": 330.49428799998714,
+            "application_sql_round_trips": 7,
+            "failed": false
+          },
+          {
+            "purpose": "repair",
+            "queue_wait_ms": 0,
+            "transaction_ms": 278.35719199999585,
+            "application_sql_round_trips": 2,
+            "failed": false
+          },
+          {
+            "purpose": "repair",
+            "queue_wait_ms": 0,
+            "transaction_ms": 349.7389990000229,
+            "application_sql_round_trips": 3,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 326,
+            "transaction_ms": 589.7291520000144,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 911,
+            "transaction_ms": 1038.1832149999973,
+            "application_sql_round_trips": 27,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 1456,
+            "transaction_ms": 532.1667540000053,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 1489,
+            "transaction_ms": 559.9045709999918,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 1547,
+            "transaction_ms": 662.8832150000089,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 1731,
+            "transaction_ms": 954.5285799999838,
+            "application_sql_round_trips": 27,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 2661,
+            "transaction_ms": 529.4424369999906,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 2695,
+            "transaction_ms": 607.4220919999934,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 2802,
+            "transaction_ms": 666.4260749999958,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 2969,
+            "transaction_ms": 586.5456740000227,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 2368,
+            "transaction_ms": 1050.0661549999786,
+            "application_sql_round_trips": 27,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 0,
+            "transaction_ms": 761.8202890000248,
+            "application_sql_round_trips": 27,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 0,
+            "transaction_ms": 775.3882759999833,
+            "application_sql_round_trips": 27,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 0,
+            "transaction_ms": 948.2827939999988,
+            "application_sql_round_trips": 27,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 0,
+            "transaction_ms": 824.4708270000119,
+            "application_sql_round_trips": 27,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 0,
+            "transaction_ms": 760.5766260000237,
+            "application_sql_round_trips": 27,
+            "failed": false
+          },
+          {
+            "purpose": "other",
+            "queue_wait_ms": 0,
+            "transaction_ms": 236.5813419999904,
+            "application_sql_round_trips": 1,
+            "failed": false
+          }
+        ]
+      },
+      {
+        "histories_completed": 8,
+        "committed_ingress": 8,
+        "ingress_interval_ms": 500,
+        "elapsed_ms": 13344.802473999996,
+        "transactions": 21,
+        "application_sql_round_trips": 358,
+        "upstream_batches": 1,
+        "github_requests": 0,
+        "ingress_ms": [
+          961.3978110000025,
+          1894.4485320000094,
+          1929.5584539999836,
+          2138.309070999996,
+          2979.498595000012,
+          3048.18847199998,
+          3081.940892999992,
+          3119.3846649999905
+        ],
+        "ingress_p95_ms": 3119.3846649999905,
+        "ingress_admission_p95_ms": 2560,
+        "publication_transactions": 8,
+        "publication_max_hold_ms": 1019.7287669999932,
+        "writers": [
+          {
+            "purpose": "other",
+            "queue_wait_ms": 0,
+            "transaction_ms": 221.69496999998228,
+            "application_sql_round_trips": 1,
+            "failed": false
+          },
+          {
+            "purpose": "repair",
+            "queue_wait_ms": 0,
+            "transaction_ms": 363.20750899999985,
+            "application_sql_round_trips": 7,
+            "failed": false
+          },
+          {
+            "purpose": "repair",
+            "queue_wait_ms": 0,
+            "transaction_ms": 286.56644799999776,
+            "application_sql_round_trips": 2,
+            "failed": false
+          },
+          {
+            "purpose": "repair",
+            "queue_wait_ms": 0,
+            "transaction_ms": 288.21882700000424,
+            "application_sql_round_trips": 3,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 266,
+            "transaction_ms": 672.7383310000005,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 932,
+            "transaction_ms": 903.9680010000011,
+            "application_sql_round_trips": 27,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 1343,
+            "transaction_ms": 529.0888330000162,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 1373,
+            "transaction_ms": 534.788590000011,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 1408,
+            "transaction_ms": 708.9156959999818,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 1750,
+            "transaction_ms": 771.5818560000043,
+            "application_sql_round_trips": 27,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 2388,
+            "transaction_ms": 569.3214580000204,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 2456,
+            "transaction_ms": 569.3121749999991,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 2526,
+            "transaction_ms": 533.8687980000104,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 2560,
+            "transaction_ms": 537.0806779999984,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 2187,
+            "transaction_ms": 965.6903929999971,
+            "application_sql_round_trips": 27,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 0,
+            "transaction_ms": 851.7466790000035,
+            "application_sql_round_trips": 27,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 0,
+            "transaction_ms": 835.7041249999893,
+            "application_sql_round_trips": 27,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 0,
+            "transaction_ms": 1019.7287669999932,
+            "application_sql_round_trips": 27,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 0,
+            "transaction_ms": 1010.2973589999892,
+            "application_sql_round_trips": 27,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 0,
+            "transaction_ms": 765.5785289999912,
+            "application_sql_round_trips": 27,
+            "failed": false
+          },
+          {
+            "purpose": "other",
+            "queue_wait_ms": 0,
+            "transaction_ms": 250.72018500001286,
+            "application_sql_round_trips": 1,
+            "failed": false
+          }
+        ]
+      }
+    ],
+    "after": [
+      {
+        "histories_completed": 8,
+        "committed_ingress": 8,
+        "ingress_interval_ms": 500,
+        "elapsed_ms": 11124.800221000005,
+        "transactions": 19,
+        "application_sql_round_trips": 302,
+        "upstream_batches": 1,
+        "github_requests": 0,
+        "ingress_ms": [
+          1632.3954000000012,
+          1672.9283789999972,
+          1699.9268599999996,
+          2470.6577900000048,
+          2627.87255,
+          2831.571025999998,
+          2987.5032750000028,
+          3678.7838209999973
+        ],
+        "ingress_p95_ms": 3678.7838209999973,
+        "ingress_admission_p95_ms": 3101,
+        "publication_transactions": 6,
+        "publication_max_hold_ms": 1099.3910679999972,
+        "writers": [
+          {
+            "purpose": "other",
+            "queue_wait_ms": 0,
+            "transaction_ms": 252.94940700000006,
+            "application_sql_round_trips": 1,
+            "failed": false
+          },
+          {
+            "purpose": "repair",
+            "queue_wait_ms": 0,
+            "transaction_ms": 328.5758530000021,
+            "application_sql_round_trips": 7,
+            "failed": false
+          },
+          {
+            "purpose": "repair",
+            "queue_wait_ms": 0,
+            "transaction_ms": 242.58548799999699,
+            "application_sql_round_trips": 2,
+            "failed": false
+          },
+          {
+            "purpose": "repair",
+            "queue_wait_ms": 0,
+            "transaction_ms": 305.64275700000144,
+            "application_sql_round_trips": 3,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 305,
+            "transaction_ms": 744.4634309999965,
+            "application_sql_round_trips": 21,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 1028,
+            "transaction_ms": 581.5522390000042,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 1110,
+            "transaction_ms": 541.0921789999993,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 1150,
+            "transaction_ms": 527.4203869999983,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 1649,
+            "transaction_ms": 691.689059999997,
+            "application_sql_round_trips": 21,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 1870,
+            "transaction_ms": 578.3116870000013,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 1948,
+            "transaction_ms": 657.3514619999987,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 2106,
+            "transaction_ms": 703.7389380000022,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 2309,
+            "transaction_ms": 656.6104249999989,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 2595,
+            "transaction_ms": 635.0887599999987,
+            "application_sql_round_trips": 21,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 3101,
+            "transaction_ms": 555.9628870000015,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 555,
+            "transaction_ms": 641.9302989999996,
+            "application_sql_round_trips": 21,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 0,
+            "transaction_ms": 1020.3643720000036,
+            "application_sql_round_trips": 38,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 0,
+            "transaction_ms": 1099.3910679999972,
+            "application_sql_round_trips": 38,
+            "failed": false
+          },
+          {
+            "purpose": "other",
+            "queue_wait_ms": 0,
+            "transaction_ms": 257.26435100000526,
+            "application_sql_round_trips": 1,
+            "failed": false
+          }
+        ]
+      },
+      {
+        "histories_completed": 8,
+        "committed_ingress": 8,
+        "ingress_interval_ms": 500,
+        "elapsed_ms": 11524.851112000004,
+        "transactions": 19,
+        "application_sql_round_trips": 302,
+        "upstream_batches": 1,
+        "github_requests": 0,
+        "ingress_ms": [
+          1658.3531079999811,
+          1825.8264619999973,
+          2496.6733879999956,
+          2700.9880399999965,
+          2745.1496669999906,
+          2782.6491199999873,
+          3529.0349350000033,
+          3564.0785990000004
+        ],
+        "ingress_p95_ms": 3564.0785990000004,
+        "ingress_admission_p95_ms": 3006,
+        "publication_transactions": 6,
+        "publication_max_hold_ms": 1259.9039920000068,
+        "writers": [
+          {
+            "purpose": "other",
+            "queue_wait_ms": 0,
+            "transaction_ms": 205.52582599999732,
+            "application_sql_round_trips": 1,
+            "failed": false
+          },
+          {
+            "purpose": "repair",
+            "queue_wait_ms": 0,
+            "transaction_ms": 421.7335240000102,
+            "application_sql_round_trips": 7,
+            "failed": false
+          },
+          {
+            "purpose": "repair",
+            "queue_wait_ms": 0,
+            "transaction_ms": 231.58869099998265,
+            "application_sql_round_trips": 2,
+            "failed": false
+          },
+          {
+            "purpose": "repair",
+            "queue_wait_ms": 0,
+            "transaction_ms": 343.06755199999316,
+            "application_sql_round_trips": 3,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 343,
+            "transaction_ms": 640.713408999989,
+            "application_sql_round_trips": 21,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 958,
+            "transaction_ms": 674.1138280000014,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 1136,
+            "transaction_ms": 667.976262000011,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 1341,
+            "transaction_ms": 646.3230029999977,
+            "application_sql_round_trips": 21,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 1951,
+            "transaction_ms": 523.8950759999861,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 1975,
+            "transaction_ms": 704.5673200000019,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 2180,
+            "transaction_ms": 543.4271920000028,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 2222,
+            "transaction_ms": 538.7297309999994,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 2310,
+            "transaction_ms": 714.791962999996,
+            "application_sql_round_trips": 21,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 2976,
+            "transaction_ms": 530.8168839999998,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 3006,
+            "transaction_ms": 535.5987809999788,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 1066,
+            "transaction_ms": 698.3875019999978,
+            "application_sql_round_trips": 21,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 0,
+            "transaction_ms": 1259.9039920000068,
+            "application_sql_round_trips": 38,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 0,
+            "transaction_ms": 1258.4572669999907,
+            "application_sql_round_trips": 38,
+            "failed": false
+          },
+          {
+            "purpose": "other",
+            "queue_wait_ms": 0,
+            "transaction_ms": 280.78461900001275,
+            "application_sql_round_trips": 1,
+            "failed": false
+          }
+        ]
+      },
+      {
+        "histories_completed": 8,
+        "committed_ingress": 8,
+        "ingress_interval_ms": 500,
+        "elapsed_ms": 11293.430132999958,
+        "transactions": 19,
+        "application_sql_round_trips": 302,
+        "upstream_batches": 1,
+        "github_requests": 0,
+        "ingress_ms": [
+          1648.6773239999893,
+          1678.4736120000016,
+          2489.9151490000077,
+          2565.5077869999805,
+          2718.8568289999967,
+          2797.724120000028,
+          3608.263982000004,
+          3635.363032000023
+        ],
+        "ingress_p95_ms": 3635.363032000023,
+        "ingress_admission_p95_ms": 3081,
+        "publication_transactions": 6,
+        "publication_max_hold_ms": 1163.5236010000226,
+        "writers": [
+          {
+            "purpose": "other",
+            "queue_wait_ms": 0,
+            "transaction_ms": 202.56200500001432,
+            "application_sql_round_trips": 1,
+            "failed": false
+          },
+          {
+            "purpose": "repair",
+            "queue_wait_ms": 0,
+            "transaction_ms": 358.3772619999945,
+            "application_sql_round_trips": 7,
+            "failed": false
+          },
+          {
+            "purpose": "repair",
+            "queue_wait_ms": 0,
+            "transaction_ms": 304.8508359999978,
+            "application_sql_round_trips": 2,
+            "failed": false
+          },
+          {
+            "purpose": "repair",
+            "queue_wait_ms": 0,
+            "transaction_ms": 333.0410939999856,
+            "application_sql_round_trips": 3,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 332,
+            "transaction_ms": 638.5805199999595,
+            "application_sql_round_trips": 21,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 944,
+            "transaction_ms": 676.6457519999822,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 1121,
+            "transaction_ms": 529.8803779999726,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 1206,
+            "transaction_ms": 647.5823710000259,
+            "application_sql_round_trips": 21,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 1799,
+            "transaction_ms": 663.6318259999971,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 1963,
+            "transaction_ms": 576.1115120000322,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 2039,
+            "transaction_ms": 652.7535640000133,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 2191,
+            "transaction_ms": 579.5369479999645,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 2471,
+            "transaction_ms": 655.0808529999922,
+            "application_sql_round_trips": 21,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 2924,
+            "transaction_ms": 656.1041400000104,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "ingest",
+            "queue_wait_ms": 3081,
+            "transaction_ms": 526.2289170000004,
+            "application_sql_round_trips": 16,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 1182,
+            "transaction_ms": 813.5974040000001,
+            "application_sql_round_trips": 21,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 0,
+            "transaction_ms": 1163.5236010000226,
+            "application_sql_round_trips": 38,
+            "failed": false
+          },
+          {
+            "purpose": "publication",
+            "queue_wait_ms": 0,
+            "transaction_ms": 1013.9311459999881,
+            "application_sql_round_trips": 38,
+            "failed": false
+          },
+          {
+            "purpose": "other",
+            "queue_wait_ms": 0,
+            "transaction_ms": 207.8364120000042,
+            "application_sql_round_trips": 1,
+            "failed": false
+          }
+        ]
+      }
+    ],
+    "summary": {
+      "before": {
+        "elapsed_ms": 13406.560085000005,
+        "transactions": 21,
+        "application_sql_round_trips": 358,
+        "publication_transactions": 8,
+        "publication_max_hold_ms": 1050.0661549999786,
+        "ingress_p95_ms": 3341.550322000003,
+        "ingress_admission_p95_ms": 2676
+      },
+      "after": {
+        "elapsed_ms": 11293.430132999958,
+        "transactions": 19,
+        "application_sql_round_trips": 302,
+        "publication_transactions": 6,
+        "publication_max_hold_ms": 1163.5236010000226,
+        "ingress_p95_ms": 3635.363032000023,
+        "ingress_admission_p95_ms": 3081
+      }
+    }
+  },
+  "limits": {
+    "4": {
+      "burst": [
+        {
+          "histories_completed": 8,
+          "committed_ingress": 8,
+          "ingress_interval_ms": 0,
+          "elapsed_ms": 10492.788027000002,
+          "transactions": 17,
+          "application_sql_round_trips": 293,
+          "upstream_batches": 1,
+          "github_requests": 0,
+          "ingress_ms": [
+            1637.4001080000016,
+            2255.4131329999946,
+            2829.7092989999946,
+            3539.621196,
+            4099.878267000007,
+            4764.978743999993,
+            5317.175279999996,
+            5843.80359399999
+          ],
+          "ingress_p95_ms": 5843.80359399999,
+          "ingress_admission_p95_ms": 5237,
+          "publication_transactions": 3,
+          "publication_max_hold_ms": 1736.5652790000022,
+          "writers": [
+            {
+              "purpose": "other",
+              "queue_wait_ms": 0,
+              "transaction_ms": 241.07825400000002,
+              "application_sql_round_trips": 1,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 366.54715600000054,
+              "application_sql_round_trips": 7,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 232.90688400000363,
+              "application_sql_round_trips": 2,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 1,
+              "transaction_ms": 310.5492679999952,
+              "application_sql_round_trips": 3,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 306,
+              "transaction_ms": 657.6400009999998,
+              "application_sql_round_trips": 21,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 943,
+              "transaction_ms": 668.5733229999969,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1605,
+              "transaction_ms": 617.8007700000016,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2184,
+              "transaction_ms": 574.814075000002,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2759,
+              "transaction_ms": 710.1184630000062,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 3468,
+              "transaction_ms": 560.1806669999933,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 4028,
+              "transaction_ms": 665.192102999994,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 4691,
+              "transaction_ms": 552.1412640000053,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 5237,
+              "transaction_ms": 526.7058889999898,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 4874,
+              "transaction_ms": 1502.4581770000077,
+              "application_sql_round_trips": 55,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 0,
+              "transaction_ms": 1736.5652790000022,
+              "application_sql_round_trips": 72,
+              "failed": false
+            },
+            {
+              "purpose": "other",
+              "queue_wait_ms": 0,
+              "transaction_ms": 224.9212089999928,
+              "application_sql_round_trips": 1,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 245.2992200000008,
+              "application_sql_round_trips": 3,
+              "failed": false
+            }
+          ]
+        },
+        {
+          "histories_completed": 8,
+          "committed_ingress": 8,
+          "ingress_interval_ms": 0,
+          "elapsed_ms": 10568.757087000005,
+          "transactions": 16,
+          "application_sql_round_trips": 290,
+          "upstream_batches": 1,
+          "github_requests": 0,
+          "ingress_ms": [
+            1898.4808909999847,
+            2604.600609999994,
+            3177.8842989999976,
+            3725.2390700000105,
+            4254.605163999979,
+            5001.914144999988,
+            5536.213258000003,
+            6067.551874999976
+          ],
+          "ingress_p95_ms": 6067.551874999976,
+          "ingress_admission_p95_ms": 5001,
+          "publication_transactions": 3,
+          "publication_max_hold_ms": 1914.104615999997,
+          "writers": [
+            {
+              "purpose": "other",
+              "queue_wait_ms": 0,
+              "transaction_ms": 207.864733000024,
+              "application_sql_round_trips": 1,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 333.79687099999865,
+              "application_sql_round_trips": 7,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 304.71841899998253,
+              "application_sql_round_trips": 2,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 670.7025520000025,
+              "application_sql_round_trips": 3,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 669,
+              "transaction_ms": 648.6420879999932,
+              "application_sql_round_trips": 21,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1293,
+              "transaction_ms": 578.6703710000147,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1867,
+              "transaction_ms": 705.9812139999995,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2502,
+              "transaction_ms": 573.3481739999843,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 3074,
+              "transaction_ms": 547.1523719999823,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 3610,
+              "transaction_ms": 529.6066400000127,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 4118,
+              "transaction_ms": 747.399304999999,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 4850,
+              "transaction_ms": 534.318121999997,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 5001,
+              "transaction_ms": 531.0833369999891,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 4747,
+              "transaction_ms": 1387.6661310000054,
+              "application_sql_round_trips": 55,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 0,
+              "transaction_ms": 1914.104615999997,
+              "application_sql_round_trips": 72,
+              "failed": false
+            },
+            {
+              "purpose": "other",
+              "queue_wait_ms": 0,
+              "transaction_ms": 254.15113800001564,
+              "application_sql_round_trips": 1,
+              "failed": false
+            }
+          ]
+        },
+        {
+          "histories_completed": 8,
+          "committed_ingress": 8,
+          "ingress_interval_ms": 0,
+          "elapsed_ms": 10427.628306999977,
+          "transactions": 17,
+          "application_sql_round_trips": 293,
+          "upstream_batches": 1,
+          "github_requests": 0,
+          "ingress_ms": [
+            1478.524189000018,
+            2142.0826260000467,
+            2811.5774310000124,
+            3339.3188179999706,
+            4009.8117820000043,
+            4614.222404,
+            5191.529827999999,
+            5726.680877000035
+          ],
+          "ingress_p95_ms": 5726.680877000035,
+          "ingress_admission_p95_ms": 5023,
+          "publication_transactions": 3,
+          "publication_max_hold_ms": 1885.7627719999873,
+          "writers": [
+            {
+              "purpose": "other",
+              "queue_wait_ms": 0,
+              "transaction_ms": 209.12344900000608,
+              "application_sql_round_trips": 1,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 404.36343299999135,
+              "application_sql_round_trips": 7,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 299.2741110000061,
+              "application_sql_round_trips": 2,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 246.14982200000668,
+              "application_sql_round_trips": 3,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 244,
+              "transaction_ms": 688.4909970000153,
+              "application_sql_round_trips": 21,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 911,
+              "transaction_ms": 543.2829689999926,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1447,
+              "transaction_ms": 663.6055770000094,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2077,
+              "transaction_ms": 669.6509570000344,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2741,
+              "transaction_ms": 527.7180839999928,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 3267,
+              "transaction_ms": 670.5546259999974,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 3937,
+              "transaction_ms": 604.4485470000072,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 4457,
+              "transaction_ms": 577.250028999988,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 5023,
+              "transaction_ms": 535.1590809999616,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 4791,
+              "transaction_ms": 1363.9245939999819,
+              "application_sql_round_trips": 55,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 0,
+              "transaction_ms": 1885.7627719999873,
+              "application_sql_round_trips": 72,
+              "failed": false
+            },
+            {
+              "purpose": "other",
+              "queue_wait_ms": 0,
+              "transaction_ms": 203.75648499996169,
+              "application_sql_round_trips": 1,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 246.11586200003512,
+              "application_sql_round_trips": 3,
+              "failed": false
+            }
+          ]
+        }
+      ],
+      "steady": [
+        {
+          "histories_completed": 8,
+          "committed_ingress": 8,
+          "ingress_interval_ms": 500,
+          "elapsed_ms": 11414.706621000005,
+          "transactions": 18,
+          "application_sql_round_trips": 298,
+          "upstream_batches": 1,
+          "github_requests": 0,
+          "ingress_ms": [
+            1627.9033150000032,
+            1656.1531810000015,
+            2387.2496329999994,
+            2602.558136000007,
+            2671.400078999999,
+            2910.385731999995,
+            3788.864121999999,
+            3956.2637150000082
+          ],
+          "ingress_p95_ms": 3956.2637150000082,
+          "ingress_admission_p95_ms": 3267,
+          "publication_transactions": 5,
+          "publication_max_hold_ms": 1927.662222999992,
+          "writers": [
+            {
+              "purpose": "other",
+              "queue_wait_ms": 0,
+              "transaction_ms": 204.86268299999938,
+              "application_sql_round_trips": 1,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 335.36977200000547,
+              "application_sql_round_trips": 7,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 280.3300140000065,
+              "application_sql_round_trips": 2,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 262.3781699999963,
+              "application_sql_round_trips": 3,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 261,
+              "transaction_ms": 646.6294239999988,
+              "application_sql_round_trips": 21,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 885,
+              "transaction_ms": 718.166710999998,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1104,
+              "transaction_ms": 528.640115999995,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 1246,
+              "transaction_ms": 704.3026240000036,
+              "application_sql_round_trips": 21,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1836,
+              "transaction_ms": 526.8055069999973,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1863,
+              "transaction_ms": 715.5264779999998,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2078,
+              "transaction_ms": 569.4649680000002,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2148,
+              "transaction_ms": 738.1844160000037,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 2549,
+              "transaction_ms": 664.716849000004,
+              "application_sql_round_trips": 21,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 3051,
+              "transaction_ms": 714.4979840000015,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 3267,
+              "transaction_ms": 665.7244320000027,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 1379,
+              "transaction_ms": 851.5533169999981,
+              "application_sql_round_trips": 21,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 0,
+              "transaction_ms": 1927.662222999992,
+              "application_sql_round_trips": 72,
+              "failed": false
+            },
+            {
+              "purpose": "other",
+              "queue_wait_ms": 0,
+              "transaction_ms": 255.72374799998943,
+              "application_sql_round_trips": 1,
+              "failed": false
+            }
+          ]
+        },
+        {
+          "histories_completed": 8,
+          "committed_ingress": 8,
+          "ingress_interval_ms": 500,
+          "elapsed_ms": 10500.614024999988,
+          "transactions": 17,
+          "application_sql_round_trips": 294,
+          "upstream_batches": 1,
+          "github_requests": 0,
+          "ingress_ms": [
+            1891.027356000006,
+            1923.110473000008,
+            1956.4663859999855,
+            2682.519396000018,
+            2706.581846999994,
+            2834.295656000002,
+            2928.819829999993,
+            2963.1052010000276
+          ],
+          "ingress_p95_ms": 2963.1052010000276,
+          "ingress_admission_p95_ms": 2405,
+          "publication_transactions": 4,
+          "publication_max_hold_ms": 1896.9126289999986,
+          "writers": [
+            {
+              "purpose": "other",
+              "queue_wait_ms": 0,
+              "transaction_ms": 255.81872999999905,
+              "application_sql_round_trips": 1,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 343.0437460000103,
+              "application_sql_round_trips": 7,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 227.0452379999915,
+              "application_sql_round_trips": 2,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 245.70937799999956,
+              "application_sql_round_trips": 3,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 244,
+              "transaction_ms": 973.4040520000271,
+              "application_sql_round_trips": 21,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1196,
+              "transaction_ms": 671.4128540000238,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1368,
+              "transaction_ms": 532.1846899999946,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1400,
+              "transaction_ms": 533.1824389999965,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 1737,
+              "transaction_ms": 630.4504489999963,
+              "application_sql_round_trips": 21,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2065,
+              "transaction_ms": 595.2728360000183,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2159,
+              "transaction_ms": 524.4978689999843,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2185,
+              "transaction_ms": 627.2404719999759,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2311,
+              "transaction_ms": 594.3050420000218,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2405,
+              "transaction_ms": 534.5473120000097,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 2875,
+              "transaction_ms": 1001.9097459999903,
+              "application_sql_round_trips": 38,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 0,
+              "transaction_ms": 1896.9126289999986,
+              "application_sql_round_trips": 72,
+              "failed": false
+            },
+            {
+              "purpose": "other",
+              "queue_wait_ms": 0,
+              "transaction_ms": 219.80624000000535,
+              "application_sql_round_trips": 1,
+              "failed": false
+            }
+          ]
+        },
+        {
+          "histories_completed": 8,
+          "committed_ingress": 8,
+          "ingress_interval_ms": 500,
+          "elapsed_ms": 11595.904365000024,
+          "transactions": 18,
+          "application_sql_round_trips": 298,
+          "upstream_batches": 1,
+          "github_requests": 0,
+          "ingress_ms": [
+            1609.9063169999863,
+            1818.9830959999817,
+            2682.2514119999832,
+            2757.620449000038,
+            2918.170582999999,
+            3114.0136799999746,
+            3787.01357999997,
+            3995.687242999964
+          ],
+          "ingress_p95_ms": 3995.687242999964,
+          "ingress_admission_p95_ms": 3265,
+          "publication_transactions": 5,
+          "publication_max_hold_ms": 2204.521111000038,
+          "writers": [
+            {
+              "purpose": "other",
+              "queue_wait_ms": 0,
+              "transaction_ms": 270.45806599996286,
+              "application_sql_round_trips": 1,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 357.91631800000323,
+              "application_sql_round_trips": 7,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 285.774505999987,
+              "application_sql_round_trips": 2,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 245.95595400000457,
+              "application_sql_round_trips": 3,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 245,
+              "transaction_ms": 687.1434199999785,
+              "application_sql_round_trips": 21,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 911,
+              "transaction_ms": 676.1345250000013,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1087,
+              "transaction_ms": 709.5206829999806,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 1384,
+              "transaction_ms": 644.9410160000552,
+              "application_sql_round_trips": 21,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1942,
+              "transaction_ms": 717.6817479999736,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2160,
+              "transaction_ms": 575.7374070000369,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2236,
+              "transaction_ms": 660.2664089999744,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2396,
+              "transaction_ms": 695.8429830000387,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 2649,
+              "transaction_ms": 636.4201679999824,
+              "application_sql_round_trips": 21,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 3228,
+              "transaction_ms": 536.6852329999674,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 3265,
+              "transaction_ms": 708.8515819999739,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 1245,
+              "transaction_ms": 632.0222119999817,
+              "application_sql_round_trips": 21,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 0,
+              "transaction_ms": 2204.521111000038,
+              "application_sql_round_trips": 72,
+              "failed": false
+            },
+            {
+              "purpose": "other",
+              "queue_wait_ms": 0,
+              "transaction_ms": 257.7607790000038,
+              "application_sql_round_trips": 1,
+              "failed": false
+            }
+          ]
+        }
+      ],
+      "summary": {
+        "burst": {
+          "elapsed_ms": 10492.788027000002,
+          "transactions": 17,
+          "application_sql_round_trips": 293,
+          "publication_transactions": 3,
+          "publication_max_hold_ms": 1885.7627719999873,
+          "ingress_p95_ms": 5843.80359399999,
+          "ingress_admission_p95_ms": 5023
+        },
+        "steady": {
+          "elapsed_ms": 11414.706621000005,
+          "transactions": 18,
+          "application_sql_round_trips": 298,
+          "publication_transactions": 5,
+          "publication_max_hold_ms": 1927.662222999992,
+          "ingress_p95_ms": 3956.2637150000082,
+          "ingress_admission_p95_ms": 3265
+        }
+      }
+    },
+    "8": {
+      "burst": [
+        {
+          "histories_completed": 8,
+          "committed_ingress": 8,
+          "ingress_interval_ms": 0,
+          "elapsed_ms": 10470.111103000003,
+          "transactions": 15,
+          "application_sql_round_trips": 286,
+          "upstream_batches": 1,
+          "github_requests": 0,
+          "ingress_ms": [
+            1659.9542239999864,
+            2195.212498000008,
+            2766.047046000007,
+            3306.085463999989,
+            4013.335686999999,
+            4573.512199000004,
+            5154.730786,
+            5738.957670000003
+          ],
+          "ingress_p95_ms": 5738.957670000003,
+          "ingress_admission_p95_ms": 5040,
+          "publication_transactions": 2,
+          "publication_max_hold_ms": 3563.7188030000107,
+          "writers": [
+            {
+              "purpose": "other",
+              "queue_wait_ms": 0,
+              "transaction_ms": 227.71160500000406,
+              "application_sql_round_trips": 1,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 356.2079640000011,
+              "application_sql_round_trips": 7,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 281.1868739999918,
+              "application_sql_round_trips": 2,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 251.51407000000472,
+              "application_sql_round_trips": 3,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 248,
+              "transaction_ms": 700.3505679999944,
+              "application_sql_round_trips": 21,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 926,
+              "transaction_ms": 707.9251829999994,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1629,
+              "transaction_ms": 534.6239130000031,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2128,
+              "transaction_ms": 571.3975910000008,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2698,
+              "transaction_ms": 539.8125530000107,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 3233,
+              "transaction_ms": 707.5931319999945,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 3933,
+              "transaction_ms": 560.172556999998,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 4491,
+              "transaction_ms": 580.9407249999931,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 5040,
+              "transaction_ms": 584.2770089999976,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 4786,
+              "transaction_ms": 3563.7188030000107,
+              "application_sql_round_trips": 123,
+              "failed": false
+            },
+            {
+              "purpose": "other",
+              "queue_wait_ms": 0,
+              "transaction_ms": 205.4330889999983,
+              "application_sql_round_trips": 1,
+              "failed": false
+            }
+          ]
+        },
+        {
+          "histories_completed": 8,
+          "committed_ingress": 8,
+          "ingress_interval_ms": 0,
+          "elapsed_ms": 10899.888156999994,
+          "transactions": 15,
+          "application_sql_round_trips": 286,
+          "upstream_batches": 1,
+          "github_requests": 0,
+          "ingress_ms": [
+            1685.5153480000008,
+            2289.048714999997,
+            2941.0324640000035,
+            3466.86424000001,
+            4000.8121919999976,
+            4754.694933999999,
+            5335.937966999991,
+            5865.155440000002
+          ],
+          "ingress_p95_ms": 5865.155440000002,
+          "ingress_admission_p95_ms": 5254,
+          "publication_transactions": 2,
+          "publication_max_hold_ms": 3792.7361079999973,
+          "writers": [
+            {
+              "purpose": "other",
+              "queue_wait_ms": 0,
+              "transaction_ms": 253.9948069999955,
+              "application_sql_round_trips": 1,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 335.02185800000734,
+              "application_sql_round_trips": 7,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 304.4919920000102,
+              "application_sql_round_trips": 2,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 251.39286999999604,
+              "application_sql_round_trips": 3,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 249,
+              "transaction_ms": 900.2313589999976,
+              "application_sql_round_trips": 21,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1127,
+              "transaction_ms": 533.1248729999934,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1656,
+              "transaction_ms": 603.6722330000048,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2222,
+              "transaction_ms": 651.9794029999903,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2874,
+              "transaction_ms": 525.9381319999957,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 3399,
+              "transaction_ms": 534.0723769999895,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 3932,
+              "transaction_ms": 753.6298279999901,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 4684,
+              "transaction_ms": 581.2829019999917,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 5254,
+              "transaction_ms": 529.4539119999972,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 4713,
+              "transaction_ms": 3792.7361079999973,
+              "application_sql_round_trips": 123,
+              "failed": false
+            },
+            {
+              "purpose": "other",
+              "queue_wait_ms": 0,
+              "transaction_ms": 255.0562190000055,
+              "application_sql_round_trips": 1,
+              "failed": false
+            }
+          ]
+        },
+        {
+          "histories_completed": 8,
+          "committed_ingress": 8,
+          "ingress_interval_ms": 0,
+          "elapsed_ms": 10117.453879000037,
+          "transactions": 16,
+          "application_sql_round_trips": 289,
+          "upstream_batches": 1,
+          "github_requests": 0,
+          "ingress_ms": [
+            1775.945355999982,
+            2357.8202789999777,
+            2973.7652139999554,
+            3586.5849770000204,
+            4245.4249830000335,
+            4771.063815000001,
+            5306.978516000032,
+            5882.180810999998
+          ],
+          "ingress_p95_ms": 5882.180810999998,
+          "ingress_admission_p95_ms": 4969,
+          "publication_transactions": 2,
+          "publication_max_hold_ms": 2823.4658219999983,
+          "writers": [
+            {
+              "purpose": "other",
+              "queue_wait_ms": 0,
+              "transaction_ms": 201.68835000001127,
+              "application_sql_round_trips": 1,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 414.92571700003464,
+              "application_sql_round_trips": 7,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 226.0478310000035,
+              "application_sql_round_trips": 2,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 248.3587749999715,
+              "application_sql_round_trips": 3,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 247,
+              "transaction_ms": 854.8326849999721,
+              "application_sql_round_trips": 21,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1078,
+              "transaction_ms": 672.0448540000361,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1745,
+              "transaction_ms": 582.0117469999823,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2290,
+              "transaction_ms": 615.8680719999829,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2906,
+              "transaction_ms": 612.8478650000179,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 3515,
+              "transaction_ms": 658.9376100000227,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 4107,
+              "transaction_ms": 525.6867429999984,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 4622,
+              "transaction_ms": 535.81945000001,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 4969,
+              "transaction_ms": 575.1577589999652,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 4778,
+              "transaction_ms": 2823.4658219999983,
+              "application_sql_round_trips": 123,
+              "failed": false
+            },
+            {
+              "purpose": "other",
+              "queue_wait_ms": 0,
+              "transaction_ms": 205.37084799999138,
+              "application_sql_round_trips": 1,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 246.86086600000272,
+              "application_sql_round_trips": 3,
+              "failed": false
+            }
+          ]
+        }
+      ],
+      "steady": [
+        {
+          "histories_completed": 8,
+          "committed_ingress": 8,
+          "ingress_interval_ms": 500,
+          "elapsed_ms": 10566.866959000006,
+          "transactions": 18,
+          "application_sql_round_trips": 297,
+          "upstream_batches": 1,
+          "github_requests": 0,
+          "ingress_ms": [
+            1448.8033339999965,
+            1488.0460500000045,
+            2299.3939649999957,
+            2337.9884420000017,
+            2424.8267249999917,
+            2591.0347129999864,
+            3316.3831670000072,
+            3544.0815230000007
+          ],
+          "ingress_p95_ms": 3544.0815230000007,
+          "ingress_admission_p95_ms": 2793,
+          "publication_transactions": 4,
+          "publication_max_hold_ms": 2111.553058999998,
+          "writers": [
+            {
+              "purpose": "other",
+              "queue_wait_ms": 0,
+              "transaction_ms": 284.63328199999523,
+              "application_sql_round_trips": 1,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 332.6515240000008,
+              "application_sql_round_trips": 7,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 242.25291400001151,
+              "application_sql_round_trips": 2,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 247.44917599999462,
+              "application_sql_round_trips": 3,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 246,
+              "transaction_ms": 667.7408310000028,
+              "application_sql_round_trips": 21,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 892,
+              "transaction_ms": 532.9377450000029,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 926,
+              "transaction_ms": 539.8158180000028,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 1073,
+              "transaction_ms": 648.1502880000044,
+              "application_sql_round_trips": 21,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1614,
+              "transaction_ms": 662.9559600000066,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1777,
+              "transaction_ms": 538.4864390000002,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1815,
+              "transaction_ms": 586.681482,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1902,
+              "transaction_ms": 666.4764980000036,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 2454,
+              "transaction_ms": 694.4512360000081,
+              "application_sql_round_trips": 21,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2763,
+              "transaction_ms": 530.5901770000055,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2793,
+              "transaction_ms": 727.6250889999937,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 1257,
+              "transaction_ms": 2111.553058999998,
+              "application_sql_round_trips": 89,
+              "failed": false
+            },
+            {
+              "purpose": "other",
+              "queue_wait_ms": 0,
+              "transaction_ms": 202.9856010000076,
+              "application_sql_round_trips": 1,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 245.6165900000051,
+              "application_sql_round_trips": 3,
+              "failed": false
+            }
+          ]
+        },
+        {
+          "histories_completed": 8,
+          "committed_ingress": 8,
+          "ingress_interval_ms": 500,
+          "elapsed_ms": 10802.537400999994,
+          "transactions": 17,
+          "application_sql_round_trips": 294,
+          "upstream_batches": 1,
+          "github_requests": 0,
+          "ingress_ms": [
+            1591.5961709999974,
+            1752.445697999996,
+            1840.4726530000044,
+            2656.2819810000074,
+            2736.152768,
+            2794.6438009999983,
+            2914.85977000001,
+            3743.1707040000183
+          ],
+          "ingress_p95_ms": 3743.1707040000183,
+          "ingress_admission_p95_ms": 3059,
+          "publication_transactions": 4,
+          "publication_max_hold_ms": 2255.0108329999784,
+          "writers": [
+            {
+              "purpose": "other",
+              "queue_wait_ms": 0,
+              "transaction_ms": 259.4952179999964,
+              "application_sql_round_trips": 1,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 447.4130090000108,
+              "application_sql_round_trips": 7,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 281.47771599999396,
+              "application_sql_round_trips": 2,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 251.47318000001542,
+              "application_sql_round_trips": 3,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 250,
+              "transaction_ms": 805.5041349999956,
+              "application_sql_round_trips": 21,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1035,
+              "transaction_ms": 534.0459580000024,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1070,
+              "transaction_ms": 661.0717389999772,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1231,
+              "transaction_ms": 587.505914999987,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 1782,
+              "transaction_ms": 636.661053000018,
+              "application_sql_round_trips": 21,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1956,
+              "transaction_ms": 678.9787659999856,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2134,
+              "transaction_ms": 580.1330280000111,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2215,
+              "transaction_ms": 558.3564049999986,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2274,
+              "transaction_ms": 620.0835350000125,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 2437,
+              "transaction_ms": 666.4084970000258,
+              "application_sql_round_trips": 21,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 3059,
+              "transaction_ms": 661.9195749999781,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 661,
+              "transaction_ms": 2255.0108329999784,
+              "application_sql_round_trips": 89,
+              "failed": false
+            },
+            {
+              "purpose": "other",
+              "queue_wait_ms": 0,
+              "transaction_ms": 206.07844599999953,
+              "application_sql_round_trips": 1,
+              "failed": false
+            }
+          ]
+        },
+        {
+          "histories_completed": 8,
+          "committed_ingress": 8,
+          "ingress_interval_ms": 500,
+          "elapsed_ms": 10446.193111,
+          "transactions": 16,
+          "application_sql_round_trips": 290,
+          "upstream_batches": 1,
+          "github_requests": 0,
+          "ingress_ms": [
+            1741.9659279999905,
+            1781.3543720000307,
+            1824.6604420000222,
+            2792.879063999979,
+            2945.5527739999816,
+            2980.2292540000053,
+            3095.210106000013,
+            3159.904852000007
+          ],
+          "ingress_p95_ms": 3159.904852000007,
+          "ingress_admission_p95_ms": 2573,
+          "publication_transactions": 3,
+          "publication_max_hold_ms": 2695.530043000006,
+          "writers": [
+            {
+              "purpose": "other",
+              "queue_wait_ms": 0,
+              "transaction_ms": 221.5090349999955,
+              "application_sql_round_trips": 1,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 333.42675499996403,
+              "application_sql_round_trips": 7,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 228.45362700003898,
+              "application_sql_round_trips": 2,
+              "failed": false
+            },
+            {
+              "purpose": "repair",
+              "queue_wait_ms": 0,
+              "transaction_ms": 308.9754490000196,
+              "application_sql_round_trips": 3,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 308,
+              "transaction_ms": 798.7949570000055,
+              "application_sql_round_trips": 21,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1085,
+              "transaction_ms": 633.4691259999527,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1219,
+              "transaction_ms": 539.7993480000296,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 1259,
+              "transaction_ms": 543.7083219999913,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 1716,
+              "transaction_ms": 803.6847040000139,
+              "application_sql_round_trips": 21,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2107,
+              "transaction_ms": 664.0924590000068,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2271,
+              "transaction_ms": 653.0158040000242,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2424,
+              "transaction_ms": 534.3557099999744,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2458,
+              "transaction_ms": 615.1481349999667,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "ingest",
+              "queue_wait_ms": 2573,
+              "transaction_ms": 564.6241789999767,
+              "application_sql_round_trips": 16,
+              "failed": false
+            },
+            {
+              "purpose": "publication",
+              "queue_wait_ms": 3031,
+              "transaction_ms": 2695.530043000006,
+              "application_sql_round_trips": 106,
+              "failed": false
+            },
+            {
+              "purpose": "other",
+              "queue_wait_ms": 0,
+              "transaction_ms": 219.94585799996275,
+              "application_sql_round_trips": 1,
+              "failed": false
+            }
+          ]
+        }
+      ],
+      "summary": {
+        "burst": {
+          "elapsed_ms": 10470.111103000003,
+          "transactions": 15,
+          "application_sql_round_trips": 286,
+          "publication_transactions": 2,
+          "publication_max_hold_ms": 3563.7188030000107,
+          "ingress_p95_ms": 5865.155440000002,
+          "ingress_admission_p95_ms": 5040
+        },
+        "steady": {
+          "elapsed_ms": 10566.866959000006,
+          "transactions": 17,
+          "application_sql_round_trips": 294,
+          "publication_transactions": 4,
+          "publication_max_hold_ms": 2255.0108329999784,
+          "ingress_p95_ms": 3544.0815230000007,
+          "ingress_admission_p95_ms": 2793
+        }
+      }
+    }
+  },
+  "full_batch": {
+    "before": {
+      "histories_completed": 100,
+      "committed_ingress": 0,
+      "ingress_interval_ms": 0,
+      "elapsed_ms": 73935.30092200002,
+      "transactions": 105,
+      "application_sql_round_trips": 2114,
+      "upstream_batches": 1,
+      "github_requests": 0,
+      "ingress_ms": [],
+      "ingress_p95_ms": null,
+      "ingress_admission_p95_ms": null,
+      "publication_transactions": 100,
+      "publication_max_hold_ms": 976.3661270000157,
+      "writers": [
+        {
+          "purpose": "other",
+          "queue_wait_ms": 0,
+          "transaction_ms": 206.80122799996752,
+          "application_sql_round_trips": 1,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "queue_wait_ms": 0,
+          "transaction_ms": 411.91016699996544,
+          "application_sql_round_trips": 7,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "queue_wait_ms": 0,
+          "transaction_ms": 249.90638900001068,
+          "application_sql_round_trips": 2,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "queue_wait_ms": 0,
+          "transaction_ms": 244.9283019999857,
+          "application_sql_round_trips": 3,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 223,
+          "transaction_ms": 793.2699499999871,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 853.6021220000111,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 681.9305450000102,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 682.15204299998,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 645.8961530000088,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 639.1301659999881,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 698.0895640000235,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 646.9365950000356,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 640.2955229999498,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 670.1262920000008,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 633.7821100000292,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 789.4548560000258,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 796.457202999969,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 635.4932560000452,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 644.0200530000147,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 796.616028999968,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 860.8915140000172,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 652.4250889999676,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 797.115168999997,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 650.2788280000095,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 689.4040810000151,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 643.2365410000202,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 637.1464859999833,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 650.2286039999453,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 634.4480570000014,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 792.0078690000228,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 692.1997639999609,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 632.9573080000118,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 636.106214999978,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 689.6763750000391,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 650.3205200000084,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 638.0732200000202,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 622.3533329999773,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 635.2178889999632,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 648.0224949999829,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 681.7729030000046,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 798.6728770000045,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 673.4685750000062,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 639.6198219999787,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 801.701595999999,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 831.2581389999832,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 636.3563960000174,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 635.2198109999881,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 637.2032209999743,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 797.0856249999488,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 790.6778289999929,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 808.4788599999738,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 637.675138999999,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 794.33391700004,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 642.3148059999803,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 800.0626369999954,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 694.6254400000325,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 771.7649510000483,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 682.5657479999936,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 632.3990409999969,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 638.1156130000018,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 644.2544500000076,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 636.1881460000295,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 851.5604359999998,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 883.4267329999711,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 807.0864769999753,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 640.9618310000515,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 793.8712810000288,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 646.7825470000389,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 633.6925880000344,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 635.5119340000092,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 976.3661270000157,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 810.6364069999545,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 798.5797500000335,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 632.6493529999861,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 627.3428480000002,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 635.4210600000224,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 645.2923889999511,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 836.4013910000212,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 634.2340899999836,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 639.8218720000004,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 640.7264720000094,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 798.5033359999652,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 650.8841860000393,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 645.4991049999953,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 636.4516869999934,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 652.9879230000079,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 644.1272020000033,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 800.1655000000028,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 850.0604040000471,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 699.3425710000447,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 742.7335960000055,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 783.0323080000235,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 634.9184449999593,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 631.8539540000493,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 634.3226720000384,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 855.3690819999902,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 791.4195679999539,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 760.8325980000081,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 652.9278250000207,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 638.739356999984,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 636.1116529999999,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 649.9689500000095,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 639.5103200000012,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 648.971222000022,
+          "application_sql_round_trips": 21,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "queue_wait_ms": 0,
+          "transaction_ms": 259.14976800000295,
+          "application_sql_round_trips": 1,
+          "failed": false
+        }
+      ]
+    },
+    "after": {
+      "histories_completed": 100,
+      "committed_ingress": 0,
+      "ingress_interval_ms": 0,
+      "elapsed_ms": 44564.99476599996,
+      "transactions": 55,
+      "application_sql_round_trips": 1414,
+      "upstream_batches": 1,
+      "github_requests": 0,
+      "ingress_ms": [],
+      "ingress_p95_ms": null,
+      "ingress_admission_p95_ms": null,
+      "publication_transactions": 50,
+      "publication_max_hold_ms": 1115.1043690000079,
+      "writers": [
+        {
+          "purpose": "other",
+          "queue_wait_ms": 0,
+          "transaction_ms": 221.14152000000468,
+          "application_sql_round_trips": 1,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "queue_wait_ms": 0,
+          "transaction_ms": 329.0180030000047,
+          "application_sql_round_trips": 7,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "queue_wait_ms": 0,
+          "transaction_ms": 251.41820000001462,
+          "application_sql_round_trips": 2,
+          "failed": false
+        },
+        {
+          "purpose": "repair",
+          "queue_wait_ms": 1,
+          "transaction_ms": 319.9118969999836,
+          "application_sql_round_trips": 3,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 319,
+          "transaction_ms": 861.457183999999,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 784.8383460000041,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 991.7040590000106,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 780.3718770000269,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 902.0934470000211,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 816.5288200000068,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 994.1968040000065,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 794.5930719999596,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 802.5567440000013,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 866.3424039999954,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 788.8522549999761,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 1053.4618140000384,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 883.61977999995,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 800.9910839999793,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 793.3756280000089,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 1053.1790449999971,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 983.8189640000346,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 870.7038579999935,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 784.029356999963,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 830.7971859999816,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 851.4189579999656,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 801.147827000008,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 782.9602929999819,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 783.9282979999552,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 794.8902119999984,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 876.8348349999869,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 799.881119000027,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 879.2555019999854,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 882.3247700000065,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 797.592798000027,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 860.0040610000142,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 804.8421009999583,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 798.8055160000222,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 1013.0913549999823,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 789.2540099999751,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 861.717249999987,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 995.7373370000278,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 870.7586299999966,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 897.493060000008,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 789.6876519999932,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 986.9485020000138,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 786.1612369999639,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 793.6659289999516,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 1068.8320829999866,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 1115.1043690000079,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 872.3028590000467,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 784.8773849999998,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 782.6491919999826,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 778.6096159999724,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "publication",
+          "queue_wait_ms": 0,
+          "transaction_ms": 785.1618460000027,
+          "application_sql_round_trips": 28,
+          "failed": false
+        },
+        {
+          "purpose": "other",
+          "queue_wait_ms": 0,
+          "transaction_ms": 207.29315799998585,
+          "application_sql_round_trips": 1,
+          "failed": false
+        }
+      ]
+    }
+  },
+  "summary": {
+    "before": {
+      "elapsed_ms": 12735.794163999992,
+      "transactions": 21,
+      "application_sql_round_trips": 358,
+      "publication_transactions": 8,
+      "publication_max_hold_ms": 965.9217350000108,
+      "ingress_p95_ms": 5766.15915599998,
+      "ingress_admission_p95_ms": 5020
+    },
+    "after": {
+      "elapsed_ms": 11232.484383000003,
+      "transactions": 18,
+      "application_sql_round_trips": 298,
+      "publication_transactions": 5,
+      "publication_max_hold_ms": 1261.579414000007,
+      "ingress_p95_ms": 5765.657747999998,
+      "ingress_admission_p95_ms": 4850
+    }
+  }
+}

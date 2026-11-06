@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import base64
+import datetime as dt
 import json
 import os
+import re
 import shlex
 import subprocess
 import textwrap
@@ -315,6 +317,17 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
                             )
                     except ValueError:
                         status, summary = "failed", "Default-branch tauceti.toml is invalid"
+                if path.endswith("pr-build.yml"):
+                    on = re.search(r"(?ms)^on:\n(.*?)(?=^[^\s#]|\Z)", text)
+                    events = on[1] if on else ""
+                    bors = project.raw.get("merge", {}).get("backend") == "bors"
+                    if bors:
+                        configured = bool(re.search(r"(?m)^  repository_dispatch:", events)) and all(
+                            trigger in events for trigger in ("tauceti-bors-staging", "tauceti-bors-pr-approved"))
+                    else:
+                        configured = bool(re.search(r"(?m)^  merge_group:", events))
+                    if not configured:
+                        status, summary = "failed", path + ": missing build triggers for the selected merger"
             findings.append(
                 Finding(
                     "files." + path,
@@ -334,87 +347,21 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
                 )
             )
 
-        direct = project.raw.get("merge", {}).get("backend") == "github-direct"
-        rules_endpoint = f"repos/{repo}/rules/branches/{project.branch}"
-        rules_url = f"https://github.com/{repo}/settings/rules/new?target=branch"
-        rules, error = gh.read(rules_endpoint)
-        active_rules = [r for page in _pages(rules or []) for r in (page if isinstance(page, list) else [page])]
-        # The rules API omits classic branch protection. Personal projects often
-        # use it, and its checks/review requirements count just like rulesets.
-        classic = False
-        if not active_rules and not error:
-            endpoint = f"repos/{repo}/branches/{project.branch}/protection"
-            protection, error = gh.read(endpoint)
-            if protection:
-                classic = True
-                rules_endpoint = endpoint
-                rules_url = f"https://github.com/{repo}/settings/branches"
-                reviews = protection.get("required_pull_request_reviews")
-                checks = protection.get("required_status_checks")
-                if reviews is not None:
-                    active_rules.append({"type": "pull_request", "parameters": {
-                        "require_code_owner_review": reviews.get("require_code_owner_reviews", False)}})
-                if checks is not None:
-                    active_rules.append({"type": "required_status_checks", "parameters": {
-                        "strict_required_status_checks_policy": checks.get("strict", False),
-                        "required_status_checks": [{"context": c} for c in checks.get("contexts", [])]}})
-        types = {r.get("type") for r in active_rules if isinstance(r, dict)}
-        if direct:
-            strict = any(r.get("parameters", {}).get("strict_required_status_checks_policy")
-                         for r in active_rules if r.get("type") == "required_status_checks")
-            findings.append(Finding(
-                "merge.direct", "unknown" if error else "failed" if strict or "merge_queue" in types else "ready",
-                error or ("Disable strict checks and merge queue" if strict or "merge_queue" in types else "Direct merging permits branches behind main"),
-                "Required checks without requiring an up-to-date branch or a merge queue",
-                commands=[_cmd("gh", "api", rules_endpoint)],
-                urls=[rules_url],
-                steps=["Edit the active default-branch rule. Under Require status checks to pass, clear Require branches to be up to date before merging. Clear Require merge queue if present. Click Save changes."],
-                verify=again, section="branch-rules"))
-        needed = {"pull_request", "required_status_checks"}
-        if project.raw.get("merge", {}).get("backend", "github-queue") == "github-queue":
-            needed.add("merge_queue")
-        missing = sorted(needed - types)
-        required_checks = set(project.raw.get("merge", {}).get("checks", ["build", "bump-guard", "scope"]))
-        actual_checks = {
-            check["context"]
-            for rule in active_rules
-            if rule.get("type") == "required_status_checks"
-            for check in rule.get("parameters", {}).get("required_status_checks", [])
-        }
-        missing.extend("check:" + name for name in sorted(required_checks - actual_checks))
-        if not any(
-            rule.get("type") == "pull_request" and rule.get("parameters", {}).get("require_code_owner_review")
-            for rule in active_rules
-        ):
-            missing.append("code-owner review")
-        findings.append(
-            Finding(
-                "rules.content",
-                "unknown" if error else "failed" if missing else "ready",
-                error
-                or (
-                    "Missing rules: " + ", ".join(missing)
-                    if missing
-                    else "Required rule types present; inspect configured checks"
-                ),
-                "PR review and required build, bump-guard, scope checks; merge queue when selected",
-                commands=[_cmd("gh", "api", rules_endpoint)],
-                urls=[rules_url],
-                steps=[
-                    f"Edit the existing protection rule for {project.branch}." if classic else f"Name: Tau Ceti content. Enforcement status: Active. Target branches → Add target → Include by pattern → {project.branch}.",
-                    "After merging setup, open a normal content PR so the newly installed pr-build workflow runs. Then enable Require a pull request before merging and Require review from Code Owners. Under Require status checks to pass, Add checks: " + ", ".join(sorted(required_checks)) + ". Select their GitHub Actions producer. If a name is not listed yet, let that content PR's build finish, then return to the rule editor and add the check.",
-                    ("Clear Require branches to be up to date before merging and Require merge queue. Keep the automation App out of the bypass list: it merges reviewed content through the normal PR checks." if direct else
-                     "Enable Require merge queue." if project.raw.get("merge", {}).get("backend", "github-queue") == "github-queue" else
-                     "Bors is the selected merger. Keep the existing merge authority until its pilot staging build succeeds; then use the Bors branch rules in the manual."),
-                    "Keep configuration changes subject to human code-owner review. Click Save changes (classic protection) or Create/Save changes with Enforcement Active (ruleset).",
-                ],
-                verify=again,
-                section="branch-rules",
-            )
-        )
+        if not project.feature("progress"):
+            path = ".github/workflows/roadmap-label.yml"
+            _, error = gh.read(f"repos/{repo}/contents/{path}?ref={project.branch}")
+            if not isinstance(error, _MissingFile):
+                findings.append(Finding(
+                    "files.roadmap-label.disabled", "unknown" if error else "failed",
+                    error or "Roadmap labeling is installed although features.progress is false",
+                    "Install roadmap labeling only when progress is enabled", role="Maintainer",
+                    steps=[f"Review {path}. If it is the old generated workflow, remove it with git rm {path} and open a reviewed PR. Preserve any project-specific customization, or deliberately enable progress if it is wanted."],
+                    urls=[f"https://github.com/{repo}/blob/{project.branch}/{path}"], verify=again, section="workflows"))
+
+        findings.extend(merge_findings(project, gh, again))
 
         expected_variables = {
-            "MERGE_BACKEND": {"bors": "bors", "github-direct": "direct"}.get(project.raw.get("merge", {}).get("backend"), "queue")
+            "MERGE_BACKEND": "bors" if project.raw.get("merge", {}).get("backend") == "bors" else "queue"
         }
         if extras and project.service("cache").get("mode", "off") != "off":
             cache = project.service("cache")
@@ -460,13 +407,25 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
 
         metadata = []
         errors = []
+        repository_secrets = []
         secret_endpoints = ("secrets", "organization-secrets") if repo_info["content"]["owner"]["type"] == "Organization" else ("secrets",)
         for endpoint in secret_endpoints:
             value, error = gh.read(f"repos/{repo}/actions/{endpoint}")
-            metadata.extend(_items(value, "secrets"))
+            rows = _items(value, "secrets")
+            metadata.extend(rows)
+            if endpoint == "secrets" and not error:
+                repository_secrets = rows
             if error:
                 errors.append(error)
         names = {row["name"] for row in metadata}
+        # Repository secrets override organization secrets with the same name.
+        # An inaccessible, unused organization secret must not block verification.
+        app_settings = {}
+        for row in metadata:
+            if row["name"] in ("APP_ID", "APP_PRIVATE_KEY"):
+                app_settings.setdefault(row["name"], row)
+        app_errors = [] if {"APP_ID", "APP_PRIVATE_KEY"} <= {row["name"] for row in repository_secrets} else errors
+        app_metadata = list(app_settings.values())
         required_secrets = ["APP_ID", "APP_PRIVATE_KEY"]
         if extras and project.feature("claims"):
             required_secrets += ["CLAIMS_APP_ID", "CLAIMS_APP_PRIVATE_KEY"]
@@ -521,13 +480,17 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
                 Finding(
                     "secrets." + name,
                     "ready" if present else "unknown" if errors else "failed",
-                    f"{name}: present, not functionally verified"
+                    f"{name}: present; successful use is checked separately"
                     if present
                     else "; ".join(errors) or f"{name} unavailable",
                     "Selected feature credential available to its trusted consuming workflow",
                     commands=[f"{_cmd('gh', 'secret', 'set', name, '--repo', repo)} < {shlex.quote(str(secret_file))}"],
                     urls=urls,
                     steps=steps,
+                    role=(("Organization owner or GitHub App manager registers the App; repository administrator uploads secrets"
+                           if repo_info["content"]["owner"]["type"] == "Organization" else
+                           "Repository owner registers the App and uploads secrets")
+                          if "APP_" in name else "Repository administrator uploads the provider or bot credential"),
                     verify=again,
                     section="apps-and-credentials",
                     optional=name not in ("APP_ID", "APP_PRIVATE_KEY"),
@@ -535,97 +498,265 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
             )
 
         for consumer, workflow in (("pr-build", "pr-build.yml"), ("Auto-merge", "auto-merge.yml")):
-            runs, error = gh.read(
-                f"repos/{repo}/actions/workflows/{workflow}/runs?per_page=1",
-                paginate=False,
-            )
-            candidates = _items(runs, "workflow_runs")
-            latest = candidates[0] if candidates else None
-            status = "pending"
-            summary = error or (
-                f"Latest run {latest['id']}: {latest.get('conclusion') or latest.get('status')}; inspect the consuming job"
-                if latest
-                else "No consuming workflow run observed"
-            )
-            if latest:
-                if latest.get("conclusion") in ("failure", "timed_out", "action_required"):
-                    status = "failed"
-                jobs, job_error = gh.read(f"repos/{repo}/actions/runs/{latest['id']}/jobs")
-                token_steps = [
-                    step
-                    for job in _items(jobs, "jobs")
-                    for step in job.get("steps", [])
-                    if any(
-                        label in step.get("name", "").lower()
-                        for label in (
-                            "create-github-app-token",
-                            "mint merge token",
-                            "mint comment token",
-                            "mint repo-scoped app token",
-                            "mint the app token",
-                        )
-                    )
-                ]
-                if consumer == "pr-build" and not job_error and latest.get("conclusion") == "success":
+            status, latest = "pending", None
+            summary = "No workflow run yet; successful use has not been checked"
+            setup = next((f for f in findings if f.id == "files..github/workflows/" + workflow), None)
+            if setup and setup.status != "ready":
+                summary = "Finish installing the project workflows first; successful use has not been checked"
+            else:
+                # An older run may have been rerun after a newer run was created.
+                # Use a small page of workflow records, ordered by attempt start.
+                # This is credential-use verification, not the merge settings check.
+                limit = 1 if consumer == "pr-build" else 10
+                runs, error = gh.read(f"repos/{repo}/actions/workflows/{workflow}/runs?per_page={limit}", paginate=False)
+                candidates = sorted(_items(runs, "workflow_runs"), key=lambda run:
+                                    _timestamp(run.get("run_started_at") or run.get("created_at")) or
+                                    dt.datetime.min.replace(tzinfo=dt.timezone.utc), reverse=True)
+                latest = candidates[0] if candidates else None
+                if error:
+                    summary = "Successful use not checked: cannot read workflow runs. " + error
+                for run in candidates:
+                    attempt = run.get("run_attempt", 1)
+                    label = f"Run {run['id']}, attempt {attempt}"
+                    if consumer != "pr-build" and run.get("conclusion") == "skipped":
+                        _, summary = _credential_use([], app_metadata, app_errors, names, run)
+                        continue
+                    jobs, job_error = gh.read(f"repos/{repo}/actions/runs/{run['id']}/attempts/{attempt}/jobs")
                     steps = [step for job in _items(jobs, "jobs") for step in job.get("steps", [])]
-                    if all(
-                        any(
-                            label in step.get("name", "").lower() and step.get("conclusion") == "success"
-                            for step in steps
-                        )
-                        for label in ("build exact candidate", "report build and bump-guard")
-                    ):
-                        status, summary = (
-                            "ready",
-                            f"Run {latest['id']} built the candidate and reported its statuses using GITHUB_TOKEN; App credentials are checked by Auto-merge",
-                        )
-                changed = max(
-                    (row.get("updated_at", "") for row in metadata if row["name"] in ("APP_ID", "APP_PRIVATE_KEY")),
-                    default="",
-                )
-                if (
-                    not job_error
-                    and latest.get("conclusion") == "success"
-                    and token_steps
-                    and all(step.get("conclusion") == "success" for step in token_steps)
-                    and latest.get("created_at", "") >= changed
-                ):
-                    status, summary = (
-                        "ready",
-                        f"Run {latest['id']} succeeded and its App-token steps succeeded after the recorded credential updates",
-                    )
-            findings.append(
-                Finding(
-                    "evidence." + consumer.lower(),
-                    status,
-                    summary,
-                    "The actual build/status steps succeed; App-token creation is verified separately in Auto-merge"
-                    if consumer == "pr-build"
-                    else "Relevant credential-consuming step succeeds without skipping or fallback",
-                    commands=(
-                        [_cmd("gh", "run", "view", str(latest["id"]), "--repo", repo, "--log")]
-                        if latest
-                        else [_cmd("gh", "workflow", "list", "--repo", repo)]
-                    ),
-                    urls=[latest["html_url"] if latest else f"https://github.com/{repo}/actions"],
-                    steps=([
-                        "After merging the setup workflows into the default branch, open or update a content pull request to trigger pr-build. Inspect its build and status-reporting steps.",
-                        f"For pr-build, list open content PRs and choose the number to build:\n$ {_cmd('gh', 'pr', 'list', '--repo', repo, '--state', 'open')}\nThen run:\n$ {_cmd('gh', 'workflow', 'run', 'pr-build.yml', '--repo', repo, '-f', 'pr=PR_NUMBER')}\nReplace PR_NUMBER with that open PR's number. The setup workflows must already be merged into the default branch.",
-                    ] if consumer == "pr-build" else [
-                        "Auto-merge has no manual-dispatch trigger. It runs after a normal content build or review update; use the Actions run linked above to inspect its App-token step. It only merges content that passes the configured review and build policy.",
-                        "A successful overall run is not proof that an optional credential was used. Inspect the App-token and consuming steps; skipped/fallback steps leave the credential unverified.",
-                    ]),
-                    verify=again,
-                    section="verification",
-                )
-            )
+                    if job_error:
+                        summary = f"{label}: successful use not checked; cannot read its jobs. {job_error}"
+                        latest = run
+                        break
+                    if consumer == "pr-build":
+                        build = [step for step in steps if any(name in step.get("name", "").lower()
+                                 for name in ("build exact candidate", "report build and bump-guard"))]
+                        if any(step.get("conclusion") == "failure" for step in build) or run.get("conclusion") in ("failure", "timed_out", "action_required"):
+                            status, summary = "failed", f"{label}: build or status reporting failed; inspect the linked run"
+                        elif all(any(name in step.get("name", "").lower() and step.get("conclusion") == "success"
+                                     for step in build) for name in ("build exact candidate", "report build and bump-guard")):
+                            status, summary = "ready", f"{label}: build and status reporting succeeded. This uses GITHUB_TOKEN; App credentials are checked separately."
+                        else:
+                            summary = f"{label}: build and status reporting have not both completed successfully"
+                        break
+                    token_steps = [step for step in steps if any(name in step.get("name", "").lower() for name in
+                                   ("create-github-app-token", "mint merge token", "mint comment token",
+                                    "mint repo-scoped app token", "mint the app token"))]
+                    status, summary = _credential_use(token_steps, app_metadata, app_errors, names, run)
+                    if any(step.get("conclusion") in ("success", "failure") for step in token_steps):
+                        latest = run
+                        summary = label + ": " + summary
+                        break
+            commands = [_cmd("gh", "run", "view", str(latest["id"]), "--repo", repo, "--log")] if latest else []
+            findings.append(Finding(
+                "evidence." + consumer.lower(), status, summary,
+                "An existing workflow has built and reported its result" if consumer == "pr-build" else
+                "An existing workflow has successfully used the App credentials",
+                commands=commands,
+                urls=[latest.get("html_url", f"https://github.com/{repo}/actions/runs/{latest['id']}") if latest else f"https://github.com/{repo}/actions"],
+                steps=(["pr-build runs on normal content changes. Inspect the build and status-reporting steps in an existing run."]
+                       if consumer == "pr-build" else
+                       ["Auto-merge has no manual-dispatch trigger. It runs after normal build or review updates; inspect its App-token step in an existing run."])
+                      + ["Successful use is a separate check from configuration. You can leave it unchecked until the next normal workflow run; there is no need to create a PR just to clear this check.",
+                         "If a step failed, inspect the linked logs, fix the reported problem and rerun the workflow. Skipped steps do not demonstrate successful credential use."],
+                verify=again, section="verification"))
 
     if extras:
         optional_findings = auxiliary_findings(project, gh, again) + extra_findings(project, gh, again)
         for finding in optional_findings:
             finding.optional = True
         findings.extend(optional_findings)
+    _setup_order(findings)
     return findings
+
+
+def _timestamp(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.astimezone(dt.timezone.utc) if parsed.tzinfo else None
+    except ValueError:
+        return None
+
+
+def _credential_use(steps, metadata, errors, names, run):
+    if errors:
+        return "pending", "Cannot read App credential settings; successful use of the current settings is not checked. " + "; ".join(errors)
+    if not {"APP_ID", "APP_PRIVATE_KEY"} <= names:
+        return "pending", "App credential settings are missing; finish Automation App credentials first"
+    observed = [step for step in steps if step.get("conclusion") in ("success", "failure")]
+    if not observed:
+        return "pending", "Settings are present, but recent runs skipped App token creation or it has not completed yet"
+    changed = [_timestamp(row.get("updated_at")) for row in metadata if row["name"] in ("APP_ID", "APP_PRIVATE_KEY")]
+    if not changed or any(value is None for value in changed):
+        return "pending", "App token creation ran, but the credential update time is unavailable; current settings are not checked"
+    changed = max(changed)
+    times = [_timestamp(step.get("started_at") or run.get("run_started_at")) for step in observed]
+    if any(value is None for value in times):
+        return "pending", "App token creation ran, but its timing cannot be checked against the credential update"
+    current = [step for step, started in zip(observed, times) if started >= changed]
+    if not current:
+        return "pending", "App token creation ran before the latest credential update; the updated settings have not been checked"
+    if any(step["conclusion"] == "failure" for step in current):
+        return "failed", "App credential use failed; inspect its token-creation step"
+    return "ready", "App token creation succeeded after the recorded credential updates"
+
+
+def _setup_order(findings):
+    """Replace premature instructions with the concrete earlier step to finish."""
+    by_id = {f.id: f for f in findings}
+    def ready(name):
+        return name in by_id and by_id[name].status == "ready"
+    for finding in findings:
+        first = []
+        if finding.id.startswith("files.") and finding.repair == "workflows":
+            first = [name for name in ("repositories.content", "pins.tools", "pins.review") if not ready(name)]
+        elif finding.id == "lean.content":
+            first = [name for name in ("files..github/workflows/pr-build.yml",) if not ready(name)]
+        elif finding.id == "roadmap.workflows":
+            first = [name for name in ("pins.tools", "files.tauceti.toml", "lean.roadmap") if not ready(name)]
+        elif finding.id == "rules.content":
+            first = [name for name in ("files..github/workflows/pr-build.yml",) if not ready(name)]
+        if first and finding.status != "ready":
+            published = finding.steps[:1] if finding.id.startswith("lean.") else []
+            finding.steps = published + ["Finish " + ", ".join(_label(name) for name in first) + " first, then run doctor again for this step's instructions."]
+            finding.commands = []
+            finding.repair = ""
+        if finding.id.startswith(("pins.", "lean.", "files.", "configuration.")) or finding.id == "roadmap.workflows":
+            finding.role = "Maintainer"
+        elif finding.id.startswith("evidence."):
+            finding.role = "Maintainer with access to Actions runs"
+        elif finding.id.startswith("repositories."):
+            finding.role = "Repository owner or maintainer with access"
+    order = {section: index for index, section in enumerate((
+        "repositories", "configuration-and-ownership", "versions", "actions", "workflows",
+        "apps-and-credentials", "lean-and-upstream-dependencies", "roadmap-lean-package",
+        "roadmaps", "verification", "branch-rules"))}
+    findings.sort(key=lambda finding: order.get(finding.section, len(order)))
+
+
+def merge_findings(project, gh, again):
+    """Check merge settings directly, including every applicable branch rule."""
+    repo, branch = project.content, project.branch
+    bors = project.raw.get("merge", {}).get("backend", "github-queue") == "bors"
+    endpoint = f"repos/{repo}/rules/branches/{branch}"
+    rules, error = gh.read(endpoint)
+    active = [r for page in _pages(rules or []) for r in (page if isinstance(page, list) else [page])]
+    problems, unknown = [], [f"Cannot read branch rules: {error}"] if error else []
+    # Classic protection and rulesets can both apply. A bypass must work through
+    # all of them; inspecting just one can incorrectly claim admin merge works.
+    protection, protection_error = gh.read(f"repos/{repo}/branches/{branch}/protection")
+    if protection_error:
+        info, _ = gh.read(f"repos/{repo}")
+        if "HTTP 404" not in protection_error or not (info or {}).get("permissions", {}).get("admin"):
+            unknown.append(f"Cannot verify classic branch protection: {protection_error}. Ask a repository administrator to inspect it.")
+    if protection:
+        reviews, checks = protection.get("required_pull_request_reviews"), protection.get("required_status_checks")
+        if reviews is not None:
+            active.append({"type": "pull_request", "parameters": {
+                "require_code_owner_review": reviews.get("require_code_owner_reviews", False)}})
+        if checks is not None:
+            active.append({"type": "required_status_checks", "parameters": {
+                "required_status_checks": [{"context": c} for c in checks.get("contexts", [])]}})
+        if not bors and protection.get("enforce_admins", {}).get("enabled"):
+            problems.append("Classic protection prevents administrator overrides")
+        if bors:
+            problems.append("Move classic protection to a ruleset that allows the Bors App to update the base branch")
+    types = {r.get("type") for r in active}
+    needed = {"pull_request", "required_status_checks"} | (set() if bors else {"merge_queue"})
+    rules_known = not unknown
+    if rules_known:
+        problems.extend("Missing rule: " + name for name in sorted(needed - types))
+    if bors and "merge_queue" in types:
+        problems.append("Disable the GitHub merge queue when Bors is the merger")
+    checks = {c["context"] for r in active if r.get("type") == "required_status_checks"
+              for c in r.get("parameters", {}).get("required_status_checks", [])}
+    required = set(project.raw.get("merge", {}).get("checks", [])) | {"build", "bump-guard", "scope"}
+    if rules_known:
+        problems.extend("Missing required check: " + name for name in sorted(required - checks))
+    if rules_known and not any(r.get("type") == "pull_request" and
+               r.get("parameters", {}).get("require_code_owner_review") for r in active):
+        problems.append("Require code-owner review for human-owned files")
+
+    service = project.service("bors")
+    bors_app = None
+    if bors and service.get("url"):
+        slug = service.get("app_slug", repo.split('/')[1].lower() + "-bors")
+        app, app_error = gh.read(f"apps/{slug}")
+        if app_error:
+            unknown.append(f"Cannot identify the project Bors App: {app_error}")
+        else:
+            bors_app = app.get("id")
+            if type(bors_app) is not int or bors_app <= 0:
+                unknown.append("The Bors App response did not identify an App ID")
+                bors_app = None
+            if app.get("permissions", {}).get("contents") != "write":
+                problems.append("Grant the Bors App Contents: write permission so it can land tested commits")
+    if bors:
+        if not service.get("url"):
+            problems.append("Set services.bors.url to the Bors HTTPS address")
+        repository_id = service.get("repository_id", 1 if project.legacy else None)
+        if type(repository_id) is not int or repository_id <= 0:
+            problems.append("Set services.bors.repository_id to this project's repository number in Bors")
+    # Deletion/creation/force-push protection does not block an ordinary merge.
+    # Keep those protections intact instead of requiring a bypass for them.
+    merge_rules = [r for r in active if r.get("type") not in ("creation", "deletion", "non_fast_forward")]
+    rule_ids = {r["ruleset_id"] for r in merge_rules if r.get("ruleset_id")}
+    if merge_rules and not rule_ids and not protection and not error:
+        unknown.append("Branch rules did not identify their rulesets; an administrator must check their bypass lists")
+    for rule_id in sorted(rule_ids):
+        detail, detail_error = gh.read(f"repos/{repo}/rulesets/{rule_id}")
+        if detail_error:
+            unknown.append(f"Cannot read ruleset {rule_id} bypass settings: {detail_error}")
+            continue
+        actors = detail.get("bypass_actors")
+        if actors is None:
+            unknown.append(f"Ruleset {rule_id} hides its bypass list; ask a repository administrator to check it")
+            continue
+        def administrator(actor):
+            return (actor.get("actor_type") == "RepositoryRole" and actor.get("actor_id") == 5
+                    or actor.get("actor_type") == "OrganizationAdmin")
+        if bors:
+            outsiders = [actor for actor in actors if actor.get("actor_type") != "Integration"
+                         or bors_app is not None and actor.get("actor_id") != bors_app]
+        else:
+            outsiders = [actor for actor in actors if not administrator(actor)]
+        if outsiders:
+            problems.append(f"Restrict the bypass list in ruleset {rule_id} to " +
+                            ("the project Bors App; administrators approve with bors merge" if bors else
+                             "administrators; remove automation Apps and other non-administrator bypass actors"))
+        if bors:
+            if bors_app and not any(a.get("actor_type") == "Integration" and a.get("actor_id") == bors_app
+                                    and a.get("bypass_mode", "always") == "always" for a in actors):
+                problems.append(f"Allow the project Bors App to bypass ruleset {rule_id} with Always allow")
+        else:
+            if not any(administrator(a)
+                       and a.get("bypass_mode", "always") in ("always", "pull_request") for a in actors):
+                problems.append(f"Allow repository administrators to perform admin merges through ruleset {rule_id}")
+    steps = [
+        "First install the workflows and let an ordinary content build run so GitHub lists its check names. Then edit the default-branch rules; do not require missing checks before installing setup.",
+        f"Require pull requests, code-owner review for human-owned files, and checks {', '.join(sorted(required))} from their GitHub Actions producer.",
+    ]
+    if bors:
+        steps += [
+            "Select Bors as the only merger: disable Require merge queue. Give the project's Bors App Always allow on rulesets that otherwise block its tested commit. Keep content authors and the ordinary automation App out of that bypass. Preserve deletion and force-push protection.",
+            "Set services.bors.url and repository_id from the Bors repository page. Register/install the project Bors App and configure its webhook. If its slug differs from REPOSITORY-bors, set services.bors.app_slug to the actual slug. An authorized administrator uses bors merge to approve restricted paths; existing exact-revision approval checks still apply.",
+        ]
+    else:
+        steps += [
+            "Enable Require merge queue. On rulesets that block merges, add Repository admin to the Bypass list with For pull requests only. Keep the bypass restricted to administrators. Preserve deletion and force-push protection. If classic protection also applies, allow administrator overrides there too.",
+            "Restricted paths keep scope red and cannot merge automatically. After reviewing the PR, a repository administrator can use GitHub's admin merge (gh pr merge PR_NUMBER --admin --squash). Ordinary review does not turn scope green. Bors is not required.",
+            "If GitHub does not offer a merge queue for this repository or account, configure Bors and select merge.backend = bors instead.",
+        ]
+    steps.append("If settings are inaccessible, ask a repository administrator or organization owner to inspect the named rule. Token scopes cannot grant your account administration access.")
+    return [Finding(
+        "rules.content", "failed" if problems else "unknown" if unknown else "ready",
+        "\n".join(problems + unknown) or ("Bors merge settings and scope override configured" if bors else
+                                         "Merge queue, required checks and administrator override configured"),
+        "Bors with bors merge scope overrides" if bors else "GitHub merge queue with administrator scope overrides",
+        role="Repository administrator; GitHub App manager for Bors App permissions" if bors else "Repository administrator",
+        commands=[_cmd("gh", "api", endpoint)], urls=[f"https://github.com/{repo}/settings/rules"],
+        steps=steps, verify=again, section="branch-rules")]
 
 
 def package_findings(project, gh, repo_info, again):
@@ -650,9 +781,19 @@ def package_findings(project, gh, repo_info, again):
                 errors.append(_MissingFile(f"{toml_error}\n{lean_error}"))
             else:
                 errors.append(f"lakefile.toml: {toml_error}\nlakefile.lean: {lean_error}")
+        directories = [root.replace(".", "/") for root in project.roots] if role == "content" else [project.roadmap_dir, project.completed_dir]
+        for directory in directories:
+            value, directory_error = gh.read(f"repos/{repo}/contents/{directory}?ref={branch}")
+            if directory_error:
+                errors.append(directory_error if isinstance(directory_error, _MissingFile) else f"{directory}: {directory_error}")
+            elif not isinstance(value, list):
+                errors.append(_MissingFile(f"Expected source directory: {directory} in {repo} at {branch}"))
         lean_format = role == "content" and not lean_error
         root = project.roots[0] if role == "content" else project.roadmap_dir
         if role == "content":
+            source = root.replace(".", "/")
+            basic = _cmd("printf", "%s\\n", "/-", f"Copyright (c) {dt.date.today().year} Your Name. All rights reserved.",
+                         "Released under Apache 2.0 license as described in the file LICENSE.", "Authors: Your Name", "-/", "module")
             lakefile = (f'name = "{root}"\ndefaultTargets = ["{root}"]\nplatformIndependent = true\n'
                         '[[require]]\nname = "mathlib"\ngit = "https://github.com/leanprover-community/mathlib4"\nrev = "master"\n'
                         f'[[lean_lib]]\nname = "{root}"\nglobs = ["{root}.*"]\n'
@@ -664,7 +805,7 @@ def package_findings(project, gh, repo_info, again):
                 "For an existing package, run lake update and lake build, then commit the resolved lake-manifest.json with the reviewed package configuration. Use the remaining starter steps only for a new package.",
                 "Only if starting a new Mathlib-based package, obtain its matching toolchain:\n$ " + _cmd("gh", "api", "repos/leanprover-community/mathlib4/contents/lean-toolchain?ref=master", "--jq", ".content | @base64d") + " > lean-toolchain\n$ elan toolchain install \"$(cat lean-toolchain)\"\nFor a different direct dependency use that dependency's selected toolchain; keep its existing package dependencies.",
                 f"For that new package, write lakefile.toml with:\n{lakefile}\nThe axioms and module-system sources arrive with the project workflow setup; install that setup before building these executables.",
-                f"For a new package create its source directory and empty root module:\n$ mkdir -p {shlex.quote(root.replace('.', '/'))}\n$ printf 'module\\n' > {shlex.quote(root.replace('.', '/') + '.lean')}\nAdd your mathematical source modules there, with a Mathlib-style copyright/license/Authors header followed by module. After the workflow setup supplies scripts/Axioms.lean and scripts/ModuleSystem.lean:\n$ lake update\n$ lake exe cache get\n$ lake build\nCommit the toolchain, lakefile, manifest and Lean sources through a human-reviewed PR.",
+                f"For a new package create its root module and a tracked starter file. Replace Your Name in the header with your own name:\n$ mkdir -p {shlex.quote(source)}\n$ printf 'module\\n' > {shlex.quote(source + '.lean')}\n$ {basic} > {shlex.quote(source + '/Basic.lean')}\nGit will keep the source directory because Basic.lean is tracked. After the workflow setup supplies scripts/Axioms.lean and scripts/ModuleSystem.lean:\n$ lake update\n$ lake exe cache get\n$ lake build\nCommit the toolchain, lakefile, manifest and Lean sources through a human-reviewed PR.",
             ]
         else:
             lakefile = (f'name = "{root}"\ndefaultTargets = ["{root}", "{project.completed_dir}"]\n'
@@ -675,7 +816,7 @@ def package_findings(project, gh, repo_info, again):
                 f"First finish the Content Lean package setup: merge lean-toolchain, lakefile.toml, lake-manifest.json and Lean sources into {project.content}@{project.branch}. The roadmap depends on that published package; a local build or an unmerged content PR does not satisfy this prerequisite.",
                 f"In a local checkout of {repo}, keep an existing working roadmap package. Only after the content setup is merged, copy its toolchain for a new package:\n$ " + _cmd("gh", "api", f"repos/{project.content}/contents/lean-toolchain?ref={project.branch}", "--jq", ".content | @base64d") + " > lean-toolchain",
                 f"For a new package write lakefile.toml with:\n{lakefile}\nUse the actual name from the content repository's lakefile for the require name if it differs from {project.roots[0]}.",
-                f"For a new package create the empty root modules and source directories:\n$ mkdir -p {shlex.quote(root)} {shlex.quote(project.completed_dir)}\n$ touch {shlex.quote(root + '.lean')} {shlex.quote(project.completed_dir + '.lean')}\n$ lake update\n$ lake build\nCommit the Lake files and root modules through a human-reviewed PR. Add human-written target statements under the configured roadmap directory; they may contain sorry.",
+                f"For a new package create the empty root modules and source directories:\n$ mkdir -p {shlex.quote(root)} {shlex.quote(project.completed_dir)}\n$ touch {shlex.quote(root + '.lean')} {shlex.quote(project.completed_dir + '.lean')} {shlex.quote(root + '/.gitkeep')} {shlex.quote(project.completed_dir + '/.gitkeep')}\n$ lake update\n$ lake build\nCommit the Lake files and root modules through a human-reviewed PR. Add human-written target statements under the configured roadmap directory; they may contain sorry.",
             ]
         published = f"This check reads GitHub at {repo}@{branch}, not your local checkout. Local lake update or lake build will not clear it: commit the package files and merge the PR into {branch}, then rerun doctor."
         ignore = "Before running Lake, ensure /.lake/ is in .gitignore so git add . cannot stage build artifacts and downloaded dependencies. Preserve existing ignore rules; add the rule only if it is not already covered:\n$ git check-ignore -q .lake/ || printf '\\n/.lake/\\n' >> .gitignore\nCommit .gitignore with the package files."
@@ -687,7 +828,8 @@ def package_findings(project, gh, repo_info, again):
         else:
             status, summary = "ready", f"Lean package files are published in {repo}@{branch}"
         if role == "roadmap" and status != "ready" and not any(f.id == "lean.content" and f.status == "ready" for f in findings):
-            summary += f"\nPrerequisite unresolved: finish and merge the content package in {project.content}@{project.branch} first."
+            summary += f"\nFinish the content package in {project.content}@{project.branch} first."
+            setup = [f"First finish the Content Lean package setup: merge its files into {project.content}@{project.branch}, then run doctor again for the roadmap instructions."]
         findings.append(Finding(
             "lean." + role, status, summary,
             "Published Lean toolchain, Lake package and resolved dependencies", steps=([
@@ -770,6 +912,13 @@ def extra_findings(project, gh, again):
     owner = project.content.split("/")[0]
     for name in ("github_state", "bors", "cache"):
         service = project.service(name)
+        if name == "github_state" and project.environment()["TAUCETI_GITHUB_STATE_URL"] == "https://github-state.taucetiproject.org" and project.content == "TauCetiProject/TauCeti":
+            results.append(Finding(
+                "services.github_state", "ready", "Public Tau Ceti mirror selected; no client token required",
+                "Ordinary workers use the public mirror automatically. Private health and administration remain operator-only.",
+                urls=["https://github-state.taucetiproject.org"], verify=again, section="github-state",
+            ))
+            continue
         mode = service.get("mode", "off")
         results.append(
             Finding(
@@ -1315,7 +1464,6 @@ def _label(check):
         "evidence.pr-build": "Content build",
         "evidence.auto-merge": "Automatic merging",
         "rules.content": "Content branch protection",
-        "merge.direct": "Direct merging",
         "actions.enabled": "GitHub Actions",
         "github.auth": "GitHub access",
         "configuration.ownership": "Human configuration ownership",
@@ -1340,7 +1488,7 @@ def _paragraph(text, indent="  "):
                         break_long_words=False, break_on_hyphens=False))
 
 
-def _render_tasks(findings):
+def _render_tasks(findings, *, project=None):
     groups = {}
     for item in findings:
         groups.setdefault(_label(item.id), []).append(item)
@@ -1352,9 +1500,18 @@ def _render_tasks(findings):
                 _paragraph(line)
         if all(item.status in ("ready", "disabled") for item in items):
             continue
+        print("  Who: " + "; ".join(dict.fromkeys(item.role for item in items)))
+        for repair in dict.fromkeys(item.repair for item in items if item.repair):
+            command = ["tauceti-tools", "doctor", "--fix", repair]
+            if project:
+                command += ["--conf", project.source]
+            print("  Command-line repair (preview): " + _cmd(*command))
+            print("  Add --apply after reviewing the preview to perform this repair.")
         for url in dict.fromkeys(url for item in items for url in item.urls):
             print("  Open: " + url)
         steps = list(dict.fromkeys(step for item in items for step in item.steps))
+        if steps:
+            print("  Repair steps:" if any(item.repair for item in items) else "  Manual steps:")
         for index, step in enumerate(steps, 1):
             lines = step.splitlines()
             prefix = f"  {index}. "
@@ -1370,6 +1527,8 @@ def _render_tasks(findings):
                     _paragraph(line, "     ")
         for command in dict.fromkeys(command for item in items for command in item.commands):
             print("  $ " + command)
+        for command in dict.fromkeys(item.verify for item in items if item.verify):
+            print("  Check again: " + command)
         print("  Guide: " + DOCS + "#" + items[0].section)
 
 
@@ -1390,7 +1549,7 @@ def render(findings, *, json_output=False, show_ready=False, project=None):
             print(f"Core setup: {len(unresolved(core))} checks need attention; {passed} checks passed.")
         else:
             print(f"Core setup: ready ({passed} checks passed).")
-        _render_tasks(core if show_ready else unresolved(core))
+        _render_tasks(core if show_ready else unresolved(core), project=project)
     if extras:
         print()
         _paragraph("The remaining items are optional extras: you can omit these from the `tauceti doctor` report using the `--no-extras` flag.", "")
@@ -1403,7 +1562,7 @@ def render(findings, *, json_output=False, show_ready=False, project=None):
         disabled = [_label(f.id) for f in extras if f.status == "disabled"]
         if disabled:
             _paragraph("Disabled: " + ", ".join(disabled) + ".", "")
-        _render_tasks(extras if show_ready else unresolved(extras))
+        _render_tasks(extras if show_ready else unresolved(extras), project=project)
         if not unresolved(extras):
             print("All enabled extras are ready.")
     if project and unresolved(findings):

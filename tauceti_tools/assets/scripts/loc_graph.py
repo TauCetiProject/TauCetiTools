@@ -15,7 +15,7 @@ Styled to sit on the dark navy Tau Ceti site (see web/static_files/style.css).
 
 import subprocess, sys, argparse, datetime as dt, html, math, json
 
-from chart_style import base_css, card_rect
+from chart_style import base_css, card_rect, hover_metadata
 
 
 def git(repo, *args):
@@ -138,7 +138,29 @@ def nice_ceil(x):
     return int(10 * mag)
 
 
-def render(data, title, accent, out):
+def loc_axis_max(value):
+    """About 5% headroom, rounded up in small, readable increments.
+
+    Rounding the whole maximum to 1/2/2.5/5/10 left almost half the chart empty
+    just after crossing 5 million. Round to 0.1 * magnitude instead.
+    """
+    if value <= 0:
+        return 1
+    step = max(1, 10 ** (math.floor(math.log10(value)) - 1))
+    return math.ceil(value * 1.05 / step) * step
+
+
+def growth_metrics(data):
+    """Calendar-day differences, with no invented baseline before the first day."""
+    counts = dict(data)
+    def growth(day, value, days):
+        previous = (dt.date.fromisoformat(day) - dt.timedelta(days=days)).isoformat()
+        return (value - counts[previous]) / days if previous in counts else None
+    return ([growth(day, value, 1) for day, value in data],
+            [growth(day, value, 7) for day, value in data])
+
+
+def render(data, title, accent, out, comparison=None):
     W, H = 900, 460
     L, R, T, B = 72, 28, 60, 52      # margins
     pw, ph = W - L - R, H - T - B
@@ -146,7 +168,7 @@ def render(data, title, accent, out):
     d0 = dt.date.fromisoformat(data[0][0])
     d1 = dt.date.fromisoformat(data[-1][0])
     span = max((d1 - d0).days, 1)
-    ymax = nice_ceil(max(v for _, v in data))
+    ymax = loc_axis_max(max(v for _, v in data))
 
     def X(d): return L + (dt.date.fromisoformat(d) - d0).days / span * pw
     def Y(v): return T + ph - v / ymax * ph
@@ -179,9 +201,23 @@ def render(data, title, accent, out):
     dots = "".join(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3"/>' for x, y in pts)
     latest = data[-1][1]
     grad = "g" + accent.lstrip("#")
+    daily, weekly = growth_metrics(data)
+    metrics = [
+        {"label": "Lines of Lean", "unit": "LOC", "values": [v for _, v in data]},
+        {"label": "LOC since yesterday", "unit": "LOC", "signed": True, "values": daily},
+        {"label": "7-day moving average", "unit": "LOC/day", "digits": 1, "values": weekly},
+    ]
+    note = ""
+    if comparison:
+        metrics.append({"label": "Relative to Mathlib", "unit": "× Mathlib", "digits": 2,
+                        "values": [v / comparison["lines"] for _, v in data]})
+        note = f'Mathlib baseline: {comparison["lines"]:,} LOC at pinned {comparison["ref"][:12]} (fixed for all dates).'
+    metadata = hover_metadata([{"bounds": [L, T, pw, ph], "x": [X(d) for d, _ in data],
+                                "labels": [d for d, _ in data], "series": metrics, "note": note}])
 
     svg = f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" role="img"
      aria-label="{html.escape(title)}: {latest:,} lines as of {data[-1][0]}">
+  {metadata}
   <defs>
     <linearGradient id="{grad}" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="{accent}" stop-opacity="0.28"/>
@@ -219,12 +255,19 @@ if __name__ == "__main__":
     ap.add_argument("--accent", default="#ff9d4d")
     ap.add_argument("--out", required=True)
     ap.add_argument("--dump-data", help="also write daily (date, line-count) pairs as JSON")
+    ap.add_argument("--mathlib-repo", help="checkout of pinned Mathlib for the tooltip baseline")
     ap.add_argument("pathspecs", nargs="+")
     a = ap.parse_args()
     data = series(a.repo, a.pathspecs, a.ref)
     if not data:
         sys.exit("no commits matched pathspecs on a day that has finished")
-    render(data, a.title, a.accent, a.out)
+    comparison = None
+    if a.mathlib_repo:
+        lines = count_lines(a.mathlib_repo, "HEAD", ["Mathlib/**/*.lean", "Mathlib.lean"])
+        if lines <= 0:
+            sys.exit("Mathlib comparison contains no lines")
+        comparison = {"lines": lines, "ref": git(a.mathlib_repo, "rev-parse", "HEAD").strip()}
+    render(data, a.title, a.accent, a.out, comparison=comparison)
     if a.dump_data:
         with open(a.dump_data, "w") as f:
             json.dump(data, f)

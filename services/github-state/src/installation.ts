@@ -1,8 +1,9 @@
 import { scanHostedCapacity } from './runner-capacity';
 import { blocksRepairs, readMigration } from './migration';
 import { DurableObject } from 'cloudflare:workers';
-import { Env, json, Repository, stub, parseGitHub, digest } from './protocol';
-import { Recipe, extract, recipes, batchQuery, batchLimit } from './catalog';
+import { Env, json, Repository, repositories, stub, parseGitHub, digest } from './protocol';
+import { INSTALLATION_HOP_MS } from './repair_io';
+import { Recipe, extract, recipes, batchQuery, batchLimit, UpstreamDataError } from './catalog';
 import { settings } from './reconciliation';
 import { AccountingMetrics } from './monitoring';
 import { classify, log, requestId } from './storage';
@@ -10,6 +11,7 @@ import { classify, log, requestId } from './storage';
 class QuotaDeferred extends Error {
   constructor(readonly result:any) { super('GitHub quota deferred'); }
 }
+type CapacityWaiter={repository:Repository}|{readyAt:number,wake:()=>void};
 
 export class InstallationScheduler extends DurableObject<Env> {
   private tokenFlight?:Promise<string>;
@@ -18,7 +20,13 @@ export class InstallationScheduler extends DurableObject<Env> {
   private auditFlight?:Promise<void>;
   private accountingMetrics=new AccountingMetrics();
   private accountingFailure:any;
+  private accountingPreparationFailure:any;
+  private accountingIndexReady=false;
   private preparedAccounting:any;
+  private capacityWaiters=new Map<string,CapacityWaiter>();
+  private capacityNotifying=new Set<string>();
+  private capacityReleaseHints=0;
+  private capacityWakeStats={scope:'installation_instance_since_restart',repository:0,runner:0};
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS budgets(resource TEXT PRIMARY KEY,remaining INTEGER,lim INTEGER,reset INTEGER,blocked INTEGER DEFAULT 0);
@@ -28,6 +36,37 @@ export class InstallationScheduler extends DurableObject<Env> {
     this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS redelivery_retries(id TEXT PRIMARY KEY,due INTEGER,attempt INTEGER);');
     const columns=new Set(this.ctx.storage.sql.exec<any>('PRAGMA table_info(accounting)').toArray().map(c=>c.name));
     for(const [name,type] of Object.entries({shape:'TEXT',batch_size:'INTEGER DEFAULT 1',predicted:'INTEGER'})) if(!columns.has(name)) this.ctx.storage.sql.exec('ALTER TABLE accounting ADD COLUMN '+name+' '+type);
+    // Health must survive ordinary object eviction without rescanning the
+    // accounting log or resetting the report's original observation time.
+    try {
+      this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS prepared_accounting(singleton INTEGER PRIMARY KEY CHECK(singleton=1),data TEXT NOT NULL)');
+      const saved=this.ctx.storage.sql.exec<{data:string}>('SELECT data FROM prepared_accounting WHERE singleton=1').toArray()[0];
+      if(saved) {
+        const report=JSON.parse(saved.data);
+        if(report?.version!==1 || !Number.isSafeInteger(report.at) || report.at<0 || report.at>Date.now() || report.scope!=='retained_accounting_hour' || typeof report.window_complete!=='boolean' || report.scanned_limit!==10000 || !Array.isArray(report.hour) || !Array.isArray(report.recipes))throw new Error('invalid accounting snapshot');
+        this.preparedAccounting={version:1,at:report.at,window_start:report.at-3600000,scope:report.scope,window_complete:report.window_complete,scanned_limit:report.scanned_limit,hour:report.hour,recipes:report.recipes,prepared_deployment:typeof report.prepared_deployment==='string'?report.prepared_deployment:null};
+      }
+    }catch(error) {this.accountingPreparationFailure={at:Date.now(),reason:classify(error)};log('installation_health_load_failed',this.accountingPreparationFailure);}
+  }
+  private async ensureAccountingIndex():Promise<void> {
+    if(this.accountingIndexReady)return;
+    try {
+      if(this.ctx.storage.sql.exec<{name:string}>('PRAGMA index_list(accounting)').toArray().some(index=>index.name==='accounting_estimate')) {
+        this.accountingIndexReady=true;return;
+      }
+      const now=Date.now(),retryAfter=await this.ctx.storage.get<number>('accounting_index_retry_after');
+      if(typeof retryAfter==='number' && retryAfter>now)return;
+      // Commit the backoff before DDL: a CPU-limit reset cannot be caught and
+      // must not turn the next cold start or minute tick into another build.
+      await this.ctx.storage.put('accounting_index_retry_after',now+86400000);
+      await this.ctx.storage.sync();
+      // Keep time before shape so shaped/unshaped estimates and latency
+      // lookups can all skip the older ledger. Queries remain unchanged.
+      this.ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS accounting_estimate ON accounting(api,operation,at,shape,points)');
+      this.accountingIndexReady=true;
+    } catch(error) {
+      log('installation_accounting_index_failed',{reason:classify(error)});
+    }
   }
   async jwt(): Promise<string> {
     const b64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_');
@@ -50,7 +89,7 @@ export class InstallationScheduler extends DurableObject<Env> {
     let t = await this.ctx.storage.get<{token:string;expires:number}>('token');
     if (!force && t && t.expires > Date.now()+300000) return t.token;
     const until=await this.ctx.storage.get<number>('secondary_until') || 0,budget=this.budget('app-core');
-    if (until>Date.now() || budget?.blocked>Date.now()) throw new QuotaDeferred({deferred:true,category:until>Date.now()?'secondary':'primary:app-core',retry_at:Math.max(until,budget?.blocked || 0)});
+    if (until>Date.now() || budget?.blocked>Date.now()) throw new QuotaDeferred({deferred:true,category:until>Date.now()?'secondary':'primary:app-core',retry_at:Math.max(until,budget?.blocked || 0),scope:until>Date.now()?{kind:'installation'}:{kind:'pool',api:'app-core'}});
     const response = await this.http('/app/installations/' + installation + '/access_tokens', await this.jwt(), 'POST', {}, 'installation_token', 'authentication');
     if (response.deferred) throw new QuotaDeferred(response);
     if (response.status !== 201 || !response.body.token) throw new Error('installation token unavailable');
@@ -84,10 +123,11 @@ export class InstallationScheduler extends DurableObject<Env> {
   }
   deferral(api:string,cost:number): any {
     const b=this.budget(api),now=Date.now();
-    if(this.usable(api)>=cost) return null;
+    const usable=this.usable(api);if(usable>=cost) return null;
     const actual=b && b.reset>now?b.remaining:b?.lim || 5000;
-    if((!b || b.blocked<=now) && actual>=cost) return {deferred:true,category:'capacity',retry_at:now+250};
-    return {deferred:true,category:'primary:'+api,retry_at:Math.max(now+1000,b?.blocked || b?.reset || now+60000)};
+    const scope={kind:usable<=0?'pool':'query',api};
+    if((!b || b.blocked<=now) && actual>=cost) return {deferred:true,category:'capacity',retry_at:now+250,scope};
+    return {deferred:true,category:'primary:'+api,retry_at:Math.max(now+1000,b?.blocked || b?.reset || now+60000),scope};
   }
   estimate(operation:string,api:string,shape?:string,fallback=1): number {
     if(api!=='graphql') return 1;
@@ -102,12 +142,14 @@ export class InstallationScheduler extends DurableObject<Env> {
     const aliases=[...query.matchAll(/q\d+:/g)].length,batchSize=aliases || 1;
     const predicted=this.estimate(operation,api,shape,operation==='review_threads_batch'?Math.max(1,Math.round(batchSize*11/100)):1);
     const secondary=await this.ctx.storage.get<number>('secondary_until') || 0;
-    if(secondary>Date.now()) throw new QuotaDeferred({deferred:true,category:'secondary',retry_at:secondary});
-    this.ctx.storage.sql.exec('DELETE FROM reservations WHERE expires<=?',Date.now());
-    if(this.ctx.storage.sql.exec<any>('SELECT COUNT(*) n FROM reservations').one().n>=settings(this.env).concurrency) throw new QuotaDeferred({deferred:true,category:'capacity',retry_at:Date.now()+250});
-    const deferred=this.deferral(resource,predicted);if(deferred) throw new QuotaDeferred(deferred);
+    if(secondary>Date.now()) throw new QuotaDeferred({deferred:true,category:'secondary',retry_at:secondary,scope:{kind:'installation'}});
+    const expired=this.ctx.storage.sql.exec('DELETE FROM reservations WHERE expires<=? RETURNING id',Date.now()).toArray().length;
+    if(expired)this.capacityReleaseHints=Math.min(settings(this.env).concurrency,this.capacityReleaseHints+expired);
+    if(this.ctx.storage.sql.exec<any>('SELECT COUNT(*) n FROM reservations').one().n>=settings(this.env).concurrency) throw new QuotaDeferred({deferred:true,category:'capacity',retry_at:Date.now()+250,scope:{kind:'installation'}});
+    const deferred=this.deferral(resource,predicted);if(deferred){this.notifyCapacityWaiters();throw new QuotaDeferred(deferred);}
     const reservation=crypto.randomUUID();
     this.ctx.storage.sql.exec('INSERT INTO reservations VALUES(?,?,?,?)',reservation,resource,predicted,Date.now()+settings(this.env).lease_ms);
+    this.notifyCapacityWaiters();
     let observedDebit=false;
     try {
     const headers: Record<string,string> = {'Authorization':'Bearer ' + token,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'tauceti-github-state','Content-Type':'application/json'};
@@ -158,7 +200,7 @@ export class InstallationScheduler extends DurableObject<Env> {
         this.ctx.storage.sql.exec('INSERT INTO quota_types VALUES(?,?,?,?,?) ON CONFLICT(category) DO UPDATE SET last_seen=excluded.last_seen,count=count+1,evidence=excluded.evidence',category,Date.now(),Date.now(),1,evidence);
         if (newType) console.error(JSON.stringify({event:'new_quota_type',category,evidence:JSON.parse(evidence)}));
         if (!primary) await this.ctx.storage.put('secondary_until',until);
-        return {status:response.status,body:parsed,deferred:true,category,retry_at:until};
+        return {status:response.status,body:parsed,deferred:true,category,retry_at:until,scope:primary?{kind:olderWindow?'query':'pool',api:bucket}:{kind:'installation'}};
       }
     }
     return {status:response.status,body:parsed,etag:response.headers.get('etag'),link:response.headers.get('link'),points,bytes:text.length,elapsed_ms:Date.now()-started,remaining:response.headers.get('x-ratelimit-remaining'),limit:response.headers.get('x-ratelimit-limit')};
@@ -166,7 +208,7 @@ export class InstallationScheduler extends DurableObject<Env> {
       // A lost response can still have consumed quota; retain the predicted debit.
       if(!observedDebit)this.ctx.storage.sql.exec('UPDATE budgets SET remaining=MAX(0,remaining-?) WHERE resource=?',predicted,resource);
       throw error;
-    } finally {this.ctx.storage.sql.exec('DELETE FROM reservations WHERE id=?',reservation);}
+    } finally {if(this.ctx.storage.sql.exec('DELETE FROM reservations WHERE id=? RETURNING id',reservation).toArray().length)this.releaseCapacityHints(1);}
   }
   // All GitHub requests from all repository objects pass through this installation owner.
   // Budget selection affects background reads only; authoring writes never enter this service.
@@ -174,13 +216,13 @@ export class InstallationScheduler extends DurableObject<Env> {
     const request_id=/^[A-Za-z0-9-]{1,64}$/.test(input.request_id || '')?input.request_id:crypto.randomUUID();
     const reason=error instanceof Error && error.message==='upstream_identity_unavailable'?'upstream_identity_unavailable':'malformed_upstream_response';
     try {log('upstream_response_unavailable',{request_id,operation,api,reason});}catch {}
-    return {unavailable:true,reason,request_id};
+    return {unavailable:true,reason,request_id,failure_kind:error instanceof UpstreamDataError?'member':'unknown'};
   }
   async read(input: any): Promise<Response> {
     if (input.nested) return this.threadPage(input);
     const candidates = recipes(input.repository.name,input.query,input.cursor,input.page).map(r=>({...r,cost:this.estimate(input.query.operation,r.api,undefined,r.cost)}));
     const until = await this.ctx.storage.get<number>('secondary_until') || 0;
-    if (until > Date.now()) return json({deferred:true,category:'secondary',retry_at:until});
+    if (until > Date.now()) return json({deferred:true,category:'secondary',retry_at:until,scope:{kind:'installation'}});
     const available = candidates.filter(r => {
       if (input.api && r.api!==input.api) return false;
       const b = this.budget(r.api);
@@ -195,6 +237,9 @@ export class InstallationScheduler extends DurableObject<Env> {
     // Prefer latency when quota pressure is similar. Large pressure differences
     // still preserve the scarcer pool for operations with no alternative API.
     available.sort((a,b)=>{
+      // REST list responses omit mergeability. Prefer the complete inventory
+      // recipe while its pool is usable; exhaustion still falls back to REST.
+      if(input.query.operation==='open_prs' && a.api!==b.api)return a.api==='graphql'?-1:1;
       const pa=this.pressure(a),pb=this.pressure(b);
       if (pa<=minimum*1.2 && pb<=minimum*1.2) {
         const stats=(r:Recipe)=>this.ctx.storage.sql.exec<any>('SELECT COUNT(*) n,AVG(latency) latency FROM accounting WHERE api=? AND operation=? AND status IN (200,304) AND at>?',r.api,input.query.operation,Date.now()-3600000).one();
@@ -212,7 +257,7 @@ export class InstallationScheduler extends DurableObject<Env> {
         if (result.status === 401) { token = await this.token(input.repository.installation,true); result = await request(); }
       } catch(error) {if(error instanceof QuotaDeferred) result=error.result;else throw error;}
       if (result.deferred) {
-        if (String(result.category).startsWith('secondary') || result.category==='capacity') return json(result);
+        if (String(result.category).startsWith('secondary') || result.category==='capacity') {this.registerCapacityWaiter(input.repository,result);return json(result);}
         continue;
       }
       if (result.status === 304) return json({unchanged:true,api:recipe.api,etag:result.etag});
@@ -271,15 +316,15 @@ export class InstallationScheduler extends DurableObject<Env> {
   }
   async batch(input:any): Promise<Response> {
     const b=this.budget('graphql'), until=await this.ctx.storage.get<number>('secondary_until') || 0;
-    if (until>Date.now()) return json({deferred:true,category:'secondary',retry_at:until});
+    if (until>Date.now()) return json({deferred:true,category:'secondary',retry_at:until,scope:{kind:'installation'}});
     if (!Array.isArray(input.jobs) || !input.jobs.length) throw new Error('invalid batch');
     const operation=input.jobs[0].query.operation;
     const limit=batchLimit(operation);
     const predicted=this.estimate(operation+'_batch','graphql',undefined,operation==='review_threads'?Math.max(1,Math.round(input.jobs.length*11/100)):1);
     const core=this.usable('core'),graphql=this.usable('graphql');
-    if(operation!=='review_threads' && core>=input.jobs.length && predicted/Math.max(1,graphql)>1.2*input.jobs.length/Math.max(1,core)) return json({deferred:true,category:'routing:core',retry_at:Date.now()});
+    if(!['pr','review_threads'].includes(operation) && core>=input.jobs.length && predicted/Math.max(1,graphql)>1.2*input.jobs.length/Math.max(1,core)) return json({deferred:true,category:'routing:core',retry_at:Date.now()});
     const deferred=this.deferral('graphql',predicted);if(deferred) return json(deferred);
-    if (input.jobs.length>limit || !['issue_comments','review_threads','statuses','reactions'].includes(operation)) throw new Error('invalid batch operation');
+    if (input.jobs.length>limit || !['pr','issue_comments','review_threads','statuses','reactions'].includes(operation)) throw new Error('invalid batch operation');
     const request=batchQuery(input.repository.name,input.jobs);
     let token=await this.token(input.repository.installation);
     let result=await this.http('/graphql',token,'POST',request,operation+'_batch','graphql');
@@ -294,14 +339,17 @@ export class InstallationScheduler extends DurableObject<Env> {
       if (!item) return {key:j.key,unavailable:true,retry_at:Date.now()+60000};
       try {
         const normalize=operation==='statuses'?(value:any)=>(value.status===null?[]:value.status.contexts.map((c:any)=>({context:c.context,state:c.state,startedAt:c.createdAt})))
-          :operation==='issue_comments'?recipes(input.repository.name,j.query).find(r=>r.api==='graphql')!.normalize
+          :['pr','issue_comments'].includes(operation)?recipes(input.repository.name,j.query).find(r=>r.api==='graphql')!.normalize
           :operation==='reactions'?(node:any)=>{if(!emojis[node.content])throw new Error('unsupported reaction');return {id:String(node.databaseId),content:emojis[node.content],created_at:node.createdAt,user:node.user || {}};}:(value:any)=>value;
         const field=operation==='review_threads'?'reviewThreads':operation==='reactions'?'reactions':'comments';
-        const recipe:Recipe={operation,api:'graphql',path:'/graphql',cost:1,collection:operation!=='statuses',connection:operation==='statuses'?['item']:['item',field],normalize};
+        const recipe:Recipe={operation,api:'graphql',path:'/graphql',cost:1,collection:!['pr','statuses'].includes(operation),connection:['pr','statuses'].includes(operation)?['item']:['item',field],normalize};
         const data=extract(recipe,{data:{item}});
         if(operation==='review_threads' && data.rows.some((thread:any)=>thread.comments.pageInfo.hasNextPage))return {key:j.key,continuation:{rows:data.rows,cursor:data.cursor},api:'graphql'};
         return {key:j.key,data:data.rows,api:'graphql',cursor:data.cursor};
-      }catch(error) {return {key:j.key,...this.unavailableResponse(input,operation,'graphql',error)};}
+      }catch(error) {
+        if(operation==='pr' && error instanceof Error && error.message==='labels overflow')return {key:j.key,restart:true,api:'core'};
+        return {key:j.key,...this.unavailableResponse(input,operation,'graphql',error)};
+      }
 
     })});
   }
@@ -401,77 +449,261 @@ export class InstallationScheduler extends DurableObject<Env> {
   prepareAccounting():void {
     const now=Date.now();if(this.preparedAccounting && now-this.preparedAccounting.at<60000)return;
     try {
+      this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS prepared_accounting(singleton INTEGER PRIMARY KEY CHECK(singleton=1),data TEXT NOT NULL)');
       const source='(SELECT api,operation,shape,batch_size,at,points,bytes,latency,predicted FROM accounting ORDER BY id DESC LIMIT 10000)';
       const bounds=this.ctx.storage.sql.exec<any>('SELECT COUNT(*) n,MIN(at) oldest FROM '+source).one();
-      this.preparedAccounting={at:now,scope:'retained_accounting_hour',window_complete:bounds.n<10000 || bounds.oldest<now-3600000,scanned_limit:10000,
+      const prepared={version:1,at:now,window_start:now-3600000,prepared_deployment:this.env.CF_VERSION?.id ?? null,scope:'retained_accounting_hour',window_complete:bounds.n<10000 || bounds.oldest<now-3600000,scanned_limit:10000,
         hour:this.ctx.storage.sql.exec('SELECT api,operation,COUNT(*) requests,SUM(points) points,SUM(points IS NULL) unmeasured,SUM(bytes) bytes,AVG(latency) latency FROM '+source+' WHERE at>? GROUP BY api,operation',now-3600000).toArray(),
         recipes:this.ctx.storage.sql.exec('SELECT api,operation,shape,batch_size,COUNT(*) requests,SUM(points) points,AVG(points) mean_points,MAX(points) max_points,AVG(predicted) predicted,AVG(latency) latency,MAX(latency) max_latency FROM '+source+' WHERE at>? GROUP BY api,operation,shape,batch_size',now-3600000).toArray()};
-    }catch(error) {log('installation_health_prepare_failed',{reason:classify(error)});}
+      this.ctx.storage.sql.exec('INSERT INTO prepared_accounting(singleton,data) VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET data=excluded.data',JSON.stringify(prepared));
+      this.preparedAccounting=prepared;
+      this.accountingPreparationFailure=null;
+    }catch(error) {this.accountingPreparationFailure={at:Date.now(),reason:classify(error)};log('installation_health_prepare_failed',this.accountingPreparationFailure);}
   }
-  async runnerCapacity(repo:Repository):Promise<Response> {
+  async cachedRunnerCapacity(repo:Repository):Promise<Response> {
+    // Status collectors may read an old snapshot, but never cause discovery,
+    // token acquisition, retry scheduling, or GitHub requests.
+    const organization=repo.name.split('/')[0];
+    let saved=await this.ctx.storage.get<any>('runner-capacity:'+organization);
+    if(saved?.complete!==true) saved=await this.ctx.storage.get<any>('runner-capacity-last-good:'+organization) || saved;
+    return json(saved?{...saved,cached:true,read_only:true}:{complete:false,organization,reason:'capacity_not_prepared',cached:true,read_only:true});
+  }
+  async runnerCapacity(repo:Repository & {namespace_cap?:number}):Promise<Response> {
+    const namespaceTarget=repo.namespace_cap ?? 20;
+    if(!Number.isSafeInteger(namespaceTarget) || namespaceTarget<1 || namespaceTarget>10000)return json({error:'invalid_namespace_cap'},400);
     const organization=repo.name.split('/')[0],key='runner-capacity:'+organization;
+    const answers=(value:any)=>value.namespace_discovery_target!==undefined && (value.complete!==true || value.routing_version===2 || value.placement_unavailable!=='capacity_namespace_target' || value.namespace_busy_lower_bound>=namespaceTarget);
+    // Reuse complete inventories and sufficient lower bounds across caps. An
+    // upgrade to a larger target uses the same organization cache and budget.
+    while(this.capacityFlight) {
+      const value=await this.capacityFlight;
+      if(value.organization===organization && answers(value))return json({cached:false,...value},value.complete?200:503);
+    }
     // Install the flight before the first storage await, so a finishing scan
     // cannot race a caller that already read an expired value.
     this.capacityFlight ||= (async()=>{
       const saved=await this.ctx.storage.get<any>(key);
-      if(saved?.retry_at>Date.now())return {...saved,cached:true};
-      const deadline=Date.now()+15000;
+      if(saved?.retry_at>Date.now() && answers(saved))return {...saved,cached:true};
+      // Retain the most informative requested target across refreshes, so mixed
+      // caps cannot multiply scans on every two-minute cache expiry.
+      const target=Math.max(namespaceTarget,saved?.namespace_discovery_target || 0);
+      const deadline=Date.now()+20000;
       const attempts=await this.ctx.storage.get<number[]>('runner-capacity-attempts') || [];
+      const bootstrapKey='runner-capacity-label-bootstrap-v2:'+organization;
+      const bootstrap=await this.ctx.storage.get<{spent:number;done:boolean}>(bootstrapKey) || {spent:0,done:false};
       try {
+        // Only immutable job labels and already-assigned identities are reused;
+        // every scan still gets live job IDs/statuses. This is not job history.
+        this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS runner_capacity_jobs(key TEXT PRIMARY KEY,revision TEXT NOT NULL,jobs TEXT NOT NULL,seen_at INTEGER NOT NULL)');
+        this.ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS runner_capacity_jobs_seen ON runner_capacity_jobs(seen_at)');
+        this.ctx.storage.sql.exec('DELETE FROM runner_capacity_jobs WHERE seen_at<?',Date.now()-3600000);
+        this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS runner_capacity_ranges(key TEXT PRIMARY KEY,boundaries TEXT NOT NULL,seen_at INTEGER NOT NULL)');
+        this.ctx.storage.sql.exec('DELETE FROM runner_capacity_ranges WHERE seen_at<?',Date.now()-3600000);
+        const queuedCache={
+          getRanges:(key:string)=>{
+            const row=this.ctx.storage.sql.exec<any>('SELECT boundaries FROM runner_capacity_ranges WHERE key=?',key).toArray()[0];
+            if(!row)return undefined;
+            try {const values=JSON.parse(row.boundaries);return Array.isArray(values)?values:undefined;}
+            catch {return undefined;}
+          },
+          putRanges:(key:string,boundaries:number[])=>{
+            if(!boundaries.length){this.ctx.storage.sql.exec('DELETE FROM runner_capacity_ranges WHERE key=?',key);return;}
+            this.ctx.storage.sql.exec('INSERT INTO runner_capacity_ranges VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET boundaries=excluded.boundaries,seen_at=excluded.seen_at',key,JSON.stringify(boundaries),Date.now());
+          },
+          get:(key:string,revision:string)=>{
+            const row=this.ctx.storage.sql.exec<any>('SELECT jobs FROM runner_capacity_jobs WHERE key=? AND revision=?',key,revision).toArray()[0];
+            if(!row)return undefined;
+            let jobs:any;
+            try {
+              jobs=JSON.parse(row.jobs);
+              if(!Array.isArray(jobs) || !jobs.every(job=>
+                job && /^\d+$/.test(String(job.id)) && typeof job.status==='string' &&
+                Array.isArray(job.labels) && job.labels.every((label:unknown)=>typeof label==='string')))throw new Error('invalid cache');
+            }catch {
+              this.ctx.storage.sql.exec('DELETE FROM runner_capacity_jobs WHERE key=?',key);return undefined;
+            }
+            this.ctx.storage.sql.exec('UPDATE runner_capacity_jobs SET seen_at=? WHERE key=?',Date.now(),key);
+            return jobs;
+          },
+          put:(key:string,revision:string,jobs:any[])=>{
+            this.ctx.storage.sql.exec('INSERT INTO runner_capacity_jobs VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET revision=excluded.revision,jobs=excluded.jobs,seen_at=excluded.seen_at',key,revision,JSON.stringify(jobs),Date.now());
+          },
+        };
         const token=await this.token(repo.installation);
-        const snapshot=await scanHostedCapacity(organization,async path=>{
+        const snapshot=await scanHostedCapacity(organization,async (path,body)=>{
+          const api=body?'graphql':'core';
           const until=await this.ctx.storage.get<number>('secondary_until') || 0;
           if(until>Date.now() || this.usable('core')<=1500)throw new Error('capacity_quota_reserve');
+          if(api==='graphql' && this.usable('graphql')<=1000)throw new Error('capacity_graphql_reserve');
           while(attempts.length && attempts[0]<Date.now()-3600000)attempts.shift();
-          if(attempts.length>=500)throw new Error('capacity_hourly_budget');
+          if(attempts.length>=2400)throw new Error('capacity_hourly_budget');
           // Persist before launching: a lost network response still consumes allowance.
           attempts.push(Date.now());await this.ctx.storage.put('runner-capacity-attempts',attempts);
+          if(!bootstrap.done) {
+            bootstrap.spent=Math.min(800,bootstrap.spent+1);
+            if(bootstrap.spent>=800)bootstrap.done=true;
+            await this.ctx.storage.put(bootstrapKey,bootstrap);
+          }
           for(;;) {
-            try {return await this.http(path,token,'GET',undefined,'runner_capacity','core');}
+            try {return await this.http(path,token,body?'POST':'GET',body,'runner_capacity',api);}
             catch(error) {
               if(!(error instanceof QuotaDeferred) || error.result.category!=='capacity' || Date.now()+250>deadline)throw error;
-              await new Promise(resolve=>setTimeout(resolve,250));
+              if(error.result.scope?.kind==='installation' && Number.isSafeInteger(error.result.retry_at)){
+                if(!await this.waitRunnerCapacity(error.result.retry_at,deadline))throw error;
+              }else await new Promise(resolve=>setTimeout(resolve,250));
             }
           }
-        });
-        const value={complete:true,organization,...snapshot,retry_at:Date.now()+30000,coverage:'organization_repository_inventory'};
-        await this.ctx.storage.put(key,value);return value;
+        },target,queuedCache);
+        if(snapshot.routing_version===2 && !bootstrap.done){bootstrap.done=true;await this.ctx.storage.put(bootstrapKey,bootstrap);}
+        // A 145-second cache permits at most 25 full scans per rolling hour:
+        // 25 * 96 attempts fits the unchanged 2400-attempt ceiling.
+        // Target upgrades also charge the same hard hourly attempt allowance.
+        // Active pickers can continue a productive partial pass after a shared
+        // cooldown. Keep both the per-pass and hourly provider budgets intact.
+        const continuing=snapshot.placement_unavailable==='capacity_scan_limit' && snapshot.job_cache_writes>0 &&
+          (!saved || snapshot.job_cache_hits>(saved.job_cache_hits || 0)) &&
+          (attempts.length<900 || !bootstrap.done && attempts.length<2208);
+        const value={complete:true,organization,namespace_discovery_target:target,...snapshot,retry_at:Date.now()+(continuing?30000:145000),coverage:snapshot.routing_version===2?'organization_repository_inventory':'organization_running_inventory'};
+        await this.ctx.storage.put(key,value);
+        await this.ctx.storage.put('runner-capacity-last-good:'+organization,value);
+        return value;
       } catch(error) {
-        const value={complete:false,organization,reason:error instanceof QuotaDeferred?'capacity_deferred':error instanceof Error && error.message.startsWith('capacity_')?error.message:classify(error),retry_at:Math.max(Date.now()+120000,error instanceof QuotaDeferred?error.result.retry_at || 0:0)};
+        const value={complete:false,organization,namespace_discovery_target:target,reason:error instanceof QuotaDeferred?'capacity_deferred':error instanceof Error && error.message.startsWith('capacity_')?error.message:classify(error),retry_at:Math.max(Date.now()+145000,error instanceof QuotaDeferred?error.result.retry_at || 0:0)};
         await this.ctx.storage.put(key,value);return value;
       }
     })().finally(()=>{this.capacityFlight=undefined;});
     const value=await this.capacityFlight;return json({cached:false,...value},value.complete?200:503);
   }
+  private releaseCapacityHints(count:number):void {
+    this.capacityReleaseHints=Math.min(settings(this.env).concurrency,this.capacityReleaseHints+count);
+    this.notifyCapacityWaiters();
+  }
+  private registerCapacityWaiter(repo:Repository|undefined,result:any):void {
+    if(!repo || result?.category!=='capacity' || result.scope?.kind!=='installation')return;
+    // Optional hints are bounded by configured repositories. Unknown callers
+    // keep ordinary quota handling and cron; this never rejects their request.
+    let known:Repository|undefined;
+    try{known=repositories(this.env).find(candidate=>candidate.id===repo.id && candidate.installation===repo.installation);}catch{return;}
+    if(!known)return;
+    this.capacityWaiters.set(repo.id,{repository:known});
+    // A reservation may have been released between rejection and registration.
+    this.notifyCapacityWaiters();
+  }
+  private async waitRunnerCapacity(readyAt:number,deadline:number):Promise<boolean> {
+    // One coalesced scan has at most three parallel reads. These local wake
+    // recipients share the same best-effort hints as repository recipients;
+    // they never hold or grant a reservation. Ordinary requests use no probe.
+    const id='runner:'+crypto.randomUUID(),entry={readyAt,wake:()=>{}};
+    let timer:ReturnType<typeof setTimeout>|undefined;
+    try{
+      for(;;){
+        const now=Date.now();if(now>=deadline)return false;
+        const wake=new Promise<void>(resolve=>entry.wake=resolve);
+        this.capacityWaiters.set(id,entry);
+        if(now>=readyAt){
+          // Only after an actual scoped rejection and its real retry deadline.
+          // While still full, retain this eligible registration instead of
+          // manufacturing another250ms deferral that misses every release.
+          try{if(this.ctx.storage.sql.exec<any>('SELECT COUNT(*) n FROM reservations WHERE expires>?',now).one().n<settings(this.env).concurrency)return true;}
+          catch{return true;} // A failed optional hint falls back to real http.
+        }
+        this.notifyCapacityWaiters();
+        const delay=Math.min(deadline-now,now<readyAt?readyAt-now:250);
+        await Promise.race([wake,new Promise<void>(resolve=>{timer=setTimeout(resolve,delay);})]);
+        if(timer!==undefined){clearTimeout(timer);timer=undefined;}
+      }
+    }finally{if(timer!==undefined)clearTimeout(timer);this.capacityWaiters.delete(id);}
+  }
+  private notifyCapacityWaiters():void {
+    if(!this.capacityWaiters.size || !this.capacityReleaseHints)return;
+    try{
+    const active=this.ctx.storage.sql.exec<any>('SELECT COUNT(*) n FROM reservations WHERE expires>?',Date.now()).one().n;
+    this.capacityReleaseHints=Math.min(this.capacityReleaseHints,Math.max(0,settings(this.env).concurrency-active));
+    for(const [id,recipient] of this.capacityWaiters) {
+      if(!this.capacityReleaseHints)break;
+      if('wake' in recipient){
+        if(recipient.readyAt>Date.now())continue;
+        this.capacityWaiters.delete(id);this.capacityReleaseHints--;this.capacityWakeStats.runner++;recipient.wake();continue;
+      }
+      // Hints cannot occupy all of the Worker's outgoing connections. They do
+      // not hold quota reservations, and ordinary requests never await them.
+      if(this.capacityNotifying.size)continue;
+      if(this.capacityNotifying.has(id))continue;
+      const repo=recipient.repository;
+      this.capacityWaiters.delete(id);this.capacityReleaseHints--;this.capacityNotifying.add(id);this.capacityWakeStats.repository++;
+      const work=Promise.resolve().then(()=>stub(this.env.REPOSITORIES,id).fetch('https://internal/capacity-ready',{
+        method:'POST',body:JSON.stringify({installation:repo.installation}),signal:AbortSignal.timeout(1500)
+      })).then(async response=>{const ok=response.ok;await response.body?.cancel();if(!ok)throw Error('capacity wake unavailable');}).catch(()=>{
+        try{log('capacity_wake_failed',{reason:'notification_unavailable'});}catch{}
+      }).finally(()=>{this.capacityNotifying.delete(id);this.notifyCapacityWaiters();});
+      this.ctx.waitUntil?.(work);
+    }
+    }catch{try{log('capacity_wake_failed',{reason:'notification_unavailable'});}catch{}}
+  }
+  private availability(repo?:Repository):Response {
+    const active=this.ctx.storage.sql.exec<any>('SELECT COUNT(*) n FROM reservations WHERE expires>?',Date.now()).one().n;
+    const result=active>=settings(this.env).concurrency
+      ?{deferred:true,category:'capacity',retry_at:Date.now()+250,scope:{kind:'installation'}}
+      :{available:true};
+    // A lost notification or installation restart can leave a repository's
+    // capacity restriction alive after its advisory registration was lost.
+    // A full hint renews that bounded registration; requests still reserve
+    // capacity normally, and an unknown optional recipient changes no result.
+    if(result.deferred)this.registerCapacityWaiter(repo,result);
+    return json(result);
+  }
+  protected get repairHopLimit():number{return INSTALLATION_HOP_MS;}
   async fetch(req: Request): Promise<Response> {
+    const path=new URL(req.url).pathname;
+    if(!['/read','/batch'].includes(path))return this.handleFetch(req);
+    // The installation hop itself must recover even if a caller is canceled.
+    // This bounds one RPC, never a complete paginated history or repository turn.
+    let timer:ReturnType<typeof setTimeout>|undefined;
+    const actual=this.handleFetch(req);
+    this.ctx.waitUntil?.(actual.then(()=>{},()=>{}));
+    try{return await Promise.race([actual,new Promise<Response>(()=>{
+      timer=setTimeout(()=>this.ctx.abort('installation_transport_stalled'),this.repairHopLimit);
+    })]);}finally{if(timer!==undefined)clearTimeout(timer);}
+  }
+  private async handleFetch(req: Request): Promise<Response> {
     let tracked:string|undefined;
     try {
       const path = new URL(req.url).pathname;
-      if(['/read','/batch','/measure','/audit'].includes(path) && ['test','production'].includes(this.env.MIGRATION_ENVIRONMENT || '')) {
-        const input:any=await req.clone().json(),repo=path==='/audit'?input:input.repository;
+      let input:any;
+      if(['/read','/batch','/measure','/audit'].includes(path)) {
+        input=await req.json();const repo=path==='/audit'?input:input.repository;
         if(typeof repo?.id==='string') {tracked=repo.id;this.repositoryRequests.set(tracked!,1+(this.repositoryRequests.get(tracked!) || 0));}
-        if(repo?.id && blocksRepairs(await readMigration(this.env.ARCHIVE,repo.id)))return json({unavailable:true,reason:'migration_frozen',retry_at:Date.now()+60000},503);
+        if(['test','production'].includes(this.env.MIGRATION_ENVIRONMENT || '') && repo?.id && blocksRepairs(await readMigration(this.env.ARCHIVE,repo.id)))return json({unavailable:true,reason:'migration_frozen',retry_at:Date.now()+60000},503);
+      }
+      if(path==='/availability'){
+        let repo:Repository|undefined;
+        try{repo=(await req.json() as any)?.repository;}catch{}
+        return this.availability(repo);
       }
       if (path==='/runner-capacity') return await this.runnerCapacity(await req.json() as Repository);
-      if (path==='/read') return await this.read({...await req.json() as object,request_id:requestId(req)});
-      if (path==='/batch') return await this.batch({...await req.json() as object,request_id:requestId(req)});
-      if (path==='/measure') return await this.measure({...await req.json() as object,request_id:requestId(req)});
+      if (path==='/runner-capacity-cached') return await this.cachedRunnerCapacity(await req.json() as Repository);
+      if (path==='/read') return await this.read({...input,request_id:requestId(req)});
+      if (path==='/batch') return await this.batch({...input,request_id:requestId(req)});
+      if (path==='/measure') return await this.measure({...input,request_id:requestId(req)});
       if (path==='/maintenance') {
-        this.expireAccounting();this.prepareAccounting();return json({ok:true,telemetry_failure:this.accountingFailure});
+        this.expireAccounting();this.prepareAccounting();await this.ensureAccountingIndex();return json({ok:true,telemetry_failure:this.accountingFailure,accounting_preparation_failure:this.accountingPreparationFailure ?? null});
       }
       if (path==='/audit') {
         this.expireAccounting();
-        const repo=await req.json() as Repository;
+        const repo=input as Repository;
         this.auditFlight ||= this.audit(repo).finally(()=>{this.auditFlight=undefined;});
         await this.auditFlight;return json({ok:true});
       }
-      if (path==='/health') return json({repository_inflight:[...this.repositoryRequests].map(([repository,requests])=>({repository,requests})),redelivery_failure:await this.ctx.storage.get('last_redelivery_failure') || null,reconciliation_version:2,deployment_id:this.env.CF_VERSION?.id,settings:settings(this.env),inflight:this.ctx.storage.sql.exec('SELECT resource,COUNT(*) requests,SUM(cost) reserved_points FROM reservations WHERE expires>? GROUP BY resource',Date.now()).toArray(),budgets:this.ctx.storage.sql.exec('SELECT * FROM budgets').toArray(),quota_types:this.ctx.storage.sql.exec('SELECT * FROM quota_types').toArray(),...(this.preparedAccounting?{...this.preparedAccounting,stale:Date.now()-this.preparedAccounting.at>180000}:this.accountingMetrics.snapshot()),telemetry_failure:this.accountingFailure});
+      if (path==='/health') return json({capacity_wakes:{...this.capacityWakeStats},repository_inflight:[...this.repositoryRequests].map(([repository,requests])=>({repository,requests})),redelivery_failure:await this.ctx.storage.get('last_redelivery_failure') || null,reconciliation_version:2,deployment_id:this.env.CF_VERSION?.id,settings:settings(this.env),inflight:this.ctx.storage.sql.exec('SELECT resource,COUNT(*) requests,SUM(cost) reserved_points FROM reservations WHERE expires>? GROUP BY resource',Date.now()).toArray(),budgets:this.ctx.storage.sql.exec('SELECT * FROM budgets').toArray(),quota_types:this.ctx.storage.sql.exec('SELECT * FROM quota_types').toArray(),...(this.preparedAccounting?{...this.preparedAccounting,stale:Date.now()-this.preparedAccounting.at>180000}:this.accountingMetrics.snapshot()),telemetry_failure:this.accountingFailure,accounting_preparation_failure:this.accountingPreparationFailure ?? null});
       return json({error:'not_found'},404);
     } catch (error) {
-      if (error instanceof QuotaDeferred) return json(error.result);
+      if (error instanceof QuotaDeferred) {
+        let repo:Repository|undefined;try{repo=tracked?repositories(this.env).find(repo=>repo.id===tracked):undefined;}catch{}
+        this.registerCapacityWaiter(repo,error.result);return json(error.result);
+      }
       const reason=error instanceof Error && error.message==='malformed_upstream_response'?'malformed_upstream_response':classify(error),request_id=requestId(req);
       try {log('installation_operation_failed',{reason,request_id});}catch {}
-      return json({unavailable:true,reason,request_id,...(reason==='malformed_upstream_response'?{}:{retry_at:Date.now()+60000})},503);
+      return json({unavailable:true,reason,request_id,failure_kind:reason==='malformed_upstream_response'?'transport':'unknown',...(reason==='malformed_upstream_response'?{}:{retry_at:Date.now()+60000})},503);
     } finally {if(tracked) {const remaining=(this.repositoryRequests.get(tracked) || 1)-1;if(remaining)this.repositoryRequests.set(tracked,remaining);else this.repositoryRequests.delete(tracked);}}
   }
 }

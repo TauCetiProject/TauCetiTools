@@ -1,7 +1,7 @@
-import { Env, EventPointer, matchesETag, Query, Repository, authorize, digest, json, repositories, repository, stub, validSignature, validateQuery, parseGitHub, CI_EVENTS } from './protocol';
+import { Env, EventPointer, matchesETag, Query, Repository, authorize, digest, json, repositories, repository, stub, validSignature, validateQuery, parseGitHub, CI_EVENTS, publicQuery } from './protocol';
 import { blocksRepairs, holdsRetention, readMigration } from './migration';
 import { classify, log, requestId } from './storage';
-import { PARK_AFTER_ATTEMPTS, backlog, backoff, drain, maintainIngress, maintainRaw, release, ingressMode, noteRepositoryFull, park, reconcile, setIngressMode, storageState } from './ingress';
+import { PARK_AFTER_ATTEMPTS, backlog, backoff, replayIngress, maintainIngress, maintainRaw, release, ingressMode, noteRepositoryFull, park, reconcile, setIngressMode, storageState } from './ingress';
 import { prepareQueueMetrics } from './queue_monitoring';
 import { authorizeCompute, boundedText, prepareProvider, saveCompute } from './provider_monitoring';
 import { R2_CLASSES, policy, retirePrefix } from './retention';
@@ -18,10 +18,25 @@ const STORAGE_OPERATIONS=new Set(['ownership','scan','cleanup','probe','fault','
 async function query(req:Request,env:Env,q:Query,request_id:string): Promise<Response> {
   try { validateQuery(q); } catch { return json({error:'invalid_query'},400); }
   const repo=repository(env,q.repository);
-  if (!await authorize(req,env)) return json({error:'unauthorized'},401);
-  if (!repo || !await authorize(req,env,repo.name)) return json({version:1,repository:q.repository,operation:q.operation,status:'unavailable',revision:0,complete:false,reason:'repository_unavailable'});
+  const authenticated=Boolean(repo) && await authorize(req,env,repo!.name);
+  if (!authenticated && !publicQuery(env,repo)) {
+    if (!await authorize(req,env)) return json({error:'unauthorized'},401);
+    return json({version:1,repository:q.repository,operation:q.operation,status:'unavailable',revision:0,complete:false,reason:'repository_unavailable'});
+  }
+  if (!repo) return json({error:'repository_unavailable'},403);
+  if(!authenticated) {
+    if(!env.PUBLIC_QUERY_LIMIT)return json({error:'public_reads_unavailable'},503);
+    try {
+      const allowed=await env.PUBLIC_QUERY_LIMIT.limit({key:repo.id+':'+(req.headers.get('CF-Connecting-IP') || 'unknown')});
+      if(!allowed.success)return json({error:'public_rate_limited'},429,{'Retry-After':'60'});
+    } catch {
+      // A binding outage affects this public query only. Mixed batches retain
+      // their independent authenticated results and workers use normal fallback.
+      return json({error:'public_reads_unavailable'},503);
+    }
+  }
   let response:Response;const started=Date.now();
-  try {response=await stub(env.REPOSITORIES,repo.id).fetch('https://internal/query',{method:'POST',headers:{'If-None-Match':req.headers.get('If-None-Match') || '','x-request-id':request_id},body:JSON.stringify({...q,repository:repo.name})});}
+  try {response=await stub(env.REPOSITORIES,repo.id).fetch('https://internal/'+(authenticated?'query':'public-query'),{method:'POST',headers:{'If-None-Match':req.headers.get('If-None-Match') || '','x-request-id':request_id,'x-query-dispatched-at':String(started),'x-query-readonly':authenticated?'0':'1'},body:JSON.stringify({...q,repository:repo.name})});}
   catch(error) {
     const reason=classify(error);
     if (reason==='storage_full') await noteRepositoryFull(env,repo.id,'query',started).catch(()=>{});
@@ -80,11 +95,19 @@ export default {
         return json({accepted:true},202);
       }
       // Reporting never enters query(), noteDemand(), configure(), or the scheduler.
-      if (url.pathname==='/v1/runner-capacity' && req.method==='GET') {
+      if (['/v1/runner-capacity','/v1/runner-capacity/cached'].includes(url.pathname) && req.method==='GET') {
         const repo=repository(env,url.searchParams.get('repository') || '');
         if(!repo || !await authorize(req,env,repo.name))return json({error:'unauthorized'},401);
-        return stub(env.INSTALLATIONS,repo.installation).fetch('https://internal/runner-capacity',{
+        const cachedOnly=url.pathname.endsWith('/cached')?'true':url.searchParams.get('cached_only');
+        if(cachedOnly!==null && cachedOnly!=='true')return json({error:'invalid_cached_only'},400);
+        if(cachedOnly==='true')return stub(env.INSTALLATIONS,repo.installation).fetch('https://internal/runner-capacity-cached',{
           method:'POST',body:JSON.stringify(repo)});
+        const rawCap=url.searchParams.get('namespace_cap');
+        if(rawCap!==null && !/^[1-9]\d{0,4}$/.test(rawCap))return json({error:'invalid_namespace_cap'},400);
+        const namespaceCap=rawCap===null?20:Number(rawCap);
+        if(namespaceCap>10000)return json({error:'invalid_namespace_cap'},400);
+        return stub(env.INSTALLATIONS,repo.installation).fetch('https://internal/runner-capacity',{
+          method:'POST',body:JSON.stringify({...repo,namespace_cap:namespaceCap})});
       }
       if (url.pathname==='/v1/activity' && req.method==='POST') {
         if (!await authorize(req,env)) return json({error:'unauthorized'},401);
@@ -96,6 +119,16 @@ export default {
         if (!repo || !await authorize(req,env,repo.name)) return json({error:'repository_unavailable'},403);
         if (!Array.isArray(input.numbers) || input.numbers.length>500 || input.numbers.some((n:any)=>!Number.isSafeInteger(n) || n<=0)) return json({error:'invalid_numbers'},400);
         return stub(env.REPOSITORIES,repo.id).fetch('https://internal/activity',{method:'POST',body:JSON.stringify({repository:repo.name,numbers:[...new Set(input.numbers)]})});
+      }
+      if(url.pathname==='/v1/refresh-pr' && req.method==='POST'){
+        if(!await authorize(req,env))return json({error:'unauthorized'},401);
+        const text=await req.text();if(text.length>4096)return json({error:'payload_too_large'},413);
+        let input:any;try{input=parseGitHub(text);}catch{return json({error:'invalid_json'},400);}
+        const repo=repository(env,input?.repository);
+        if(!repo || !await authorize(req,env,repo.name))return json({error:'repository_unavailable'},403);
+        if(!Number.isSafeInteger(input.number) || input.number<=0 || !/^[a-f0-9]{40}$/.test(input.expected_head || '') || input.observed_head!==undefined && !/^[a-f0-9]{40}$/.test(input.observed_head))return json({error:'invalid_request'},400);
+        // This optional capability never sets a host-wide Retry-After header.
+        return stub(env.REPOSITORIES,repo.id).fetch('https://internal/refresh-pr',{method:'POST',body:JSON.stringify({...input,repository:repo.name})});
       }
       if (url.pathname==='/v1/query' && req.method==='GET') {
         let args; try { args=parseGitHub(url.searchParams.get('args') || '{}'); } catch { return json({error:'invalid_args'},400); }
@@ -168,7 +201,7 @@ export default {
             const barrier=await forward('/storage/ingress',{mode:input.mode,repository_id:repo.id});
             return json({...mode,repository:await barrier.json()},barrier.status);
           }
-          if (url.pathname==='/admin/ingress/replay' && req.method==='POST') return json(await drain(env,repo,{limit:input.limit,held:input.held===true}));
+          if (url.pathname==='/admin/ingress/replay' && req.method==='POST') return json(await replayIngress(env,repo,{limit:input.limit,held:input.held===true}));
           if (url.pathname==='/admin/ingress/reconcile' && req.method==='POST') return json(await reconcile(env,repo,input,(payload,event)=>targets(env,payload,event)));
         } catch(error) {return json({error:error instanceof Error?error.message.slice(0,200):'invalid_request',request_id},400);}
         return json({error:'not_found'},404);

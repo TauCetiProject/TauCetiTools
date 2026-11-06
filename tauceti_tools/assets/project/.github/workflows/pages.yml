@@ -40,6 +40,7 @@ on:
       - 'scripts/pr_stats_graphs.py'
       - 'scripts/pipeline_health.py'
       - 'scripts/ci_stats_graphs.py'
+      - 'scripts/ci_report_assets.py'
       - 'scripts/ci_daily_graphs.py'
       - 'scripts/generated_assets.py'
       - 'scripts/roadmap_progress.py'
@@ -158,6 +159,28 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: git clone --quiet https://github.com/TauCetiProject/TauCetiRoadmap.git /tmp/roadmap
 
+      # Compare every historical library point with the same pinned Mathlib tree.
+      # No Mathlib build or oleans are needed: only Lean source line counts.
+      - name: Read the pinned Mathlib revision
+        id: statistics-mathlib
+        working-directory: ${{ github.workspace }}
+        run: |
+          ref=$(jq -er '.packages[] | select(.name == "mathlib") | .rev' lake-manifest.json)
+          [[ "$ref" =~ ^[0-9a-f]{40}$ ]]
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout Mathlib source for the statistics baseline
+        uses: actions/checkout@v4
+        with:
+          repository: leanprover-community/mathlib4
+          ref: ${{ steps.statistics-mathlib.outputs.ref }}
+          path: .statistics-mathlib
+          persist-credentials: false
+          sparse-checkout: |
+            /Mathlib/
+            /Mathlib.lean
+          sparse-checkout-cone-mode: false
+
       # Overwrites the checked-in SVGs in the runner only (never committed back). The
       # versions tracked in web/static_files/ are just fallback snapshots so a local
       # `cd web && lake exe web` renders something; refresh them by running these same
@@ -166,7 +189,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           python3 scripts/loc_graph.py \
-            --repo . --ref HEAD \
+            --repo . --ref HEAD --mathlib-repo .statistics-mathlib \
             --title "Tau Ceti — lines of Lean" --accent "#ff9d4d" \
             --out web/static_files/loc-tauceti.svg \
             --dump-data "$RUNNER_TEMP/library-loc.json" \
@@ -333,18 +356,16 @@ jobs:
             fi
           }
 
-      # TauCetiCI records every Actions run in the organisation and publishes a SQLite database
-      # after collection; the CI charts use independent source coverage. The release is public, so the
-      # download needs no credentials beyond the token gh wants to have.
+      # Cache the already-published CI charts. The site build does not collect CI
+      # data or download/rebuild the historical SQLite database.
       - name: Regenerate the CI charts into static_files
         working-directory: ${{ github.workspace }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          python3 scripts/ci_stats_graphs.py --download --db "$RUNNER_TEMP/ci.sqlite" \
-            --out-dir web/static_files \
+          python3 scripts/ci_report_assets.py --out-dir web/static_files \
           || {
-            echo "::warning::Some CI chart groups are stale or failed; dated daily charts refresh through their coverage, other stale groups retain their previous SVGs; see static/ci-freshness.json for errors"
+            echo "::warning::Some published CI chart groups are unavailable; retained their previous SVGs; see static/ci-freshness.json"
             echo "CI chart groups (see static/ci-freshness.json)" >> "$RUNNER_TEMP/data-failures"
           }
 

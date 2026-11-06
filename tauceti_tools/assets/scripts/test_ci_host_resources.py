@@ -373,12 +373,12 @@ class HostResourcesTests(unittest.TestCase):
         self.assertNotIn('--bind "$RUNNER_TEMP"', workflow)
         self.assertNotIn('--ro-bind "$RUNNER_TEMP"', workflow)
         step = workflow.split('- name: Upload trusted host resource observations')[1].split('- name:')[0]
-        self.assertIn('if: always()', step)
+        self.assertIn("vars.CI_RESOURCE_EXPERIMENT == '1'", step)
         self.assertIn('continue-on-error: true', step)
         publication = (HERE.parent / '.github/workflows/publish-lake-cache.yml').read_text()
         observe = publication.split('- name: Observe publication volume')[1]
         self.assertNotIn('LAKE_CACHE_KEY', observe)
-        self.assertIn('publisher-tools/scripts/ci_publication_observation.py', observe)
+        self.assertRegex(observe, r'publisher-tools/(?:tauceti_tools/assets/)?scripts/ci_publication_observation\.py')
         self.assertIn('--plan \"$RUNNER_TEMP/lake-publication-plan\"', observe)
         self.assertIn('scripts/ci_publication_observation.py', publication.split('- name: Download')[0])
 

@@ -266,6 +266,7 @@ def cli():
             config["queues"]["consumers"][1]["queue"] = name + "-events-dlq"
             config["env"] = {}
             target = config
+            target.get("vars", {}).pop("PUBLIC_READ_REPOSITORIES", None)
         target["vars"] = {
             **target.get("vars", {}),
             **{k: settings[k] for k in ["GITHUB_APP_ID", "GITHUB_INSTALLATION_ID", "ALLOWED_REPOSITORIES"]},

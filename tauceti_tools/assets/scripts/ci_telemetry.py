@@ -9,7 +9,7 @@ Reads what `sandbox-build.sh` left in the telemetry directory:
   lake-build.log   the `lake build` output: one `✔ [i/N] <Verb> <Module> (<time>)` line per job
 
 and writes `tauceti-ci.telemetry/v1`: the phases with their durations, and the build's jobs counted
-by verb (Built, Unpacked from the artifact cache, Replayed, ...) with the slowest built modules.
+by verb (Built, Unpacked from the artifact cache, Replayed, ...) without retaining per-module records.
 Extra context (the runner picker's decision) comes from `--meta key=value` pairs.
 
 Everything read here was written inside the sandbox, where candidate code runs, so it is recorded
@@ -29,7 +29,6 @@ import stat
 from pathlib import Path
 
 LINE = re.compile(r"^[✔⚠✖]\s*\[(\d+)/(\d+)\]\s+(\w+)\s+(\S+)(?:\s+\(([\d.]+)(ms|s)\))?")
-MAX_MODULES = 500
 MAX_LINES = 200_000
 MAX_BYTES = {"phases.tsv": 64 * 1024, "lake-build.log": 64 * 1024 * 1024}
 
@@ -88,8 +87,6 @@ def phases(text: str) -> list[dict]:
 
 def build_log(text: str) -> dict:
     verbs: dict[str, int] = {}
-    built: list[tuple[str, float]] = []
-    total = 0
     if not text:
         return {}
     for i, line in enumerate(text.splitlines()):
@@ -98,19 +95,10 @@ def build_log(text: str) -> dict:
         m = LINE.match(line.strip())
         if not m:
             continue
-        total = max(total, int(m.group(2)))
-        verb, module = m.group(3)[:20], m.group(4)
+        verb = m.group(3)[:20]
         verbs[verb] = verbs.get(verb, 0) + 1
-        if verb == "Built" and m.group(5):
-            secs = float(m.group(5)) / (1000 if m.group(6) == "ms" else 1)
-            built.append((module[:200], secs))
-    built.sort(key=lambda x: -x[1])
-    return {
-        "jobs_total": total,
-        "jobs_by_verb": verbs,
-        "built_seconds_total": round(sum(s for _, s in built), 1),
-        "slowest_built": [{"module": m, "seconds": round(s, 2)} for m, s in built[:MAX_MODULES]],
-    }
+    return {"jobs_by_verb": verbs}
+
 
 
 def main(argv=None):

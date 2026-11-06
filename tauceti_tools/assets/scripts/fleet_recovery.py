@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Bound queued fleet startup using the SAME workflow run's second attempt.
+"""Bound queued fleet startup using another attempt of the SAME workflow run.
 
 Using rerun instead of repository_dispatch preserves bors's unique staging-run
-identity. Attempt two is forced to Namespace by the trusted picker. Force-cancel
-bypasses always() finalizers; failed recovery publishes an infrastructure verdict.
+identity. The picker skips machines whose earlier attempt never acquired a runner.
+Force-cancel bypasses always() finalizers; failed recovery publishes a fenced
+infrastructure verdict. PR retries require the original head to remain current.
 """
 
-from http.client import HTTPException
 import os
 import re
 import sys
 import time
 import urllib.error
+from http.client import HTTPException
 
 from github_api import APIError, Deferred, GitHub
 
@@ -19,6 +20,7 @@ TITLE = re.compile(
     r"^bors branch=[^ ]+ batch=[1-9][0-9]* head=(?P<head>[0-9a-f]{40}) base=[0-9a-f]{40}$"
 )
 
+PR_TITLE = re.compile(r"^pr-build pr=(?P<pr>[1-9][0-9]*) head=(?P<head>[0-9a-f]{40})$")
 
 _client = None
 
@@ -34,15 +36,15 @@ def api(path, data=None):
                            idempotent=path.startswith("/statuses/"))
 
 
-def eligible(run):
-    """Accept only initial bors dispatches with the expected repository, path and title."""
-    return (
-        run.get("event") == "repository_dispatch"
-        and run.get("run_attempt") == 1
-        and bool(TITLE.fullmatch(run.get("display_title", "")))
-        and run.get("path") == ".github/workflows/pr-build.yml"
-        and run.get("repository", {}).get("full_name") == "TauCetiProject/TauCeti"
-    )
+def eligible(run, *, policy=False):
+    """Accept immutable build identities from the trusted repository and workflow."""
+    staging = run.get("event") == "repository_dispatch" and bool(TITLE.fullmatch(run.get("display_title", "")))
+    pr = policy and run.get("event") in ("pull_request_target", "repository_dispatch") and bool(PR_TITLE.fullmatch(run.get("display_title", "")))
+    attempt = run.get("run_attempt")
+    return ((staging or pr) and type(attempt) is int and attempt >= 1
+            and (policy or attempt == 1) and run.get("path") == ".github/workflows/pr-build.yml"
+            and run.get("repository", {}).get("full_name") == "TauCetiProject/TauCeti")
+
 
 
 def build_job(data):
@@ -61,7 +63,7 @@ def build_job(data):
 
 
 def recover(
-    run_id, *, fetch=api, clock=time.monotonic, sleep=time.sleep
+    run_id, *, fetch=api, clock=time.monotonic, sleep=time.sleep, policy=False
 ):
     """Bound first-attempt fleet acquisition and request a same-run Namespace retry.
 
@@ -85,23 +87,24 @@ def recover(
                 sleep(5 * (attempt + 1))
 
     run = fetch(f"/actions/runs/{run_id}")
-    if not eligible(run):
+    if not eligible(run, policy=policy):
         return "not-an-initial-bors-attempt"
     try:
-        return wait_for_fleet(run_id, fetch=fetch, clock=clock, sleep=sleep, run=run)
+        return wait_for_fleet(run_id, fetch=fetch, clock=clock, sleep=sleep, run=run, policy=policy)
     except Deferred:
         raise  # Do not spend an exhausted credential on failure-status probes.
     except (OSError, HTTPException, ValueError, KeyError, TypeError, RuntimeError):
-        failure_status(run_id, run, fetch=fetch)
+        failure_status(run_id, run, fetch=fetch, policy=policy)
         raise
 
 
-def wait_for_fleet(run_id, *, fetch, clock, sleep, run):
+def wait_for_fleet(run_id, *, fetch, clock, sleep, run, policy=False):
     """Allow seven minutes for placement, then two full minutes for acquisition.
 
     GitHub's job created_at can precede dependency completion. Only the first
     observed fleet labels start the monotonic acquisition timer.
     """
+    attempt = run["run_attempt"]
     deadline = clock() + 420
     placed = False
     next_run_read = clock() + 30
@@ -112,13 +115,13 @@ def wait_for_fleet(run_id, *, fetch, clock, sleep, run):
         if clock() >= next_run_read:
             latest = fetch(f"/actions/runs/{run_id}")
             next_run_read = clock() + 30
-        if latest.get("run_attempt") != 1 or latest.get("status") == "completed":
+        if latest.get("run_attempt") != attempt or latest.get("status") == "completed":
             return "already-terminal-or-retried"
-        job = build_job(fetch(f"/actions/runs/{run_id}/attempts/1/jobs?per_page=100"))
+        job = build_job(fetch(f"/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100"))
         if job:
             labels = job.get("labels", [])
-            if labels and "tauceti-fleet" not in labels:
-                return "namespace-selected"
+            if labels and not {"tauceti-fleet", "tauceti-fleet-pr", "tauceti-fleet-staging"}.intersection(labels):
+                return "cloud-selected" if policy else "namespace-selected"
             if job.get("runner_name") or job.get("runner_id") or job["status"] in ("in_progress", "completed"):
                 return "runner-acquired"
             if labels and not placed:
@@ -127,18 +130,22 @@ def wait_for_fleet(run_id, *, fetch, clock, sleep, run):
         sleep(10)
     if not placed:
         raise TimeoutError("Picker placement was not observable within seven minutes")
-    return handoff(run_id, run, fetch=fetch, clock=clock, sleep=sleep)
+    return handoff(run_id, run, fetch=fetch, clock=clock, sleep=sleep, policy=policy)
 
 
-def handoff(run_id, run, *, fetch, clock, sleep):
+def handoff(run_id, run, *, fetch, clock, sleep, policy=False):
     """Force-stop one verified attempt and reconcile its single rerun request.
 
     The caller owns terminal failure reporting if any observation or mutation
     fails. No mutation is repeated after an ambiguous HTTP result.
     """
+    attempt = run["run_attempt"]
     latest = fetch(f"/actions/runs/{run_id}")
-    if latest.get("run_attempt") != 1 or latest.get("status") == "completed":
+    if latest.get("run_attempt") != attempt or latest.get("status") == "completed":
         return "already-terminal-or-retried"
+    # Confirm PR metadata is readable before cancelling; repeat the head guard
+    # immediately before rerun to detect pushes during cancellation.
+    current_pr_head(run, fetch)
     # Mutations are not automatically retried after an ambiguous HTTP failure.
     try:
         fetch(f"/actions/runs/{run_id}/force-cancel", {})
@@ -154,46 +161,60 @@ def handoff(run_id, run, *, fetch, clock, sleep):
     deadline = clock() + 120
     while clock() < deadline:
         latest = fetch(f"/actions/runs/{run_id}")
-        if latest.get("run_attempt") != 1:
+        if latest.get("run_attempt") != attempt:
             return "another-recovery-already-advanced-attempt"
         if latest["status"] == "completed":
             if latest.get("conclusion") != "cancelled":
                 return "completed-during-cancellation"
             final_job = build_job(
-                fetch(f"/actions/runs/{run_id}/attempts/1/jobs?per_page=100")
+                fetch(f"/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
             )
             if not final_job or final_job.get("runner_name") or final_job.get("runner_id"):
                 # A real build raced acquisition; normal bors recovery owns it.
-                failure_status(run_id, run, fetch=fetch)
+                failure_status(run_id, run, fetch=fetch, policy=policy)
                 return "runner-acquired-during-cancellation"
+            if PR_TITLE.fullmatch(run.get("display_title", "")) and not current_pr_head(run, fetch):
+                return "superseded-pr-cancelled"
             try:
                 fetch(f"/actions/runs/{run_id}/rerun", {})
-                return "rerun-on-namespace-requested"
+                return "rerun-with-updated-placement-requested" if policy else "rerun-on-namespace-requested"
             except (OSError, HTTPException, APIError):
                 # POST may have succeeded despite a lost response. Observe the
                 # successor before deciding to hand recovery back to bors.
                 deadline = clock() + 60
                 while clock() < deadline:
-                    if fetch(f"/actions/runs/{run_id}").get("run_attempt", 0) > 1:
-                        return "rerun-on-namespace-observed"
+                    if fetch(f"/actions/runs/{run_id}").get("run_attempt", 0) > attempt:
+                        return "rerun-with-updated-placement-observed" if policy else "rerun-on-namespace-observed"
                     sleep(5)
                 raise RuntimeError("Namespace retry not confirmed; bors infrastructure recovery requested") from None
         sleep(5)
     raise TimeoutError("Force cancellation not confirmed; bors infrastructure recovery requested")
 
 
-def failure_status(run_id, original, *, fetch=api):
+def current_pr_head(run, fetch):
+    match = PR_TITLE.fullmatch(run.get("display_title", ""))
+    return not match or fetch(f"/pulls/{match.group('pr')}")["head"]["sha"] == match.group("head")
+
+
+def failure_status(run_id, original, *, fetch=api, policy=False):
     """Report failed handoff only for the verified original attempt.
 
     A successor attempt must retain ownership of its statuses. This is a
     best-effort GET/POST fence, matching the finalizer's run-attempt check.
     """
     latest = fetch(f"/actions/runs/{run_id}")
-    if not eligible(latest) or latest["display_title"] != original["display_title"]:
+    if (not eligible(latest, policy=policy) or latest.get("run_attempt") != original.get("run_attempt")
+            or latest["display_title"] != original["display_title"]):
         return
-    head = TITLE.fullmatch(original["display_title"]).group("head")
+    match = TITLE.fullmatch(original["display_title"]) or PR_TITLE.fullmatch(original["display_title"])
+    try:
+        if not current_pr_head(original, fetch):
+            return
+    except (OSError, HTTPException, ValueError, KeyError, TypeError, RuntimeError):
+        return  # Unknown current head cannot authorize status publication.
+    head = match.group("head")
     fetch(f"/statuses/{head}", dict(
-        context="build", state="failure", description="fleet startup recovery failed; retry staging on Namespace",
+        context="build", state="failure", description="fleet startup recovery failed; retry this build",
         target_url=f"https://github.com/TauCetiProject/TauCeti/actions/runs/{run_id}",
     ))
 
@@ -203,7 +224,7 @@ def main():
         run_id = int(os.environ["FLEET_RUN_ID"])
         if run_id <= 0:
             raise ValueError("run id")
-        print(recover(run_id))
+        print(recover(run_id, policy=os.environ.get("FLEET_ROUTING_POLICY_ENABLED") == "true"))
         return 0
     except (OSError, HTTPException, ValueError, KeyError, TypeError, RuntimeError) as exc:
         print(

@@ -63,7 +63,10 @@ test('LOC uses complete cached files at the exact PR head without scheduling wor
   await db.prepare('INSERT INTO collections VALUES (?,?,?,?,?,?,?)').run(key,'files','{"number":7}',0,Date.now(),1,null);
   assert.equal((await (await query(state,[7])).json()).prs[0].lean_loc,null);
   await db.prepare('UPDATE collections SET complete=1 WHERE key=?').run(key);
-  assert.deepEqual((await (await query(state,[7])).json()).prs[0].lean_loc,{added:30,deleted:4,head_sha:head});
+  const measured=(await (await query(state,[7])).json()).prs[0];
+  assert.deepEqual(measured.lean_loc,{added:30,deleted:4,head_sha:head});
+  assert.equal(measured.base_sha,base);
+  assert.deepEqual(measured.diff_totals,{files:2,added:32,deleted:5});
   p.headRefOid='c'.repeat(40);await put();
   assert.equal((await (await query(state,[7])).json()).prs[0].lean_loc,null,'an old-head diff must not count');
   const newer={filename:'TauCeti/A.lean',status:'modified',additions:30,deletions:4,blob_url:`https://github.com/org/repo/blob/${p.headRefOid}/TauCeti/A.lean`};
@@ -75,6 +78,108 @@ test('LOC uses complete cached files at the exact PR head without scheduling wor
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM demand').get()).n,0);
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM jobs').get()).n,0);
  }finally{await db.close();}
+});
+test('removed files use merge-base URLs and old negative LOC caches are recomputed',async()=>{
+ const {db,state}=await fixture();try{
+  const head='a'.repeat(40),base='b'.repeat(40),mergeBase='c'.repeat(40),key='files:{"number":7}';
+  const p={number:7,state:'CLOSED',headRefOid:head,baseRefOid:base,changedFiles:3,additions:12,deletions:20};
+  await db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?,0)').run('pr','7','',JSON.stringify(p),'',Date.now(),1);
+  const files=[
+   {filename:'A.lean',status:'modified',additions:10,deletions:3,raw_url:`https://github.com/org/repo/raw/${head}/A.lean`},
+   {filename:'Removed.lean',status:'removed',additions:0,deletions:17,raw_url:`https://github.com/org/repo/raw/${mergeBase}/Removed.lean`},
+   {filename:'README.md',status:'added',additions:2,deletions:0,raw_url:`https://github.com/org/repo/raw/${head}/README.md`}
+  ];
+  for(const f of files){
+   const id='7:'+f.filename;
+   await db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?,0)').run('files',id,'7',JSON.stringify(f),'',Date.now(),1);
+   await db.prepare('INSERT INTO members VALUES (?,?)').run(key,id);
+  }
+  await db.prepare('INSERT INTO collections VALUES (?,?,?,?,?,?,?)').run(key,'files','{"number":7}',1,Date.now(),1,null);
+  await db.prepare('INSERT INTO activity_loc_cache VALUES (?,?,?)').run('7',JSON.stringify([head,base,3,12,20,1]),'null');
+  assert.deepEqual((await (await query(state,[7])).json()).prs[0].lean_loc,{added:10,deleted:20,head_sha:head});
+  // A wrong surviving-file head remains invalid even when totals match.
+  files[0].raw_url=`https://github.com/org/repo/raw/${mergeBase}/A.lean`;
+  await db.prepare("UPDATE resources SET data=? WHERE kind='files' AND id='7:A.lean'").run(JSON.stringify(files[0]));
+  await db.prepare('UPDATE collections SET revision=revision+1 WHERE key=?').run(key);
+  assert.equal((await (await query(state,[7])).json()).prs[0].lean_loc,null);
+  files[0].raw_url=`https://github.com/org/repo/raw/${head}/A.lean`;
+  files[1].raw_url='https://github.com/org/repo/raw/main/Removed.lean';
+  await db.prepare("UPDATE resources SET data=? WHERE kind='files' AND id='7:A.lean'").run(JSON.stringify(files[0]));
+  await db.prepare("UPDATE resources SET data=? WHERE kind='files' AND id='7:Removed.lean'").run(JSON.stringify(files[1]));
+  await db.prepare('UPDATE collections SET revision=revision+1 WHERE key=?').run(key);
+  assert.equal((await (await query(state,[7])).json()).prs[0].lean_loc,null,'removed file refs must still be immutable');
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM demand').get()).n,0);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM jobs').get()).n,0);
+ }finally{await db.close();}
+});
+test('verified LOC facts remain readable without a complete file collection',async()=>{
+ const {db,state}=await fixture();try{
+  const head='a'.repeat(40),base='b'.repeat(40),p={state:'CLOSED',headRefOid:head,baseRefOid:base,changedFiles:2,additions:10,deletions:3};
+  await db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?,0)').run('pr','7','',JSON.stringify(p),'',Date.now(),1);
+  const loc={added:10,deleted:3,head_sha:head};
+  await db.prepare('INSERT INTO activity_loc_cache VALUES (?,?,?)').run('7',JSON.stringify([2,head,base]),JSON.stringify(loc));
+  assert.deepEqual((await (await query(state,[7])).json()).prs[0].lean_loc,loc);
+  await db.prepare('INSERT INTO collections VALUES (?,?,?,?,?,?,?)').run('files:{"number":7}','files','{"number":7}',1,Date.now(),999,null);
+  assert.deepEqual((await (await query(state,[7])).json()).prs[0].lean_loc,loc,'a file refresh cannot invalidate the exact Git comparison');
+  p.baseRefOid='c'.repeat(40);
+  await db.prepare("UPDATE resources SET data=? WHERE kind='pr' AND id='7'").run(JSON.stringify(p));
+  assert.equal((await (await query(state,[7])).json()).prs[0].lean_loc,null,'a different comparison cannot reuse the fact');
+ }finally{await db.close();}
+});
+test('a racing negative file validation cannot replace a Git-proven LOC fact',async()=>{
+ const {db,state}=await fixture();try{
+  const head='a'.repeat(40),base='b'.repeat(40),loc={added:10,deleted:3,head_sha:head};
+  await db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?,0)').run('pr','7','',JSON.stringify({state:'CLOSED',headRefOid:head,baseRefOid:base,changedFiles:1,additions:10,deletions:3}),'',Date.now(),1);
+  await db.prepare('INSERT INTO collections VALUES (?,?,?,?,?,?,?)').run('files:{"number":7}','files','{"number":7}',1,Date.now(),1,null);
+  let inserted=false;
+  state.optionalRead=async function(operation,write){
+   if(operation==='activity_loc_cache' && !inserted){inserted=true;await this.store.exec('INSERT INTO activity_loc_cache VALUES (?,?,?)','7',JSON.stringify([2,head,base]),JSON.stringify(loc));}
+   await write();
+  };
+  await query(state,[7]);
+  assert.ok(inserted);
+  assert.deepEqual((await (await query(state,[7])).json()).prs[0].lean_loc,loc);
+ }finally{await db.close();}
+});
+test('a stale comparison cannot overwrite a newer Git-proven fact',async()=>{
+ for(const archived of [false,true]){
+  const {db,state}=await fixture();try{
+   const head='a'.repeat(40),newHead='c'.repeat(40),base='b'.repeat(40);
+   const before={state:'CLOSED',headRefOid:head,baseRefOid:base,changedFiles:1,additions:10,deletions:3};
+   const after={...before,headRefOid:newHead,additions:20,deletions:6},loc={added:20,deleted:6,head_sha:newHead};
+   const encoded=p=>JSON.stringify(archived?{$r2:p.headRefOid}:p);
+   if(archived)state.env.ARCHIVE={get:async key=>({json:async()=>key===head?before:after})};
+   await db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?,0)').run('pr','7','',encoded(before),'',Date.now(),1);
+   await db.prepare('INSERT INTO collections VALUES (?,?,?,?,?,?,?)').run('files:{"number":7}','files','{"number":7}',1,Date.now(),1,null);
+   let inserted=false;
+   state.optionalRead=async function(operation,write){
+    if(operation==='activity_loc_cache' && !inserted){
+     inserted=true;
+     await db.prepare("UPDATE resources SET data=? WHERE kind='pr' AND id='7'").run(encoded(after));
+     await this.store.exec('INSERT INTO activity_loc_cache VALUES (?,?,?)','7',JSON.stringify([2,newHead,base]),JSON.stringify(loc));
+    }
+    await write();
+   };
+   await query(state,[7]);assert.ok(inserted);
+   assert.deepEqual((await (await query(state,[7])).json()).prs[0].lean_loc,loc);
+  }finally{await db.close();}
+ }
+});
+test('removed-only and mixed-merge-base cached lists cannot prove the current head',async()=>{
+ for(const mixed of [false,true]){
+  const {db,state}=await fixture();try{
+   const head='a'.repeat(40),base='b'.repeat(40),key='files:{"number":7}';
+   const files=[{filename:'Deleted.lean',status:'removed',additions:0,deletions:10,raw_url:`https://github.com/org/repo/raw/${base}/Deleted.lean`}];
+   if(mixed)files.push(
+    {filename:'Other.lean',status:'removed',additions:0,deletions:10,raw_url:`https://github.com/org/repo/raw/${'c'.repeat(40)}/Other.lean`},
+    {filename:'Added.lean',status:'added',additions:1,deletions:0,raw_url:`https://github.com/org/repo/raw/${head}/Added.lean`});
+   const p={state:'CLOSED',headRefOid:head,baseRefOid:base,changedFiles:files.length,additions:mixed?1:0,deletions:mixed?20:10};
+   await db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?,0)').run('pr','7','',JSON.stringify(p),'',Date.now(),1);
+   for(const f of files){await db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?,0)').run('files',f.filename,'7',JSON.stringify(f),'',Date.now(),1);await db.prepare('INSERT INTO members VALUES (?,?)').run(key,f.filename);}
+   await db.prepare('INSERT INTO collections VALUES (?,?,?,?,?,?,?)').run(key,'files','{"number":7}',1,Date.now(),1,null);
+   assert.equal((await (await query(state,[7])).json()).prs[0].lean_loc,null);
+  }finally{await db.close();}
+ }
 });
 test('background Bors receipt import is shared and rate limited; activity reads never fetch',async()=>{
  const {db,state}=(await fixture()),original=globalThis.fetch;

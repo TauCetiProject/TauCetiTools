@@ -24,8 +24,20 @@ tauceti-tools doctor --conf ./tauceti.toml --fix roadmap.workflows --apply
 Preview/inspect the generated workflow PRs, then merge them normally. Register the project-owned
 App, install it only on the selected repositories, upload the named credentials, and configure
 branch rules using the printed commands and UI instructions. An ordinary content PR supplies
-the first real build/credential evidence. Nothing in this example enrolls the project in hosted
-infrastructure or modifies Epsilon Eridani.
+the first build result. Doctor checks App-token use separately when a normal workflow uses it;
+you do not need an extra PR merely to verify credentials. Nothing in this example enrolls the project in hosted
+infrastructure or modifies Epsilon Eridani. The tracked `Completed/.gitkeep` keeps that empty
+directory in a fresh clone.
+
+The starter selects GitHub's merge queue: set `MERGE_BACKEND=queue`, require the build,
+bump-guard and scope checks, and allow repository administrators to perform admin merges
+while keeping automation Apps out of the bypass list. To test Bors instead, configure its
+service and repository ID, set `merge.backend="bors"` and `MERGE_BACKEND=bors`, disable the
+GitHub queue and give the Bors App the authority described in the manual. Restricted paths
+need an explicit admin merge with the queue, or an authorized `bors merge` with Bors.
+
+During setup, App-dependent jobs skip with a message while credentials are missing; normal
+builds still run. Supply credentials before treating those skipped jobs as configured automation.
 
 For a local configuration/isolation check, pass this file to the Worker `--help` or `doctor`
 commands. `doctor` reports inaccessible example repositories as unknown and explains how to

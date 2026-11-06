@@ -1,5 +1,34 @@
 # Shared GitHub state
 
+The production Tau Ceti mirror publishes `/v1/query` and `/v1/query_batch` reads
+for `TauCetiProject/TauCeti` without a client token. Ordinary Tau Ceti workers
+therefore need no state-service configuration. `PUBLIC_READ_REPOSITORIES` is an
+explicit JSON list of public repository names, intersected with the installed
+`ALLOWED_REPOSITORIES`; it is empty unless the operator configures it. Private
+repositories and all administration, health, changes and activity APIs retain
+their existing authentication. Custom deployments should publish only data
+intended for anonymous readers. Anonymous queries serve existing mirrored data;
+they never renew demand, schedule hydration or configure a repository. Public
+and authenticated reads share stable, byte-bounded pagination. Temporary
+continuation pages are stored in private R2 and expire after ten minutes.
+Authenticated clients retain background demand.
+
+Public queries require the `PUBLIC_QUERY_LIMIT` binding (1,200 queries per minute per client IP, including individual batch queries). Identical reads share preparation and public reads use a separate page cache bounded at sixteen entries and 12 MiB of serialized results. Shared-IP fleets have room for normal survey, dispatch and continuation bursts; public reads have no separate concurrency refusal or total-snapshot size cutoff. Set `PUBLIC_READ_REPOSITORIES = "[]"` explicitly to revoke public access; `keep_vars` preserves omitted deployment variables.
+
+Authenticated reporting clients can read
+`GET /v1/runner-capacity/cached?repository=OWNER/REPO` without initiating
+discovery, token acquisition, or provider requests. This returns `read_only: true`
+with the saved snapshot and its original observation time, even after expiry;
+an empty cache reports `capacity_not_prepared`. Normal scheduler discovery also
+prepares `running_jobs` by hosted pool and fleet machine identity using job rows
+it already fetched. These counts require an assigned runner or fresh check-run
+execution state, exclude queued
+destinations, and include all workflow jobs. Reporting adds no GitHub reads.
+The discovery endpoint also accepts `cached_only=true`; new collectors should
+use the dedicated path so an older server returns 404 rather than ignoring a
+parameter and starting discovery.
+
+
 Reporting clients can use authenticated `POST /v1/activity` with
 `{"repository":"TauCetiProject/TauCeti","numbers":[1,2]}` (maximum 500 numbers).
 It returns stored PR headers, original observation timestamps and missing IDs.
@@ -28,10 +57,12 @@ flowchart LR
   D --> R
 ```
 
-The optional [Neon PostgreSQL backend](POSTGRES.md) retains the public API and
-installation quota owner. Production remains on SQLite until the separate #316
-cutover. Its provisioning, test isolation, restore evidence, performance gate
-and explicit generation fence are documented in that guide.
+The [Neon PostgreSQL backend](POSTGRES.md) retains the public API and installation
+quota owner. The production repository moved to PostgreSQL on 2026-10-26; the
+[accepted migration receipt](validation/migration-production-release-2026-10-26.json)
+records the checks and retained recovery data. Provisioning, test isolation,
+restore evidence, the performance gate and generation fencing are documented
+in [POSTGRES.md](POSTGRES.md).
 
 ## Data and recovery
 
@@ -45,6 +76,22 @@ The selected repository store holds indexed resources, collection membership and
 jobs with pagination state, a seven-day change journal, and stable query
 snapshots. Initial inventories and histories publish complete coverage after
 all pages finish. A failed page preserves the previous complete collection.
+
+The main webhook queue admits up to sixteen concurrent single-message consumers
+in production and test. This overlaps delivery I/O while the existing repository
+writer serializes mutations. Each message retains its own acknowledgement,
+retry and durable replay behavior; the dead-letter consumer remains at one.
+Ingestion health separates writer wait (total and maximum milliseconds per
+event type/minute) from application-through-cleanup time. A growing writer wait
+means that increasing delivery concurrency alone will not resolve the delay.
+
+PostgreSQL housekeeping runs in the background from the existing cron and
+maintenance hooks. Survey rebuilding coalesces independently of storage maintenance
+so a slow cache cannot delay expiry, monitoring or retention-policy changes.
+Cron and repair selection do not await optional housekeeping. Stored reads can
+derive dirty survey projections from current fragments while the cache catches
+up. SQLite retains its foreground expiry path for local storage recovery.
+
 Snapshots paginate at 500 rows or approximately 1.49 MB per page. Continuation
 pages are written to private R2 (at most four uploads at a time), never to
 SQLite; continuation reads individual pages rather than repeatedly decoding the
@@ -52,8 +99,14 @@ entire inventory.
 Concurrent queries at the same revision share a snapshot.
 
 PR and issue headers and commit statuses update from webhook payloads. A
-changed PR does not start a full repository survey. Full inventories reconcile
-hourly; overlapping deltas catch missed updates.
+changed PR does not start a full repository survey. Open PR headers reconcile every five minutes; other full inventories reconcile
+hourly, and overlapping deltas catch missed updates.
+
+Repository-wide discovery batches the compact fragments needed by dirty review
+projections alongside its related metadata. Changed summaries retain exact stored
+collection membership and ordering without separate database round trips for
+every PR's issue and review history. These reads do not fetch GitHub data or wait
+for background hydration; incomplete histories remain explicitly incomplete.
 
 GitHub Actions runs and jobs and check runs are not mirrored. No client reads
 them, and keeping every run, job and check run for every commit was about 90%
@@ -82,6 +135,14 @@ for ownership, prepared status, release evidence, and rollback requirements.
 The installation object owns token refresh, all GitHub read requests,
 per-resource quotas, API selection, and accounting. Every GraphQL query asks
 for `rateLimit.cost`; concurrent header differences are not point accounting.
+Recent cost estimates and API latency lookups share an accounting index ordered
+by API, operation and observation time. This avoids repeatedly scanning the
+seven-day ledger and preserves existing cost, quota and routing decisions. The
+index is built by the existing minute maintenance path and maintained with that
+ledger. Startup and ordinary reads never build it. Before attempting creation,
+maintenance durably flushes a one-day retry deadline, so a storage failure or
+CPU-limit reset cannot cause repeated builds on subsequent startups or ticks.
+The existing queries remain available while the optimization is absent.
 REST 304 responses record zero primary points. Similar quota pressure permits
 selection by measured latency; scarce pools are preserved for operations with
 no alternative API. Batch histories and reactions reduce request cost. Nested
@@ -111,10 +172,202 @@ calls run outside installation-wide locks; atomic quota reservations and
 expiring job leases protect concurrent requests. Large nested thread histories
 checkpoint one comment page per quantum instead of monopolizing a turn.
 
+Open PR headers refresh through the existing paginated inventory every five
+minutes and after base-branch pushes. Queued pushes coalesce; pushes during a
+scan retain its pages and a newer generation for the next pass. GraphQL is
+preferred for this inventory because REST lists omit mergeability, with REST
+remaining available during GraphQL quota exhaustion. Maintenance independently
+promotes at most 64 missing PR headers per turn. Unresolved `UNKNOWN` results
+coalesce into another bulk inventory after one minute. When that inventory had
+to use REST lists, which omit mergeability, maintenance also promotes unresolved
+PR details so available REST quota can recover them. Up to eight PR details share one GraphQL
+request and results use the existing bounded grouped publication path. Keeping
+a detail group within one publication chunk lets bulk headers and histories
+regain scheduler slots promptly. Label
+overflow falls back to REST per member. No freshness requirement blocks stored
+reads or worker admission. Within the existing lane shares, background headers
+precede backfills for three weighted cycles out of four, with inventory headers
+first; the remaining cycle serves oldest work. Real requested reads
+retain their existing fresh/oldest ordering.
+
+Maintenance independently promotes at most 64 missing status/comment collections
+for current open PRs into the requested lane per turn. Already requested work is
+excluded so successive turns advance through the inventory. Existing attempts,
+pagination, leases, and retry deadlines are retained. Among real requests,
+three turns out of four prefer newer demand and one retains oldest-due ordering;
+maintenance work sorts behind real reads without creating demand records or user
+latency samples. Its completion retains ordinary refresh intervals. The candidate
+scan runs outside the writer transaction; promotion rechecks current state atomically.
+Maintenance uses the requested lane's share but yields to active work when another
+preferred lane is empty. Quota-deferred dependencies retain their demand provenance.
+The existing weighted shares between lanes remain unchanged. Expiry and coverage
+preparation precede the launch window rather than consuming it before jobs start.
+
+Webhook ingestion collects each event's repair requests and schedules them with
+bulk coverage, demand and job lookups after its resource changes. The event's
+receipt, resources, membership and repair obligations remain one atomic commit;
+retry deadlines, pagination and existing ownership are preserved. Successful
+commits update a bounded latest-minute aggregate for each event type, exposed
+as `ingestion` in protected PostgreSQL health. When that type next appears in a later minute,
+`repository_ingest_summary` logs its completed bucket. Each bucket records committed
+deliveries, application SQL round trips (excluding transaction setup/commit), and
+elapsed time from application entry through commit and connection cleanup. These
+are I/O-inclusive measurements; CPU is not measured. SQLite does not supply
+the PostgreSQL query counter. Buckets carry their minute timestamp and can be
+old; these process-local, best-effort aggregates can lose the last quiet bucket
+on eviction or undercount an uncertain commit. Existing repair-arrival counters
+can also include rolled-back attempts. Use durable receipts/jobs and fixed-cohort
+coverage for acceptance measurements, rather than treating diagnostic counters
+as a complete ledger. See [ingestion measurements](INGEST-PERFORMANCE.md).
+
+PostgreSQL cache misses return stored or unavailable results without awaiting
+writer admission for demand bookkeeping. One repository owner coalesces readers,
+committing demand and initial job creation together in small groups. Failed
+groups retain pending intent for a later read or the existing cron tick; no new
+timer or hydration prerequisite is introduced. Uncommitted intent is local to
+the instance; ordinary missing-coverage maintenance and later reads remain its
+restart backstop. A bookkeeping memo never establishes complete coverage, and
+an actual miss bypasses it immediately. Public and migration shadow reads do
+not create demand.
+
+An owner-level repair coordinator claims complete upstream groups before sending
+requests, preserving four-group parallelism and normal batch sizes. A slot spans
+fetch, preparation, publication and cleanup. Finishing one group immediately
+refills its slot while other groups continue. Companion claims and lease cleanup
+use bulk statements with the existing generation and key/token checks.
+Writer logs distinguish demand, ingress, repair, publication and other callers
+using bounded purpose names, without recording queries or payloads.
+
+Alarm/tick handlers return after finite scheduling work. The dispatch count
+bounds a scheduling quantum; productive work continues automatically across
+quanta, with bounded coverage and maintenance between them. Full slots pause the
+quantum until a completion, without repeatedly selecting due backlog or waiting
+inside an alarm handler. Ordinary ticks retain expiry and restart recovery.
+Same-owner scheduling fallback alarms resume that record without external
+maintenance. Genuine ticks and future retry/lease alarms remain external. A
+consumed stale fallback re-arms durable recovery even if no fill is needed;
+lost or uncertain optional alarm tags recover through the ordinary external path.
+An overdue wake retained without a storage rewrite still records ordinary demand;
+intent is checked again when the alarm is consumed, including a racing schedule
+write. Accepted ordinary work during a continuation handler retains an external
+wake. Existing mutation/schema holds keep repair wakeups future-only.
+Active local key/token ownership prevents duplicate fetches after persisted lease
+expiry. Existing repair/publication transactions renew matching leases near
+expiry, without a heartbeat timer. Each committed member releases its local
+ownership so a newer dirty generation can proceed before its siblings finish.
+Protected `repair_scheduler` health diagnostics report active groups and members,
+pending transport hops, selections, launch/maintenance counts, lease-renewal row
+updates and accumulated slot milliseconds by the group leader's lane. These are
+instance counters, include active group time and reset on owner replacement;
+they are neither a durable completion ledger nor scheduling inputs.
+
+Finite per-key/API attempt records prevent no-progress deferral and restart
+loops; ordinary external wakes refresh these records. A confirmed member-data
+error committed to a future ordinary retry can advance independent ready work
+across a quantum; its retry settlement is recorded separately from data/checkpoint
+progress and completed coverage. Backend failures, unknown outcomes and
+unclassified unavailable responses do not earn this continuation credit.
+Explicit data validation uses additive `failure_kind` metadata; a malformed or
+truncated HTTP body and a generic JavaScript exception earn no credit. Replay
+eligibility is broader than continuation eligibility. Failed untouched tails
+remain excluded across internal chains until an ordinary external wake.
+Quota deferrals retain their exact deadlines and carry additive
+installation/pool/query scope. Unknown
+scope retains ordinary bounded selection. Only a known installation reservation
+restriction can use an optional bounded SQLite availability hint. PostgreSQL
+receives best-effort capacity-release notifications, normally one registered
+recipient per released reservation, with coalesced wakes at existing retry
+deadlines when necessary. Notifications and hints never grant reservations or
+become prerequisites for ordinary work; lost notifications recover through cron.
+Capacity wakes preserve unrelated failed-tail and API-path records even after
+a turn closes. They clear only capacity rejections known when the wake arrived;
+a newer rejection cannot be cleared by an older pending hint. Partial slot
+occupancy retains the owner-reported deadline without repeated empty maintenance.
+The existing runner-capacity scan also registers bounded local wake recipients
+after a real installation-reservation rejection. Its actual retry deadline stays
+unchanged. Once that deadline passes, a still-full installation retains the
+eligible registration rather than issuing another futile request and moving the
+retry deadline forward. Each release wakes at most one eligible recipient per
+released slot, in registration order; local recipients need no outgoing callback.
+The existing timed fallback remains, failed optional availability checks fall
+back to the real request, and every request still acquires its ordinary quota
+reservation. This adds no reservation queue, grant or ordinary-request preflight.
+
+Each repair archive/installation transport hop has a conservative fifteen-minute
+bound, independent of total history size or queue age. The installation owner's
+fourteen-minute RPC bound lets a stalled dependency recover first. Verified
+transport cancellation is preferred; an uncancellable expired hop retains its
+slot until automatic owner recovery, after durable key/token backoff where the
+writer is usable. Unconfirmed outcomes retain ordinary lease recovery. A normal
+member failure drains its neighboring archive operations without resetting the
+owner. Successful paginated histories have no total-duration deadline.
+Cancellable expired hops allow at most two seconds for actual cancellation
+acknowledgement after cleanup before last-resort recovery; this applies only to
+an already-failed transport and never to healthy work or job eligibility.
+
+Full upstream batches retain their existing sizes. Small, independent page-one
+issue-comment, status and reaction histories publish in transactions bounded by
+eight members, 256 KiB of prepared data and 128 rows. Partially filled chunks run
+immediately; oversized, paginated and coupled thread results use the individual
+path. Preparation and staging remain outside the writer. Each member has its
+own consumable input/cache, sharing transaction revisions and the change journal.
+Leases are checked under the writer; a newer webhook generation can still publish
+safely and leave its new repair due. Committed publication and deferral/routing
+bookkeeping release only their own key/token leases atomically.
+
+If non-publication work is actually queued on the writer, publication ends at
+the next whole-history boundary and immediately queues the prepared remainder
+through the existing FIFO lane. Each admission publishes at least one owned
+member when one remains, skipping stale leases without an empty intermediate
+commit. This changes chunk size without a wait, admission gate or queue reorder.
+The protected `grouped_publication` health counters record committed admissions,
+members, maximum members and queued-work yields since instance startup. They
+are best-effort diagnostics, include refreshes of complete histories and can
+undercount uncertain commits; they are not a missing-history drainage ledger.
+
+A confirmed healthy member-data rollback permits one individual replay from
+fresh input. Fences, backend failures and uncertain commits use durable recovery;
+they do not trigger a replay loop or one connection attempt per remaining result.
+Unclassified failures retry only the attempted chunk; untouched members retain
+their attempts and deadlines. Adapter-classified backend failures retain the
+established unfinished-group exponential retry, avoiding one costly backend
+failure per tiny chunk under a persistent timeout. Confirmed member-data rollback
+takes precedence over backend classification and still isolates healthy siblings.
+Committed or deferred outcomes remain protected by key/token checks; failed
+cleanup retains ordinary lease-expiry recovery. Completion metrics merge after commit; an uncertain commit
+can undercount them, so fixed durable coverage remains the acceptance evidence.
+Unsettled failed-tail members are excluded from leader/companion selection for
+the rest of that alarm turn. Already committed new generations and API transitions
+remain eligible. Next-alarm calculation excludes immediately due failed tails,
+while retaining future retry/lease deadlines and earlier incoming alarms. A
+failed tail cannot repeatedly refetch in the same turn or drive its own 100-ms
+alarm loop. Existing cron/tick/retry continuation starts a fresh turn; no
+persisted cooldown or new timer is added, and unrelated work remains eligible.
+Compatible quota/routing/retry bookkeeping also uses bounded bulk statements,
+preserving per-member deadlines, attempt increments and wait reasons. This changes
+transaction cost, not the quota owner's decisions. A failed bookkeeping commit
+retries its captured decision once, preserving capacity semantics and the exact
+deadline. If its cause is a backend failure, the same recovery admission applies
+ordinary backoff to the still-owned tail after saving those exact decisions. See
+[publication measurements](PUBLICATION-PERFORMANCE.md).
+
+Compact surveys immediately include exact-head commit statuses received by webhook,
+even before the first full status collection is hydrated. The per-PR
+`statusCheckRollupCoverage` field distinguishes `webhook_observed`, `complete`, and
+`unavailable`. Newer contexts override older snapshots, including failures; unrelated
+head SHAs never contribute. This does not declare complete comment histories or
+change the coverage gate on full status queries. Public surveys remain read-only
+and never wait for GitHub or hydration. Authenticated surveys also return stored
+facts without awaiting per-PR dependency scheduling. The existing maintenance owner
+backfills missing open-head coverage, and selected-PR reads register real demand
+through their normal path. Survey validators include a representation
+version so old empty-status responses cannot survive deployment through a 304.
+
 `RECONCILIATION_SETTINGS` is an optional JSON variable with `concurrency`
-(default/max 4), `dispatches` (default 16, max 100), `launch_ms` (default 10000,
-max 30000), and four positive `weights` (default `[8,4,2,1]`). Settings affect
-background reads only. Health includes lane eligibility, oldest requested age,
+(default/max 4), `dispatches` (default 16, max 100), and four positive `weights`
+(default `[8,4,2,1]`). Legacy `launch_ms` values still load and appear in settings;
+the elapsed launch window is retired and does not impose a cooldown. Settings
+affect background reads only. Health includes lane eligibility, oldest requested age,
 repair arrivals/completions/cancellations, wait reasons, requested latency p95,
 and measured cost/latency by query shape and batch size.
 
@@ -156,6 +409,30 @@ An opaque random `trace` correlates stages of the same job object within a
 dispatch, including concurrent jobs with identical operation/page metadata.
 `publication_encode_pages` records the staged size before the encoding scan.
 
+## Synchronous PR correction
+
+Authenticated consumers can report a selected-head contradiction with `POST /v1/refresh-pr`
+and `{repository, number, expected_head, observed_head?}`. The service coalesces concurrent
+requests for the same PR, performs one installation-owned full read, and commits the canonical
+PR, survey inventory and affected coverage before reporting `outcome: refreshed`. If the
+stored head already differs from the reported expectation, `outcome: already-changed` returns
+that committed record without claiming a new validation. Re-select work from current facts;
+a successful refresh does not prevent a later push.
+
+The response waits for the read and committed publication outcome; there is no separate
+refresh-response deadline. Existing transport and database failures remain explicit.
+Unavailability includes a millisecond
+`retry_at` in the body, never a `Retry-After` header. Clients must keep that deadline separate
+from discovery-wide cooldowns and continue other work. Ordinary reconciliation retains the
+retry obligation; no acknowledgement, disputed state or manual reset is required.
+
+Non-head PR webhooks patch only their changed fields. Targeted full reads can correct a
+misleading PR source timestamp, but newer stored inputs supersede an in-flight read. Such
+reads re-arm with a fresh start and no validator rather than falsely advancing verification.
+PR writes invalidate saved targeted ETags; an automatic one-time validator reset recovers
+older poisoned records. Head corrections invalidate affected cached PR queries and aggregate
+survey grace entries without decoding unrelated histories.
+
 ## Client behavior
 
 Clients request the newest available service data, including conditional reads.
@@ -172,6 +449,10 @@ fetching every PR's full comment histories. The scheduling cascade remains in
 the worker for full service-outage fallback. See [compact surveys](../../docs/compact-surveys.md)
 for scope rules, per-history coverage, migration, telemetry, and cross-language
 contract tests.
+The v1 response keeps `review.markers` as an empty array for existing clients.
+Coordination comments and claims in older cached projections do not populate it.
+Survey ETags include a representation tag so an older markerless cached response
+is replaced once, after which ordinary conditional reads return 304 again.
 
 ```toml
 max_open_prs = 128
@@ -255,6 +536,11 @@ mints an independent installation token or spends quota outside that owner.
 
 Service measurement commands remain in `scripts/measure.py`, `measure_surveys.py`,
 `measure_capacity.py` and `observe_reconciliation.py`.
+`npm run benchmark:history-demand` compares a full baseline source snapshot with
+the current implementation on isolated PostgreSQL schemas. It measures cache-miss
+responses, durable demand, fixed-cohort repair and companion claims; upstream
+responses are fixtures and it makes no GitHub requests. See
+[the method and results](HISTORY-DEMAND-PERFORMANCE.md) for scope and limitations.
 The example worker's process-manager rollout and shadow commands live in
 [TauCetiWorker/services/github-state/scripts](https://github.com/TauCetiProject/TauCetiWorker/tree/main/services/github-state/scripts).
 Downstream deployment and credential setup are documented in the
@@ -266,9 +552,9 @@ Source verification does not select PostgreSQL or constitute a release receipt.
 
 ### Shared runner-capacity discovery
 
-`GET /v1/runner-capacity?repository=OWNER/REPO` requires an existing client token
+`GET /v1/runner-capacity?repository=OWNER/REPO&namespace_cap=20` requires an existing client token
 authorized for that configured repository. Its installation owner performs one
-bounded organization inventory and shares the result for 30 seconds, coalescing
+bounded organization inventory and shares the result for 145 seconds, coalescing
 concurrent requests. It counts running GitHub-hosted jobs, excluding Namespace
 and self-hosted labels, across the repositories visible to the installation.
 The current deployment organization has only public repositories. Adding private
@@ -276,14 +562,84 @@ repositories requires granting the installation visibility to those repositories
 
 The response includes `complete`, `organization`, `busy`, `observed_at`, `retry_at`,
 and refresh request counts. This is an advisory observation, not a reserved slot
-or an atomic snapshot. Missing pages or quota rejection produce HTTP 503 with
-`complete:false`, never a partial count. Failed refreshes are cached for two minutes (or a longer instructed cooldown).
+or an atomic snapshot. Missing running-inventory pages or quota rejection produce
+HTTP 503 with `complete:false`. Failed refreshes are cached for 145 seconds (or a
+longer instructed cooldown). Routing version 2 also reports a complete observed
+inventory of queued/running Namespace build jobs and queued fleet targets.
+Picker, recovery, publication, and finalizer control jobs are excluded from the
+build count.
+
+Queued discovery inspects jobs as each workflow page arrives, starting with
+repositories and workflows already using Namespace, with older runs first on each
+page. Batched GraphQL check-suite reads supply fresh queued/running job IDs and
+execution states. Completed attempts are filtered upstream and cannot inflate the
+live-inventory pagination or query batch size.
+Only immutable job labels and already-assigned runner identities are reused from
+a compact SQLite cache. A new job ID (including a matrix expansion or rerun)
+requires fresh REST details. Fresh check-run execution states and immutable routing
+labels identify the running pool without refetching a newly assigned runner's
+identity. Missing or paginated check-suite data uses ordinary REST discovery.
+Completed REST job receipts cannot be resurrected by a delayed check-suite status.
+Inactive metadata entries expire after an hour; cached metadata is never an
+activity count. Parallel GraphQL batches request at most 100 suites and 200 job
+nodes each to bound latency and point cost under the same four-request gate.
+
+Large queued listings use overlapping creation-time ranges instead of shifting
+offset pages. Their split instant belongs to both children, avoiding sub-second
+boundary gaps; job IDs deduplicate overlaps. An overfull single second or missing
+creation metadata remains explicitly unknown.
+Discovered split timestamps (at most sixteen per repository) persist for an hour
+of inactivity. Later scans read those ranges in parallel instead of locating the
+same older pages through a serial chain. These are search hints only: each scan
+freshly reads the whole overlapping partition, including both unbounded ends,
+and subdivides any newly overfull range. No coverage or activity is cached.
+Fresh leaf counts merge sparse neighboring ranges and remove all splits when a
+queue drains, so old bursts do not permanently multiply listing requests.
+
+Each pass has a ninety-six-request ceiling, counting REST and GraphQL
+calls, with a twenty-second launch window inside the picker's existing 25-second
+timeout. Cached-only status reads never wait for that discovery. A productive partial pass has one shared thirty-second
+cooldown only while its cache-hit frontier advances and fewer than 900 attempts
+have been spent in the rolling hour. Active pickers continue unseen work after an
+owner restart; no extra poller is added. Normal successful scans and other failures
+keep the 145-second cache. The 2400-attempt hourly ceiling and 1500 core reserve
+are unchanged; GraphQL observation also preserves a 1000-point reserve.
+At most twenty-five full scans fit in a rolling hour; 25 × 96 stays within the
+same 2400-attempt ceiling while leaving enough room to finish each inventory.
+Initial cache bootstrap may use up to 800 attempts of that same hourly allowance
+when prior scans have already spent more than 900 calls. It never raises the
+2400-call ceiling, preserves 192 attempts before admitting a continuation, and
+closes durably on the first full inventory or after the bootstrap allowance.
+Queued repositories and range branches progress concurrently under one global
+four-request gate. Snapshots expose elapsed time and the running-inventory
+request subtotal to distinguish request exhaustion from slow provider responses.
+
+Discovery stops after observing at least the requested `namespace_cap` distinct
+Namespace builds, or at the existing scan limit. The positive integer target
+(default twenty, maximum 10,000) follows the picker's configured admission cap.
+One organization snapshot is shared across targets: a complete inventory answers
+all caps, a sufficient lower bound answers smaller caps, and failures share one
+cooldown. Only a larger cap needing more evidence upgrades discovery; that
+larger target remains in use after cache expiry so mixed caps do not multiply
+refresh scans. All scans serialize under the same installation quota budget. Incomplete queued
+discovery preserves the complete running GitHub count as routing version 1,
+plus `namespace_busy_lower_bound`, observed `queued_fleet` reservations, and
+`placement_unavailable`. Distinct job IDs
+are counted once, and completed pages remain useful if a later page fails.
+All counts are advisory observations over the scan window. A lower bound at or
+above a picker's cap is evidence of saturation. Legacy offset-based queued
+pagination stays partial, because starting workflows can shift between pages. An incomplete
+count below that cap does not establish spare capacity: the picker continues
+through its configured destinations and native GitHub fallback. Logs show the
+lower bound, inventory coverage, cap state, and partial-scan reason.
+
 Refresh uses existing installation quota accounting, honors secondary cooldowns,
-leaves at least 1,500 core requests for repository work, and spends at most 500
+leaves at least 1,500 core requests for repository work, and spends at most 2,400
 read attempts per rolling hour, including lost network responses on this operation. Brief request-slot
 contention yields within the scan deadline rather than invalidating the snapshot. A scan is bounded to
-80 requests, at most three simultaneous reads, and a 15-second launch window; individual requests retain their
+96 requests, at most four simultaneous reads, and a 20-second launch window; individual requests retain their
 existing timeout. There is no alarm, CI event storage, or new polling task.
 
-Pickers retain bounded direct discovery when this view is unavailable. Visiting
-ordinary reports/status does not invoke capacity discovery.
+Pickers without a configured shared service retain bounded direct discovery.
+Shared-service failure or partial coverage never fans out into a direct scan
+from every picker. Visiting ordinary reports/status does not invoke capacity discovery.

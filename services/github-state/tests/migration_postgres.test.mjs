@@ -162,12 +162,11 @@ test('ordinary supervisor restarts a fenced repository, preserves cursors, and r
   await f.state.ingest({key:parked.key,delivery:parked.delivery,event:parked.event,repository:custom.name,received:parked.received});
   const committedRevision=(await f.admin.query(`SELECT value FROM ${f.schema}.meta WHERE key='revision'`)).rows[0].value;
   f.archive.fail((op,key,at)=>op==='delete' && key.includes('/pointers/') && at==='after');
-  await ingress.drain(f.env,custom);
-  const pending=await f.archive.get(pointer.key).then(o=>o.json());
-  assert.ok(pending.retry_at>Date.now());
-  // Simulate the ordinary owner's next pass after its real retry deadline.
-  await f.archive.put(pointer.key,JSON.stringify({...pending,retry_at:0}));
-  await ingress.drain(f.env,custom);
+  const cleanup=await ingress.drain(f.env,custom);
+  assert.equal(cleanup.failed,0);assert.equal(cleanup.superseded,1);
+  assert.equal(await f.archive.get(pointer.key),null,'a lost cleanup acknowledgement must not recreate the deleted pointer');
+  assert.ok(await f.archive.get(ingress.receiptKey(custom.id,parked.delivery)));
+  assert.equal((await ingress.drain(f.env,custom)).replayed,0);
   const revision=(await f.admin.query(`SELECT value FROM ${f.schema}.meta WHERE key='revision'`)).rows[0].value;
   f.archive.fail((op,key)=>op==='get' && key===`control/${custom.id}/migration.json`);
   const cold=await fixture(f.db,f.archive,{...f.env});
@@ -192,7 +191,8 @@ test('ordinary supervisor restarts a fenced repository, preserves cursors, and r
   assert.equal((await f.admin.query(`SELECT COUNT(*)::text n FROM ${f.schema}.deliveries WHERE id='freeze-event'`)).rows[0].n,'1');
   assert.ok(f.archive.objects.has(`receipts/${custom.id}/freeze-event.json`));
   assert.ok(!(await f.archive.list({prefix:`parked/${custom.id}/pointers/`})).objects.length);
-  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json({deployment_id:'test-deployment',repository_inflight:[],hour:[]})})};
+  const accounting={at:Date.now()-3600000,scope:'retained_accounting_hour',stale:true,window_complete:false};
+  f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async()=>Response.json({deployment_id:'test-deployment',repository_inflight:[],hour:[],...accounting})})};
   // An unrelated historical raw gap does not own this migration's queues.
   await f.archive.put('control/raw-recovery.json',JSON.stringify({last_completed:1,gaps:{count:1,truncated:false}}));
   const queueSample=async(at,count)=>f.archive.put('control/queue-metrics.json',JSON.stringify({queue:{at,count:0,error:null},dlq:{at,count,error:null}}));
@@ -204,9 +204,16 @@ test('ordinary supervisor restarts a fenced repository, preserves cursors, and r
   const pinned=await ingress.park(f.env,custom,poison,'fixture_failure');
   const normalKey=ingress.pointerKey(custom.id,poison),heldKey=ingress.pointerKey(custom.id,poison,true);
   await f.archive.put(heldKey,JSON.stringify({...pinned,retry_at:Date.now()+86400000}));await f.archive.delete(normalKey);
+  const selectedAt=(await migration.readMigration(f.archive,custom.id)).cutover.selected_at;
+  await f.archive.put(ingress.recoveryKey(custom.id),JSON.stringify({held_cursor:heldKey,held_pass_started_at:selectedAt-1000}));
+  await ingress.replayIngress(f.env,custom,{held:true});
+  const oldSweep=await f.archive.get(ingress.recoveryKey(custom.id)).then(o=>o.json());
+  assert.ok(oldSweep.held_pass_completed_at>=selectedAt,'completion after selection alone is insufficient');
+  await f.request('/migration-supervise',{});
+  assert.equal(migration.blocksRepairs(await migration.readMigration(f.archive,custom.id)),true,'a pre-selection sweep must not release target repair dispatch');
   await ingress.maintainIngress(f.env,custom);
   const visited=await f.archive.get(ingress.recoveryKey(custom.id)).then(o=>o.json());
-  assert.equal(typeof visited.held_last_pass,'object');assert.ok(visited.held_pass_completed_at>=(await migration.readMigration(f.archive,custom.id)).cutover.selected_at);
+  assert.ok(visited.held_pass_started_at>=selectedAt);assert.equal(typeof visited.held_last_pass,'object');assert.ok(visited.held_pass_completed_at>=(await migration.readMigration(f.archive,custom.id)).cutover.selected_at);
 
   assert.equal((await (await f.request('/migration-supervise',{})).json()).phase,'replaying');
   assert.equal(migration.blocksRepairs(await migration.readMigration(f.archive,custom.id)),false,'a deferred poison item cannot indefinitely stop bounded reconciliation');
@@ -215,6 +222,7 @@ test('ordinary supervisor restarts a fenced repository, preserves cursors, and r
   await ingress.release(f.env,custom,poison);assert.ok(!await f.archive.head(heldKey));
   const done=await (await f.request('/migration-supervise',{})).json();
   assert.equal(done.phase,'complete');assert.equal(done.cutover.release.backend_write_owner,'postgres');
+  assert.deepEqual(done.cutover.release.github_hour_observation,{...accounting,window_start:accounting.at-3600000,prepared_deployment:null,telemetry_failure:null},'retained request counts keep their actual stale and incomplete observation context');
   const receiptKey=migration.archiveKey(custom.id,generation)+'/receipt.json';
   const immutable=f.archive.objects.get(receiptKey).text;await f.request('/migration-supervise',{});assert.equal(f.archive.objects.get(receiptKey).text,immutable);
   await f.archive.delete(receiptKey); // crash at release receipt publication

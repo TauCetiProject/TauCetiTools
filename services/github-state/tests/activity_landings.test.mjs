@@ -25,8 +25,11 @@ test('receipt fetch is restricted to the existing stored Bors journal and refuse
  try{
   globalThis.fetch=async(url,options)=>{assert.equal(url,BORS_RECEIPTS);assert.equal(options.redirect,'manual');return Response.json(fixture());};
   assert.equal((await readPromotionReceipts()).length,1);
-  globalThis.fetch=async()=>new Response(new Uint8Array(8*1024*1024+1));
-  await assert.rejects(readPromotionReceipts(),/size limit/);
+  const large={...fixture(),diagnostic:'x'.repeat(8*1024*1024+1)};
+  globalThis.fetch=async()=>Response.json(large);
+  assert.equal((await readPromotionReceipts()).length,1,'valid receipts are not lost as diagnostic payloads grow');
+  globalThis.fetch=async()=>new Response(null,{status:302});
+  await assert.rejects(readPromotionReceipts(),/HTTP 302/);
  }finally{globalThis.fetch=original;}
 });
 test('Workers runtime accepts the binding fetch options and never follows redirects',async()=>{

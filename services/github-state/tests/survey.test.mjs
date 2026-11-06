@@ -52,3 +52,10 @@ test('in-progress scoreboards cannot replace completed verdicts in compact or di
  assert.equal(facts.issueFragment(init).meta,null);
  assert.notEqual(facts.SURVEY_INDEX_VERSION,facts.SURVEY_CONTRACT);
 });
+
+
+test('old coordination comments and cached fragments do not project claims',()=>{
+ const body='<!--tauceti-review-in-progress '+JSON.stringify({head:'a'.repeat(40),expires_at:9999999999,providers:['claude']})+'-->';
+ assert.equal('markers' in facts.summarize([{body}],[]),false);
+ assert.equal('markers' in facts.summarizeFragments([{meta:null,rebase_heads:[],marker:{head:'a'.repeat(40),expires_at:9999999999}}],[]),false);
+});

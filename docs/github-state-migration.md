@@ -7,6 +7,102 @@ is stored-read compatibility and durable parked ingress. S1
 Neon PostgreSQL backend. Both must be deployed and accepted before production
 start. Merging code or closing an issue does not prove deployed acceptance.
 
+The [2026-10-26 production release](../services/github-state/validation/migration-production-release-2026-10-26.json)
+records the completed production migration after fresh deployed S0/S1 acceptance.
+All twenty tables, 8,035,458 rows and 3,972 SQL pages passed canonical
+source/import/PostgreSQL readback checks before execution normalization and
+activation. The R2 inventory verified 1,721,084 objects. PostgreSQL became the
+sole writer at 00:03:41 UTC; ordinary bounded replay completed at 06:15:57 UTC.
+The final parked/held and queue/DLQ snapshots were zero. The original Durable
+Object remains fenced, archives remain retained, and all seven broad retention
+classes remain pinned with lifecycle expiry disabled. No observation finish,
+unpinning, retirement or write flipback was performed.
+
+Exactly one production target cohort passed: warm open-PR, survey and comment
+p95 were 280, 133 and 105 ms, versus the frozen source's 251, 145 and 109 ms.
+Each workload used 100 samples, concurrency four and five warmups; the largest
+increase was 11.6%, within the 20% gate. Both cohorts used the same deployed
+module with different live data revisions and include the existing DTO cache.
+Separate cycled cache-miss diagnostics include a history p95 increase from
+90 to 443 ms; those diagnostics have no 20% acceptance claim. The unchanged
+original Worker client passed fresh-cache and byte-exact copied retained-cache
+workflows, including marker-list repair and 304 revalidation, without independent
+provider attempts. Old public cursors expired normally, new continuations passed,
+and pre-selection stored shadow checks covered active cursors and activity.
+
+A real pull-request webhook arrived 19.360 seconds after the authoritative
+freeze. Its retained raw body, original timestamp and pin were verified beyond
+the configured twenty-retry horizon; it was absent from the verified standby
+delivery table before activation. Observations after replay verified one SQL
+delivery receipt, the permanent R2 receipt and exact retained raw body/timestamp;
+pointer/pin absence was observed after the SQL commit. This is delivery/cleanup
+evidence, not an independent replay of
+every materialization or audit of every semantic publication. A full logged-request
+hour wholly after replay completion contained 423 repository requests. Across 327
+discrete post-completion samples, observed in-flight requests never exceeded the
+configured owner concurrency of four. Retained accounting
+does not prove every external attempt was logged. The receipt preserves failed
+operational probes, automatic rate-limit recovery, and a final publication attempt
+that stopped on newly arriving input before safely resuming with the original
+passed cohort and full-hour evidence. Private evidence hashes are commitments to
+retained operator files, not files published in this repository.
+
+The [2026-10-25 test release](../services/github-state/validation/migration-test-release-2026-10-25.json)
+records accepted TEST migration: twenty tables, 17,921,250 rows, canonical
+source/import/readback checks, a completed retained raw-input pass with zero
+reported gaps, all 221 captured failed
+inputs and the signed freeze-time webhook verified, unchanged clients and cursors,
+and a complete request-accounting hour after replay finished. PostgreSQL is the
+single TEST writer; the original Durable Object, archives and all seven retention
+pins remain retained. At that historical receipt, production still used SQLite and
+its data migration had not started. The production release above records its
+subsequent independent deployed acceptance and cutover.
+
+Exactly one target warm-read cohort was compared with the original frozen source
+cohort: open-PR, survey and issue-comment p95 were 286, 119 and 115 ms, versus
+557, 145 and 147 ms. Each workload used 100 samples, concurrency four and five
+warmups. The repeated-read gate includes the existing DTO cache; separate
+cache-miss diagnostics carry no 20% acceptance claim. Source and target used
+different deployed code and live data revisions; both identities and row counts
+are explicit in the receipt. Queue counts are approximate fresh snapshots, and
+empty R2 lanes are direct observations rather than a continuous-empty claim.
+The historical raw-pass completion timestamp does not establish traversal start.
+
+The [2026-10-22 test checkpoint](../services/github-state/validation/migration-test-checkpoint-2026-10-22.json)
+remains the earlier incomplete import/selection checkpoint. It records the hold
+after external test deployments changed the running artifact, including the
+interval before a durable ingress pause. The accepted release retains that
+application-interval accounting and its limitations: one intermediate deployment is not mapped to a
+Git commit, and sampled receipt/resource checks are not a full independent
+replay of every materialization or an audit of every semantic publication.
+Raw recovery continued after the 2026-10-22 22:47 UTC ingress pause. The
+already-present artifact was verified and adopted at 23:09 UTC that day; this
+changed its acceptance status, not its proven serving start or whether raw
+recovery continued. The public receipt records that bound; it does not reconstruct
+a complete mutation audit for the intervening period or prove continuous absence
+of deletion. Clearing an unmirrored CI diagnostic is not application delivery recovery.
+
+A local cursor-verifier discovery error stopped final acceptance after the
+successful latency cohort: an empty singleton lock was parsed as JSON. The
+separately verified correction admits only timestamped baseline JSON reports;
+malformed reports and duplicate same-generation baselines still fail. The
+corrected cursor check passed once. The original 108 operator files, empty locks,
+stop evidence and successful cohort were preserved, and the observer resumed
+using retained proofs without another performance measurement. The release
+embeds the cursor proof; an external hash-bound sidecar records its corrected
+verifier provenance. Any production operator plan must include this discovery
+correction before starting its observer.
+
+The [2026-10-23 client compatibility deployment](../services/github-state/validation/migration-client-compatibility-2026-10-23.json)
+records the production deployment of [PR #90](https://github.com/TauCetiProject/TauCetiTools/pull/90)
+while SQLite remained authoritative. The original Worker client passed fresh-cache
+and retained-cache survey, inventory, history, pagination and 304 checks.
+Rereading a byte-exact copy of the retained survey cache added the required
+marker-list field to all 399 rows that lacked it. The unchanged client performed
+the refresh; the original cache was left intact. This code-only receipt predates
+the accepted TEST release and does not constitute a production data migration or
+replace fresh deployed S0/S1 acceptance for the final production module.
+
 ## Preparation and commands
 
 The admin command defaults to verification. Environment selection is mandatory.
@@ -46,6 +142,69 @@ is reached; use `status` while the normal bounded ingress owners drain the backl
 Cron publishes the completion receipt when its release gates pass. An HTTP or
 transport failure also exits the command: inspect the reason and rerun the same
 generation for a transient failure.
+
+Historical parked CI input can dominate the replay backlog even though new CI
+webhooks are acknowledged as not mirrored. The existing replay owner batches at
+most 100 due CI delivery IDs into one fenced ignored-receipt transaction, without
+loading their webhook bodies or creating resources, jobs or change-feed entries.
+It still publishes each permanent R2 receipt before deleting that pointer/body.
+Lost responses and interrupted cleanup reuse delivery receipts. Semantic events
+use the ordinary application path, held retry deadlines remain in force, and an
+older repository deployment without the private batch RPC falls back to that path.
+
+Explicit admin replay shares cron's conditional R2 lease and stored lane cursor.
+The optional `limit` must be an integer from 1 to 100 (default 25); invalid
+values return HTTP 400 before acquiring the lease. Each pass uses a twenty-second
+work budget, respects pointer and recovery-error backoffs, and returns `leased`, `deadline`, or `lease_replaced` when appropriate.
+The requested limit is an upper bound; successful admin replies report the
+effective `page_limit`. A zero-progress deadline with due input and an adequate
+initial budget halves the observed page size, down to one pointer. Limits are
+persisted in the R2 lease claim before work starts. Cron keeps a fixed page limit
+within each lane, alternates lane preference, and checkpoints once between lanes
+when budget remains. That conditional handoff preserves the first lane's progress
+and names only the second lane in the new claim. A lost claim or handoff response
+may conservatively reduce that named lane even if it never started; this uncertain
+evidence expires within fifteen minutes. No checkpoint write is added per page.
+
+An expired owner can reduce only its named lane, and a cancelled smaller admin
+probe cannot reduce the automatic limit. Four fast full pages allow cautious
+growth without extending an existing recovery expiry. Both working limits and failed-size ceilings expire after fifteen minutes;
+quiet repositories and held input do not need successful full pages to recover
+the default size. Expiry and legacy CI-count evidence can reduce the working limit
+but never install a ceiling. Legacy CI counts establish an attempted batch, not
+its complete page size, so they select a conservative 25-pointer working limit.
+Optional lane-selection read failures fall back to normal replay; actual drain
+errors still retain the usual recovery backoff. Prepared recovery metadata records
+learned limits/expiry and each pass's page size, due-input count, budget and duration.
+This changes page sizing only; ownership, receipts, cursor checkpoints and retry
+deadlines still govern application and cleanup.
+An expired owner's completion cannot overwrite a replacement checkpoint.
+Permanent delivery receipts use conditional creation. Failed cleanup updates a
+pointer only if the ETag of its loaded snapshot still matches, so a stale attempt cannot
+recreate an already deleted pointer or shorten a newer retry deadline.
+`delivery_errors` in the immediate admin response contains bounded delivery/event/
+timestamp/reason metadata with `retry_scheduled`, `held`, `superseded` or
+`unconfirmed` outcomes for receipt inspection. Superseded updates are counted
+separately from failures. These error arrays are excluded from newly stored pass summaries and are
+filtered from health and observation responses, including older summaries. Successful manual work does not postpone cron. A completed held sweep only
+unblocks reconciliation when that sweep started after target selection; a saved
+pre-selection cursor cannot provide that evidence. A parkable refusal retains
+the checkpoint before its group. Future retry deadlines remain binding; a sweep
+visits deferred input without treating it as applied, and held input still blocks
+final migration completion. Treat a lost response as
+unknown progress and repeat through the same leased interface.
+
+If replay needs a post-selection service fix, preserve PostgreSQL ownership,
+the source write fence, the original selection deployment and baseline. Record
+the fix-forward deployment separately in the operator's release receipt, verify the
+same target generation and bindings before/after deployment, and run the public
+read/client gates against the resulting service. Do not rewrite the source
+identity or original checksums to make the new deployment appear to have
+performed the export. The runtime receipt keeps the original `source.deployment`
+and records the current version in `cutover.release.deployment`; retain the
+original selection version and the forward PR/code/version in the operator's
+receipt as well. A deployment change before selection still invalidates
+the frozen generation and follows the ordinary pre-switch recovery procedure.
 
 Before enabling `MIGRATION_ENVIRONMENT=test|production`, deploy the coordinator,
 queue consumers, installation quota owner and retention guards everywhere. Fence
@@ -231,6 +390,38 @@ python3 services/github-state/scripts/migrate.py --environment production \
 ```
 
 Held-input recovery is a fix-forward operation, not permission to discard input.
+
+Repository data writes use serialized interactive transactions at Read Committed
+isolation, including standalone write batches. Every data writer must acquire the
+database ownership lock. Before
+acquiring the ownership lock, it records the session PID, exact backend start time
+and a unique transaction-local application name. When a client times out or loses
+its transport, the adapter closes that connection instead of queuing rollback
+behind the stalled query. Ordinary SQL and application errors still roll back a
+healthy connection.
+
+For a direct Neon endpoint, a separate bounded HTTP query terminates only that
+identified session in the same database and application role, and waits for server
+confirmation. Pooler and other endpoints only check whether the identified
+transaction has ended; they never signal a reusable backend. Unconfirmed cleanup
+blocks local writers for up to 45 seconds, with a one-second cleanup retry cooldown.
+After that grace period, writers retry the database ownership lock even if HTTP
+remains unavailable. This is an availability grace period, not a bound on server
+COMMIT or socket waits. Expired identities remain available for bounded cleanup
+attempts in rotation; only confirmed termination or an ended transaction removes
+an identity. A still-held ownership lock causes a bounded lock timeout and leaves
+input parked. Stored reads remain available. Health reports cleanup count, age,
+blocking/expired state and HTTP cleanup failures. Prepared capacity monitoring
+uses its separate generation-checked HTTP function. This local gate does not
+survive an isolate restart or store replacement; the database ownership lock and
+server timeouts still apply.
+
+A failed or uncertain commit never retries the application callback; termination
+or an absent session does not prove rollback. Input replay checks the committed
+delivery receipt. Sanitized diagnostics report cleanup result, failing phase,
+writer wait and transaction duration without session tokens, SQL or driver error
+bodies.
+
 Inspect the pointer/body and their digest privately; never paste payloads or secrets
 into logs or issue comments. Recover an exact missing body from retained raw/pinned
 input or migration archives, or fix the parser/target error on PostgreSQL. Preserve
@@ -247,6 +438,49 @@ complete migration receipt. Stored PostgreSQL reads and bounded reconciliation
 continue, while final completion and the broad retention hold intentionally wait
 for recovery. An irrecoverable data gap is not a successful migration.
 
+Queue consumers use one message per batch, with at most four primary invocations
+and one dead-letter invocation. Each repository has its own serialized writer;
+large parallel input for one repository increases its waiting requests rather
+than its write capacity. This bounds queue-originated calls to five while
+allowing other repositories and work outside the writer to overlap. Each message
+still commits or parks durably before its own acknowledgement. Non-parkable
+failures park after ten attempts; the queue's 20-retry limit also covers failures
+to park, using the existing retry delays.
+
+Replay has separate concurrency and a cooperative deadline: an in-flight group
+can still outlast its recovery lease. Monitor replay stops and queue count/oldest
+age during rollout; these queue limits reduce contention without guaranteeing a
+lease duration. Migration completion requires empty primary and dead-letter
+queue observations, including traffic for other configured repositories.
+
+Parked replay checks a page of eligible non-CI deliveries against the existing
+read-only SQL receipt endpoint, with at most 100 IDs in one request. A confirmed
+receipt is promoted to permanent R2 before its pointer/body is removed, without
+re-entering the event writer or fetching its payload. Unknown, malformed or
+unconfirmed lookups use ordinary per-event deduplication. Future retry deadlines
+remain in force, and a lookup that consumes the pass budget leaves the cursor
+and inputs in place. `known_receipts`, `receipt_lookup_status` and
+`timing.receipt_lookup_ms` describe this read; these counts are not semantic
+changes or completed cleanups. The separate bounded CI receipt path is unchanged.
+This read may confirm an already committed delivery while the repository writer
+is held or parked; promoting that proof applies no new input and leaves the
+committed SQL state available to the frozen export.
+
+The ordinary raw-input recovery owner retries an independent keyset page of at
+most five recorded gaps before advancing the raw prefix scan. It honors each
+retry deadline and yields after a five-second cooperative budget within the
+existing pass. A gap behind the main cursor therefore need not wait for a full
+history rescan. Successful recovery uses the existing committed-receipt or durable
+parking proof, preserves the original raw object, and never dispatches GitHub
+repair work. CI gaps can clear from their stored event metadata; that clearance
+creates no application receipt. Failed attempts retain the gap with backoff, and
+a conditional update protects a newer retry state from a stale owner. The
+checkpoint records `gap_cursor` and `gap_last_pass` separately from the raw cursor.
+Errors in this independent gap-retry page remain counted and retained; they do
+not stop the prefix scan or postpone other due gap entries. The main prefix scan
+still stops if it cannot preserve a failure as a durable gap. The time budget
+is cooperative between attempts; a single pending I/O operation may exceed it.
+
 Abandonment is valid only before target activation. It retains archives, fences the
 target and releases a writable source. A separately selected operator ingress pause
 remains in effect. After PostgreSQL accepts writes, abandonment cannot reactivate
@@ -259,6 +493,15 @@ identities, bookmark/revision, counts/checksums, shadow proof, staging transform
 cursor/latency evidence, parked/held/raw recovery state, latest applied input,
 GitHub request accounting, health and backend write owner. Confirm unchanged external
 clients and backlog drain against live telemetry before declaring release accepted.
+The terminal receipt's `github_hour` and `github_hour_observation` describe retained
+accounting at replay completion, including its original observation time, scan
+completeness and known telemetry failure. They are context, not a post-completion
+release measurement. Observe a separate fresh full window starting after both
+replay completion and the released deployment; a restored report's current
+deployment ID does not establish that window. Retained accounting counts logged
+requests and cannot prove that interrupted or failed accounting attempts never
+occurred. Check migration's GitHub dispatch fence and test its zero-bootstrap
+behavior separately.
 
 Keep the original DO and referenced archives read-only through observation. It can
 only be an explicitly timestamped emergency last-known-data read fallback after

@@ -315,7 +315,7 @@ test('malformed upstream JSON stays unavailable, preserves request ID, and retri
   const query={repository,query:{repository:repository.name,operation:'open_prs'},api:'graphql'};
   const first=await stub.fetch('https://internal/read',{method:'POST',headers:{'x-request-id':'malformed-drill'},body:JSON.stringify(query)});
   assert.equal(first.status,503);const error=await first.json();
-  assert.equal(error.unavailable,true);assert.equal(error.reason,'malformed_upstream_response');assert.equal(error.request_id,'malformed-drill');assert.equal(Object.hasOwn(error,'data'),false);
+  assert.equal(error.unavailable,true);assert.equal(error.reason,'malformed_upstream_response');assert.equal(error.failure_kind,'transport');assert.equal(error.request_id,'malformed-drill');assert.equal(Object.hasOwn(error,'data'),false);
   assert.equal(network,1,'no fallback fanout for a malformed response');
   malformed=false;
   const recovered=await (await send(stub,'/read',query)).json();
@@ -344,7 +344,7 @@ test('malformed status/header objects stay unavailable rather than becoming empt
   const ns=await mf.getDurableObjectNamespace('INSTALLATIONS'),stub=ns.get(ns.idFromName(repository.installation));
   for(const query of [{operation:'statuses',args:{sha:'a'.repeat(40)}},{operation:'pr',args:{number:7}},{operation:'repository'}]) {
    const before=network,result=await (await stub.fetch('https://internal/read',{method:'POST',headers:{'x-request-id':'shape-drill'},body:JSON.stringify({repository,query:{repository:repository.name,...query},api:'core'})})).json();
-   assert.equal(result.unavailable,true);assert.equal(result.reason,'malformed_upstream_response');assert.equal(result.request_id,'shape-drill');assert.equal(Object.hasOwn(result,'data'),false);assert.equal(network-before,1);
+   assert.equal(result.unavailable,true);assert.equal(result.reason,'malformed_upstream_response');assert.equal(result.failure_kind,'member');assert.equal(result.request_id,'shape-drill');assert.equal(Object.hasOwn(result,'data'),false);assert.equal(network-before,1);
   }
  }finally{await mf.dispose();}
 });
@@ -441,4 +441,17 @@ test('malformed label connections stay unavailable and overflow waits for the RE
   const before=network,result=await (await send(stub,'/read',input)).json();
   assert.equal(result.deferred,true);assert.match(result.category,/primary/);assert.ok(result.retry_at>Date.now()+60000);assert.equal(network-before,1);
  }finally {await mf.dispose();}
+});
+
+test('PR header batches normalize scalars and isolate malformed members',async()=>{
+ const mf=await runtime(async req=>{
+  const payload=await req.json();assert.match(payload.query,/q0:pullRequest\(number:7\).*mergeable.*baseRefOid/);
+  const row={number:7,state:'OPEN',headRefOid:'a'.repeat(40),baseRefOid:'b'.repeat(40),mergeable:'CONFLICTING',labels:{totalCount:0,nodes:[]},author:{login:'author'}};
+  return response({data:{rateLimit:{cost:1,remaining:4999,resetAt:new Date(Date.now()+300000).toISOString()},repository:{q0:row,q1:{...row,number:8,labels:{totalCount:1,nodes:[]}}}}});
+ });try{
+  const ns=await mf.getDurableObjectNamespace('INSTALLATIONS'),stub=ns.get(ns.idFromName('200'));
+  const result=await (await send(stub,'/batch',{repository,jobs:[7,8].map(number=>({key:String(number),query:{operation:'pr',args:{number}}}))})).json();
+  assert.equal(result.results[0].data.mergeable,'CONFLICTING');assert.deepEqual(result.results[0].data.labels,[]);
+  assert.equal(result.results[1].restart,true);assert.equal(result.results[1].api,'core');assert.equal(Object.hasOwn(result.results[1],'data'),false);
+ }finally{await mf.dispose();}
 });

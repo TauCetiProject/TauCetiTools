@@ -1,0 +1,219 @@
+{
+  "baseline": "7051ff816e703984565612babdd5fdd80d8cf89d",
+  "implementation_sha256": "130a8d53deae6529d53791adfd063d43cd4192cd9d49182f55f0d4e2d6325fb7",
+  "scope": "full baseline source snapshot with identical installed dependencies; isolated real PostgreSQL; fixed four-PR cohort; 30 authenticated repository-handler reads per trial; deliberate 500ms writer hold; fixture upstream only; excludes unrelated storage diagnostics; not a production fleet throughput measurement",
+  "trials": 3,
+  "before": [
+    {
+      "reads": 30,
+      "p50_ms": 4450.855463000001,
+      "p95_ms": 5176.904103,
+      "replies_complete_ms": 5179.662511,
+      "demand_durable_ms": 5179.664204000001,
+      "demand_transactions": 12,
+      "total_transactions": 26,
+      "transaction_admission_p95_ms": 2548.5384990000002,
+      "all_histories_complete_ms": 11617.063512,
+      "histories_completed": 4,
+      "oldest_requested_after": null,
+      "fixture_upstream_reads": 4,
+      "github_requests": 0,
+      "purposes": {
+        "other": 26
+      }
+    },
+    {
+      "reads": 30,
+      "p50_ms": 4390.335913999996,
+      "p95_ms": 5081.619976000002,
+      "replies_complete_ms": 5081.929703999995,
+      "demand_durable_ms": 5081.932177999988,
+      "demand_transactions": 12,
+      "total_transactions": 26,
+      "transaction_admission_p95_ms": 2646.0651760000037,
+      "all_histories_complete_ms": 11400.231221999988,
+      "histories_completed": 4,
+      "oldest_requested_after": null,
+      "fixture_upstream_reads": 4,
+      "github_requests": 0,
+      "purposes": {
+        "other": 26
+      }
+    },
+    {
+      "reads": 30,
+      "p50_ms": 4481.641702000008,
+      "p95_ms": 5213.335669999986,
+      "replies_complete_ms": 5213.620882999996,
+      "demand_durable_ms": 5213.624148000003,
+      "demand_transactions": 12,
+      "total_transactions": 26,
+      "transaction_admission_p95_ms": 2667.0468749999854,
+      "all_histories_complete_ms": 11975.280721999996,
+      "histories_completed": 4,
+      "oldest_requested_after": null,
+      "fixture_upstream_reads": 4,
+      "github_requests": 0,
+      "purposes": {
+        "other": 26
+      }
+    }
+  ],
+  "after": [
+    {
+      "reads": 30,
+      "p50_ms": 211.082273,
+      "p95_ms": 462.59868399999687,
+      "replies_complete_ms": 510.3118020000038,
+      "demand_durable_ms": 2639.771753000001,
+      "demand_transactions": 3,
+      "total_transactions": 17,
+      "transaction_admission_p95_ms": 1349.0199429999993,
+      "all_histories_complete_ms": 8763.653145000004,
+      "histories_completed": 4,
+      "oldest_requested_after": null,
+      "fixture_upstream_reads": 4,
+      "github_requests": 0,
+      "purposes": {
+        "read_demand": 3,
+        "other": 5,
+        "repair": 5,
+        "publication": 4
+      }
+    },
+    {
+      "reads": 30,
+      "p50_ms": 203.5541060000105,
+      "p95_ms": 409.1414850000001,
+      "replies_complete_ms": 466.0064369999891,
+      "demand_durable_ms": 2877.908171999996,
+      "demand_transactions": 3,
+      "total_transactions": 17,
+      "transaction_admission_p95_ms": 1574.1608879999985,
+      "all_histories_complete_ms": 9104.165367999987,
+      "histories_completed": 4,
+      "oldest_requested_after": null,
+      "fixture_upstream_reads": 4,
+      "github_requests": 0,
+      "purposes": {
+        "read_demand": 3,
+        "other": 5,
+        "repair": 5,
+        "publication": 4
+      }
+    },
+    {
+      "reads": 30,
+      "p50_ms": 176.46873299998697,
+      "p95_ms": 408.27645800000755,
+      "replies_complete_ms": 462.46511299998383,
+      "demand_durable_ms": 2709.928041999985,
+      "demand_transactions": 3,
+      "total_transactions": 17,
+      "transaction_admission_p95_ms": 1444.4550520000048,
+      "all_histories_complete_ms": 8948.658697000006,
+      "histories_completed": 4,
+      "oldest_requested_after": null,
+      "fixture_upstream_reads": 4,
+      "github_requests": 0,
+      "purposes": {
+        "read_demand": 3,
+        "other": 5,
+        "repair": 5,
+        "publication": 4
+      }
+    }
+  ],
+  "companions": {
+    "before": [
+      {
+        "histories_completed": 8,
+        "upstream_batch_requests": 4,
+        "github_requests": 0,
+        "total_transactions": 65,
+        "duration_ms": 20724.428429000003,
+        "purposes": {
+          "other": 65
+        }
+      },
+      {
+        "histories_completed": 8,
+        "upstream_batch_requests": 4,
+        "github_requests": 0,
+        "total_transactions": 65,
+        "duration_ms": 20544.480490999995,
+        "purposes": {
+          "other": 65
+        }
+      },
+      {
+        "histories_completed": 8,
+        "upstream_batch_requests": 4,
+        "github_requests": 0,
+        "total_transactions": 65,
+        "duration_ms": 20645.240279999998,
+        "purposes": {
+          "other": 65
+        }
+      }
+    ],
+    "after": [
+      {
+        "histories_completed": 8,
+        "upstream_batch_requests": 1,
+        "github_requests": 0,
+        "total_transactions": 14,
+        "duration_ms": 7670.662752999997,
+        "purposes": {
+          "other": 2,
+          "repair": 4,
+          "publication": 8
+        }
+      },
+      {
+        "histories_completed": 8,
+        "upstream_batch_requests": 1,
+        "github_requests": 0,
+        "total_transactions": 14,
+        "duration_ms": 7572.181612,
+        "purposes": {
+          "other": 2,
+          "repair": 4,
+          "publication": 8
+        }
+      },
+      {
+        "histories_completed": 8,
+        "upstream_batch_requests": 1,
+        "github_requests": 0,
+        "total_transactions": 14,
+        "duration_ms": 7604.504625000001,
+        "purposes": {
+          "other": 2,
+          "repair": 4,
+          "publication": 8
+        }
+      }
+    ]
+  },
+  "summary": {
+    "before": {
+      "p50_ms": 4450.855463000001,
+      "p95_ms": 5176.904103,
+      "replies_complete_ms": 5179.662511,
+      "demand_durable_ms": 5179.664204000001,
+      "demand_transactions": 12,
+      "total_transactions": 26,
+      "all_histories_complete_ms": 11617.063512
+    },
+    "after": {
+      "p50_ms": 203.5541060000105,
+      "p95_ms": 409.1414850000001,
+      "replies_complete_ms": 466.0064369999891,
+      "demand_durable_ms": 2709.928041999985,
+      "demand_transactions": 3,
+      "total_transactions": 17,
+      "all_histories_complete_ms": 8948.658697000006
+    }
+  }
+}

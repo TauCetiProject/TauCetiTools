@@ -397,16 +397,13 @@ def set_group(z, message, bot_id, group, desired, dry_run=False):
 def review_emoji(status):
     """Review reaction from the completed review signal, not merge eligibility.
 
-    In particular, the live review marker that produces `review-in-progress`
-    produces 👀 here. A completed blocking review produces ✍️, and an all-green
+    A completed blocking review produces ✍️, and an all-green
     review produces ✔️. Merely waiting for review has no review reaction.
     """
     if status["review"] == "approved":
         return "check"
     if status["review"] == "changes":
         return "writing"
-    if status.get("review_inprogress"):
-        return "eyes"
     return None
 
 

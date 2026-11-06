@@ -18,6 +18,7 @@ const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
 function harness(){
  const archive=bucket(),state={full:false,applied:new Map(),error:null,throws:false};
  const repository={async fetch(url,init){
+  if(new URL(url).pathname==='/storage/deliveries'){const {ids}=JSON.parse(init.body);return Response.json({known:ids.filter(id=>state.applied.has(id))});}
   if(state.throws) throw new Error('network connection lost');
   const pointer=JSON.parse(init.body);
   if(state.applied.has(pointer.delivery)) return Response.json({ok:true});
@@ -39,6 +40,14 @@ async function deliver(env,delivery,attempts=1){
  return message;
 }
 const parked=(archive,delivery)=>[...archive.objects.keys()].filter(k=>k.startsWith('parked/100/pointers/') && k.endsWith('-'+delivery+'.json'));
+test('the public survey edge replaces numeric validators and revalidates the repaired representation',async()=>{
+ const h=harness(),etag='"survey-v1-observed-statuses:17"';
+ h.env.CLIENT_TOKENS=JSON.stringify([{hash:sha('client'),repositories:[repo.name]}]);
+ h.env.REPOSITORIES.get=()=>({fetch:async()=>Response.json({version:1,repository:repo.name,operation:'survey',status:'ok',complete:true,revision:17,data:[]},{headers:{ETag:etag}})});
+ const read=validator=>worker.fetch(new Request('https://public/v1/query?repository=org%2Frepo&operation=survey',{headers:{Authorization:'Bearer client','If-None-Match':validator}}),h.env,{});
+ const repaired=await read('"17"');assert.equal(repaired.status,200);assert.equal(repaired.headers.get('etag'),etag);
+ for(const validator of [etag,'W/'+etag,'"other", W/'+etag])assert.equal((await read(validator)).status,304);
+});
 // Every acknowledged event has a committed receipt or a durable pointer and pinned body.
 function durable({archive,state},delivery){
  if(state.applied.has(delivery)) return true;
@@ -131,6 +140,63 @@ function repositoryFixture(env={},size=0,db=new DatabaseSync(':memory:'),archive
  state.fixtureReady=ready;
  return {db,state,archive,ready};
 }
+test('receipt lookups stay outside the writer and do not block unrelated mirror reads',async()=>{
+ const f=repositoryFixture();await f.ready;
+ const key='fixture/slow-receipt';await f.archive.put(key,JSON.stringify({issue:{number:7},comment:{id:42,body:'hello'}}));
+ let release,entered;const gate=new Promise(r=>release=r),ready=new Promise(r=>entered=r);
+ const head=f.archive.head;let heads=0;
+ let writing=false;const atomic=f.state.atomic.bind(f.state);
+ f.state.atomic=apply=>atomic(async state=>{writing=true;try{return await apply(state);}finally{writing=false;}});
+ f.archive.head=async key=>{if(key.startsWith('receipts/')){assert.equal(writing,false,'receipt I/O must not hold the writer');heads++;entered();await gate;}return head(key);};
+ const event=f.state.ingest({repository:repo.name,event:'issue_comment',delivery:'slow-receipt',key,received:Date.now()});
+ await ready;let timer;
+ try {
+  const read=f.state.store.exec("SELECT value FROM meta WHERE key='repository'");
+  const result=await Promise.race([read,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('receipt I/O blocked a local read')),1000);})]);
+  assert.equal(result.toArray().length,1);
+ }finally{clearTimeout(timer);release();}
+ await event;assert.equal(heads,1,'only one receipt lookup is needed, before acquiring the writer');
+});
+
+test('SQL-first receipt lookup deduplicates while archival moves a receipt to R2',async()=>{
+ const f=repositoryFixture();await f.ready;
+ const delivery='archive-race',key='fixture/archive-race';
+ await f.archive.put(key,JSON.stringify({issue:{number:7},comment:{id:42,body:'must not replay'}}));
+ f.db.prepare('INSERT INTO deliveries VALUES(?,?,?)').run(delivery,'issue_comment',Date.now()-30*86400000);
+ let heads=0;const head=f.archive.head;
+ f.archive.head=async key=>{heads++;return head(key);};
+ const pointer={repository:repo.name,event:'issue_comment',delivery,key,received:Date.now()};
+ await f.state.ingest(pointer);
+ assert.equal(heads,0,'a SQL receipt needs no remote lookup');
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM resources').get().n,0);
+ // Archival publishes R2 before deleting SQL. After deletion the same event
+ // is still rejected by the one pre-transaction remote check.
+ await f.archive.put('receipts/100/'+delivery+'.json','{}');
+ f.db.prepare('DELETE FROM deliveries WHERE id=?').run(delivery);
+ await f.state.ingest(pointer);assert.equal(heads,1);
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM resources').get().n,0);
+});
+
+test('a concurrent ingest receipt remains retained even for an old parked event',async()=>{
+ const f=repositoryFixture();await f.ready;
+ const pointer={repository:repo.name,event:'issue_comment',delivery:'concurrent-old',key:'fixture/concurrent-old',received:Date.now()-30*86400000};
+ await f.archive.put(pointer.key,JSON.stringify({issue:{number:7},comment:{id:42,body:'must not apply twice'}}));
+ f.state.storageLoaded=true;f.state.retentionPolicy={mode:'enforce',disabled:[],pinned:[]};
+ const head=f.archive.head;let raced=false;
+ f.archive.head=async key=>{
+  const value=await head(key);
+  if(key.startsWith('receipts/') && !raced){
+   raced=true;
+   await f.state.atomic(state=>state.commitReceipt(pointer));
+   await f.state.archiveDeliveryReceipts();
+  }
+  return value;
+ };
+ await f.state.ingest(pointer);
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,1);
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM resources').get().n,0);
+ assert.equal(await f.state.meta('review_coordination'),undefined);
+});
 const queryFixture=(state,q)=>state.fetch(new Request('https://internal/query',{method:'POST',body:JSON.stringify({repository:'org/repo',...q})})).then(r=>r.json());
 
 test('R2 cursors validate repository, query and expiry',async()=>{
@@ -619,6 +685,95 @@ test('installation accounting prepares retained hourly projections with a bounde
  owner.prepareAccounting();
  assert.equal(owner.preparedAccounting.hour[0].requests,10000);
  assert.equal(owner.preparedAccounting.scope,'retained_accounting_hour');assert.equal(owner.preparedAccounting.window_complete,false,'bound reached must not masquerade as a complete hour');
+ const restarted=new InstallationScheduler(state.ctx,{});
+ assert.deepEqual(restarted.preparedAccounting,JSON.parse(JSON.stringify(owner.preparedAccounting)),'restart preserves the scan-completeness limit');
+});
+
+test('cold installation health restores retained accounting without refreshing its timestamp or scanning the log',async()=>{
+ const {InstallationScheduler}=await load('src/installation.ts'),{state,db}=repositoryFixture();await state.fixtureReady;
+ state.ctx.storage.get=async()=>undefined;
+ const originalNow=Date.now,originalFetch=globalThis.fetch;let now=originalNow(),externalCalls=0;
+ Date.now=()=>now;globalThis.fetch=async()=>{externalCalls++;assert.fail('accounting health must not query GitHub');};
+ try {
+  const owner=new InstallationScheduler(state.ctx,{});
+  db.prepare('INSERT INTO accounting(at,operation,api,status,points,latency,bytes) VALUES(?,?,?,?,?,?,?)').run(now,'pr','core',200,1,10,20);
+  owner.prepareAccounting();
+  const first=owner.preparedAccounting;
+  assert.equal(first.window_complete,true);assert.equal(first.hour[0].requests,1);
+  const queries=[],exec=state.ctx.storage.sql.exec.bind(state.ctx.storage.sql);
+  state.ctx.storage.sql.exec=(sql,...bindings)=>{queries.push(sql);return exec(sql,...bindings);};
+  now+=90000;
+  const restarted=new InstallationScheduler(state.ctx,{}),health=await(await restarted.fetch(new Request('https://internal/health'))).json();
+  assert.equal(health.scope,'retained_accounting_hour');assert.equal(health.at,first.at);assert.equal(health.stale,false);assert.deepEqual(health.hour,JSON.parse(JSON.stringify(first.hour)));
+  now+=100000;
+  const stale=await(await new InstallationScheduler(state.ctx,{}).fetch(new Request('https://internal/health'))).json();
+  assert.equal(stale.at,first.at);assert.equal(stale.stale,true,'eviction must not make an old report fresh');
+  assert.ok(!queries.some(sql=>/FROM accounting\b/.test(sql)),'cold reads use the single prepared row');
+  assert.equal(externalCalls,0);
+  restarted.prepareAccounting();
+  const refreshed=new InstallationScheduler(state.ctx,{}).preparedAccounting;
+  assert.equal(refreshed.at,now);assert.equal(scalar(db,'SELECT COUNT(*) FROM prepared_accounting'),1);
+ }finally {Date.now=originalNow;globalThis.fetch=originalFetch;}
+});
+
+test('a failed accounting snapshot write preserves the last durable report',async()=>{
+ const {InstallationScheduler}=await load('src/installation.ts'),{state,db}=repositoryFixture();await state.fixtureReady;
+ state.ctx.storage.get=async()=>undefined;
+ const originalNow=Date.now;let now=originalNow();Date.now=()=>now;
+ try {
+  const owner=new InstallationScheduler(state.ctx,{}),insert=db.prepare('INSERT INTO accounting(at,operation,api,status,points,latency,bytes) VALUES(?,?,?,?,?,?,?)');
+  insert.run(now,'pr','core',200,1,10,20);owner.prepareAccounting();const first=JSON.parse(JSON.stringify(owner.preparedAccounting));
+  now+=190000;
+  insert.run(now,'pr','core',200,1,10,20);
+  const exec=state.ctx.storage.sql.exec.bind(state.ctx.storage.sql);
+  state.ctx.storage.sql.exec=(sql,...bindings)=>{if(sql.startsWith('INSERT INTO prepared_accounting'))throw new Error('storage unavailable');return exec(sql,...bindings);};
+  owner.prepareAccounting();
+  assert.deepEqual(JSON.parse(JSON.stringify(owner.preparedAccounting)),first);
+  assert.deepEqual(new InstallationScheduler(state.ctx,{}).preparedAccounting,first,'restart cannot publish the failed update');
+  const failed=await(await owner.fetch(new Request('https://internal/health'))).json();
+  assert.equal(failed.stale,true);assert.equal(failed.accounting_preparation_failure.at,now);
+  state.ctx.storage.sql.exec=exec;owner.prepareAccounting();
+  const refreshed=new InstallationScheduler(state.ctx,{}).preparedAccounting;
+  assert.equal(refreshed.at,now);assert.equal(refreshed.hour[0].requests,2);
+  assert.equal((await(await owner.fetch(new Request('https://internal/health'))).json()).accounting_preparation_failure,null);
+ }finally {Date.now=originalNow;}
+});
+
+test('invalid saved accounting falls back to provisional health and the next preparation repairs it',async()=>{
+ const {InstallationScheduler}=await load('src/installation.ts'),{state,db}=repositoryFixture();await state.fixtureReady;
+ state.ctx.storage.get=async()=>undefined;
+ const initial=new InstallationScheduler(state.ctx,{});initial.prepareAccounting();const report=initial.preparedAccounting;
+ for(const data of ['{','{}',JSON.stringify({...report,version:2}),JSON.stringify({...report,at:Date.now()+86400000}),JSON.stringify({...report,window_complete:undefined})]) {
+  db.prepare('UPDATE prepared_accounting SET data=? WHERE singleton=1').run(data);
+  const restarted=new InstallationScheduler(state.ctx,{}),health=await(await restarted.fetch(new Request('https://internal/health'))).json();
+  assert.equal(health.scope,'installation_instance_since_restart');assert.equal(health.stale,true);assert.ok(health.accounting_preparation_failure);
+  restarted.prepareAccounting();
+  assert.equal(new InstallationScheduler(state.ctx,{}).preparedAccounting.version,1);
+  assert.equal((await(await restarted.fetch(new Request('https://internal/health'))).json()).accounting_preparation_failure,null);
+ }
+});
+
+test('saved accounting cannot replace live scheduler identity or quota settings',async()=>{
+ const {InstallationScheduler}=await load('src/installation.ts'),{state,db}=repositoryFixture();await state.fixtureReady;
+ state.ctx.storage.get=async()=>undefined;
+ const owner=new InstallationScheduler(state.ctx,{CF_VERSION:{id:'preparing-version'}});owner.prepareAccounting();
+ db.prepare('UPDATE prepared_accounting SET data=? WHERE singleton=1').run(JSON.stringify({...owner.preparedAccounting,deployment_id:'wrong-version',settings:{concurrency:1000},stale:false,window_start:0}));
+ const restarted=new InstallationScheduler(state.ctx,{CF_VERSION:{id:'current-version'}}),health=await(await restarted.fetch(new Request('https://internal/health'))).json();
+ assert.equal(health.deployment_id,'current-version');assert.equal(health.prepared_deployment,'preparing-version');
+ assert.equal(health.window_start,owner.preparedAccounting.at-3600000);assert.notEqual(health.settings.concurrency,1000);
+});
+
+test('optional accounting snapshot creation failure does not disable the scheduler and can recover',async()=>{
+ const {InstallationScheduler}=await load('src/installation.ts'),{state}=repositoryFixture();await state.fixtureReady;
+ state.ctx.storage.get=async()=>undefined;
+ const exec=state.ctx.storage.sql.exec.bind(state.ctx.storage.sql);
+ state.ctx.storage.sql.exec=(sql,...bindings)=>{if(sql.startsWith('CREATE TABLE IF NOT EXISTS prepared_accounting'))throw new Error('storage unavailable');return exec(sql,...bindings);};
+ const owner=new InstallationScheduler(state.ctx,{}),health=await owner.fetch(new Request('https://internal/health'));
+ assert.equal(health.status,200);assert.equal((await health.json()).scope,'installation_instance_since_restart');
+ state.ctx.storage.sql.exec=exec;
+ const maintenance=await(await owner.fetch(new Request('https://internal/maintenance',{method:'POST'}))).json();
+ assert.equal(maintenance.accounting_preparation_failure,null);
+ assert.equal(new InstallationScheduler(state.ctx,{}).preparedAccounting.scope,'retained_accounting_hour');
 });
 
 
@@ -810,9 +965,11 @@ test('durable leases coordinate overlapping cron passes and recover after owner 
  await h.archive.put(ingress.recoveryKey(repo.id),JSON.stringify({lease_until:Date.now()+60000}));
  await ingress.maintainIngress(h.env,repo);assert.equal((await ingress.backlog(h.env,repo)).prepared_at,null);
  advance(61000);
- let lists=0;const list=h.archive.list;h.archive.list=async options=>{lists++;return list(options);};
+ const lists=[];const list=h.archive.list;h.archive.list=async options=>{lists.push(options.limit);return list(options);};
  await Promise.all([ingress.maintainIngress(h.env,repo),ingress.maintainIngress(h.env,repo)]);
- assert.equal(lists,4,'only one pass owns the two replay and count lists');
+ assert.equal(lists.filter(n=>n===50).length,2,'only the lease owner scans both replay lanes');
+ assert.equal(lists.filter(n=>n===1000).length,2,'only the lease owner prepares both counts');
+ assert.ok(lists.filter(n=>n===1).length<=4,'contenders only perform bounded lane-selection reads');
  assert.equal((await ingress.backlog(h.env,repo)).lease_until,0);
 }));
 
@@ -900,7 +1057,7 @@ test('successful maintenance runs on consecutive cron minutes despite variable R
 test('deadline exhaustion never advances an unvisited lane or skips the rest of a partial page',async()=>clock(async advance=>{
  const h=harness();h.state.full=true;for(let i=0;i<60;i++)await deliver(h.env,'deadline-'+String(i).padStart(2,'0'));h.state.full=false;
  const original=h.env.REPOSITORIES.get().fetch;
- h.env.REPOSITORIES.get=()=>({fetch:async(...args)=>{advance(1000);return original(...args);}});
+ h.env.REPOSITORIES.get=()=>({fetch:async(...args)=>{if(new URL(args[0]).pathname==='/storage/deliveries')return Response.json({known:[]});advance(1000);return original(...args);}});
  const pass=await ingress.drain(h.env,repo,{limit:50,deadline:Date.now()+1});
  assert.equal(pass.replayed,10);assert.ok(pass.cursor.endsWith('-deadline-09.json'));
  const unvisited=await ingress.drain(h.env,repo,{limit:50,cursor:pass.cursor,deadline:Date.now()-1});assert.equal(unvisited.cursor,pass.cursor);assert.equal(unvisited.replayed,0);
@@ -909,7 +1066,7 @@ test('deadline exhaustion never advances an unvisited lane or skips the rest of 
 
 test('failed count preparation keeps the last observation timestamp and defaults survive first-owner crash',async()=>clock(async advance=>{
  const h=cronHarness();await ingress.maintainIngress(h.env,repo);const before=await ingress.backlog(h.env,repo);
- advance(61000);h.archive.failures.push((op,k)=>op==='list' && k.includes('/pointers/'));await ingress.maintainIngress(h.env,repo);
+ advance(61000);const list=h.archive.list;let fail=true;h.archive.list=options=>{if(fail&&options.limit===1000&&options.prefix.includes('/pointers/')){fail=false;throw Error('count list failed');}return list(options);};await ingress.maintainIngress(h.env,repo);
  const after=await ingress.backlog(h.env,repo);assert.equal(after.prepared_at,before.prepared_at);assert.ok(after.last_attempt>before.last_attempt);assert.ok(after.last_error);
  await h.archive.put(ingress.recoveryKey(repo.id),JSON.stringify({lease_until:Date.now()+60000,last_attempt:Date.now()}));
  const fresh=await ingress.backlog(h.env,repo);assert.equal(fresh.parked.count,null);assert.equal(fresh.held.count,null);
@@ -938,6 +1095,30 @@ test('raw maintenance uses metadata without downloading committed bodies, promot
  await h.archive.put('webhooks/2026-10-20/legacy-known.json','{"repository":{"id":100}}',{customMetadata:{event:'ping'}});
  h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{assert.equal(new URL(url).pathname,'/storage/deliveries');return Response.json({known:JSON.parse(init.body).ids});}});
  advance(60000);await ingress.maintainRaw(h.env,()=>[repo]);assert.ok(h.archive.objects.has(ingress.receiptKey(repo.id,'legacy-known')));assert.equal(parked(h.archive,'legacy-known').length,0);
+}));
+
+test('raw maintenance dispositions CI deliveries from listed metadata alone and expires them in large pages',async()=>clock(async()=>{
+ const h=cronHarness();for(let i=0;i<1500;i++)await h.archive.put('webhooks/2026-10-12/ci-'+String(i).padStart(4,'0')+'.json','{}',{customMetadata:{event:i%2?'workflow_job':'check_run',sha256:'x',targets:'["100"]',received:'1',expires:i<1200?'1':String(Date.now()+86400000)}});
+ await h.archive.put('control/raw-gaps/ci-0001.json',JSON.stringify({failures:1,retry_at:0}));
+ const get=h.archive.get,head=h.archive.head;
+ h.archive.get=async key=>{assert.ok(!key.startsWith('webhooks/'),key);if(key.startsWith('control/raw-gaps/'))assert.equal(key,'control/raw-gaps/ci-0001.json','only the bounded existing gap record is read');return get(key);};
+ h.archive.head=async key=>{assert.fail('unexpected head '+key);};
+ await ingress.maintainRaw(h.env,()=>[repo]);h.archive.get=get;h.archive.head=head;
+ const state=JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes);assert.ok(state.last_completed);
+ assert.equal([...h.archive.objects.keys()].filter(k=>k.startsWith('webhooks/')).length,300);
+ assert.equal([...h.archive.objects.keys()].filter(k=>k.startsWith('invalid/') || k.startsWith('parked/')).length,0);
+ assert.equal(JSON.parse(h.archive.objects.get('control/retention/raw_webhooks.json').bytes).deleted,1200);
+ assert.equal(h.archive.objects.has('control/raw-gaps/ci-0001.json'),false);assert.deepEqual(state.gaps,{count:0,truncated:false});
+}));
+
+test('raw maintenance recovers independent deliveries concurrently and parks every one',async()=>clock(async()=>{
+ const h=cronHarness();for(let i=0;i<25;i++)await h.archive.put('webhooks/2026-10-12/lost-'+String(i).padStart(2,'0')+'.json','{"repository":{"id":100}}',{customMetadata:{event:'issue_comment'}});
+ let inflight=0,peak=0;const batches=[],get=h.archive.get;h.archive.get=async key=>{if(!key.startsWith('webhooks/'))return get(key);inflight++;peak=Math.max(peak,inflight);await new Promise(r=>setImmediate(r));inflight--;return get(key);};
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{assert.equal(new URL(url).pathname,'/storage/deliveries');batches.push(JSON.parse(init.body).ids);return Response.json({known:[]});}});
+ await ingress.maintainRaw(h.env,()=>[repo]);
+ assert.ok(peak>1,'peak '+peak);assert.ok(JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes).last_completed);
+ assert.ok(batches.length<25);assert.equal(batches.flat().length,25);
+ for(let i=0;i<25;i++)assert.equal(parked(h.archive,'lost-'+String(i).padStart(2,'0')).length,1);
 }));
 
 test('permanent receipts cannot delay expiry sweeps for snapshots and staging',async()=>{
@@ -1151,4 +1332,785 @@ test('test-migration constructor waits for a full marker before attempting a leg
   assert.equal(db.prepare("SELECT COUNT(*) n FROM meta WHERE key='schema_version'").get().n,0);
   assert.equal(reset.state.schema,'migration_pending');assert.ok(reset.state.degraded);
  }finally{db.close();}
+});
+
+test('parked CI receipts batch without semantic changes and survive response/cleanup crashes',async()=>{
+ const f=repositoryFixture();await f.ready;
+ let batches=0,individual=0,lost=true;
+ const namespace={idFromName:()=>({toString:()=>f.state.ctx.id.toString()}),get:()=>({fetch:async(url,init)=>{
+  const path=new URL(url).pathname;
+  if(path==='/ci-receipts')batches++;else if(path==='/event')individual++;
+  const response=await f.state.fetch(new Request(url,init));
+  if(path==='/ci-receipts'&&response.ok&&lost){lost=false;throw Error('response lost after committed batch');}
+  return response;
+ }})};
+ f.state.env.REPOSITORIES=namespace;
+ const env={ALLOWED_REPOSITORIES:JSON.stringify([repo]),ARCHIVE:f.archive,REPOSITORIES:namespace},now=Date.now(),items=[];
+ for(let i=0;i<25;i++){
+  const p={repository:repo.name,delivery:'old-ci-'+i,event:i%2?'check_run':'workflow_job',received:now-10000+i,key:'webhooks/ci/'+i};
+  await f.archive.put(p.key,'{}');await ingress.park(env,repo,p,'migration');items.push(p);
+ }
+ const waiting=items.at(-1),waitingKey=ingress.pointerKey(repo.id,waiting),value=await(await f.archive.get(waitingKey)).json();
+ await f.archive.put(waitingKey,JSON.stringify({...value,retry_at:now+600000}));
+ f.archive.failures.push((op,key)=>op==='put'&&key===ingress.receiptKey(repo.id,'old-ci-0'));
+ f.archive.failures.push((op,key)=>op==='delete'&&key===ingress.bodyKey(repo.id,'old-ci-1'));
+ const revision=await f.state.revision(),first=await ingress.drain(env,repo,{limit:100});
+ assert.equal(batches,1);assert.ok(individual>0,'response loss uses existing deduplication');
+ assert.equal(first.failed,2);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,24);
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM changes').get().n,0);assert.equal(await f.state.revision(),revision);
+ for(const p of items.slice(0,-1))assert.equal(f.db.prepare('SELECT event FROM deliveries WHERE id=?').get(p.delivery).event,'ignored:'+p.event);
+ assert.ok(await f.archive.get(ingress.bodyKey(repo.id,'old-ci-0')),'SQL commit alone cannot release the body before R2 receipt publication');
+ assert.ok(await f.archive.get(ingress.pointerKey(repo.id,items[1])),'cleanup interruption retains the pointer');
+ assert.equal(await f.archive.get(ingress.receiptKey(repo.id,waiting.delivery)),null);
+ for(const p of items.slice(0,-1)){const key=ingress.pointerKey(repo.id,p),o=await f.archive.get(key);if(o){const v=await o.json();await f.archive.put(key,JSON.stringify({...v,retry_at:0}));}}
+ const second=await ingress.drain(env,repo,{limit:100});assert.equal(second.failed,0);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,24);
+ for(const p of items.slice(0,-1)){assert.ok(await f.archive.get(ingress.receiptKey(repo.id,p.delivery)));assert.equal(await f.archive.get(ingress.pointerKey(repo.id,p)),null);assert.equal(await f.archive.get(ingress.bodyKey(repo.id,p.delivery)),null);}
+ assert.ok(await f.archive.get(waitingKey));assert.equal(await f.state.revision(),revision);
+});
+
+test('CI receipt endpoint rejects semantic input, wrong object, paused ingress and source fence',async()=>{
+ const f=repositoryFixture();await f.ready;f.state.env.REPOSITORIES={idFromName:()=>({toString:()=>f.state.ctx.id.toString()})};
+ const send=body=>f.state.fetch(new Request('https://internal/ci-receipts',{method:'POST',body:JSON.stringify(body)})),event={delivery:'bounded-ci',event:'workflow_run',received:Date.now()},input={repository:repo.name,events:[event]};
+ for(const events of[[],Array(101).fill(event),[{...event,event:'issue_comment'}],[{...event,received:1.5}],[{...event,delivery:'bad/id'}],[event,{...event,event:'check_run'}]])assert.equal((await send({...input,events})).status,400);
+ f.state.env.REPOSITORIES={idFromName:()=>({toString:()=>'other-object'})};assert.equal((await send(input)).status,400);
+ f.state.env.REPOSITORIES={idFromName:()=>({toString:()=>f.state.ctx.id.toString()})};
+ f.state.ingress='parked';assert.equal((await send(input)).status,503);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,0);
+ f.state.ingress='apply';f.state.migrationState={phase:'exporting'};assert.equal((await send(input)).status,503);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,0);
+ f.state.migrationState=null;assert.equal((await send(input)).status,200);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,1);
+ assert.equal((await send(input)).status,200);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,1);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM changes').get().n,0);
+});
+
+test('CI batches respect SQLite bindings, storage refusal and an in-flight ingress pause',async()=>{
+ const f=repositoryFixture();await f.ready;
+ f.state.env.REPOSITORIES={idFromName:()=>({toString:()=>f.state.ctx.id.toString()})};
+ const events=Array.from({length:100},(_,i)=>({delivery:'bounded-'+i,event:'workflow_run',received:Date.now()}));
+ const send=()=>f.state.fetch(new Request('https://internal/ci-receipts',{method:'POST',body:JSON.stringify({repository:repo.name,events})}));
+ for(const reason of ['storage_full','storage_error']){
+  f.state.degraded={since:Date.now(),reason};const response=await send();
+  assert.equal(response.status,503);assert.equal((await response.json()).parkable,true);
+  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,0);
+ }
+ f.state.degraded=undefined;f.state.inputFailure={at:Date.now(),reason:'old_failure'};
+ const exec=f.state.ctx.storage.sql.exec;let largest=0;
+ f.state.ctx.storage.sql.exec=(sql,...bindings)=>{largest=Math.max(largest,bindings.length);assert.ok(bindings.length<=100);return exec(sql,...bindings);};
+ let release,entered;const gate=new Promise(r=>release=r),syncing=new Promise(r=>entered=r);
+ f.state.ctx.storage.sync=async()=>{entered();await gate;};
+ const batch=send();await syncing;
+ assert.equal(f.state.applying,1);let paused=false;
+ const pause=f.state.fetch(new Request('https://internal/storage/ingress',{method:'POST',body:JSON.stringify({mode:'parked'})})).then(async r=>{paused=true;return r.json();});
+ await new Promise(r=>setTimeout(r,75));assert.equal(paused,false,'pause must wait through durable sync');
+ release();assert.equal((await batch).status,200);
+ assert.deepEqual(await pause,{mode:'parked',in_flight:0,drained:true});
+ assert.equal(f.state.inputFailure,undefined);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,100);
+ assert.equal(largest,99);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM changes').get().n,0);
+});
+
+test('a late ingress-control read cannot undo a completed pause',async()=>{
+ for(const path of ['/ci-receipts','/event']){
+  const f=repositoryFixture();await f.ready;f.state.ingress=undefined;
+  f.state.env.REPOSITORIES={idFromName:()=>({toString:()=>f.state.ctx.id.toString()})};
+  let release,entered;const gate=new Promise(r=>release=r),reading=new Promise(r=>entered=r),get=f.archive.get;
+  f.archive.get=async key=>{if(key==='control/100/ingress.json'){entered();await gate;return{json:async()=>({mode:'apply'})};}return get(key);};
+  const event={delivery:'late-control',event:'check_run',received:Date.now()},body=path==='/event'?{...event,repository:repo.name,key:'unused'}:{repository:repo.name,events:[event]};
+  const pending=f.state.fetch(new Request('https://internal'+path,{method:'POST',body:JSON.stringify(body)}));
+  await reading;
+  const pause=await f.state.fetch(new Request('https://internal/storage/ingress',{method:'POST',body:JSON.stringify({mode:'parked'})}));
+  assert.equal((await pause.json()).drained,true);release();
+  assert.equal((await pending).status,503);assert.equal(f.state.ingress,'parked');
+  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,0);
+ }
+});
+
+test('CI replay survives an old actor and a deadline immediately after batch commit',async()=>clock(async advance=>{
+ const f=repositoryFixture();await f.ready;let oldActor=true,expire=false,batches=0,individual=0;
+ const namespace={idFromName:()=>({toString:()=>f.state.ctx.id.toString()}),get:()=>({fetch:async(url,init)=>{
+  const path=new URL(url).pathname;
+  if(path==='/ci-receipts'){batches++;if(oldActor)return new Response(null,{status:404});}else if(path==='/event')individual++;
+  const response=await f.state.fetch(new Request(url,init));
+  if(path==='/ci-receipts' && expire){expire=false;advance(2000);}
+  return response;
+ }})};f.state.env.REPOSITORIES=namespace;
+ const env={ALLOWED_REPOSITORIES:JSON.stringify([repo]),ARCHIVE:f.archive,REPOSITORIES:namespace};
+ const park=async delivery=>{const p={repository:repo.name,delivery,event:'check_run',received:Date.now(),key:'webhooks/'+delivery};await f.archive.put(p.key,'{}');await ingress.park(env,repo,p,'migration');return p;};
+ const old=await park('old-actor');assert.equal((await ingress.drain(env,repo)).replayed,1);
+ assert.equal(individual,1);assert.equal((await(await f.archive.get(ingress.receiptKey(repo.id,old.delivery))).json()).disposition,'not_mirrored');
+ oldActor=false;f.state.ctx.storage.sync=async()=>advance(7);const pending=await park('deadline-commit');expire=true;
+ const first=await ingress.drain(env,repo,{deadline:Date.now()+1000});assert.equal(first.stopped,'deadline');assert.equal(first.replayed,0);
+ assert.equal(first.timing.batch_ms,2007);assert.equal(first.timing.batch_lookup_ms,undefined);assert.equal(first.timing.batch_write_ms,7);assert.equal(first.timing.cleanup_ms,0);
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries WHERE id=?').get(pending.delivery).n,1);
+ assert.ok(await f.archive.get(ingress.pointerKey(repo.id,pending)));assert.ok(await f.archive.get(ingress.bodyKey(repo.id,pending.delivery)));
+ assert.equal(await f.archive.get(ingress.receiptKey(repo.id,pending.delivery)),null);
+ assert.equal((await ingress.drain(env,repo)).replayed,1);assert.equal(batches,3);assert.equal(individual,1);
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,2);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM changes').get().n,0);
+ assert.equal(await f.archive.get(ingress.pointerKey(repo.id,pending)),null);
+}));
+
+test('ordinary replay learns a smaller durable page after repeated zero-progress deadlines',async()=>clock(async advance=>{
+ const h=harness(),committed=new Map(),sizes=[],cleanup=[];let slow=true;
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{
+  assert.equal(new URL(url).pathname,'/ci-receipts');
+  const rows=JSON.parse(init.body).events;sizes.push(rows.length);
+  for(const p of rows)if(!committed.has(p.delivery))committed.set(p.delivery,1);
+  if(slow && rows.length>2)advance(21000);else advance(1000);
+  return Response.json({committed:rows.map(p=>p.delivery)});
+ }});
+ for(let i=0;i<12;i++){
+  const p={repository:repo.name,delivery:'adaptive-'+String(i).padStart(2,'0'),event:'check_run',received:Date.now(),key:'webhooks/adaptive-'+i};
+  await h.archive.put(p.key,'{}');await ingress.park(h.env,repo,p,'migration');
+ }
+ const remove=h.archive.delete;
+ h.archive.delete=async keys=>{for(const key of Array.isArray(keys)?keys:[keys])if(key.includes('/bodies/')){
+  const delivery=key.slice(key.lastIndexOf('/')+1).replace(/\.json$/,'');
+  assert.ok(committed.has(delivery));assert.ok(await h.archive.get(ingress.receiptKey(repo.id,delivery)));cleanup.push(delivery);
+ }return remove(keys);};
+ // A held cooldown is independent of the normal lane's learned page size.
+ const delayed={repository:repo.name,delivery:'adaptive-held',event:'check_run',received:Date.now(),key:'webhooks/adaptive-held'};
+ await h.archive.put(delayed.key,'{}');await ingress.park(h.env,repo,delayed,'migration');
+ const original=await(await h.archive.get(ingress.pointerKey(repo.id,delayed))).json(),retry=Date.now()+3600000;
+ await h.archive.put(ingress.pointerKey(repo.id,delayed,true),JSON.stringify({...original,retry_at:retry,replay_failures:5}));
+ await remove(ingress.pointerKey(repo.id,delayed));
+ await ingress.maintainIngress(h.env,repo);
+ let state=await(await h.archive.get(ingress.recoveryKey(repo.id))).json();
+ assert.equal(state.pointers_last_pass.replayed,0);assert.equal(state.pointers_last_pass.stopped,'deadline');
+ assert.equal(state.pointers_last_pass.page_size,12);assert.equal(cleanup.length,0);
+ // Each call loads a fresh module/process, and only the ordinary supervisor
+ // resumes work. No explicit admin replay, cursor reset or cooldown bypass.
+ for(let n=0;n<20 && [...h.archive.objects.keys()].some(k=>k.startsWith('parked/100/pointers/'));n++){
+  advance(31000);await(await load('src/ingress.ts')).maintainIngress(h.env,repo);
+ }
+ state=await(await h.archive.get(ingress.recoveryKey(repo.id))).json();
+ assert.equal([...h.archive.objects.keys()].filter(k=>k.startsWith('parked/100/pointers/')).length,0);
+ assert.equal(committed.size,12);assert.ok([...committed.values()].every(n=>n===1));
+ assert.equal(cleanup.length,12);assert.deepEqual(sizes.slice(0,3),[12,6,3]);assert.ok(sizes.slice(3).every(n=>n===1));
+ assert.equal(state.pointers_page_limit,2);assert.equal(state.pointers_page_ceiling,2);assert.ok(state.pointers_page_ceiling_until>Date.now());
+ assert.equal(state.held_page_limit,undefined);assert.equal(state.held_page_ceiling,undefined);
+ assert.equal((await(await h.archive.get(ingress.pointerKey(repo.id,delayed,true))).json()).retry_at,retry);
+ assert.ok(await h.archive.get(ingress.bodyKey(repo.id,delayed.delivery)));assert.equal(committed.has(delayed.delivery),false);
+ assert.equal(state.lease_until,0);
+ // A temporary slowdown must not impose a permanent throughput ceiling.
+ slow=false;advance(15*60000+1);
+ for(let i=0;i<24;i++){const p={repository:repo.name,delivery:'healthy-'+String(i).padStart(2,'0'),event:'check_run',received:Date.now(),key:'webhooks/healthy-'+i};await h.archive.put(p.key,'{}');await ingress.park(h.env,repo,p,'migration');}
+ for(let n=0;n<5 && [...h.archive.objects.keys()].some(k=>k.startsWith('parked/100/pointers/'));n++){advance(31000);await ingress.maintainIngress(h.env,repo);}
+ state=await(await h.archive.get(ingress.recoveryKey(repo.id))).json();assert.ok((state.pointers_page_limit ?? 100)>2);assert.equal(state.pointers_page_ceiling,undefined);
+ assert.equal(cleanup.length,36);assert.equal(committed.size,36);
+}));
+
+test('a reset after the learned lease claim preserves its limit and cursor',async()=>clock(async advance=>{
+ const h=harness();h.state.full=true;for(const d of ['learned-a','learned-b','learned-c','learned-d'])await deliver(h.env,d);h.state.full=false;
+ await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
+ const key=ingress.recoveryKey(repo.id),cursor='parked/100/pointers/000000000000000-before.json';
+ await h.archive.put(key,JSON.stringify({pointers_cursor:cursor,pointers_last_pass:{replayed:0,failed:0,stopped:'deadline',page_size:4,page_limit:50,budget_ms:20000}}));
+ const put=h.archive.put;let lost=true;
+ h.archive.put=async(k,...args)=>{const result=await put(k,...args);if(k===key&&lost){lost=false;throw Error('reset after learned lease');}return result;};
+ await assert.rejects(ingress.maintainIngress(h.env,repo),/reset after learned lease/);
+ const claim=await(await h.archive.get(key)).json();assert.equal(claim.pointers_page_limit,2);assert.equal(claim.pointers_cursor,cursor);assert.equal(h.state.applied.size,0);
+ advance(61000);await(await load('src/ingress.ts')).maintainIngress(h.env,repo);
+ assert.equal(h.state.applied.size,4);assert.ok([...h.state.applied.values()].every(n=>n===1));
+ assert.equal((await(await h.archive.get(key)).json()).lease_until,0);
+}));
+
+test('expired owners that lose every slow completion still converge without an admin retry',async()=>clock(async advance=>{
+ const h=harness(),key=ingress.recoveryKey(repo.id),committed=new Set(),sizes=[];
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{
+  assert.equal(new URL(url).pathname,'/ci-receipts');const rows=JSON.parse(init.body).events;sizes.push(rows.length);
+  for(const p of rows)committed.add(p.delivery);
+  if(rows.length>2){
+   advance(61000);const owner=await(await h.archive.get(key)).json();
+   // Another controller has fenced this completion. No slow pass gets to
+   // publish its observed size/deadline, only its original lease claim survives.
+   await h.archive.put(key,JSON.stringify({...owner,replaced:true,lease_until:Date.now()}));
+  }else advance(1000);
+  return Response.json({committed:rows.map(p=>p.delivery)});
+ }});
+ for(let i=0;i<16;i++){const p={repository:repo.name,delivery:'expired-page-'+String(i).padStart(2,'0'),event:'check_run',received:Date.now(),key:'webhooks/expired-page-'+i};await h.archive.put(p.key,'{}');await ingress.park(h.env,repo,p,'migration');}
+ await ingress.maintainIngress(h.env,repo);
+ const first=await(await h.archive.get(key)).json();assert.equal(first.pointers_last_pass,undefined);assert.equal(first.replay_inflight.limit,50);assert.equal(first.replay_inflight.lane,'pointers');
+ for(let n=0;n<20 && [...h.archive.objects.keys()].some(k=>k.startsWith('parked/100/pointers/'));n++){
+  advance(31000);await(await load('src/ingress.ts')).maintainIngress(h.env,repo);
+ }
+ assert.equal([...h.archive.objects.keys()].filter(k=>k.startsWith('parked/100/pointers/')).length,0);assert.equal(committed.size,16);
+ const state=await(await h.archive.get(key)).json();assert.equal(state.pointers_page_limit,2);assert.equal(state.pointers_page_ceiling,undefined);
+ assert.deepEqual(sizes.slice(0,6),[16,16,12,6,3,1]);assert.ok(sizes.slice(6).every(n=>n===1));assert.equal(state.lease_until,0);
+ assert.equal(state.held_page_limit,undefined);assert.equal(state.held_page_ceiling,undefined);
+ for(let i=0;i<16;i++){const delivery='expired-page-'+String(i).padStart(2,'0');assert.ok(await h.archive.get(ingress.receiptKey(repo.id,delivery)));assert.equal(await h.archive.get(ingress.bodyKey(repo.id,delivery)),null);}
+}));
+
+test('learned limits grow only with fast full pages at the cap and respect caller limits',async()=>clock(async advance=>{
+ const h=harness(),key=ingress.recoveryKey(repo.id),sizes=[];h.state.full=true;
+ for(let i=0;i<80;i++)await deliver(h.env,'growth-'+String(i).padStart(2,'0'));h.state.full=false;
+ await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
+ await h.archive.put(key,JSON.stringify({pointers_page_limit:2,held_page_limit:1}));
+ const list=h.archive.list;h.archive.list=async options=>{if(options.prefix==='parked/100/pointers/'&&options.startAfter!==undefined)sizes.push(options.limit);return list(options);};
+ const original=h.env.REPOSITORIES.get();h.env.REPOSITORIES.get=()=>({fetch:async(...args)=>{if(new URL(args[0]).pathname==='/storage/deliveries')return Response.json({known:[]});advance(500);return original.fetch(...args);}});
+ for(let n=0;n<3;n++){assert.equal((await ingress.replayIngress(h.env,repo,{limit:1})).replayed,1);}
+ assert.equal((await(await h.archive.get(key)).json()).pointers_page_limit,2,'smaller explicit requests cannot grow the cap');
+ await ingress.maintainIngress(h.env,repo);advance(31000);await ingress.maintainIngress(h.env,repo);
+ const state=await(await h.archive.get(key)).json();assert.ok((state.pointers_page_limit ?? 100)>2);assert.equal(state.held_page_limit,1);
+ assert.ok(sizes.some(n=>n>2));assert.ok(sizes.every(n=>n<=50));assert.equal(h.state.applied.size,80);
+}));
+
+test('legacy CI deadline evidence is usable without penalizing a starved shared-budget lane',async()=>{
+ const h=harness(),key=ingress.recoveryKey(repo.id);
+ await h.archive.put(key,JSON.stringify({
+  pointers_last_pass:{replayed:0,failed:0,stopped:'deadline',batched:8},
+  held_last_pass:{replayed:0,failed:0,stopped:'deadline',page_size:10,page_limit:50,budget_ms:1000},
+ }));
+ const result=await ingress.replayIngress(h.env,repo,{limit:1});assert.equal(result.replayed,0);assert.equal(result.remaining,false);
+ const state=await(await h.archive.get(key)).json();assert.equal(state.pointers_page_limit,25);assert.equal(state.pointers_page_ceiling,undefined);
+ assert.equal(state.held_page_limit,undefined);assert.equal(state.held_page_ceiling,undefined);
+ assert.equal(result.page_limit,1);assert.equal(state.replay_inflight,undefined);
+});
+
+test('an expired one-pointer admin probe does not reduce automatic replay or its other lane',async()=>clock(async advance=>{
+ const h=harness(),key=ingress.recoveryKey(repo.id);h.state.full=true;
+ for(let i=0;i<80;i++)await deliver(h.env,'cancelled-probe-'+i);h.state.full=false;
+ await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
+ const put=h.archive.put;let lost=true;h.archive.put=async(k,...args)=>{const value=await put(k,...args);if(k===key&&lost){lost=false;throw Error('cancelled admin claim');}return value;};
+ await assert.rejects(ingress.replayIngress(h.env,repo,{limit:1}),/cancelled admin claim/);assert.equal(h.state.applied.size,0);
+ const list=h.archive.list,sizes=[];h.archive.list=async options=>{if(options.prefix==='parked/100/pointers/'&&options.limit>1&&options.limit<=100)sizes.push(options.limit);return list(options);};
+ advance(61000);await ingress.maintainIngress(h.env,repo);
+ assert.deepEqual(sizes,[50,50]);assert.equal(h.state.applied.size,80);
+ const state=await(await h.archive.get(key)).json();for(const lane of ['pointers','held']){assert.equal(state[lane+'_page_limit'],undefined);assert.equal(state[lane+'_page_ceiling'],undefined);}
+}));
+
+test('an expired completion after progress recovers throughput without a ceiling or duplicate input',async()=>clock(async advance=>{
+ const h=harness(),key=ingress.recoveryKey(repo.id);h.state.full=true;for(let i=0;i<4;i++)await deliver(h.env,'completed-before-reset-'+i);h.state.full=false;
+ await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
+ const put=h.archive.put;let lost=true;h.archive.put=async(k,body,...args)=>{if(k===key&&lost&&JSON.parse(body).lease_until===0){lost=false;throw Error('lost final checkpoint');}return put(k,body,...args);};
+ await assert.rejects(ingress.maintainIngress(h.env,repo),/lost final checkpoint/);assert.equal(h.state.applied.size,4);
+ h.state.full=true;for(let i=0;i<200;i++)await deliver(h.env,'after-progress-'+i);h.state.full=false;
+ await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
+ advance(61000);await ingress.maintainIngress(h.env,repo);
+ const state=await(await h.archive.get(key)).json();assert.equal(h.state.applied.size,204);assert.ok([...h.state.applied.values()].every(n=>n===1));
+ assert.ok((state.pointers_page_limit ?? 100)>25);assert.equal(state.pointers_page_ceiling,undefined);assert.equal(state.held_page_limit,undefined);
+}));
+
+test('a full source does not attribute an expired claim to either unattempted lane',async()=>clock(async advance=>{
+ const h=harness(),key=ingress.recoveryKey(repo.id);h.state.full=true;await deliver(h.env,'still-full-adaptive');
+ await h.archive.put(key,JSON.stringify({lease_until:Date.now()-1,replay_inflight:{lane:'pointers',limit:50,kind:'cron'},pointers_page_limit:50,held_page_limit:50}));
+ advance(1000);await ingress.maintainIngress(h.env,repo);
+ const state=await(await h.archive.get(key)).json();assert.equal(state.pointers_page_limit,50);assert.equal(state.held_page_limit,50);assert.equal(state.replay_inflight,undefined);assert.equal(h.state.applied.size,0);
+}));
+
+test('both lanes retain their cadence and a lost handoff response preserves the completed lane',async()=>clock(async advance=>{
+ const h=harness(),key=ingress.recoveryKey(repo.id);h.state.full=true;
+ for(const d of ['handoff-normal','handoff-held'])await deliver(h.env,d);h.state.full=false;
+ await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
+ const held=(await(await h.archive.get(parked(h.archive,'handoff-held')[0])).json());
+ await h.archive.put(ingress.pointerKey(repo.id,held,true),JSON.stringify(held));await h.archive.delete(ingress.pointerKey(repo.id,held));
+ const put=h.archive.put;let lost=true;
+ h.archive.put=async(k,body,...args)=>{const value=await put(k,body,...args);if(k===key&&lost&&JSON.parse(body).replay_inflight?.lane==='held'){lost=false;throw Error('lost lane handoff acknowledgement');}return value;};
+ await ingress.maintainIngress(h.env,repo);
+ const pending=await(await h.archive.get(key)).json();assert.equal(pending.replay_inflight.lane,'held');assert.ok(pending.pointers_pass_completed_at);
+ assert.equal(h.state.applied.get('handoff-normal'),1);assert.equal(h.state.applied.has('handoff-held'),false);assert.ok(await h.archive.get(ingress.receiptKey(repo.id,'handoff-normal')));
+ advance(61000);await ingress.maintainIngress(h.env,repo);
+ assert.equal(h.state.applied.size,2);assert.ok([...h.state.applied.values()].every(n=>n===1));
+ const state=await(await h.archive.get(key)).json();assert.equal(state.pointers_page_limit,undefined);assert.equal(state.pointers_page_ceiling,undefined);assert.ok(state.held_pass_completed_at);
+ assert.equal(state.held_page_limit,25,'a lost handoff acknowledgement is uncertain evidence for only its named lane');
+ // An all-cooldown held lane still leaves time for normal input in this tick.
+ h.state.full=true;await deliver(h.env,'next-normal');await deliver(h.env,'cooldown-held');h.state.full=false;
+ await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
+ const p=await(await h.archive.get(parked(h.archive,'cooldown-held')[0])).json(),retry=Date.now()+3600000;
+ await h.archive.put(ingress.pointerKey(repo.id,p,true),JSON.stringify({...p,retry_at:retry}));await h.archive.delete(ingress.pointerKey(repo.id,p));
+ advance(31000);await ingress.maintainIngress(h.env,repo);
+ assert.equal(h.state.applied.get('next-normal'),1);assert.equal(h.state.applied.has('cooldown-held'),false);
+ assert.equal((await(await h.archive.get(ingress.pointerKey(repo.id,p,true))).json()).retry_at,retry);
+}));
+
+test('sustained fast backlog cannot extend a learned limit beyond its original expiry',async()=>clock(async advance=>{
+ const h=harness(),key=ingress.recoveryKey(repo.id),until=Date.now()+15*60000;
+ h.state.full=true;for(let i=0;i<160;i++)await deliver(h.env,'busy-expiry-'+i);h.state.full=false;
+ await h.archive.put(key,JSON.stringify({pointers_page_limit:2,pointers_page_limit_until:until,pointers_page_ceiling:2,pointers_page_ceiling_until:until}));
+ for(let i=0;i<8;i++)await ingress.replayIngress(h.env,repo,{limit:100});
+ let state=await(await h.archive.get(key)).json();assert.equal(state.pointers_page_limit,2);assert.equal(state.pointers_page_limit_until,until);
+ advance(15*60000+1);const pass=await ingress.replayIngress(h.env,repo,{limit:100});assert.equal(pass.page_limit,100);assert.equal(pass.replayed,100);
+ state=await(await h.archive.get(key)).json();assert.equal(state.pointers_page_ceiling,undefined);assert.equal(state.pointers_page_limit,undefined);
+}));
+
+test('quiet held limits expire without successful full pages and optional selection failures do not delay input',async()=>clock(async advance=>{
+ const h=harness(),key=ingress.recoveryKey(repo.id);h.state.full=true;await deliver(h.env,'quiet-held');await deliver(h.env,'selection-fallback');h.state.full=false;
+ await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
+ const p=await(await h.archive.get(parked(h.archive,'quiet-held')[0])).json(),retry=Date.now()+3600000;
+ await h.archive.put(ingress.pointerKey(repo.id,p,true),JSON.stringify({...p,retry_at:retry}));await h.archive.delete(ingress.pointerKey(repo.id,p));
+ await h.archive.put(key,JSON.stringify({next_lane:'held',held_page_limit:1,held_page_limit_until:Date.now()+15*60000,held_page_ceiling:1,held_page_ceiling_until:Date.now()+15*60000}));
+ advance(16*60000);const list=h.archive.list;let failed=false;
+ h.archive.list=options=>{if(!failed&&options.limit===1){failed=true;throw Error('optional lane availability unavailable');}return list(options);};
+ await ingress.maintainIngress(h.env,repo);
+ const state=await(await h.archive.get(key)).json();assert.equal(failed,true);assert.equal(state.last_error,null);assert.equal(state.held_page_limit,undefined);assert.equal(state.held_page_ceiling,undefined);
+ assert.equal(h.state.applied.get('selection-fallback'),1);assert.equal(h.state.applied.has('quiet-held'),false);assert.equal((await(await h.archive.get(ingress.pointerKey(repo.id,p,true))).json()).retry_at,retry);
+}));
+
+test('lost cleanup acknowledgements cannot recreate committed CI pointers or replace receipts',async()=>clock(async advance=>{
+ const f=repositoryFixture();await f.ready;
+ const ns={idFromName:()=>({toString:()=>f.state.ctx.id.toString()}),get:()=>({fetch:(url,init)=>f.state.fetch(new Request(url,init))})};f.state.env.REPOSITORIES=ns;
+ const env={ALLOWED_REPOSITORIES:JSON.stringify([repo]),ARCHIVE:f.archive,REPOSITORIES:ns};
+ const p={repository:repo.name,delivery:'cleanup-ack-lost',event:'check_run',received:Date.now(),key:'webhooks/cleanup-ack-lost'};
+ await f.archive.put(p.key,'{}');await ingress.park(env,repo,p,'migration');
+ const key=ingress.pointerKey(repo.id,p),remove=f.archive.delete;let lost=true;
+ f.archive.delete=async keys=>{await remove(keys);if(lost&&[].concat(keys).includes(key)){lost=false;throw Error('lost cleanup acknowledgement');}};
+ const pass=await ingress.drain(env,repo);
+ assert.equal(pass.failed,0);assert.equal(pass.superseded,1);assert.equal(pass.last_error,undefined);assert.equal(pass.next_retry,undefined);assert.deepEqual(pass.delivery_errors,[{delivery:p.delivery,event:p.event,received:p.received,reason:'internal',outcome:'superseded'}]);
+ assert.equal(await f.archive.get(key),null);assert.equal(await f.archive.get(ingress.bodyKey(repo.id,p.delivery)),null);
+ const receipt=f.archive.objects.get(ingress.receiptKey(repo.id,p.delivery)).bytes.toString();
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM deliveries').get().n,1);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM changes').get().n,0);
+ advance(10000);
+ assert.equal((await f.state.fetch(new Request('https://internal/event',{method:'POST',body:JSON.stringify(p)}))).status,200);
+ assert.equal(f.archive.objects.get(ingress.receiptKey(repo.id,p.delivery)).bytes.toString(),receipt,'duplicate application must preserve the first durable receipt');
+ assert.equal((await ingress.drain(env,repo)).replayed,0);
+}));
+
+test('stale replay failures cannot shorten a newer retry deadline',async()=>{
+ const h=harness();h.state.full=true;await deliver(h.env,'newer-cooldown');h.state.full=false;
+ const key=parked(h.archive,'newer-cooldown')[0],p=await(await h.archive.get(key)).json(),future=Date.now()+600000,put=h.archive.put;let once=true;
+ h.archive.put=async(k,...args)=>{
+  if(once&&k===ingress.receiptKey(repo.id,p.delivery)){once=false;await put(key,JSON.stringify({...p,replay_failures:4,retry_at:future}));throw Error('R2 put failed');}
+  return put(k,...args);
+ };
+ const result=await ingress.drain(h.env,repo);assert.equal(result.failed,0);assert.equal(result.superseded,1);
+ const saved=await(await h.archive.get(key)).json();assert.equal(saved.replay_failures,4);assert.equal(saved.retry_at,future);
+ assert.equal((await ingress.drain(h.env,repo)).replayed,0);assert.equal(h.state.applied.get(p.delivery),1);
+});
+
+test('manual and cron replay share one conditional lease in either acquisition order',async()=>{
+ for(const first of ['manual','cron']){
+  const h=harness();h.state.full=true;for(const d of ['lease-a','lease-b'])await deliver(h.env,d);h.state.full=false;
+  await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
+  const original=h.env.REPOSITORIES.get();let release,entered,blocked=true,calls=0;
+  const gate=new Promise(r=>release=r),waiting=new Promise(r=>entered=r);
+  h.env.REPOSITORIES.get=()=>({fetch:async(...args)=>{calls++;if(blocked){blocked=false;entered();await gate;}return original.fetch(...args);}});
+  const pending=first==='manual'?ingress.replayIngress(h.env,repo,{limit:1}):ingress.maintainIngress(h.env,repo);
+  await waiting;const before=calls;
+  assert.equal((await ingress.replayIngress(h.env,repo,{limit:1})).stopped,'leased');
+  await ingress.maintainIngress(h.env,repo);assert.equal(calls,before,'a competing owner must not dispatch another application');
+  release();await pending;
+  if(first==='manual')assert.equal((await ingress.replayIngress(h.env,repo,{limit:1})).replayed,1,'manual work can advance a healthy owner between cron ticks');
+  assert.equal(h.state.applied.size,2);assert.ok([...h.state.applied.values()].every(n=>n===1));
+  assert.equal((await(await h.archive.get(ingress.recoveryKey(repo.id))).json()).lease_until,0);
+ }
+});
+
+test('manual replay recovers an unacknowledged lease claim after expiry',async()=>clock(async advance=>{
+ const h=harness();h.state.full=true;await deliver(h.env,'lease-reset');h.state.full=false;
+ const key=ingress.recoveryKey(repo.id),put=h.archive.put;let lost=true;
+ h.archive.put=async(k,...args)=>{const r=await put(k,...args);if(k===key&&lost){lost=false;throw Error('reset after lease persistence');}return r;};
+ await assert.rejects(ingress.replayIngress(h.env,repo),/reset after lease persistence/);
+ assert.equal(h.state.applied.size,0);assert.equal((await ingress.replayIngress(h.env,repo)).stopped,'leased');
+ advance(61000);assert.equal((await ingress.replayIngress(h.env,repo)).replayed,1);assert.equal(h.state.applied.get('lease-reset'),1);
+}));
+
+test('manual replay checkpoints bounded keyset progress and respects recovery backoff',async()=>clock(async advance=>{
+ const h=harness();h.state.full=true;for(let i=0;i<20;i++)await deliver(h.env,'deadline-'+String(i).padStart(2,'0'));h.state.full=false;
+ const original=h.env.REPOSITORIES.get();h.env.REPOSITORIES.get=()=>({fetch:async(...args)=>{advance(3000);return original.fetch(...args);}});
+ const first=await ingress.replayIngress(h.env,repo,{limit:25});assert.equal(first.replayed,10);assert.equal(first.stopped,'deadline');
+ const key=ingress.recoveryKey(repo.id),state=await(await h.archive.get(key)).json();assert.equal(state.pointers_cursor,first.cursor);assert.equal(state.lease_until,0);
+ const second=await ingress.replayIngress(h.env,repo,{limit:25});assert.equal(second.replayed,10);assert.equal(second.remaining,false);assert.equal(h.state.applied.size,20);
+ await h.archive.put(key,JSON.stringify({...state,lease_until:0,last_error:'transport',next_retry:Date.now()+60000}));
+ const deferred=await ingress.replayIngress(h.env,repo);assert.equal(deferred.stopped,'recovery_backoff');assert.equal(deferred.replayed,0);
+}));
+
+test('a replaced manual lease keeps its newer checkpoint after the old pass commits',async()=>{
+ const h=harness();h.state.full=true;await deliver(h.env,'replaced-lease');h.state.full=false;
+ const key=ingress.recoveryKey(repo.id),remove=h.archive.delete;let replaced=false;
+ h.archive.delete=async keys=>{await remove(keys);if(!replaced){replaced=true;const state=await(await h.archive.get(key)).json();await h.archive.put(key,JSON.stringify({...state,replacement:true,lease_until:Date.now()+60000}));}};
+ const pass=await ingress.replayIngress(h.env,repo);assert.equal(pass.replayed,1);assert.equal(pass.stopped,'lease_replaced');
+ assert.equal((await(await h.archive.get(key)).json()).replacement,true);assert.equal(h.state.applied.get('replaced-lease'),1);
+});
+
+test('invalid manual replay limits cannot acquire or delay the owner',async()=>{
+ const h=harness();for(const limit of[0,-1,1.5,101])await assert.rejects(ingress.replayIngress(h.env,repo,{limit}),/invalid_replay_limit/);
+ assert.equal(await h.archive.get(ingress.recoveryKey(repo.id)),null);
+});
+
+test('manual replay preserves cron cadence and keeps delivery diagnostics administrative',async()=>clock(async advance=>{
+ const h=harness();h.state.full=true;for(const d of ['cadence-a','cadence-b'])await deliver(h.env,d);h.state.full=false;
+ await h.archive.put('control/100/storage.json',JSON.stringify({state:'writable',verified_at:Date.now()}));
+ const key=ingress.recoveryKey(repo.id),due=Date.now()+1000;
+ await h.archive.put(key,JSON.stringify({next_retry:due,last_error:null}));
+ assert.equal((await ingress.replayIngress(h.env,repo,{limit:1})).replayed,1);
+ assert.equal((await(await h.archive.get(key)).json()).next_retry,due);
+ advance(1001);await ingress.maintainIngress(h.env,repo);assert.equal(h.state.applied.size,2);
+ h.state.error='internal';await deliver(h.env,'private-error',10);
+ const reply=await ingress.replayIngress(h.env,repo);assert.equal(reply.failed,1);assert.equal(reply.delivery_errors[0].delivery,'private-error');
+ const state=await(await h.archive.get(key)).json();assert.equal(state.pointers_last_pass.delivery_errors,undefined);
+ for(const lane of ['pointers','held'])state[lane+'_last_pass']={replayed:2,failed:1,delivery_errors:reply.delivery_errors,failed_deliveries:reply.delivery_errors};
+ await h.archive.put(key,JSON.stringify(state));
+ for(const publicStatus of [false,true]){
+  const view=await ingress.backlog(h.env,repo,publicStatus);
+  for(const lane of ['pointers','held'])assert.deepEqual(view[lane+'_last_pass'],{replayed:2,failed:1});
+ }
+}));
+
+test('retry fencing uses the same GET snapshot as the replayed pointer',async()=>{
+ const h=harness();h.state.full=true;await deliver(h.env,'between-list-get');h.state.full=false;
+ const key=parked(h.archive,'between-list-get')[0],list=h.archive.list;let rewrite=true;
+ h.archive.list=async options=>{const page=await list(options);if(rewrite&&options.prefix==='parked/100/pointers/'){rewrite=false;const p=await(await h.archive.get(key)).json();await h.archive.put(key,JSON.stringify({...p,replay_failures:2}));}return page;};
+ h.archive.failures.push((op,k)=>op==='put'&&k===ingress.receiptKey(repo.id,'between-list-get'));
+ const pass=await ingress.drain(h.env,repo);assert.equal(pass.failed,1);assert.equal(pass.superseded,0);
+ const p=await(await h.archive.get(key)).json();assert.equal(p.replay_failures,3);assert.ok(p.retry_at>Date.now());assert.equal(pass.delivery_errors[0].outcome,'retry_scheduled');
+});
+
+test('moving a failed normal pointer preserves an existing held cooldown',async()=>{
+ const h=harness();h.state.full=true;await deliver(h.env,'held-race');h.state.full=false;h.state.error='internal';
+ const key=parked(h.archive,'held-race')[0],p=await(await h.archive.get(key)).json(),held=ingress.pointerKey(repo.id,p,true),future=Date.now()+600000;
+ await h.archive.put(key,JSON.stringify({...p,replay_failures:4}));await h.archive.put(held,JSON.stringify({...p,replay_failures:9,retry_at:future}));
+ const pass=await ingress.drain(h.env,repo);assert.equal(pass.failed,1);assert.equal(pass.delivery_errors[0].outcome,'held');
+ assert.equal(await h.archive.get(key),null);const retained=await(await h.archive.get(held)).json();assert.equal(retained.replay_failures,9);assert.equal(retained.retry_at,future);assert.ok(await h.archive.get(p.key));
+});
+
+test('manual held replay resumes its own cursor and retains it across a pause',async()=>{
+ const h=harness();h.state.full=true;for(const d of ['held-a','held-b'])await deliver(h.env,d);h.state.full=false;
+ const keys=[];for(const d of ['held-a','held-b']){const key=parked(h.archive,d)[0],p=await(await h.archive.get(key)).json(),held=ingress.pointerKey(repo.id,p,true);await h.archive.put(held,JSON.stringify(p));await h.archive.delete(key);keys.push(held);}
+ const first=await ingress.replayIngress(h.env,repo,{held:true,limit:1});assert.equal(first.replayed,1);assert.equal(first.cursor,keys[0]);
+ await ingress.setIngressMode(h.env,repo,'parked','test pause');
+ const paused=await ingress.replayIngress(h.env,repo,{held:true,limit:1});assert.equal(paused.stopped,'parked');assert.equal(paused.cursor,keys[0]);
+ assert.equal((await(await h.archive.get(ingress.recoveryKey(repo.id))).json()).held_cursor,keys[0]);
+ await ingress.setIngressMode(h.env,repo,'apply');assert.equal((await ingress.replayIngress(h.env,repo,{held:true,limit:1})).replayed,1);assert.equal(h.state.applied.size,2);
+ const state=await(await h.archive.get(ingress.recoveryKey(repo.id))).json();assert.equal(state.held_cursor,undefined);assert.ok(state.held_pass_completed_at);
+});
+
+test('retry maintenance errors count each pointer once and retain uncertain move outcomes',async()=>{
+ for(const failure of ['retry','held','delete']){
+  const h=harness();h.state.full=true;await deliver(h.env,'maintenance-'+failure);h.state.full=false;h.state.error='internal';
+  const key=parked(h.archive,'maintenance-'+failure)[0],p=await(await h.archive.get(key)).json();await h.archive.put(key,JSON.stringify({...p,replay_failures:4}));
+  const held=ingress.pointerKey(repo.id,p,true);
+  h.archive.failures.push((op,k)=>failure==='retry'?op==='put'&&k===key:failure==='held'?op==='put'&&k===held:op==='delete'&&k===key);
+  const result=await ingress.drain(h.env,repo);assert.equal(result.failed,1);assert.equal(result.delivery_errors.length,1);assert.equal(result.delivery_errors[0].outcome,'unconfirmed');
+  assert.ok(await h.archive.get(p.key));assert.ok(await h.archive.get(key));
+ }
+});
+
+test('a parkable refusal rewinds its group so a resumed sweep cannot skip due input',async()=>{
+ const h=harness();h.state.full=true;for(let i=0;i<20;i++)await deliver(h.env,'rewind-'+String(i).padStart(2,'0'));h.state.full=false;
+ const original=h.env.REPOSITORIES.get();let refuse=true;
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{const p=JSON.parse(init.body);if(refuse&&p.delivery==='rewind-10'){refuse=false;return Response.json({error:'database_unavailable',parkable:true},{status:503});}return original.fetch(url,init);}});
+ const first=await ingress.replayIngress(h.env,repo,{limit:25});assert.equal(first.stopped,'database_unavailable');assert.equal(first.replayed,19);assert.equal(first.failed,0);
+ assert.ok(first.cursor.endsWith('-rewind-09.json'),'checkpoint must precede the refused group');
+ let state=await(await h.archive.get(ingress.recoveryKey(repo.id))).json();assert.equal(state.pointers_pass_completed_at,undefined);
+ const next=await ingress.replayIngress(h.env,repo,{limit:25});assert.equal(next.replayed,1);assert.equal(next.remaining,false);
+ state=await(await h.archive.get(ingress.recoveryKey(repo.id))).json();assert.ok(state.pointers_pass_completed_at>=state.pointers_pass_started_at);
+ assert.equal(h.state.applied.size,20);assert.ok([...h.state.applied.values()].every(n=>n===1));
+});
+
+test('due raw gaps retry behind the scan cursor without a full history pass',async()=>clock(async()=>{
+ const h=cronHarness(),raw='webhooks/2026-10-14/passed-gap.json',gap='control/raw-gaps/passed-gap.json',after='webhooks/2026-10-23/already-scanned.json';
+ const body=JSON.stringify({repository:{id:100}});await h.archive.put(raw,body,{customMetadata:{event:'ping',sha256:sha(body),expires:'1'}});
+ await h.archive.put(gap,JSON.stringify({key:raw,failures:1,retry_at:Date.now()-1,reason:'R2 get failed'}));
+ await h.archive.put('control/raw-recovery.json',JSON.stringify({after}));
+ const list=h.archive.list,starts=[];h.archive.list=async options=>{if(options.prefix==='webhooks/')starts.push(options.startAfter);return list(options);};
+ await ingress.maintainRaw(h.env,()=>[repo]);
+ assert.equal(h.archive.objects.has(gap),false,'an overdue gap must not wait for the raw cursor to wrap');
+ assert.deepEqual(starts,[after]);assert.ok(h.archive.objects.has(raw),'gap recovery does not expire the original');
+ const [key]=parked(h.archive,'passed-gap'),p=JSON.parse(h.archive.objects.get(key).bytes);
+ assert.equal(p.original_key,raw);assert.equal(p.sha256,sha(body));assert.equal(sha(h.archive.objects.get(p.key).bytes),sha(body));assert.equal(h.state.applied.size,0,'raw recovery only parks input');assert.equal(h.githubReads(),0);
+}));
+
+test('raw gap retries preserve cooldowns and do not read deferred bodies',async()=>clock(async()=>{
+ const h=cronHarness(),raw='webhooks/2026-10-14/deferred-gap.json',gap='control/raw-gaps/deferred-gap.json',retry_at=Date.now()+600000;
+ await h.archive.put(raw,'{}',{customMetadata:{event:'ping'}});await h.archive.put(gap,JSON.stringify({key:raw,failures:3,retry_at}));await h.archive.put('control/raw-recovery.json',JSON.stringify({after:'webhooks/2026-10-23/z.json'}));
+ const head=h.archive.head;h.archive.head=async key=>{assert.notEqual(key,raw,'a future retry must not probe its body');return head(key);};
+ await ingress.maintainRaw(h.env,()=>[repo]);assert.equal(JSON.parse(h.archive.objects.get(gap).bytes).retry_at,retry_at);assert.equal(parked(h.archive,'deferred-gap').length,0);
+}));
+
+test('raw gap retry pages advance past deferred gaps and never rewind the raw cursor',async()=>clock(async advance=>{
+ const h=cronHarness(),after='webhooks/2026-10-23/z.json';for(let i=0;i<8;i++){
+  const id='gap-'+i,raw='webhooks/2026-10-14/'+id+'.json';await h.archive.put(raw,'{}',{customMetadata:{event:'ping'}});await h.archive.put('control/raw-gaps/'+id+'.json',JSON.stringify({key:raw,failures:1,retry_at:i<5?Date.now()+86400000:0}));
+ }
+ await h.archive.put('control/raw-recovery.json',JSON.stringify({after}));const list=h.archive.list;
+ h.archive.list=async options=>options.prefix==='webhooks/'?{objects:[],truncated:true}:list(options);
+ await ingress.maintainRaw(h.env,()=>[repo]);let state=JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes);assert.equal(state.after,after);assert.equal(state.gap_last_pass.examined,5);assert.equal(state.gap_last_pass.resolved,0);assert.ok(state.gap_cursor.endsWith('gap-4.json'));
+ advance(61000);await ingress.maintainRaw(h.env,()=>[repo]);state=JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes);assert.equal(state.after,after);assert.equal(state.gap_last_pass.examined,3);assert.equal(state.gap_last_pass.resolved,3);assert.equal(state.gap_cursor,undefined);
+ for(let i=0;i<8;i++)assert.equal(parked(h.archive,'gap-'+i).length,i<5?0:1);
+}));
+
+test('raw gap retry retains missing input and records a real backoff',async()=>clock(async()=>{
+ const h=cronHarness(),raw='webhooks/2026-10-14/missing-gap.json',gap='control/raw-gaps/missing-gap.json';await h.archive.put(gap,JSON.stringify({key:raw,failures:1,retry_at:0}));await h.archive.put('control/raw-recovery.json',JSON.stringify({after:'webhooks/2026-10-23/z.json'}));
+ await ingress.maintainRaw(h.env,()=>[repo]);const failed=JSON.parse(h.archive.objects.get(gap).bytes);assert.equal(failed.failures,2);assert.ok(failed.retry_at>Date.now());assert.match(failed.reason,/raw_body_unavailable/);assert.equal(parked(h.archive,'missing-gap').length,0);assert.deepEqual(JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes).gaps,{count:1,truncated:false});
+}));
+
+test('raw gap cleanup can crash after durable parking and restart without duplicate application',async()=>clock(async advance=>{
+ const h=cronHarness(),raw='webhooks/2026-10-14/crash-gap.json',gap='control/raw-gaps/crash-gap.json';await h.archive.put(raw,'{}',{customMetadata:{event:'ping',expires:'1'}});await h.archive.put(gap,JSON.stringify({key:raw,failures:1,retry_at:0}));await h.archive.put('control/raw-recovery.json',JSON.stringify({after:'webhooks/2026-10-23/z.json'}));await h.archive.put('control/100/retention-policy.json',JSON.stringify({mode:'enforce',disabled:[],pinned:['raw_webhooks']}));
+ const get=h.archive.get;h.archive.get=async key=>{const value=await get(key);if(value&&key===gap){const json=value.json;let read=false;value.json=async()=>{assert.equal(read,false,'R2 response body must be consumed once');read=true;return json();};}return value;};
+ h.archive.failures.push((op,key)=>op==='delete'&&key===gap);await ingress.maintainRaw(h.env,()=>[repo]);assert.ok(h.archive.objects.has(gap));assert.equal(parked(h.archive,'crash-gap').length,1);assert.ok(h.archive.objects.has(ingress.bodyKey(repo.id,'crash-gap')));
+ advance(61000);await ingress.maintainRaw(h.env,()=>[repo]);assert.equal(h.archive.objects.has(gap),false);assert.equal(parked(h.archive,'crash-gap').length,1);assert.ok(h.archive.objects.has(raw));
+ assert.equal((await ingress.drain(h.env,repo)).replayed,1);assert.equal((await ingress.drain(h.env,repo)).replayed,0);assert.equal(h.state.applied.get('crash-gap'),1);assert.equal(h.githubReads(),0);
+}));
+
+test('a stale raw gap retry failure cannot overwrite a newer cooldown',async()=>clock(async()=>{
+ const h=cronHarness(),raw='webhooks/2026-10-14/newer-gap.json',gap='control/raw-gaps/newer-gap.json';await h.archive.put(raw,'{}',{customMetadata:{event:'ping'}});await h.archive.put(gap,JSON.stringify({key:raw,failures:1,retry_at:0}));await h.archive.put('control/raw-recovery.json',JSON.stringify({after:'webhooks/2026-10-23/z.json'}));
+ const put=h.archive.put,newer={key:raw,failures:8,retry_at:Date.now()+600000,reason:'newer_failure'};h.archive.put=async(key,...args)=>{if(key===ingress.bodyKey(repo.id,'newer-gap')){await put(gap,JSON.stringify(newer));throw Error('older parking failure');}return put(key,...args);};
+ await ingress.maintainRaw(h.env,()=>[repo]);assert.deepEqual(JSON.parse(h.archive.objects.get(gap).bytes),newer);assert.ok(h.archive.objects.has(raw));assert.equal(parked(h.archive,'newer-gap').length,0);
+}));
+
+test('raw gap retry yields after its cooperative budget and retains its next key',async()=>clock(async advance=>{
+ const h=cronHarness();for(let i=0;i<3;i++){const raw='webhooks/2026-10-14/budget-'+i+'.json';await h.archive.put(raw,'{}',{customMetadata:{event:'ping'}});await h.archive.put('control/raw-gaps/budget-'+i+'.json',JSON.stringify({key:raw,failures:1,retry_at:0}));}
+ await h.archive.put('control/raw-recovery.json',JSON.stringify({after:'webhooks/2026-10-23/z.json'}));const head=h.archive.head;h.archive.head=async key=>{if(key.startsWith('webhooks/'))advance(6000);return head(key);};
+ await ingress.maintainRaw(h.env,()=>[repo]);const state=JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes);assert.equal(state.gap_last_pass.examined,1);assert.equal(state.gap_last_pass.resolved,1);assert.ok(state.gap_cursor.endsWith('budget-0.json'));assert.equal(parked(h.archive,'budget-1').length,0);assert.equal(parked(h.archive,'budget-2').length,0);
+}));
+
+
+test('due CI raw gaps resolve from metadata without reading or replaying their body',async()=>clock(async()=>{
+ const h=cronHarness(),raw='webhooks/2026-10-14/ci-gap.json',gap='control/raw-gaps/ci-gap.json';await h.archive.put(raw,'private CI body',{customMetadata:{event:'check_run'}});await h.archive.put(gap,JSON.stringify({key:raw,failures:1,retry_at:0}));await h.archive.put('control/raw-recovery.json',JSON.stringify({after:'webhooks/2026-10-23/z.json'}));
+ const get=h.archive.get;h.archive.get=async key=>{assert.notEqual(key,raw,'listed CI metadata needs no body read');return get(key);};
+ await ingress.maintainRaw(h.env,()=>assert.fail('CI input needs no inventory or targeting query'));
+ assert.equal(h.archive.objects.has(gap),false);assert.ok(h.archive.objects.has(raw));assert.equal(parked(h.archive,'ci-gap').length,0);assert.equal(h.archive.objects.has(ingress.receiptKey(repo.id,'ci-gap')),false,'gap clearance is not an application receipt');
+}));
+
+test('raw gap entry errors do not abort the independent prefix scan',async()=>clock(async()=>{
+ for(const fault of ['get','json','put']){
+  const h=cronHarness(),raw='webhooks/2026-10-14/broken-gap.json',gap='control/raw-gaps/broken-gap.json',after='webhooks/2026-10-23/a.json',later='webhooks/2026-10-23/z.json';
+  await h.archive.put(raw,'{}',{customMetadata:{event:'ping'}});await h.archive.put(gap,fault==='json'?'{':JSON.stringify({key:raw,failures:1,retry_at:0}));await h.archive.put('control/raw-recovery.json',JSON.stringify({after}));await h.archive.put(later,'{}',{customMetadata:{event:'check_run'}});
+  const list=h.archive.list;let prefixCalls=0;h.archive.list=async options=>{if(options.prefix==='webhooks/'){prefixCalls++;assert.equal(options.startAfter,after);}return list(options);};
+  if(fault==='get')h.archive.failures.push((op,key)=>op==='get'&&key===gap);
+  if(fault==='put'){h.archive.failures.push((op,key)=>op==='put'&&key===ingress.bodyKey(repo.id,'broken-gap'));h.archive.failures.push((op,key)=>op==='put'&&key===gap);}
+  await ingress.maintainRaw(h.env,()=>[repo]);const state=JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes);
+  assert.equal(prefixCalls,1,fault);assert.equal(state.after,undefined,fault);assert.ok(state.last_completed,fault);assert.equal(state.last_error,null,fault);assert.equal(state.gap_last_pass.errors,1,fault);assert.ok(h.archive.objects.has(gap),fault);assert.ok(h.archive.objects.has(raw),fault);assert.equal(state.gaps.count,1,fault);
+ }
+}));
+
+test('raw gap listing failure does not suppress raw prefix recovery',async()=>clock(async()=>{
+ const h=cronHarness(),after='webhooks/2026-10-23/a.json',later='webhooks/2026-10-23/z.json';await h.archive.put('control/raw-recovery.json',JSON.stringify({after}));await h.archive.put(later,'{}',{customMetadata:{event:'ping'}});h.archive.failures.push((op,key)=>op==='list'&&key==='control/raw-gaps/');
+ await ingress.maintainRaw(h.env,()=>[repo]);const state=JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes);assert.equal(state.gap_last_pass.errors,1);assert.equal(state.last_error,null);assert.ok(state.last_completed);assert.equal(parked(h.archive,'z').length,1);
+}));
+
+test('a replaced raw gap lease repeats parking safely without overwriting the new checkpoint',async()=>clock(async advance=>{
+ const h=cronHarness(),raw='webhooks/2026-10-14/lease-gap.json',gap='control/raw-gaps/lease-gap.json',key='control/raw-recovery.json';await h.archive.put(raw,'{}',{customMetadata:{event:'ping'}});await h.archive.put(gap,JSON.stringify({key:raw,failures:1,retry_at:0}));await h.archive.put(key,JSON.stringify({after:'webhooks/2026-10-23/a.json'}));
+ const put=h.archive.put;let replaced=false;const newer={after:'webhooks/2026-10-23/z.json',lease_until:Date.now()+60000,owner:'replacement'};
+ h.archive.put=async(name,...args)=>{if(name.includes('/pointers/')&&!replaced){replaced=true;await put(key,JSON.stringify(newer));}return put(name,...args);};
+ await ingress.maintainRaw(h.env,()=>[repo]);assert.deepEqual(JSON.parse(h.archive.objects.get(key).bytes),newer);assert.equal(parked(h.archive,'lease-gap').length,1);assert.ok(h.archive.objects.has(raw));
+ // A lost completion can leave an earlier marker for the next owner to retry.
+ await put(gap,JSON.stringify({key:raw,failures:1,retry_at:0}));advance(61000);await ingress.maintainRaw(h.env,()=>[repo]);assert.equal(h.archive.objects.has(gap),false);assert.equal(parked(h.archive,'lease-gap').length,1);assert.equal((await ingress.drain(h.env,repo)).replayed,1);assert.equal(h.state.applied.get('lease-gap'),1);
+}));
+
+test('a CI-labelled gap with no raw metadata cannot be cleared as unmirrored',async()=>clock(async()=>{
+ const h=cronHarness(),raw='webhooks/2026-10-14/missing-ci-gap.json',gap='control/raw-gaps/missing-ci-gap.json';await h.archive.put(gap,JSON.stringify({key:raw,failures:1,retry_at:0,reason:'check_run'}));await h.archive.put('control/raw-recovery.json',JSON.stringify({after:'webhooks/2026-10-23/z.json'}));
+ await ingress.maintainRaw(h.env,()=>assert.fail('missing raw input cannot be targeted'));
+ const retained=JSON.parse(h.archive.objects.get(gap).bytes);assert.equal(retained.failures,2);assert.match(retained.reason,/raw_body_unavailable/);assert.ok(retained.retry_at>Date.now());assert.equal(h.archive.objects.has(ingress.receiptKey(repo.id,'missing-ci-gap')),false);assert.equal(parked(h.archive,'missing-ci-gap').length,0);
+}));
+
+test('failed gap cleanup keeps an expired main-scan raw object until a later recovery',async()=>clock(async advance=>{
+ const h=cronHarness(),raw='webhooks/2026-10-14/main-expired.json',gap='control/raw-gaps/main-expired.json';await h.archive.put(raw,'{}',{customMetadata:{event:'ping',expires:'1'}});await h.archive.put(gap,JSON.stringify({key:raw,failures:1,retry_at:0}));
+ // This gap lies before the independent gap page; the main scan reaches it.
+ await h.archive.put('control/raw-recovery.json',JSON.stringify({gap_cursor:'control/raw-gaps/z.json'}));h.archive.failures.push((op,key)=>op==='delete'&&key===gap);
+ await ingress.maintainRaw(h.env,()=>[repo]);assert.ok(h.archive.objects.has(raw),'failed gap deletion must not expire its only raw lookup');assert.ok(h.archive.objects.has(gap));assert.equal(parked(h.archive,'main-expired').length,1);
+ advance(61000);await ingress.maintainRaw(h.env,()=>[repo]);assert.equal(h.archive.objects.has(gap),false);assert.equal(parked(h.archive,'main-expired').length,1);assert.ok(h.archive.objects.has(ingress.bodyKey(repo.id,'main-expired')));
+}));
+
+test('lost gap-delete acknowledgement cannot resurrect a resolved gap',async()=>clock(async()=>{
+ const h=cronHarness(),raw='webhooks/2026-10-14/lost-gap-ack.json',gap='control/raw-gaps/lost-gap-ack.json';await h.archive.put(raw,'{}',{customMetadata:{event:'ping'}});await h.archive.put(gap,JSON.stringify({key:raw,failures:1,retry_at:0}));await h.archive.put('control/raw-recovery.json',JSON.stringify({after:'webhooks/2026-10-23/z.json'}));
+ const remove=h.archive.delete;let lost=false;h.archive.delete=async keys=>{await remove(keys);if(keys===gap&&!lost){lost=true;throw Error('lost gap delete acknowledgement');}};
+ await ingress.maintainRaw(h.env,()=>[repo]);assert.equal(lost,true);assert.equal(h.archive.objects.has(gap),false);assert.ok(h.archive.objects.has(raw));assert.equal(parked(h.archive,'lost-gap-ack').length,1);assert.equal(h.state.applied.size,0);assert.equal(JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes).gaps.count,0);
+}));
+
+test('a malformed gap cannot hold up a later due entry in the same retry page',async()=>clock(async()=>{
+ const h=cronHarness(),raw='webhooks/2026-10-14/b-valid-gap.json';await h.archive.put('control/raw-gaps/a-broken-gap.json','{');await h.archive.put(raw,'{}',{customMetadata:{event:'ping'}});await h.archive.put('control/raw-gaps/b-valid-gap.json',JSON.stringify({key:raw,failures:1,retry_at:0}));await h.archive.put('control/raw-recovery.json',JSON.stringify({after:'webhooks/2026-10-23/z.json'}));
+ await ingress.maintainRaw(h.env,()=>[repo]);const state=JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes);assert.equal(state.gap_last_pass.examined,2);assert.equal(state.gap_last_pass.resolved,1);assert.equal(state.gap_last_pass.errors,1);assert.ok(h.archive.objects.has('control/raw-gaps/a-broken-gap.json'));assert.equal(parked(h.archive,'b-valid-gap').length,1);assert.equal(state.gaps.count,1);
+}));
+
+test('parked semantic deliveries promote committed SQL receipts in one read without entering the writer',async()=>{
+ const h=harness(),{drain,receiptKey,bodyKey}=await load('src/ingress.ts');h.state.full=true;
+ for(const id of ['known-a','known-b','new-c'])await deliver(h.env,id);
+ h.state.applied.set('known-a',1);h.state.applied.set('known-b',1);h.state.full=false;
+ const original=h.env.REPOSITORIES.get,lookups=[],events=[];
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{if(new URL(url).pathname==='/storage/deliveries'){lookups.push(JSON.parse(init.body).ids);return Response.json({known:['known-a','known-b','unrequested']});}events.push(JSON.parse(init.body).delivery);return original().fetch(url,init);}});
+ // A SQL receipt proves the old input even if a prior cleanup removed its body.
+ await h.archive.delete(bodyKey(repo.id,'known-a'));
+ const result=await drain(h.env,repo,{limit:100});assert.equal(result.replayed,3);assert.equal(result.failed,0);assert.equal(result.known_receipts,2);assert.equal(result.receipt_lookup_status,200);
+ assert.deepEqual(lookups,[['known-a','known-b','new-c']]);assert.deepEqual(events,['new-c']);assert.deepEqual([...h.state.applied.values()],[1,1,1]);
+ for(const id of ['known-a','known-b'])assert.equal((await(await h.archive.get(receiptKey(repo.id,id))).json()).source,'sql_receipt');
+ assert.equal(await h.archive.get(receiptKey(repo.id,'unrequested')),null);assert.equal((await drain(h.env,repo)).replayed,0);
+});
+
+test('SQL receipt promotion survives failed receipt writes and lost pointer cleanup without reapplication',async()=>{
+ const h=harness(),{drain,receiptKey,bodyKey}=await load('src/ingress.ts');h.state.full=true;
+ for(const id of ['receipt-put','cleanup-lost'])await deliver(h.env,id);
+ h.state.full=false;for(const id of ['receipt-put','cleanup-lost'])h.state.applied.set(id,1);
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{assert.equal(new URL(url).pathname,'/storage/deliveries');return Response.json({known:JSON.parse(init.body).ids});}});
+ h.archive.failures.push((op,key)=>op==='put'&&key===receiptKey(repo.id,'receipt-put'));
+ const remove=h.archive.delete;let lost=true;h.archive.delete=async keys=>{await remove(keys);if(lost&&[].concat(keys).some(k=>k.endsWith('-cleanup-lost.json'))){lost=false;throw Error('lost cleanup acknowledgement');}};
+ const first=await drain(h.env,repo);assert.equal(first.failed,1);assert.equal(first.superseded,1);assert.ok(await h.archive.get(bodyKey(repo.id,'receipt-put')));assert.equal(parked(h.archive,'receipt-put').length,1);assert.ok(await h.archive.get(receiptKey(repo.id,'cleanup-lost')));assert.equal(parked(h.archive,'cleanup-lost').length,0);
+ const key=parked(h.archive,'receipt-put')[0],p=await(await h.archive.get(key)).json();await h.archive.put(key,JSON.stringify({...p,retry_at:0}));
+ assert.equal((await drain(h.env,repo)).failed,0);assert.equal(parked(h.archive,'receipt-put').length,0);assert.deepEqual([...h.state.applied.values()],[1,1]);
+});
+
+for(const response of ['lost','malformed','unavailable'])test('uncertain SQL receipt lookup falls back to ordinary deduplicated replay: '+response,async()=>{
+ const h=harness(),{drain}=await load('src/ingress.ts');h.state.full=true;await deliver(h.env,'fallback-'+response);h.state.full=false;
+ const original=h.env.REPOSITORIES.get;let events=0;
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{if(new URL(url).pathname==='/storage/deliveries'){if(response==='lost')throw Error('lost read response');return response==='malformed'?Response.json({known:'invalid'}):Response.json({error:'unavailable'},{status:503});}events++;return original().fetch(url,init);}});
+ const result=await drain(h.env,repo);assert.equal(result.known_receipts,0);assert.equal(result.replayed,1);assert.equal(result.failed,0);assert.equal(events,1);assert.equal(h.state.applied.get('fallback-'+response),1);
+});
+
+test('SQL receipt batch preserves retry cooldowns and excludes other repositories',async()=>{
+ const h=harness(),{drain,receiptKey}=await load('src/ingress.ts');h.state.full=true;
+ for(const id of ['deferred-known','foreign-known'])await deliver(h.env,id);
+ for(const id of ['deferred-known','foreign-known']){const key=parked(h.archive,id)[0],p=await(await h.archive.get(key)).json();await h.archive.put(key,JSON.stringify({...p,...(id==='deferred-known'?{retry_at:Date.now()+600000,last_error:'quota'}:{repository:'other/repo'})}));}
+ h.env.REPOSITORIES.get=()=>({fetch:async(url)=>{assert.equal(new URL(url).pathname,'/event');return Response.json({error:'wrong_repository',parkable:true},{status:503});}});
+ const before=h.archive.objects.get(parked(h.archive,'deferred-known')[0]).bytes.toString(),result=await drain(h.env,repo);assert.equal(result.known_receipts,0);assert.equal(result.receipt_lookup_status,null);assert.equal(result.replayed,0);assert.equal(h.archive.objects.get(parked(h.archive,'deferred-known')[0]).bytes.toString(),before);
+ for(const id of ['deferred-known','foreign-known'])assert.equal(await h.archive.get(receiptKey(repo.id,id)),null);
+});
+
+test('a slow committed-receipt lookup cannot advance an unvisited replay cursor',async()=>clock(async advance=>{
+ const h=harness();h.state.full=true;for(let i=0;i<12;i++)await deliver(h.env,'lookup-deadline-'+i);h.state.full=false;
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{assert.equal(new URL(url).pathname,'/storage/deliveries');advance(21000);return Response.json({known:JSON.parse(init.body).ids});}});
+ const pass=await ingress.drain(h.env,repo,{limit:50,deadline:Date.now()+20000});assert.equal(pass.replayed,0);assert.equal(pass.failed,0);assert.equal(pass.cursor,undefined);assert.equal(pass.stopped,'deadline');assert.equal(pass.known_receipts,12);
+ assert.equal([...h.archive.objects.keys()].filter(k=>k.startsWith('parked/100/pointers/')).length,12);assert.equal([...h.archive.objects.keys()].filter(k=>k.startsWith('parked/100/bodies/')).length,12);assert.equal([...h.archive.objects.keys()].filter(k=>k.startsWith('receipts/')).length,0);
+}));
+
+test('a mixed replay page keeps CI commit batching separate from known semantic receipt promotion',async()=>{
+ const h=harness(),{drain,pointerKey}=await load('src/ingress.ts');h.state.full=true;for(const id of ['mixed-known','mixed-ci','mixed-new'])await deliver(h.env,id);h.state.full=false;h.state.applied.set('mixed-known',1);
+ const ciKey=parked(h.archive,'mixed-ci')[0],ci=await(await h.archive.get(ciKey)).json();await h.archive.put(ciKey,JSON.stringify({...ci,event:'workflow_job'}));
+ const original=h.env.REPOSITORIES.get,lookups=[],ciBatches=[],events=[];
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{const input=JSON.parse(init.body),path=new URL(url).pathname;if(path==='/storage/deliveries'){lookups.push(input.ids);return Response.json({known:['mixed-known']});}if(path==='/ci-receipts'){ciBatches.push(input.events);for(const p of input.events)h.state.applied.set(p.delivery,1);return Response.json({committed:input.events.map(p=>p.delivery)});}events.push(input.delivery);return original().fetch(url,init);}});
+ const result=await drain(h.env,repo);assert.equal(result.replayed,3);assert.equal(result.failed,0);assert.equal(result.known_receipts,1);assert.equal(result.batched,1);assert.deepEqual(lookups,[['mixed-known','mixed-new']]);assert.deepEqual(ciBatches.map(v=>v.map(p=>p.delivery)),[['mixed-ci']]);assert.deepEqual(events,['mixed-new']);assert.deepEqual([...h.state.applied.values()],[1,1,1]);assert.equal(await h.archive.get(pointerKey(repo.id,ci)),null);
+});
+
+test('held-lane known receipt promotion honors the original retry deadline',async()=>clock(async advance=>{
+ const h=harness(),{drain,pointerKey,receiptKey}=await load('src/ingress.ts');h.state.full=true;await deliver(h.env,'held-known');h.state.full=false;h.state.applied.set('held-known',1);
+ const normal=parked(h.archive,'held-known')[0],p=await(await h.archive.get(normal)).json(),held=pointerKey(repo.id,p,true);await h.archive.put(held,JSON.stringify({...p,retry_at:Date.now()+10000,replay_failures:7}));await h.archive.delete(normal);
+ const original=h.env.REPOSITORIES.get;let events=0;h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{if(new URL(url).pathname!=='/storage/deliveries')events++;return original().fetch(url,init);}});
+ assert.equal((await drain(h.env,repo,{held:true})).replayed,0);assert.ok(await h.archive.get(held));assert.equal(await h.archive.get(receiptKey(repo.id,p.delivery)),null);
+ advance(10001);const done=await drain(h.env,repo,{held:true});assert.equal(done.known_receipts,1);assert.equal(done.replayed,1);assert.equal(done.failed,0);assert.equal(events,0);assert.equal(h.state.applied.get(p.delivery),1);assert.equal(await h.archive.get(held),null);
+}));
+
+test('raw receipt lookups coalesce concurrent reads without applying input',async()=>{
+ const h=harness(),batches=[];h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{assert.equal(new URL(url).pathname,'/storage/deliveries');const input=JSON.parse(init.body);assert.equal(input.repository_id,repo.id);batches.push(input.ids);return Response.json({known:input.ids.filter(id=>id.endsWith('0'))});}});
+ const lookup=ingress.rawReceiptLookup(h.env),ids=Array.from({length:25},(_,i)=>'legacy-'+i),results=await Promise.all(ids.map(id=>lookup.known(repo,id)));
+ assert.deepEqual(batches,[ids]);assert.deepEqual(results,ids.map(id=>id.endsWith('0')));assert.equal(h.state.applied.size,0);assert.equal(h.archive.objects.size,0);assert.deepEqual({...lookup.summary(),request_ms:0},{lookups:25,requests:1,requested_ids:25,known_lookups:3,failures:0,largest_batch:25,request_ms:0,groups:0,group_tasks:0,rounds:0,group_ms:0,barrier_wait_ms:0});
+});
+
+test('raw receipt batches stay bounded and deduplicate only within the same repository',async()=>{
+ const h=harness(),other={...repo,id:'101',name:'org/other'},batches=[];h.env.REPOSITORIES.get=id=>({fetch:async(url,init)=>{assert.equal(new URL(url).pathname,'/storage/deliveries');const input=JSON.parse(init.body);assert.equal(input.repository_id,id);assert.ok(input.ids.length<=100);assert.equal(new Set(input.ids).size,input.ids.length);batches.push({id,ids:input.ids});return Response.json({known:id===repo.id?input.ids:[]});}});
+ const lookup=ingress.rawReceiptLookup(h.env),calls=Array.from({length:215},(_,i)=>lookup.known(repo,'id-'+i));calls.push(lookup.known(repo,'same'),lookup.known(repo,'same'),lookup.known(other,'same'));
+ const result=await Promise.all(calls);assert.ok(result.slice(0,-1).every(Boolean));assert.equal(result.at(-1),false);assert.equal(batches.filter(b=>b.id===repo.id).length,3);assert.equal(batches.filter(b=>b.id===other.id).length,1);assert.equal(lookup.summary().largest_batch,100);assert.equal(lookup.summary().requested_ids,217);assert.equal(lookup.summary().lookups,218);
+});
+
+for(const kind of['transport','http','malformed'])test('raw receipt '+kind+' failure stays unknown and completes every waiting caller',async()=>{
+ const h=harness();let cancelled=false;h.env.REPOSITORIES.get=()=>({fetch:async()=>{if(kind==='transport')throw Error('fixture transport failure');if(kind==='http')return new Response(new ReadableStream({cancel(){cancelled=true;}}),{status:503});return Response.json({other:[]});}});
+ const lookup=ingress.rawReceiptLookup(h.env);assert.deepEqual(await Promise.all(['a','b','c'].map(id=>lookup.known(repo,id))),[false,false,false]);assert.equal(lookup.summary().failures,1);assert.equal(lookup.summary().known_lookups,0);assert.equal(cancelled,kind==='http');assert.equal(h.state.applied.size,0);
+});
+
+test('raw receipt response cannot acknowledge a different or malformed delivery',async()=>{
+ const h=harness();h.env.REPOSITORIES.get=()=>({fetch:async()=>Response.json({known:['other',null,1,'valid']})});const lookup=ingress.rawReceiptLookup(h.env);assert.deepEqual(await Promise.all(['valid','unknown'].map(id=>lookup.known(repo,id))),[true,false]);assert.equal(lookup.summary().known_lookups,1);
+});
+
+test('raw receipt coalescer flushes later groups independently and keeps only bounded counters',async()=>{
+ const h=harness();let calls=0;h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{calls++;return Response.json({known:JSON.parse(init.body).ids});}});const lookup=ingress.rawReceiptLookup(h.env);
+ assert.deepEqual(await Promise.all(['a','b'].map(id=>lookup.known(repo,id))),[true,true]);assert.equal(await lookup.known(repo,'c'),true);assert.equal(calls,2);const summary=lookup.summary();summary.lookups=999;assert.equal(lookup.summary().lookups,3);assert.ok(Object.values(lookup.summary()).every(Number.isFinite));
+});
+
+test('legacy raw recovery batches committed receipts, parks unknown input, and retains original body hashes',async()=>clock(async()=>{
+ const h=cronHarness(),batches=[];for(let i=0;i<25;i++){const id='legacy-batch-'+String(i).padStart(2,'0'),text=JSON.stringify({repository:{id:100},value:i});await h.archive.put('webhooks/2026-10-20/'+id+'.json',text,{customMetadata:{event:'issue_comment',sha256:sha(Buffer.from(text)),received:'1792000000123'}});if(i%2===0)h.state.applied.set(id,1);}
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{assert.equal(new URL(url).pathname,'/storage/deliveries','raw maintenance never applies events or dispatches inventory');const ids=JSON.parse(init.body).ids;batches.push(ids);return Response.json({known:ids.filter(id=>h.state.applied.has(id))});}});
+ await ingress.maintainRaw(h.env,()=>[repo]);assert.ok(batches.length<25);assert.equal(batches.flat().length,25);
+ for(let i=0;i<25;i++){const id='legacy-batch-'+String(i).padStart(2,'0'),raw=h.archive.objects.get('webhooks/2026-10-20/'+id+'.json');assert.ok(raw);if(i%2===0){const receipt=JSON.parse(h.archive.objects.get(ingress.receiptKey(repo.id,id)).bytes);assert.equal(receipt.source,'sql_receipt');assert.equal(parked(h.archive,id).length,0);assert.equal(h.state.applied.get(id),1);}else{const p=JSON.parse(h.archive.objects.get(parked(h.archive,id)[0]).bytes);assert.equal(p.received,1792000000123);assert.equal(p.sha256,raw.customMetadata.sha256);assert.equal(sha(h.archive.objects.get(p.key).bytes),p.sha256);assert.equal(h.state.applied.has(id),false);}}
+ const s=JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes);assert.equal(s.receipt_lookup.lookups,25);assert.equal(s.receipt_lookup.known_lookups,13);assert.ok(s.last_completed);assert.deepEqual(s.gaps,{count:0,truncated:false});
+}));
+
+test('lost raw receipt lookup safely parks input and a later committed lookup promotes without replay',async()=>clock(async advance=>{
+ const h=cronHarness(),id='lost-raw-batch';await h.archive.put('webhooks/2026-10-20/'+id+'.json','{"repository":{"id":100}}',{customMetadata:{event:'issue_comment'}});h.env.REPOSITORIES.get=()=>({fetch:async()=>{throw Error('lost read response');}});
+ await ingress.maintainRaw(h.env,()=>[repo]);assert.equal(parked(h.archive,id).length,1);assert.equal(h.archive.objects.has(ingress.receiptKey(repo.id,id)),false);assert.equal(h.state.applied.size,0);assert.equal(JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes).receipt_lookup.failures,1);
+ // The first pass only parked. Simulate an independently committed application;
+ // the second pass resolves its existing proof without entering /event.
+ h.state.applied.set(id,1);h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{assert.equal(new URL(url).pathname,'/storage/deliveries');return Response.json({known:JSON.parse(init.body).ids});}});advance(61000);await ingress.maintainRaw(h.env,()=>[repo]);assert.ok(h.archive.objects.has(ingress.receiptKey(repo.id,id)));assert.equal(h.state.applied.get(id),1);
+}));
+
+test('partial raw receipt publication retains a retry gap and restarts without publishing semantic changes',async()=>clock(async advance=>{
+ const h=cronHarness();for(const id of['publish-a','publish-b','publish-c']){await h.archive.put('webhooks/2026-10-20/'+id+'.json','{"repository":{"id":100}}',{customMetadata:{event:'issue_comment'}});h.state.applied.set(id,1);}
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{assert.equal(new URL(url).pathname,'/storage/deliveries');return Response.json({known:JSON.parse(init.body).ids});}});h.archive.failures.push((op,key)=>op==='put'&&key===ingress.receiptKey(repo.id,'publish-b'));
+ await ingress.maintainRaw(h.env,()=>[repo]);assert.ok(h.archive.objects.has(ingress.receiptKey(repo.id,'publish-a')));assert.ok(h.archive.objects.has(ingress.receiptKey(repo.id,'publish-c')));assert.equal(h.archive.objects.has(ingress.receiptKey(repo.id,'publish-b')),false);const gap='control/raw-gaps/publish-b.json',before=JSON.parse(h.archive.objects.get(gap).bytes);assert.equal(before.failures,1);assert.ok(before.retry_at>Date.now());
+ advance(61000);await ingress.maintainRaw(h.env,()=>[repo]);assert.ok(h.archive.objects.has(ingress.receiptKey(repo.id,'publish-b')));assert.equal(h.archive.objects.has(gap),false);for(const id of h.state.applied.keys()){assert.equal(h.state.applied.get(id),1);assert.equal(parked(h.archive,id).length,0);assert.ok(h.archive.objects.has('webhooks/2026-10-20/'+id+'.json'));}
+}));
+
+test('a raw receipt batch crossing its dispatch budget checkpoints only its completed group',async()=>clock(async advance=>{
+ const h=cronHarness();for(let i=0;i<30;i++)await h.archive.put('webhooks/2026-10-20/budget-batch-'+String(i).padStart(2,'0')+'.json','{}',{customMetadata:{event:'ping'}});
+ let delayed=false;h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{assert.equal(new URL(url).pathname,'/storage/deliveries');const ids=JSON.parse(init.body).ids;if(!delayed){delayed=true;assert.equal(ids.length,25);advance(25000);}return Response.json({known:ids});}});
+ await ingress.maintainRaw(h.env,()=>[repo]);let s=JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes);assert.ok(s.after.endsWith('budget-batch-24.json'));assert.equal(s.last_completed,undefined);assert.equal(s.receipt_lookup.lookups,25);assert.equal(s.receipt_lookup.requests,1);assert.equal(s.receipt_lookup.at,Date.now());assert.equal(h.archive.objects.has(ingress.receiptKey(repo.id,'budget-batch-25')),false);assert.equal(h.state.applied.size,0);
+ advance(61000);await ingress.maintainRaw(h.env,()=>[repo]);s=JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes);assert.ok(s.last_completed);assert.equal(s.receipt_lookup.lookups,5);for(let i=0;i<30;i++)assert.ok(h.archive.objects.has(ingress.receiptKey(repo.id,'budget-batch-'+String(i).padStart(2,'0'))));assert.equal(h.state.applied.size,0);
+}));
+
+test('a receipt lookup completing after raw lease replacement cannot overwrite the new cursor or counters',async()=>clock(async advance=>{
+ const h=cronHarness(),key='control/raw-recovery.json',retention='control/retention/raw_webhooks.json';for(const id of['late-a','late-b','late-c'])await h.archive.put('webhooks/2026-10-20/'+id+'.json','{}',{customMetadata:{event:'ping'}});await h.archive.put(retention,JSON.stringify({owner:'previous'}));let newer;
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{assert.equal(new URL(url).pathname,'/storage/deliveries');const ids=JSON.parse(init.body).ids;assert.equal(ids.length,3);advance(61000);newer={owner:'replacement',after:'webhooks/2026-10-24/z.json',lease_until:Date.now()+60000,receipt_lookup:{requests:999}};await h.archive.put(key,JSON.stringify(newer));return Response.json({known:ids});}});
+ await ingress.maintainRaw(h.env,()=>[repo]);assert.deepEqual(JSON.parse(h.archive.objects.get(key).bytes),newer);assert.deepEqual(JSON.parse(h.archive.objects.get(retention).bytes),{owner:'previous'});for(const id of['late-a','late-b','late-c']){assert.ok(h.archive.objects.has(ingress.receiptKey(repo.id,id)));assert.ok(h.archive.objects.has('webhooks/2026-10-20/'+id+'.json'));assert.equal(parked(h.archive,id).length,0);}assert.equal(h.state.applied.size,0);
+}));
+
+test('a raw group batches staggered body completion without any coalescing timer',async()=>{
+ const h=harness(),batches=[],lookup=ingress.rawReceiptLookup(h.env);let release;const lateBody=new Promise(r=>release=r);h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{batches.push(JSON.parse(init.body).ids);return Response.json({known:JSON.parse(init.body).ids});}});
+ const group=lookup.runGroup([()=>lookup.known(repo,'early'),async()=>{await lateBody;return lookup.known(repo,'late');},async()=> 'no_receipt_needed']);
+ await new Promise(r=>setImmediate(r));assert.equal(batches.length,0,'waiting for the other original body, not a time window');release();assert.deepEqual(await group,[true,true,'no_receipt_needed']);assert.deepEqual(batches,[['early','late']]);assert.equal(lookup.summary().requests,1);
+});
+
+test('a raw group flushes when the last body needs no SQL lookup',async()=>{
+ const h=harness(),lookup=ingress.rawReceiptLookup(h.env);let release;const body=new Promise(r=>release=r);let requests=0;h.env.REPOSITORIES.get=()=>({fetch:async()=>{requests++;return Response.json({known:['only']});}});
+ const group=lookup.runGroup([()=>lookup.known(repo,'only'),async()=>{await body;return 'already_durable';}]);await new Promise(r=>setImmediate(r));assert.equal(requests,0);release();assert.deepEqual(await group,[true,'already_durable']);assert.equal(requests,1);
+});
+
+test('a failing raw group member cannot strand the other receipt waiters',async()=>{
+ const h=harness(),lookup=ingress.rawReceiptLookup(h.env);h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>Response.json({known:JSON.parse(init.body).ids})});let done=false;
+ await assert.rejects(lookup.runGroup([async()=>{await lookup.known(repo,'safe');done=true;},async()=>{throw Error('original body unavailable');}]),/original body unavailable/);assert.equal(done,true);assert.equal(lookup.summary().known_lookups,1);assert.deepEqual(await lookup.runGroup([()=>lookup.known(repo,'next')]),[true]);
+});
+
+test('raw groups handle sequential targets without mixing repository receipt identities',async()=>{
+ const h=harness(),lookup=ingress.rawReceiptLookup(h.env),other={...repo,id:'101',name:'org/other'},requests=[];h.env.REPOSITORIES.get=id=>({fetch:async(url,init)=>{const p=JSON.parse(init.body);assert.equal(id,p.repository_id);requests.push(p);return Response.json({known:id===repo.id?p.ids:[]});}});
+ const result=await lookup.runGroup([async()=>[await lookup.known(repo,'shared'),await lookup.known(other,'shared')],()=>lookup.known(other,'other-only'),()=>lookup.known(repo,'same-repo')]);assert.deepEqual(result,[[true,false],false,true]);assert.equal(requests.filter(p=>p.repository_id===repo.id).length,1);assert.deepEqual(requests.find(p=>p.repository_id===repo.id).ids,['shared','same-repo']);assert.equal(lookup.summary().failures,0);
+});
+
+test('empty raw groups and single due-gap lookups complete without a timer',async()=>{
+ const h=harness(),lookup=ingress.rawReceiptLookup(h.env);h.env.REPOSITORIES.get=()=>({fetch:async()=>Response.json({known:[]})});assert.deepEqual(await lookup.runGroup([]),[]);assert.deepEqual(await lookup.runGroup([()=>lookup.known(repo,'one-gap')]),[false]);assert.equal(lookup.summary().requests,1);
+});
+
+test('a failed group lookup completes and a later group can resolve its own receipts',async()=>{
+ const h=harness(),lookup=ingress.rawReceiptLookup(h.env);let failed=true;h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{if(failed)throw Error('read unavailable');return Response.json({known:JSON.parse(init.body).ids});}});
+ assert.deepEqual(await lookup.runGroup(['a','b','c'].map(id=>()=>lookup.known(repo,id))),[false,false,false]);assert.equal(lookup.summary().failures,1);failed=false;assert.deepEqual(await lookup.runGroup(['a','b','c'].map(id=>()=>lookup.known(repo,id))),[true,true,true]);assert.equal(lookup.summary().requests,2);
+});
+
+test('raw groups reject overlapping ownership, overlarge groups and an outstanding standalone lookup',async()=>{
+ const h=harness(),lookup=ingress.rawReceiptLookup(h.env);h.env.REPOSITORIES.get=()=>({fetch:async()=>Response.json({known:[]})});let release;const gate=new Promise(r=>release=r),group=lookup.runGroup([async()=>{await gate;return true;}]);await assert.rejects(lookup.runGroup([]),/raw_receipt_group_invalid/);release();assert.deepEqual(await group,[true]);await assert.rejects(lookup.runGroup(Array.from({length:101},()=>async()=>true)),/raw_receipt_group_invalid/);
+ let respond,entered;const response=new Promise(r=>respond=r),ready=new Promise(r=>entered=r);h.env.REPOSITORIES.get=()=>({fetch:async()=>{entered();return response;}});const pending=lookup.known(repo,'in-flight');await ready;await assert.rejects(lookup.runGroup([]),/raw_receipt_group_invalid/);respond(Response.json({known:[]}));assert.equal(await pending,false);assert.deepEqual(await lookup.runGroup([]),[]);
+});
+
+test('one raw-group member may wait on multiple repositories concurrently without deadlock',async()=>{
+ const h=harness(),lookup=ingress.rawReceiptLookup(h.env),other={...repo,id:'101',name:'org/other'};h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{await new Promise(r=>setImmediate(r));return Response.json({known:JSON.parse(init.body).ids});}});
+ assert.deepEqual(await lookup.runGroup([()=>Promise.all([lookup.known(repo,'same'),lookup.known(other,'same')])]),[[true,true]]);assert.equal(lookup.summary().requests,2);assert.equal(lookup.summary().group_tasks,1);assert.equal(lookup.summary().groups,1);
+});
+
+test('raw-group completion waits for a member lookup even when its task did not await the result',async()=>{
+ const h=harness(),lookup=ingress.rawReceiptLookup(h.env);let respond,entered;const response=new Promise(r=>respond=r),ready=new Promise(r=>entered=r);h.env.REPOSITORIES.get=()=>({fetch:async()=>{entered();return response;}});let finished=false;
+ const group=lookup.runGroup([async()=>{void lookup.known(repo,'detached-read');return 'task-returned';}]).then(v=>{finished=true;return v;});await ready;await new Promise(r=>setImmediate(r));assert.equal(finished,false);respond(Response.json({known:['detached-read']}));assert.deepEqual(await group,['task-returned']);assert.equal(lookup.summary().known_lookups,1);assert.deepEqual(await lookup.runGroup([]),[]);
+});
+
+test('an external receipt call while a raw group is active cannot strand group members',async()=>{
+ const h=harness(),lookup=ingress.rawReceiptLookup(h.env);h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>Response.json({known:JSON.parse(init.body).ids})});let release;const body=new Promise(r=>release=r),group=lookup.runGroup([async()=>{await body;return lookup.known(repo,'group');}]);const external=lookup.known(repo,'external');release();assert.deepEqual(await group,[true]);assert.equal(await external,true);
+});
+
+test('maintainRaw holds staggered original bodies in one receipt batch and records barrier cost',async()=>{
+ const h=cronHarness();for(let i=0;i<25;i++)await h.archive.put('webhooks/2026-10-20/staggered-'+String(i).padStart(2,'0')+'.json','{}',{customMetadata:{event:'ping'}});
+ const get=h.archive.get;let release;const lateBody=new Promise(r=>release=r);h.archive.get=async key=>{if(key==='webhooks/2026-10-20/staggered-24.json')await lateBody;return get(key);};let requests=0;h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{assert.equal(new URL(url).pathname,'/storage/deliveries');requests++;return Response.json({known:JSON.parse(init.body).ids});}});
+ const running=ingress.maintainRaw(h.env,()=>[repo]);await new Promise(r=>setTimeout(r,35));assert.equal(requests,0,'actual maintenance must wait past the former20ms flush window');release();await running;const state=JSON.parse(h.archive.objects.get('control/raw-recovery.json').bytes),stats=state.receipt_lookup;assert.equal(requests,1);assert.equal(stats.requests,1);assert.equal(stats.lookups,25);assert.equal(stats.largest_batch,25);assert.equal(stats.group_tasks,25);assert.ok(stats.groups>=1);assert.equal(stats.rounds,1);assert.ok(stats.group_ms>0);assert.ok(stats.barrier_wait_ms>0);assert.equal(stats.failures,0);assert.ok(state.last_completed);assert.equal(h.state.applied.size,0);
+});
+
+test('raw-group drain rechecks a receipt lookup chained from an unawaited result',async()=>{
+ const h=harness(),lookup=ingress.rawReceiptLookup(h.env);let answerSecond,entered;const secondResponse=new Promise(r=>answerSecond=r),secondEntered=new Promise(r=>entered=r);let requests=0,finished=false;
+ h.env.REPOSITORIES.get=()=>({fetch:async(url,init)=>{requests++;if(requests===2){entered();return secondResponse;}return Response.json({known:JSON.parse(init.body).ids});}});
+ const group=lookup.runGroup([async()=>{void lookup.known(repo,'first').then(()=>lookup.known(repo,'second'));return 'member-returned';}]).then(v=>{finished=true;return v;});await secondEntered;await new Promise(r=>setImmediate(r));assert.equal(finished,false,'chained lookup must finish before the group releases ownership');answerSecond(Response.json({known:['second']}));assert.deepEqual(await group,['member-returned']);assert.equal(lookup.summary().known_lookups,2);assert.equal(lookup.summary().requests,2);assert.deepEqual(await lookup.runGroup([]),[]);
+});
+
+
+test('saturated repository maintenance cannot reject same-bucket transactional spill reads',async t=>{
+ const f=repositoryFixture();await f.ready;
+ await f.archive.put('resources/spill',JSON.stringify({id:'exact-large-id',observed:123,verified:456}));
+ const original=f.archive.put,stalled=[];f.archive.put=async(key,...args)=>{if(key!=='maintenance-stall')return original(key,...args);return new Promise(resolve=>stalled.push(resolve));};
+ t.mock.timers.enable({apis:['setTimeout']});
+ try{
+  const archive=f.state.maintenanceArchive;assert.equal(f.state.maintenanceArchive,archive);
+  const calls=Array.from({length:16},()=>assert.rejects(archive.put('maintenance-stall','body'),/timeout/));
+  await new Promise(setImmediate);t.mock.timers.tick(1500);await Promise.all(calls);
+  await assert.rejects(f.state.maintenanceArchive.get('resources/spill'),/busy/);
+  const scoped=Object.create(f.state);scoped.store={backend:'postgres',transactional:true};
+  assert.notEqual(scoped.transactionArchive,archive);assert.equal(scoped.transactionArchive,f.state.transactionArchive);
+  const rows=Array.from({length:8},()=>({data:JSON.stringify({$r2:'resources/spill'})})),values=[];
+  for await(const value of scoped.decodeRows(rows))values.push(value);
+  assert.equal(values.length,8);assert.ok(values.every(value=>value.id==='exact-large-id'&&value.observed===123&&value.verified===456));
+  for(const release of stalled)release(null);await new Promise(setImmediate);
+  assert.ok(await f.state.maintenanceArchive.get('resources/spill'));
+ }finally{t.mock.timers.reset();}
 });

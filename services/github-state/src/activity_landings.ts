@@ -1,5 +1,5 @@
 // Read existing Bors receipts, never GitHub or the merge-control API.
-export const BORS_RECEIPTS = 'https://bors.taucetiproject.org/repositories/1/candidates?base=main';
+export const BORS_RECEIPTS = 'https://bors.taucetiproject.org/repositories/1/candidates?base=main&promoted=true';
 const sha = (value:any) => typeof value==='string' && /^[a-f0-9]{40}$/.test(value);
 
 export function promotionReceipts(value:any, repository='TauCetiProject/TauCeti', branch='main') {
@@ -23,17 +23,5 @@ export function promotionReceipts(value:any, repository='TauCetiProject/TauCeti'
 export async function readPromotionReceipts(fetcher:typeof fetch=fetch, url=BORS_RECEIPTS, repository='TauCetiProject/TauCeti', branch='main') {
   const response=await fetcher(url,{method:'GET',redirect:'manual',signal:AbortSignal.timeout(5000),headers:{'User-Agent':'TauCetiGitHubState/1.0','Accept':'application/json'}});
   if(response.status!==200 || !response.body) throw new Error('Bors receipts HTTP '+response.status);
-  const reader=response.body.getReader(),chunks=[];
-  let size=0;
-  try {
-    for(;;) {
-      const {done,value}=await reader.read(); if(done) break;
-      size+=value.byteLength;
-      if(size>8*1024*1024) throw new Error('Bors receipts exceed size limit');
-      chunks.push(value);
-    }
-  } finally {await reader.cancel();}
-  const raw=new Uint8Array(size);let offset=0;
-  for(const chunk of chunks) {raw.set(chunk,offset);offset+=chunk.byteLength;}
-  return promotionReceipts(JSON.parse(new TextDecoder().decode(raw)),repository,branch);
+  return promotionReceipts(await response.json(),repository,branch);
 }

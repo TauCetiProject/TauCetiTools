@@ -167,6 +167,9 @@ else:
     def test_generated_wrapper_exposes_optional_credential_configuration(self):
         wrapper = (ROOT / "tauceti_tools/assets/project/.github/workflows/pr-build.yml").read_text()
         source = WORKFLOW.read_text()
+        # Reusable workflow titles are ignored: the generated caller must carry the identity too.
+        title = next(line for line in source.splitlines() if line.startswith("run-name:"))
+        self.assertIn(title, wrapper)
         for name in ("CI_READ_APP_ID", "CI_READ_APP_PRIVATE_KEY", "CI_STATUS_APP_ID", "CI_STATUS_APP_PRIVATE_KEY"):
             self.assertIn(name + ": {required: false}", source)
             self.assertIn(name + ": ${{ secrets." + name + " }}", wrapper)

@@ -43,8 +43,9 @@ def configuration_problem(source, reason, *, fresh=False):
                       f"  diff -u {quote(str(target))} {quote(str(output))}"]
     lines += [
         f"Open {output} in your editor. Check the content and roadmap repository names,",
-        "project.branch, lean.roots and project.codeowners. The starter uses direct",
-        "automatic merging, without a queue or requiring branches to be up to date.",
+        "project.branch, lean.roots and project.codeowners. The starter uses GitHub's merge queue.",
+        "Alternatively, configure Bors and select merge.backend = bors. Coordinate the chosen",
+        "backend with the repository's MERGE_BACKEND variable and branch rules before upgrading.",
     ]
     if remote:
         lines += [f"Use the reviewed starter to update the published configuration at {source}",

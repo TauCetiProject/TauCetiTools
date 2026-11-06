@@ -98,10 +98,9 @@ tauceti-tools init --repo ExampleOrg/ExampleCeti --owner-login ExampleMaintainer
 
 `init` can fill an empty `tauceti.toml`; it refuses to replace a nonempty file.
 For an existing configuration, use `--output tauceti.toml.example` to generate a separate
-reference and compare the settings. The template selects `merge.backend = "github-direct"`:
-merges happen automatically after the required build and review, with no merge queue and
-no requirement to be up to date with the default branch. Change that setting only when
-intentionally selecting another merge backend. Check the generated Lean module roots,
+reference and compare the settings. The template selects `merge.backend = "github-queue"`.
+Use GitHub's merge queue or explicitly configure Bors; these are the two supported merge setups.
+Check the generated Lean module roots,
 roadmap directory names and human ownership against the existing project.
 
 The [complete example](../examples/epsilon-eridani.toml) shows the full configuration.
@@ -306,7 +305,9 @@ copies that published toolchain and resolves the content repository as a depende
 an unmerged content setup PR or local build does not satisfy this prerequisite.
 
 In the roadmap repository create an active directory, for example `ExampleCetiRoadmap/`,
-with one subdirectory per area. Each area has `README.md`; `Suggested.lean` can give
+with one subdirectory per area. For a new empty roadmap, track `.gitkeep` files under both
+`ExampleCetiRoadmap/` and `Completed/` so Git retains them. The labeling script reports
+“No roadmap areas yet; nothing to label” until an area is added. Each area has `README.md`; `Suggested.lean` can give
 target statements and examples. Completed areas may live under `Completed/`.
 
 Human ownership applies to roadmap content. Generated `STATUS.md` and `PROGRESS.md`
@@ -372,7 +373,10 @@ clone after opening the PR. If push or PR creation fails after committing, it pr
 retains the prepared checkout for recovery.
 
 Commit the project configuration, CODEOWNERS and workflow changes on a branch and open a
-PR against the upstream default branch. Do not merge setup through an admin bypass.
+PR against the upstream default branch. Review the generated changes as a human. If existing
+branch rules block human-owned setup files, use the selected merger's explicit scope override
+described under [Branch rules](#branch-rules). On a new repository, install setup before
+requiring its check names.
 
 The trusted build workflow selects immutable PR and base commits, establishes source scope,
 attests Lake configuration, prepares integration and runs candidate Lean offline under the
@@ -516,39 +520,67 @@ must include the destination repository under their access policy. Environment s
 available only to jobs selecting that environment and may require approval. Secrets are passed
 explicitly to reusable workflows; they do not automatically follow a workflow call.
 
-Use Actions variables for non-secret values, for example `MERGE_BACKEND` (`queue`, `direct` or `bors`),
+Use Actions variables for non-secret values, for example `MERGE_BACKEND` (`queue` or `bors`),
 `LAKE_CACHE_ARTIFACT_ENDPOINT_PUBLIC`, `LAKE_CACHE_REVISION_ENDPOINT_PUBLIC` and deliberately
 enabled fleet/runner settings. Set `CI_REVIEW_ENABLED` only if paid CI review is intended;
 operator-run subscription review does not require provider API keys in the repository.
 
 ## Branch rules
 
-Open `https://github.com/ExampleOrg/ExampleCeti/settings/rules/new?target=branch`:
+The `scope` check restricts which files automation may merge. It does not turn ordinary
+human review into permission for a bot to change infrastructure.
 
-1. Name: **Tau Ceti content**. Enforcement status: **Active**. Target the configured default
-   branch.
-2. Require a pull request and code-owner review for human-owned changes.
-3. Require checks **build**, **bump-guard**, **scope**, with the expected check producer.
-4. With `merge.backend = "github-queue"`, enable **Require merge queue**. The installed workflow must run
-   on `merge_group` and validate the actual combined commit.
-5. Configure any automation bypass only for pull requests and only for the intended App.
-   Trusted merge policy must still reject unauthorized human-owned changes. Do not give
-   content authors unconditional bypass or use admin merge to get past missing reviews.
+| Project setup | Actions variable | Normal merging | Human scope override |
+| --- | --- | --- | --- |
+| `merge.backend = "github-queue"` | `MERGE_BACKEND=queue` | GitHub merge queue | An administrator performs an admin merge. |
+| `merge.backend = "bors"` | `MERGE_BACKEND=bors` | Bors | An authorized administrator uses `bors merge`. |
 
-For `merge.backend = "github-direct"`, set the Actions variable `MERGE_BACKEND` to `direct`.
-Require the same build, scope and bump-guard checks, and leave **Require branches to be up to
-date before merging** unchecked (`required_status_checks.strict = false`). Do not require a
-merge queue. Trusted automation applies the same current-head scoreboard and path policy,
-then squash-merges through GitHub's API with the exact reviewed head SHA. Advancing the base
-branch does not invalidate a review of the same diff or require a branch update. GitHub still
-rejects merge conflicts. Keep the direct-merge App out of the ruleset bypass list so
-GitHub also enforces the required checks. The hourly sweep retries
-eligible PRs after missed events. This mode works for public personal-account repositories.
-PR axiom audits check changed modules only; without staging, violations confined to rebuilt,
-unchanged importers are caught by the full main audit after merging.
+Open `https://github.com/ExampleOrg/ExampleCeti/settings/rules`. Check every rule applying to
+the default branch, including organization rulesets and any classic protection rule.
 
-GitHub merge queue availability depends on repository visibility and account type. The standard
-starter uses a public organization-owned repository. If a queue is unavailable, explicitly select direct GitHub merging or configure Bors.
+For either setup, require pull requests, code-owner review for human-owned files, and checks
+**build**, **bump-guard** and **scope** from their expected GitHub Actions producer. Install the
+workflows first and let an ordinary build run before selecting their check names.
+
+With the **GitHub merge queue**, enable **Require merge queue** and set `MERGE_BACKEND=queue`.
+The build workflow must handle `merge_group` and build the combined commit. On rulesets that
+block merges, add **Repository admin** to the bypass list with **For pull requests only**.
+Keep the bypass restricted to administrators. Preserve separate deletion and force-push
+protection. If classic branch protection also applies, allow administrator overrides there too.
+
+A PR touching restricted files keeps `scope` red and cannot merge automatically. After
+reviewing its changes and build result, an administrator can explicitly merge it through
+GitHub's UI or `gh pr merge PR_NUMBER --repo ExampleOrg/ExampleCeti --admin --squash`.
+This bypasses the normal branch rules; it does not claim that `scope` passed. Ordinary review
+alone is not a scope override. This setup needs no Bors deployment or Bors approval.
+
+With **Bors**, disable the GitHub merge queue and set `MERGE_BACKEND=bors` after configuring the
+service. The Bors App needs **Always allow** on rulesets that otherwise prevent it from
+updating the base branch with its tested staging commit. Keep deletion and force-push
+protection in separate rulesets without adding a Bors bypass. Replace overlapping classic
+protection with an equivalent ruleset that permits this App. Only the project Bors App should
+bypass rules that block merging; administrators approve restricted paths through `bors merge`.
+Configure `services.bors.url` and `services.bors.repository_id` from the Bors repository page. Doctor identifies the Bors App as `REPOSITORY-bors`; if you
+registered a different slug, set `services.bors.app_slug` to that actual slug.
+
+An authorized administrator uses `bors merge` to approve restricted paths. Trusted CI verifies
+Bors's approval for the exact PR head and merge base, including the member PRs of a staging
+batch. Changed heads, revoked approvals and users who no longer have admin access cannot
+reuse an old approval. The other scope guards and build checks still apply.
+
+Doctor checks these settings and installed workflow configuration directly. It does not scan
+PRs to infer merge policy. If it cannot read a bypass list or protection setting, it identifies
+the setting and asks a repository administrator to inspect it.
+
+Existing `github-direct` configurations must choose one of these two setups. For the merge
+queue, edit `merge.backend` to `github-queue`, enable the queue and set `MERGE_BACKEND=queue`.
+For Bors, configure the service and its branch rules before selecting `bors` and setting
+`MERGE_BACKEND=bors`. Review and publish the configuration and matching generated workflows.
+A Tools-version bump alone leaves an old `github-direct` configuration unsupported in CI.
+Prepare the configuration and workflow changes together, and coordinate the repository variable
+and branch rules with the maintainer before installing the new setup. Doctor does not silently
+convert a configuration or change repository settings. If your repository cannot use GitHub's
+merge queue, configure Bors.
 
 The roadmap repository separately protects authored roadmap text. Progress automation may
 merge only its validated generated report updates. Data/CI archive permissions are separate
@@ -813,6 +845,23 @@ alone is insufficient reason to change merge authority.
 
 ## GitHub state
 
+The hosted Tau Ceti mirror publishes read-only queries for `TauCetiProject/TauCeti`
+without a client token, allowing ordinary Tau Ceti workers to use it by default.
+Service operators may explicitly publish other public repositories using the
+`PUBLIC_READ_REPOSITORIES` JSON name list. A name must also exist in
+`ALLOWED_REPOSITORIES`; publishing a name does not enroll a repository or expose
+administrative, health, changes or activity endpoints. Only publish repositories
+whose mirrored data is intended to be public. The default custom deployment
+continues to require scoped client credentials. Anonymous queries only read
+existing mirrored snapshots; they cannot request hydration or configure repositories. Large responses use
+the existing stable pagination with temporary R2 continuation pages, instead of
+falling back to GitHub because of inventory size. Missing coverage still uses
+the worker's normal fallback.
+An absent GitHub state section defaults to the public mirror for the canonical
+Tau Ceti content repository; an explicit `mode = "off"` still disables it.
+
+Public queries require the `PUBLIC_QUERY_LIMIT` binding (1,200 queries per minute per client IP, including individual batch queries). Identical reads share preparation and public reads use a separate page cache bounded at sixteen entries and 12 MiB of serialized results. Shared-IP fleets have room for normal survey, dispatch and continuation bursts; public reads have no separate concurrency refusal or total-snapshot size cutoff. Set `PUBLIC_READ_REPOSITORIES = "[]"` explicitly to revoke public access; `keep_vars` preserves omitted deployment variables.
+
 `off` uses direct GitHub reads. `hosted` requests enrollment in the operator's shared mirror.
 `custom` deploys the same service in the downstream's Cloudflare account.
 
@@ -997,7 +1046,12 @@ and branch, or a Cloudflare service binding. Absence of Bors does not impair Git
 
 ## Verification
 
-Use real workflow runs as evidence:
+Configuration checks and successful workflow runs answer different questions. Doctor can
+check that a secret exists, but GitHub hides its value. It separately reports whether an
+existing workflow has successfully used the App credentials. You can leave that use unchecked
+until the next normal run; there is no need to create a PR merely to satisfy doctor.
+
+Inspect existing runs with:
 
 ```sh
 gh workflow list --repo ExampleOrg/ExampleCeti
@@ -1008,7 +1062,13 @@ gh api repos/ExampleOrg/ExampleCeti/actions/runs/RUN_ID/jobs
 
 Substitute an actual run ID from the listing. Inspect the credential-consuming step, not just
 the overall green conclusion: a skipped step or authentication fallback leaves that credential
-unverified. Trigger a content PR for pr-build; review and build changes trigger merge automation.
+unchecked. Normal content changes trigger pr-build; review and build changes trigger merge automation.
+After fixing credentials, rerun the existing workflow. Doctor checks the rerun and its token
+step rather than rejecting it because the original run predates the credential update. A
+newer skipped run does not hide a successful rerun among the recent workflow records. This
+optional credential-use check is separate from checking merge settings. A skipped step or an
+inaccessible record is reported as unchecked, rather than a configuration
+error. A step that actually failed is reported separately.
 Use `gh workflow run WORKFLOW --repo ... --ref main` only where the existing workflow supports
 manual dispatch, supplying its declared inputs.
 
@@ -1023,6 +1083,14 @@ gh run watch RUN_ID --repo ExampleOrg/ExampleCeti --exit-status --interval 120
 ```
 
 ## Operation and recovery
+
+If Bors explicitly reports the requested staging batch as canceled, a successful
+build's finalizer finishes with `batch withdrawn; no verdict posted`. It removes
+the pending finalization or success intent without posting a red or green
+`build` commit status. This is a completed finalizer job, not a successful build
+verdict for the withdrawn batch. Missing, malformed or unavailable Bors responses
+do not prove withdrawal; real build and cache publication failures retain their
+failure behavior, including a sandbox build that was canceled before completion.
 
 Review upgrades as configuration/workflow PRs. Update common pins and their literal callers
 together. Never point unfinished publication records at a new destination during an upgrade.
@@ -1118,8 +1186,8 @@ to its exact `APP_SLUG[bot]` login. These are public identifiers, not keys.
 Exact-run cancellation and speculative trains remain Tau Ceti-only; downstream deployments
 do not need cancellation actor or workflow IDs.
 The repository ID used in a Bors observation URL is instead Bors's own database repository ID,
-visible in its `/repositories/NUMBER` UI; store it as `services.bors.repository_id` only if
-collecting those optional receipts.
+visible in its `/repositories/NUMBER` UI. Set `services.bors.repository_id` to that number;
+the scope approval check uses it to read the correct project's approval records.
 
 Save the App's client ID, client secret, PEM and webhook secret in private files. Upload:
 

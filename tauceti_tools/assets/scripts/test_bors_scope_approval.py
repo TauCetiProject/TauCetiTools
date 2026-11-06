@@ -158,6 +158,20 @@ class ScopeApprovalTests(unittest.TestCase):
                 self.data['requested_batch'].update(change)
                 self.assertFalse(self.batch())
 
+    def test_batches_larger_than_the_old_bors_limit_are_verified(self):
+        count = 1200
+        for number in range(3, count + 1):
+            self.prs[number] = dict(number=number, state='open', draft=False, head=dict(sha=SECOND),
+                                    base=dict(ref='main', sha=BASE), changed_files=1)
+            self.files[number] = [dict(filename=f'TauCeti/Member{number}.lean', status='modified')]
+            self.data['requested_batch']['members'].append(dict(pr=number, head_sha=SECOND))
+        self.assertEqual(len(self.data['requested_batch']['members']), count)
+        self.assertTrue(self.batch())
+        self.files[count] = [dict(filename='scripts/late.sh', status='added')]
+        self.assertFalse(self.batch())
+        self.data['scope_approvals'].append(approval(count, SECOND))
+        self.assertTrue(self.batch())
+
     def test_other_pr_cannot_smuggle_restricted_paths(self):
         self.files[2] = [dict(filename='scripts/evil.sh', status='added')]
         self.assertFalse(self.batch())
@@ -223,7 +237,7 @@ class WorkflowTests(unittest.TestCase):
         self.steps = self.workflow['jobs']['sandboxed-build']['steps']
         self.report = next(s['run'] for s in self.steps if s.get('id') == 'report')
 
-    def verdict(self, **guards):
+    def verdict(self, backend="bors", **guards):
         start = self.report.index('if [ "${{ env.SCOPE_OK }}"')
         end = self.report.index('post_status scope "$sc_state" "$sc_desc"', start)
         script = self.report[start:end]
@@ -232,13 +246,14 @@ class WorkflowTests(unittest.TestCase):
         script = re.sub(r'\$\{\{ env\.([A-Z_]+) \}\}', lambda m: values.get(m[1], ''), script)
         result = subprocess.run(['bash', '-c', 'python3() { return 0; }; ' + script +
                                  '\nprintf "%s" "$sc_state"'], capture_output=True, text=True,
-                                env={**os.environ, 'IS_BATCH': 'false', 'TESTED_SCOPE_HEAD': HEAD,
+                                env={**os.environ, 'IS_BATCH': 'false', 'MERGE_BACKEND': backend, 'TESTED_SCOPE_HEAD': HEAD,
                                      'TESTED_SCOPE_BASE': BASE, 'SCOPE_PR': '1'})
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout
 
     def test_human_approval_only_waives_paths(self):
         self.assertEqual(self.verdict(), 'success')
+        self.assertEqual(self.verdict(backend="queue"), "failure")
         for guard in ['BUMP_BAD', 'INFRA', 'TOO_LARGE', 'DIFF_UNKNOWN', 'NEWFILE_TOO_LONG']:
             with self.subTest(guard=guard):
                 self.assertEqual(self.verdict(**{guard: '1'}), 'failure')

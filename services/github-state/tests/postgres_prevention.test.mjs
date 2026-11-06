@@ -320,3 +320,93 @@ pg('repeated PostgreSQL resource refreshes reuse immutable spill contents across
   assert.equal([...f.env.ARCHIVE.objects.keys()].filter(k=>k.startsWith('resources/')).length,2);
  }finally {await f.close();}
 });
+
+for(const loseResponse of[false,true])pg('historical CI replay batches fenced PostgreSQL receipts before R2 cleanup without GitHub; lost response='+loseResponse,async()=>{
+ const f=await postgresFixture();try{
+  f.env.ARCHIVE=bucket();let batches=0,individual=0,lost=loseResponse;
+  f.env.INSTALLATIONS={idFromName(){throw Error('CI receipt replay must not fetch GitHub');}};
+  f.env.REPOSITORIES={idFromName:id=>({toString:()=>id}),get:()=>({fetch:async(url,init)=>{
+   const path=new URL(url).pathname;if(path==='/ci-receipts')batches++;else if(path==='/event')individual++;
+   const r=await f.state.fetch(new Request(url,init));if(path==='/ci-receipts'&&r.ok&&lost){lost=false;throw Error('lost commit response');}return r;
+  }})};
+  const originalRevision=await f.state.revision(),items=[];
+  for(let i=0;i<30;i++){const p={key:'webhooks/ci/'+i,repository:repo.name,delivery:'pg-ci-'+i,event:i%2?'check_run':'workflow_run',received:Date.now()-10000+i};await f.env.ARCHIVE.put(p.key,'{}');await ingress.park(f.env,repo,p,'migration');items.push(p);}
+  const semantic={key:'webhooks/ci/semantic',repository:repo.name,delivery:'mixed-semantic',event:'issue_comment',received:Date.now()};
+  await f.env.ARCHIVE.put(semantic.key,JSON.stringify({issue:{number:7},comment:{id:'mixed-comment',body:'must apply normally',created_at:'2026-10-19T00:00:00Z'}}));
+  await ingress.park(f.env,repo,semantic,'migration');
+  f.env.ARCHIVE.failures.push((op,key)=>op==='put'&&key===ingress.receiptKey(repo.id,'pg-ci-0'));
+  const first=await ingress.drain(f.env,repo,{limit:100});assert.equal(batches,1);assert.equal(first.batched,loseResponse?0:30);assert.equal(first.batch_status,loseResponse?'transport_error':200);assert.equal(individual,loseResponse?31:1);assert.equal(first.failed,1);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,31);
+  assert.deepEqual((await f.store.exec('SELECT kind,id FROM changes ORDER BY revision')).toArray(),[{kind:'issue_comments',id:'mixed-comment'},{kind:'collection',id:'issue_comments:{"number":7}'}],'only the semantic comment and its membership publish changes');
+  assert.equal(await f.state.revision(),originalRevision+2);
+  assert.ok((await f.store.exec("SELECT data FROM resources WHERE kind='issue_comments' AND id='mixed-comment'")).one().data.includes('must apply normally'));
+  const key=ingress.pointerKey(repo.id,items[0]),p=await(await f.env.ARCHIVE.get(key)).json();await f.env.ARCHIVE.put(key,JSON.stringify({...p,retry_at:0}));
+  assert.equal((await ingress.drain(f.env,repo,{limit:100})).failed,0);assert.equal((await f.env.ARCHIVE.list({prefix:'parked/100/'})).objects.length,0);
+  assert.equal(await f.state.revision(),originalRevision+2);
+  const r=await send(f.state,'/ci-receipts',{repository:repo.name,events:[{delivery:'semantic-not-allowed',event:'issue_comment',received:Date.now()}]});assert.equal(r.status,400);
+  await f.admin.query(`UPDATE ${f.schema}.backend_control SET backend='migration' WHERE singleton=1`);
+  assert.equal((await send(f.state,'/ci-receipts',{repository:repo.name,events:[{delivery:'wrong-owner',event:'workflow_job',received:Date.now()}]})).status,503);
+  assert.equal((await f.store.exec("SELECT COUNT(*) n FROM deliveries WHERE id='wrong-owner'")).one().n,0);
+ }finally{await f.close();}
+});
+
+pg('leased admin replay preserves PostgreSQL commit receipts after a lost cleanup acknowledgement',async()=>{
+ const f=await postgresFixture();try{
+  f.env.ARCHIVE=bucket();f.env.INSTALLATIONS={idFromName(){throw Error('replay must not fetch GitHub');}};
+  f.env.REPOSITORIES={idFromName:id=>({toString:()=>id}),get:()=>({fetch:(url,init)=>f.state.fetch(new Request(url,init))})};
+  const pointer={repository:repo.name,delivery:'pg-cleanup-ack',event:'workflow_job',received:Date.now(),key:'webhooks/pg-cleanup-ack'};
+  await f.env.ARCHIVE.put(pointer.key,'{}');await ingress.park(f.env,repo,pointer,'migration');
+  const key=ingress.pointerKey(repo.id,pointer),remove=f.env.ARCHIVE.delete;let lost=true;
+  f.env.ARCHIVE.delete=async keys=>{await remove(keys);if(lost&&[].concat(keys).includes(key)){lost=false;throw Error('lost cleanup acknowledgement');}};
+  const revision=await f.state.revision(),first=await ingress.replayIngress(f.env,repo);
+  assert.equal(first.failed,0);assert.equal(first.superseded,1);assert.equal(first.delivery_errors[0].delivery,pointer.delivery);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,1);assert.equal(await f.state.revision(),revision);
+  assert.equal(await f.env.ARCHIVE.get(key),null);assert.equal(await f.env.ARCHIVE.get(ingress.bodyKey(repo.id,pointer.delivery)),null);
+  const receipt=f.env.ARCHIVE.objects.get(ingress.receiptKey(repo.id,pointer.delivery)).bytes.toString();
+  assert.equal((await send(f.state,'/event',pointer)).status,200);
+  assert.equal(f.env.ARCHIVE.objects.get(ingress.receiptKey(repo.id,pointer.delivery)).bytes.toString(),receipt);
+  assert.equal((await ingress.replayIngress(f.env,repo)).replayed,0);assert.equal((await f.store.exec('SELECT COUNT(*) n FROM changes')).one().n,0);
+ }finally{await f.close();}
+});
+
+pg('ordinary PostgreSQL replay adapts after receipt commits exhaust the cleanup budget',async()=>{
+ const f=await postgresFixture(),realNow=Date.now;let now=realNow();
+ try{
+  Date.now=()=>now;f.env.ARCHIVE=bucket();let batches=0;
+  f.env.INSTALLATIONS={idFromName(){throw Error('adaptive replay must not fetch GitHub');}};
+  f.env.REPOSITORIES={idFromName:id=>({toString:()=>id}),get:()=>({fetch:async(url,init)=>{
+   assert.equal(new URL(url).pathname,'/ci-receipts');batches++;
+   const response=await f.state.fetch(new Request(url,init));
+   if(response.ok&&JSON.parse(init.body).events.length>2)now+=21000;
+   return response;
+  }})};
+  const revision=await f.state.revision(),items=[];
+  for(let i=0;i<8;i++){const p={repository:repo.name,delivery:'adaptive-pg-'+i,event:'workflow_job',received:now+i,key:'webhooks/adaptive-pg-'+i};await f.env.ARCHIVE.put(p.key,'{}');await ingress.park(f.env,repo,p,'migration');items.push(p);}
+  await ingress.maintainIngress(f.env,repo);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,8);
+  for(const p of items){assert.ok(await f.env.ARCHIVE.get(ingress.pointerKey(repo.id,p)));assert.ok(await f.env.ARCHIVE.get(ingress.bodyKey(repo.id,p.delivery)));assert.equal(await f.env.ARCHIVE.get(ingress.receiptKey(repo.id,p.delivery)),null);}
+  for(let n=0;n<12 && (await f.env.ARCHIVE.list({prefix:'parked/100/pointers/'})).objects.length;n++){now+=31000;await ingress.maintainIngress(f.env,repo);}
+  assert.equal((await f.env.ARCHIVE.list({prefix:'parked/100/pointers/'})).objects.length,0);assert.ok(batches>1);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,8);assert.equal(await f.state.revision(),revision);
+  for(const table of ['resources','changes','jobs'])assert.equal((await f.store.exec('SELECT COUNT(*) n FROM '+table)).one().n,0);
+  for(const p of items){assert.ok(await f.env.ARCHIVE.get(ingress.receiptKey(repo.id,p.delivery)));assert.equal(await f.env.ARCHIVE.get(ingress.bodyKey(repo.id,p.delivery)),null);}
+ }finally{Date.now=realNow;await f.close();}
+});
+
+pg('committed semantic PostgreSQL receipts clean parked input in one read without a writer or duplicate change',async()=>{
+ const f=await postgresFixture();try{
+  f.env.ARCHIVE=bucket();f.env.INSTALLATIONS={idFromName(){throw Error('receipt promotion must not fetch GitHub');}};
+  const originalRevision=await f.state.revision(),pointers=[];let lookups=0,individual=0;
+  for(let i=0;i<12;i++){const p={key:'webhooks/known/'+i,repository:repo.name,delivery:'known-semantic-'+i,event:'issue_comment',received:Date.now()+i};await f.env.ARCHIVE.put(p.key,'{}');await ingress.park(f.env,repo,p,'migration');pointers.push(p);}
+  await f.admin.query(`INSERT INTO ${f.schema}.deliveries(id,event,received) SELECT 'known-semantic-'||i,'issue_comment',$1 FROM generate_series(0,11) i`,[Date.now()]);
+  f.env.REPOSITORIES={idFromName:id=>({toString:()=>id}),get:()=>({fetch:async(url,init)=>{if(new URL(url).pathname==='/storage/deliveries')lookups++;else{individual++;throw Error('known receipt must not enter event writer');}return f.state.fetch(new Request(url,init));}})};
+  // Reject every repository write: promotion must be read-only in PostgreSQL.
+  const batch=f.store.batch.bind(f.store);f.store.batch=statements=>{assert.ok(statements.every(s=>/^SELECT\b/i.test(s.sql)));return batch(statements);};f.store.transaction=()=>{throw Error('receipt lookup acquired writer');};
+  f.env.ARCHIVE.failures.push((op,key)=>op==='put'&&key===ingress.receiptKey(repo.id,pointers[0].delivery));
+  const first=await ingress.drain(f.env,repo,{limit:100});assert.equal(first.known_receipts,12);assert.equal(first.replayed,11);assert.equal(first.failed,1);assert.equal(individual,0);assert.equal(lookups,1);
+  const key=ingress.pointerKey(repo.id,pointers[0]),p=await(await f.env.ARCHIVE.get(key)).json();await f.env.ARCHIVE.put(key,JSON.stringify({...p,retry_at:0}));
+  const second=await ingress.drain(f.env,repo,{limit:100});assert.equal(second.replayed,1);assert.equal(second.failed,0);assert.equal(individual,0);assert.equal(lookups,2);
+  assert.equal(await f.state.revision(),originalRevision);assert.equal((await f.store.exec('SELECT COUNT(*) n FROM changes')).one().n,0);assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,12);
+  for(const p of pointers){assert.equal((await(await f.env.ARCHIVE.get(ingress.receiptKey(repo.id,p.delivery))).json()).source,'sql_receipt');assert.equal(await f.env.ARCHIVE.get(ingress.bodyKey(repo.id,p.delivery)),null);assert.equal(await f.env.ARCHIVE.get(ingress.pointerKey(repo.id,p)),null);}
+ }finally{await f.close();}
+});

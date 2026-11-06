@@ -1,0 +1,36 @@
+{
+  "schema": "tauceti-bors.observation/v1",
+  "repo": "TauCetiProject/TauCeti",
+  "base": "main",
+  "requested_batch": {
+    "id": 1547,
+    "state": "canceled",
+    "members": [
+      {
+        "pr": 19876,
+        "head_sha": "c416b02af8ababf9c584d1e8e1b60307cd13a2b9"
+      },
+      {
+        "pr": 19769,
+        "head_sha": "1453c838afc1752c598f044ed1227c395488cae1"
+      },
+      {
+        "pr": 19819,
+        "head_sha": "48754921326f08800572f3f2bd4fcab74d21cc38"
+      },
+      {
+        "pr": 19761,
+        "head_sha": "7871ee6532664686a0f572d0cc2fc235ffcc362e"
+      }
+    ],
+    "base": "main",
+    "sealed": true,
+    "base_sha": "a832f3bb277e53cb731a2602744efce7df53f597",
+    "promotion_retry_at": 0,
+    "promotion_failures": 0,
+    "recovery_after": 0,
+    "recovery_failures": 0,
+    "head_sha": null,
+    "train": null
+  }
+}

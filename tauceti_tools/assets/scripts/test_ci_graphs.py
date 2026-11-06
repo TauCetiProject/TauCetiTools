@@ -22,20 +22,20 @@ class MergeQueueChartsTest(unittest.TestCase):
                                created_at TEXT);
             CREATE TABLE jobs (repo TEXT, run_id INTEGER, job_id INTEGER, name TEXT,
                                created_at TEXT, started_at TEXT, conclusion TEXT,
-                               runner_kind TEXT, wait_s REAL, run_s REAL, failure_class TEXT);
+                               runner_kind TEXT, wait_s REAL, run_s REAL, failure_class TEXT, labels TEXT);
             CREATE TABLE steps (job_id INTEGER, name TEXT, run_s REAL);
             CREATE TABLE main_commits (sha TEXT, committed_at TEXT, pr INTEGER);
             CREATE TABLE main_landings (repo TEXT, head_sha TEXT, landed_at TEXT);
         """)
 
     def build(self, number, trigger, conclusion="success", *, repo="TauCeti",
-              workflow=daily.PR_BUILD, kind="namespace", day="2026-10-06"):
+              workflow=daily.PR_BUILD, kind="namespace", day="2026-10-06", labels=()):
         stamp = day + "T10:00:00Z"
         self.db.execute("INSERT INTO runs VALUES (?,?,?,?,?)",
                         (repo, number, workflow, trigger, stamp))
-        self.db.execute("INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        self.db.execute("INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                         (repo, number, number * 10, daily.BUILD, stamp, stamp,
-                         conclusion, kind, 120, 600, None))
+                         conclusion, kind, 120, 600, None, json.dumps(labels)))
 
     def arrival(self, sha, pr, created, landed=None, repo="TauCeti"):
         self.db.execute("INSERT INTO main_commits VALUES (?,?,?)", (sha, created, pr))
@@ -52,7 +52,7 @@ class MergeQueueChartsTest(unittest.TestCase):
         self.build(4, "bors_staging", "cancelled")
         # A rerun is another job for the same run, not another PR arrival.
         self.db.execute("INSERT INTO jobs SELECT repo,run_id,job_id+1,name,created_at,"
-                        "started_at,conclusion,runner_kind,wait_s,run_s,failure_class "
+                        "started_at,conclusion,runner_kind,wait_s,run_s,failure_class,labels "
                         "FROM jobs WHERE run_id=2")
         m = self.metrics()
         self.assertEqual(dict(m["mq"]["2026-10-06"]),
@@ -73,8 +73,77 @@ class MergeQueueChartsTest(unittest.TestCase):
         self.build(2, "pr", "failure", kind="github")
         m = self.metrics()
         self.assertEqual(m["pr_total"]["2026-10-06"], 1)
-        self.assertEqual(m["picker"]["2026-10-06"], [1, 0])
+        self.assertEqual(m["picker"]["2026-10-06"], [1, 0, 0, 0, 0])
         self.assertEqual(sum(m["fails"]["2026-10-06"].values()), 1)
+
+    def test_named_fleet_jobs_are_included_in_daily_totals_and_picker_denominator(self):
+        self.build(1, "pr", kind="github")
+        self.build(2, "pr", kind="self-hosted", labels=["fleet-4fab2fed9a5145f894d066c7bb28ace4"])
+        self.build(3, "pr", "failure", kind="self-hosted", labels=["fleet-host-tauchonki"])
+        self.build(4, "bors_staging", kind="self-hosted", labels=["fleet-11e2756fc11042d798f759410573a935"])
+        self.build(5, "pr", kind="self-hosted", labels=["fleet-unknown"])
+        m = self.metrics()
+        day = "2026-10-06"
+        self.assertEqual(m["picker"][day], [1, 0, 1, 1, 1])
+        self.assertEqual(m["pr_total"][day], 4)
+        self.assertEqual(m["dur"][(day, "PR, eastanglia")], [10])
+        self.assertEqual(m["wait"][(day, "PR, leanfro")], [2])
+        self.assertEqual(m["minutes"][day]["leanfro"], 20)
+        self.assertEqual(m["minutes"][day]["eastanglia"], 10)
+        self.assertEqual(m["minutes"][day]["Other self-hosted"], 10)
+        self.assertEqual(m["mq"][day]["success"], 1)
+        for file, svg in daily.charts(self.db, daily.ts("2026-10-08")).items():
+            ET.fromstring(svg)
+            if file in ("ci-build-duration.svg", "ci-build-wait.svg", "ci-runner-minutes.svg"):
+                self.assertIn("eastanglia", svg)
+                self.assertIn("leanfro", svg)
+                self.assertNotIn("tauchonki", svg)
+
+    def test_archived_runner_name_identifies_jobs_without_permanent_labels(self):
+        self.build(1, "pr", kind="self-hosted", labels=["self-hosted", "tauceti-fleet"])
+        self.db.execute("ALTER TABLE jobs ADD COLUMN runner_name TEXT")
+        self.db.execute("UPDATE jobs SET runner_name='fleet-11e2756fc110-0123456789abcdef'")
+        m = self.metrics()
+        self.assertEqual(m["picker"]["2026-10-06"], [0, 0, 0, 1, 0])
+        self.assertEqual(m["minutes"]["2026-10-06"]["leanfro"], 10)
+        self.assertEqual(self.db.execute("SELECT runner_kind FROM jobs").fetchone()[0], "self-hosted")
+
+    def test_named_fleet_jobs_contribute_to_running_and_queued_series(self):
+        self.build(1, "pr", kind="self-hosted", labels=["fleet-4fab2fed9a5145f894d066c7bb28ace4"])
+        self.build(2, "bors_staging", kind="self-hosted", labels=["fleet-11e2756fc11042d798f759410573a935"])
+        self.db.execute("ALTER TABLE jobs ADD COLUMN completed_at TEXT")
+        self.db.execute("UPDATE jobs SET started_at='2026-10-06T10:02:00Z', completed_at='2026-10-06T10:12:00Z'")
+        self.db.execute("ALTER TABLE runs ADD COLUMN conclusion TEXT DEFAULT 'success'")
+        self.db.execute("ALTER TABLE runs ADD COLUMN jobs_fetched INTEGER DEFAULT 1")
+        self.db.execute("ALTER TABLE runs ADD COLUMN updated_at TEXT DEFAULT '2026-10-06T10:12:00Z'")
+        since = daily.ts("2026-10-06T10:00:00Z")
+        jobs = fleet.load_jobs(self.db, since, since + 1200)
+        data = fleet.bin_series(jobs, since, since + 1200, 600)
+        for kind in ("eastanglia", "leanfro"):
+            self.assertEqual(data["running"][kind], [0.8, 0.2])
+            self.assertEqual(data["queued"][kind], [1, 0])
+        self.assertEqual(data["running"]["gh-build-pr"], [0, 0])
+        ET.fromstring(fleet.render(data, "Fleet", "Fixture", []))
+
+    def test_cancelled_fleet_jobs_need_assignment_evidence_for_minutes_and_waits(self):
+        self.build(1, "pr", "cancelled", kind="self-hosted", labels=["fleet-4fab2fed9a5145f894d066c7bb28ace4"])
+        self.build(2, "pr", "cancelled", kind="self-hosted", labels=["fleet-4fab2fed9a5145f894d066c7bb28ace4"])
+        self.db.execute("INSERT INTO steps VALUES (20,'Build',0)")
+        m = self.metrics()
+        self.assertEqual(m["minutes"]["2026-10-06"]["eastanglia"], 10)
+        self.assertEqual(m["minutes"]["2026-10-06"]["cancelled PR builds"], 10)
+        self.assertEqual(m["wait"][("2026-10-06", "PR, eastanglia")], [2])
+        self.assertEqual(m["picker"]["2026-10-06"], [0, 0, 2, 0, 0])
+
+    def test_unassigned_fleet_cancellation_is_not_drawn_as_running(self):
+        self.build(1, "pr", "cancelled", kind="self-hosted", labels=["fleet-4fab2fed9a5145f894d066c7bb28ace4"])
+        self.db.execute("ALTER TABLE jobs ADD COLUMN completed_at TEXT")
+        self.db.execute("UPDATE jobs SET completed_at='2026-10-06T10:12:00Z'")
+        self.db.execute("ALTER TABLE runs ADD COLUMN conclusion TEXT DEFAULT 'cancelled'")
+        self.db.execute("ALTER TABLE runs ADD COLUMN jobs_fetched INTEGER DEFAULT 1")
+        self.db.execute("ALTER TABLE runs ADD COLUMN updated_at TEXT DEFAULT '2026-10-06T10:12:00Z'")
+        since = daily.ts("2026-10-06T10:00:00Z")
+        self.assertEqual(fleet.load_jobs(self.db, since, since + 1200), [])
 
     def test_landing_time_is_main_arrival_not_staging_creation(self):
         self.arrival("a", 42, "2026-10-05T10:00:00Z", "2026-10-06T01:00:00Z")
@@ -118,7 +187,7 @@ class MergeQueueChartsTest(unittest.TestCase):
 
     def test_other_job_waits_stop_at_their_complete_day(self):
         self.build(1, 'pr', day='2026-10-06')
-        self.db.execute("INSERT INTO jobs VALUES ('TauCeti',1,999,'label','2026-10-06T12:00:00Z',NULL,'success','github',600,2,NULL)")
+        self.db.execute("INSERT INTO jobs VALUES ('TauCeti',1,999,'label','2026-10-06T12:00:00Z',NULL,'success','github',600,2,NULL,'[]')")
         m = daily.metrics(self.db, '2026-10-05', '2026-10-07', daily.ts('2026-10-06T12:00:00Z'))
         self.assertNotIn(('2026-10-06', 'other GitHub jobs'), m['wait'])
         self.assertIn(('2026-10-06', 'PR, Namespace'), m['wait'])
@@ -235,12 +304,13 @@ class MergeTimelinesTest(unittest.TestCase):
 
     def test_fractional_timestamps_and_partial_day_respect_window(self):
         for stamp in ("2026-10-05T23:59:59.999999Z", "2026-10-06T00:00:00Z",
-                      "2026-10-08T11:59:59.999000Z", "2026-10-08T12:00:00Z"):
+                      "2026-10-08T11:59:59.999000Z", "2026-10-08T11:59:59.999999Z",
+                      "2026-10-08T12:00:00Z"):
             self.sample(stamp, [42])
             self.staging(len(self.db.execute("SELECT * FROM runs").fetchall()), [42], stamp=stamp)
         m = self.history()
-        self.assertEqual(len(m["queue"]), 2)
-        self.assertEqual(len(m["runs"]), 2)
+        self.assertEqual(len(m["queue"]), 3)
+        self.assertEqual(len(m["runs"]), 3)
         self.assertGreater(m["queue"][-1][0], daily.ts("2026-10-08T00:00:00Z"))
 
     def test_production_runs_use_batch_membership_and_latest_overall_result(self):

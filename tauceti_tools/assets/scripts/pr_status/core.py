@@ -48,10 +48,6 @@ SCOREBOARD_MARKER = "<!--tauceti-scoreboard-->"
 # Greedy `\{.*\}` (with re.S) so a meta object with a nested `"states": {...}` is captured whole: a
 # lazy `\{.*?\}` would stop at the first inner `}` and mis-parse it. `\s+`/`\s*` tolerate any spacing.
 _META_RE = re.compile(r"<!--tauceti-meta:v1\s+(\{.*\})\s*-->", re.S)
-# The engine's in-flight marker: `<!--tauceti-review-in-progress {json}-->`, carrying a `head` and an
-# `expires_at` (epoch seconds) so a crashed reviewer self-clears. The format is owned by the review
-# engine; we parse only those two fields (mirrors the worker's de-contention read).
-_INPROGRESS_RE = re.compile(r"<!--tauceti-review-in-progress (.*?)-->", re.S)
 _REPO_ASSOCIATED = ("OWNER", "MEMBER", "COLLABORATOR")
 
 # `gh` exits nonzero on a rate limit without retrying. The sinks driven by
@@ -366,24 +362,6 @@ def repo_associated_scoreboard_meta(pr):
     return scoreboard_meta_from(repo_associated_comments(pr))
 
 
-def inprogress_from(comments, head, now):
-    """True iff some supplied comment carries an UNEXPIRED in-progress marker for exactly `head`.
-
-    Head-exact (a new push is a new review unit, not covered by an old marker) and TTL-bounded
-    (a crashed reviewer's marker self-clears once `expires_at` passes), mirroring the engine's own
-    de-contention read. A malformed or non-matching marker is ignored."""
-    for c in comments:
-        for m in _INPROGRESS_RE.finditer(c.get("body") or ""):
-            try:
-                d = json.loads(m.group(1))
-            except json.JSONDecodeError:
-                continue
-            exp = d.get("expires_at")
-            if isinstance(exp, int) and exp > now and d.get("head") == head:
-                return True
-    return False
-
-
 def newest_status(head, context):
     """(state, updated_at) of the newest commit status for `context`, else (None, None).
 
@@ -460,10 +438,9 @@ def derive(pr, ci_override=None, state=None, now=None):
         {"lifecycle": "open"|"merged"|"closed",
          "ci":        "running"|"success"|"failure"|None,   # None => not reported
          "review":    "none"|"running"|"changes"|"approved"|None,
-         "review_inprogress": bool,                          # a live in-progress marker at HEAD
          "head":      "<sha>", "title": "<title>"}
 
-    `ci`, `review`, and `review_inprogress` are only meaningful while the PR is open; on a
+    `ci` and `review` are only meaningful while the PR is open; on a
     merged/closed PR they are None/False (a sink shows a terminal state and clears the rest).
 
     `ci_override` (running|success|failure|none|None) forces the CI state instead of reading the
@@ -482,7 +459,6 @@ def derive(pr, ci_override=None, state=None, now=None):
     if lifecycle != "open":
         ci = None
         review = None
-        inprogress = False
     else:
         if ci_override is not None:
             ci = None if ci_override == "none" else ci_override
@@ -490,13 +466,11 @@ def derive(pr, ci_override=None, state=None, now=None):
             ci = ci_status(st["head"])
         comments = issue_comments(pr)
         review = review_state(scoreboard_meta_from(comments), st["head"])
-        inprogress = inprogress_from(comments, st["head"], int(time.time()) if now is None else now)
 
     return {
         "lifecycle": lifecycle,
         "ci": ci,
         "review": review,
-        "review_inprogress": inprogress,
         "head": st["head"],
         "title": st["title"],
     }

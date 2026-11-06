@@ -9,8 +9,8 @@ The adapter reads all comments and current commit statuses through GraphQL, fetc
 the diff for otherwise approved PRs, and checks
 that the PR's head, base, lifecycle and hold state have not changed before
 reporting readiness. The gate selects the newest completed current-head review,
-requires every configured rubric, handles legacy scoreboard tables and live
-review markers, and enforces build, scope, allowed paths and pin-validation rules.
+requires every configured rubric, handles legacy scoreboard tables,
+and enforces build, scope, allowed paths and pin-validation rules.
 Drafts, held PRs and stacked bases are reported separately.
 
 | Label | Meaning |
@@ -19,7 +19,6 @@ Drafts, held PRs and stacked bases are reported separately.
 | `ci-failed` | The build failed |
 | `merge-check-failed` | A scope or pin-validation check failed |
 | `awaiting-review` | Current-head reviews are absent or incomplete |
-| `review-in-progress` | A live review delays enqueueing |
 | `awaiting-author` | A current review requests changes or the PR conflicts |
 | `needs-human-review` | Approved changes include human-owned files |
 | `awaiting-dependency` | The PR targets a stacked branch rather than main |
@@ -97,7 +96,6 @@ reconciles two independent, mutually-exclusive reaction groups from `core.derive
 | **CI (build)** | waiting / running | 🟡 `yellow` |
 | | passed | 🟢 `green_circle` |
 | | failed | 🔴 `red_circle` |
-| **Review / lifecycle** | review in progress | 👀 `eyes` |
 | | waiting for review | *(none)* |
 | | changes requested / blocked | ✍️ `writing` |
 | | all review done, all green | ✔️ `check` |
@@ -325,9 +323,9 @@ cd scripts/pr_status
 python3 -m unittest test_pr_labels test_readiness test_zulip test_stuck_alerts
 ```
 
-`test_pr_labels` covers the derivation (`core.review_state`, `core.inprogress_from`,
+`test_pr_labels` covers the derivation (`core.review_state`,
 `core.derive`), metadata plumbing, and label reconciliation. `test_readiness`
-runs the pinned merge gate on current/stale/incomplete reviews, live markers,
+runs the pinned merge gate on current/stale/incomplete reviews, ignored old markers,
 human paths, CI and pin guards, and head-move races. It needs the pinned engine
 checkout described above. `test_zulip` covers review reactions, PR post
 rendering, legacy-message rewriting, batch continuation, dry runs, and rate-limit

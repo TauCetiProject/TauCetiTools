@@ -587,10 +587,14 @@ def main(argv: list[str] | None = None) -> int:
             args.since = moment.strftime("%Y-%m-%dT%H:%M:%SZ")
         except ValueError:
             ap.error("--since must be an ISO timestamp in UTC")
-    areas = canonical_areas(pathlib.Path(args.roadmap_dir))
-    if not areas:
-        print("no roadmap areas found", file=sys.stderr)
+    try:
+        areas = canonical_areas(pathlib.Path(args.roadmap_dir))
+    except OSError as error:
+        print(f"Cannot read roadmap directory {args.roadmap_dir}: {error.strerror}", file=sys.stderr)
         return 2
+    if not areas:
+        print("No roadmap areas yet; nothing to label.")
+        return 0
     api = GitHub(max_wait=args.max_wait)
     failed = False
     args._state = None

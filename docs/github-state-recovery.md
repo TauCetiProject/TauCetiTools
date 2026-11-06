@@ -15,17 +15,47 @@ starve held input. Five failures move an item to held without ending scheduled
 ownership. Per-item retry delays grow from 5 seconds to 10 minutes. One bad
 body, pointer, or R2 operation does not cancel other items in the group.
 
-A separate bounded pass on the same cron visits raw deliveries in pages of 50
+A separate bounded pass on the same cron visits raw deliveries in pages of 1000
 (up to 20 pages), with a durable keyset cursor and 20-second dispatch budget.
 Accepted raw objects carry target/digest metadata so already-durable input
-needs only HEAD checks. Legacy committed SQL receipts are promoted without
+needs only HEAD checks. Raw objects whose listed event metadata names an
+unmirrored CI event are dispositioned from the listing alone, with no gap,
+receipt or body read and no `invalid/` record. Legacy committed SQL receipts are promoted without
 replaying them. Only visited keys advance either recovery cursor. It reconciles queue/DLQ
 loss using stored bytes, delivery IDs, and application receipts. Raw expiry
-belongs to this pass and happens only after pinning or a durable explicit
-invalid-event disposition. Invalid JSON and intentionally unmirrored or
+belongs to this pass and happens only after pinning, a durable explicit
+invalid-event disposition, or a listed CI event. Invalid JSON and other unmirrored or
 out-of-scope events get digest-bearing dispositions under `invalid/`. Missing
 bodies, digest mismatches, or absent event metadata remain precise gaps under
 `control/raw-gaps/`; their source is retained. No GitHub refetch repairs a gap.
+
+Legacy raw recovery groups receipt lookups into repository-specific, read-only
+requests of at most 100 distinct delivery IDs. Body verification and targeting
+still precede each lookup. The existing group of 25 flushes pending lookups when
+every member is waiting for a receipt or has completed. Varied body-read times
+therefore do not split a single-target group into small timed batches. Members
+that need no receipt or fail before lookup still release their group slot.
+Multi-target members can require another lookup round for a later repository.
+Due gaps remain sequential one-member groups and flush their lookup immediately;
+only direct helper calls outside a group retain the 20ms fallback window.
+This reduces database requests without applying events
+or making GitHub requests. Failed or malformed lookups leave deliveries unknown,
+so they take the existing durable-parking path. A failed request can park every
+member of that batch, adding bounded pointer work for already-committed input.
+The raw state records timestamped `receipt_lookup` counters for lookups,
+receipt-endpoint requests, the sum of distinct IDs requested across batches, known results,
+failed requests, largest batch, and cumulative request time. They describe the
+last recorded invocation; earlier counters can remain visible during an active
+lease. Request time sums overlapping requests and is not wall-clock latency.
+These are read-operation counters, not semantic change counts.
+`groups` and `group_tasks` count dispatched recovery groups and their non-CI
+members; `rounds` counts group-triggered flushes. `group_ms` sums their elapsed
+time, including body reads and receipt/parking work. `barrier_wait_ms` sums
+each lookup's wait before its flush, so it can exceed group wall time. The
+barrier puts a slow body before other members' post-lookup work; compare these
+counters and raw objects examined per pass before claiming improved throughput.
+The existing lease, gap cooldowns and cooperative
+dispatch budget remain in force; batching provides no hard completion deadline.
 
 An event response waits for SQL durability and then records a durable R2
 application receipt under `receipts/<repository>/<delivery>.json`. Replay checks

@@ -1,10 +1,13 @@
-import { RepositoryStore, SQLiteStore, PostgresStore, ReadCacheStore, BufferedStore, SerialLane, columns } from './repository_store';
+import { RepositoryStore, StoreUnavailable, StoreFenced, canReplayPublication, isBackendFailure, isMemberDataFailure, WriterPurpose, WriterOperation, SQLiteStore, PostgresStore, ReadCacheStore, BufferedStore, SerialLane, columns, collectionJoin } from './repository_store';
 import { repositoryHealth } from './repository_health';
 import { DurableObject } from 'cloudflare:workers';
-import { Env, EventPointer, matchesETag, Query, Result, digest, json, queryKey, repository, stub, validateQuery, parseGitHub, CI_EVENTS, NOT_MIRRORED, stagingStateKey, stagedPageKey } from './protocol';
+import { Env, EventPointer, matchesETag, Query, Result, digest, json, queryKey, repository, stub, validateQuery, parseGitHub, CI_EVENTS, NOT_MIRRORED, publicQuery, stagingStateKey, stagedPageKey } from './protocol';
 import { comment, issue, pr, status } from './normalize';
+import { equivalentPR, webhookPR } from './pr_updates';
 import { batchLimit } from './catalog';
 import { Lane, LANES, laneAt, settings } from './reconciliation';
+import { RepairCoordinator, RepairGroup, RepairIdentity, RepairQuantum, RepairEffect, repairPath } from './repair_coordinator';
+import { repairHop, RepairTransportTimeout, REPAIR_HOP_MS } from './repair_io';
 import { SURVEY_CONTRACT, SURVEY_INDEX_VERSION, compactPR, issueFragment, reviewFragment, summarizeFragments, inScope, roadmapFocuses } from './survey';
 import { readPromotionReceipts } from './activity_landings';
 import { queueMetrics } from './queue_monitoring';
@@ -17,7 +20,27 @@ import { Checkpoint, DEFAULT_POLICY, Policy, RetentionClass, R2_CLASSES, RULES, 
 import { CapacitySample, RepairMetrics, RequestMetrics, SQLITE_ALLOWANCE, capacity, postgresCapacity, emitAlarm, timedBucket, within } from './monitoring';
 import { Failure, FULL_MESSAGE, AdminError, CLEANUP, PARKABLE, classify, deleteClass, faultySql, log, missingSchema, requestId, scan, summary, userTables as summaryTables } from './storage';
 
+type IngestRepair={q:Query,priority:number,dirty?:boolean,dirtyIfMissing?:boolean,missingOnly?:boolean};
+const INGEST_EVENT_TYPES=new Set(['pull_request','issues','issue_comment','pull_request_review_comment','pull_request_review','pull_request_review_thread','status','push','create','delete','repository','label','milestone','merge_group']);
+interface RepairWait {job:any;due:number;attempts:number;reason:string;event:string;installationCapacity?:boolean;memberFailure?:boolean;failure?:{category:string,request_id?:string}}
+interface PreparedRefresh {job:any;q:Query;repo:any;started:number;response:Response|null;result:any;memberRetryAt?:number;preparedNext?:string;staged?:{key:string,expires:number};objects:Map<string,string>;encodings:Map<string,string>}
+// Explicit per-result parser/identity failures are distinct from quota waits,
+// transport/backend failures, and an unclassified unavailable response.
+const memberUnavailable=(result:any):boolean=>!result.deferred && result.unavailable && result.failure_kind==='member';
+const PUBLICATION_ITEMS=8,PUBLICATION_BYTES=256*1024,PUBLICATION_ROWS=128;
+// Historical associations are retained in head_prs. An open PR keeps only its
+// current head active; unknown head data must never retire a status obligation.
+const statusHeadDormant=(state:unknown,head:unknown,sha:string):boolean=>state==='CLOSED' || state==='MERGED'
+  || state==='OPEN' && typeof head==='string' && /^[0-9a-f]{40}$/i.test(head) && head.toLowerCase()!==sha.toLowerCase();
 class LeaseLost extends Error {}
+// Retain the attempted chunk and original error. Adapter-classified backend
+// failures keep group recovery; an unclassified chunk error affects only it.
+class PublicationFailure extends Error {
+  constructor(readonly jobs:any[],readonly error:unknown){super('publication_interrupted');}
+}
+class WaitFailure extends PublicationFailure {
+  constructor(readonly waits:RepairWait[],readonly expired:boolean,error:unknown){super(waits.map(x=>x.job),error);}
+}
 const SCHEMA_VERSION=5;
 // 10 GiB limit less a margin. With no recorded storage state, a database this
 // large is treated as full: no startup write may risk a failed commit, which
@@ -28,10 +51,15 @@ const FULL_DATABASE=10*1024**3-16*1024**2;
 // clients use their direct GitHub fallback instead of acting on frozen state.
 const FROZEN_AFTER=10*60000;
 const CURSOR_UPLOADS=4;
+// Change when the survey wire representation changes without a data revision.
+const SURVEY_ETAG_PREFIX='survey-v1-observed-statuses:';
 // Private to local read scopes; request bodies and RPC arguments cannot set it.
 const ACTIVITY_CLOCK=Symbol('activity clock');
 const decimalArgument=(value:string):number|string=>Number.isSafeInteger(Number(value))?Number(value):value;
-const activityFingerprint=(p:any,revision:number|undefined)=>JSON.stringify([p.headRefOid,p.baseRefOid,p.changedFiles,p.additions,p.deletions,revision]);
+const activityFingerprint=(p:any,revision:number|undefined)=>JSON.stringify([2,p.headRefOid,p.baseRefOid,p.changedFiles,p.additions,p.deletions,revision]);
+// Git comparisons are immutable for a head/base pair, independent of mirror files.
+const activityGitFingerprint=(p:any)=>JSON.stringify([2,p.headRefOid,p.baseRefOid]);
+const ACTIVITY_LOC_CACHE_QUERY='SELECT data FROM activity_loc_cache WHERE number=? AND fingerprint IN (?,?)';
 const cursorKey=(repo:string,id:string,offset:number)=>`cursors/${repo}/${id}/${offset}.json`;
 function coordinationWindows(history:any,now:number):any {
   if(!history)return null;
@@ -48,18 +76,40 @@ function coordinationWindows(history:any,now:number):any {
 export class RepositoryState extends DurableObject<Env> {
   private [ACTIVITY_CLOCK]?:number;
   private inflightQueries=new Map<string,Promise<Result>>();
-  private completedQueries=new Map<string,{result:Result,expires:number,built:number}>();
+  private publicCompletedQueries=new Map<string,{result:Result,expires:number,built:number,bytes?:number}>();
+  private completedQueries=new Map<string,{result:Result,expires:number,built:number,bytes?:number}>();
+  private prQueryEpoch=0;
+  private prQueriesChanged=new Set<string>();
+  private prQueryEpochs=new Map<string,number>();
+  private prRefreshes=new Map<number,Promise<any>>();
   private alarmFlight?:Promise<void>;
   private revisionState:{value?:number}={};
   private readRevision?:number;
   private owner:RepositoryState=this;
+  private maintenanceIOScope={};
+  private transactionIOScope={};
+  private retirementIOScope={};
   private mutationState={active:0,blocked:false};
   private pendingChanges?:{revision:number,at:number,kind:string,id:string,tombstone:number}[];
   private repositoryMemo?:any;
+  private readOnlyQuery=false;
   private readScope=false;
   private preparedEncodings?:Map<string,string>;
+  private dispatchSettled?:Set<string>;
+  private repairGroup?:RepairGroup;
+  private repairCoordinator?:RepairCoordinator;
+  private quotaRestriction?:{category:string,retry_at:number,installation:string,quantum:RepairQuantum,dataProgress:number};
+  private capacityWake?:{at:number,latest?:number,timer:ReturnType<typeof setTimeout>,resolve:()=>void};
+  private repairAlarm?:{at:number,quota:boolean,continuation:boolean};
+  private ordinaryAlarmAt?:number;
+  private alarmSchedule=0;
+  private availabilityFlight?:Promise<any>;
+  private renewedLeases=0;
   private optionalWork={active:0};
   private demandMemo=new Map<string,number>();
+  private ingestStats=new Map<string,{minute:number,deliveries:number,sql_round_trips:number,sql_samples:number,writer_wait_ms:number,writer_wait_max_ms:number,apply_through_cleanup_ms:number,apply_max_ms:number}>();
+  private groupedPublication={scope:'repository_instance_since_restart',since:Date.now(),admissions:0,members:0,queued_work_yields:0,max_members:0};
+  private readDemands={pending:new Map<string,Query>(),active:new Map<string,{complete?:boolean}>(),flight:undefined as Promise<void>|undefined};
   sql:SqlStorage;
   store:RepositoryStore;
   localMeta(key:string):any {const row=this.sql.exec<any>('SELECT value FROM meta WHERE key=?',key).toArray()[0];return row?JSON.parse(row.value):undefined;}
@@ -72,6 +122,8 @@ export class RepositoryState extends DurableObject<Env> {
   private retentionPolicy: Policy = DEFAULT_POLICY;
   private retentionState: Partial<Record<RetentionClass, Checkpoint>> = {};
   private storageFlight?: Promise<void>;
+  private surveyFlight?: Promise<void>;
+  private retirementFlight?: Promise<void>;
   private storageLoaded=false;
   private retentionProgressLoaded=false;
   private retentionLoadFlight?:Promise<void>;
@@ -80,6 +132,7 @@ export class RepositoryState extends DurableObject<Env> {
   private checkpointAt=0;
   private checkpointText='';
   private storageTurn=0;
+  private retirementAfter='';
   private receiptsPinned=true;
   private receiptsChecked=0;
   private observation:any;
@@ -290,36 +343,119 @@ export class RepositoryState extends DurableObject<Env> {
     if(this.degraded || this.repairsHeld()) return;
     try {await write();} catch(error) {this.noteFailure(operation,error);}
   }
-  async setAlarm(at:number): Promise<void> {
+  async setAlarm(at:number,quota=false,continuation=false,repair=false): Promise<void> {
     // PostgreSQL uses the existing cron tick, never the obsolete SQLite file.
     if(this.store.backend==='postgres')return;
     if(this.faultFull) throw new Error(FULL_MESSAGE);
+    const owner=this.owner,schedule=++owner.alarmSchedule;
+    if(!repair)owner.ordinaryAlarmAt=Math.min(owner.ordinaryAlarmAt ?? at,at);
+    // A new input/demand wake can race an older continuation's alarm read.
+    // Preserve its external meaning even if the continuation schedules earlier.
+    if((continuation || quota) && owner.ordinaryAlarmAt!==undefined && owner.ordinaryAlarmAt<=Date.now()+100){continuation=false;quota=false;}
+    // Uncertain scheduling loses the optional tag and recovers as an ordinary
+    // external alarm; never misclassify an old durable wake using a failed write.
+    owner.repairAlarm=undefined;
     await this.ctx.storage.setAlarm(at);
+    if(owner.alarmSchedule===schedule)owner.repairAlarm={at,quota,continuation};
   }
-  async atomic<T>(apply:(state:RepositoryState)=>Promise<T>):Promise<T> {
+  private noteOrdinaryAlarm(at:number):void {
+    if(this.store.backend!=='sqlite')return;
+    const owner=this.owner,now=Date.now();
+    owner.ordinaryAlarmAt=Math.min(owner.ordinaryAlarmAt ?? at,at);
+    // An already-pending wake can be earlier than new demand and need no
+    // storage rewrite. Preserve the ordinary intent when that wake is overdue.
+    if(at<=now+100 && owner.repairAlarm && owner.repairAlarm.at<=now+100)owner.repairAlarm=undefined;
+  }
+  async atomic<T>(apply:(state:RepositoryState)=>Promise<T>,purpose:WriterPurpose='other',operation?:WriterOperation):Promise<T> {
     if(this.store.transactional)return apply(this);
     if(this.migrationHeld())throw new AdminError('migration_frozen');
     if(this.mutationState.blocked)throw new Error('Repository backend generation fenced');
     this.mutationState.active++;
-    let scoped:RepositoryState | undefined;
+    let scoped:RepositoryState | undefined,renewed:{key:string,lease_id:string,lease_until:number}[]=[];
     try {
       const result=await this.store.transaction(async store=>{
         scoped=Object.create(this) as RepositoryState;
         const buffered=store.backend==='postgres'?new BufferedStore(store):undefined;
-        scoped!.store=buffered || store;scoped!.revisionState={};scoped!.readScope=false;scoped!.readRevision=undefined;scoped!.repositoryMemo=undefined;scoped!.pendingChanges=store.backend==='postgres'?[]:undefined;
-        const result=await apply(scoped!);await scoped!.flushChanges();await buffered?.flush();return result;
-      });
+        scoped!.store=buffered || store;scoped!.revisionState={};scoped!.readScope=false;scoped!.readRevision=undefined;scoped!.repositoryMemo=undefined;scoped!.pendingChanges=store.backend==='postgres'?[]:undefined;scoped!.prQueriesChanged=new Set();
+        const result=await apply(scoped!);
+        if(purpose==='repair' || purpose==='publication')renewed=await scoped!.renewRepairLeases();
+        await scoped!.flushChanges();await buffered?.flush();return result;
+      },purpose,operation);
       if(scoped?.revisionState.value!==undefined)this.revisionState.value=Math.max(this.revisionState.value ?? 0,scoped.revisionState.value);
+      for(const row of renewed){const current=this.owner.repairCoordinator?.owned.get(row.key);if(current?.lease_id===row.lease_id)current.lease_until=row.lease_until;}
+      this.owner.renewedLeases+=renewed.length;
       if(scoped?.repositoryMemo!==undefined)this.repositoryMemo=scoped.repositoryMemo;
+      if(scoped?.prQueriesChanged.size){this.owner.prQueryEpoch++;for(const id of scoped.prQueriesChanged)this.owner.prQueryEpochs.set(id,this.owner.prQueryEpoch);}
       return result;
     }catch(error){this.revisionState.value=undefined;throw error;}finally{this.mutationState.active--;}
   }
-  backgroundDemand(q:Query):void {
+  backgroundDemand(q:Query,missing=false):void {
+    if(this.readOnlyQuery)return;
+    if(this.store.backend==='postgres') {
+      if(q.allow_observed || ['survey','progress'].includes(q.operation) || this.repairsHeld())return;
+      const owner=this.owner,key=queryKey(q);
+      if(owner.store.backend!=='postgres')return;
+      if(missing)owner.demandMemo.delete(key);
+      const active=owner.readDemands.active.get(key);
+      // An active miss already covers this key. Requeue only when a newer
+      // miss contradicts that transaction's completed-collection decision.
+      if(active && (!missing || active.complete!==true))return;
+      if(!missing && (owner.demandMemo.get(key) || 0)>Date.now()-60000)return;
+      owner.readDemands.pending.set(key,{...q,cursor:undefined});
+      owner.startReadDemands();return;
+    }
     const key=queryKey(q),now=Date.now();
     if(this.optionalWork.active>=2 || (this.demandMemo.get(key) || 0)>now-60000)return;
     this.demandMemo.set(key,now);
     while(this.demandMemo.size>2000)this.demandMemo.delete(this.demandMemo.keys().next().value!);
     this.backgroundWrite('demand',()=>this.noteDemand(q));
+  }
+  private startReadDemands():void {
+    const owner=this.owner,work=owner.readDemands;
+    if(work.flight || !work.pending.size || owner.degraded || owner.repairsHeld())return;
+    // One owner coalesces racing readers. No cache response awaits this work,
+    // and no busy-work cap drops a different reader's repair request.
+    let retryLater=false;
+    const flight=Promise.resolve().then(async()=>{
+      while(work.pending.size && !owner.degraded && !owner.repairsHeld()) {
+        // Small transactions yield the writer to ingress and repair between
+        // groups, without a timer, quota change or an extra admission rule.
+        const batch=[...work.pending.entries()].slice(0,4);
+        for(const [key] of batch){work.pending.delete(key);work.active.set(key,{});}
+        try {
+          await owner.atomic(async state=>{
+            const missing:{q:Query,priority:number}[]=[];
+            for(const [key,q] of batch) {
+              await state.noteDemand(q);
+              const done=await state.complete(q);
+              work.active.get(key)!.complete=done;
+              if(!done)missing.push({q,priority:5});
+            }
+            // Demand and initial job creation commit together. Existing jobs
+            // retain their generation, lease, retry and upstream wait deadline.
+            await state.enqueueMany(missing);
+          },'read_demand');
+          // This memo records committed bookkeeping, not complete coverage.
+          // Every actual miss bypasses it; cached results retain their existing
+          // once-per-minute refresh limit, including observed partial PR rows.
+          for(const [key] of batch)if(!work.pending.has(key))owner.demandMemo.set(key,Date.now());
+          while(owner.demandMemo.size>2000)owner.demandMemo.delete(owner.demandMemo.keys().next().value!);
+        } catch(error) {
+          for(const [key,q] of batch)if(!work.pending.has(key))work.pending.set(key,q);
+          retryLater=true;
+          owner.noteFailure('demand',error);
+          // Keep the intent, but do not spin on an unavailable writer. A later
+          // read or the existing cron tick resumes it through the same owner.
+          break;
+        } finally {for(const [key] of batch)work.active.delete(key);}
+      }
+    }).finally(()=>{
+      if(work.flight===flight)work.flight=undefined;
+      // A reader can enqueue between the last empty check and this finally.
+      if(!retryLater && work.pending.size)owner.startReadDemands();
+    });
+    work.flight=flight;
+    owner.ctx.waitUntil?.(flight);
   }
   backgroundWrite(operation:string,write:()=>Promise<unknown>):void {
     if(this.optionalWork.active>=2)return;
@@ -328,10 +464,12 @@ export class RepositoryState extends DurableObject<Env> {
     if(this.ctx.waitUntil)this.ctx.waitUntil(work);
   }
   async noteReadDemand(q:Query,known?:boolean):Promise<void> {
-    if(this.store.backend==='postgres' && (known ?? await this.complete(q))){this.backgroundDemand(q);return;}
+    if(this.readOnlyQuery)return;
+    if(this.store.backend==='postgres'){this.backgroundDemand(q,!(known ?? await this.complete(q)));return;}
     await this.optionalAsync('demand',()=>this.noteDemand(q));
   }
   async optionalRead(operation:string,write:()=>Promise<unknown>):Promise<void> {
+    if(this.readOnlyQuery)return;
     if(this.store.backend==='postgres' && this.readScope){this.backgroundWrite(operation,write);return;}
     await this.optionalAsync(operation,write);
   }
@@ -423,6 +561,24 @@ export class RepositoryState extends DurableObject<Env> {
         const rows=results[at++].toArray(),contexts=results[at++].toArray();
         for(const sha of hs){const key=queryKey({operation:'statuses',args:{sha}});cache.seed('SELECT data FROM resources WHERE kind=? AND id=? AND tombstone=0',['statuses',key],rows.filter(r=>r.id===key && !r.tombstone));cache.seed('SELECT data FROM resources WHERE kind=? AND parent=? AND tombstone=0',['status_context',sha],contexts.filter(r=>r.parent===sha));}
       }
+      if(ns.length) {
+        const hydrated=new Set(results[0].toArray().filter(row=>row.contract===SURVEY_INDEX_VERSION).map(row=>row.number));
+        const dirty=results[2].toArray().map(row=>row.number).filter(number=>hydrated.has(number));
+        await this.primeSurveyFragments(dirty);
+      }
+    }
+  }
+  async primeSurveyFragments(numbers:string[]):Promise<void> {
+    if(!(this.store instanceof ReadCacheStore) || !numbers.length)return;
+    // A changed projection still needs current fragments, but one remote round
+    // trip per history per PR makes repository-wide discovery miss its deadline.
+    // Prefetch only dirty, hydrated parents in the existing bounded parent batch.
+    // Match exact collection membership; orphaned/removed comments stay excluded.
+    for(const kind of ['issue_comments','review_comments']) {
+      const rows=await this.scanRows(`SELECT f.parent,f.data FROM survey_fragments f JOIN members m ON m.id=f.id AND m.collection=(? || '{"number":' || f.parent || '}') WHERE f.kind=? AND f.parent IN (${numbers.map(()=>'?').join(',')}) ORDER BY CAST(f.id AS INTEGER),f.id`,kind+':',kind,...numbers);
+      const grouped=new Map<string,any[]>();
+      for(const row of rows){let group=grouped.get(row.parent);if(!group){group=[];grouped.set(row.parent,group);}group.push({data:row.data});}
+      for(const number of numbers)this.store.seed('SELECT f.data FROM survey_fragments f JOIN members m ON m.id=f.id AND m.collection=? WHERE f.kind=? AND f.parent=? ORDER BY CAST(f.id AS INTEGER),f.id',[queryKey({operation:kind,args:{number:decimalArgument(number)}}),kind,number],grouped.get(number) || []);
     }
   }
   async meta(key:string):Promise<any> {
@@ -476,13 +632,22 @@ export class RepositoryState extends DurableObject<Env> {
   }
   async decode(text: string): Promise<any> {
     const data = JSON.parse(text);
-    if (data?.$r2) { const object = await (this.store.transactional && this.store.backend==='postgres'?this.maintenanceArchive:this.env.ARCHIVE).get(data.$r2); if (!object) throw new Error('resource unavailable'); return object.json(); }
+    if (data?.$r2) { const object = await (this.store.transactional && this.store.backend==='postgres'?this.transactionArchive:this.env.ARCHIVE).get(data.$r2); if (!object) throw new Error('resource unavailable'); return object.json(); }
     if(data && typeof data==='object' && !Array.isArray(data))delete data.__tauceti_received_at;
     return data;
   }
   async *decodeRows(rows:{data:string}[]):AsyncGenerator<any> {
     // Archived collection reads preserve order with a bounded R2 fanout.
-    for(let i=0;i<rows.length;i+=8)for(const data of await Promise.all(rows.slice(i,i+8).map(r=>this.decode(r.data))))yield data;
+    for(let i=0;i<rows.length;i+=8)for(const data of await this.repairAll(rows.slice(i,i+8).map(r=>this.decode(r.data))))yield data;
+  }
+  private async repairAll<T>(work:Promise<T>[]):Promise<T[]> {
+    if(!this.repairGroup)return Promise.all(work);
+    // A bad page must not orphan its healthy siblings' get/body operations.
+    const results=await Promise.allSettled(work);
+    if([...this.repairGroup.pendingIO.values()].some(hop=>hop.expired))throw new RepairTransportTimeout();
+    const failed=results.find((result):result is PromiseRejectedResult=>result.status==='rejected');
+    if(failed)throw failed.reason;
+    return results.map(result=>(result as PromiseFulfilledResult<T>).value);
   }
   async put(kind:string,id:string,data:any,started=Date.now(),deleted=false,parent='',fromEvent=false,prepared?:string): Promise<boolean> {
     if(!this.store.transactional) {
@@ -494,8 +659,8 @@ export class RepositoryState extends DurableObject<Env> {
     if(fromEvent && received>started)return false;
     const updated = data?.updatedAt || data?.updated_at || data?.created_at || data?.startedAt || '';
     // A response begun before a webhook cannot overwrite that event, even if HTTP finishes later.
-    if (!fromEvent && old?.observed > started) return false;
-    if (old?.updated && updated && old.updated > updated) return false;
+    if (!fromEvent && old?.observed > started) return kind==='pr' && equivalentPR(await this.decode(old.data),data);
+    if ((kind!=='pr' || fromEvent) && old?.updated && updated && old.updated > updated) return false;
     if (old?.updated && updated===old.updated && old.tombstone && !deleted) return false;
     if(kind==='pr' && old && data?.headRefOid) {
       const prior=await this.decode(old.data);
@@ -510,7 +675,7 @@ export class RepositoryState extends DurableObject<Env> {
     if(oldStored && typeof oldStored==='object')delete oldStored.__tauceti_received_at;
     // R2 encoding yields: repeat the guard against events received during that await.
     if(!this.store.transactional)old=(await this.store.exec<any>('SELECT * FROM resources WHERE kind=? AND id=?',kind,id)).toArray()[0];
-    if (!fromEvent && old?.observed>started || old?.updated && updated && old.updated>updated || old?.updated && updated===old.updated && old.tombstone && !deleted) return false;
+    if (!fromEvent && old?.observed>started || (kind!=='pr' || fromEvent) && old?.updated && updated && old.updated>updated || old?.updated && updated===old.updated && old.tombstone && !deleted) return false;
     if (kind==='pr' && /^[1-9][0-9]*$/.test(id) && data?.headRefOid) await this.store.exec('INSERT OR IGNORE INTO head_prs VALUES(?,?)',data.headRefOid,id);
     if (old && JSON.stringify(oldStored)===plain && Boolean(old.tombstone)===deleted) {
       if(encoded===old.data)await this.store.exec('UPDATE resources SET observed=? WHERE kind=? AND id=?',Date.now(),kind,id);
@@ -526,6 +691,13 @@ export class RepositoryState extends DurableObject<Env> {
     const writes:{sql:string,bindings:(string|number)[]}[]=[resourceWrite];
     if(kind==='pr' && /^[1-9][0-9]*$/.test(id))writes.push({sql:'INSERT INTO survey_inventory VALUES(?,?) ON CONFLICT(number) DO UPDATE SET data=excluded.data',bindings:[id,JSON.stringify(compactPR(data))]});
     await this.store.batch(writes);
+    if(kind==='pr' && data?.number){
+      const key=queryKey({operation:'pr',args:{number:data.number}});
+      const textKey=queryKey({operation:'pr',args:{number:String(data.number)}});
+      await this.store.exec('UPDATE jobs SET etag=NULL WHERE key IN (?,?)',key,textKey);
+      await this.store.exec('UPDATE collections SET etag=NULL WHERE key IN (?,?)',key,textKey);
+      if(!fromEvent || oldStored?.headRefOid!==data.headRefOid || oldStored?.state!==data.state)this.prQueriesChanged.add(String(data.number));
+    }
     if(this.store instanceof ReadCacheStore)this.store.seed('SELECT data,tombstone FROM resources WHERE kind=? AND id=?',[kind,id],[{data:encoded,tombstone:Number(deleted)}]);
     if(['issue_comments','review_comments'].includes(kind)) {
       await this.projectSurvey(kind,id,parent,data,deleted);await this.dirtySurvey(parent);
@@ -548,7 +720,7 @@ export class RepositoryState extends DurableObject<Env> {
     if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.projectSurvey.call(state,kind,id,parent,data,deleted));
     if(!parent || !(await this.store.exec("SELECT id FROM resources WHERE kind='pr' AND id=?",parent)).toArray().length) return;
     const fragment=kind==='issue_comments'?issueFragment(data):reviewFragment(data);
-    const useful=kind==='issue_comments'?fragment.meta!==null || fragment.marker || fragment.rebase_heads.length:fragment.root || fragment.parent && fragment.reply;
+    const useful=kind==='issue_comments'?fragment.meta!==null || fragment.rebase_heads.length:fragment.root || fragment.parent && fragment.reply;
     if(deleted || !useful) await this.store.exec('DELETE FROM survey_fragments WHERE kind=? AND id=?',kind,id);
     else await this.store.exec('INSERT INTO survey_fragments VALUES(?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET parent=excluded.parent,data=excluded.data',kind,id,parent,JSON.stringify(fragment));
   }
@@ -607,10 +779,10 @@ export class RepositoryState extends DurableObject<Env> {
     const fragments:(string|number)[][]=[];
     const flush=async()=>{if(!fragments.length)return;const batch=fragments.splice(0);await this.store.exec('INSERT INTO survey_fragments VALUES '+batch.map(()=>'(?,?,?,?)').join(',')+' ON CONFLICT(kind,id) DO UPDATE SET parent=excluded.parent,data=excluded.data',...batch.flat());};
     if(prRow)for(let offset=0;offset<rows.length;offset+=8) {
-      const decoded=await Promise.all(rows.slice(offset,offset+8).map(async row=>({row,data:await this.decode(row.data)})));
+      const decoded=await this.repairAll(rows.slice(offset,offset+8).map(async row=>({row,data:await this.decode(row.data)})));
       for(const {row,data} of decoded) {
         const fragment=row.kind==='issue_comments'?issueFragment(data):reviewFragment(data);
-        const useful=row.kind==='issue_comments'?fragment.meta!==null || fragment.marker || fragment.rebase_heads.length:fragment.root || fragment.parent && fragment.reply;
+        const useful=row.kind==='issue_comments'?fragment.meta!==null || fragment.rebase_heads.length:fragment.root || fragment.parent && fragment.reply;
         if(useful)fragments.push([row.kind,row.id,number,JSON.stringify(fragment)]);
       }
       if(fragments.length>=200)await flush();
@@ -628,9 +800,9 @@ export class RepositoryState extends DurableObject<Env> {
     if(!inventoryComplete) {await this.optionalAsync('enqueue',async ()=>(await this.enqueue(inventory,5)));return null;}
     // Scan compact local metadata, then add statuses only for the selected
     // roadmap. Descriptions and unrelated comment histories stay in storage.
-    const rows=await this.scanRows("SELECT COALESCE(s.data,r.data) data FROM members m JOIN resources r ON r.kind='pr' AND r.id=m.id LEFT JOIN survey_inventory s ON s.number=r.id WHERE m.collection=? AND r.tombstone=0 ORDER BY CAST(r.id AS INTEGER),r.id",queryKey(inventory));
+    const rows=await this.scanRows(`SELECT COALESCE(s.data,r.data) data FROM members m ${collectionJoin(this.store)} resources r ON r.kind='pr' AND r.id=m.id LEFT JOIN survey_inventory s ON s.number=r.id WHERE m.collection=? AND r.tombstone=0 ORDER BY CAST(r.id AS INTEGER),r.id`,queryKey(inventory));
     const scope=String(q.args?.roadmap || 'any'),skip=String(q.args?.skip || '').split(',').filter(Boolean),out=[];
-    const author_counts:Record<string,number>={},stages=new Set(String(q.args?.stages ?? 'review,fix,rebase').split(','));
+    const author_counts:Record<string,number>={};
     const decoded=[];for(const storedRow of rows)decoded.push(compactPR(await this.decode(storedRow.data)));
     const selected=decoded.filter(row=>q.args?.numbers?String(q.args.numbers).split(',').includes(String(row.number)):inScope(row,scope,skip));
     await this.primeRelated(selected.map(r=>String(r.number)),selected.map(r=>r.headRefOid).filter(Boolean));
@@ -649,49 +821,53 @@ export class RepositoryState extends DurableObject<Env> {
         try {projected=(await this.projectedSurvey(number));}catch {hydrated=false;await this.optionalRead('survey_invalidate',async ()=>(await this.invalidateSurvey(number)));}
         if(hydrated) {const data=projected;await this.optionalRead('survey_projection',async ()=>(await this.rebuildSurvey(number,data)));}
       }
-      const review={...(hydrated && projected?JSON.parse(projected):summarizeFragments([],[])),issue_complete:false,review_complete:false};
-      const statuses=await this.rows({repository:q.repository,operation:'statuses',args:{sha:row.headRefOid}});
-      const green=Array.isArray(statuses) && statuses.some(c=>c.context==='build' && c.state==='SUCCESS') && !statuses.some(c=>c.context==='build' && c.state!=='SUCCESS');
+      // Existing v1 clients require this array. The survey projection ignores
+      // coordination comments, including claims in older cached projections.
+      const review={...(hydrated && projected?JSON.parse(projected):summarizeFragments([],[])),markers:[],issue_complete:false,review_complete:false};
+      const statusQuery={repository:q.repository,operation:'statuses',args:{sha:row.headRefOid}};
+      const statuses=await this.statusRows(statusQuery,true);
+      const statusComplete=(await this.complete(statusQuery)) && (await this.store.exec('SELECT data FROM resources WHERE kind=? AND id=? AND tombstone=0','statuses',queryKey(statusQuery))).toArray().length>0;
       for(const [operation,field] of [['issue_comments','issue_complete'],['review_comments','review_complete']]) {
         const child={repository:q.repository,operation,args:{number:row.number}};
         review[field]=hydrated && (await this.complete(child));
-        // Demand is deduplicated in the installation scheduler; serving a
-        // snapshot never performs synchronous upstream validation.
-        const needs=operation==='issue_comments'?(green && (stages.has('review') || stages.has('fix'))) || stages.has('rebase') && (row.labels || []).some((l:any)=>l.name==='needs-rebase'):green && (stages.has('review') || stages.has('fix'));
-        if(!row.isDraft && needs && !(await this.complete(child))) {await this.noteReadDemand(child);await this.optionalAsync('enqueue',async ()=>(await this.enqueue(child,5)));}
       }
-      out.push({contract:SURVEY_CONTRACT,pr:{...compactPR(row),statusCheckRollup:Array.isArray(statuses)?statuses:[]},review});
+      // Discovery must not await one demand/enqueue transaction per missing
+      // history. The existing maintenance owner backfills open-head coverage;
+      // selected-PR reads still register real demand through their normal path.
+      out.push({contract:SURVEY_CONTRACT,pr:{...compactPR(row),statusCheckRollup:Array.isArray(statuses)?statuses:[],statusCheckRollupCoverage:statusComplete?'complete':statuses?.length?'webhook_observed':'unavailable'},review});
     }
     return {rows:out,author_counts};
   }
   async surveyHealth(): Promise<any> {
-    const counts=(await this.store.exec<any>("SELECT COUNT(*) open_prs,SUM(h.contract=?) hydrated,SUM(s.number IS NOT NULL) materialized FROM members m JOIN resources r ON r.kind='pr' AND r.id=m.id LEFT JOIN survey_hydrated h ON h.number=r.id LEFT JOIN survey_state s ON s.number=r.id WHERE m.collection=? AND r.tombstone=0",SURVEY_INDEX_VERSION,queryKey({operation:'open_prs'}))).one();
+    const counts=(await this.store.exec<any>(`SELECT COUNT(*) open_prs,SUM(h.contract=?) hydrated,SUM(s.number IS NOT NULL) materialized FROM members m ${collectionJoin(this.store)} resources r ON r.kind='pr' AND r.id=m.id LEFT JOIN survey_hydrated h ON h.number=r.id LEFT JOIN survey_state s ON s.number=r.id WHERE m.collection=? AND r.tombstone=0`,SURVEY_INDEX_VERSION,queryKey({operation:'open_prs'}))).one();
     const failures=(await this.store.exec<any>('SELECT COUNT(*) n FROM survey_hydration_failures')).one().n;
     return {contract:SURVEY_CONTRACT,...counts,failures};
   }
   id(operation:string,row:any): string { return String(row.number || row.id || row.node_id || row.ref || row.context || row.sha || row.headRefOid || 'value'); }
   async enqueue(q:Query,priority=20,due=Date.now(),dirty=false): Promise<void> {
+    if(this.readOnlyQuery)return;
     if (q.operation==='progress' || NOT_MIRRORED.has(q.operation)) return;
-    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.enqueue.call(state,q,priority,due,dirty));
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.enqueue.call(state,q,priority,due,dirty),'enqueue');
     const key=queryKey(q);
     const prior=(await this.store.exec<any>('SELECT * FROM jobs WHERE key=?',key)).toArray()[0];
-    const lane=(await this.lane(q,dirty || Boolean(prior?.dirty),priority)),requested=lane==='requested'?(prior?.requested_at || Date.now()):prior?.requested_at || null;
+    const lane=prior?.lane==='requested' && prior?.requested_at && (dirty || prior?.dirty)?'requested':(await this.lane(q,dirty || Boolean(prior?.dirty),priority)),requested=lane==='requested'?(prior?.requested_at || Date.now()):prior?.requested_at || null;
     await this.store.exec('INSERT INTO jobs(key,query,priority,due,dirty,generation,lane,requested_at,created_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET priority=excluded.priority,lane=excluded.lane,requested_at=excluded.requested_at,dirty=MAX(dirty,excluded.dirty),generation=generation+excluded.generation' + (dirty ? ",due=CASE WHEN wait_reason IS NOT NULL OR attempt>0 THEN due ELSE MIN(due,excluded.due) END" : ''),key,JSON.stringify({...q,allow_observed:undefined}),priority,due,Number(dirty),Number(dirty),lane,requested,Date.now());
     if (!prior) await this.metric('arrival',q,lane);
     const alarm=this.store.backend==='postgres'?null:await this.ctx.storage.getAlarm();
     const scheduled=(await this.store.exec<any>('SELECT due FROM jobs WHERE key=?',key)).one().due;
     if (!alarm || alarm>scheduled) await this.setAlarm(Math.max(Date.now()+100,scheduled));
+    else this.noteOrdinaryAlarm(scheduled);
   }
-  async enqueueMany(input:{q:Query,priority:number,dirty?:boolean}[]):Promise<void> {
+  async enqueueMany(input:{q:Query,priority:number,dirty?:boolean}[],backfill=false):Promise<void> {
     input=input.filter(({q})=>q.operation!=='progress' && !NOT_MIRRORED.has(q.operation));
     if(!input.length)return;
-    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.enqueueMany.call(state,input));
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.enqueueMany.call(state,input,backfill),'enqueue');
     const readBatch=this.store.backend==='sqlite'?80:256,writeBatch=this.store.backend==='sqlite'?10:200,metricBatch=this.store.backend==='sqlite'?20:200;
     const entries=new Map<string,{q:Query,priority:number,dirty?:boolean}>();
     for(const item of input){const key=queryKey(item.q),prior=entries.get(key);entries.set(key,{...item,dirty:prior?.dirty || item.dirty});}
     if(entries.size>512){
       const unique=[...entries.values()];
-      for(let offset=0;offset<unique.length;offset+=512)await this.enqueueMany(unique.slice(offset,offset+512));
+      for(let offset=0;offset<unique.length;offset+=512)await this.enqueueMany(unique.slice(offset,offset+512),backfill);
       return;
     }
     const jobs=new Map<string,any>(),demands=new Map<string,any>(),collections=new Set<string>();
@@ -717,16 +893,26 @@ export class RepositoryState extends DurableObject<Env> {
     const ids=[...entries.values()].filter(e=>e.q.operation==='reactions').map(e=>String(e.q.args?.id));
     if(ids.length)for(const row of await select('resources','id',ids," AND kind='review_comments'",'id,kind,parent,tombstone'))if(row.kind==='review_comments'){comments.set(row.id,row);if(row.parent)numbers.add(row.parent);}
     const states=new Map<string,any>();
-    for(const row of await select('resources','id',[...numbers]," AND kind IN ('pr','issue')","id,kind,json_extract(data,'$.state') state"))if(['pr','issue'].includes(row.kind) && (!states.has(row.id)||row.kind==='pr'))states.set(row.id,row);
+    const head=this.store.backend==='postgres'?"CASE WHEN json_type(data,'$.headRefOid')='string' THEN json_extract(data,'$.headRefOid') END":"json_extract(data,'$.headRefOid')";
+    for(const row of await select('resources','id',[...numbers]," AND kind IN ('pr','issue')","id,kind,json_extract(data,'$.state') state,"+(shas.length?head:"NULL")+" head"))if(['pr','issue'].includes(row.kind) && (!states.has(row.id)||row.kind==='pr'))states.set(row.id,row);
     const now=Date.now();let scheduled=Infinity;
     const values:any[][]=[],metrics:any[][]=[];
     for(const [key,{q,priority,dirty=false}] of entries) {
       const prior=jobs.get(key),demanded=(demands.get(key)?.at || 0)>now-300000;
       const comment=q.operation==='reactions'?comments.get(String(q.args?.id)):null;
       const ns=q.args?.number?[String(q.args.number)]:q.args?.sha?heads.get(String(q.args.sha)) || []:comment?.parent?[comment.parent]:[];
-      const dormant=!demanded && (comment?.tombstone || ns.length>0 && ns.every(n=>states.get(n)?.state && states.get(n).state!=='OPEN'));
-      const lane=demanded && !collections.has(key)?'requested':dirty || prior?.dirty || priority<=5 || q.operation.endsWith('_delta')?'active':q.operation.startsWith('recent_') || dormant?'archive':'verification';
-      values.push([key,JSON.stringify({...q,allow_observed:undefined}),priority,now,Number(dirty),Number(dirty),lane,lane==='requested'?(prior?.requested_at || now):prior?.requested_at || null,now]);
+      const dormant=!demanded && (comment?.tombstone || ns.length>0 && ns.every(n=>q.operation==='statuses'
+        ?states.get(n)?.kind==='pr' && statusHeadDormant(states.get(n)?.state,states.get(n)?.head,String(q.args?.sha))
+        :states.get(n)?.state && states.get(n).state!=='OPEN'));
+      // File coverage belongs to a head. A head-change job can be dirty while
+      // the previous head's collection still carries complete=1.
+      const covered=collections.has(key) && !(q.operation==='files' && prior?.dirty);
+      if(backfill && (covered || dormant))continue;
+      const lane=prior?.lane==='requested' && prior?.requested_at && (dirty || prior?.dirty)?'requested':(demanded || backfill) && !covered?'requested':dirty || prior?.dirty || priority<=5 || q.operation.endsWith('_delta')?'active':q.operation.startsWith('recent_') || dormant?'archive':'verification';
+      // Maintenance shares the requested lane without fabricating a user read.
+      // NULL sorts behind real demand and stays out of user latency metrics.
+      const requested=prior?.requested_at || (backfill && !demanded?null:now);
+      values.push([key,JSON.stringify({...q,allow_observed:undefined}),priority,now,Number(dirty),Number(dirty),lane,lane==='requested'?requested:prior?.requested_at || null,now]);
       if(!prior)metrics.push([now,'arrival',lane,q.operation,1]);
       scheduled=Math.min(scheduled,!prior?now:dirty && !prior.wait_reason && !prior.attempt?Math.min(prior.due,now):prior.due);
     }
@@ -739,6 +925,49 @@ export class RepositoryState extends DurableObject<Env> {
     for(const [at,event,lane,operation,value] of metrics)this.repairMetrics.record(event,lane,operation,value,at);
     const alarm=this.store.backend==='postgres'?null:await this.ctx.storage.getAlarm();
     if(!alarm || alarm>scheduled)await this.setAlarm(Math.max(now+100,scheduled));
+    else this.noteOrdinaryAlarm(scheduled);
+  }
+  private async enqueueIngest(input:IngestRepair[]):Promise<void> {
+    if(!this.store.transactional)return this.atomic(state=>state.enqueueIngest(input),'ingest');
+    // Ingest requests all have active priority (0..2). Read the post-event
+    // scheduling facts together, preserving the individual enqueue semantics.
+    input=input.filter(({q})=>q.operation!=='progress' && !NOT_MIRRORED.has(q.operation));
+    if(!input.length)return;
+    const keys=[...new Set(input.map(({q})=>queryKey(q)))],jobs=new Map<string,any>(),demand=new Map<string,number>(),complete=new Set<string>();
+    const readBatch=this.store.backend==='sqlite'?80:256;
+    for(let offset=0;offset<keys.length;offset+=readBatch) {
+      const chunk=keys.slice(offset,offset+readBatch),where=' WHERE key IN ('+chunk.map(()=>'?').join(',')+')';
+      const [js,ds,cs]=await this.store.batch([
+        {sql:'SELECT key,dirty,generation,lane,requested_at,due,attempt,wait_reason FROM jobs'+where,bindings:chunk},
+        {sql:'SELECT key,at FROM demand'+where,bindings:chunk},
+        {sql:'SELECT key FROM collections'+where+' AND complete=1',bindings:chunk}
+      ]);
+      for(const row of js.toArray())jobs.set(row.key,row);
+      for(const row of ds.toArray())demand.set(row.key,row.at);
+      for(const row of cs.toArray())complete.add(row.key);
+    }
+    const now=Date.now(),writes=new Map<string,any[]>(),increments=new Map<string,number>();
+    for(const {q,priority,dirty=false,dirtyIfMissing=false,missingOnly=false} of input) {
+      const key=queryKey(q),known=complete.has(key);if(missingOnly && known)continue;
+      const prior=jobs.get(key),changed=dirty || dirtyIfMissing && !known;
+      const lane:Lane=prior?.lane==='requested' && prior?.requested_at && (changed || prior?.dirty)?'requested':(demand.get(key) || 0)>now-300000 && !known?'requested':'active';
+      const requested=lane==='requested'?(prior?.requested_at || now):prior?.requested_at || null;
+      const due=prior?(changed && prior.wait_reason==null && !prior.attempt?Math.min(prior.due,now):prior.due):now;
+      const generation=(increments.get(key) || 0)+Number(changed);increments.set(key,generation);
+      const values=[key,JSON.stringify({...q,allow_observed:undefined}),priority,due,Number(changed || Boolean(prior?.dirty)),generation,lane,requested,now];
+      writes.set(key,values);jobs.set(key,{...prior,dirty:values[4],requested_at:requested,due});
+      if(!prior)await this.metric('arrival',q,lane);
+    }
+    const rows=[...writes.values()],writeBatch=this.store.backend==='sqlite'?10:200;
+    for(let offset=0;offset<rows.length;offset+=writeBatch) {
+      const chunk=rows.slice(offset,offset+writeBatch);
+      await this.store.exec('INSERT INTO jobs(key,query,priority,due,dirty,generation,lane,requested_at,created_at) VALUES '+chunk.map(()=>'(?,?,?,?,?,?,?,?,?)').join(',')+' ON CONFLICT(key) DO UPDATE SET priority=excluded.priority,due=excluded.due,dirty=excluded.dirty,generation=generation+excluded.generation,lane=excluded.lane,requested_at=excluded.requested_at',...chunk.flat());
+    }
+    if(rows.length && this.store.backend==='sqlite') {
+      const scheduled=Math.min(...rows.map(row=>Number(row[3]))),alarm=await this.ctx.storage.getAlarm();
+      if(!alarm || alarm>scheduled)await this.setAlarm(Math.max(now+100,scheduled));
+      else this.noteOrdinaryAlarm(scheduled);
+    }
   }
   async complete(q:Pick<Query,'operation'|'args'>): Promise<boolean> { return (await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length>0; }
   async metric(event:string,q:Query,lane:Lane,value=1): Promise<void> {try{this.repairMetrics.record(event,lane,q.operation,value);}catch(error){try{this.noteFailure('repair_metrics',error);}catch{}}}
@@ -749,7 +978,7 @@ export class RepositoryState extends DurableObject<Env> {
     return q.operation.startsWith('recent_') || (await this.dormant(q))?'archive':'verification';
   }
   async configure(name:string): Promise<void> {
-    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.configure.call(state,name));
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.configure.call(state,name),'other','configure');
     const repo=repository(this.env,name); if (!repo) throw new Error('repository not allowed');
     await this.setMeta('repository',repo);
     for (const operation of ['repository','refs','open_prs','open_issues','recent_prs','recent_issues','pr_delta','issue_delta']) await this.enqueue({repository:repo.name,operation},operation==='open_prs' || operation.endsWith('_delta')?0:10);
@@ -776,53 +1005,80 @@ export class RepositoryState extends DurableObject<Env> {
     const history=await this.meta('review_coordination');
     return coordinationWindows(history,this[ACTIVITY_CLOCK] ?? Date.now());
   }
-  async ingest(pointer:EventPointer,preparedBody?:any): Promise<void> {
+  private recordIngest(event:string,queries:number|undefined,elapsed:number,writerWait:number):void {
+    const type=INGEST_EVENT_TYPES.has(event)?event:'other',minute=Math.floor(Date.now()/60000)*60000;
+    let row=this.ingestStats.get(type);
+    if(row && row.minute!==minute){try{log('repository_ingest_summary',{event_type:type,...row});}catch{}row=undefined;}
+    if(!row){row={minute,deliveries:0,sql_round_trips:0,sql_samples:0,writer_wait_ms:0,writer_wait_max_ms:0,apply_through_cleanup_ms:0,apply_max_ms:0};this.ingestStats.set(type,row);}
+    row.writer_wait_ms+=writerWait;row.writer_wait_max_ms=Math.max(row.writer_wait_max_ms,writerWait);
+    row.deliveries++;row.apply_through_cleanup_ms+=elapsed;row.apply_max_ms=Math.max(row.apply_max_ms,elapsed);
+    if(queries!==undefined){row.sql_round_trips+=queries;row.sql_samples++;}
+  }
+  async ingest(pointer:EventPointer,preparedBody?:any): Promise<boolean> {
     const configured=repository(this.env,pointer.repository);if(!configured)throw Error('repository not allowed');
     if(!this.store.transactional){
-      if(await this.env.ARCHIVE.head(receiptKey(configured.id,pointer.delivery)))return;
-      if((await this.store.exec('SELECT id FROM deliveries WHERE id=?',pointer.delivery)).toArray().length)return;
+      // Archival publishes R2 before deleting SQL. Read SQL first: either its
+      // receipt is still present, or the following R2 check can see the archive.
+      // Reversing these reads needs another remote lookup under the writer.
+      if((await this.store.exec('SELECT id FROM deliveries WHERE id=?',pointer.delivery)).toArray().length)return false;
+      const receiptStarted=Date.now(),archived=await this.env.ARCHIVE.head(receiptKey(configured.id,pointer.delivery));
+      if(Date.now()-receiptStarted>=100)log('repository_receipt_slow',{elapsed_ms:Date.now()-receiptStarted,transactional:false});
+      if(archived)return false;
       let body:any,encodings=new Map<string,string>();
       if(!CI_EVENTS.has(pointer.event)){
         const object=await this.env.ARCHIVE.get(pointer.key);if(!object)throw Error('event body unavailable');body=parseGitHub(await object.text());
         if(body.comment){const value=comment(body.comment),text=JSON.stringify(value);if(new TextEncoder().encode(text).length>=1500000)encodings.set('resource:'+text,await this.encode(value,undefined,configured.id));}
       }
-      return this.atomic(async state=>{state.preparedEncodings=encodings;await RepositoryState.prototype.ingest.call(state,pointer,body);});
+      let measured:RepositoryStore|undefined,applyStarted=0,committed=false;const queuedAt=Date.now();
+      await this.atomic(async state=>{
+        measured=state.store;applyStarted=Date.now();state.preparedEncodings=encodings;
+        if(state.store.backend==='postgres')state.store=new ReadCacheStore(state.store);
+        committed=await RepositoryState.prototype.ingest.call(state,pointer,body);
+      },'ingest');
+      if(committed)try{this.owner.recordIngest(pointer.event,measured?.queryCount,Date.now()-applyStarted,Math.max(0,applyStarted-queuedAt));}catch{}
+      return committed;
     }
-    // Receipt archival publishes R2 before deleting SQL. Recheck under writer
-    // ownership so an archival race cannot reapply a committed old delivery.
-    if(await this.maintenanceArchive.head(receiptKey(configured.id,pointer.delivery)))return;
-    if((await this.store.exec('SELECT id FROM deliveries WHERE id=?',pointer.delivery)).toArray().length)return;
+    // Another ingest can commit while we preload the body. Its fresh SQL
+    // receipt remains retained; no external I/O is needed under the writer.
+    if((await this.store.exec('SELECT id FROM deliveries WHERE id=?',pointer.delivery)).toArray().length)return false;
     if(this.degraded){if(this.degraded.reason!=='storage_full')throw Error('repository storage control unavailable');throw Error('Exceeded the maximum database size; SQLITE_FULL recorded at '+new Date(this.degraded.since).toISOString());}
-    if(CI_EVENTS.has(pointer.event)){await this.store.exec('INSERT OR IGNORE INTO deliveries VALUES(?,?,?)',pointer.delivery,'ignored:'+pointer.event,Date.now());return;}
+    if(CI_EVENTS.has(pointer.event)){await this.store.exec('INSERT OR IGNORE INTO deliveries VALUES(?,?,?)',pointer.delivery,'ignored:'+pointer.event,Date.now());return true;}
     const body:any=preparedBody,repo=configured;await this.setMeta('repository',repo);
-    const event=pointer.event, deleted=body.action==='deleted';
+    const event=pointer.event, deleted=body.action==='deleted',repairs:IngestRepair[]=[];
     // All updates are idempotent; receipt is committed only after their durable rows and jobs.
     if (event==='pull_request' && body.pull_request) {
-      const row=pr(body.pull_request), number=String(row.number);
-      const before=(await this.store.exec<any>('SELECT data FROM resources WHERE kind=? AND id=?','pr',number)).toArray()[0];
+      const snapshot=pr(body.pull_request), number=String(snapshot.number);
+      const before=(await this.store.exec<any>('SELECT * FROM resources WHERE kind=? AND id=?','pr',number)).toArray()[0];
+      if(this.store instanceof ReadCacheStore)this.store.seed('SELECT * FROM resources WHERE kind=? AND id=?',['pr',number],before?[before]:[]);
       const prior=before?await this.decode(before.data):null;
-      const accepted=await this.put('pr',number,row,pointer.received,false,number,true);
+      const row=webhookPR(prior,snapshot,body);
+      const accepted=row?await this.put('pr',number,row,pointer.received,false,number,true):false;
       // A webhook describes one PR, not a complete inventory. Never create fake coverage.
       const key=queryKey({operation:'open_prs'});
-      if (accepted) await this.membership(key,number,body.pull_request.state==='open');
-      const detail={repository:repo.name,operation:'pr',args:{number:row.number}};
-      const detailKnown=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(detail))).toArray().length>0;
-      await this.enqueue(detail,0,Date.now(),!detailKnown || row.mergeable==='UNKNOWN');
-      const inventoryKnown=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',key)).toArray().length>0;
-      await this.enqueue({repository:repo.name,operation:'open_prs'},1,Date.now(),!inventoryKnown);
-      if(accepted && row.headRefOid && prior?.headRefOid!==row.headRefOid) await this.enqueue({repository:repo.name,operation:'files',args:{number:row.number}},1,Date.now(),true);
+      if (accepted) await this.membership(key,number,row.state==='OPEN');
+      const detail={repository:repo.name,operation:'pr',args:{number:snapshot.number}};
+      repairs.push({q:detail,priority:0,dirty:!row || row.mergeable==='UNKNOWN' || prior?.headRefOid!==snapshot.headRefOid || prior?.state!==snapshot.state,dirtyIfMissing:true},{q:{repository:repo.name,operation:'open_prs'},priority:1,dirtyIfMissing:true});
+      if(accepted && row.headRefOid && prior?.headRefOid!==row.headRefOid){
+        const files={repository:repo.name,operation:'files',args:{number:row.number}};
+        await this.store.exec('UPDATE collections SET complete=0,etag=NULL WHERE key=?',queryKey(files));
+        repairs.push({q:files,priority:1,dirty:true});
+      }
+      // Published mirrors hydrate new open PR histories from trusted webhooks,
+      // independently of anonymous query demand.
+      if(snapshot.state==='OPEN' && publicQuery(this.env,repo))for(const operation of ['issue_comments','review_threads']) {
+        const child={repository:repo.name,operation,args:{number:snapshot.number}};
+        repairs.push({q:child,priority:2,missingOnly:true});
+      }
       if (accepted && row.headRefOid) for (const operation of ['statuses']) {
         const q={repository:repo.name,operation,args:{sha:row.headRefOid}};
-        const known=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length>0;
-        await this.enqueue(q,1,Date.now(),!known || prior?.headRefOid!==row.headRefOid);
+        repairs.push({q,priority:1,dirtyIfMissing:true,dirty:prior?.headRefOid!==row.headRefOid});
       }
     }
     if (event==='issues' && body.issue) {
       const row=issue(body.issue); const accepted=await this.put('issue',String(row.number),row,pointer.received,deleted,String(row.number),true);
       if (accepted) await this.membership(queryKey({operation:'open_issues'}),String(row.number),!deleted && row.state==='OPEN');
       const q={repository:repo.name,operation:'open_issues'};
-      const known=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length>0;
-      await this.enqueue(q,1,Date.now(),!known);
+      repairs.push({q,priority:1,dirtyIfMissing:true});
     }
     if (event==='issue_comment' && body.action==='created' && body.comment) await this.recordReviewStart(body.comment,pointer.received);
     if (['issue_comment','pull_request_review_comment'].includes(event) && body.comment) {
@@ -831,19 +1087,17 @@ export class RepositoryState extends DurableObject<Env> {
       const row=comment(body.comment); const accepted=await this.put(operation,String(row.id),row,pointer.received,deleted,String(number),true);
       const key=queryKey({operation,args:{number}});
       if (accepted) await this.membership(key,String(row.id),!deleted);
-      const known=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',key)).toArray().length>0;
-      await this.enqueue({repository:repo.name,operation,args:{number}},0,Date.now(),!known);
-      if (operation==='review_comments') await this.enqueue({repository:repo.name,operation:'review_threads',args:{number}},2,Date.now(),true);
+      repairs.push({q:{repository:repo.name,operation,args:{number}},priority:0,dirtyIfMissing:true});
+      if (operation==='review_comments')repairs.push({q:{repository:repo.name,operation:'review_threads',args:{number}},priority:2,dirty:true});
     }
     if (event==='pull_request_review' || event==='pull_request_review_thread') {
       const number=body.pull_request?.number;
-      if (number) for (const operation of ['review_threads','reviews','review_comments']) await this.enqueue({repository:repo.name,operation,args:{number}},1,Date.now(),true);
+      if (number) for (const operation of ['review_threads','reviews','review_comments'])repairs.push({q:{repository:repo.name,operation,args:{number}},priority:1,dirty:true});
     }
     if (event==='status' && body.sha && body.context) {
       await this.put('status_context',body.sha+':'+body.context,status(body),pointer.received,false,body.sha,true);
       const q={repository:repo.name,operation:'statuses',args:{sha:body.sha}};
-      const known=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length>0;
-      await this.enqueue(q,0,Date.now(),!known);
+      repairs.push({q,priority:0,dirtyIfMissing:true});
     }
     if (['push','create','delete','repository','label','milestone','merge_group'].includes(event)) {
       if (event==='push' && String(body.ref).startsWith('refs/heads/')) {
@@ -851,17 +1105,30 @@ export class RepositoryState extends DurableObject<Env> {
         const removed=Boolean(body.deleted) || /^0+$/.test(body.after || '');
         if (await this.put('refs',body.ref,row,pointer.received,removed,'',true)) await this.membership(queryKey({operation:'refs'}),body.ref,!removed);
       }
+      if(event==='push' && !body.deleted && String(body.ref).startsWith('refs/heads/')) {
+        const branch=String(body.ref).slice('refs/heads/'.length);
+        const base=branch===body.repository?.default_branch || (await this.store.exec(`SELECT s.number FROM members m ${collectionJoin(this.store)} survey_inventory s ON s.number=m.id WHERE m.collection=? AND json_extract(s.data,'$.state')='OPEN' AND json_extract(s.data,'$.baseRefName')=? LIMIT 1`,queryKey({operation:'open_prs'}),branch)).toArray().length>0;
+        if(base) {
+          const inventory={repository:repo.name,operation:'open_prs'};
+          const job=(await this.store.exec<any>('SELECT dirty,started FROM jobs WHERE key=?',queryKey(inventory))).toArray()[0];
+          // One bulk refresh, preserving pages. Coalesce queued pushes; retain
+          // a newer generation when a base moves during an in-flight scan.
+          repairs.push({q:inventory,priority:0,dirty:!job?.dirty || job.started!=null});
+        }
+      }
       // Header and CI webhooks already update the indexed records. A single
       // changed PR must not trigger a repository-wide survey at fleet scale.
       for (const operation of ['open_prs','open_issues','refs','repository']) {
         const q={repository:repo.name,operation};
-        const known=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length>0;
-        await this.enqueue(q,2,Date.now(),!known || operation==='repository' && event==='repository' || operation==='refs' && ['create','delete'].includes(event));
+        repairs.push({q,priority:operation==='open_prs'?0:2,dirtyIfMissing:true,dirty:operation==='repository' && event==='repository' || operation==='refs' && ['create','delete'].includes(event)});
       }
     }
-    await this.commitReceipt(pointer);
+    await this.enqueueIngest(repairs);
+    await this.commitReceipt(pointer);return true;
   }
   async commitReceipt(pointer:EventPointer):Promise<void> {
+    // Use commit time, not the event's age: writer-side ingest deduplication
+    // relies on archival retaining newly committed SQL receipts for 14 days.
     const now=Date.now();
     await this.store.batch([
       {sql:'INSERT OR IGNORE INTO deliveries VALUES(?,?,?)',bindings:[pointer.delivery,pointer.event,now]},
@@ -875,26 +1142,34 @@ export class RepositoryState extends DurableObject<Env> {
   }
 
   kind(q:Query): string { return ['open_prs','recent_prs','pr','pr_delta'].includes(q.operation)?'pr':['open_issues','recent_issues','issue_delta'].includes(q.operation)?'issue':q.operation; }
+  async statusRows(q:Query,allowObserved=false):Promise<any[]|null> {
+    const key=queryKey(q),complete=await this.complete(q);
+    if(!complete && !allowObserved)return null;
+    const row=complete?(await this.store.exec<any>('SELECT data FROM resources WHERE kind=? AND id=? AND tombstone=0','statuses',key)).toArray()[0]:undefined;
+    if(complete && !row && !allowObserved)return null;
+    const data=row?await this.decode(row.data):[];
+    if(!Array.isArray(data))return null;
+    const contexts=new Map(data.map(n=>{const value=status(n);return [value.context,value];}));
+    for(const row of await this.scanRows('SELECT data FROM resources WHERE kind=? AND parent=? AND tombstone=0','status_context',String(q.args?.sha))) {
+      const value=status(await this.decode(row.data)),prior=contexts.get(value.context);
+      if(!prior || Date.parse(value.startedAt)>=Date.parse(prior.startedAt))contexts.set(value.context,value);
+    }
+    return complete && row || contexts.size?[...contexts.values()]:null;
+  }
   async rows(q:Query): Promise<any[] | any | null> {
+    if(q.operation==='statuses')return this.statusRows(q);
     const key=queryKey(q), collection=(await this.store.exec<any>('SELECT * FROM collections WHERE key=? AND complete=1',key)).toArray()[0];
     if (!collection) return null;
     if (q.operation==='pr') {
       const row=(await this.store.exec<any>('SELECT data FROM resources WHERE kind=? AND id=? AND tombstone=0','pr',String(q.args?.number))).toArray()[0];
       if (row) return (await this.decode(row.data));
     }
-    if (['pr','repository','statuses'].includes(q.operation)) {
+    if (['pr','repository'].includes(q.operation)) {
       const row=(await this.store.exec<any>('SELECT data FROM resources WHERE kind=? AND id=? AND tombstone=0',q.operation,key)).toArray()[0];
       if (!row) return null;
-      const data=await this.decode(row.data);
-      if (q.operation!=='statuses' || !Array.isArray(data)) return data;
-      const contexts=new Map(data.map(n=>{const value=status(n);return [value.context,value];}));
-      for (const row of await this.scanRows('SELECT data FROM resources WHERE kind=? AND parent=? AND tombstone=0','status_context',String(q.args?.sha))) {
-        const value=status(await this.decode(row.data)),prior=contexts.get(value.context);
-        if (!prior || Date.parse(value.startedAt)>=Date.parse(prior.startedAt)) contexts.set(value.context,value);
-      }
-      return [...contexts.values()];
+      return await this.decode(row.data);
     }
-    const members=await this.scanRows('SELECT r.data FROM members m JOIN resources r ON r.kind=? AND r.id=m.id WHERE m.collection=? AND r.tombstone=0 ORDER BY CAST(r.id AS INTEGER),r.id',this.kind(q),key);
+    const members=await this.scanRows(`SELECT r.data FROM members m ${collectionJoin(this.store)} resources r ON r.kind=? AND r.id=m.id WHERE m.collection=? AND r.tombstone=0 ORDER BY CAST(r.id AS INTEGER),r.id`,this.kind(q),key);
     const rows=[];
     if(q.operation==='open_prs')await this.primeRelated([],members.map(r=>JSON.parse(r.data).headRefOid).filter(Boolean));
     for await(const data of this.decodeRows(members)) {
@@ -912,30 +1187,55 @@ export class RepositoryState extends DurableObject<Env> {
   async unavailable(q:Query,reason:string): Promise<Result> {
     return {version:1,repository:q.repository,operation:q.operation,status:'unavailable',revision:(await this.revision()),complete:false,reason};
   }
-  async stableQuery(q:Query):Promise<Result> {
-    if(q.cursor)return this.query(q);
-    // Surveys discover candidate work. Repeating a full inventory whenever any
+  async changedQuery(q:Query,after:number):Promise<boolean> {
+    const number=q.args?.number,sha=q.args?.sha;
+    let relevant:string,keys=[queryKey(q)],bindings:(string|number)[];
+    if(number!==undefined && ['pr','progress','issue_comments','review_comments','files'].includes(q.operation)) {
+      const parent=String(number);
+      const children=q.operation==='progress'?['issue_comments','review_comments']
+        :q.operation==='pr'?[]:[q.operation];
+      if(q.operation==='progress')keys=['pr','issue_comments','review_comments'].map(operation=>queryKey({...q,operation}));
+      const parts:string[]=[];bindings=[];
+      if(['pr','progress'].includes(q.operation)){
+        parts.push("(c.kind='pr' AND c.id IN (?,?))");bindings.push(parent,queryKey({...q,operation:'pr'}));
+      }
+      if(children.length){parts.push('(c.kind IN ('+children.map(()=>'?').join(',')+') AND r.parent=?)');bindings.push(...children,parent);}
+      relevant=parts.join(' OR ');
+    } else if(q.operation==='statuses' && typeof sha==='string') {
+      relevant="(c.kind='statuses' AND c.id=?) OR (c.kind='status_context' AND r.parent=?)";bindings=[queryKey(q),sha];
+    } else return true; // Other query shapes retain the repository-wide retry.
+    // The retained change log identifies the rows/collection read by this PR.
+    // Unrelated webhooks cannot invalidate its snapshot or force full history
+    // decoding again. Real edits, membership changes and tombstones still retry.
+    return (await this.store.exec(
+      "SELECT 1 FROM changes c LEFT JOIN resources r ON r.kind=c.kind AND r.id=c.id WHERE c.revision>? AND ((c.kind='collection' AND c.id IN ("+keys.map(()=>'?').join(',')+')) OR '+relevant+') LIMIT 1',
+      after,...keys,...bindings,
+    )).toArray().length>0;
+  }
+  async stableQuery(q:Query,readOnly=false):Promise<Result> {
+    if(q.cursor)return this.query(q,readOnly);
+    // Inventories discover candidate work. Repeating a full inventory whenever any
     // webhook advances the repository revision makes a busy repository appear
-    // unavailable. Selected-PR reads retain the exact revision checks below.
-    if(q.operation==='survey')return this.query(q);
+    // unavailable. Selected-PR reads check the revisions of their own inputs.
+    if(['survey','open_prs','open_issues'].includes(q.operation))return this.query(q,readOnly);
     for(let attempt=0;attempt<3;attempt++) {
-      const result=await this.query(q);
+      const result=await this.query(q,readOnly);
       const row=(await this.store.exec<any>("SELECT value FROM meta WHERE key='revision'")).toArray()[0];
       const revision=row?JSON.parse(row.value):0;
       this.revisionState.value=Math.max(this.revisionState.value ?? 0,revision);
-      if(result.revision===revision)return result;
+      if(result.revision===revision || !await this.changedQuery(q,result.revision))return result;
     }
     return this.unavailable(q,'concurrent_input');
   }
-  async query(q:Query): Promise<Result> {
+  async query(q:Query,readOnly=false): Promise<Result> {
     if(!this.readScope) {
-      const scoped=Object.create(this) as RepositoryState;if(this.store.backend==='postgres')scoped.store=new ReadCacheStore(this.store);scoped.readScope=true;scoped.readRevision=await this.revision();
-      return scoped.query(q);
+      const scoped=Object.create(this) as RepositoryState;if(this.store.backend==='postgres')scoped.store=new ReadCacheStore(this.store);scoped.readScope=true;scoped.readOnlyQuery=readOnly;scoped.readRevision=await this.revision();
+      return scoped.query(q,readOnly);
     }
     validateQuery(q);
     if (NOT_MIRRORED.has(q.operation)) return this.unavailable(q,'not_mirrored');
     if (!(await this.meta('repository'))) {
-      if(this.store.backend==='postgres')return this.unavailable(q,'repository_unconfigured');
+      if(this.readOnlyQuery || this.store.backend==='postgres')return this.unavailable(q,'repository_unconfigured');
       try {await this.configure(q.repository);}
       catch(error) {return (await this.unavailable(q,this.noteFailure('configure',error)));}
     }
@@ -949,17 +1249,17 @@ export class RepositoryState extends DurableObject<Env> {
     } else if (q.operation==='progress') {
       const detail={...q,operation:'pr'};
       const p=await this.rows(detail);
-      await this.noteReadDemand(detail,p!==null);
-      if(!(await this.complete(detail))) await this.optionalAsync('enqueue',async ()=>(await this.enqueue(detail,5)));
+      await this.noteReadDemand(detail,await this.complete(detail));
+      if(this.store.backend!=='postgres' && !(await this.complete(detail))) await this.optionalAsync('enqueue',async ()=>(await this.enqueue(detail,5)));
       const cs=await this.rows({...q,operation:'issue_comments'}), rcs=await this.rows({...q,operation:'review_comments'});
       for (const operation of ['issue_comments','review_comments']) {
         const child={...q,operation};
         await this.noteReadDemand(child);
-        if (!(await this.complete(child))) await this.optionalAsync('enqueue',async ()=>(await this.enqueue(child,5)));
+        if (this.store.backend!=='postgres' && !(await this.complete(child))) await this.optionalAsync('enqueue',async ()=>(await this.enqueue(child,5)));
       }
       rows=p && cs && rcs ? {head:p.headRefOid,state:p.state,ncomments:cs.length+rcs.length,revision:(await this.revision())}:null;
     } else {
-      if (!q.allow_observed && !(await this.complete(q))) await this.optionalAsync('enqueue',async ()=>(await this.enqueue(q,5)));
+      if (this.store.backend!=='postgres' && !q.allow_observed && !(await this.complete(q))) await this.optionalAsync('enqueue',async ()=>(await this.enqueue(q,5)));
       rows=await this.rows(q);
     }
     const complete=rows!==null && (q.operation==='survey' || q.operation==='progress' || (await this.complete(q)));
@@ -967,6 +1267,9 @@ export class RepositoryState extends DurableObject<Env> {
     const result:Result={version:1,repository:q.repository,operation:q.operation,status:rows===null?'unavailable':'ok',revision:(await this.revision()),observed_at:observed || verified,verified_at:verified,complete,coverage:complete?'complete':q.allow_observed?'webhook_observed':undefined};
     if(q.operation==='survey') {result.contract=SURVEY_CONTRACT;result.author_counts=author_counts;}
     if (rows===null) return {...result,reason:'coverage_unavailable'};
+    // Public reads use the same stable pagination as authenticated reads.
+    // Only temporary cursor objects may be written; repository hydration and
+    // demand remain disabled in this read scope.
     if (Array.isArray(rows) && rows.length>100) {
       const id=crypto.randomUUID(),expires=Date.now()+600000,repo=(await this.meta('repository')).id;
       // Continuation pages go directly to private R2, never into SQLite. Each
@@ -985,7 +1288,7 @@ export class RepositoryState extends DurableObject<Env> {
           await this.env.ARCHIVE.put(cursorKey(repo,id,next.offset),body,{customMetadata:{kind:'cursor',expires:String(expires+60000)}});
         }
       };
-      await Promise.all(Array.from({length:Math.min(CURSOR_UPLOADS,pending.length)},upload));
+      await this.repairAll(Array.from({length:Math.min(CURSOR_UPLOADS,pending.length)},upload));
       return pages[0].page;
     }
     return {...result,data:rows};
@@ -1000,7 +1303,7 @@ export class RepositoryState extends DurableObject<Env> {
     let observed:number | undefined,verified:number | undefined;
     for (const source of sources as {key:string,kind:string,id?:string}[]) {
       const at=source.id?(await this.store.exec<any>('SELECT observed at FROM resources WHERE kind=? AND id=?',source.kind,source.id)).toArray()[0]?.at
-        :(await this.store.exec<any>('SELECT MAX(r.observed) at FROM members m JOIN resources r ON r.kind=? AND r.id=m.id WHERE m.collection=?',source.kind,source.key)).one().at;
+        :(await this.store.exec<any>(`SELECT MAX(r.observed) at FROM members m ${collectionJoin(this.store)} resources r ON r.kind=? AND r.id=m.id WHERE m.collection=?`,source.kind,source.key)).one().at;
       const checked=(await this.store.exec<any>('SELECT verified FROM collections WHERE key=?',source.key)).toArray()[0]?.verified;
       if (at) observed=Math.max(observed ?? 0,at);
       if (checked) verified=verified===undefined?checked:Math.min(verified,checked);
@@ -1025,12 +1328,16 @@ export class RepositoryState extends DurableObject<Env> {
     }
     if (payload.key!==key) return (await this.unavailable(q,'cursor_query_mismatch'));
     if (Boolean(payload.allow_observed)!==Boolean(q.allow_observed)) return (await this.unavailable(q,'cursor_coverage_mismatch'));
-    if (payload.result?.data!==undefined) return payload.result;
+    // HTTP cursors and migration shadow reads share this path. Retained pages
+    // keep their original revision/timestamps; only the wire DTO is normalized.
+    const compatible=(result:Result):Result=>q.operation==='survey' && Array.isArray(result.data)
+      ? {...result,data:result.data.map(row=>({...row,review:{...row.review,markers:[]}}))}:result;
+    if (payload.result?.data!==undefined) return compatible(payload.result);
     // Existing ten-minute cursors survive a rolling deployment. Only an offset
     // inside the stored snapshot can continue it; never fabricate an empty page.
     const legacy=cursor.match(/^([^:]+):([1-9][0-9]{0,8})$/),offset=Number(legacy?.[2]),id=legacy?.[1] || '';
     if (!legacy || !Array.isArray(payload.rows) || offset>=payload.rows.length) return (await this.unavailable(q,'cursor_invalid'));
-    return this.page(payload.result,payload.rows,id,offset);
+    return compatible(this.page(payload.result,payload.rows,id,offset));
   }
   page(result:Result,rows:any[],id:string,offset:number): Result {
     // Keep the number of client round trips bounded as inventories grow.
@@ -1045,7 +1352,11 @@ export class RepositoryState extends DurableObject<Env> {
   }
   async interval(q:Query): Promise<number> {
     if (q.operation==='pr_delta' || q.operation==='issue_delta') return 60000;
-    if (q.operation==='open_prs' || q.operation==='open_issues') return 3600000;
+    if (q.operation==='open_prs') {
+      const unknown=(await this.store.exec("SELECT s.number FROM members m "+collectionJoin(this.store)+" survey_inventory s ON s.number=m.id WHERE m.collection=? AND json_extract(s.data,'$.state')='OPEN' AND json_extract(s.data,'$.mergeable')='UNKNOWN' LIMIT 1",queryKey(q))).toArray().length>0;
+      return unknown?60000:300000;
+    }
+    if (q.operation==='open_issues') return 3600000;
     if (q.operation==='files') return 365*86400000; // head-change webhook dirties this immutable-by-head read
     if (q.operation==='reactions') {
       const active=(await this.store.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q))).toArray()[0];
@@ -1058,21 +1369,32 @@ export class RepositoryState extends DurableObject<Env> {
     return 3600000;
   }
   async priority(q:Query): Promise<number> {
-    if (q.operation.endsWith('_delta')) return 0;
+    if (q.operation==='open_prs' || q.operation.endsWith('_delta')) return 0;
     const demand=(await this.store.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q))).toArray()[0];
     if (demand?.at>Date.now()-300000) return 5;
     if (['open_prs','open_issues','repository','refs'].includes(q.operation)) return 10;
     return 20;
   }
   async noteDemand(q:Query): Promise<void> {
-    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.noteDemand.call(state,q));
     if (q.allow_observed || q.operation==='survey') return;
     const key=queryKey(q),now=Date.now();
     const prior=(await this.store.exec<any>('SELECT at FROM demand WHERE key=?',key)).toArray()[0];
+    // Demand stays hot for five minutes. Repeated cached reads need at most
+    // one refresh per minute, not a write transaction (and SQLite input gate)
+    // per reader. Check again inside the transaction to coalesce racing reads.
+    if(prior?.at>now-60000 && await this.complete(q))return;
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.noteDemand.call(state,q),'other','demand');
     await this.store.exec('INSERT INTO demand VALUES(?,?) ON CONFLICT(key) DO UPDATE SET at=excluded.at',key,now);
     const complete=(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',key)).toArray().length>0;
     if (!complete && q.operation!=='progress') {
       await this.store.exec("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?),due=CASE WHEN wait_reason IS NULL AND attempt=0 THEN MIN(due,?) ELSE due END WHERE key=?",now,now,key);
+      if(q.operation==='review_comments') {
+        const source={...q,operation:'review_threads'};
+        const background=(await this.store.exec('SELECT key FROM jobs WHERE key=? AND requested_at IS NULL',queryKey(source))).toArray().length>0;
+        // A read arriving after REST deferral needs the other-pool dependency
+        // promoted too; the parent's real quota deadline remains untouched.
+        if(background)await this.noteDemand(source);
+      }
     }
     if (prior?.at>now-300000) return;
     if (complete && q.operation!=='progress' && !(await this.store.exec('SELECT key FROM jobs WHERE key=?',key)).toArray().length) await this.enqueue(q,20,now+(await this.interval(q)));
@@ -1082,13 +1404,95 @@ export class RepositoryState extends DurableObject<Env> {
     const due=(await this.store.exec<any>('SELECT due FROM jobs WHERE key=?',key)).toArray()[0]?.due;
     const alarm=this.store.backend==='postgres'?null:await this.ctx.storage.getAlarm();
     if (due && (!alarm || alarm>due)) await this.setAlarm(Math.max(now+100,due));
+    else if(due)this.noteOrdinaryAlarm(due);
   }
-  async nextJob(): Promise<any> {
-    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.nextJob.call(state));
-    const now=Date.now(),turn=(await this.meta('repair_turn')) || 0;
-    await this.setMeta('repair_turn',turn+1);
+  private excludeRepairKeys(keys?:Set<string>,includePaths=true):{sql:string,bindings:string[]} {
+    const coordinator=this.owner.repairCoordinator;
+    const omitted=new Set([...(keys || []),...(coordinator?.owned.keys() || [])]);
+    const paths=includePaths?[
+      ...[...(coordinator?.current.paths || [])].flatMap(([key,paths])=>[...paths].map(path=>({key,path}))),
+      ...[...(coordinator?.current.capacityPaths || [])].flatMap(([key,paths])=>[...paths.keys()].map(path=>({key,path}))),
+    ]:[];
+    if(!omitted.size && !paths.length)return {sql:'',bindings:[]};
+    // One JSON binding covers a full failed upstream group on native SQLite.
+    const values=this.store.backend==='sqlite'?'SELECT value FROM json_each(?)':'SELECT jsonb_array_elements_text(CAST(? AS JSONB))';
+    let sql=omitted.size?' AND key NOT IN ('+values+')':'',bindings=omitted.size?[JSON.stringify([...omitted])]:[];
+    if(paths.length){
+      if(this.store.backend==='sqlite'){
+        sql+=" AND key||char(0)||COALESCE(api,'auto') NOT IN (SELECT value FROM json_each(?))";
+        bindings.push(JSON.stringify(paths.map(p=>p.key+'\0'+p.path)));
+      }else{
+        sql+=" AND NOT EXISTS (SELECT 1 FROM jsonb_to_recordset(CAST(? AS JSONB)) AS p(key TEXT,path TEXT) WHERE p.key=jobs.key AND p.path=COALESCE(jobs.api,'auto'))";
+        bindings.push(JSON.stringify(paths));
+      }
+    }
+    return {sql,bindings};
+  }
+  async nextJob(excluded?:Set<string>): Promise<any> {
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.nextJob.call(state,excluded),'other','job_select');
+    const now=Date.now(),counters=(await this.store.exec<any>('SELECT key,value FROM meta WHERE key IN (?,?)','repair_turn','requested_turn')).toArray();
+    const turns=new Map(counters.map(row=>[row.key,JSON.parse(row.value)])),turn=turns.get('repair_turn') || 0,requestedTurn=turns.get('requested_turn') || 0;
     const preferred=laneAt(turn,settings(this.env).weights);
-    return (await this.store.exec<any>('SELECT * FROM jobs WHERE due<=? AND lease_until<=? ORDER BY CASE WHEN lane=? THEN 0 WHEN lane=\'requested\' THEN 1 WHEN lane=\'active\' THEN 2 WHEN lane=\'verification\' THEN 3 ELSE 4 END,due,key LIMIT 1',now,now,preferred)).toArray()[0];
+    // Real reads precede maintenance in the requested lane. Give fresh real
+    // demand three turns out of four, retaining one oldest-first turn.
+    const fresh=requestedTurn%4!==0;
+    // One full weighted cycle in four keeps oldest-first ordering in every
+    // lane, including installations whose cycle length is divisible by four.
+    const omit=this.excludeRepairKeys(excluded);
+    const job=(await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=?"+omit.sql+" ORDER BY CASE WHEN lane=? AND (lane!='requested' OR requested_at IS NOT NULL) THEN 0 WHEN lane='requested' AND (requested_at IS NOT NULL OR ?='requested') THEN 1 WHEN lane='active' THEN 2 WHEN lane='requested' THEN 3 WHEN lane='verification' THEN 4 ELSE 5 END,CASE WHEN ? AND lane='requested' THEN COALESCE(requested_at,0) ELSE 0 END DESC,CASE WHEN ? AND (lane!='requested' OR requested_at IS NULL) THEN CASE WHEN key='open_prs:{}' THEN -2 WHEN key LIKE 'pr:%' THEN -1 ELSE 0 END ELSE 0 END,due,key LIMIT 1",now,now,...omit.bindings,preferred,preferred,Number(fresh),Number(Math.floor(turn/settings(this.env).weights.reduce((a,b)=>a+b,0))%4!==0))).toArray()[0];
+    if(job)await this.setMeta('repair_turn',turn+1);
+    if(job?.lane==='requested' && job.requested_at)await this.setMeta('requested_turn',requestedTurn+1);
+    return job;
+  }
+  async requestOpenCoverage():Promise<void> {
+    if(this.readOnlyQuery || this.degraded || this.repairsHeld() || this.schema!=='current')return;
+    // Public discovery never creates demand. The existing maintenance owner
+    // independently backfills bounded missing coverage for current open heads.
+    // Already requested jobs leave this selection, so each tick advances it.
+    try{await this.requestOpenPRHeaders();}catch(error){this.noteFailure('open_pr_headers',error);}
+    const join=collectionJoin(this.store);
+    const inventory=`SELECT s.number,s.data FROM members m ${join} survey_inventory s ON s.number=m.id ${join} resources r ON r.kind='pr' AND r.id=m.id WHERE m.collection=? AND r.tombstone=0 AND json_extract(s.data,'$.state')='OPEN'`;
+    const candidates=`WITH live AS (${inventory}), wanted AS (`+
+      `SELECT number,'statuses' operation,'statuses:{"sha":"'||json_extract(data,'$.headRefOid')||'"}' AS key,json_extract(data,'$.headRefOid') head FROM live WHERE json_extract(data,'$.headRefOid') IS NOT NULL UNION ALL `+
+      `SELECT number,'issue_comments','issue_comments:{"number":'||number||'}',NULL FROM live UNION ALL `+
+      `SELECT number,'review_comments','review_comments:{"number":'||number||'}',NULL FROM live UNION ALL `+
+      `SELECT number,'files','files:{"number":'||number||'}',NULL FROM live) `+
+      `SELECT w.* FROM wanted w LEFT JOIN collections c ON c.key=w.key AND c.complete=1 LEFT JOIN jobs j ON j.key=w.key WHERE (c.key IS NULL OR (w.operation='files' AND j.dirty=1)) AND (j.key IS NULL OR j.lane!='requested') ORDER BY CAST(w.number AS INTEGER) DESC,w.operation LIMIT 64`;
+    const missing=(await this.store.exec<any>(candidates,queryKey({operation:'open_prs'}))).toArray();
+    if(!missing.length)return;
+    const repo=(await this.meta('repository'))?.name;
+    if(!repo)return;
+    // Scan outside the writer transaction. enqueueMany rechecks completion,
+    // demand and job state atomically before promoting the bounded selection.
+    await this.enqueueMany(missing.map(row=>{const args:Record<string,string|number>=row.operation==='statuses'?{sha:row.head}:{number:decimalArgument(row.number)};return {q:{repository:repo,operation:row.operation,args},priority:5};}),true);
+  }
+  private async requestOpenPRHeaders(numbers?:string[]):Promise<void> {
+    const now=Date.now(),join=collectionJoin(this.store),rest=(await this.meta('pr_inventory_api'))==='core';
+    // Complete coverage does not imply a current head/base or mergeability.
+    // Use upstream verification, not webhook observation time: label/comment
+    // activity must not postpone a mergeability refresh indefinitely.
+    const filter=numbers?' AND r.number IN ('+numbers.map(()=>'?').join(',')+')':'';
+    const candidates=`SELECT r.number id FROM members m ${join} survey_inventory r ON r.number=m.id LEFT JOIN collections c ON c.key='pr:{"number":'||r.number||'}' LEFT JOIN jobs j ON j.key='pr:{"number":'||r.number||'}' WHERE m.collection=? AND json_extract(r.data,'$.state')='OPEN' AND (c.key IS NULL OR (?=1 AND json_extract(r.data,'$.mergeable')='UNKNOWN' AND c.verified<?)) AND (j.key IS NULL OR (j.lane!='requested' AND j.started IS NULL))`+filter+' ORDER BY COALESCE(c.verified,0),r.number LIMIT 64';
+    const rows=(await this.store.exec<any>(candidates,queryKey({operation:'open_prs'}),Number(rest),now-60000,...(numbers || []))).toArray();
+    if(!rows.length)return;
+    // Recheck the bounded selection under the existing writer, as coverage
+    // promotion does. Preserve leases, retry deadlines and real demand.
+    if(!this.store.transactional)return this.atomic(state=>state.requestOpenPRHeaders(rows.map(row=>row.id)),'enqueue');
+    const repo=(await this.meta('repository'))?.name;if(!repo)return;
+    const requests=rows.map(row=>({q:{repository:repo,operation:'pr',args:{number:decimalArgument(row.id)}},priority:0,dirty:true}));
+    await this.enqueueMany(requests);
+    await this.store.exec("UPDATE jobs SET lane='requested',requested_at=CASE WHEN EXISTS (SELECT 1 FROM demand d WHERE d.key=jobs.key AND d.at>?) THEN requested_at ELSE NULL END WHERE key IN ("+requests.map(()=>'?').join(',')+')',now-300000,...requests.map(row=>queryKey(row.q)));
+  }
+  private async dormantStatusHeads(heads:string[]):Promise<Set<string>> {
+    if(!heads.length)return new Set();
+    const type=this.store.backend==='postgres'?'string':'text';
+    // Materialize only compact indexed projections, not whole PR bodies. This
+    // prevents PostgreSQL from repeating the sanitized body parse per predicate.
+    const head="CASE WHEN json_type(r.data,'$.headRefOid')='"+type+"' THEN json_extract(r.data,'$.headRefOid') END";
+    const valid=this.store.backend==='postgres'?"head ~ '^[0-9a-fA-F]{40}$'":"length(head)=40 AND head NOT GLOB '*[^0-9a-fA-F]*'";
+    const rows=(await this.store.exec<any>("WITH status_heads AS MATERIALIZED (SELECT h.sha,json_extract(r.data,'$.state') state,"+head+" head FROM head_prs h LEFT JOIN resources r ON r.kind='pr' AND r.id=h.number WHERE h.sha IN ("+heads.map(()=>'?').join(',')+")) SELECT sha,COUNT(*) total,SUM(CASE WHEN state IN ('CLOSED','MERGED') OR (state='OPEN' AND "+valid+" AND lower(head)!=lower(sha)) THEN 1 ELSE 0 END) dormant FROM status_heads GROUP BY sha",...heads)).toArray();
+    const associated=new Set(rows.map(row=>row.sha));
+    return new Set([...rows.filter(row=>row.total>0 && row.dormant===row.total).map(row=>row.sha),...heads.filter(sha=>!associated.has(sha))]);
   }
   async dormant(q:Query): Promise<boolean> {
     const demand=(await this.store.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q))).toArray()[0];
@@ -1100,8 +1504,7 @@ export class RepositoryState extends DurableObject<Env> {
       if (row?.tombstone) return true;
       if (row?.parent) numbers=[row.parent];
     } else if (q.operation==='statuses') {
-      const counts=(await this.store.exec<any>("SELECT COUNT(*) total,SUM(CASE WHEN json_extract(r.data,'$.state') IN ('CLOSED','MERGED') THEN 1 ELSE 0 END) closed FROM head_prs h LEFT JOIN resources r ON r.kind='pr' AND r.id=h.number WHERE h.sha=?",String(q.args?.sha))).one();
-      return counts.total>0 && counts.closed===counts.total;
+      return (await this.dormantStatusHeads([String(q.args?.sha)])).has(String(q.args?.sha));
     }
     if (!numbers.length) return false;
     return (await Promise.all(numbers.map(async number=>{
@@ -1111,7 +1514,7 @@ export class RepositoryState extends DurableObject<Env> {
     }))).every(Boolean);
   }
   async finishJob(job:any,q:Query,etag?:string): Promise<void> {
-    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.finishJob.call(state,job,q,etag));
+    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.finishJob.call(state,job,q,etag),'repair');
     const current=(await this.store.exec<any>('SELECT generation,priority,requested_at,lane FROM jobs WHERE key=?',job.key)).toArray()[0];
     const again=current?.generation>(job.start_generation || 0);
     // A newer webhook can arrive while pages are being fetched. Completing the
@@ -1122,8 +1525,9 @@ export class RepositoryState extends DurableObject<Env> {
       await this.metric('requested_latency_ms',q,'requested',Date.now()-requested);
       if(job.page===1 && !job.nested) await this.metric('requested_single_latency_ms',q,'requested',Date.now()-requested);
     }
-    await this.store.exec('UPDATE jobs SET due=?,priority=?,lane=?,dirty=?,started=NULL,cursor=NULL,page=1,api=NULL,etag=?,attempt=0,wait_reason=NULL,nested=NULL,requested_at=? WHERE key=?',again?Date.now():Date.now()+(await this.interval(q)),again?current.priority:(await this.priority(q)),(await this.lane(q,again)),Number(again),etag || null,again?current?.requested_at || null:null,job.key);
-    if (!again && (await this.dormant(q))) await this.store.exec('DELETE FROM jobs WHERE key=?',job.key);
+    const obsolete=!again && (await this.obsoleteJobs([{...job,requested_at:null}])).length>0;
+    await this.store.exec('UPDATE jobs SET due=?,priority=?,lane=?,dirty=?,started=NULL,cursor=NULL,page=1,api=NULL,etag=?,attempt=0,wait_reason=NULL,nested=NULL,requested_at=? WHERE key=?',again?Date.now():Date.now()+(await this.interval(q)),again?current.priority:(await this.priority(q)),(again && current?.lane==='requested'?'requested':await this.lane(q,again)),Number(again),etag || null,again?current?.requested_at || null:null,job.key);
+    if(obsolete)await this.store.exec("DELETE FROM jobs WHERE key=? AND COALESCE(generation,0)=? AND COALESCE(lease_id,'')=?",job.key,current?.generation || 0,job.lease_id || '');
   }
   async nextRefreshCursor(q:Query,result:any,started:number):Promise<string|undefined>{
     let next=result.cursor;
@@ -1135,7 +1539,136 @@ export class RepositoryState extends DurableObject<Env> {
     return next;
   }
   async refresh(job:any,supplied?:any): Promise<void> {
+    const prepared=await this.prepareRefresh(job,supplied);
+    try{await this.publishPrepared([prepared],false);}catch(error){if(!(error instanceof LeaseLost))throw error;}
+  }
+  private async ensurePRValidators():Promise<void> {
+    if(await this.meta('pr_validator_version')===1)return;
+    await this.atomic(async state=>{
+      if(await state.meta('pr_validator_version')===1)return;
+      await state.store.exec("UPDATE jobs SET etag=NULL WHERE key LIKE 'pr:%'");
+      await state.store.exec("UPDATE collections SET etag=NULL,verified=0 WHERE operation='pr'");
+      await state.setMeta('pr_validator_version',1);
+    },'other','pr_validators');
+  }
+  private async rearmPR(job:any):Promise<void> {
+    await this.store.exec('UPDATE jobs SET started=NULL,etag=NULL,dirty=1,due=?,cursor=NULL,page=1,api=NULL,wait_reason=NULL,attempt=0 WHERE key=?',Date.now(),job.key);
+  }
+  // Called inside the publication transaction by both read paths.
+  private async publishPR(data:any,started:number,expectedRevision?:number):Promise<boolean> {
+    const repo=await this.meta('repository'),number=String(data.number);
+    const old=(await this.store.exec<any>("SELECT data,revision FROM resources WHERE kind='pr' AND id=?",number)).toArray()[0];
+    const prior=old?await this.decode(old.data):null;
+    if(expectedRevision!==undefined && Number(old?.revision || 0)!==expectedRevision && !equivalentPR(prior,data))return false;
+    if(!await this.put('pr',number,data,started,false,number))return false;
+    // The numeric resource is authoritative. Remove the legacy alias rather
+    // than letting two independently ordered snapshots disagree.
+    const q={repository:repo.name,operation:'pr',args:{number:data.number}},key=queryKey(q);
+    await this.store.exec('DELETE FROM resources WHERE kind=? AND id=?','pr',key);
+    await this.membership(queryKey({operation:'open_prs'}),number,data.state==='OPEN');
+    if(prior?.headRefOid!==data.headRefOid){
+      const files={repository:repo.name,operation:'files',args:{number:data.number}};
+      await this.store.exec('UPDATE collections SET complete=0,etag=NULL WHERE key=?',queryKey(files));
+      await this.enqueue(files,1,Date.now(),true);
+      if(data.headRefOid)await this.enqueue({repository:repo.name,operation:'statuses',args:{sha:data.headRefOid}},1,Date.now(),true);
+    }
+    return true;
+  }
+  private async finishSynchronousPR(job:any,q:Query):Promise<boolean> {
+    // Only the unchanged, unowned scalar obligation can be satisfied here.
+    // Even an expired lease belongs to recovery; never complete it for its owner.
+    const eligible=(row:any)=>row && Number.isSafeInteger(row.generation) && row.generation>0 && Number.isSafeInteger(row.created_at) && row.created_at>0
+      && !row.lease_id && row.lease_until===0 && row.started===null
+      && row.page===1 && row.cursor===null && row.nested===null;
+    if(!eligible(job))return false;
+    const [jobs,demand]=await this.store.batch([{sql:'SELECT * FROM jobs WHERE key=?',bindings:[job.key]},{sql:'SELECT at FROM demand WHERE key=?',bindings:[job.key]}]);
+    const current=jobs.toArray()[0];
+    if(!eligible(current) || ['generation','created_at','start_generation','attempt','wait_reason','api','due','requested_at'].some(key=>current[key]!==job[key]))return false;
+    // Reuse committed transaction-local facts across the existing completion,
+    // interval and priority rules. No process-wide cache or new scheduling rule.
+    const state=Object.create(this) as RepositoryState,cache=new ReadCacheStore(this.store);state.store=cache;
+    cache.seed('SELECT generation,priority,requested_at,lane FROM jobs WHERE key=?',[job.key],[current]);
+    cache.seed('SELECT at FROM demand WHERE key=?',[job.key],demand.toArray());
+    // Keep synchronous completion separate from background requested latency.
+    state.metric=(event,query,lane,value)=>this.metric('synchronous_'+event,query,lane,value);
+    await state.finishJob({...current,start_generation:job.generation},q);
+    return true;
+  }
+  async refreshPR(input:{repository:string,number:number,expected_head:string}):Promise<any> {
+    const requestedAt=Date.now(),q={repository:input.repository,operation:'pr',args:{number:input.number}};
+    // Failure reporting must still work when reading the database does not.
+    const unavailable=(reason:string,retry_at=Date.now()+30000)=>({version:1,repository:input.repository,operation:'pr',status:'unavailable',complete:false,revision:0,reason,retry_at});
+    const current=(await this.store.exec<any>("SELECT r.data,r.revision,c.verified,c.revision AS checked_revision FROM resources r LEFT JOIN collections c ON c.key=? AND c.complete=1 WHERE r.kind='pr' AND r.id=?",queryKey(q),String(input.number))).toArray()[0];
+    if(current){const data=await this.decode(current.data);if(data.headRefOid && data.headRefOid!==input.expected_head)return {version:1,repository:input.repository,operation:'pr',status:'ok',complete:true,outcome:'already-changed',revision:await this.revision(),data};}
+    // Reuse only a full verification that still covers this exact stored
+    // revision. A newer webhook invalidates it even inside the short window.
+    if(current && await this.meta('pr_validator_version')===1){
+      if(current.verified>Date.now()-30000 && Number(current.checked_revision)>=Number(current.revision))return {version:1,repository:input.repository,operation:'pr',status:'ok',complete:true,outcome:'recently-verified',revision:await this.revision(),verified_at:current.verified,data:await this.decode(current.data)};
+    }
+    let flight=this.owner.prRefreshes.get(input.number);
+    if(!flight){
+      const timing:Record<string,number>={lookup_ms:Date.now()-requestedAt};
+      const measure=async<T>(phase:string,work:()=>Promise<T>):Promise<T>=>{
+        const start=Date.now();try{return await work();}finally{timing[phase]=Date.now()-start;}
+      };
+      flight=(async()=>{
+        try{
+          await measure('validators_ms',()=>this.ensurePRValidators());
+          // Existing jobs provide restart recovery. No network I/O owns a writer.
+          const recovery=await measure('enqueue_ms',()=>this.atomic(async state=>{
+            await state.enqueue(q,0,Date.now(),true);
+            return (await state.store.exec<any>("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?) WHERE key=? RETURNING *",Date.now(),queryKey(q))).toArray()[0];
+          },'other','pr_refresh_enqueue'));
+          const {repo,revision}=await measure('read_start_ms',async()=>({
+            repo:await this.meta('repository'),
+            revision:Number((await this.store.exec<any>("SELECT revision FROM resources WHERE kind='pr' AND id=?",String(input.number))).toArray()[0]?.revision || 0)
+          }));
+          const started=Date.now();
+          const {response,result}=await measure('github_ms',async()=>{
+            const response=await stub(this.env.INSTALLATIONS,repo.installation).fetch('https://internal/read',{method:'POST',body:JSON.stringify({repository:repo,query:q,page:1})});
+            return {response,result:await response.json() as any};
+          });
+          if(result.deferred)await this.noteQuotaRestriction(result);
+          if(!response.ok || result.deferred || result.unavailable || result.unchanged || !result.data || result.data.number!==input.number || !/^[a-f0-9]{40}$/.test(result.data.headRefOid || ''))return unavailable(result.category || result.reason || 'refresh_unavailable',result.retry_at);
+          const metrics=new RepairMetrics();
+          const committed=await measure('publish_ms',()=>this.atomic(async state=>{
+            state.repairMetrics=metrics;
+            if(!await state.publishPR(result.data,started,revision))return {accepted:false,completed:false};
+            await state.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET complete=1,verified=excluded.verified,revision=excluded.revision,etag=NULL',queryKey(q),'pr',JSON.stringify(q.args),1,Date.now(),await state.revision(),null);
+            return {accepted:true,completed:await state.finishSynchronousPR(recovery,q)};
+          },'other','pr_refresh_publish'));
+          try{this.repairMetrics.merge(metrics);}catch{}
+          try{log('pr_refresh_recovery',{number:input.number,accepted:committed.accepted,completed:committed.completed});}catch{}
+          return committed.accepted?{version:1,repository:input.repository,operation:'pr',status:'ok',complete:true,outcome:'refreshed',revision:await measure('reply_ms',()=>this.revision()),verified_at:Date.now(),data:result.data}:unavailable('superseded',Date.now()+1000);
+        }catch(error){this.noteFailure('refresh_pr',error);return unavailable('refresh_failed');}
+      })().then(result=>({...result,timing_ms:{...timing,total_ms:Date.now()-requestedAt}}));
+      this.owner.prRefreshes.set(input.number,flight);
+      const owned=flight,began=Date.now();
+      void flight.then(result=>{try{log("pr_refresh",{number:input.number,outcome:result.outcome || result.reason || "failed",elapsed_ms:Date.now()-began,timing_ms:result.timing_ms});}catch{}},()=>{});
+      const cleanup=()=>{if(this.owner.prRefreshes.get(input.number)===owned)this.owner.prRefreshes.delete(input.number);};
+      // A stalled binding must not make this instance's shared promise the
+      // permanent owner. Late publication still obeys the revision fence.
+      const expiry=setTimeout(cleanup,60000);
+      const settled=()=>{clearTimeout(expiry);cleanup();};
+      void flight.then(settled,settled);
+      this.owner.ctx.waitUntil?.(flight);
+    }
+    // Wait for the actual read/publication result. A slow successful correction
+    // must not become an artificial failure while it is still committing.
+    return flight;
+  }
+  private async prepareRefresh(job:any,supplied?:any):Promise<PreparedRefresh> {
     const repo=(await this.meta('repository')), q:Query=JSON.parse(job.query);
+    if(q.operation==='pr' && !supplied){
+      await this.ensurePRValidators();
+      // A quota deferral's original job start is not the HTTP observation start.
+      const [resources,validators]=await this.store.batch([{sql:"SELECT revision FROM resources WHERE kind='pr' AND id=?",bindings:[String(q.args?.number)]},{sql:'SELECT etag FROM jobs WHERE key=?',bindings:[job.key]}]);
+      job={...job,pr_revision:Number(resources.toArray()[0]?.revision || 0),started:Date.now(),etag:validators.toArray()[0]?.etag};
+      // Preserve the existing standalone write semantics (including migration
+      // handling); the operation name only attributes the PostgreSQL admission.
+      if(this.store.backend==='postgres')await this.store.transaction(tx=>tx.exec('UPDATE jobs SET started=? WHERE key=?',job.started,job.key),'other','pr_read_start');
+      else await this.store.exec('UPDATE jobs SET started=? WHERE key=?',job.started,job.key);
+    }
     const started=job.started || Date.now();
     if (!job.started) {
       job.start_generation=job.generation || 0;
@@ -1149,18 +1682,19 @@ export class RepositoryState extends DurableObject<Env> {
     }
     const response=supplied?null:await stub(this.env.INSTALLATIONS,repo.installation).fetch('https://internal/read',{method:'POST',headers:{'x-request-id':crypto.randomUUID()},body:JSON.stringify({repository:repo,query:upstream,cursor:job.cursor,page:job.page,api:job.api,nested,etag:job.page===1 && !job.nested && q.operation!=='workflow_runs'?job.etag:undefined})});
     const result:any=supplied?{...supplied}:await response!.json();
+    if(result.deferred)await this.noteQuotaRestriction(result);
     this.traceRepair('refresh_response',job);
     const objects=new Map<string,string>(),encodings=new Map<string,string>();
     const prefix=`staging/${repo.id}/${encodeURIComponent(job.key)}/${started}/`;
     const publish=(!response || response.ok) && !result.continuation && !result.restart && !result.deferred && !result.unavailable && !result.error && !result.unchanged && result.data!==undefined;
     const preparedNext=publish?await this.nextRefreshCursor(q,result,started):undefined;
-    const checkpoint=publish?await this.meta(stagingStateKey(job.key)):undefined;
+    const checkpoint=publish && job.page>1?await this.meta(stagingStateKey(job.key)):undefined;
     // Checkpointed pages are immutable. Load them before taking the publication
     // lock; the lease is checked again inside the transaction before use.
     if(publish && !preparedNext){
       this.traceRepair('publication_load_pages',job);
       const pages=Array.from({length:Math.max(0,(job.page || 1)-1)},(_,i)=>i+1);
-      for(let offset=0;offset<pages.length;offset+=8)await Promise.all(pages.slice(offset,offset+8).map(async page=>{const object=await this.env.ARCHIVE.get(stagedPageKey(checkpoint,prefix+page,started,page));if(!object)throw Error('staging page missing');objects.set(prefix+page,await object.text());}));
+      for(let offset=0;offset<pages.length;offset+=8)await this.repairAll(pages.slice(offset,offset+8).map(async page=>{const object=await this.env.ARCHIVE.get(stagedPageKey(checkpoint,prefix+page,started,page));if(!object)throw Error('staging page missing');objects.set(prefix+page,await object.text());}));
     }
     let staged:{key:string,expires:number}|undefined;
     if(publish){const text=JSON.stringify(result.data);staged={key:prefix+job.page+'-'+crypto.randomUUID(),expires:Date.now()+86400000};await this.env.ARCHIVE.put(staged.key,text,{customMetadata:{expires:String(staged.expires)}});objects.set(prefix+job.page,text);}
@@ -1172,20 +1706,139 @@ export class RepositoryState extends DurableObject<Env> {
     }
     if(result.continuation){const text=JSON.stringify(result.continuation);if(new TextEncoder().encode(text).length>=1500000)encodings.set('staging:'+text,await this.encode(result.continuation,Date.now()+86400000));}
     this.traceRepair('refresh_transaction',job,sizes);
-    try {await this.atomic(state=>{
-      state.preparedEncodings=encodings;
-      const archive=state.env.ARCHIVE;
-      state.env={...state.env,ARCHIVE:new Proxy(archive,{get(target,key){if(key==='get')return async(name:string,...args:any[])=>{
-        if(!objects.has(name))return (target.get as any)(name,...args);
-        // Publication consumes each prepared page once; the immutable R2 key remains durable for retry.
-        const consume=()=>{const text=objects.get(name)!;objects.delete(name);return text;};
-        return {text:async()=>consume(),json:async()=>JSON.parse(consume())};
-      };const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;}})};
-      return RepositoryState.prototype.applyRefresh.call(state,job,q,repo,started,response,result,preparedNext,staged);
-    });this.traceRepair('refresh_committed',job);}
-    catch(error){if(!(error instanceof LeaseLost))throw error;}
+    return {job,q,repo,started,response,result,preparedNext,staged,objects,encodings};
   }
-  async applyRefresh(job:any,q:Query,repo:any,started:number,response:Response|null,result:any,preparedNext:string|undefined,staged:{key:string,expires:number}|undefined):Promise<void> {
+  private async publishPrepared(input:PreparedRefresh[],grouped:boolean,attempted?:any[]):Promise<PreparedRefresh[]> {
+    const metrics=new RepairMetrics(),committed:PreparedRefresh[]=[];let consumed=0;
+    await this.atomic(async parent=>{
+      const base=parent.store,leaseRows=new Map<string,any>(),collections=new Set<string>(),demands=new Map<string,any>();
+      if(grouped) {
+        const keys=input.map(p=>p.job.key),where=' WHERE key IN ('+keys.map(()=>'?').join(',')+')';
+        const [jobs,cs,ds]=await base.batch([{sql:'SELECT * FROM jobs'+where,bindings:keys},{sql:'SELECT key FROM collections'+where+' AND complete=1',bindings:keys},{sql:'SELECT key,at FROM demand'+where,bindings:keys}]);
+        for(const row of jobs.toArray())leaseRows.set(row.key,row);
+        for(const row of cs.toArray())collections.add(row.key);
+        for(const row of ds.toArray())demands.set(row.key,row);
+      }
+      for(const p of input) {
+        // Let queued non-publication callers reach the writer at a whole-history
+        // boundary. Always consume one member, then immediately requeue the rest.
+        if(grouped && committed.length>0 && (base.queuedOtherWork || 0)>0)break;
+        consumed++;
+        attempted?.push(p.job);
+        if(grouped && p.job.lease_id && leaseRows.get(p.job.key)?.lease_id!==p.job.lease_id)continue;
+        const state=Object.create(parent) as RepositoryState;
+        // The transaction owns the shared buffer/revision/change journal. Each
+        // member owns its read cache and consumable preparation state.
+        state.store=grouped?new ReadCacheStore(base):base;
+        if(grouped) {
+          const cache=state.store as ReadCacheStore,key=p.job.key,row=leaseRows.get(key);
+          cache.seed('SELECT lease_id FROM jobs WHERE key=?',[key],row?[{lease_id:row.lease_id}]:[]);
+          cache.seed('SELECT key FROM collections WHERE key=? AND complete=1',[key],collections.has(key)?[{key}]:[]);
+          cache.seed('SELECT at FROM demand WHERE key=?',[key],demands.has(key)?[{at:demands.get(key).at}]:[]);
+        }
+        const objects=grouped?new Map(p.objects):p.objects;
+        state.preparedEncodings=grouped?new Map(p.encodings):p.encodings;
+        state.repairMetrics=metrics;
+        const archive=state.env.ARCHIVE;
+        state.env={...state.env,ARCHIVE:new Proxy(archive,{get(target,key){if(key==='get')return async(name:string,...args:any[])=>{
+          if(!objects.has(name))return (target.get as any)(name,...args);
+          const consume=()=>{const text=objects.get(name)!;objects.delete(name);return text;};
+          return {text:async()=>consume(),json:async()=>JSON.parse(consume())};
+        };const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;}})};
+        p.memberRetryAt=await RepositoryState.prototype.applyRefresh.call(state,p.job,p.q,p.repo,p.started,p.response,grouped?{...p.result}:p.result,p.preparedNext,p.staged) || undefined;
+        committed.push(p);
+      }
+      await this.releaseLeases(parent.store,committed.map(p=>p.job));
+    },'publication');
+    for(const p of input.slice(0,consumed)){
+      const changed=committed.includes(p),result=p.result;
+      const effect=!changed?'none':p.memberRetryAt && p.memberRetryAt>Date.now()?'member-retry':result.deferred || result.unavailable?(result.category==='capacity' && result.scope?.kind==='installation'?'capacity':'defer'):result.restart || result.api!==p.job.api && p.job.page>1 && p.job.api?'restart':'progress';
+      this.settleRepairJobs([p.job],effect);
+    }
+    if(grouped)try{
+      const stats=this.owner.groupedPublication ||= {scope:'repository_instance_since_restart',since:Date.now(),admissions:0,members:0,queued_work_yields:0,max_members:0};
+      stats.admissions++;stats.members+=committed.length;stats.queued_work_yields+=Number(consumed<input.length);stats.max_members=Math.max(stats.max_members,committed.length);
+    }catch{}
+    try{this.repairMetrics.merge(metrics);}catch{}
+    for(const p of committed){p.objects.clear();p.encodings.clear();p.result.data=undefined;this.traceRepair('refresh_committed',p.job);}
+    return input.slice(consumed);
+  }
+  private async releaseLeases(store:RepositoryStore,jobs:any[]):Promise<void> {
+    const size=store.backend==='sqlite'?50:256;
+    for(let offset=0;offset<jobs.length;offset+=size){const chunk=jobs.slice(offset,offset+size);await store.exec('UPDATE jobs SET lease_id=NULL,lease_until=0 WHERE '+chunk.map(()=>'(key=? AND lease_id=?)').join(' OR '),...chunk.flatMap(j=>[j.key,j.lease_id]));}
+  }
+  private settleRepairJobs(jobs:any[],effect:RepairEffect='none'):void {
+    if(!jobs.length)return;
+    for(const job of jobs)this.dispatchSettled?.add(job.key);
+    if(this.repairGroup)this.owner.repairCoordinator?.settled(jobs,effect);
+    const coordinator=this.owner.repairCoordinator,group=this.repairGroup;
+    if(effect==='capacity' && coordinator && group?.capacityRetryAt && coordinator.wakeSequence>group.wakeAtStart){
+      if(group.capacityRetryAt>Date.now())this.owner.scheduleCapacityDeadline(group.capacityRetryAt);
+      else void coordinator.resumeCapacity();
+    }
+  }
+  private async renewRepairLeases():Promise<{key:string,lease_id:string,lease_until:number}[]> {
+    const owned=this.owner.repairCoordinator?.owned;
+    if(!owned?.size)return [];
+    const now=Date.now(),interval=settings(this.env).lease_ms;
+    const near=[...owned.values()].filter(job=>job.lease_until<=now+interval/2);
+    if(!near.length)return [];
+    const values=JSON.stringify(near.map(j=>({key:j.key,token:j.lease_id})));
+    if(this.store.backend==='sqlite')return (await this.store.exec<any>("UPDATE jobs SET lease_until=? WHERE key IN (SELECT j.key FROM json_each(?) o CROSS JOIN jobs j ON j.key=json_extract(o.value,'$.key') WHERE j.lease_id=json_extract(o.value,'$.token') AND j.lease_until<=?) RETURNING key,lease_id,lease_until",now+interval,values,now+interval/2)).toArray();
+    return (await this.store.exec<any>('UPDATE jobs SET lease_until=? WHERE lease_until<=? AND EXISTS (SELECT 1 FROM jsonb_to_recordset(CAST(? AS JSONB)) AS o(key TEXT,token TEXT) WHERE o.key=jobs.key AND o.token=jobs.lease_id) RETURNING key,lease_id,lease_until',now+interval,now+interval/2,values)).toArray();
+  }
+  private async publishBatch(jobs:any[],results:any[]):Promise<void> {
+    let pending:PreparedRefresh[]=[],waits:{job:any,result:any}[]=[],failures:ReturnType<RepositoryState['retryWait']>[]=[],bytes=0,rows=0;
+    const apply=async(members:any[],work:()=>Promise<unknown>)=>{try{await work();}catch(error){throw error instanceof PublicationFailure?error:new PublicationFailure(members,error);}};
+    const unsafePreparation=(error:unknown)=>this.degraded || this.repairsHeld() || (error instanceof StoreUnavailable || error instanceof StoreFenced || /^(backend_fenced|database_unavailable|storage_full|storage_error|schema_unavailable)$/.test(classify(error))) && !canReplayPublication(error);
+    const flushFailures=async()=>{if(failures.length){const input=failures;failures=[];for(const expired of [false,true]){const chunk=input.filter(x=>x.expired===expired);if(chunk.length)await apply(chunk.map(x=>x.job),()=>this.persistWaits(chunk,expired));}}};
+    const flushWaits=async()=>{if(waits.length){const input=waits;waits=[];await apply(input.map(x=>x.job),()=>this.deferJobs(input));}};
+    const flush=async()=>{
+      await flushFailures();
+      if(!pending.length)return;
+      let remaining=pending;pending=[];bytes=0;rows=0;
+      while(remaining.length){
+       const chunk=remaining,attempted:any[]=[];remaining=[];
+       try{remaining=await this.publishPrepared(chunk,true,attempted);}
+       catch(error){
+        if(!canReplayPublication(error))throw new PublicationFailure(attempted.length?attempted:chunk.map(p=>p.job),error);
+        // Group attempts retain immutable input. Every individual fallback gets
+        // fresh state and its own error path after the confirmed rollback.
+        for(const p of chunk)await apply([p.job],async()=>{
+          try{await this.publishPrepared([p],true);}catch(cause){
+            if(!(cause instanceof LeaseLost)){if(!canReplayPublication(cause))throw cause;await this.retryJob(p.job,cause);}
+          }
+        });
+       }
+      }
+    };
+    for(let index=0;index<jobs.length;index++) {
+      const job=jobs[index],result=results[index] || {unavailable:true};
+      if(result.deferred || result.unavailable){await flushFailures();await flush();waits.push({job,result});results[index]=undefined;continue;}
+      await flushWaits();
+      const scalarPR=JSON.parse(job.query).operation==='pr';
+      const flat=(scalarPR || ['issue_comments','statuses','reactions'].includes(JSON.parse(job.query).operation)) && job.page===1 && !job.nested && !result.cursor && !result.continuation && !result.restart && !result.deferred && !result.unavailable && !result.error && !result.unchanged && (scalarPR?result.data && typeof result.data==='object' && !Array.isArray(result.data):Array.isArray(result.data));
+      const size=flat?new TextEncoder().encode(JSON.stringify(result.data)).length:0,count=flat?(scalarPR?1:result.data.length):0;
+      if(!flat || size>PUBLICATION_BYTES || count>PUBLICATION_ROWS) {
+        await flush();
+        let prepared:PreparedRefresh;
+        try{prepared=await this.prepareRefresh(job,result);}catch(error){
+          if(unsafePreparation(error)){await flushFailures();throw new PublicationFailure([job],error);}
+          failures.push(this.retryWait(job,error));results[index]=undefined;continue;
+        }
+        try{await this.publishPrepared([prepared],false);}catch(error){
+          if(!(error instanceof LeaseLost)){if(!canReplayPublication(error))throw new PublicationFailure([job],error);failures.push(this.retryWait(job,error));}
+        }finally{results[index]=undefined;}
+        continue;
+      }
+      if(pending.length>=PUBLICATION_ITEMS || bytes+size>PUBLICATION_BYTES || rows+count>PUBLICATION_ROWS)await flush();
+      try{pending.push(await this.prepareRefresh(job,result));bytes+=size;rows+=count;}
+      catch(error){if(unsafePreparation(error)){await flushFailures();throw new PublicationFailure([job],error);}failures.push(this.retryWait(job,error));}
+      finally{results[index]=undefined;}
+    }
+    await flush();await flushWaits();await flushFailures();
+  }
+  async applyRefresh(job:any,q:Query,repo:any,started:number,response:Response|null,result:any,preparedNext:string|undefined,staged:{key:string,expires:number}|undefined):Promise<number|void> {
     if (job.lease_id && (await this.store.exec<any>('SELECT lease_id FROM jobs WHERE key=?',job.key)).toArray()[0]?.lease_id!==job.lease_id) throw new LeaseLost();
     if (result.continuation) {
       const nested=await this.encode(result.continuation,Date.now()+86400000);
@@ -1203,15 +1856,25 @@ export class RepositoryState extends DurableObject<Env> {
         // The existing thread reconciler supplies the same flat history. Preserve
         // the REST cooldown while promoting that dependency in the other pool.
         const source={...q,operation:'review_threads'};
-        const existing=(await this.store.exec<any>('SELECT started,dirty FROM jobs WHERE key=?',queryKey(source))).toArray()[0];
-        await this.noteDemand(source);await this.enqueue(source,1,Date.now(),!existing || !existing.started && !existing.dirty);
-        if(!(await this.complete(q))) await this.store.exec("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?) WHERE key=?",job.requested_at || Date.now(),queryKey(source));
+        const existing=(await this.store.exec<any>('SELECT started,dirty,lane FROM jobs WHERE key=?',queryKey(source))).toArray()[0];
+        // A real read may have arrived after the claim. Preserve that demand,
+        // while maintenance dependencies remain background work with no clock.
+        const parent=(await this.store.exec<any>('SELECT requested_at,lane FROM jobs WHERE key=?',job.key)).toArray()[0],requested=parent?.requested_at;
+        if(requested)await this.noteDemand(source);
+        await this.enqueue(source,1,Date.now(),!existing || !existing.started && !existing.dirty);
+        if(!(await this.complete(q)) && (requested || parent?.lane==='requested' && existing?.lane!=='active')) await this.store.exec("UPDATE jobs SET lane='requested',requested_at=COALESCE(requested_at,?) WHERE key=?",requested || null,queryKey(source));
       }
-      await this.store.exec('UPDATE jobs SET due=?,attempt=attempt+?,wait_reason=? WHERE key=?',result.retry_at || Date.now()+Math.min(3600000,60000*2**Math.min(6,job.attempt)),capacity?0:1,result.category || result.reason || 'upstream',job.key);
+      const due=result.retry_at || Date.now()+Math.min(3600000,60000*2**Math.min(6,job.attempt));
+      await this.store.exec('UPDATE jobs SET due=?,attempt=attempt+?,wait_reason=? WHERE key=?',due,capacity?0:1,result.category || result.reason || 'upstream',job.key);
       await this.metric(capacity?'capacity_wait':'retry',q,job.lane || 'verification');
-      if(!capacity) await this.setMeta('last_upstream_failure',{at:Date.now(),operation:q.operation,category:result.category || result.reason || 'upstream',request_id:result.request_id}); return;
+      if(!capacity) await this.setMeta('last_upstream_failure',{at:Date.now(),operation:q.operation,category:result.category || result.reason || 'upstream',request_id:result.request_id}); return memberUnavailable(result)?due:undefined;
     }
     if (result.unchanged) {
+      if(q.operation==='pr'){
+        const row=(await this.store.exec<any>("SELECT observed FROM resources WHERE kind='pr' AND id=?",String(q.args?.number))).toArray()[0];
+        const validator=(await this.store.exec<any>('SELECT etag FROM jobs WHERE key=?',job.key)).toArray()[0]?.etag;
+        if(!job.etag || validator!==job.etag || !row || row.observed>started){await this.rearmPR(job);return;}
+      }
       await this.store.exec('DELETE FROM meta WHERE key=?',stagingStateKey(job.key));
       await this.store.exec('UPDATE collections SET verified=? WHERE key=?',Date.now(),job.key);
       await this.finishJob(job,q,job.etag); return;
@@ -1247,8 +1910,10 @@ export class RepositoryState extends DurableObject<Env> {
     const kind=this.kind(q), memberIDs=new Set<string>(), acceptedIDs=new Set<string>();
     const changedNumbers=new Set<number>(), changedHeads=new Set<number>();
     if (scalar!==undefined || ['pr','repository','statuses'].includes(q.operation)) {
-      await this.put(q.operation,job.key,scalar===undefined?rows:scalar,started);
-      if (q.operation==='pr' && scalar?.number) await this.put('pr',String(scalar.number),scalar,started,false,String(scalar.number));
+      if(q.operation==='pr'){
+        if(!scalar?.number || String(scalar.number)!==String(q.args?.number))throw Error('malformed PR response');
+        if(!await this.publishPR(scalar,started,job.pr_revision)){await this.rearmPR(job);return;}
+      }else await this.put(q.operation,job.key,scalar===undefined?rows:scalar,started);
     } else {
       for await (const row of this.publicationRows(q,rows,publicationStore)) {
         if (q.operation.startsWith('recent_') && Date.parse(row.updatedAt)<Date.now()-30*86400000) continue;
@@ -1286,7 +1951,9 @@ export class RepositoryState extends DurableObject<Env> {
     if (job.lease_id && (await this.store.exec<any>('SELECT lease_id FROM jobs WHERE key=?',job.key)).toArray()[0]?.lease_id!==job.lease_id) throw new LeaseLost();
     if (!(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',job.key)).toArray().length) await this.nextRevision('collection',job.key);
     await this.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET complete=1,verified=excluded.verified,revision=excluded.revision,etag=excluded.etag',job.key,q.operation,JSON.stringify(q.args || {}),1,Date.now(),(await this.revision()),job.page===1?result.etag || null:null);
+    if(this.store instanceof ReadCacheStore)this.store.seed('SELECT key FROM collections WHERE key=? AND complete=1',[job.key],[{key:job.key}]);
     await this.store.exec('DELETE FROM meta WHERE key=?',stagingStateKey(job.key));
+    if(q.operation==='open_prs')await this.setMeta('pr_inventory_api',result.api);
     await this.finishJob(job,q,job.page===1?result.etag || null:null);
     // These paths now need only repair identities. Release payload strings
     // before building a large fan-out, while keeping detail/thread rows until
@@ -1318,8 +1985,10 @@ export class RepositoryState extends DurableObject<Env> {
         for (const operation of ['issue_comments','review_threads','reviews','files']) repairs.push({q:{repository:repo.name,operation,args:{number:row.number}},priority:20});
         if (q.operation==='open_prs') {
           const itemKey=queryKey({operation:'pr',args:{number:row.number}});
-          await this.put('pr',itemKey,row,started);
-          await this.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET complete=1,verified=excluded.verified,revision=excluded.revision',itemKey,'pr',JSON.stringify({number:row.number}),1,Date.now(),(await this.revision()),null);
+          if(acceptedIDs.has(String(row.number))){
+            await this.store.exec('DELETE FROM resources WHERE kind=? AND id=?','pr',itemKey);
+            await this.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET complete=1,verified=excluded.verified,revision=excluded.revision,etag=NULL',itemKey,'pr',JSON.stringify({number:row.number}),1,Date.now(),(await this.revision()),null);
+          }else repairs.push({q:{repository:repo.name,operation:'pr',args:{number:row.number}},priority:0,dirty:true});
         }
         if (q.operation==='open_prs' && row.headRefOid) for (const operation of ['statuses']) repairs.push({q:{repository:repo.name,operation,args:{sha:row.headRefOid}},priority:2});
         if(q.operation==='open_prs')rows[published++]=identity(row);
@@ -1327,7 +1996,6 @@ export class RepositoryState extends DurableObject<Env> {
       if(q.operation==='open_prs') await this.setMeta('bootstrap_inventory',Date.now());
     }
     if (q.operation==='open_issues') for (const row of rows) repairs.push({q:{repository:repo.name,operation:'issue_comments',args:{number:row.number}},priority:20});
-    if (q.operation==='review_comments') for (const row of rows) repairs.push({q:{repository:repo.name,operation:'reactions',args:{id:String(row.id)}},priority:25});
     if (q.operation==='review_threads') {
       // This complete thread reconciliation also supplies the flat REST-shaped history.
       const comments=rows.flatMap(t=>t.comments.nodes.map(comment));
@@ -1337,7 +2005,6 @@ export class RepositoryState extends DurableObject<Env> {
       let published=0;
       for await (const c of this.publicationRows(flatQuery,comments,publicationStore)) {
         ids.add(String(c.id)); await this.put('review_comments',String(c.id),c,started,false,String(q.args?.number));
-        repairs.push({q:{repository:repo.name,operation:'reactions',args:{id:String(c.id)}},priority:25});
         comments[published++]=undefined;
       }
       const prior=await this.scanRows('SELECT m.id,r.observed FROM members m LEFT JOIN resources r ON r.kind=? AND r.id=m.id WHERE m.collection=?','review_comments',flatKey);
@@ -1348,9 +2015,9 @@ export class RepositoryState extends DurableObject<Env> {
       if (!(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',flatKey)).toArray().length) await this.nextRevision('collection',flatKey);
       await this.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET complete=1,verified=excluded.verified,revision=excluded.revision',flatKey,'review_comments',JSON.stringify(q.args),1,Date.now(),(await this.revision()),null);
       const dependent=(await this.store.exec<any>('SELECT * FROM jobs WHERE key=? AND wait_reason LIKE ?',flatKey,'primary%')).toArray()[0];
-      if(dependent) {
+      if(dependent && !dependent.lease_id) {
         await this.finishJob({...dependent,start_generation:dependent.generation},{...q,operation:'review_comments'});
-        await this.store.exec('UPDATE jobs SET lease_id=NULL,lease_until=0 WHERE key=?',flatKey);
+        await this.store.exec('UPDATE jobs SET lease_id=NULL,lease_until=0 WHERE key=? AND lease_id IS NULL',flatKey);
       }
     }
     // Fan-out retains only compact query identities, never the decoded inventory.
@@ -1421,16 +2088,46 @@ export class RepositoryState extends DurableObject<Env> {
   async storageMaintenance(runExpiry=true): Promise<void> {
     if(this.migrationHeld() || this.mutationState.blocked)return;
     if(this.storageFlight)return this.storageFlight;
-    this.activeOperations++;
+    this.owner.activeOperations++;
     this.traceRepair('storage_prepare');
     const flight=this.prepareStorage(runExpiry);this.storageFlight=flight;
-    try {await flight;this.traceRepair('storage_prepared');}finally {this.activeOperations--;if(this.storageFlight===flight)this.storageFlight=undefined;}
+    try {await flight;this.traceRepair('storage_prepared');}finally {this.owner.activeOperations--;if(this.storageFlight===flight)this.storageFlight=undefined;}
   }
-  get maintenanceArchive():R2Bucket {return timedBucket(this.env.ARCHIVE);}
+  get maintenanceArchive():R2Bucket {return timedBucket(this.env.ARCHIVE,this.owner.maintenanceIOScope);}
+  get transactionArchive():R2Bucket {return timedBucket(this.env.ARCHIVE,this.owner.transactionIOScope);}
   startStorageMaintenance():void {
     if(this.migrationHeld() || this.mutationState.blocked)return;
-    const task=this.storageMaintenance(false).catch(error=>this.noteFailure('storage_maintenance',error));
+    if(this.store.backend==='postgres')this.owner.startSurveyMaintenance();
+    const task=this.storageMaintenance(this.store.backend==='postgres').catch(error=>this.noteFailure('storage_maintenance',error));
     if(this.ctx.waitUntil)this.ctx.waitUntil(task);
+  }
+  private startSurveyMaintenance():void {
+    if(this.surveyFlight || this.repairsHeld() || this.mutationState.blocked)return;
+    // Optional cache work has its own coalesced promise so it cannot hold
+    // repair selection, expiry, monitoring or retention-policy changes.
+    this.activeOperations++;
+    const flight=Promise.resolve().then(()=>this.maintenance())
+      .catch(error=>{this.noteFailure('maintenance',error);})
+      .finally(()=>{this.activeOperations--;if(this.surveyFlight===flight)this.surveyFlight=undefined;});
+    this.surveyFlight=flight;
+    if(this.ctx.waitUntil)this.ctx.waitUntil(flight);
+  }
+  private startRetirementMaintenance():void {
+    const owner=this.owner;
+    if(owner.retirementFlight || owner.degraded || owner.repairsHeld() || owner.mutationState.blocked)return;
+    // Historical LOC validation can involve remote rows and R2 bodies. One
+    // coalesced pass must not hold repair selection or other housekeeping.
+    owner.activeOperations++;
+    const state=Object.create(owner) as RepositoryState;
+    state.env={...owner.env,ARCHIVE:timedBucket(owner.env.ARCHIVE,owner.retirementIOScope)};
+    const flight=Promise.resolve().then(async()=>{
+      do {await state.retireQuotaObsolete();}
+      while(owner.retirementAfter && !owner.degraded && !owner.repairsHeld() && !owner.mutationState.blocked);
+    })
+      .catch(error=>{owner.noteFailure('local_retirement',error);})
+      .finally(()=>{owner.activeOperations--;if(owner.retirementFlight===flight)owner.retirementFlight=undefined;});
+    owner.retirementFlight=flight;
+    if(owner.ctx.waitUntil)owner.ctx.waitUntil(flight);
   }
   async loadRetentionState():Promise<void> {
     if(this.storageLoaded && this.retentionProgressLoaded)return;
@@ -1686,12 +2383,7 @@ export class RepositoryState extends DurableObject<Env> {
   }
   async retireUnneeded(job:any): Promise<boolean> {
     if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.retireUnneeded.call(state,job));
-    const q:Query=JSON.parse(job.query);
-    if (!NOT_MIRRORED.has(q.operation) && (job.dirty || !(await this.dormant(q)) || !(await this.complete(q)))) return false;
-    const removed=(await this.store.exec('DELETE FROM jobs WHERE key=? AND COALESCE(generation,0)=? AND lease_until<=? AND COALESCE(started,0)=? AND dirty=? RETURNING key',job.key,job.generation || 0,Date.now(),job.started || 0,job.dirty || 0)).toArray();
-    if(!removed.length)return false;
-    await this.store.exec('DELETE FROM meta WHERE key=?',stagingStateKey(job.key));
-    await this.metric('cancellation',q,job.lane);return true;
+    return (await this.claimCompanions(job,[job],undefined,true)).some(row=>row.key===job.key);
   }
   async claim(job:any): Promise<any> {
     if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.claim.call(state,job));
@@ -1699,26 +2391,205 @@ export class RepositoryState extends DurableObject<Env> {
     await this.store.exec('UPDATE jobs SET lease_id=?,lease_until=?,started=?,start_generation=? WHERE key=? AND lease_until<=? AND COALESCE(generation,0)=? AND COALESCE(started,0)=?',lease,now+settings(this.env).lease_ms,started,generation,job.key,now,job.generation || 0,job.started || 0);
     return (await this.store.exec<any>('SELECT * FROM jobs WHERE key=? AND lease_id=?',job.key,lease)).toArray()[0];
   }
-  async retryJob(job:any,error:unknown): Promise<void> {
-    if(!this.store.transactional)return this.atomic(state=>RepositoryState.prototype.retryJob.call(state,job,error));
-    const expired=error instanceof Error && /staging page missing/.test(error.message);
-    const category=expired?'staging_expired':'transport_or_parser';
-    const delay=Math.min(3600000,60000*2**Math.min(job.attempt || 0,6));
-    await this.store.exec('UPDATE jobs SET due=?,attempt=attempt+1,wait_reason=?'+(expired?',started=NULL,cursor=NULL,page=1,api=NULL,etag=NULL,nested=NULL':'')+' WHERE key=? AND lease_id=?',Date.now()+delay,category,job.key,job.lease_id);
-    await this.metric('retry',JSON.parse(job.query),job.lane);
-    await this.setMeta('last_upstream_failure',{at:Date.now(),operation:JSON.parse(job.query).operation,category});
+  async retryJob(job:any,error:unknown):Promise<void> {await this.retryJobs([job],error);}
+  private retryWait(job:any,error:unknown):RepairWait & {expired:boolean} {
+    const expired=error instanceof Error && /staging page missing/.test(error.message),reason=expired?'staging_expired':'transport_or_parser';
+    const named=error instanceof Error && error.constructor===Error && ['staging page missing','repeated upstream cursor'].includes(error.message);
+    return {job,due:Date.now()+Math.min(3600000,60000*2**Math.min(job.attempt || 0,6)),attempts:1,reason,event:'retry',failure:{category:reason},memberFailure:named || isMemberDataFailure(error),expired};
   }
-  async dispatch(first:any): Promise<void> {
+  private async retryJobs(jobs:any[],error:unknown):Promise<Set<string>> {
+    const input=jobs.map(job=>this.retryWait(job,error));return this.persistWaits(input,input[0]?.expired || false);
+  }
+  private async deferJobs(input:{job:any,result:any}[]):Promise<void> {
+    for(const {result} of input)await this.noteQuotaRestriction(result);
+    const now=Date.now();
+    await this.persistWaits(input.map(({job,result})=>{
+      const capacity=result.category==='capacity';
+      return {job,due:result.retry_at || now+Math.min(3600000,60000*2**Math.min(6,job.attempt)),attempts:capacity?0:1,reason:result.category || result.reason || 'upstream',event:capacity?'capacity_wait':'retry',installationCapacity:capacity&&result.scope?.kind==='installation',memberFailure:memberUnavailable(result),failure:capacity?undefined:{category:result.category || result.reason || 'upstream',request_id:result.request_id}};
+    }));
+  }
+  private async persistWaits(input:RepairWait[],expired=false):Promise<Set<string>> {
+    if(!input.length)return new Set();
+    if(!this.store.transactional) {
+      const metrics=new RepairMetrics();
+      let waiting:Set<string>;
+      try{waiting=await this.atomic(async state=>{state.repairMetrics=metrics;return state.persistWaits(input,expired);},'repair');}
+      catch(error){throw new WaitFailure(input,expired,error);}
+      this.settleRepairJobs(input.map(item=>item.job));
+      this.settleRepairJobs(input.filter(item=>waiting.has(item.job.key)&&!item.installationCapacity&&!(item.memberFailure&&item.due>Date.now())).map(item=>item.job),'defer');
+      this.settleRepairJobs(input.filter(item=>waiting.has(item.job.key)&&item.memberFailure&&item.due>Date.now()).map(item=>item.job),'member-retry');
+      this.settleRepairJobs(input.filter(item=>waiting.has(item.job.key)&&item.installationCapacity).map(item=>item.job),'capacity');
+      try{this.repairMetrics.merge(metrics);}catch{}return waiting;
+    }
+    const size=this.store.backend==='sqlite'?12:128,changed=new Set<string>();
+    for(let offset=0;offset<input.length;offset+=size) {
+      const chunk=input.slice(offset,offset+size),cases=(field:'due'|'attempts'|'reason',type:string)=>'CASE key '+chunk.map(()=>`WHEN ? THEN CAST(? AS ${type})`).join(' ')+' END';
+      const rows=(await this.store.exec<any>('UPDATE jobs SET lease_id=NULL,lease_until=0,due='+cases('due','BIGINT')+',attempt=attempt+'+cases('attempts','INTEGER')+',wait_reason='+cases('reason','TEXT')+(expired?',started=NULL,cursor=NULL,page=1,api=NULL,etag=NULL,nested=NULL':'')+' WHERE '+chunk.map(()=>'(key=? AND lease_id=?)').join(' OR ')+' RETURNING key',...chunk.flatMap(x=>[x.job.key,x.due]),...chunk.flatMap(x=>[x.job.key,x.attempts]),...chunk.flatMap(x=>[x.job.key,x.reason]),...chunk.flatMap(x=>[x.job.key,x.job.lease_id]))).toArray();
+      for(const row of rows)changed.add(row.key);
+    }
+    let last:typeof input[number]|undefined;
+    for(const item of input)if(changed.has(item.job.key)){await this.metric(item.event,JSON.parse(item.job.query),item.job.lane);if(item.failure)last=item;}
+    if(last)await this.setMeta('last_upstream_failure',{at:Date.now(),operation:JSON.parse(last.job.query).operation,...last.failure});
+    // An earlier uncertain commit can already have saved the exact decision.
+    // Confirm that state without excluding a committed newer dirty generation.
+    const waiting=new Set(changed),unmatched=input.filter(item=>!changed.has(item.job.key));
+    const batch=this.store.backend==='sqlite'?80:128;
+    for(let offset=0;offset<unmatched.length;offset+=batch){
+      const chunk=unmatched.slice(offset,offset+batch),expected=new Map(chunk.map(item=>[item.job.key,item]));
+      const rows=(await this.store.exec<any>('SELECT key,due,wait_reason,lease_id FROM jobs WHERE key IN ('+chunk.map(()=>'?').join(',')+')',...chunk.map(item=>item.job.key))).toArray();
+      for(const row of rows){const item=expected.get(row.key)!;if(!row.lease_id && row.due===item.due && row.wait_reason===item.reason)waiting.add(row.key);}
+    }
+    return waiting;
+  }
+  private async routeBatchToCore(jobs:any[]):Promise<Set<string>> {
+    if(!this.store.transactional){
+      const changed=await this.atomic(state=>state.routeBatchToCore(jobs),'repair');this.settleRepairJobs(jobs);
+      this.settleRepairJobs(jobs.filter(job=>changed.has(job.key)),'route');return changed;
+    }
+    const size=this.store.backend==='sqlite'?49:256,now=Date.now(),changed=new Set<string>();
+    for(let offset=0;offset<jobs.length;offset+=size){const chunk=jobs.slice(offset,offset+size);
+      for(const row of (await this.store.exec('UPDATE jobs SET lease_id=NULL,lease_until=0,api=?,due=? WHERE '+chunk.map(()=>'(key=? AND lease_id=?)').join(' OR ')+' RETURNING key','core',now,...chunk.flatMap(j=>[j.key,j.lease_id]))).toArray())changed.add(row.key);
+    }
+    return changed;
+  }
+  private async recoverWaitFailure(failure:WaitFailure,jobs:any[]):Promise<void> {
+    const metrics=new RepairMetrics();
+    // One recovery admission preserves the exact captured waits first, then
+    // applies ordinary backend backoff only to still-owned unfinished members.
+    const waiting=await this.atomic(async state=>{
+      state.repairMetrics=metrics;
+      const saved=await state.persistWaits(failure.waits,failure.expired);
+      if(isBackendFailure(failure.error))for(const key of await state.retryJobs(jobs,failure.error))saved.add(key);
+      return saved;
+    },'repair');
+    const input=isBackendFailure(failure.error)?jobs:failure.waits.map(item=>item.job);
+    const capacity=new Set(failure.waits.filter(item=>item.installationCapacity).map(item=>item.job.key));
+    const member=new Set(failure.waits.filter(item=>item.memberFailure&&item.due>Date.now()).map(item=>item.job.key));
+    this.settleRepairJobs(input);this.settleRepairJobs(input.filter(job=>waiting.has(job.key)&&!capacity.has(job.key)&&!member.has(job.key)),'defer');
+    this.settleRepairJobs(input.filter(job=>waiting.has(job.key)&&member.has(job.key)),'member-retry');
+    this.settleRepairJobs(input.filter(job=>waiting.has(job.key)&&capacity.has(job.key)),'capacity');
+    try{this.repairMetrics.merge(metrics);}catch{}
+  }
+  private async obsoleteJobs(candidates:any[]):Promise<any[]> {
+    if(!candidates.length)return [];
+    const operation=JSON.parse(candidates[0].query).operation;
+    if(!NOT_MIRRORED.has(operation) && !['pr','files','issue_comments','review_comments','review_threads','reviews','reactions','statuses'].includes(operation))return [];
+    const hot=new Set<string>(candidates.filter(job=>job.requested_at!=null).map(job=>job.key)),collections=new Map<string,{revision:number,complete:number}>();
+    const readBatch=this.store.backend==='sqlite'?80:256;
+    for(let offset=0;offset<candidates.length;offset+=readBatch) {
+      const keys=candidates.slice(offset,offset+readBatch).map(j=>j.key),where=' WHERE key IN ('+keys.map(()=>'?').join(',')+')';
+      const [ds,cs]=await this.store.batch([{sql:'SELECT key FROM demand'+where+' AND at>?',bindings:[...keys,Date.now()-300000]},...(operation==='files'?[{sql:'SELECT key,revision,complete FROM collections'+where,bindings:keys}]:[])]);
+      for(const row of cs?.toArray() || [])collections.set(row.key,row);for(const row of ds.toArray())hot.add(row.key);
+    }
+    const quiet=candidates.filter(j=>!hot.has(j.key));
+    const states=new Map<string,string>(),details=new Map<string,any>(),comments=new Map<string,any>(),closedHeads=new Set<string>();
+    const numbers=new Set<string>();
+    if(operation==='statuses') {
+      const heads=[...new Set(quiet.map(j=>String(JSON.parse(j.query).args.sha)))];
+      for(let offset=0;offset<heads.length;offset+=readBatch) {
+        const chunk=heads.slice(offset,offset+readBatch);
+        for(const sha of await this.dormantStatusHeads(chunk))closedHeads.add(sha);
+      }
+    } else if(operation==='reactions') {
+      const ids=[...new Set(quiet.map(j=>String(JSON.parse(j.query).args.id)))];
+      for(let offset=0;offset<ids.length;offset+=readBatch) {
+        const chunk=ids.slice(offset,offset+readBatch);
+        for(const row of (await this.store.exec<any>("SELECT id,parent,tombstone FROM resources WHERE kind='review_comments' AND id IN ("+chunk.map(()=>'?').join(',')+')',...chunk)).toArray()){comments.set(row.id,row);if(row.parent)numbers.add(row.parent);}
+      }
+    } else for(const job of quiet)numbers.add(String(JSON.parse(job.query).args.number));
+    const ns=[...numbers],prs=new Set<string>();
+    for(let offset=0;offset<ns.length;offset+=readBatch) {
+      const chunk=ns.slice(offset,offset+readBatch);
+      const fields=['headRefOid','baseRefOid','changedFiles','additions','deletions','mergedAt'],where=" WHERE kind IN ('pr','issue') AND id IN ("+chunk.map(()=>'?').join(',')+')';
+      let sql="SELECT id,kind,json_extract(data,'$.state') state FROM resources"+where;
+      if(['pr','files'].includes(operation)) {
+        if(this.store.backend==='postgres') {
+          // Parse each sanitized body once and transfer only output metadata.
+          const value="regexp_replace(data,'\\\\u(0000|[dD][89a-fA-F][0-9a-fA-F]{2})','\\\\ufffd','g')::jsonb";
+          sql="WITH final_resources AS MATERIALIZED (SELECT id,kind,"+value+" value FROM resources"+where+") SELECT id,kind,value->>'state' state,jsonb_build_object("+fields.map(field=>"'"+field+"',value->'"+field+"'").join(',')+") detail FROM final_resources";
+        } else sql="SELECT id,kind,json_extract(data,'$.state') state,json_object("+fields.map(field=>"'"+field+"',json_extract(data,'$."+field+"')").join(',')+") detail FROM resources"+where;
+      }
+      for(const row of (await this.store.exec<any>(sql,...chunk)).toArray())if(!prs.has(row.id)){
+        states.set(row.id,row.state);details.set(row.id,typeof row.detail==='string'?JSON.parse(row.detail):row.detail);if(row.kind==='pr')prs.add(row.id);
+      }
+    }
+    const dormant=async(job:any):Promise<boolean>=>{
+      if(NOT_MIRRORED.has(operation))return true;
+      if(hot.has(job.key))return false;
+      const args=JSON.parse(job.query).args;
+      if(operation==='statuses')return closedHeads.has(String(args.sha));
+      const comment=operation==='reactions'?comments.get(String(args.id)):null;
+      if(comment?.tombstone)return true;
+      const state=states.get(String(operation==='reactions'?comment?.parent:args.number));
+      if(!['CLOSED','MERGED'].includes(state || ''))return false;
+      if(operation==='files') {
+        try {
+          const p=details.get(String(args.number));
+          const collection=collections.get(job.key);
+          const cached=(await this.store.exec<any>(ACTIVITY_LOC_CACHE_QUERY,args.number,activityFingerprint(p,collection?.revision),activityGitFingerprint(p))).toArray()[0];
+          if(cached)return Boolean(JSON.parse(cached.data));
+          if(!collection?.complete)return false;
+          // Maintenance validates outside the writer; rechecks under the
+          // writer use that head/revision-bound cache, never R2 or file scans.
+          if(this.store.transactional)return false;
+          return Boolean(await this.activityLOC(args.number,p));
+        }catch(error){this.noteFailure('retirement_files',error);return false;}
+      }
+      if(operation==='pr') {
+        const p=details.get(String(args.number));
+        return Boolean(p && typeof p.headRefOid==='string' && /^[0-9a-f]{40}$/i.test(p.headRefOid) && typeof p.baseRefOid==='string' && /^[0-9a-f]{40}$/i.test(p.baseRefOid)
+          && ['changedFiles','additions','deletions'].every(key=>Number.isSafeInteger(p[key]) && p[key]>=0)
+          && (state!=='MERGED' || typeof p.mergedAt==='string' && Number.isFinite(Date.parse(p.mergedAt))));
+      }
+      return ['issue_comments','review_comments','review_threads','reviews','reactions'].includes(operation);
+    };
+    const obsolete=[];for(const job of candidates)if(await dormant(job))obsolete.push(job);
+    return obsolete;
+  }
+  private async claimCompanions(first:any,selection?:any[],excluded?:Set<string>,retireOnly=false):Promise<any[]> {
+    const operation=JSON.parse(first.query).operation;
+    const omit=this.excludeRepairKeys(excluded);
+    const candidates=selection || (await this.store.exec<any>("SELECT * FROM jobs WHERE due<=? AND lease_until<=? AND lane=? AND page=1 AND api IS NULL AND nested IS NULL AND key LIKE ?"+omit.sql+" ORDER BY CASE WHEN lane='requested' AND requested_at IS NULL THEN 1 ELSE 0 END,due,key LIMIT ?",Date.now(),Date.now(),first.lane,operation+':%',...omit.bindings,Math.max(0,batchLimit(operation)-1))).toArray();
+    if(!candidates.length)return [];
+    if(!this.store.transactional)return this.atomic(state=>state.claimCompanions(first,candidates,excluded,retireOnly),'repair');
+    const obsolete=await this.obsoleteJobs(candidates);
+    const deleted=new Set<string>(),readBatch=this.store.backend==='sqlite'?80:256;
+    // Use the same snapshot predicates as retireUnneeded. Chunking below is
+    // solely SQLite's 100-binding SQL limit, not a limit on jobs or batches.
+    const deleteBatch=this.store.backend==='sqlite'?24:256;
+    for(let offset=0;offset<obsolete.length;offset+=deleteBatch) {
+      const chunk=obsolete.slice(offset,offset+deleteBatch);
+      for(const row of (await this.store.exec<any>('DELETE FROM jobs WHERE lease_until<=? AND ('+chunk.map(()=>'(key=? AND COALESCE(generation,0)=? AND COALESCE(started,0)=? AND dirty=?)').join(' OR ')+') RETURNING key',Date.now(),...chunk.flatMap(j=>[j.key,j.generation || 0,j.started || 0,j.dirty]))).toArray())deleted.add(row.key);
+    }
+    const retired=candidates.filter(j=>deleted.has(j.key));
+    for(let offset=0;offset<retired.length;offset+=readBatch) {
+      const keys=retired.slice(offset,offset+readBatch).map(j=>stagingStateKey(j.key));
+      await this.store.exec('DELETE FROM meta WHERE key IN ('+keys.map(()=>'?').join(',')+')',...keys);
+    }
+    for(const job of retired)await this.metric('cancellation',JSON.parse(job.query),job.lane);
+    if(retireOnly)return retired;
+    const wanted=candidates.filter(j=>!deleted.has(j.key));if(!wanted.length)return [];
+    const now=Date.now(),lease=crypto.randomUUID(),claimed=new Map<string,any>();
+    const claimBatch=this.store.backend==='sqlite'?32:256;
+    for(let offset=0;offset<wanted.length;offset+=claimBatch) {
+      const chunk=wanted.slice(offset,offset+claimBatch);
+      const rows=(await this.store.exec<any>('UPDATE jobs SET lease_id=?,lease_until=?,started=CASE WHEN COALESCE(started,0)=0 THEN ? ELSE started END,start_generation=CASE WHEN COALESCE(started,0)=0 THEN generation ELSE start_generation END WHERE lease_until<=? AND ('+chunk.map(()=>'(key=? AND COALESCE(generation,0)=? AND COALESCE(started,0)=?)').join(' OR ')+') RETURNING *',lease,now+settings(this.env).lease_ms,now,now,...chunk.flatMap(j=>[j.key,j.generation || 0,j.started || 0]))).toArray();
+      for(const row of rows)claimed.set(row.key,row);
+    }
+    return wanted.flatMap(j=>claimed.has(j.key)?[claimed.get(j.key)]:[]);
+  }
+  async dispatch(first:any,claimedGroup?:any[],preparationError?:unknown,failed?:Set<string>): Promise<void> {
+    const scoped=Object.create(this) as RepositoryState;scoped.dispatchSettled=new Set<string>();
+    await scoped.dispatchOwned(first,claimedGroup,preparationError,failed);
+  }
+  private async dispatchOwned(first:any,claimedGroup?:any[],preparationError?:unknown,failed?:Set<string>): Promise<void> {
     this.traceRepair('dispatch',first);
-    const q:Query=JSON.parse(first.query),operation=q.operation,repo=(await this.meta('repository'));
-    let jobs=[first];
+    const q:Query=JSON.parse(first.query),operation=q.operation,repo=(await this.owner.meta('repository'));
+    let jobs=claimedGroup || [first];
     try {
-      if (['issue_comments','review_threads','statuses','reactions'].includes(operation) && first.page===1 && !first.api && !first.nested) {
-        const candidates=(await this.store.exec<any>('SELECT * FROM jobs WHERE due<=? AND lease_until<=? AND lane=? AND page=1 AND api IS NULL AND nested IS NULL AND key LIKE ? ORDER BY due,key LIMIT ?',Date.now(),Date.now(),first.lane,operation+':%',Math.max(0,batchLimit(operation)-1))).toArray();
-        for (const item of candidates) {
-          if ((await this.retireUnneeded(item))) continue;
-          const claimed=(await this.claim(item));if (claimed) jobs.push(claimed);
-        }
+      if(preparationError)throw preparationError;
+      if (['pr','issue_comments','review_threads','statuses','reactions'].includes(operation) && first.page===1 && !first.api && !first.nested) {
+        if(!claimedGroup)jobs.push(...await this.claimCompanions(first));
         if (operation==='reactions') {
           const supported=[];
           for (const item of jobs) {
@@ -1729,82 +2600,325 @@ export class RepositoryState extends DurableObject<Env> {
           if (supported.length!==jobs.length) { await this.refresh(first);return; }
           jobs=supported;
         }
+        if(operation==='pr') {
+          const ids=jobs.map(j=>String(JSON.parse(j.query).args.number));
+          const rows=(await this.store.exec<any>("SELECT id,revision FROM resources WHERE kind='pr' AND id IN ("+ids.map(()=>'?').join(',')+')',...ids)).toArray();
+          const revisions=new Map(rows.map(row=>[row.id,Number(row.revision)])),started=Date.now();
+          jobs=jobs.map((job,i)=>({...job,pr_revision:revisions.get(ids[i]) || 0,started}));
+        }
         const response=await stub(this.env.INSTALLATIONS,repo.installation).fetch('https://internal/batch',{method:'POST',headers:{'x-request-id':crypto.randomUUID()},body:JSON.stringify({repository:repo,jobs:jobs.map(j=>({key:j.key,query:JSON.parse(j.query),node_id:j.node_id}))})});
         const result:any=await response.json();
-        if (result.results) {
-          for(let i=0;i<jobs.length;i++) {
-            try {await this.refresh(jobs[i],result.results[i] || {unavailable:true});}
-            catch(error) {await this.retryJob(jobs[i],error);}
-          }
+        if (Array.isArray(result.results)) {
+          await this.publishBatch(jobs,result.results);
         } else if (result.deferred && operation!=='review_threads' && result.category!=='capacity' && !String(result.category).startsWith('secondary')) {
           // Retry REST-capable operations in their other pool on the next quantum.
-          for(const item of jobs) await this.store.exec('UPDATE jobs SET api=?,due=? WHERE key=? AND lease_id=?','core',Date.now(),item.key,item.lease_id);
-        } else for(const item of jobs) await this.refresh(item,result.deferred || result.unavailable?result:{unavailable:true,reason:'malformed_service_response'});
+          await this.routeBatchToCore(jobs);
+        } else await this.deferJobs(jobs.map(job=>({job,result:result.deferred || result.unavailable?result:{unavailable:true,reason:'malformed_service_response'}})));
       } else await this.refresh(first);
     } catch(error) {
-      for(const item of jobs) await this.retryJob(item,error);
+      try{
+        if(error instanceof WaitFailure)await this.recoverWaitFailure(error,jobs);
+        else{
+          const cause=error instanceof PublicationFailure?error.error:error;
+          await this.retryJobs(error instanceof PublicationFailure && !isBackendFailure(cause)?error.jobs:jobs,cause);
+        }
+      }finally{
+        const unfinished=jobs.filter(job=>!this.dispatchSettled?.has(job.key));
+        for(const job of unfinished)failed?.add(job.key);
+        if(this.repairGroup)this.owner.repairCoordinator?.failed(unfinished);
+      }
     } finally {
-      for(const item of jobs) await this.store.exec('UPDATE jobs SET lease_id=NULL,lease_until=0 WHERE key=? AND lease_id=?',item.key,item.lease_id);
+      await this.releaseLeases(this.store,jobs.filter(job=>!this.dispatchSettled?.has(job.key)));
       this.traceRepair('dispatch_complete',first);
     }
   }
   async alarm(): Promise<void> {
-    if(this.owner.alarmFlight)return this.owner.alarmFlight;
-    const flight=this.runSingleAlarm();this.owner.alarmFlight=flight;
+    const owner=this.owner,tag=owner.repairAlarm;
+    const ordinaryDue=owner.store.backend==='sqlite' && owner.ordinaryAlarmAt!==undefined && owner.ordinaryAlarmAt<=Date.now()+100;
+    const continuation=!ordinaryDue && owner.store.backend==='sqlite' && tag?.continuation && tag.at<=Date.now() && owner.repairCoordinator;
+    if(owner.alarmFlight){
+      if(continuation){
+        await owner.alarmFlight;
+        if(owner.repairAlarm===tag)owner.repairAlarm=undefined;
+        return owner.runContinuationAlarm();
+      }
+      void owner.repairCoordinator?.wake(true);return owner.alarmFlight;
+    }
+    const quota=!ordinaryDue && owner.store.backend==='sqlite' && tag?.quota && tag.at<=Date.now() && owner.quotaRestriction?.category==='capacity';
+    if(!continuation && !quota && owner.ordinaryAlarmAt!==undefined && owner.ordinaryAlarmAt<=Date.now()+100)owner.ordinaryAlarmAt=undefined;
+    owner.repairAlarm=undefined;
+    const flight=continuation?owner.runContinuationAlarm():quota?owner.runQuotaAlarm():this.runSingleAlarm();owner.alarmFlight=flight;
     try{await flight;}finally{if(this.owner.alarmFlight===flight)this.owner.alarmFlight=undefined;}
   }
   async runSingleAlarm(): Promise<void> {
     if(this.migrationUnavailable) await this.retryMigrationControl();
     if(this.repairsHeld()) return;
-    this.activeOperations++;
-    try {await this.runAlarm();} finally {this.activeOperations--;}
+    await this.runAlarm();
   }
   async runAlarm(): Promise<void> {
-    const options=settings(this.env),began=Date.now();let dispatched=0,retired=0;
-    try {
-      this.traceRepair('expire');
-      await this.expire();
-      this.traceRepair('select_jobs');
-      if(this.schema!=='current' && !this.degraded) this.startup();
-      // Every dispatch writes its lease before any GitHub request, so a full
-      // store stops here without spending upstream quota.
-      if(!this.degraded && typeof this.schema!=='object') try {
-        while(dispatched<options.dispatches && Date.now()-began<options.launch_ms && !this.degraded && !this.migrationHeld()) {
-          const wave:Promise<void>[]=[];
-          while(wave.length<options.concurrency && dispatched<options.dispatches) {
-            const selected=await this.atomic(async state=>{const next=await state.nextJob();if(!next)return undefined;if(await state.retireUnneeded(next))return {retired:true,job:undefined};return {retired:false,job:await state.claim(next)};});
-            if(!selected)break;
-            if(selected.retired){if(++retired>=200)break;continue;}
-            const job=selected.job;if(!job)continue;
-            dispatched++;wave.push(this.dispatch(job));
-          }
-          if (!wave.length) break;
-          await Promise.allSettled(wave);
+    if(this.owner.ordinaryAlarmAt!==undefined && this.owner.ordinaryAlarmAt<=Date.now()+100)this.owner.ordinaryAlarmAt=undefined;
+    await this.getRepairCoordinator().wake(true);
+  }
+  private async runContinuationAlarm():Promise<void> {
+    if(this.migrationUnavailable)await this.retryMigrationControl();
+    if(this.repairsHeld() || this.degraded)return;
+    this.owner.activeOperations++;
+    try{
+      await this.getRepairCoordinator().wake();
+      // A consumed stale continuation may find a now-closed or full owner.
+      // Re-arm durable future retry/lease recovery even when wake() is a no-op.
+      await this.armRepairAlarm();
+    }finally{this.owner.activeOperations--;}
+  }
+  private async runQuotaAlarm():Promise<void> {
+    if(this.repairsHeld() || this.degraded)return;
+    this.owner.activeOperations++;
+    try{
+      if(this.getRepairCoordinator().full){await this.armRepairAlarm();return;}
+      // A retry of a known restriction is not another external maintenance pass.
+      if(await this.quotaAllowsRepairClaim(true))await this.getRepairCoordinator().resumeCapacity(true);
+      else await this.armRepairAlarm();
+    }finally{this.owner.activeOperations--;}
+  }
+  private getRepairCoordinator():RepairCoordinator {
+    const owner=this.owner;if(owner!==this)return owner.getRepairCoordinator();
+    if(this.repairCoordinator)return this.repairCoordinator;
+    const options=settings(this.env);
+    return this.repairCoordinator=new RepairCoordinator({
+      concurrency:options.concurrency,dispatches:options.dispatches,
+      held:()=>Boolean(owner.degraded || owner.repairsHeld() || owner.mutationState.blocked || typeof owner.schema==='object'),
+      operations:delta=>{owner.activeOperations+=delta;},
+      lifetime:work=>{owner.ctx.waitUntil?.(work);},
+      failure:error=>{owner.noteFailure('repair_dispatch',error);},
+      stalled:()=>{owner.ctx.abort('repair_transport_stalled');},
+      select:async q=>{
+        if(!await owner.quotaAllowsRepairClaim())return undefined;
+        // A chunk can settle members while its group still occupies a slot.
+        // When that prompts refill, use the existing read-only eligibility
+        // query before paying for an empty writer transaction and connection.
+        // The atomic claim below still rechecks the current row and ownership.
+        if(owner.getRepairCoordinator().groups.size){
+          try{if(!await owner.hasEligibleRepair(q))return undefined;}
+          catch{/* An optional HTTP-read failure cannot replace the atomic writer claim. */}
         }
-      } catch(error) {this.noteFailure('repair_dispatch',error);}
-      this.traceRepair('maintenance');
-      try {if(!this.migrationHeld()) await this.maintenance();} catch(error) {this.noteFailure('maintenance',error);}
-    } finally {
-      try {
-        const row=(await this.store.exec<any>('SELECT MIN(MAX(due,lease_until)) AS due FROM jobs')).one();
-        // Degraded mode writes nothing, not even the next alarm; the cron tick
-        // keeps expiring rows until a probe restores writes.
-        if (row.due && !this.degraded && !this.migrationHeld()) await this.setAlarm(Math.max(Date.now()+100,row.due));
-      } catch(error) {this.noteFailure('alarm',error);}
-      this.traceRepair('storage_maintenance');
-      this.startStorageMaintenance();
-      this.traceRepair('alarm_complete');
+        let attempted:any;
+        try{return await owner.atomic(async state=>{
+          const next=await state.nextJob(q.failed);if(!next)return undefined;attempted=next;
+          if(await state.retireUnneeded(next))return {retired:true};
+          const first=await state.claim(next);if(!first)return undefined;
+          const operation=JSON.parse(first.query).operation;
+          const batchable=['pr','issue_comments','review_threads','statuses','reactions'].includes(operation) && first.page===1 && !first.api && !first.nested;
+          const jobs=[first];if(batchable)jobs.push(...await state.claimCompanions(first,undefined,q.failed));
+          return {jobs};
+        },'repair');}catch(error){
+          if(attempted)q.failed.add(attempted.key);
+          if(attempted && canReplayPublication(error)){
+            // A healthy rolled-back preparation failure isolates its leader.
+            // Backend/uncertain claim failures never split into a retry loop.
+            const first=await owner.atomic(state=>state.claim(attempted),'repair');
+            return first?{jobs:[first],preparationError:error}:{skipped:true};
+          }
+          throw error;
+        }
+      },
+      eligible:q=>owner.hasEligibleRepair(q),
+      dispatch:async group=>{
+        const scoped=Object.create(owner) as RepositoryState;scoped.repairGroup=group;
+        scoped.env=scoped.repairEnvironment(group);
+        await scoped.dispatch(group.jobs[0],group.jobs,group.preparationError);
+      },
+      maintenance:async(external,phase)=>{
+        if(external && phase==='before'){
+          if(owner.store.backend==='sqlite'){owner.traceRepair('expire');await owner.expire();}
+          owner.traceRepair('select_jobs');
+          if(owner.schema!=='current' && !owner.degraded)owner.startup();
+        }
+        if(phase==='before' || !external)try{await owner.requestOpenCoverage();}catch(error){owner.noteFailure('open_coverage',error);}
+        if(phase==='after'){
+          owner.traceRepair('maintenance');
+          if(!owner.migrationHeld())try{
+            if(owner.store.backend==='postgres')owner.startRetirementMaintenance();
+            else await owner.retireQuotaObsolete();
+          }catch(error){owner.noteFailure('local_retirement',error);}
+          try{if(owner.store.backend==='sqlite' && !owner.migrationHeld())await owner.maintenance();}catch(error){owner.noteFailure('maintenance',error);}
+          if(external){owner.traceRepair('storage_maintenance');owner.startStorageMaintenance();owner.traceRepair('alarm_complete');}
+        }
+      },
+      arm:()=>owner.armRepairAlarm(),
+    });
+  }
+  private async hasEligibleRepair(q:RepairQuantum):Promise<boolean> {
+    const restriction=this.quotaRestriction;
+    if(restriction && restriction.installation===(await this.meta('repository'))?.installation && this.quotaBlocksRepairTurn(q))return false;
+    const omit=this.excludeRepairKeys(q.failed),now=Date.now();
+    return Boolean((await this.store.exec('SELECT key FROM jobs WHERE due<=? AND lease_until<=?'+omit.sql+' LIMIT 1',now,now,...omit.bindings)).toArray().length);
+  }
+  private async retireQuotaObsolete():Promise<void> {
+    if(this.degraded || this.repairsHeld())return;
+    const omit=this.excludeRepairKeys(undefined,false),now=Date.now();
+    // Scan locally even while upstream is unavailable. Walk backwards so
+    // histories/statuses retire before potentially slow final-file proofs.
+    // This position is disposable: a restart simply rescans cached facts.
+    const before=this.owner.retirementAfter;
+    const candidates=(await this.store.exec<any>("SELECT jobs.* FROM jobs WHERE "+(before?'key<? AND ':'')+"lease_until<=?"+omit.sql+
+      " AND NOT EXISTS (SELECT 1 FROM demand d WHERE d.key=jobs.key AND d.at>?) ORDER BY key DESC LIMIT 100",...(before?[before]:[]),now,...omit.bindings,now-300000)).toArray();
+    if(!candidates.length){this.owner.retirementAfter='';return;}
+    const groups=new Map<string,any[]>();
+    for(const job of candidates){const operation=JSON.parse(job.query).operation,group=groups.get(operation)||[];group.push(job);groups.set(operation,group);}
+    for(const group of groups.values())try{
+      const obsolete=await this.obsoleteJobs(group);
+      if(obsolete.length)await this.atomic(state=>state.claimCompanions(obsolete[0],obsolete,undefined,true),'repair');
+    }catch(error){this.noteFailure('local_retirement',error);}
+    this.owner.retirementAfter=candidates[candidates.length-1].key;
+  }
+  private async armRepairAlarm():Promise<void> {
+    if(this.store.backend==='postgres' || this.degraded || this.migrationHeld())return;
+    if(this.owner.ordinaryAlarmAt!==undefined && this.owner.ordinaryAlarmAt<=Date.now()+100){
+      // New demand can reuse an overdue alarm while a continuation is already
+      // executing. Preserve a real external wake even when failed keys would
+      // otherwise disappear from the repair-only alarm query.
+      const now=Date.now(),existing=await this.ctx.storage.getAlarm();
+      await this.setAlarm(existing && existing>now?Math.min(existing,now+100):now+100,false,false,true);return;
     }
+    const coordinator=this.repairCoordinator!,now=Date.now(),omit=this.excludeRepairKeys(coordinator.current.failed);
+    const restriction=this.quotaRestriction;
+    const restricted=Boolean(restriction && restriction.installation===(await this.meta('repository'))?.installation && this.quotaBlocksRepairTurn(coordinator.current));
+    const futureOnly=coordinator.full || coordinator.unproductiveStop || restricted || this.owner.mutationState.blocked || typeof this.owner.schema==='object';
+    const where=futureOnly?' WHERE (due>? OR lease_until>?)':omit.sql?' WHERE (due>? OR lease_until>? OR (1=1'+omit.sql+'))':'';
+    const bindings=futureOnly?[now,now]:omit.sql?[now,now,...omit.bindings]:[];
+    const row=(await this.store.exec<any>('SELECT MIN(MAX(due,lease_until)) AS due FROM jobs'+where,...bindings)).one();
+    const retryAt=!coordinator.full?this.quotaRestriction?.retry_at:undefined,soon=Date.now()+100;
+    const quotaAt=retryAt?Math.max(soon,retryAt):undefined,jobAt=row.due?Math.max(soon,row.due):undefined;
+    const at=quotaAt&&jobAt?Math.min(quotaAt,jobAt):quotaAt || jobAt;if(!at)return;
+    const earlier=await this.ctx.storage.getAlarm();
+    const quota=Boolean(quotaAt===at && this.quotaRestriction?.category==='capacity');
+    const continuation=Boolean(!quota && jobAt===at && row.due<=now);
+    if(!earlier || earlier>at)await this.setAlarm(at,quota,continuation,true);
+  }
+  protected get repairHopLimit():number{return REPAIR_HOP_MS;}
+  private repairEnvironment(group:RepairGroup):Env {
+    const owner=this.owner,env=this.env;
+    const hop=<T>(action:()=>Promise<T>,cancel?:()=>void)=>repairHop(group,action,cancel,owner.repairHopLimit);
+    const body=(value:any):any=>value && typeof value==='object'?new Proxy(value,{get(target,key){
+      const item=Reflect.get(target,key,target);
+      if(typeof item!=='function')return item;
+      return ['text','json','arrayBuffer','bytes'].includes(String(key))?(...args:any[])=>hop(()=>item.apply(target,args)):item.bind(target);
+    }}):value;
+    const archive=new Proxy(env.ARCHIVE,{get(target,key){
+      const value=Reflect.get(target,key,target);if(typeof value!=='function')return value;
+      return (...args:any[])=>hop(()=>value.apply(target,args)).then(result=>key==='get'?body(result):result);
+    }});
+    const installations=new Proxy(env.INSTALLATIONS,{get(target,key){
+      if(key!=='get'){const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;}
+      return (...args:any[])=>{
+        const instance=(target.get as any)(...args);
+        return new Proxy(instance,{get(stub,key){
+          if(key!=='fetch'){const value=Reflect.get(stub,key,stub);return typeof value==='function'?value.bind(stub):value;}
+          return (input:any,init:any)=>{
+            group.wakeAtStart=owner.getRepairCoordinator().wakeSequence;
+            const abort=new AbortController();
+            return hop(()=>stub.fetch(input,{...init,signal:abort.signal}),()=>abort.abort()).then(body);
+          };
+        }});
+      };
+    }});
+    return {...env,ARCHIVE:archive,INSTALLATIONS:installations};
+  }
+  private async noteQuotaRestriction(result:any):Promise<void> {
+    const owner=this.owner;
+    if(!this.repairGroup || result?.scope?.kind!=='installation' || !Number.isSafeInteger(result.retry_at)
+      || typeof result.category!=='string' || result.category!=='capacity' && !result.category.startsWith('secondary'))return;
+    if(result.category==='capacity'){
+      this.repairGroup.capacityRetryAt=result.retry_at;
+      if(this.repairGroup.wakeAtStart!==owner.repairCoordinator?.wakeSequence){owner.scheduleCapacityDeadline(result.retry_at);return;}
+    }
+    if(result.retry_at<=Date.now() && result.category!=='capacity')return;
+    const repo=await owner.meta('repository');if(!repo?.installation)return;
+    if(result.category==='capacity' && this.repairGroup.wakeAtStart!==owner.repairCoordinator?.wakeSequence){owner.scheduleCapacityDeadline(result.retry_at);return;}
+    const quantum=owner.getRepairCoordinator().current;
+    owner.quotaRestriction={category:result.category,retry_at:result.retry_at,installation:repo.installation,quantum,dataProgress:quantum.dataProgress};
+  }
+  private scheduleCapacityDeadline(at:number):void {
+    const owner=this.owner;
+    // A real release can arrive before its rejected job's retry deadline.
+    // Preserve that ordinary wake when maintenance runs past the deadline;
+    // otherwise the paused quantum excludes the now-overdue job from arming.
+    if(owner.store.backend==='sqlite'){owner.noteOrdinaryAlarm(at);return;}
+    const delay=at-Date.now();
+    if(delay<=0 || delay>settings(owner.env).lease_ms)return;
+    if(owner.capacityWake?.at===at)return;
+    if(owner.capacityWake && owner.capacityWake.at<at){owner.capacityWake.latest=Math.max(owner.capacityWake.latest || at,at);return;}
+    const latest=owner.capacityWake?Math.max(owner.capacityWake.latest || owner.capacityWake.at,owner.capacityWake.at):undefined;
+    if(owner.capacityWake){clearTimeout(owner.capacityWake.timer);owner.capacityWake.resolve();owner.capacityWake=undefined;}
+    let resolve!:()=>void;const waiting=new Promise<void>(done=>resolve=done);
+    const fire=()=>{
+      if(owner.capacityWake?.at!==at)return;
+      // Timers may round down by a millisecond. A wake before the durable due
+      // time can find no job and lose the only prompt continuation.
+      const remaining=at-Date.now();
+      if(remaining>0){owner.capacityWake.timer=setTimeout(fire,remaining);return;}
+      const latest=owner.capacityWake.latest;
+      owner.capacityWake=undefined;resolve();
+      void owner.getRepairCoordinator().resumeCapacity(true);
+      if(latest && latest>Date.now())owner.scheduleCapacityDeadline(latest);
+    };
+    const timer=setTimeout(fire,delay);
+    owner.capacityWake={at,latest,timer,resolve};owner.ctx.waitUntil?.(waiting);
+  }
+  private quotaBlocksRepairTurn(quantum:RepairQuantum):boolean {
+    const restriction=this.owner.quotaRestriction;
+    return Boolean(restriction && (restriction.retry_at>Date.now() || restriction.quantum===quantum && restriction.dataProgress===quantum.dataProgress));
+  }
+  private async quotaAllowsRepairClaim(probe=false):Promise<boolean> {
+    const owner=this.owner,restriction=owner.quotaRestriction;if(!restriction)return true;
+    const repo=await owner.meta('repository');
+    if(repo?.installation!==restriction.installation){owner.quotaRestriction=undefined;return true;}
+    if(!probe && owner.quotaBlocksRepairTurn(owner.getRepairCoordinator().current))return false;
+    if(restriction.retry_at>Date.now())return false;
+    owner.quotaRestriction=undefined;
+    if(owner.store.backend!=='sqlite' || restriction.category!=='capacity')return true;
+    // Only after a real global-capacity rejection. A hung optional hint does
+    // not hold a repair slot or block normal claims; at most one is outstanding.
+    if(owner.availabilityFlight)return true;
+    const wake=owner.getRepairCoordinator().wakeSequence;
+    const abort=new AbortController();
+    const actual=(async()=>{
+      const response=await stub(owner.env.INSTALLATIONS,repo.installation).fetch('https://internal/availability',{method:'POST',body:JSON.stringify({repository:repo}),signal:abort.signal});
+      return response.ok?await response.json():null;
+    })();
+    owner.availabilityFlight=actual;
+    const tracked=actual.finally(()=>{if(owner.availabilityFlight===actual)owner.availabilityFlight=undefined;}).catch(()=>{});
+    owner.ctx.waitUntil?.(tracked);
+    let timer:ReturnType<typeof setTimeout>|undefined;
+    try{
+      const result:any=await Promise.race([actual,new Promise(resolve=>{timer=setTimeout(()=>{abort.abort();resolve(null);},1500);})]);
+      if(wake===owner.getRepairCoordinator().wakeSequence && result?.scope?.kind==='installation' && result.category==='capacity' && Number.isSafeInteger(result.retry_at) && result.retry_at>Date.now()){
+        const quantum=owner.getRepairCoordinator().current;
+        owner.quotaRestriction={...restriction,retry_at:result.retry_at,quantum,dataProgress:quantum.dataProgress};return false;
+      }
+    }catch{}finally{if(timer!==undefined)clearTimeout(timer);}
+    return true;
+  }
+  private async activityLandingsFresh():Promise<boolean> {
+    // One committed read, without an in-memory freshness or ownership cache.
+    const rows=(await this.store.exec<any>('SELECT key,value FROM meta WHERE key IN (?,?)','activity_landings_transport','activity_landings_checked')).toArray();
+    try {
+      const values=new Map(rows.map(row=>[row.key,JSON.parse(row.value)])),checked=values.get('activity_landings_checked'),now=Date.now();
+      return values.get('activity_landings_transport')==='service-binding-v2' && Number.isSafeInteger(checked) && checked>0 && checked<=now && now-checked<300000;
+    }catch{return false;}
   }
   async refreshActivityLandings(): Promise<void> {
     const configured=await this.meta('repository'),receiptURL=configured?.bors_receipts_url;
     if(!receiptURL && !(configured?.name==='TauCetiProject/TauCeti' && this.env.BORS_ACTIVITY))return;
     if(receiptURL && (!receiptURL.startsWith('https://') || new URL(receiptURL).username || new URL(receiptURL).password))throw Error('Bors receipts require an approved HTTPS URL');
     const now=Date.now(),token=crypto.randomUUID();
+    // A failed speculative read does not replace the authoritative reservation.
+    try{if(await this.activityLandingsFresh())return;}catch{}
     const reserved=await this.atomic(async state=>{
-      if((await state.meta('activity_landings_transport'))==='service-binding-v2' && now-((await state.meta('activity_landings_checked')) || 0)<300000)return false;
+      // Another caller can reserve while this one waits in the writer queue.
+      if(await state.activityLandingsFresh())return false;
       await state.setMeta('activity_landings_checked',now);await state.setMeta('activity_landings_transport','service-binding-v2');await state.setMeta('activity_landings_token',token);return true;
-    });
+    },'other','activity_landings_reserve');
     if(!reserved)return;
     let receipts:Awaited<ReturnType<typeof readPromotionReceipts>>=[],failure:string|null=null;
     try{receipts=await readPromotionReceipts((url,options)=>this.env.BORS_ACTIVITY?this.env.BORS_ACTIVITY.fetch(url,options):fetch(url,options),receiptURL,configured.name,configured.branch || 'main');}
@@ -1816,7 +2930,7 @@ export class RepositoryState extends DurableObject<Env> {
         await state.setMeta('activity_landings_success',now);
       }
       await state.setMeta('activity_landings_error',failure);
-    });
+    },'other','activity_landings_publish');
   }
   async primeActivity(numbers:number[]):Promise<RepositoryState> {
     if(this.store.backend!=='postgres')return this;
@@ -1839,7 +2953,8 @@ export class RepositoryState extends DurableObject<Env> {
         if(p){
           cache.seed('SELECT at,source FROM activity_landings WHERE number=? AND head=?',[number,p.headRefOid || ''],landings.filter(r=>r.number===id && r.head===p.headRefOid));
           const fingerprint=activityFingerprint(p,collection[0]?.revision);
-          cache.seed('SELECT data FROM activity_loc_cache WHERE number=? AND fingerprint=?',[number,fingerprint],loc.toArray().filter(r=>r.number===id && r.fingerprint===fingerprint));
+          const gitFingerprint=activityGitFingerprint(p);
+          cache.seed(ACTIVITY_LOC_CACHE_QUERY,[number,fingerprint,gitFingerprint],loc.toArray().filter(r=>r.number===id && [fingerprint,gitFingerprint].includes(r.fingerprint)));
         }
       }
       // Reuse already decoded PR metadata, including occasional R2-backed rows.
@@ -1848,41 +2963,51 @@ export class RepositoryState extends DurableObject<Env> {
     }
     return state;
   }
-  async activityLOC(number:number,p:any,budget?:{remaining:number}): Promise<any> {
+  async activityLOC(number:number,p:any,budget?:{remaining:number},source?:string): Promise<any> {
     const key=queryKey({operation:'files',args:{number}});
     const complete=(await this.store.exec<any>('SELECT complete,revision FROM collections WHERE key=?',key)).toArray()[0];
-    if(!complete?.complete || !p.headRefOid || !Number.isSafeInteger(p.changedFiles)) return null;
-    const fingerprint=activityFingerprint(p,complete.revision);
-    const cached=(await this.store.exec<any>('SELECT data FROM activity_loc_cache WHERE number=? AND fingerprint=?',number,fingerprint)).toArray()[0];
+    if(!p.headRefOid) return null;
+    const fingerprint=activityFingerprint(p,complete?.revision);
+    const gitFingerprint=activityGitFingerprint(p);
+    const cached=(await this.store.exec<any>(ACTIVITY_LOC_CACHE_QUERY,number,fingerprint,gitFingerprint)).toArray()[0];
     if(cached) return JSON.parse(cached.data);
+    // A verified fact remains useful without its original file collection.
+    // File-derived facts retain snapshot checks; Git facts follow their commits.
+    if(!complete?.complete || !Number.isSafeInteger(p.changedFiles)) return null;
     if(budget && budget.remaining--<=0) return null;
     const remember=async (result:any)=>{
-      await this.optionalRead('activity_loc_cache',async ()=>(await this.store.exec('INSERT OR REPLACE INTO activity_loc_cache VALUES (?,?,?)',number,fingerprint,JSON.stringify(result))));
+      // Check the source at write time too: an old read must not overwrite a
+      // newer head's Git fact. Raw source equality also covers archived PRs.
+      const identity=source===undefined?{sql:"json_extract(data,'$.headRefOid')=? AND json_extract(data,'$.baseRefOid') IS NOT DISTINCT FROM ?",bindings:[p.headRefOid,p.baseRefOid ?? null]}:{sql:'data=?',bindings:[source]};
+      await this.optionalRead('activity_loc_cache',async ()=>(await this.store.exec("INSERT INTO activity_loc_cache SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM resources WHERE kind='pr' AND id=? AND "+identity.sql+") ON CONFLICT(number) DO UPDATE SET fingerprint=excluded.fingerprint,data=excluded.data WHERE activity_loc_cache.fingerprint<>?",number,fingerprint,JSON.stringify(result),String(number),...identity.bindings,gitFingerprint)));
       return result;
     };
-    const stored=await this.scanRows("SELECT r.data FROM members m JOIN resources r ON r.kind='files' AND r.id=m.id WHERE m.collection=? AND r.tombstone=0",key);
+    const stored=await this.scanRows(`SELECT r.data FROM members m ${collectionJoin(this.store)} resources r ON r.kind='files' AND r.id=m.id WHERE m.collection=? AND r.tombstone=0`,key);
     if(stored.length!==p.changedFiles) return remember(null);
-    let added=0,deleted=0,totalAdded=0,totalDeleted=0;
+    let added=0,deleted=0,totalAdded=0,totalDeleted=0,headBound=stored.length===0,removedRef:string|undefined;
     for(const row of stored) {
       const file=await this.decode(row.data);
       if(typeof file.filename!=='string') return remember(null);
       if(!Number.isSafeInteger(file.additions) || file.additions<0 || !Number.isSafeInteger(file.deletions) || file.deletions<0) return remember(null);
-      // Cached file URLs carry their immutable commit. A mixed/old-head file
-      // collection cannot be credited to the PR's current output.
-      const expected=file.status==='removed'?p.baseRefOid:p.headRefOid;
-      const matches=(raw:any)=>{
+      // Surviving files bind the list to the head. Removed files instead name
+      // one comparison merge base, which need not equal the base branch tip.
+      const expected=file.status==='removed'?null:p.headRefOid;
+      const reference=(raw:any)=>{
         try {
           const url=new URL(raw),parts=url.pathname.split('/').filter(Boolean);
-          if(url.hostname==='github.com') return ['blob','raw'].includes(parts[2]) && parts[3]===expected;
-          if(url.hostname==='raw.githubusercontent.com') return parts[2]===expected;
-          return url.hostname==='api.github.com' && url.searchParams.get('ref')===expected;
-        } catch {return false;}
+          return url.hostname==='github.com' && ['blob','raw'].includes(parts[2])?parts[3]
+            :url.hostname==='raw.githubusercontent.com'?parts[2]
+            :url.hostname==='api.github.com'?url.searchParams.get('ref'):null;
+        } catch {return null;}
       };
-      if(!expected || ![file.blob_url,file.raw_url,file.contents_url].some(matches)) return remember(null);
+      const ref=[file.blob_url,file.raw_url,file.contents_url].map(reference).find(ref=>expected?ref===expected:typeof ref==='string' && /^[0-9a-f]{40}$/i.test(ref));
+      if(!ref) return remember(null);
+      if(file.status==='removed') {if(removedRef && removedRef!==ref)return remember(null);removedRef=ref;}
+      else headBound=true;
       totalAdded+=file.additions;totalDeleted+=file.deletions;
       if(typeof file.filename==='string' && file.filename.endsWith('.lean')) {added+=file.additions;deleted+=file.deletions;}
     }
-    if(Number.isSafeInteger(p.additions) && p.additions!==totalAdded || Number.isSafeInteger(p.deletions) && p.deletions!==totalDeleted) return remember(null);
+    if(!headBound || Number.isSafeInteger(p.additions) && p.additions!==totalAdded || Number.isSafeInteger(p.deletions) && p.deletions!==totalDeleted) return remember(null);
     return remember({added,deleted,head_sha:p.headRefOid});
   }
   // The last time the mirror changed: an applied webhook or a stored repair.
@@ -2054,7 +3179,7 @@ export class RepositoryState extends DurableObject<Env> {
     }catch {throw new AdminError('migration_target_configuration');}
     this.store=new PostgresStore(this.env.REPOSITORY_DATABASE_URL,repo,owner.generation);
     this.selectedMigrationGeneration=owner.generation;this.schema='current';this.degraded=undefined;this.storageMarkerUnavailable=false;
-    this.repositoryMemo=undefined;this.revisionState.value=undefined;this.completedQueries.clear();
+    this.repositoryMemo=undefined;this.revisionState.value=undefined;this.completedQueries.clear();this.publicCompletedQueries.clear();
   }
   private async selectMigrationBackend():Promise<void> {
     const state=this.migrationState;
@@ -2090,7 +3215,7 @@ export class RepositoryState extends DurableObject<Env> {
     if(health.deployment_id!==this.env.CF_VERSION?.id || !Array.isArray(health.repository_inflight))throw new AdminError('migration_dispatch_drain_unavailable');
     if(health.repository_inflight.some((row:any)=>row.repository===repo.id && row.requests>0))throw new AdminError('migration_drain_pending');
     }
-    if(this.activeOperations || this.mutationState.active || this.optionalWork.active || this.applying)throw new AdminError('migration_drain_pending');
+    if(this.owner.activeOperations || this.mutationState.active || this.optionalWork.active || this.applying)throw new AdminError('migration_drain_pending');
   }
   private async fenceMigration(state:Migration):Promise<void> {
     const sql=this.nativeSql;
@@ -2220,7 +3345,7 @@ export class RepositoryState extends DurableObject<Env> {
     // parking/receipt handler owns normal and dead-letter inputs. Historical
     // bucket scans remain visible, but are independent recovery work.
     if(['queue','dlq'].some(name=>queues[name].stale || queues[name].count!==0 || queues[name].at<state.cutover!.selected_at!))return;
-    if(!state.cutover!.replay_complete && (heldEmpty || recovery.held_pass_completed_at>=state.cutover!.selected_at!)){state.cutover!.replay_complete=Date.now();await saveMigration(this.env.ARCHIVE,state);}
+    if(!state.cutover!.replay_complete && (heldEmpty || recovery.held_pass_started_at>=state.cutover!.selected_at! && recovery.held_pass_completed_at>=recovery.held_pass_started_at)){state.cutover!.replay_complete=Date.now();await saveMigration(this.env.ARCHIVE,state);}
     if(!heldEmpty){log('migration_held_input_pending',{repository:state.repository,held:recovery.held?.count ?? null,next_retry:recovery.next_retry ?? null,reconciliation_resumed:Boolean(state.cutover!.replay_complete)});return;}
     await this.prepareDiagnostics();
     const evidence=await this.env.ARCHIVE.get(`control/${state.repository}/migration-acceptance.json`);
@@ -2231,7 +3356,8 @@ export class RepositoryState extends DurableObject<Env> {
     state.cutover!.release={schema_versions:{source:state.source.schema,target:1},deployment:this.env.CF_VERSION?.id,source:state.source,target:state.target,
       revision:await this.meta('revision'),latest_applied_input:await this.meta('latest_applied_input'),latest_webhook:await this.meta('last_webhook'),latest_repair:await this.meta('last_repair'),
       backlog:{parked:0,held:0,queue:0,dlq:0,queue_observed_at:queues.queue.at,dlq_observed_at:queues.dlq.at,raw_completed:recovery.raw?.last_completed ?? null,raw_gaps:recovery.raw?.gaps ?? null},backend_write_owner:'postgres',
-      latency:{baseline_p95_ms:acceptance.latency.baseline_p95_ms,target_p95_ms:acceptance.latency.target_p95_ms},cursor_coverage:{versions:['r2-v1'],active_checked:state.cutover!.shadow?.cursor_checks || 0,expired_checked:state.cutover!.shadow?.expired_cursor_checks || 0},github_hour:rate.hour ?? null,health};
+      latency:{baseline_p95_ms:acceptance.latency.baseline_p95_ms,target_p95_ms:acceptance.latency.target_p95_ms},cursor_coverage:{versions:['r2-v1'],active_checked:state.cutover!.shadow?.cursor_checks || 0,expired_checked:state.cutover!.shadow?.expired_cursor_checks || 0},github_hour:rate.hour ?? null,
+      github_hour_observation:{at:rate.at ?? null,window_start:Number.isSafeInteger(rate.at)?rate.at-3600000:null,prepared_deployment:rate.prepared_deployment ?? null,scope:rate.scope ?? null,stale:rate.stale ?? true,window_complete:rate.window_complete ?? null,telemetry_failure:rate.telemetry_failure ?? null},health};
     state.cutover!.completed_at=Date.now();state.phase='complete';await saveMigration(this.env.ARCHIVE,state);
     await terminalReceipt(this.env.ARCHIVE,state);
   }
@@ -2367,7 +3493,7 @@ export class RepositoryState extends DurableObject<Env> {
       if(input.operation==='abandon') {
         // There is no PostgreSQL write switch in this protocol. Preserve all
         // archives; explicit abandonment only releases this source fence.
-        if(this.activeOperations || this.mutationState.active || this.optionalWork.active) throw new AdminError('migration_drain_pending');
+        if(this.owner.activeOperations || this.mutationState.active || this.optionalWork.active) throw new AdminError('migration_drain_pending');
         state={...state,phase:'abandoned',failure:null};
         await this.env.ARCHIVE.put(archiveKey(repo,id)+'/abandoned.json',encodeMigration(state));
         await saveMigration(this.env.ARCHIVE,state);
@@ -2382,8 +3508,8 @@ export class RepositoryState extends DurableObject<Env> {
           const owner:any=await claimed.json();
           if(owner.generation!==id || owner.target!==target || owner.source.object!==state.source.object || owner.source.deployment!==state.source.deployment) throw new AdminError('migration_generation_used');
         } else if(!await this.env.ARCHIVE.put(claimKey,JSON.stringify({generation:id,target,source:state.source}),{onlyIf:{etagDoesNotMatch:'*'}})) throw new AdminError('migration_generation_used');
-        for(const deadline=Date.now()+25000;(this.activeOperations>0 || this.mutationState.active>0 || this.optionalWork.active>0) && Date.now()<deadline;) await new Promise(resolve=>setTimeout(resolve,25));
-        if(this.activeOperations || this.mutationState.active || this.optionalWork.active) throw new AdminError('migration_drain_pending');
+        for(const deadline=Date.now()+25000;(this.owner.activeOperations>0 || this.mutationState.active>0 || this.optionalWork.active>0) && Date.now()<deadline;) await new Promise(resolve=>setTimeout(resolve,25));
+        if(this.owner.activeOperations || this.mutationState.active || this.optionalWork.active) throw new AdminError('migration_drain_pending');
         await beginExport(this.env.ARCHIVE,this.ctx.storage,this.sql,state);
       } else if(input.operation==='step') {
         if(state.phase==='exporting') await exportStep(this.env.ARCHIVE,this.sql,state,input.limit);
@@ -2406,6 +3532,12 @@ export class RepositoryState extends DurableObject<Env> {
     }
   }
   async fetch(req:Request): Promise<Response> {
+    // A separate route fails closed if the edge reaches an older object version
+    // that does not implement read-only public snapshots yet.
+    if(new URL(req.url).pathname==='/public-query') {
+      req=new Request(new URL('/query',req.url),req);
+      req.headers.set('x-query-readonly','1');
+    }
     const path=new URL(req.url).pathname;
     if((path==='/tick' || path==='/migration-supervise') && this.migrationUnavailable) await this.retryMigrationControl();
     if(path==='/migration-supervise') {
@@ -2423,8 +3555,17 @@ export class RepositoryState extends DurableObject<Env> {
       if(path==='/retained-object') return json({retained:true});
     }
     const tracked=!this.migrationHeld();
-    if(tracked) this.activeOperations++;
-    try {return await this.repositoryFetch(req);} finally {if(tracked) this.activeOperations--;}
+    if(tracked) this.owner.activeOperations++;
+    const started=Date.now();
+    try {
+      const response=await this.repositoryFetch(req);
+      if(path==='/query') {
+        const dispatched=Number(req.headers.get('x-query-dispatched-at'));
+        response.headers.set('X-TauCeti-Query-Ms',String(Date.now()-started));
+        if(dispatched>0)response.headers.set('X-TauCeti-Input-Wait-Ms',String(Math.max(0,started-dispatched)));
+      }
+      return response;
+    } finally {if(tracked) this.owner.activeOperations--;}
   }
   async repositoryFetch(req:Request): Promise<Response> {
     const url=new URL(req.url),path=url.pathname,request_id=requestId(req),requestStarted=Date.now();
@@ -2433,11 +3574,61 @@ export class RepositoryState extends DurableObject<Env> {
       if (path.startsWith('/storage/')) return await this.storage(path,req);
       // A genuinely missing schema is a precise error, not empty data.
       if (typeof this.schema==='object' && path!=='/health') return json({error:this.schema.error,missing:this.schema.missing,cause:this.schema.cause,parkable:true,request_id},503);
+      if(path==='/capacity-ready' && req.method==='POST'){
+        const input:any=await req.json(),owner=this.owner,repo=await owner.meta('repository');
+        if(input?.installation!==repo?.installation)return json({ok:true,stale:true});
+        const restriction=owner.quotaRestriction;
+        if(restriction?.category==='capacity'){
+          owner.scheduleCapacityDeadline(restriction.retry_at);owner.quotaRestriction=undefined;
+        }
+        void owner.getRepairCoordinator().capacityWake(restriction?.category==='capacity');return json({ok:true});
+      }
       if (path==='/configure') { await this.configure((await req.json() as any).repository); return json({ok:true}); }
+      if (path==='/ci-receipts') {
+        // Old parked CI input predates the decision not to mirror these events.
+        // Commit its existing ignored-delivery disposition in one fenced batch;
+        // the ingress owner still publishes each R2 receipt before cleanup.
+        const input:any=await req.json(),repo=repository(this.env,input?.repository);
+        if(!repo || this.env.REPOSITORIES.idFromName(repo.id).toString()!==this.ctx.id.toString())return json({error:'invalid_ci_receipts'},400);
+        if(!Array.isArray(input.events) || !input.events.length || input.events.length>100 || input.events.some((p:any)=>!p || typeof p.delivery!=='string' || !/^[a-zA-Z0-9-]{1,100}$/.test(p.delivery) || !CI_EVENTS.has(p.event) || !Number.isSafeInteger(p.received) || p.received<0))return json({error:'invalid_ci_receipts'},400);
+        const events=new Map<string,any>();
+        for(const p of input.events){if(events.has(p.delivery) && events.get(p.delivery).event!==p.event)return json({error:'invalid_ci_receipts'},400);events.set(p.delivery,p);}
+        if(this.storageMarkerUnavailable)return json({error:'storage_control_unavailable',parkable:true,request_id},503);
+        if(this.ingress===undefined){const mode=(await this.env.ARCHIVE.get(controlKey(repo.id)).then(o=>o?.json<any>()))?.mode ?? 'apply';this.ingress ??= mode;}
+        if(this.ingress==='parked')return json({error:'ingress_parked',parkable:true,request_id},503);
+        if(this.degraded)return json({error:this.degraded.reason==='storage_full'?'storage_full':'storage_control_unavailable',parkable:true,request_id},503);
+        this.applying++;let timing:{lookup_ms?:number;write_ms:number}|undefined;
+        try {
+          const now=Date.now(),rows=[...events.values()];let pending=rows;
+          // Lost batch replies and cleanup failures leave durable SQL receipts.
+          // Discover those with a read before joining the serialized writer.
+          // New deliveries still commit under the ordinary generation fence.
+          if(this.store.backend==='postgres') {
+            const known=new Set((await this.store.exec<any>('SELECT id FROM deliveries WHERE id IN ('+rows.map(()=>'?').join(',')+')',...rows.map(p=>p.delivery))).toArray().map(r=>r.id));
+            pending=rows.filter(p=>!known.has(p.delivery));
+          }
+          const lookupFinished=Date.now();
+          if(pending.length) {
+            if((this.ingress as string|undefined)==='parked')return json({error:'ingress_parked',parkable:true,request_id},503);
+            if(this.storageMarkerUnavailable)return json({error:'storage_control_unavailable',parkable:true,request_id},503);
+            const degraded=this.degraded as {reason:string}|undefined;
+            if(degraded)return json({error:degraded.reason==='storage_full'?'storage_full':'storage_control_unavailable',parkable:true,request_id},503);
+            if(this.mutationState.blocked)return json({error:'backend_fenced',parkable:true,request_id},503);
+          }
+          if(pending.length)await this.atomic(async state=>{
+            const size=state.store.backend==='sqlite'?33:100;
+            for(let start=0;start<pending.length;start+=size){const batch=pending.slice(start,start+size);await state.store.exec('INSERT OR IGNORE INTO deliveries VALUES '+batch.map(()=>'(?,?,?)').join(','),...batch.flatMap(p=>[p.delivery,'ignored:'+p.event,now]));}
+          });
+          if(this.store.backend==='sqlite')await this.ctx.storage.sync();
+          timing={...(this.store.backend==='postgres'?{lookup_ms:lookupFinished-now}:{}),write_ms:Date.now()-lookupFinished};
+          this.inputFailure=undefined;
+        }finally{this.applying--;}
+        return json({committed:[...events.keys()],timing});
+      }
       if (path==='/event') {
         const pointer=await req.json() as EventPointer,repo=repository(this.env,pointer.repository);
         if(this.storageMarkerUnavailable)return json({error:'storage_control_unavailable',parkable:true,request_id},503);
-        if (this.ingress===undefined && repo) this.ingress=(await this.env.ARCHIVE.get(controlKey(repo.id)).then(o=>o?.json<any>()))?.mode ?? 'apply';
+        if (this.ingress===undefined && repo) {const mode=(await this.env.ARCHIVE.get(controlKey(repo.id)).then(o=>o?.json<any>()))?.mode ?? 'apply';this.ingress ??= mode;}
         if (this.ingress==='parked') return json({error:'ingress_parked',parkable:true,request_id},503);
         if(!repo) throw new Error('repository not allowed');
         let flight=this.deliveryFlights.get(pointer.delivery);
@@ -2447,7 +3638,7 @@ export class RepositoryState extends DurableObject<Env> {
             try {
               await this.ingest(pointer);
               if(this.store.backend==='sqlite')await this.ctx.storage.sync();
-              await this.env.ARCHIVE.put(receiptKey(repo.id,pointer.delivery),JSON.stringify({delivery:pointer.delivery,committed_at:Date.now(),disposition:CI_EVENTS.has(pointer.event)?'not_mirrored':'applied'}));
+              await this.env.ARCHIVE.put(receiptKey(repo.id,pointer.delivery),JSON.stringify({delivery:pointer.delivery,committed_at:Date.now(),disposition:CI_EVENTS.has(pointer.event)?'not_mirrored':'applied'}),{onlyIf:{etagDoesNotMatch:'*'}});
             } finally {this.applying--;}
           })();
           this.deliveryFlights.set(pointer.delivery,flight);
@@ -2461,6 +3652,7 @@ export class RepositoryState extends DurableObject<Env> {
         // only once a complete archive reference index/release protocol exists.
         return json({retained:true,reason:'recovery_reference_index_required'});
       }
+      if(path==='/refresh-pr')return json(await this.refreshPR(await req.json() as any));
       if (path==='/activity') {
         const input:any=await req.json();
         const prs=[],missing=[],locBudget={remaining:32},state=await this.primeActivity(input.numbers);
@@ -2471,8 +3663,9 @@ export class RepositoryState extends DurableObject<Env> {
           const p=await state.decode(row.data);
           const landing=(await state.store.exec<any>('SELECT at,source FROM activity_landings WHERE number=? AND head=?',number,p.headRefOid || '')).toArray()[0];
           prs.push({number,state:p.state,created_at:p.createdAt || null,landed_at:p.mergedAt || (landing?new Date(landing.at/1000).toISOString():null),
-            head_sha:p.headRefOid || null,observed_at:row.observed,
-            landing_source:p.mergedAt?'github-merged':landing?.source || null,lean_loc:await state.activityLOC(number,p,locBudget)});
+            head_sha:p.headRefOid || null,base_sha:p.baseRefOid || null,
+            diff_totals:{files:p.changedFiles,added:p.additions,deleted:p.deletions},observed_at:row.observed,
+            landing_source:p.mergedAt?'github-merged':landing?.source || null,lean_loc:await state.activityLOC(number,p,locBudget,row.data)});
         }
         // Normal responses retain their completion-time clock. A migration
         // shadow supplies the same private clock to both local read scopes.
@@ -2484,53 +3677,58 @@ export class RepositoryState extends DurableObject<Env> {
       }
       if (path==='/query') {
         const q=parseGitHub(await req.text()) as Query;
+        const readOnly=req.headers.get('x-query-readonly')==='1';
         validateQuery(q);
         requestOperation=q.operation;
         if (NOT_MIRRORED.has(q.operation)){requestUnavailable=true;return json(await this.unavailable(q,'not_mirrored'));}
         await this.meta('repository');
-        if(q.cursor)this.backgroundDemand(q);
+        if(q.cursor && !readOnly)this.backgroundDemand(q);
         const changed=await this.frozenSince();
         const planned=this.migrationHeld() || this.migrationState?.phase==='replaying';
         if(changed!==null && !planned){requestUnavailable=true;return json({...await this.unavailable(q,'mirror_frozen'),frozen_since:changed},200,{'X-TauCeti-Storage':'degraded'});}
-        const etag='"'+(await this.revision())+'"',headers:Record<string,string>=this.degraded?{'X-TauCeti-Storage':'degraded'}:{};
+        // Replace a cached markerless survey even when stored data has not
+        // changed. Clients treat validators as opaque; revisions stay numeric.
+        const tag=(revision:number)=>'"'+(q.operation==='survey'?SURVEY_ETAG_PREFIX:'')+revision+'"';
+        const etag=tag(await this.revision()),headers:Record<string,string>=this.degraded?{'X-TauCeti-Storage':'degraded'}:{};
         if(this.migrationUnavailable && this.store.backend==='sqlite') {headers['X-TauCeti-Read-Fallback']='last-known-source';const frozen=this.localMeta('backend_owner')?.frozen_at;if(frozen)headers['X-TauCeti-Source-Frozen-At']=String(frozen);}
         if (!q.cursor && matchesETag(req.headers.get('if-none-match'),etag) && q.operation!=='progress' && (await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length) {
-          this.backgroundDemand(q);
+          if(!readOnly)this.backgroundDemand(q);
           return new Response(null,{status:304,headers:{ETag:etag,...headers}});
         }
-        const key=queryKey(q)+'|observed:'+Boolean(q.allow_observed)+'|'+(q.cursor || '');
-        const cached=this.completedQueries.get(key);
+        const key=(readOnly?'public|':'authenticated|')+queryKey(q)+'|observed:'+Boolean(q.allow_observed)+'|'+(q.cursor || '')+'|pr-epoch:'+(['survey','open_prs'].includes(q.operation)?this.owner.prQueryEpoch:['pr','progress'].includes(q.operation)?this.owner.prQueryEpochs.get(String(q.args?.number)) || 0:0);
+        const completed=readOnly?this.publicCompletedQueries:this.completedQueries;
+        const cached=completed.get(key);
         if (!q.cursor && cached && cached.expires>Date.now() &&
-          (cached.result.revision===(await this.revision()) || q.operation==='survey' && Date.now()-cached.built<10000)) {
+          (cached.result.revision===(await this.revision()) || ['survey','open_prs','open_issues'].includes(q.operation) && Date.now()-cached.built<10000 || !await this.changedQuery(q,cached.result.revision))) {
           requestCoverage=cached.result.coverage || 'unknown';
-          this.backgroundDemand(q);
-          return json(cached.result,200,{ETag:'"'+cached.result.revision+'"',...headers});
+          if(!readOnly)this.backgroundDemand(q);
+          return json(cached.result,200,{ETag:tag(cached.result.revision),...headers});
         }
         let pending=this.inflightQueries.get(key);
         if (!pending) {
-          pending=q.cursor?this.continuation(q,queryKey(q)):this.stableQuery(q);
+          pending=q.cursor?this.continuation(q,queryKey(q)):this.stableQuery(q,readOnly);
           this.inflightQueries.set(key,pending);
         }
         let result:Result;
         try { result=await pending; }
         finally { if (this.inflightQueries.get(key)===pending) this.inflightQueries.delete(key); }
-        if (!q.cursor && result.status==='ok' && (q.operation==='survey' || result.revision===await this.revision())) {
-          this.completedQueries.delete(key);
-          this.completedQueries.set(key,{result,expires:Date.now()+540000,built:Date.now()});
-          while (this.completedQueries.size>16) this.completedQueries.delete(this.completedQueries.keys().next().value!);
+        if (!q.cursor && result.status==='ok') {
+          completed.delete(key);
+          completed.set(key,{result,expires:Date.now()+540000,built:Date.now(),...(readOnly?{bytes:new TextEncoder().encode(JSON.stringify(result)).length}:{})});
+          while (completed.size>16 || readOnly && [...completed.values()].reduce((n,e)=>n+(e.bytes || 0),0)>12*1024*1024) completed.delete(completed.keys().next().value!);
         }
         requestUnavailable=result.status==='unavailable';
         requestCoverage=result.coverage || 'unknown';
-        return json(result,200,{ETag:'"'+result.revision+'"',...headers});
+        return json(result,200,{ETag:tag(result.revision),...headers});
       }
       if (path==='/health' && this.store.backend==='postgres') {
         const monitoring=await this.preparedObservation(),storage=monitoring.storage || {backend:'postgres',schema_version:null,expected_schema_version:1,expected_generation:this.backendGeneration(),connected:null,stale:true};
-        return json({...this.diagnostics,reconciliation_version:2,revision:this.revisionState.value ?? this.diagnostics.revision ?? null,repository:this.repositoryMemo ?? this.diagnostics.repository ?? null,storage,monitoring,request_id,deployment_id:this.env.CF_VERSION?.id,diagnostics_at:this.diagnosticsAt || null,diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
+        return json({...this.diagnostics,grouped_publication:this.owner.groupedPublication,repair_scheduler:{...this.owner.repairCoordinator?.snapshot(),lease_renewal_row_updates:this.owner.renewedLeases || 0},ingestion:[...this.owner.ingestStats].map(([event_type,row])=>({event_type,...row})),reconciliation_version:2,revision:this.revisionState.value ?? this.diagnostics.revision ?? null,repository:this.repositoryMemo ?? this.diagnostics.repository ?? null,storage,monitoring,request_id,deployment_id:this.env.CF_VERSION?.id,diagnostics_at:this.diagnosticsAt || null,diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
       }
       if (path==='/health') {
         const storage={...await this.storageState(),backend:'sqlite',schema_version:SCHEMA_VERSION};
         if(typeof this.schema==='object' || storage.connected===false)return json({storage,deployment_id:this.env.CF_VERSION?.id,monitoring:await this.preparedObservation(),request_id});
-        return json({...this.diagnostics,reconciliation_version:2,settings:settings(this.env),...this.repairMetrics.summary(),queries:[...this.queryCounts.values()],query_metrics_scope:'repository_instance_since_restart',repair_metrics_scope:'repository_instance_since_restart',storage,storage_bytes:storage.database_size ?? (storage.capacity as any)?.database_bytes,
+        return json({...this.diagnostics,grouped_publication:this.owner.groupedPublication,repair_scheduler:{...this.owner.repairCoordinator?.snapshot(),lease_renewal_row_updates:this.owner.renewedLeases || 0},reconciliation_version:2,settings:settings(this.env),...this.repairMetrics.summary(),queries:[...this.queryCounts.values()],query_metrics_scope:'repository_instance_since_restart',repair_metrics_scope:'repository_instance_since_restart',storage,storage_bytes:storage.database_size ?? (storage.capacity as any)?.database_bytes,
           repository:await this.meta('repository'),revision:await this.revision(),bootstrap_inventory:await this.meta('bootstrap_inventory'),latest_applied_input:await this.meta('latest_applied_input'),
           deployment_id:this.env.CF_VERSION?.id,monitoring:await this.preparedObservation(),diagnostics_at:this.diagnosticsAt || null,diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
       }
@@ -2548,10 +3746,11 @@ export class RepositoryState extends DurableObject<Env> {
       }
       if (path==='/activity-refresh' && req.method==='POST') {if(!this.degraded) await this.refreshActivityLandings();return json({ok:true,degraded:Boolean(this.degraded)});}
       if (path==='/tick') {
+        this.owner.startReadDemands();
         // Cron reaches a full object even if its alarm cannot be rescheduled.
         if(this.store.backend==='postgres')this.startStorageMaintenance();
         if(this.store.backend==='sqlite')await this.storageMarker();
-        await this.expire();
+        if(this.store.backend==='sqlite')await this.expire();
         if(this.degraded && this.store.backend==='sqlite')await this.recoverHeadroom();
         if (!(await this.meta('repository'))) {
           if(this.store.backend==='postgres')return json({ok:false,reason:'repository_unconfigured'},409);
@@ -2573,6 +3772,9 @@ export class RepositoryState extends DurableObject<Env> {
       return json({error:reason,parkable:PARKABLE.has(reason),message:(error instanceof Error?error.message:'operation failed').slice(0,200),request_id},reason==='internal'?500:503);
     }finally {
       if(path==='/query')try {
+        const finished=Date.now(),dispatched=Number(req.headers.get('x-query-dispatched-at'));
+        if(finished-requestStarted>=250 || dispatched>0 && requestStarted-dispatched>=250)
+          log('repository_query_slow',{request_id,operation:requestOperation,handler_ms:finished-requestStarted,input_wait_ms:dispatched>0?Math.max(0,requestStarted-dispatched):null,error:requestError,unavailable:requestUnavailable});
         this.requestMetrics.record(Date.now()-requestStarted,requestError,requestUnavailable);
         if(requestOperation) {
           const coverage=requestError?'error':requestUnavailable?'unavailable':requestCoverage,key=JSON.stringify([requestOperation,coverage]);

@@ -18,6 +18,7 @@ from .project import CANONICAL, ConfigError, Project, bootstrap, checkout_root
 
 HERE = Path(__file__).resolve().parent
 ASSETS = HERE / "assets"
+MAINTENANCE_CONTROL_RUNNER = '${{ fromJSON(format(\'["nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=0","namespace-features:github.run-id={0}"]\', github.run_id)) }}'
 
 # Resolve tags when updating Tools, never when generating a downstream setup PR.
 # Verified against each action's GitHub commits API on 2026-10-21.
@@ -42,6 +43,108 @@ def pin_actions(text: str) -> str:
     return text
 
 
+def guard_app_jobs(text: str, *, runner: str = "ubuntu-latest") -> str:
+    """Skip App-dependent jobs during setup; preserve their event filters."""
+    heading = re.search(r"(?m)^jobs:\n", text)
+    if not heading or "\n  app-credentials:\n" in text:
+        return text
+    before, jobs = text[:heading.start()], text[heading.end():]
+    blocks = list(re.finditer(r"(?m)^  ([A-Za-z0-9_-]+):\n", jobs))
+    originals = {match[1]: jobs[match.start():blocks[i + 1].start() if i + 1 < len(blocks) else len(jobs)]
+                 for i, match in enumerate(blocks)}
+
+    def needs(block):
+        match = re.search(r"(?m)^    needs:[^\n]*(?:\n      - [^\n]+)*", block)
+        if not match:
+            return None, []
+        value = match[0].split(":", 1)[1].strip()
+        names = value.strip("[]").split(",") if not value.startswith("-") else [line.strip()[2:] for line in value.splitlines()]
+        return match, [name.strip().strip("\"'") for name in names]
+
+    def condition(block):
+        match = re.search(r"(?m)^    if: (.*)(?:\n(?:      .*)?)*", block)
+        if not match:
+            return None, ""
+        value = match[0].split(":", 1)[1].strip()
+        if value.startswith((">", "|")):
+            value = value.split("\n", 1)[1].strip()
+        # Strip YAML comments while preserving quoted strings containing '#'.
+        value = re.sub(r"'(?:[^']|'')*'|\"[^\"]*\"|#[^\n]*", lambda m: "" if m[0].startswith("#") else m[0], value)
+        value = " ".join(line.strip() for line in value.splitlines()).strip()
+        if value.startswith("${{") and value.endswith("}}"):
+            value = value[3:-2].strip()
+        return match, value
+
+    def event_filter(block, dependencies):
+        _, own = condition(block)
+        if re.search(r"\b(?:always|success|failure|cancelled)\s*\(", own):
+            return "true"
+        values = [own] + [condition(originals.get(name, ""))[1] for name in dependencies]
+        values = [value for value in values if value and not re.search(r"\b(?:needs|steps|env|runner|job|secrets)\.", value)
+                  and not re.search(r"\b(?:always|success|failure|cancelled)\s*\(", value)]
+        return " && ".join("(" + value + ")" for value in values) or "true"
+
+    credentials, filters = set(), set()
+    for index in reversed(range(len(blocks))):
+        match = blocks[index]
+        end = blocks[index + 1].start() if index + 1 < len(blocks) else len(jobs)
+        block = jobs[match.start():end]
+        refs = set(re.findall(r"\$\{\{\s*((?:secrets|vars)\.[A-Z0-9_]*(?:APP_ID|APP_PRIVATE_KEY))\s*\}\}", block))
+        if not refs:
+            continue
+        credentials.update(refs)
+        dependency, dependencies = needs(block)
+        filters.add(event_filter(block, dependencies))
+        if dependency:
+            block = block[:dependency.start()] + "    needs: [app-credentials, " + ", ".join(dependencies) + "]" + block[dependency.end():]
+        else:
+            block = block.replace(match[0], match[0] + "    needs: app-credentials\n", 1)
+        match_if, original = condition(block)
+        expression = "needs.app-credentials.outputs.ready == 'true'"
+        if match_if:
+            expression += " && (" + original + ")"
+            block = block[:match_if.start()] + "    if: >-\n      " + expression + "\n" + block[match_if.end():].lstrip("\n")
+        else:
+            block = block.replace(match[0], match[0] + "    if: " + expression + "\n", 1)
+        jobs = jobs[:match.start()] + block + jobs[end:]
+    if not credentials:
+        return text
+    # Only a boolean leaves this job. Secret values never reach outputs or logs.
+    names = [ref.split(".", 1)[1] for ref in sorted(credentials)]
+    env = "".join("          " + ref.split(".", 1)[1] + ": ${{ " + ref + " }}\n" for ref in sorted(credentials))
+    preflight_if = "" if "true" in filters else "    if: >-\n      " + " || ".join("(" + value + ")" for value in sorted(filters)) + "\n"
+    preflight = (
+        "  app-credentials:\n" + preflight_if +
+        "    runs-on: " + runner + "\n"
+        "    permissions: {}\n"
+        "    outputs:\n"
+        "      ready: ${{ steps.check.outputs.ready }}\n"
+        "    steps:\n"
+        "      - name: Check App settings for setup\n"
+        "        id: check\n"
+        "        env:\n" + env +
+        "        shell: bash\n"
+        "        run: |\n"
+        "          ready=true\n"
+        "          for name in " + " ".join(names) + "; do\n"
+        "            if [ -z \"${!name}\" ]; then\n"
+        "              ready=false\n"
+        "              printf 'Missing %s. Finish App credential setup with tauceti-tools doctor.\\n' \"$name\" >> \"$GITHUB_STEP_SUMMARY\"\n"
+        "            fi\n"
+        "          done\n"
+        "          printf 'ready=%s\\n' \"$ready\" >> \"$GITHUB_OUTPUT\"\n\n"
+    )
+    return before + "jobs:\n" + preflight + jobs
+
+
+def repair_cache_url(project: Project) -> str:
+    """The repair cache's public read base, or empty when ``[services.repair_cache]`` is off."""
+    service = project.service("repair_cache")
+    if service.get("mode", "off") == "off":
+        return ""
+    return str(service.get("url", "")).rstrip("/")
+
+
 def substitutions(project: Project) -> list[tuple[str, str]]:
     """Render only trusted tool templates, never contributor/agent content."""
     root = project.roots[0]
@@ -50,6 +153,7 @@ def substitutions(project: Project) -> list[tuple[str, str]]:
             "This release's build harness supports one Lean library root; split the library or keep its existing custom build workflow"
         )
     pairs = [
+        ("__MAINTENANCE_RUNNER__", MAINTENANCE_CONTROL_RUNNER if project.legacy else "ubuntu-latest"),
         ("TauCetiProject/TauCetiRoadmap", project.repos["roadmap"]),
         ("TauCetiProject/TauCetiReview", project.tool("review").get("repo", "TauCetiProject/TauCetiReview")),
         ("TauCetiProject/TauCetiProgress", project.tool("progress").get("repo", "TauCetiProject/TauCetiProgress")),
@@ -61,6 +165,12 @@ def substitutions(project: Project) -> list[tuple[str, str]]:
         ("repositories: TauCeti\n", "repositories: " + project.content.split("/")[1] + "\n"),
         ("repositories: tauceti-claims\n", "repositories: " + project.repos.get("claims", "/").split("/")[1] + "\n"),
         ("https://bors.taucetiproject.org", project.service("bors").get("url", "")),
+        ("/repositories/1/active-batches", "/repositories/" + str(project.service("bors").get("repository_id", 1 if project.legacy else "")) + "/active-batches"),
+        # The repair worker's cache, read by staging CI (lake-cache-services.sh). Off renders an
+        # empty URL, which leaves the service undefined and the fetch a logged no-op.
+        ("https://repair-cache.taucetiproject.org", repair_cache_url(project)),
+        ('REPAIR_CACHE_SERVICE="tauceti-repair"',
+         'REPAIR_CACHE_SERVICE=' + json.dumps(project.service("repair_cache").get("name", "tauceti-repair"))),
         ("https://taucetiproject.github.io/TauCeti/docs", project.raw.get("publication", {}).get("docs_url", "")),
         ("roadmap_dir: TauCetiRoadmap", "roadmap_dir: " + project.roadmap_dir),
         ("lean_root: TauCeti", "lean_root: " + project.roots[0]),
@@ -277,15 +387,6 @@ def write_project(project: Project, checkout: Path, role: str = "content") -> li
             text = render((ASSETS / "downstream/api-docs.yml").read_text(), project)
         else:
             text = render(source.read_text(), project)
-        if relative.as_posix() in (".github/workflows/ci.yml", ".github/workflows/lint-full.yml") and not project.legacy:
-            # Downstreams build and audit their library. The shared harness's own
-            # regression fixtures belong to its source repository, not each clone.
-            import re
-            text = re.sub(r"(?ms)^  readiness-tests:.*?(?=^  build:)", "", text)
-            text = re.sub(
-                r"(?ms)^      - name: (?:Infrastructure policy unit tests|Lake archive reuse integration tests|Header audit equivalence tests)\n.*?(?=^      - |^  [a-z]|\Z)", "", text)
-            text = text.replace("needs: [build, duplicate-audit-tests]", "needs: [build]")
-            text = text.replace(" && needs['duplicate-audit-tests'].result == 'success'", "")
         if relative.name == "pr-status.yml" and not project.feature("zulip"):
             text = text.replace('args=(--since', 'args=(--labels-only --since')
             text = text.replace("Reconcile labels and Zulip posts", "Reconcile PR status labels")
@@ -320,6 +421,11 @@ def write_project(project: Project, checkout: Path, role: str = "content") -> li
         if relative.as_posix() == ".github/actions/checkout-merge-policy/action.yml" and review.get("ref"):
             text = re.sub(r"(?m)^(        ref: )[0-9a-f]{40}$", lambda m, ref=review["ref"]: m[1] + ref, text)
         if relative.suffix in (".yml", ".yaml"):
+            if relative.name not in ("pr-build.yml", "retry-ci-status.yml"):
+                runner = (MAINTENANCE_CONTROL_RUNNER
+                          if project.legacy and relative.name in ("update.yml", "stuck-alerts.yml", "pr-status.yml")
+                          else "ubuntu-latest")
+                text = guard_app_jobs(text, runner=runner)
             text = pin_actions(text)
         target.write_text(text)
         target.chmod(source.stat().st_mode & 0o777)
@@ -520,6 +626,7 @@ def write_auxiliary(project: Project, checkout: Path, role: str) -> list[str]:
         if role == "data" and target.exists():
             continue
         if relative.suffix in (".yml", ".yaml"):
+            text = guard_app_jobs(text)
             text = pin_actions(text)
         target.write_text(text)
         written.append(str(relative))

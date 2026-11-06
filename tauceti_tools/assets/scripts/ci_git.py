@@ -156,6 +156,32 @@ def tree_entry(checkout, commit, path):
         return f"{mode} {kind} {oid}"
 
 
+def lint_metadata(checkout, base, head):
+    """Read the exact merge base and batch commit titles without a REST compare.
+
+    Lint policy accepts at most 128 attributed PRs. Read one extra title so an
+    oversized history retains the existing full-lint fallback instead of silently
+    considering a partial batch. PR scope only needs the merge base.
+    """
+    with object_reader(checkout) as git:
+        git.commit(base)
+        git.commit(head)
+        bases = git.run("merge-base", "--all", base, head).stdout.decode().splitlines()
+        if len(bases) != 1:
+            raise ValueError("expected one exact merge base")
+        history = f"{base}..{head}"
+        count = int(git.run("rev-list", "--count", history).stdout)
+        messages = git.run("log", "--no-show-signature", "--format=%B", "-z",
+                           "--max-count=129", history).stdout.decode(errors="replace").split("\0")
+        if messages[-1] or len(messages) - 1 != min(count, 129):
+            raise ValueError("malformed local commit metadata")
+        # %s folds a multiline first paragraph; policy uses the exact first line.
+        return {"merge_base_commit": {"sha": git.commit(bases[0])},
+                "total_commits": count,
+                "commits": [{"commit": {"message": message.split("\n", 1)[0]}}
+                            for message in messages[:-1]]}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -170,14 +196,20 @@ def main():
     entry.add_argument("--checkout", required=True)
     entry.add_argument("--commit", required=True)
     entry.add_argument("--path", required=True, choices=PINS)
+    lint = commands.add_parser("lint-metadata")
+    lint.add_argument("--checkout", required=True)
+    lint.add_argument("--base", required=True)
+    lint.add_argument("--head", required=True)
     args = parser.parse_args()
     try:
         if args.command == "resolve":
             print(json.dumps(resolve(args.repository, args.head_repository, args.head, args.base_ref, args.store,
                                      staging_ref=args.staging_ref,
                                      token=os.environ.get("CI_GIT_TOKEN") or os.environ.get("GH_TOKEN"))))
-        else:
+        elif args.command == "tree-entry":
             print(tree_entry(args.checkout, args.commit, args.path))
+        else:
+            print(json.dumps(lint_metadata(args.checkout, args.base, args.head)))
     except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         # Do not print network stderr or the environment: either could contain
         # credentials. Local identity diagnostics above are safe and actionable.

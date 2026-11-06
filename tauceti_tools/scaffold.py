@@ -59,7 +59,7 @@ completed_dir = "Completed"
 # ref = "FULL_COMMIT_SHA_COMPATIBLE_WITH_YOUR_LEAN_TOOLCHAIN"
 
 [merge]
-backend = "github-direct"
+backend = "github-queue"
 checks = ["build", "bump-guard", "scope"]
 
 [[upstreams]]
@@ -83,13 +83,14 @@ security_audit = false
 roadmap_authoring = false # WIP: TauCetiRoadmapWorker and a downstream-owned job board
 
 [services.github_state]
-mode = "off" # off | hosted | custom
+mode = "{'hosted' if repo == 'TauCetiProject/TauCeti' else 'off'}" # off | hosted | custom
 # url = "https://github-state.example.org"
 
 [services.bors]
 mode = "off" # hosted supplies Neon only; YOU operate the runtime
 deployment = "docker" # docker | cloudflare
 # url = "https://bors.example.org"
+# repository_id = 123 # Replace with the number in the Bors /repositories/NUMBER URL.
 # image = "ghcr.io/taucetiproject/bors-ng@sha256:SELECT_RELEASE_DIGEST"
 
 [services.cache]

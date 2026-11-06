@@ -1,14 +1,17 @@
 name: Retry CI status publication
 
-# Replay retained terminal statuses only; never rerun the source build.
+# Replay retained statuses, and recover abandoned PR builds on the existing workflow.
 on:
   workflow_run:
     workflows: [pr-build]
     types: [completed]
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch: {}
 
 permissions:
   contents: read
-  actions: read
+  actions: write
   pull-requests: read
   statuses: write
 

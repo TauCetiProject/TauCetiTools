@@ -20,7 +20,7 @@ def script_path() -> Path:
     return Path(__file__).parent / "assets/scripts/claim.sh"
 
 
-def record_review_start(repository, pr, head, nonce, *, marker_posted, git_held):
+def record_review_start(repository, pr, head, nonce, *, git_held):
     """Append one allow-listed receipt to the fleet's existing journal, without network calls."""
     target = os.environ.get("TAUCETI_FLEET_EVENTS")
     if not target:
@@ -35,7 +35,6 @@ def record_review_start(repository, pr, head, nonce, *, marker_posted, git_held)
         head_sha=head,
         worker=os.environ.get("TAUCETI_WORKER_ID", "review"),
         machine_id=os.environ.get("TAUCETI_FLEET_MACHINE_ID", "local"),
-        marker_posted=marker_posted,
         git_held=git_held,
     )
     try:

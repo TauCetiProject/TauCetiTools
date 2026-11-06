@@ -115,13 +115,24 @@ class FinalizerTests(unittest.TestCase):
         self.assertEqual(result[0], "success")
         self.assertEqual(elapsed, 30)
 
-    def test_failed_canceled_or_missing_sandbox_never_waits_or_posts_green(self):
+    def test_canceled_missing_or_failed_audits_never_wait_or_post_green(self):
         wait = Mock(side_effect=AssertionError("no publisher wait after failed audit"))
-        for result in ["failure", "cancelled", "skipped", ""]:
+        for result in ["cancelled", "skipped", ""]:
             for state in ["success", "failure", ""]:
                 self.assertEqual(finalizer.terminal_state(dict(ENV, BUILD_JOB_RESULT=result,
                     BUILD_STATE=state), wait=wait)[0], "failure")
-        self.assertEqual(finalizer.terminal_state(dict(ENV, BUILD_STATE="failure"), wait=wait)[0], "failure")
+        for result in ["success", "failure"]:
+            for state in ["failure", ""]:
+                self.assertEqual(finalizer.terminal_state(dict(ENV, BUILD_JOB_RESULT=result,
+                    BUILD_STATE=state), wait=wait)[0], "failure")
+
+    def test_report_failure_after_successful_audits_still_requires_publication(self):
+        env = dict(ENV, BUILD_JOB_RESULT="failure", BUILD_STATE="success")
+        for published in ["success", "failure"]:
+            with self.subTest(published=published):
+                wait = Mock(return_value=(published, "publication result"))
+                self.assertEqual(finalizer.terminal_state(env, wait=wait)[0], published)
+                wait.assert_called_once_with(12, 2)
 
     def test_unconfigured_publication_preserves_existing_optional_behavior(self):
         wait = Mock(side_effect=AssertionError("publication not configured"))
@@ -136,7 +147,11 @@ class FinalizerTests(unittest.TestCase):
         observe = Mock(return_value=data)
         self.assertEqual(finalizer.terminal_state(env, wait=wait, observe=observe)[0], "success")
         observe.assert_called_once_with(7, "main")
-        for field, value in [("id", 8), ("head_sha", "c" * 40), ("state", "canceled"),
+        withdrawn = copy.deepcopy(data)
+        withdrawn["requested_batch"].update(state="canceled", head_sha=None, train=None)
+        self.assertEqual(finalizer.terminal_state(env, wait=wait, observe=lambda *_: withdrawn),
+                         ("withdrawn", "batch withdrawn; no verdict posted"))
+        for field, value in [("id", 8), ("head_sha", "c" * 40),
                              ("train", dict(candidate_id=2, generation=4, staging_ref="staging-candidate-2-3"))]:
             stale = copy.deepcopy(data)
             stale["requested_batch"][field] = value
@@ -252,7 +267,8 @@ class WorkflowBoundaryTests(unittest.TestCase):
         self.assertNotIn("LAKE_CACHE_KEY", str(report))
         self.assertIn("tauceti-bors-staging", report["if"])
         gate = PR["publish-merge-group-cache"]
-        self.assertIn("needs.sandboxed-build.result == 'success'", gate["if"])
+        self.assertIn("!cancelled()", gate["if"])
+        self.assertIn("outputs.build-state == 'success'", gate["if"])
         self.assertIn("publication-required == 'true'", gate["if"])
         self.assertIs(gate["with"]["publication-required"], True)
         self.assertNotIn("LAKE_CACHE_KEY", str(PR["sandboxed-build"]))

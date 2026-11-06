@@ -15,7 +15,7 @@ from pathlib import Path
 
 from github_api import APIError, Deferred, GitHub
 
-from bors_observation import MAX_BYTES, REPO, observation, sha
+from bors_observation import MAX_BYTES, REPO, observation, sha, valid_observation
 from bors_train_identity import candidate_ref
 
 PUBLISHER = "publish-merge-group-cache / publish"
@@ -113,9 +113,21 @@ def wait_publication(run_id, attempt, *, fetch=api, clock=time.monotonic, sleep=
         sleep(30)
 
 
+def confirmed_withdrawal(data, *, batch_id, branch):
+    """Only an explicit cancellation of the requested batch proves withdrawal."""
+    if not valid_observation(data, branch) or type(batch_id) is not int or batch_id <= 0:
+        return False
+    batch = data.get("requested_batch")
+    return (isinstance(batch, dict) and type(batch.get("id")) is int
+            and batch["id"] == batch_id and batch.get("base") == branch
+            and batch.get("state") == "canceled")
+
+
 def terminal_state(env, *, wait=wait_publication, observe=observation):
     """Keep failed/canceled audits red and revalidate bors before a green status."""
-    if env.get("BUILD_JOB_RESULT") != "success" or env.get("BUILD_STATE") != "success":
+    # Reporting can fail after the trusted audit verdict has been recorded.
+    # Canceled/skipped jobs and absent or failed audits still cannot pass.
+    if env.get("BUILD_JOB_RESULT") not in {"success", "failure"} or env.get("BUILD_STATE") != "success":
         return "failure", env.get("BUILD_DESCRIPTION") or "sandboxed merge-group build did not complete"
     if env.get("PUBLICATION_REQUIRED") == "true":
         state, description = wait(int(env["GITHUB_RUN_ID"]), int(env["GITHUB_RUN_ATTEMPT"]))
@@ -133,6 +145,8 @@ def terminal_state(env, *, wait=wait_publication, observe=observation):
                     if attempt == 2:
                         raise
                     time.sleep(5 * (attempt + 1))
+            if confirmed_withdrawal(data, batch_id=batch_id, branch=branch):
+                return "withdrawn", "batch withdrawn; no verdict posted"
             candidate_ref(data, env["STATUS_SHA"], env["BORS_BASE_SHA"],
                           batch_id=batch_id, branch=branch)
         except (OSError, ValueError, KeyError, TypeError):
@@ -235,6 +249,8 @@ def finalize(env, target, *, resume=False):
         except (OSError, APIError, ValueError, KeyError, TypeError) as error:
             state, description = "failure", "batch finalization failed: " + type(error).__name__
             break
+    if state == "withdrawn":
+        return finish_withdrawal(target)
     payload = dict(state=state, context="build", description=description[:140],
                    target_url=f"https://github.com/{REPO}/actions/runs/{env['GITHUB_RUN_ID']}")
     intent = status_intent(env, payload)
@@ -273,6 +289,12 @@ def discard_intent(target):
         Path(target).unlink(missing_ok=True)
 
 
+def finish_withdrawal(target):
+    discard_intent(target)
+    print("::notice::batch withdrawn; no verdict posted", flush=True)
+    return 0
+
+
 def publish(intent, *, target=None, resume=False):
     """Retry only publication, preserving the completed result and attempt fence."""
     validate_intent(intent)
@@ -294,20 +316,28 @@ def publish(intent, *, target=None, resume=False):
                 print("::notice::newer run already published build status; obsolete intent discarded", flush=True)
                 discard_intent(target)
                 return 0 if resume else 1
-            if latest.get("conclusion") == "cancelled":
+            canceled = latest.get("conclusion") == "cancelled"
+            if canceled:
                 payload.update(state="failure", description="batch workflow was canceled; redispatch current batch")
-            if payload["state"] == "success" and intent.get("bors"):
+            if intent["payload"]["state"] == "success" and intent.get("bors"):
                 bors = intent["bors"]
                 # A staging generation can become obsolete without this run
                 # acquiring a new attempt. Revalidate after every quota wait.
                 try:
                     observed = observation(bors["batch_id"], bors["base_ref"])
-                    candidate_ref(observed, revision, bors["base_sha"],
-                                  batch_id=bors["batch_id"], branch=bors["base_ref"])
+                    if confirmed_withdrawal(observed, batch_id=bors["batch_id"], branch=bors["base_ref"]):
+                        return finish_withdrawal(target)
+                    if not canceled:
+                        candidate_ref(observed, revision, bors["base_sha"],
+                                      batch_id=bors["batch_id"], branch=bors["base_ref"])
                 except (ValueError, KeyError, TypeError):
-                    print("::notice::obsolete or unconfirmed bors generation will not publish success", flush=True)
-                    discard_intent(target)
-                    return 0 if resume else 1
+                    if not canceled:
+                        print("::notice::obsolete or unconfirmed bors generation will not publish success", flush=True)
+                        discard_intent(target)
+                        return 0 if resume else 1
+                except OSError:
+                    if not canceled:
+                        raise
             api(f"/statuses/{revision}", payload)
             discard_intent(target)
             print(f"Posted build={payload['state']} on {revision}: {payload['description']}", flush=True)

@@ -16,6 +16,7 @@ import sys
 import time
 
 import core
+from tauceti_tools.survey_facts import deprecation_repair_finished
 
 @functools.lru_cache(maxsize=1)
 def engine():
@@ -79,13 +80,11 @@ def classify(pr, comments, statuses, paths, merge_base_sha, now=None):
     else:
         latest = gate.latest_current_scoreboard(comments, head)
         if latest is None or latest[1].get("mode") == "init":
-            result["category"] = ("review-in-progress" if gate.has_live_review(comments, head, now)
-                                  else "awaiting-review")
+            result["category"] = "awaiting-review"
         elif not verdict["review_safe"] and meta_merge_base(latest) != merge_base_sha:
             # The newest review judged a different diff (retargeted PR or rewritten base), so its
             # verdict, blocking or not, says nothing about the current one.
-            result["category"] = ("review-in-progress" if gate.has_live_review(comments, head, now)
-                                  else "awaiting-review")
+            result["category"] = "awaiting-review"
         elif not verdict["review_safe"]:
             board, meta = latest
             states = meta.get("states")
@@ -93,11 +92,7 @@ def classify(pr, comments, statuses, paths, merge_base_sha, now=None):
                 states = gate.states_from_table(board.get("body"))
             blocking = any(states.get(r) in {"blocking_request", "blocking_block"}
                            for r in gate.DEFAULT_RUBRICS)
-            result["category"] = ("awaiting-author" if blocking else
-                                  "review-in-progress" if gate.has_live_review(comments, head, now)
-                                  else "awaiting-review")
-        elif gate.has_live_review(comments, head, now):
-            result["category"] = "review-in-progress"
+            result["category"] = ("awaiting-author" if blocking else "awaiting-review")
         else:
             paths = set(paths)
             human = not paths or any(not (p.startswith("TauCeti/") or p in gate.DEFAULT_ALLOW)
@@ -145,7 +140,7 @@ def graphql(query, **variables):
 
 def evidence(number, repo, comments=True):
     owner, name = repo.split("/", 1)
-    comment_fields = ("comments(first:100, after:$cursor) { nodes { body updatedAt createdAt } "
+    comment_fields = ("comments(first:100, after:$cursor) { nodes { body updatedAt createdAt author { login } } "
                       "pageInfo { hasNextPage endCursor } }" if comments else "")
     declaration = ", $cursor:String" if comments else ""
     query = ("query($owner:String!, $name:String!, $number:Int!" + declaration + ") { "
@@ -164,7 +159,7 @@ def evidence(number, repo, comments=True):
             raise RuntimeError("PR head moved during comment pagination")
         if not comments:
             break
-        rows.extend({"body": c["body"], "updated_at": c["updatedAt"],
+        rows.extend({"body": c["body"], "user": {"login": (c.get("author") or {}).get("login")}, "updated_at": c["updatedAt"],
                      "created_at": c["createdAt"]} for c in node["comments"]["nodes"])
         page = node["comments"]["pageInfo"]
         if not page["hasNextPage"]:
@@ -211,6 +206,14 @@ def assess(pr, repo=None, now=None):
     elif after.get("mergeable") is False and result["eligible"]:
         result.update(eligible=False, category="awaiting-author",
                       reason="GitHub reports a merge conflict with the base")
+    elif (after["state"] == "open" and not after.get("draft")
+          and not ({l["name"].lower() for l in after.get("labels", [])} & sweep_engine().KEEP_LABELS)
+          and any(l["name"] == "needs-rebase" for l in after.get("labels", []))
+          and all(statuses.get(k, "").lower() == "success" for k in ["build", "scope", "bump-guard"])
+          and deprecation_repair_finished(comments, head)):
+        # Reuse the ordinary status reconciliation after fresh-head CI. No new
+        # per-PR workflow, worker protocol, or Bors state is needed for cleanup.
+        result["clear_deprecation_request"] = True
     result["checked_at"] = int(time.time()) if now is None else now
     return result
 

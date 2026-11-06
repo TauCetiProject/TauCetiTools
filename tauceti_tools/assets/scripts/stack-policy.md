@@ -108,7 +108,18 @@ Missing/deleted/inaccessible source, API pagination/rate limits, source identity
 mismatches, unsupported patches, exceeded bounds and races are recorded gaps
 without closure. An individual merge/root commit is skipped while searching for
 another supported commit; no merge patch is guessed. A failed individual fetch
-does not abort unrelated PRs. Global observation/budget failures fail the run.
+does not abort unrelated PRs. Global observation/budget failures fail the run,
+except GitHub rate limits before enforcement starts: those pass CI with an
+explicit unknown/deferred audit record. Discovered unfinished work stays pending;
+throttled discovery leaves the previous checkpoint authoritative. There is no
+immediate retry loop. A later event or scheduled sweep retries observation.
+Rate limits after enforcement starts still fail the run and retain pending work,
+so partial labeling/explanation/closure is visible. Permission errors are not
+classified as rate limits.
+
+Candidates without the required repository/author provenance are recorded as
+unknown before fetching blobs or searching landing history, even if a more
+expensive audit could establish landing. They cannot authorize enforcement.
 
 `no-confirmed-stack` means only that these bounded checks found no proof. It is
 not a proved-safe result. Undetected forms include:
@@ -150,20 +161,22 @@ wake coalescing. Legacy per-event callers still use focused checks and can
 exhaust GitHub's 100 waiting slots; upgrading the checker alone does not change
 workflow scheduling.
 
-Main-target source/base/draft events invoke trusted main policy. Other bases use
+Main-target source/base events invoke trusted main policy. Draft status alone
+does not change this policy and need not wake the checker. Other bases use
 an unprivileged wake followed by a main-defined observer. A focused invocation
 inspects its selected current PR against the full parent index. A checkpointed
 batch additionally covers changed and unfinished PRs from other notifications.
 Out-of-order or stale wakes cannot substitute an old head for current metadata.
 A target absent from the complete open index can be retired without mutation.
-Hourly/manual full sweeps re-evaluate unchanged identities too.
+Full sweeps every six hours and manual full sweeps re-evaluate unchanged identities too.
 
 The batching workflow coalesces automatic wakes globally, keeping the active run
 and newest waiting wake. Explicit requests and scheduled sweeps remain distinct;
 one job-level FIFO mutation lock serializes all writes. Cancelled waiting wakes
 are not coverage: the next batch must rediscover their changed PR identities.
 All runs publish JSONL
-in logs, a job summary and a retained artifact. `NO_STACK_APPLY=true` enables
+in logs (including the executing step when `--report` is used), a job summary and
+a retained artifact. `NO_STACK_APPLY=true` enables
 automatic checks/enforcement. Otherwise automatic jobs skip and manual audits
 remain available. Manual dispatch defaults to dry-run; `dispatch` allows only a
 manual apply selecting one positive PR number for a canary.

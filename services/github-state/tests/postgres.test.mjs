@@ -1,8 +1,9 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {postgresFixture,PostgresStore,postgresSQL} from './postgres_runtime.mjs';
+import {postgresFixture,PostgresStore,postgresSQL,rawReceiptLookup} from './postgres_runtime.mjs';
 const enabled=Boolean(process.env.TEST_POSTGRES_URL && process.env.TEST_POSTGRES_MIGRATION_URL);
 const pg=(name,fn)=>test(name,{skip:!enabled},fn);
+function requireDirectCleanup(){const host=new URL(process.env.TEST_POSTGRES_URL).hostname;assert.ok(host.endsWith('.neon.tech')&&!host.split('.')[0].endsWith('-pooler'),'Session termination fault tests require a direct, unpooled Neon test endpoint');}
 const repo={id:'100',name:'org/repo',installation:'200'};
 const complete=async(state,q)=>state.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET complete=1',q.operation+':'+JSON.stringify(q.args || {}),q.operation,JSON.stringify(q.args || {}),1,Date.now(),await state.revision(),null);
 const send=(state,path,body)=>state.fetch(new Request('https://internal'+path,{method:'POST',body:JSON.stringify(body)}));
@@ -164,6 +165,47 @@ pg('stored survey hydration batches large histories without GitHub calls',async(
   await f.state.hydrateSurvey('7');assert.ok(calls<60,'SQL statements must be batched, not per comment: '+calls);
   const facts=JSON.parse(await f.state.projectedSurvey('7'));assert.equal(facts.contest.id,'1100');assert.equal(facts.contest.rubric,'reuse');
   assert.equal((await f.store.exec('SELECT COUNT(*) n FROM survey_fragments')).one().n,1100);
+ }finally{await f.close();}
+});
+pg('global surveys batch dirty projections without per-PR SQL and retain exact membership',async()=>{
+ const f=await postgresFixture();try {
+  const count=300,contract=JSON.parse(await (await import('node:fs/promises')).readFile(new URL('../../../tauceti_tools/survey_contract.json',import.meta.url),'utf8')).id;
+  const resources=[],collections=[{key:'open_prs:{}',operation:'open_prs',args:'{}'}],fragments=[],members=[];
+  for(let number=1;number<=count;number++) {
+   const n=String(number),sha=number.toString(16).padStart(40,'0');
+   resources.push({kind:'pr',id:n,parent:null,data:JSON.stringify({number,headRefOid:sha,state:'OPEN',isDraft:false,labels:[],author:{login:'fixture'}})});
+   resources.push({kind:'statuses',id:'statuses:'+JSON.stringify({sha}),parent:null,data:JSON.stringify([{context:'build',state:'SUCCESS'}])});
+   members.push({collection:'open_prs:{}',id:n});
+   collections.push({key:'statuses:'+JSON.stringify({sha}),operation:'statuses',args:JSON.stringify({sha})});
+   for(const kind of ['issue_comments','review_comments'])collections.push({key:kind+':'+JSON.stringify({number}),operation:kind,args:JSON.stringify({number})});
+   const issue=String(9007199254741000n+BigInt(number)*10n),root=String(9007199254741001n+BigInt(number)*10n),reply=String(9007199254741002n+BigInt(number)*10n);
+   fragments.push({kind:'issue_comments',id:issue,parent:n,data:JSON.stringify({id:issue,updated:'2026-10-30',meta:{head_sha:sha,states:{reuse:'green'}},rebase_heads:[]})});
+   fragments.push({kind:'review_comments',id:root,parent:n,data:JSON.stringify({id:root,parent:null,root:'reuse',reply:false})});
+   fragments.push({kind:'review_comments',id:reply,parent:n,data:JSON.stringify({id:reply,parent:root,root:null,reply:true,created_at:'2026-10-30'})});
+   for(const [kind,id] of [['issue_comments',issue],['review_comments',root],['review_comments',reply]])members.push({collection:kind+':'+JSON.stringify({number}),id});
+  }
+  // Removed fragments and membership belonging to a different parent must never leak.
+  fragments.push({kind:'issue_comments',id:'1',parent:'1',data:JSON.stringify({id:'1',updated:'9999',meta:{head_sha:'orphan'},rebase_heads:[]})});
+  fragments.push({kind:'issue_comments',id:'2',parent:'1',data:JSON.stringify({id:'2',updated:'9999',meta:{head_sha:'wrong-parent'},rebase_heads:[]})});
+  members.push({collection:'issue_comments:{"number":2}',id:'2'});
+  await f.admin.query(`INSERT INTO ${f.schema}.resources(kind,id,parent,data,updated,observed,revision,tombstone) SELECT kind,id,parent,data,'',0,0,0 FROM jsonb_to_recordset($1::jsonb) AS r(kind text,id text,parent text,data text)`,[JSON.stringify(resources)]);
+  await f.admin.query(`INSERT INTO ${f.schema}.collections(key,operation,args,complete,verified,revision) SELECT key,operation,args,1,0,0 FROM jsonb_to_recordset($1::jsonb) AS r(key text,operation text,args text)`,[JSON.stringify(collections)]);
+  await f.admin.query(`INSERT INTO ${f.schema}.members(collection,id) SELECT collection,id FROM jsonb_to_recordset($1::jsonb) AS r(collection text,id text)`,[JSON.stringify(members)]);
+  await f.admin.query(`INSERT INTO ${f.schema}.survey_fragments(kind,id,parent,data) SELECT kind,id,parent,data FROM jsonb_to_recordset($1::jsonb) AS r(kind text,id text,parent text,data text)`,[JSON.stringify(fragments)]);
+  await f.admin.query(`INSERT INTO ${f.schema}.survey_hydrated(number,contract) SELECT id,$1 FROM ${f.schema}.resources WHERE kind='pr'`,[contract+':completed-scoreboards']);
+  await f.admin.query(`INSERT INTO ${f.schema}.survey_state(number,data,revision) SELECT id,'{"meta":null,"contest":null,"rebase_heads":[]}',0 FROM ${f.schema}.resources WHERE kind='pr'`);
+  await f.admin.query(`INSERT INTO ${f.schema}.survey_dirty(number) SELECT id FROM ${f.schema}.resources WHERE kind='pr'`);
+  const reference=JSON.parse(await f.state.projectedSurvey('1'));
+  let reads=0,pointReads=0,writes=0;
+  f.state.store=intercept(f.store,sql=>{reads++;if(!/^SELECT\b/.test(sql))writes++;if(/f\.parent=\?/.test(sql))pointReads++;});
+  f.env.INSTALLATIONS=new Proxy({},{get(){throw Error('Discovery attempted GitHub access');}});
+  const result=await f.state.query({repository:repo.name,operation:'survey',args:{roadmap:'auto',stages:'rebase,review'}},true);
+  assert.equal(result.status,'ok');assert.equal(result.complete,true);assert.equal(result.data.length,count);
+  assert.equal(pointReads,0,'dirty projections must not perform one remote scan per history per PR');
+  assert.ok(reads<40,'SQL work must scale with parent batches, not dirty PRs: '+reads);assert.equal(writes,0);
+  console.info(JSON.stringify({fixture:'global-dirty-survey',prs:count,sql_statements:reads,per_pr_fragment_reads:pointReads,writes}));
+  for(const item of result.data){assert.equal(item.review.meta.head_sha,item.pr.headRefOid);assert.equal(item.review.contest.rubric,'reuse');assert.equal(item.review.issue_complete,true);assert.equal(item.review.review_complete,true);}
+  assert.deepEqual({...result.data[0].review,markers:undefined,issue_complete:undefined,review_complete:undefined},{...reference,markers:undefined,issue_complete:undefined,review_complete:undefined});
  }finally{await f.close();}
 });
 pg('long file paths retain exact identity, update and membership uniqueness beyond B-tree tuple limits',async()=>{
@@ -359,7 +401,8 @@ pg('grouped publication packs mixed old bodies and preserves duplicate, tombston
   const newer=JSON.parse((await f.store.exec("SELECT data FROM resources WHERE kind='pr' AND id='260'")).one().data);
   assert.equal(newer.body.endsWith('\u0000tail'),true);
   assert.equal((await f.store.exec("SELECT tombstone FROM resources WHERE kind='pr' AND id='261'")).one().tombstone,1);
-  assert.equal(JSON.parse((await f.store.exec("SELECT data FROM resources WHERE kind='pr' AND id=?",'pr:{"number":1}')).one().data).state,'CLOSED');
+  assert.equal(JSON.parse((await f.store.exec("SELECT data FROM resources WHERE kind='pr' AND id='1'")).one().data).state,'CLOSED');
+  assert.equal((await f.store.exec("SELECT COUNT(*) n FROM resources WHERE kind='pr' AND id=?",'pr:{"number":1}')).one().n,0,'canonical PR replaces the legacy alias');
   const delta={repository:repo.name,operation:'pr_delta'};await f.state.enqueue(delta,0);
   const deltaJob=await f.state.claim((await f.store.exec('SELECT * FROM jobs WHERE key=?','pr_delta:{}')).one());
   const changed=rows.slice(0,180).map(row=>({...row,state:row.number===1?'OPEN':'CLOSED',updatedAt:new Date(fixed+2).toISOString()}));
@@ -379,5 +422,237 @@ pg('state projections tolerate payload Unicode escapes without changing the stor
    const row=(await f.store.exec("SELECT data original,json_extract(data,'$.state') state FROM (SELECT CAST(? AS TEXT) data) AS payload",text)).one();
    assert.equal(row.state,'OPEN');assert.ok(row.original===text,'stored payload text must remain exact');
   }
+ }finally{await f.close();}
+});
+
+pg('committed CI batches finish without entering the PostgreSQL writer again',async()=>{
+ const f=await postgresFixture();try{
+  const events=Array.from({length:100},(_,i)=>({delivery:'ci-known-'+i,event:'workflow_run',received:Date.now()}));
+  const request=()=>send(f.state,'/ci-receipts',{repository:repo.name,events});
+  assert.equal((await request()).status,200);
+  const atomic=f.state.atomic;let writes=0;
+  f.state.atomic=async()=>{writes++;throw Error('writer is unavailable');};
+  const response=await request();assert.equal(response.status,200);
+  const report=await response.json();assert.deepEqual(report.committed,events.map(p=>p.delivery));assert.ok(report.timing.write_ms>=0);assert.equal(writes,0);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,100);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM changes')).one().n,0);
+  f.state.ingress='parked';assert.equal((await request()).status,503);
+  f.state.ingress='apply';f.state.migrationState={phase:'exporting'};assert.equal((await request()).status,503);
+  f.state.migrationState=null;f.state.atomic=atomic;
+ }finally{await f.close();}
+});
+
+pg('partially committed CI batches retain the ordinary PostgreSQL writer fence',async()=>{
+ const f=await postgresFixture();try{
+  const event={delivery:'ci-prior',event:'check_run',received:Date.now()},fresh={...event,delivery:'ci-fresh'};
+  const request=events=>send(f.state,'/ci-receipts',{repository:repo.name,events});
+  assert.equal((await request([event])).status,200);
+  const prior=(await f.store.exec('SELECT received FROM deliveries WHERE id=?',event.delivery)).one().received;
+  assert.equal((await request([event,fresh])).status,200);
+  assert.equal((await f.store.exec('SELECT received FROM deliveries WHERE id=?',event.delivery)).one().received,prior,'prior commit timestamp is preserved');
+  const missing={...event,delivery:'ci-missing'};
+  await f.admin.query(`UPDATE ${f.schema}.backend_control SET generation='another-generation' WHERE singleton=1`);
+  assert.equal((await request([event])).status,200,'acknowledging a prior receipt adds no write');
+  assert.equal((await request([event,fresh,missing])).status,503,'new receipts still require the writer generation');
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,2);
+ }finally{await f.close();}
+});
+
+pg('an ingress pause during CI receipt lookup drains without starting a write',async()=>{
+ const f=await postgresFixture();let release;try{
+  let entered;const gate=new Promise(r=>release=r),reading=new Promise(r=>entered=r),raw=f.state.store;
+  f.state.store=new Proxy(raw,{get(target,key){
+   if(key==='exec')return async(sql,...args)=>{const rows=await target.exec(sql,...args);if(sql.startsWith('SELECT id FROM deliveries WHERE id IN')){entered();await gate;}return rows;};
+   const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;
+  }});
+  let writes=0;f.state.atomic=async()=>{writes++;throw Error('unexpected writer');};
+  const batch=send(f.state,'/ci-receipts',{repository:repo.name,events:[{delivery:'ci-paused-lookup',event:'check_run',received:Date.now()}]});
+  await reading;assert.equal(f.state.applying,1);
+  const pause=send(f.state,'/storage/ingress',{mode:'parked'});for(let n=0;n<100&&f.state.ingress!=='parked';n++)await new Promise(r=>setTimeout(r,20));
+  assert.equal(f.state.ingress,'parked');release();
+  assert.equal((await batch).status,503);assert.equal(writes,0);assert.equal((await(await pause).json()).drained,true);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,0);
+ }finally{release?.();await f.close();}
+});
+
+pg('CI acknowledgement survives receipt archival between its lookup and reply',async()=>{
+ const f=await postgresFixture();try{
+  const delivery='ci-archived-during-lookup';await f.store.exec('INSERT INTO deliveries VALUES(?,?,?)',delivery,'ignored:check_run',Date.now()-15*86400000);
+  f.state.storageLoaded=true;const raw=f.state.store;
+  f.state.store=new Proxy(raw,{get(target,key){
+   if(key==='exec')return async(sql,...args)=>{const rows=await target.exec(sql,...args);if(sql.startsWith('SELECT id FROM deliveries WHERE id IN'))await f.state.archiveDeliveryReceipts();return rows;};
+   const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;
+  }});
+  f.state.atomic=async()=>{throw Error('acknowledgement must not acquire the writer');};
+  const response=await send(f.state,'/ci-receipts',{repository:repo.name,events:[{delivery,event:'check_run',received:Date.now()}]});
+  assert.equal(response.status,200);assert.deepEqual((await response.json()).committed,[delivery]);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,0);
+  const receipt=await(await f.env.ARCHIVE.get('receipts/100/'+delivery+'.json')).json();assert.equal(receipt.delivery,delivery);assert.equal(receipt.disposition,'not_mirrored');
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM changes')).one().n,0);
+ }finally{await f.close();}
+});
+
+pg('a blackholed close cannot retain the server lock after a client timeout',async()=>{
+ requireDirectCleanup();
+ const f=await postgresFixture(),NativeSocket=globalThis.WebSocket,sockets=[];let calls=0,rollbacks=0,abandoned;
+ try{
+  globalThis.WebSocket=class extends NativeSocket {
+   drop=false;closeCalled=false;
+   constructor(...args){super(...args);sockets.push(this);}
+   addEventListener(type,listener,...args){return super.addEventListener(type,type==='message'?event=>{if(!this.drop)listener.call(this,event);}:listener,...args);}
+   close(...args){this.closeCalled=true;if(!this.drop)return super.close(...args);}
+  };
+  const start=performance.now();
+  await assert.rejects(f.store.transaction(async tx=>{
+   calls++;const query=tx.client.query.bind(tx.client);tx.client.query=(sql,...args)=>{if(sql==='ROLLBACK')rollbacks++;return query(sql,...args);};await tx.exec('INSERT INTO demand VALUES(?,?)','timed-out-write',Date.now());
+   assert.equal(sockets.length,1);abandoned=tx.connectionState.session;tx.client.connectionParameters.query_timeout=100;sockets[0].drop=true;
+   await tx.exec('SELECT pg_sleep(0.05)');
+  }),/Repository database unavailable/);
+  assert.ok(performance.now()-start<8000,'cleanup must confirm termination without waiting for the idle timeout');
+  assert.equal((await f.admin.query('SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE pid=$1',[abandoned.pid])).rows[0].n,0);
+  assert.equal(calls,1);assert.equal(rollbacks,0,'a client timeout must not submit ROLLBACK');assert.equal(sockets[0].closeCalled,true);
+  await f.store.transaction(write=>write.exec('INSERT INTO demand VALUES(?,?)','next-writer',Date.now()));
+  assert.deepEqual((await f.store.exec('SELECT key FROM demand ORDER BY key')).toArray(),[{key:'next-writer'}]);
+ }finally{globalThis.WebSocket=NativeSocket;for(const socket of sockets)try{NativeSocket.prototype.close.call(socket);}catch{}await f.close();}
+});
+
+pg('a client timeout during a running server statement preserves the database writer fence and rolls back',async()=>{
+ requireDirectCleanup();
+ const f=await postgresFixture(),NativeSocket=globalThis.WebSocket;let socket,calls=0,rollbacks=0;
+ try{
+  globalThis.WebSocket=class extends NativeSocket {
+   drop=false;
+   constructor(...args){super(...args);socket=this;}
+   addEventListener(type,listener,...args){return super.addEventListener(type,type==='message'?event=>{if(!this.drop)listener.call(this,event);}:listener,...args);}
+  };
+  await assert.rejects(f.store.transaction(async tx=>{
+   calls++;const query=tx.client.query.bind(tx.client);tx.client.query=(sql,...args)=>{if(sql==='ROLLBACK')rollbacks++;return query(sql,...args);};await tx.exec('INSERT INTO demand VALUES(?,?)','mid-statement',Date.now());
+   // Test-only shorter client timeout: the real server is still sleeping
+   // when the client loses its response. Keep the production server settings.
+   tx.client.connectionParameters.query_timeout=100;socket.drop=true;
+   await tx.exec('SELECT pg_sleep(2)');
+  }),/Repository database unavailable/);
+  assert.equal(calls,1);assert.equal(rollbacks,0,'a client timeout must not submit ROLLBACK');
+  // Socket closure can end the backend between the identity lookup and
+  // termination, returning false. Respect the cleanup retry cooldown before
+  // checking that the next writer acquires the same database ownership lock.
+  await new Promise(resolve=>setTimeout(resolve,1100));
+  await f.store.transaction(tx=>tx.exec('INSERT INTO demand VALUES(?,?)','after-mid-statement',Date.now()));
+  assert.deepEqual((await f.store.exec('SELECT key FROM demand ORDER BY key')).toArray(),[{key:'after-mid-statement'}]);
+ }finally{globalThis.WebSocket=NativeSocket;try{socket?.close();}catch{}await f.close();}
+});
+
+
+pg('lost ownership response is cleaned up before another transaction acquires the fence',async()=>{
+ requireDirectCleanup();
+ const f=await postgresFixture(),NativeSocket=globalThis.WebSocket,sockets=[];let callbacks=0;
+ try{
+  globalThis.WebSocket=class extends NativeSocket {
+   drop=false;
+   constructor(...args){super(...args);sockets.push(this);}
+   send(data){if(Buffer.from(data).includes(Buffer.from('backend_control')))this.drop=true;return super.send(data);}
+   addEventListener(type,listener,...args){return super.addEventListener(type,type==='message'?event=>{if(!this.drop)listener.call(this,event);}:listener,...args);}
+   close(...args){if(!this.drop)return super.close(...args);}
+  };
+  const start=performance.now();await assert.rejects(f.store.transaction(async()=>callbacks++),/Repository database unavailable/);
+  assert.ok(performance.now()-start<28000);assert.equal(callbacks,0);
+  globalThis.WebSocket=NativeSocket;
+  await f.store.transaction(tx=>tx.exec('INSERT INTO demand VALUES(?,?)','owner-response-recovered',Date.now()));
+  assert.deepEqual((await f.store.exec('SELECT key FROM demand')).toArray(),[{key:'owner-response-recovered'}]);
+ }finally{globalThis.WebSocket=NativeSocket;for(const socket of sockets)try{NativeSocket.prototype.close.call(socket);}catch{}await f.close();}
+});
+
+pg('cleanup identity guards cannot terminate a different session or a reused transaction',async()=>{
+ const f=await postgresFixture();const {Client}=await import('@neondatabase/serverless');const other=new Client(process.env.TEST_POSTGRES_URL);await other.connect();
+ try{
+  await other.query('BEGIN');
+  const token='unrelated-fixture-'+crypto.randomUUID();
+  const identity=(await other.query("SELECT pg_backend_pid() AS pid,(EXTRACT(EPOCH FROM backend_start)*1000000)::bigint::text AS started_us,set_config('application_name',$1,true) AS token FROM pg_stat_activity WHERE pid=pg_backend_pid()",[token])).rows[0];
+  for(const wrong of [{...identity,pid:0},{...identity,started_us:'1'},{...identity,token:'different-transaction'}]){
+   f.store.discarded=[{...wrong,discardedAt:Date.now()}];f.store.nextCleanupAt=0;assert.equal(await f.store.cleanupDiscarded(),'already_ended');assert.equal((await other.query('SELECT 1 AS alive')).rows[0].alive,1);
+  }
+  // COMMIT resets the LOCAL token, even if the caller missed its response.
+  await other.query('COMMIT');f.store.discarded=[{...identity,discardedAt:Date.now()}];f.store.nextCleanupAt=0;
+  assert.equal(await f.store.cleanupDiscarded(),'already_ended');assert.equal((await other.query('SELECT 1 AS alive')).rows[0].alive,1);
+  // The privileged fixture session is a different role and must never match.
+  const adminToken='fixture-admin-'+crypto.randomUUID();
+  const adminIdentity=(await f.admin.query("SELECT pg_backend_pid() AS pid,(EXTRACT(EPOCH FROM backend_start)*1000000)::bigint::text AS started_us,set_config('application_name',$1,false) AS token FROM pg_stat_activity WHERE pid=pg_backend_pid()",[adminToken])).rows[0];
+  f.store.discarded=[{...adminIdentity,discardedAt:Date.now()}];f.store.nextCleanupAt=0;assert.equal(await f.store.cleanupDiscarded(),'already_ended');assert.equal((await f.admin.query('SELECT 1 AS alive')).rows[0].alive,1);
+ }finally{await other.end();await f.close();}
+});
+
+
+pg('expired cleanup retains its session handle and cannot bypass the database ownership lock',async()=>{
+ requireDirectCleanup();
+ const f=await postgresFixture();const {Client}=await import('@neondatabase/serverless');const holder=new Client(process.env.TEST_POSTGRES_URL);holder.on('error',()=>{});await holder.connect();let released=false;
+ try{
+  await holder.query('BEGIN');
+  const token='fixture-holder-'+crypto.randomUUID();
+  const identity=(await holder.query("SELECT pg_backend_pid() AS pid,(EXTRACT(EPOCH FROM backend_start)*1000000)::bigint::text AS started_us,set_config('application_name',$1,true) AS token FROM pg_stat_activity WHERE pid=pg_backend_pid()",[token])).rows[0];
+  await holder.query(`SELECT generation FROM ${f.schema}.backend_control WHERE singleton=1 FOR UPDATE`);
+  f.store.discarded=[{...identity,discardedAt:Date.now()-45001}];let callbacks=0;
+  const query=f.store.http.query.bind(f.store.http);f.store.http.query=async(...args)=>{if(args[0].includes('AS terminated FROM pg_stat_activity'))throw Error('HTTP-only cleanup outage');return query(...args);};
+  await assert.rejects(f.store.transaction(async()=>callbacks++),/55P03/);assert.equal(callbacks,0);
+  f.store.http.query=query;
+  await f.store.transaction(tx=>tx.exec('INSERT INTO demand VALUES(?,?)','after-cleanup-grace',Date.now()));released=true;
+  assert.equal(f.store.discarded.length,0);assert.equal((await f.admin.query('SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE pid=$1',[identity.pid])).rows[0].n,0);
+  assert.deepEqual((await f.store.exec('SELECT key FROM demand')).toArray(),[{key:'after-cleanup-grace'}]);
+ }finally{if(!released)try{await holder.query('ROLLBACK');}catch{}holder.neonConfig.destroy();await f.close();}
+});
+
+pg('concurrent raw receipt checks use one PostgreSQL read batch without entering a writer',async()=>{
+ const f=await postgresFixture();try{
+  const ids=Array.from({length:25},(_,i)=>'raw-known-'+i),known=ids.filter((_,i)=>i%2===0);
+  await f.store.batch(known.map(id=>({sql:'INSERT INTO deliveries(id,event,received) VALUES(?,?,?)',bindings:[id,'issue_comment',Date.now()]})));
+  f.store.transaction=async()=>assert.fail('receipt lookup must not enter a writer transaction');
+  const transaction=f.store.http.transaction.bind(f.store.http);let readBatches=0;
+  f.store.http.transaction=async(queries,options)=>{assert.equal(options.readOnly,true);assert.equal(queries.length,ids.length);readBatches++;return transaction(queries,options);};
+  f.state.store=intercept(f.store,sql=>assert.match(sql,/^SELECT\b/,'raw lookup is stored reads only'));
+  let requests=0;const env={...f.env,REPOSITORIES:{idFromName:id=>id,get:id=>({fetch:async(url,init)=>{assert.equal(id,repo.id);assert.equal(new URL(url).pathname,'/storage/deliveries');requests++;return f.state.fetch(new Request(url,init));}})}};
+  let release;const lastBody=new Promise(resolve=>release=resolve),lookup=rawReceiptLookup(env);
+  const group=lookup.runGroup(ids.map((id,i)=>async()=>{if(i===ids.length-1)await lastBody;return lookup.known(repo,id);}));
+  await new Promise(resolve=>setTimeout(resolve,30));assert.equal(requests,0,'a slow original body must not split the group at the old20ms window');release();
+  const results=await group;assert.deepEqual(results,ids.map(id=>known.includes(id)));assert.equal(requests,1);assert.equal(readBatches,1);assert.equal(lookup.summary().known_lookups,known.length);
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,known.length);for(const table of['changes','jobs','resources'])assert.equal((await f.store.exec('SELECT COUNT(*) n FROM '+table)).one().n,0);
+ }finally{await f.close();}
+});
+
+pg('transactional spill decoding and commit survive a saturated maintenance budget on the same bucket',async()=>{
+ const f=await postgresFixture(),release=[];
+ try{
+  const archive=f.env.ARCHIVE,put=archive.put;
+  f.objects.set('resources/spill',JSON.stringify({id:'90071992547409931234',observed:123,verified:456}));
+  archive.put=async(key,...args)=>key==='maintenance-stall'?new Promise(resolve=>release.push(resolve)):put(key,...args);
+  await Promise.all(Array.from({length:16},()=>assert.rejects(f.state.maintenanceArchive.put('maintenance-stall','body'),/monitoring I\/O timeout/)));
+  await assert.rejects(f.state.maintenanceArchive.get('resources/spill'),/monitoring I\/O busy/);
+  const decoded=await f.state.atomic(async state=>{
+   const values=[];for await(const value of state.decodeRows(Array.from({length:8},()=>({data:JSON.stringify({$r2:'resources/spill'})}))))values.push(value);
+   await state.store.exec('INSERT INTO demand VALUES(?,?)','independent-spill-read',123);
+   return values;
+  });
+  assert.equal(decoded.length,8);assert.ok(decoded.every(v=>v.id==='90071992547409931234'&&v.observed===123&&v.verified===456));
+  assert.equal((await f.store.exec('SELECT at FROM demand WHERE key=?','independent-spill-read')).one().at,123);
+ }finally{for(const done of release)done();await f.close();}
+});
+
+pg('authenticated survey uses observed builds without awaiting missing-history writes',async()=>{
+ const f=await postgresFixture();try{
+  const {state}=f,sha='a'.repeat(40),other='b'.repeat(40);
+  await complete(state,{operation:'open_prs'});
+  await state.put('pr','7',{number:7,state:'OPEN',headRefOid:sha,isDraft:false,labels:[{name:'awaiting-review'}]});await state.membership('open_prs:{}','7',true);
+  await state.put('status_context',sha+':build',{context:'build',state:'SUCCESS',startedAt:'2026-10-30T20:00:00Z'},Date.now(),false,sha,true);
+  await state.put('status_context',other+':build',{context:'build',state:'FAILURE',startedAt:'2026-10-30T21:00:00Z'},Date.now(),false,other,true);
+  let reads=0,writes=0;state.store=intercept(f.store,sql=>{reads++;if(!/^SELECT\b/.test(sql))writes++;});
+  f.env.INSTALLATIONS=new Proxy({},{get(){throw Error('Public survey called GitHub');}});
+  state.backgroundDemand=()=>{}; // Inventory renewal is already an independent background task.
+  const q={repository:repo.name,operation:'survey',args:{roadmap:'auto',stages:'rebase,review'}};
+  const result=await state.query(q);assert.equal(result.status,'ok');const row=result.data[0];
+  assert.equal(row.pr.statusCheckRollupCoverage,'webhook_observed');assert.deepEqual(row.pr.statusCheckRollup,[{context:'build',state:'SUCCESS',startedAt:'2026-10-30T20:00:00Z'}]);
+  assert.equal(row.review.issue_complete,false);assert.equal(row.review.review_complete,false);assert.equal(writes,0);
+  assert.ok(reads<25,'prefetched statuses must not add one remote SQL read per missing status collection: '+reads);
+  state.store=f.store;assert.equal(await state.complete({operation:'statuses',args:{sha}}),false);assert.equal(await state.rows({repository:repo.name,operation:'statuses',args:{sha}}),null);
+  await state.requestOpenCoverage();
+  const jobs=(await state.store.exec('SELECT key,lane,requested_at FROM jobs')).toArray();assert.equal(jobs.length,5);assert.ok(jobs.some(j=>j.key==='pr:{"number":7}'));assert.ok(jobs.every(j=>j.lane==='requested' && j.requested_at===null));
+  await state.requestOpenCoverage();assert.equal((await state.store.exec('SELECT COUNT(*) n FROM jobs')).one().n,5);
  }finally{await f.close();}
 });

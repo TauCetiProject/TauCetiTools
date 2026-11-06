@@ -21,8 +21,32 @@ permissions:
   pull-requests: read
 
 jobs:
+  recover-maintenance:
+    if: ${{ !inputs.dry-run }}
+    runs-on: __MAINTENANCE_RUNNER__
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Prepare pinned shared tools
+        uses: __TOOLS_REPO__/.github/actions/setup@__TOOLS_REF__
+        with:
+          tools-repository: __TOOLS_REPO__
+          tools-ref: __TOOLS_REF__
+          project-directory: .
+      - name: Recover maintenance PRs abandoned without a build status
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/maintenance_builds.py
+
   select:
-    runs-on: ubuntu-latest
+    runs-on: __MAINTENANCE_RUNNER__
     timeout-minutes: 60
     outputs:
       target: ${{ steps.target.outputs.target }}
@@ -60,7 +84,7 @@ jobs:
   publish:
     needs: select
     if: needs.select.outputs.reconcile == 'true' && !inputs.dry-run
-    runs-on: ubuntu-latest
+    runs-on: __MAINTENANCE_RUNNER__
     steps:
       # No upstream code executes in this job, and the selection job has no App secret.
       - uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf

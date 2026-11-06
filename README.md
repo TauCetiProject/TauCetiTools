@@ -25,10 +25,17 @@ Optional extras are included by default, after the core checks; `--no-extras` om
 Disabled extras are reported as disabled and do not need setting up.
 The human report summarizes successful checks and prints the full repair procedure for
 each outstanding item, including service-operator work. `--check CHECK_ID` selects one
-check; it does not change the instructions. `--json` includes every check's ID and evidence.
+check; it does not change the instructions. `--json` includes each check's result and repair instructions.
 Missing, empty and invalid configuration files produce starter-generation and repair commands.
-`init` fills a missing or empty file, preserves a nonempty file, and defaults to direct
-automatic merging without a queue or an up-to-date branch requirement.
+`init` fills a missing or empty file, preserves a nonempty file, and defaults to GitHub's
+merge queue. Bors is the other supported merger. Administrators override scope blocks with
+an admin merge when using the queue, or with `bors merge` when using Bors.
+Doctor checks the merge settings directly rather than scanning PRs.
+
+App-dependent workflows skip with a setup message while credentials are missing; builds still
+run. Doctor separately reports missing settings, observed credential failures and successful
+use that has not been checked yet. A successful rerun can verify credentials even when the
+original workflow run predates the credential update.
 
 Configuration is selected in this order: explicit `--conf PATH_OR_HTTPS_URL`,
 `TAUCETI_CONF`, `tauceti.toml` in the current directory, then `tauceti.toml` at the
@@ -45,3 +52,34 @@ requires a separate operator grant.
 
 A [disposable project](examples/disposable-project) supplies separate content and roadmap trees
 with real immutable tool and Mathlib pins. It does not create repositories or enroll hosted services.
+
+## CI reporting collection
+
+Routine reporting uses job webhooks and bounded service-side recovery. The site
+can cache the published charts with `python3 scripts/ci_report_assets.py --out-dir
+web/static_files`, without GitHub reads or a database download. Historical
+collection is an explicit analysis: `collector.incremental --analysis` enables
+optional artifacts, failed-job logs and commit comparisons. Ruleset snapshots
+and per-module timing lists are not collected.
+
+Host resource sampling requires the repository variable `CI_RESOURCE_EXPERIMENT`
+to be `1`. Otherwise the sandbox command runs directly. Successful PR phase
+artifacts are sampled one in twenty; a resource experiment can collect the
+additional telemetry explicitly. These observations do not authorize merging or
+cache publication.
+
+The trusted build workflow optionally wraps its existing bwrap launcher with
+`scripts/ci_live_progress.py`. The wrapper stays outside the candidate sandbox,
+retains the launcher's exit status and forwards cancellation. Its background
+reporter samples bounded candidate phase/module counters and descendant CPU/Lean
+process evidence every fifteen seconds. Candidate text is untrusted telemetry;
+only fixed phases, validated module names and numeric counters are sent. The
+reporter never sends raw logs, paths, commands or environment values.
+
+Publication uses a short-lived GitHub OIDC grant with audience
+`tauceti-operations-progress`. The CI receiver binds the signed repository,
+run/attempt and check-run identity to its existing stored job facts, and treats
+these counters as observations only. OIDC request credentials stay outside
+bwrap's `env -i` environment and mounts. Telemetry/authentication/network failure
+cannot change the build result. The backend reader must be deployed before the
+workflow/tool pin is activated in a consuming repository.

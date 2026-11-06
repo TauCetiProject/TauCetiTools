@@ -1,12 +1,14 @@
 name: pr-build
+# GitHub evaluates the caller title; recovery associates dispatches on main with their PR.
+run-name: ${{ github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging' && format('bors branch={0} batch={1} head={2} base={3}', github.event.client_payload.base_ref || 'unknown', github.event.client_payload.batch_id, github.event.client_payload.head_sha, github.event.client_payload.base_sha) || format('pr-build {0}', github.event.pull_request.number || inputs.pr || github.event.client_payload.pr || github.event.merge_group.head_sha || github.run_id) }}
 on:
   pull_request_target:
     types: [opened, synchronize, reopened]
   # The merge queue tests a batch (one or more PRs combined onto current main) before it lands. We
   # build the COMBINED merge-group commit exactly as GitHub synthesized it and post the `build`
   # status on it so the queue's required check is satisfied. A combined diff that reaches outside
-  # TauCeti/ needs exact-revision human approval through bors; the trusted harness
-  # remains independent of that diff.
+  # TauCeti/ stays scope-blocked with the merge queue; an administrator can instead
+  # admin-merge its PR. Bors setups use the existing exact-revision bors merge approval.
   merge_group:
     types: [checks_requested]
   # Bors dispatches the exact staging SHA. repository_dispatch uses this trusted
@@ -17,12 +19,14 @@ on:
   workflow_dispatch:
     inputs:
       pr: { description: "PR number to build", required: true, type: string }
+      maintenance: { description: "Prioritized maintenance recovery build", type: boolean, default: false }
 
 permissions:
   contents: read
   pull-requests: read
   statuses: write
   actions: read
+  id-token: write  # reusable build job uses a telemetry-only OIDC audience
 jobs:
   validate:
     uses: __TOOLS_REPO__/.github/workflows/pr-build.yml@__TOOLS_REF__

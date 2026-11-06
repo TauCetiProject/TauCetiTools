@@ -1,0 +1,343 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {fixture} from './pr_refresh_fixture.mjs';
+const old='a'.repeat(40),head='b'.repeat(40),latest='c'.repeat(40);
+const q={repository:'org/repo',operation:'pr',args:{number:7}},key='pr:{"number":7}';
+const record=(sha=head,updatedAt='2026-11-01T09:23:46Z')=>({number:7,headRefOid:sha,baseRefOid:'d'.repeat(40),state:'OPEN',isDraft:false,updatedAt,labels:[]});
+async function seed(f){await f.state.put('pr','7',record(old,'2026-11-01T09:59:13Z'),Date.now()-1000);await f.state.enqueue(q);}
+function upstream(f,read){f.state.env={...f.state.env,INSTALLATIONS:{idFromName:id=>id,get:()=>({fetch:async(_url,init)=>Response.json(await read(JSON.parse(init.body)))})}};}
+async function event(f,action='labeled',sha=latest,overrides={}){const id=crypto.randomUUID(),body={action,label:{name:'new-label'},pull_request:{number:7,title:'title',state:action==='closed'?'closed':'open',updated_at:'2026-11-01T10:00:00Z',head:{sha},base:{sha:'d'.repeat(40)},labels:[{name:'new-label'}],...overrides}};f.objects.set(id,JSON.stringify(body));await f.state.ingest({repository:'org/repo',key:id,delivery:id,event:'pull_request',received:Date.now()+1});}
+
+test('background full read repairs poisoned timestamps and validators, and dirties dependent files',async()=>{
+ const f=await fixture();try{
+  await seed(f);await f.store.exec('UPDATE jobs SET etag=?,started=? WHERE key=?','poison',Date.now()-3600000,key);
+  const files='files:{"number":7}';await f.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?)',files,'files','{"number":7}',1,1,1,'old-files');
+  let request;upstream(f,async input=>{request=input;return input.etag?{unchanged:true}:{data:record(),api:'core',etag:'correct'};});
+  const job=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key)).one();await f.state.refresh(job);
+  assert.equal(request.etag,null);assert.equal((await f.state.rows(q)).headRefOid,head);
+  assert.equal((await f.store.exec('SELECT complete FROM collections WHERE key=?',files)).one().complete,0);
+  assert.equal((await f.store.exec('SELECT etag FROM jobs WHERE key=?',key)).one().etag,'correct');
+  assert.ok((await f.store.exec('SELECT key FROM jobs WHERE key=?','statuses:{"sha":"'+head+'"}')).toArray().length);
+  assert.equal((await f.store.exec("SELECT id FROM resources WHERE kind='pr' AND id=?",key)).toArray().length,0);
+ }finally{await f.close();}
+});
+
+test('label snapshots never replace unrelated head fields',async()=>{
+ const f=await fixture();try{await seed(f);await event(f);const row=JSON.parse((await f.store.exec("SELECT data FROM resources WHERE kind='pr' AND id='7'")).one().data);assert.equal(row.headRefOid,old);assert.deepEqual(row.labels,[{name:'new-label'}]);}
+ finally{await f.close();}
+});
+
+test('lifecycle events preserve final and reopened head facts',async()=>{
+ const f=await fixture();try{
+  await seed(f);await event(f,'closed',latest);
+  let row=JSON.parse((await f.store.exec("SELECT data FROM resources WHERE kind='pr' AND id='7'")).one().data);assert.equal(row.headRefOid,latest);assert.equal(row.state,'CLOSED');
+  await event(f,'reopened',head);row=JSON.parse((await f.store.exec("SELECT data FROM resources WHERE kind='pr' AND id='7'")).one().data);assert.equal(row.headRefOid,head);assert.equal(row.state,'OPEN');
+ }finally{await f.close();}
+});
+
+test('one synchronous read coalesces callers, commits before success and skips obsolete reports',async()=>{
+ const f=await fixture();try{
+  await seed(f);let release,entered;const ready=new Promise(r=>entered=r),gate=new Promise(r=>release=r);let reads=0;
+  upstream(f,async()=>{reads++;entered();await gate;return {data:record(),api:'core'};});
+  const input={repository:'org/repo',number:7,expected_head:old};const calls=Array.from({length:20},()=>f.state.refreshPR(input));await ready;
+  // A different write remains possible during the HTTP wait.
+  await f.state.put('issue','123',{number:123,state:'OPEN'});
+  release();const results=await Promise.all(calls);assert.equal(reads,1);assert.ok(results.every(r=>r.outcome==='refreshed'));
+  assert.equal((await f.state.rows(q)).headRefOid,head);
+  assert.equal((await f.state.refreshPR(input)).outcome,'already-changed');assert.equal(reads,1);
+ }finally{await f.close();}
+});
+
+test('newer input supersedes a full read without verification, and ordinary retry converges',async()=>{
+ const f=await fixture();try{
+  await seed(f);let first=true;upstream(f,async()=>{if(first){first=false;await event(f,'synchronize',latest);}return {data:record(),api:'core',etag:'bad-validator'};});
+  let job=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key)).one();await f.state.refresh(job);
+  assert.equal((await f.store.exec('SELECT verified FROM collections WHERE key=?',key)).toArray().length,0);
+  job=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key)).one();assert.equal(job.started,null);assert.equal(job.etag,null);assert.equal(job.dirty,1);
+  await f.state.refresh(job);assert.equal((await f.state.rows(q)).headRefOid,head);
+ }finally{await f.close();}
+});
+
+test('an in-flight 304 cannot verify a webhook-modified record',async()=>{
+ const f=await fixture();try{
+  await seed(f);await f.state.setMeta('pr_validator_version',1);
+  await f.store.exec('UPDATE jobs SET etag=? WHERE key=?','old-validator',key);
+  await f.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?)',key,'pr','{"number":7}',1,10,1,'old-validator');
+  upstream(f,async input=>{assert.equal(input.etag,'old-validator');await event(f);return {unchanged:true,api:'core'};});
+  await f.state.refresh((await f.store.exec('SELECT * FROM jobs WHERE key=?',key)).one());
+  assert.equal((await f.store.exec('SELECT verified FROM collections WHERE key=?',key)).one().verified,10);
+  const job=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key)).one();assert.equal(job.etag,null);assert.equal(job.started,null);assert.equal(job.dirty,1);
+ }finally{await f.close();}
+});
+
+test('refresh quota deferral is local response data and a failed flight can recover',async()=>{
+ const f=await fixture();try{
+  await seed(f);const retry=Date.now()+3600000;upstream(f,async()=>({deferred:true,category:'primary:core',retry_at:retry}));
+  const input={repository:'org/repo',number:7,expected_head:old};const failed=await f.state.refreshPR(input);assert.equal(failed.status,'unavailable');assert.equal(failed.retry_at,retry);
+  assert.equal((await f.store.exec('SELECT dirty FROM jobs WHERE key=?',key)).one().dirty,1);
+  assert.equal((await f.store.exec('SELECT lane FROM jobs WHERE key=?',key)).one().lane,'requested');
+  await event(f);assert.equal((await f.store.exec('SELECT lane FROM jobs WHERE key=?',key)).one().lane,'requested');
+  upstream(f,async()=>({data:record(),api:'core'}));assert.equal((await f.state.refreshPR(input)).status,'ok');
+ }finally{await f.close();}
+});
+
+test('failed correction rolls back publication, retains recovery, and retries without acknowledgement',async()=>{
+ const f=await fixture();try{
+  await seed(f);upstream(f,async()=>({data:record(),api:'core'}));
+  const publish=f.state.publishPR;
+  f.state.publishPR=async function(...args){await publish.apply(this,args);throw Error('publication failed before commit');};
+  const input={repository:'org/repo',number:7,expected_head:old};
+  assert.equal((await f.state.refreshPR(input)).status,'unavailable');
+  assert.equal(JSON.parse((await f.store.exec("SELECT data FROM resources WHERE kind='pr' AND id='7'")).one().data).headRefOid,old);
+  assert.equal((await f.store.exec('SELECT dirty FROM jobs WHERE key=?',key)).one().dirty,1);
+  f.state.publishPR=publish;
+  assert.equal((await f.state.refreshPR(input)).status,'ok');assert.equal((await f.state.rows(q)).headRefOid,head);
+ }finally{await f.close();}
+});
+
+test('successful repair invalidates the aggregate query grace cache',async()=>{
+ const f=await fixture();try{
+  await seed(f);await f.state.membership('open_prs:{}','7',true);
+  await f.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?)','open_prs:{}','open_prs','{}',1,1,1,null);
+  const request=()=>f.state.fetch(new Request('https://internal/query',{method:'POST',body:JSON.stringify({repository:'org/repo',operation:'open_prs'})}));
+  assert.equal((await (await request()).json()).data[0].headRefOid,old);
+  upstream(f,async()=>({data:record(),api:'core'}));
+  assert.equal((await f.state.refreshPR({repository:'org/repo',number:7,expected_head:old})).status,'ok');
+  assert.equal((await (await request()).json()).data[0].headRefOid,head);
+ }finally{await f.close();}
+});
+
+test('a slow correction waits for committed success instead of returning a response timeout',async()=>{
+ const f=await fixture();const timeout=globalThis.setTimeout;let release;try{
+  await seed(f);let entered;const ready=new Promise(r=>entered=r),gate=new Promise(r=>release=r);
+  upstream(f,async()=>{entered();await gate;return {data:record(),api:'core'};});
+  globalThis.setTimeout=(fn,delay,...args)=>timeout(fn,delay===15000 && String(fn).includes('refresh_timeout')?10:delay,...args);
+  const input={repository:'org/repo',number:7,expected_head:old};let settled=false;
+  const request=f.state.refreshPR(input).then(result=>{settled=true;return result;});await ready;
+  await new Promise(resolve=>timeout(resolve,30));assert.equal(settled,false,'the response must wait for its correction, even beyond the former response deadline');
+  release();const result=await request;assert.equal(result.outcome,'refreshed');assert.ok(result.timing_ms.github_ms>=0);assert.ok(result.timing_ms.publish_ms>=0);
+  assert.equal((await f.state.rows(q)).headRefOid,head);assert.equal((await f.state.refreshPR(input)).outcome,'already-changed');
+ }finally{release?.();globalThis.setTimeout=timeout;await f.close();}
+});
+
+test('text PR query arguments remain compatible and their validators are invalidated',async()=>{
+ const f=await fixture();try{
+  await seed(f);const textQ={...q,args:{number:'7'}},textKey='pr:{"number":"7"}';
+  await f.state.enqueue(textQ);upstream(f,async()=>({data:record(),api:'core',etag:'text-validator'}));
+  await f.state.refresh((await f.store.exec('SELECT * FROM jobs WHERE key=?',textKey)).one());
+  assert.equal((await f.state.rows(textQ)).headRefOid,head);
+  assert.equal((await f.store.exec('SELECT etag FROM jobs WHERE key=?',textKey)).one().etag,'text-validator');
+  await event(f,'synchronize',latest);
+  assert.equal((await f.store.exec('SELECT etag FROM jobs WHERE key=?',textKey)).one().etag,null);
+ }finally{await f.close();}
+});
+
+test('a stale label status cannot remove discovery or fence a later lifecycle delivery',async()=>{
+ const f=await fixture();try{
+  await seed(f);await f.state.membership('open_prs:{}','7',true);
+  await event(f,'labeled',old,{state:'closed',updated_at:'2026-11-01T10:30:00Z'});
+  let row=JSON.parse((await f.store.exec("SELECT data FROM resources WHERE kind='pr' AND id='7'")).one().data);
+  assert.equal(row.state,'OPEN');assert.equal(row.updatedAt,'2026-11-01T09:59:13Z');
+  assert.equal((await f.store.exec("SELECT id FROM members WHERE collection='open_prs:{}' AND id='7'")).toArray().length,1);
+  assert.equal((await f.store.exec('SELECT dirty FROM jobs WHERE key=?',key)).one().dirty,1);
+  await event(f,'closed',head,{updated_at:'2026-11-01T10:05:00Z'});
+  row=JSON.parse((await f.store.exec("SELECT data FROM resources WHERE kind='pr' AND id='7'")).one().data);assert.equal(row.state,'CLOSED');assert.equal(row.headRefOid,head);
+ }finally{await f.close();}
+});
+
+test('recent verification coalesces persistent disagreement without trusting a newer webhook',async()=>{
+ const f=await fixture();try{
+  await seed(f);let reads=0;upstream(f,async()=>{reads++;return {data:record(old),api:'core'};});
+  const input={repository:'org/repo',number:7,expected_head:old};
+  assert.equal((await f.state.refreshPR(input)).outcome,'refreshed');
+  assert.equal((await f.state.refreshPR(input)).outcome,'recently-verified');assert.equal(reads,1);
+  await event(f,'labeled',old);
+  assert.equal((await f.state.refreshPR(input)).outcome,'refreshed');assert.equal(reads,2);
+ }finally{await f.close();}
+});
+
+test('a stalled shared flight expires and its late response cannot overwrite a newer repair',async()=>{
+ const f=await fixture(),timeout=globalThis.setTimeout;let release;try{
+  await seed(f);let expire,entered,reads=0;const ready=new Promise(r=>entered=r),gate=new Promise(r=>release=r);
+  globalThis.setTimeout=(fn,delay,...args)=>{if(delay===60000 && String(fn).includes('prRefreshes') && !expire)expire=fn;return timeout(fn,delay,...args);};
+  upstream(f,async()=>{reads++;if(reads===1){entered();await gate;return {data:record(head),api:'core'};}return {data:record(latest),api:'core'};});
+  const input={repository:'org/repo',number:7,expected_head:old},first=f.state.refreshPR(input);await ready;
+  assert.equal(typeof expire,'function');expire();
+  assert.equal((await f.state.refreshPR(input)).status,'ok');assert.equal(reads,2);
+  release();assert.equal((await first).reason,'superseded');assert.equal((await f.state.rows(q)).headRefOid,latest);
+ }finally{release?.();globalThis.setTimeout=timeout;await f.close();}
+});
+
+test('synchronous correction completes only PR detail and survives a restart without an immediate refetch',async()=>{
+ const f=await fixture();try{
+  await seed(f);await f.state.setMeta('pr_validator_version',1);let reads=0;
+  upstream(f,async()=>{reads++;return {data:record(),api:'core'};});
+  const before=Date.now();assert.equal((await f.state.refreshPR({repository:'org/repo',number:7,expected_head:old})).outcome,'refreshed');
+  const job=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key)).one();
+  assert.equal(job.dirty,0);assert.equal(job.requested_at,null);assert.equal(job.lease_id,null);assert.equal(job.started,null);assert.ok(job.due>before+300000);
+  for(const dependent of ['files:{"number":7}','statuses:{"sha":"'+head+'"}'])assert.equal((await f.store.exec('SELECT dirty FROM jobs WHERE key=?',dependent)).one().dirty,1);
+  const restarted=new f.state.constructor(f.state.ctx,f.state.env);restarted.store=f.store;
+  assert.equal((await restarted.refreshPR({repository:'org/repo',number:7,expected_head:old})).outcome,'already-changed');assert.equal(reads,1);
+  assert.equal((await f.store.exec('SELECT key FROM jobs WHERE key=? AND due<=?',key,Date.now())).toArray().length,0);
+ }finally{await f.close();}
+});
+
+test('a newer dirty generation survives even when the full read is equivalent',async()=>{
+ const f=await fixture();try{
+  await seed(f);upstream(f,async()=>{await event(f,'synchronize',head);return {data:await f.state.decode((await f.store.exec("SELECT data FROM resources WHERE kind='pr' AND id='7'")).one().data),api:'core'};});
+  const result=await f.state.refreshPR({repository:'org/repo',number:7,expected_head:old});
+  assert.equal(result.outcome,'refreshed');const job=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key)).one();assert.equal(job.dirty,1);assert.ok(job.generation>=2);
+ }finally{await f.close();}
+});
+
+for(const when of ['before','during'])for(const mutation of ['lease','continuation','retry'])test(`synchronous correction retains ${mutation} ${when} its read`,async()=>{
+ const f=await fixture();try{
+  await seed(f);
+  const mutate=async()=>{
+   if(mutation==='lease')await f.store.exec('UPDATE jobs SET lease_id=?,lease_until=? WHERE key=?','another-owner',Date.now()+3600000,key);
+   if(mutation==='continuation')await f.store.exec('UPDATE jobs SET cursor=?,page=2,nested=?,started=? WHERE key=?','next-page','{}',Date.now()-1000,key);
+   if(mutation==='retry')await f.store.exec('UPDATE jobs SET attempt=attempt+1,wait_reason=?,due=?,started=? WHERE key=?','primary:core',Date.now()+3600000,Date.now()-1000,key);
+  };
+  if(when==='before')await mutate();
+  upstream(f,async()=>{if(when==='during')await mutate();return {data:record(),api:'core'};});
+  assert.equal((await f.state.refreshPR({repository:'org/repo',number:7,expected_head:old})).outcome,'refreshed');
+  const job=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key)).one();
+  if(mutation==='lease'){assert.equal(job.dirty,1);assert.equal(job.lease_id,'another-owner');}
+  if(mutation==='continuation'){assert.equal(job.dirty,1);assert.equal(job.cursor,'next-page');assert.equal(job.page,2);}
+  if(mutation==='retry'){
+   // Quota deferrals retain started; this conservative optimization leaves
+   // their ordinary recovery and quota deadline intact in both cases.
+   assert.equal(job.dirty,1);assert.equal(job.wait_reason,'primary:core');assert.ok(job.due>Date.now());
+  }
+ }finally{await f.close();}
+});
+
+test('an owner that claims and releases during the read leaves its recovery intact',async()=>{
+ const f=await fixture();try{
+  await seed(f);upstream(f,async()=>{
+   const row=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key)).one(),claimed=await f.state.claim(row);assert.ok(claimed);
+   await f.state.atomic(state=>state.releaseLeases(state.store,[claimed]));return {data:record(),api:'core'};
+  });
+  assert.equal((await f.state.refreshPR({repository:'org/repo',number:7,expected_head:old})).outcome,'refreshed');
+  const job=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key)).one();assert.equal(job.dirty,1);assert.equal(job.lease_id,null);assert.ok(job.started);
+ }finally{await f.close();}
+});
+
+test('failure after job completion rolls back both correction and obligation',async()=>{
+ const f=await fixture();try{
+  await seed(f);upstream(f,async()=>({data:record(),api:'core'}));
+  const finish=f.state.finishSynchronousPR;
+  f.state.finishSynchronousPR=async function(...args){assert.equal(await finish.apply(this,args),true);assert.equal(f.state.repairMetrics.snapshot().filter(row=>row.event.startsWith('synchronous_')).length,0);throw Error('before commit');};
+  const input={repository:'org/repo',number:7,expected_head:old};assert.equal((await f.state.refreshPR(input)).status,'unavailable');
+  assert.equal((await f.state.decode((await f.store.exec("SELECT data FROM resources WHERE kind='pr' AND id='7'")).one().data)).headRefOid,old);assert.equal((await f.store.exec('SELECT dirty FROM jobs WHERE key=?',key)).one().dirty,1);
+  assert.equal(f.state.repairMetrics.snapshot().filter(row=>row.event.startsWith('synchronous_')).length,0);
+  f.state.finishSynchronousPR=finish;assert.equal((await f.state.refreshPR(input)).outcome,'refreshed');assert.equal((await f.store.exec('SELECT dirty FROM jobs WHERE key=?',key)).one().dirty,0);
+  assert.equal(f.state.repairMetrics.snapshot().find(row=>row.event==='synchronous_completion').n,1);
+  assert.deepEqual(f.state.repairMetrics.summary().requested_latency,[],'synchronous latency must not mix with background requested latency');
+ }finally{await f.close();}
+});
+
+test('a lost committed reply is safe to repeat and does not require an acknowledgement',async()=>{
+ const f=await fixture();try{
+  await seed(f);let reads=0;upstream(f,async()=>{reads++;return {data:record(),api:'core'};});
+  const transaction=f.store.transaction.bind(f.store);let lose=true;
+  f.store.transaction=async(apply,purpose,operation)=>{const result=await transaction(apply,purpose,operation);if(lose && operation==='pr_refresh_publish'){lose=false;throw Error('reply lost after commit');}return result;};
+  const input={repository:'org/repo',number:7,expected_head:old};assert.equal((await f.state.refreshPR(input)).status,'unavailable');
+  assert.equal((await f.store.exec('SELECT dirty FROM jobs WHERE key=?',key)).one().dirty,0);
+  assert.equal((await f.state.refreshPR(input)).outcome,'already-changed');assert.equal(reads,1);
+ }finally{await f.close();}
+});
+
+for(const condition of ['expired lease','unknown creation'])test(`uncertain job identity retains recovery: ${condition}`,async()=>{
+ const f=await fixture();try{
+  await seed(f);
+  if(condition==='expired lease')await f.store.exec('UPDATE jobs SET lease_id=?,lease_until=? WHERE key=?','expired-owner',Date.now()-1000,key);
+  else await f.store.exec('UPDATE jobs SET created_at=NULL WHERE key=?',key);
+  upstream(f,async()=>({data:record(),api:'core'}));
+  assert.equal((await f.state.refreshPR({repository:'org/repo',number:7,expected_head:old})).outcome,'refreshed');
+  assert.equal((await f.store.exec('SELECT dirty FROM jobs WHERE key=?',key)).one().dirty,1);
+ }finally{await f.close();}
+});
+
+test('satisfying a PR job preserves an installation-wide quota restriction',async()=>{
+ const f=await fixture();try{
+  await seed(f);f.state.repairGroup={};
+  await f.state.noteQuotaRestriction({scope:{kind:'installation'},category:'secondary',retry_at:Date.now()+3600000});
+  const restriction=f.state.quotaRestriction;assert.equal(restriction.category,'secondary');f.state.repairGroup=undefined;
+  upstream(f,async()=>({data:record(),api:'core'}));
+  assert.equal((await f.state.refreshPR({repository:'org/repo',number:7,expected_head:old})).outcome,'refreshed');
+  assert.equal(f.state.quotaRestriction,restriction);assert.equal((await f.store.exec('SELECT dirty FROM jobs WHERE key=?',key)).one().dirty,0);
+ }finally{await f.close();}
+});
+
+test('a full synchronous read satisfies an expired-staging retry after its continuation was reset',async()=>{
+ const f=await fixture();try{
+  await seed(f);const job=await f.state.claim((await f.store.exec('SELECT * FROM jobs WHERE key=?',key)).one());assert.ok(job);
+  await f.state.retryJob(job,Error('staging page missing'));
+  const waiting=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key)).one();
+  assert.equal(waiting.started,null);assert.equal(waiting.lease_id,null);assert.equal(waiting.wait_reason,'staging_expired');assert.ok(waiting.due>Date.now());
+  upstream(f,async()=>({data:record(),api:'core'}));
+  assert.equal((await f.state.refreshPR({repository:'org/repo',number:7,expected_head:old})).outcome,'refreshed');
+  const finished=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key)).one();
+  assert.equal(finished.dirty,0);assert.equal(finished.wait_reason,null);assert.equal(finished.attempt,0);assert.equal(finished.started,null);
+ }finally{await f.close();}
+});
+
+test('maintenance retries unknown headers centrally, retaining quota waits and serving stored data',async()=>{
+ const f=await fixture();try{
+  const now=Date.now();
+  await f.state.setMeta('pr_inventory_api','core');
+  for(const [number,mergeable,verified,state] of [[7,'UNKNOWN',now-3600000,'OPEN'],[8,'UNKNOWN',now-61000,'OPEN'],[9,'MERGEABLE',now,'OPEN'],[10,'UNKNOWN',now,'OPEN'],[11,'UNKNOWN',0,'CLOSED']]) {
+   await f.state.put('pr',String(number),{...record(),number,state,mergeable});await f.state.membership('open_prs:{}',String(number),true);
+   await f.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?)',`pr:{"number":${number}}`,'pr',JSON.stringify({number}),1,verified,1,null);
+  }
+  await f.state.enqueue(q);const retry=now+3600000;
+  await f.store.exec("UPDATE jobs SET due=?,attempt=2,wait_reason='primary:graphql' WHERE key=?",retry,key);
+  await f.state.requestOpenCoverage();
+  const jobs=(await f.store.exec("SELECT * FROM jobs WHERE key LIKE 'pr:%' ORDER BY key")).toArray();
+  assert.deepEqual(jobs.map(j=>JSON.parse(j.query).args.number),[7,8]);
+  assert.ok(jobs.every(j=>j.lane==='requested' && j.requested_at===null));
+  assert.equal(jobs[0].due,retry);assert.equal(jobs[0].attempt,2);assert.equal(jobs[0].wait_reason,'primary:graphql');
+  assert.equal((await f.state.rows(q)).mergeable,'UNKNOWN','background freshness is not a read guard');
+  await f.state.requestOpenCoverage();assert.deepEqual((await f.store.exec("SELECT * FROM jobs WHERE key LIKE 'pr:%' ORDER BY key")).toArray(),jobs);
+ }finally{await f.close();}
+});
+
+test('base pushes coalesce one inventory refresh, preserving pages and in-flight generations',async()=>{
+ const f=await fixture();try{
+  const inventory={repository:'org/repo',operation:'open_prs'},inventoryKey='open_prs:{}';
+  await f.state.put('pr','7',{...record(),baseRefName:'release'});await f.state.membership('open_prs:{}','7',true);
+  const push=async(id,branch='main')=>{f.objects.set(id,JSON.stringify({ref:'refs/heads/'+branch,after:latest,repository:{default_branch:'main'}}));await f.state.ingest({repository:'org/repo',key:id,delivery:id,event:'push',received:Date.now()});};
+  await f.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?)',inventoryKey,'open_prs','{}',1,Date.now(),1,null);
+  await f.state.enqueue(inventory);await push('base-1');
+  const queued=(await f.store.exec('SELECT * FROM jobs WHERE key=?',inventoryKey)).one();
+  await push('base-2');assert.deepEqual((await f.store.exec('SELECT * FROM jobs WHERE key=?',inventoryKey)).one(),queued);
+  assert.equal((await f.store.exec("SELECT key FROM jobs WHERE key LIKE 'pr:%'")).toArray().length,0,'base changes never fan out per-PR jobs in ingestion');
+  const active=await f.state.claim(queued);
+  await f.store.exec('UPDATE jobs SET page=2,cursor=? WHERE key=?','saved-page',inventoryKey);
+  await push('base-3','release');
+  const paging=(await f.store.exec('SELECT * FROM jobs WHERE key=?',inventoryKey)).one();assert.equal(paging.page,2);assert.equal(paging.cursor,'saved-page');
+  await f.state.finishJob(active,inventory);
+  const pending=(await f.store.exec('SELECT * FROM jobs WHERE key=?',inventoryKey)).one();assert.equal(pending.dirty,1);assert.ok(pending.generation>active.start_generation);assert.ok(pending.due<=Date.now());
+  const generation=pending.generation;await push('feature','unrelated-feature');assert.equal((await f.store.exec('SELECT generation FROM jobs WHERE key=?',inventoryKey)).one().generation,generation);
+  assert.equal(await f.state.interval(inventory),300000);
+  await f.state.put('pr','7',{...record(),baseRefName:'release',mergeable:'UNKNOWN'});
+  assert.equal(await f.state.interval(inventory),60000,'unresolved headers coalesce into a bulk retry');
+  await f.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?)',key,'pr','{"number":7}',1,0,1,null);
+  await f.state.requestOpenCoverage();assert.equal((await f.store.exec('SELECT key FROM jobs WHERE key=?',key)).toArray().length,0,'GraphQL unknowns do not fan out per-PR background reads');
+ }finally{await f.close();}
+});
+
+test('batched PR reads publish independent members and cannot overwrite a newer webhook',async()=>{
+ const f=await fixture();try{
+  for(const number of [7,8]) {await f.state.put('pr',String(number),{...record(old),number,mergeable:'UNKNOWN'});await f.state.enqueue({...q,args:{number}},0);}
+  let requests=0;upstream(f,async input=>{
+   requests++;assert.equal(input.jobs.length,2);await event(f,'synchronize',latest);
+   return {results:input.jobs.map(j=>({key:j.key,api:'graphql',data:{...record(),number:j.query.args.number,mergeable:'CONFLICTING'}}))};
+  });
+  await f.state.dispatch(await f.state.claim(await f.state.nextJob()));
+  assert.equal(requests,1);assert.equal(f.state.groupedPublication.members,2);assert.equal(f.state.groupedPublication.admissions,1);assert.equal((await f.state.rows({...q,args:{number:8}})).mergeable,'CONFLICTING');
+  const current=JSON.parse((await f.store.exec("SELECT data FROM resources WHERE kind='pr' AND id='7'")).one().data);assert.equal(current.headRefOid,latest);
+  assert.equal((await f.store.exec('SELECT dirty FROM jobs WHERE key=?',key)).one().dirty,1);
+ }finally{await f.close();}
+});

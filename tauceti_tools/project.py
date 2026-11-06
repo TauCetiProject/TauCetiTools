@@ -120,7 +120,8 @@ class Project:
         review = self.tool("review")
         progress = self.tool("progress")
         cache = self.service("cache")
-        state = self.service("github_state")
+        state = self.raw.get("services", {}).get("github_state", {})
+        state_default = "https://github-state.taucetiproject.org" if self.content == "TauCetiProject/TauCeti" else ""
         return {
             **{
                 f"TAUCETI_{role.upper()}_NAME": value.split("/")[1]
@@ -146,6 +147,7 @@ class Project:
             "TAUCETI_CI_REPO": self.repos.get("ci", "") if self.feature("ci_archive") else "",
             "TAUCETI_CLAIMS_REPO": self.repos.get("claims", "") if self.feature("claims") else "",
             "TAUCETI_BASE_BRANCH": self.branch,
+            "TAUCETI_MERGE_BACKEND": self.raw.get("merge", {}).get("backend", "github-queue"),
             "TAUCETI_LEAN_ROOT": self.roots[0],
             "TAUCETI_LEAN_ROOTS": json.dumps(self.roots),
             "TAUCETI_ROADMAP_DIR": self.roadmap_dir,
@@ -159,7 +161,7 @@ class Project:
             "TAUCETI_ZULIP_SITE": self.raw.get("publication", {}).get("zulip_site", ""),
             "TAUCETI_ZULIP_CHANNEL": self.raw.get("publication", {}).get("zulip_channel", ""),
             "TAUCETI_ZULIP_TOPIC": self.raw.get("publication", {}).get("zulip_topic", ""),
-            "TAUCETI_GITHUB_STATE_URL": state.get("url", "") if state.get("mode") != "off" else "",
+            "TAUCETI_GITHUB_STATE_URL": state.get("url", state_default) if state.get("mode") != "off" else "",
             "TAUCETI_CACHE_DOMAIN": cache.get("domain", "") if cache.get("mode") != "off" else "",
             "TAUCETI_CACHE_SERVICE": cache.get("name", self.key) if cache.get("mode") != "off" else "",
             "TAUCETI_CACHE_ARTIFACT_URL": cache.get("artifact_url", "") if cache.get("mode") != "off" else "",
@@ -279,6 +281,10 @@ def _validate(raw: dict, source: str) -> Project:
                     raise ConfigError(f"services.{name}.{key} must be an HTTPS URL without credentials")
         if name == "bors" and value.get("deployment", "docker") not in ("docker", "cloudflare"):
             raise ConfigError("services.bors.deployment must be docker or cloudflare")
+        if name == "repair_cache" and "name" in value and (
+            not isinstance(value["name"], str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", value["name"])
+        ):
+            raise ConfigError("services.repair_cache.name must be a Lake cache service name (letters, digits, - and _)")
     for upstream in raw.get("upstreams", []):
         if not isinstance(upstream, dict):
             raise ConfigError("upstreams must be an array of tables")
@@ -286,8 +292,15 @@ def _validate(raw: dict, source: str) -> Project:
         if not isinstance(upstream.get("package"), str) or not re.fullmatch(r"[A-Za-z0-9_-]+", upstream["package"]):
             raise ConfigError("each upstream requires a Lake package name")
     backend = _table(raw, "merge").get("backend", "github-queue")
-    if backend not in ("github-queue", "bors", "github-direct"):
-        raise ConfigError("merge.backend must be github-queue, github-direct or bors")
+    if backend == "github-direct":
+        raise ConfigError(
+            'github-direct is no longer a supported merge setup. Choose merge.backend = "github-queue" '
+            "and enable GitHub's merge queue with MERGE_BACKEND=queue, or configure Bors and choose "
+            'merge.backend = "bors" with MERGE_BACKEND=bors. Review the branch rules before switching; '
+            'doctor does not change your configuration or GitHub settings.'
+        )
+    if backend not in ("github-queue", "bors"):
+        raise ConfigError("merge.backend must be github-queue or bors")
     if backend == "bors" and _table(raw, "services").get("bors", {}).get("mode", "off") == "off":
         raise ConfigError("Bors must be configured before selecting merge.backend = bors")
     return Project(raw, source)

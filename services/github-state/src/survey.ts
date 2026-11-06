@@ -30,12 +30,10 @@ export function compactMeta(value:any): any {
 }
 // Project once on each comment mutation; never retain prose in this index.
 export function issueFragment(c:any): any {
-  const body=c.body || '',meta=matches(spec.meta_pattern,body),claim=matches(spec.claim_pattern,body)[0];
+  const body=c.body || '',meta=matches(spec.meta_pattern,body);
   const parsed=meta.length?parse(meta[meta.length-1][1]):null;
-  const value=claim?parse(claim[1]):null;
-  const marker=object(value) && Number.isSafeInteger(value.expires_at)?{head:value.head ?? null,expires_at:value.expires_at,providers:Array.isArray(value.providers)?value.providers.filter((p:any)=>typeof p==='string'):[]}:null;
   const rebase=spec.rebase_authors.includes(c.user?.login) && body.startsWith('Merge-queue recovery for head `')?body.split(/\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]/).flatMap((line:string)=>line.match(/^<!--tauceti-rebase:v1 ([a-f0-9]{40})-->$/)?.slice(1) || []):[];
-  return {id:String(c.id),updated:c.updated_at || '',meta:body.includes(spec.scoreboard)?compactMeta(parsed):null,marker,rebase_heads:rebase};
+  return {id:String(c.id),updated:c.updated_at || '',meta:body.includes(spec.scoreboard)?compactMeta(parsed):null,rebase_heads:rebase};
 }
 export function reviewFragment(c:any): any {
   const body=c.body || '',root=c.in_reply_to_id==null?matches(spec.rubric_pattern,body)[0]?.[1]:null;
@@ -50,12 +48,12 @@ export function summarizeFragments(issues:any[],reviews:any[]): any {
     const rubric=roots.get(c.parent);
     if(rubric && c.reply && /^[0-9]+$/.test(c.id) && (!contest || BigInt(c.id)>BigInt(contest.id))) contest={id:c.id,rubric,created_at:c.created_at};
   }
-  return {meta,markers:issues.filter(c=>c.marker).map(c=>c.marker),contest,rebase_heads:[...new Set(issues.flatMap(c=>c.rebase_heads))].sort()};
+  return {meta,contest,rebase_heads:[...new Set(issues.flatMap(c=>c.rebase_heads))].sort()};
 }
 export function summarize(issues:any[],reviews:any[]): any {return summarizeFragments(issues.map(issueFragment),reviews.map(reviewFragment));}
 export function compactPR(row:any): any {
   const {body,statusCheckRollup,...rest}=row;
   // Only fields consumed by PRInfo; exclude history, descriptions and diff data.
-  const keys=['number','headRefOid','headRefName','headRepositoryOwner','headRepository','isDraft','mergeable','author','title','labels','updatedAt','state'];
+  const keys=['number','baseRefName','headRefOid','headRefName','headRepositoryOwner','headRepository','isDraft','mergeable','author','title','labels','updatedAt','state'];
   return {...Object.fromEntries(keys.filter(k=>Object.hasOwn(rest,k)).map(k=>[k,rest[k]])),target_focuses:row.target_focuses || targetFocuses(body),statusCheckRollup:statusCheckRollup || []};
 }

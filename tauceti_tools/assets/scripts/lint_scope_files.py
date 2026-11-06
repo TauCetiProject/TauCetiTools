@@ -1,7 +1,7 @@
 """List immutable Git tree changes without consulting candidate Git configuration.
 
-The caller supplies the merge base from GitHub's comparison of the exact base/head
-SHAs. Read only the checkout's object database; never enter its working tree or
+The caller supplies exact base/head SHAs, using the local merge base for raw PRs
+or the captured integration endpoints. Read only the checkout's object database; never enter its working tree or
 load its config, attributes, replacement refs, hooks, or executable helpers.
 Missing objects cause the caller to fall back to full lint.
 """

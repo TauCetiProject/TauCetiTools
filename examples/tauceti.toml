@@ -59,13 +59,14 @@ fleet = false
 security_audit = false
 
 [services.github_state]
-mode = "off" # off | hosted | custom
+mode = "hosted" # public Tau Ceti mirror; no client token required
 # url = "https://github-state.example.org"
 
 [services.bors]
 mode = "off" # hosted supplies Neon only; YOU operate the runtime
 deployment = "docker" # docker | cloudflare
 # url = "https://bors.example.org"
+# repository_id = 123 # Replace with the number in the Bors /repositories/NUMBER URL.
 # image = "ghcr.io/taucetiproject/bors-ng@sha256:SELECT_RELEASE_DIGEST"
 
 [services.cache]
@@ -73,6 +74,13 @@ mode = "off"
 # name = "tauceti-public"
 # artifact_url = "https://cache.example.org/artifacts"
 # revision_url = "https://cache.example.org/revisions"
+
+# The queue repair worker's published build outputs, which staging CI fetches for the exact
+# staging head before building. Read-only and anonymous: url holds artifacts/ and revisions/.
+[services.repair_cache]
+mode = "off"
+# name = "tauceti-repair"
+# url = "https://repair-cache.example.org"
 
 [publication]
 # docs_url = "https://taucetiproject.github.io/TauCeti/docs"

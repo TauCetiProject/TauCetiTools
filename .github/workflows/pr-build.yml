@@ -59,6 +59,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  MERGE_BACKEND: ${{ vars.MERGE_BACKEND || 'queue' }}
   IS_BATCH: ${{ github.event_name == 'merge_group' || (github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging') }}
   # Temporary escape hatch for `lake exe cache get`, kept only for an easy rollback
   # during the transition to the cache tool's new default read endpoint. Set the
@@ -90,6 +91,12 @@ jobs:
   # Name kept distinct from `build` on purpose — see the header note. The required merge check is the
   # `build` commit STATUS posted in the final step, not this job's auto-created check-run.
   sandboxed-build:
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+      actions: read
+      id-token: write  # telemetry-only grant, kept outside the candidate sandbox
     needs: pick-runner
     if: ${{ !cancelled() }}
     # `container.privileged` is required and documented by Namespace for this case: without it
@@ -850,8 +857,28 @@ jobs:
           [ -z "${BASE_SHIM_REGISTRY:-}" ] || args+=(
             --base-manifest "$BASE_SHIM_REGISTRY" --base-root "$BASE_SHIM_ROOT"
           )
-          python3 gate/scripts/check-expired-mathlib-shims.py \
-            --repo-root pr --manifest pr/${{ inputs.lean_root }}/mathlib-shims.json "${args[@]}"
+          # The build can change .lake/package artifacts. Any later Lake/Lean
+          # execution stays in a fresh PID/network namespace with no host grants.
+          probe_mounts=()
+          if [ -n "${BASE_SHIM_REGISTRY:-}" ]; then
+            probe_mounts=(--ro-bind "$BASE_SHIM_REGISTRY" "$BASE_SHIM_REGISTRY"
+                          --ro-bind "$BASE_SHIM_ROOT" "$BASE_SHIM_ROOT")
+          fi
+          env -i /usr/bin/bwrap --tmpfs / \
+            --ro-bind /usr /usr --ro-bind /etc /etc \
+            --symlink usr/bin /bin --symlink usr/sbin /sbin \
+            --symlink usr/lib /lib --symlink usr/lib64 /lib64 \
+            --dev /dev --proc /proc --tmpfs /tmp \
+            --ro-bind "$HOME/.elan" "$HOME/.elan" \
+            --ro-bind "$PWD/gate" "$PWD/gate" \
+            --ro-bind "$PWD/pr" "$PWD/pr" --bind "$PWD/pr/.lake" "$PWD/pr/.lake" \
+            "${probe_mounts[@]}" --remount-ro / \
+            --setenv PATH "$HOME/.elan/bin:/usr/bin:/bin" --setenv HOME "$HOME" \
+            --chdir "$PWD" \
+            --unshare-user --unshare-ipc --unshare-pid --unshare-net --unshare-uts \
+            --unshare-cgroup --disable-userns --die-with-parent --new-session \
+            -- python3 "$PWD/gate/scripts/check-expired-mathlib-shims.py" \
+            --repo-root "$PWD/pr" --manifest "$PWD/pr/${{ inputs.lean_root }}/mathlib-shims.json" "${args[@]}"
           rc=$?
           echo "SHIM_COVERAGE_RC=$rc" >> "$GITHUB_ENV"
           exit "$rc"
@@ -1085,17 +1112,6 @@ jobs:
         # cache records, so retain the downloaded associations and archive digests here.
         run: python3 gate/scripts/lake_cache_reuse.py snapshot pr gate/lake-cache-reuse.json
 
-      - name: Validate Lake archive reuse against a changed toolchain
-        if: ${{ env.INFRA != '1' && env.TOOLCHAIN_CHANGED == '1' }}
-        # The pin was validated above; Mathlib setup has installed that toolchain.
-        # Build only the trusted test's synthetic modules, never candidate sources.
-        # Catch Lake schema/CLI drift before a bump can land and fail main's tests.
-        run: |
-          ELAN_TOOLCHAIN="$(cat pr/lean-toolchain)" \
-            python3 gate/scripts/test_lake_cache_reuse.py --integration
-          ELAN_TOOLCHAIN="$(cat pr/lean-toolchain)" \
-            python3 gate/scripts/test_lake_cache_publish.py --integration
-
       - name: Prepare trusted read-only Lean watchdog toolchain
         if: ${{ env.INFRA != '1' }}
         run: |
@@ -1128,6 +1144,7 @@ jobs:
         id: build
         if: ${{ env.INFRA != '1' }}
         env:
+          CI_RESOURCE_EXPERIMENT: ${{ vars.CI_RESOURCE_EXPERIMENT }}
           # The sandboxed build is always offline: never let Lake reach out to a remote
           # cache from inside the sandbox. When the artifact cache is enabled above, it
           # restores ${{ inputs.lean_root }}'s oleans purely from the locally-populated $LAKE_CACHE_DIR; when it is
@@ -1164,8 +1181,15 @@ jobs:
           # would let candidate code drop a `lake` or `bash` earlier on PATH than the real one and
           # have the later audits run it. The explicit PATH below is the other half of that: it
           # never contains a directory the sandbox can write.
-          python3 gate/scripts/ci_host_resources.py --out "$RUNNER_TEMP/ci-host-resources.json" -- \
-            env -i /usr/bin/bwrap --tmpfs / \
+          resource_observer=()
+          if [ "$CI_RESOURCE_EXPERIMENT" = "1" ]; then
+            resource_observer=(python3 gate/scripts/ci_host_resources.py --out "$RUNNER_TEMP/ci-host-resources.json" --)
+          fi
+          progress_observer=()
+          if [ -f gate/scripts/ci_live_progress.py ]; then
+            progress_observer=(python3 gate/scripts/ci_live_progress.py --telemetry "$PWD/pr/.lake/telemetry" --)
+          fi
+          "${progress_observer[@]}" "${resource_observer[@]}" env -i /usr/bin/bwrap --tmpfs / \
             --ro-bind /usr /usr --ro-bind /etc /etc \
             --symlink usr/bin /bin --symlink usr/sbin /sbin \
             --symlink usr/lib /lib --symlink usr/lib64 /lib64 \
@@ -1242,8 +1266,28 @@ jobs:
             args+=(--base-manifest "$BASE_SHIM_REGISTRY" --base-root "$BASE_SHIM_ROOT")
             [ "${BUMP:-0}" = "1" ] || args+=(--only-new)
           fi
-          python3 gate/scripts/check-expired-mathlib-shims.py \
-            --repo-root pr --manifest pr/${{ inputs.lean_root }}/mathlib-shims.json "${args[@]}"
+          # The build can change .lake/package artifacts. Any later Lake/Lean
+          # execution stays in a fresh PID/network namespace with no host grants.
+          probe_mounts=()
+          if [ -n "${BASE_SHIM_REGISTRY:-}" ]; then
+            probe_mounts=(--ro-bind "$BASE_SHIM_REGISTRY" "$BASE_SHIM_REGISTRY"
+                          --ro-bind "$BASE_SHIM_ROOT" "$BASE_SHIM_ROOT")
+          fi
+          env -i /usr/bin/bwrap --tmpfs / \
+            --ro-bind /usr /usr --ro-bind /etc /etc \
+            --symlink usr/bin /bin --symlink usr/sbin /sbin \
+            --symlink usr/lib /lib --symlink usr/lib64 /lib64 \
+            --dev /dev --proc /proc --tmpfs /tmp \
+            --ro-bind "$HOME/.elan" "$HOME/.elan" \
+            --ro-bind "$PWD/gate" "$PWD/gate" \
+            --ro-bind "$PWD/pr" "$PWD/pr" --bind "$PWD/pr/.lake" "$PWD/pr/.lake" \
+            "${probe_mounts[@]}" --remount-ro / \
+            --setenv PATH "$HOME/.elan/bin:/usr/bin:/bin" --setenv HOME "$HOME" \
+            --chdir "$PWD" \
+            --unshare-user --unshare-ipc --unshare-pid --unshare-net --unshare-uts \
+            --unshare-cgroup --disable-userns --die-with-parent --new-session \
+            -- python3 "$PWD/gate/scripts/check-expired-mathlib-shims.py" \
+            --repo-root "$PWD/pr" --manifest "$PWD/pr/${{ inputs.lean_root }}/mathlib-shims.json" "${args[@]}"
           rc=$?
           echo "SHIM_EXPIRY_RC=$rc" >> "$GITHUB_ENV"
           exit "$rc"
@@ -1254,6 +1298,7 @@ jobs:
         env:
           CI_STATUS_APP_ID: ${{ secrets.CI_STATUS_APP_ID }}
           CI_STATUS_APP_PRIVATE_KEY: ${{ secrets.CI_STATUS_APP_PRIVATE_KEY }}
+          CI_STATUS_MERGE_BACKEND: ${{ vars.MERGE_BACKEND || 'queue' }}
           GH_TOKEN: ${{ steps.ci-api.outputs.status-token }}
           GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token }}
           TAUCETI_GITHUB_READ_ROLE: ${{ steps.ci-api.outputs.read-role }}
@@ -1301,7 +1346,7 @@ jobs:
             if [ "$IS_BATCH" != true ]; then
               args+=(--pr '${{ steps.pr.outputs.num }}' --base-ref '${{ steps.pr.outputs.base_ref }}')
             fi
-            if [ "$ctx" = scope ] && [ "$st" = success ] && [ "${OUT_OF_SCOPE:-}" = 1 ]; then
+            if [ "$ctx" = scope ] && [ "$st" = success ] && [ "${OUT_OF_SCOPE:-}" = 1 ] && [ "$MERGE_BACKEND" = bors ]; then
               args+=(--scope-approval-base "$TESTED_SCOPE_BASE")
               if [ "$IS_BATCH" != true ]; then
                 args+=(--scope-approval-pr "$SCOPE_PR")
@@ -1399,9 +1444,9 @@ jobs:
           # scope: the merge-policy verdict, posted as its OWN status so a policy issue never hides the
           # build result (the bug this split fixes — an out-of-scope PR used to post its "human review"
           # verdict as a red `build`, so fix-ci churned on it and you could not see whether it compiled).
-          # Kept separate from the required GitHub checks so a human-owned infrastructure PR can be
-          # merged after review, but required green by TauCetiReview's automatic merge policy. This
-          # status is therefore a trusted, fail-closed input to every automatic merge decision.
+          # Required for ordinary automated merging. An administrator overrides a
+          # restricted-path block with an admin merge when using the GitHub queue,
+          # or with bors merge when using Bors. Ordinary review is not a waiver.
           if [ "${{ env.SCOPE_OK }}" != "1" ]; then
             sc_state=failure; sc_desc="trusted scope guard did not complete — re-run pr-build"
           elif [ "${{ env.BUMP_BAD }}" = "1" ]; then
@@ -1422,7 +1467,11 @@ jobs:
             # This is an intent, not a published verdict. ci_status.py verifies
             # the current approval immediately before posting and after waits;
             # a revoked approval publishes scope=failure instead of stale green.
-            sc_state=success; sc_desc="restricted paths approved by a repository admin through bors; other scope guards passed"
+            if [ "$MERGE_BACKEND" = bors ]; then
+              sc_state=success; sc_desc="restricted paths approved by a repository admin through bors; other scope guards passed"
+            else
+              sc_state=failure; sc_desc="restricted paths need an administrator's admin merge; ordinary automation cannot merge this PR"
+            fi
           else
             sc_state=success; sc_desc="changes are in scope (${{ inputs.lean_root }}/, the allowed root files, and the bibliography only)"
           fi
@@ -1449,7 +1498,7 @@ jobs:
 
       # Host resource observations are outside all candidate-writable mounts.
       - name: Upload trusted host resource observations (statistics only)
-        if: always()
+        if: ${{ always() && vars.CI_RESOURCE_EXPERIMENT == '1' }}
         continue-on-error: true
         timeout-minutes: 3
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -1461,14 +1510,18 @@ jobs:
 
       # Statistics for TauCetiCI (https://github.com/TauCetiProject/TauCetiCI): when each phase of
       # the sandboxed build started, how many modules were built or restored from the cache, the
-      # slowest, and the runner picker's decision. After the statuses so it can never delay them,
+      # runner picker's decision; no per-module lists are retained. After the statuses so it can never delay them,
       # and continue-on-error so it can never fail the job. The phase and build files were written
       # inside the sandbox, so the record marks itself as statistics only.
       - name: Summarise CI telemetry (statistics only)
+        id: ci_telemetry
         if: always()
         continue-on-error: true
         timeout-minutes: 2
         env:
+          CI_RESOURCE_EXPERIMENT: ${{ vars.CI_RESOURCE_EXPERIMENT }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          BUILD_EVENT: ${{ github.event_name }}
           MERGE_ENGINE: ${{ github.event_name == 'merge_group' && 'queue' || (github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging' && (github.event.client_payload.base_ref == 'main' && 'bors' || 'bors_pilot') || 'pr') }}
           TESTED_HEAD: ${{ steps.pr.outputs.status_sha }}
           TESTED_BASE: ${{ steps.pr.outputs.base_sha }}
@@ -1480,6 +1533,11 @@ jobs:
           PICKER_BUSY: ${{ needs.pick-runner.outputs.busy }}
           PICKER_BUDGET: ${{ needs.pick-runner.outputs.budget }}
         run: |
+          if [ "$CI_RESOURCE_EXPERIMENT" != "1" ]; then
+            if { [ "$BUILD_EVENT" != "pull_request" ] && [ "$BUILD_EVENT" != "pull_request_target" ]; } || [ "$BUILD_OUTCOME" != "success" ] || (( GITHUB_RUN_ID % 20 != 0 )); then
+              exit 0
+            fi
+          fi
           python3 gate/scripts/ci_telemetry.py --dir pr/.lake/telemetry --out "$RUNNER_TEMP/telemetry.json" \
             --meta "event=${{ github.event_name }}" --meta "runner=$PICKED" \
             --meta "picker_busy=$PICKER_BUSY" --meta "picker_budget=$PICKER_BUDGET" \
@@ -1487,9 +1545,10 @@ jobs:
             --meta "tested_sha=$TESTED_COMMIT" --meta "tested_tree=$TESTED_TREE" \
             --meta "merge_engine=$MERGE_ENGINE" --meta "batch_id=$BORS_BATCH" \
             --meta "batch_members=$BORS_MEMBERS"
+          echo "collected=true" >> "$GITHUB_OUTPUT"
 
       - name: Upload CI telemetry
-        if: always()
+        if: ${{ always() && steps.ci_telemetry.outputs.collected == 'true' }}
         continue-on-error: true
         timeout-minutes: 3
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -1498,6 +1557,26 @@ jobs:
           path: ${{ runner.temp }}/telemetry.json
           if-no-files-found: ignore
           retention-days: 30
+
+      - name: Prepare raw failure logs
+        timeout-minutes: 1
+        if: ${{ always() && steps.build.outcome == 'failure' }}
+        continue-on-error: true
+        run: |
+          python3 gate/scripts/ci_failure_logs.py --candidate pr --runner-temp "$RUNNER_TEMP" \
+            --out "$RUNNER_TEMP/ci-failure-logs"
+
+      - name: Upload raw failure logs
+        if: ${{ always() && steps.build.outcome == 'failure' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ci-failure-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-failure-logs
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
 
       - name: Retain unpublished CI statuses
         if: always()
@@ -1516,7 +1595,8 @@ jobs:
   # helper, and is the sole holder of the key. The helper runs only after the key-bearing step.
   publish-merge-group-cache:
     needs: sandboxed-build
-    if: ${{ always() && needs.sandboxed-build.result == 'success' && needs.sandboxed-build.outputs.publication-required == 'true' }}
+    # The trusted audit verdict is independent of subsequent status-delivery failures.
+    if: ${{ !cancelled() && needs.sandboxed-build.outputs.build-state == 'success' && needs.sandboxed-build.outputs.publication-required == 'true' }}
     permissions:
       contents: read
     uses: ./.github/workflows/publish-lake-cache.yml

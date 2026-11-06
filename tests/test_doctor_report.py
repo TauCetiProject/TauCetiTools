@@ -103,7 +103,7 @@ class DoctorReportTests(unittest.TestCase):
                                        "--output", str(config)]), 0)
             project = load(str(config))
             self.assertEqual(project.roots, ["EpsilonEridani"])
-            self.assertEqual(project.raw["merge"]["backend"], "github-direct")
+            self.assertEqual(project.raw["merge"]["backend"], "github-queue")
             original = config.read_bytes()
             with redirect_stdout(io.StringIO()), patch("sys.stderr", new_callable=io.StringIO) as errors:
                 self.assertEqual(main(["init", "--repo", "one/Project", "--owner-login", "human",
@@ -128,14 +128,14 @@ class DoctorReportTests(unittest.TestCase):
         rows = {f.id: f for f in diagnose(project, github=GitHub())}
         self.assertIn('[tools.tools]', "\n".join(rows["pins.tools"].steps))
         rules = "\n".join(rows["rules.content"].steps)
-        self.assertIn("Clear Require branches to be up to date", rules)
+        self.assertIn("Finish Project files and workflows first", rules)
         for name, expected in (("LAKE_CACHE_KEY", "Object Read & Write"), ("ZULIP_EMAIL", "email="),
                                ("ZULIP_API_KEY", "key="), ("FLEET_READ_TOKEN", "features.fleet = false")):
             steps = "\n".join(rows["secrets." + name].steps)
             self.assertIn(expected, steps)
             self.assertNotIn("Click Create GitHub App", steps)
         self.assertIn("Generate a private key", "\n".join(rows["secrets.APP_PRIVATE_KEY"].steps))
-        self.assertIn("lakefile.toml", "\n".join(rows["lean.roadmap"].steps))
+        self.assertIn("First finish the Content Lean package", "\n".join(rows["lean.roadmap"].steps))
         for finding in rows.values():
             if finding.status not in ("ready", "disabled"):
                 self.assertTrue(finding.steps, finding.id)

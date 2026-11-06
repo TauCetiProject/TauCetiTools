@@ -11,6 +11,8 @@ Tables
        derive_queue_chains. (group_prs/group_position from the records are superseded: they list
        only the entry's own PR.)
        jobs_fetched: 0 when a backfill recorded the run without its jobs)
+  Runner kind retains its raw category; runner_name preserves archived fleet identity
+  so reporting aliases do not change the categories used by other database readers.
   Failure labels are recomputed from archived excerpts with the current classifier.
   Raw records retain their original label/version; records without excerpts keep that label.
   process-killed establishes neither a timeout nor an OOM cause.
@@ -71,7 +73,7 @@ CREATE TABLE jobs (
   repo TEXT, run_id INTEGER, job_id INTEGER PRIMARY KEY, run_attempt INTEGER, name TEXT,
   conclusion TEXT, created_at TEXT, started_at TEXT, completed_at TEXT, wait_s REAL, run_s REAL,
   runner_kind TEXT, runner_size TEXT, labels TEXT,
-  failure_class TEXT, failed_step TEXT, excerpt TEXT, api_status TEXT
+  failure_class TEXT, failed_step TEXT, excerpt TEXT, api_status TEXT, runner_name TEXT
 );
 CREATE TABLE steps (
   job_id INTEGER, n INTEGER, name TEXT, conclusion TEXT, started_at TEXT, completed_at TEXT,
@@ -307,14 +309,14 @@ def build(out: Path):
                 # Otherwise keep archived evidence rather than replacing it with a fallback.
                 if f.get("excerpt") is not None or derived not in ("build-unknown", "other"):
                     failure_class = derived
-            db.execute("INSERT OR REPLACE INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+            db.execute("INSERT OR REPLACE INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
                 r["repo"], r["run_id"], j["id"], j.get("run_attempt"), j["name"], j.get("conclusion"),
                 j.get("created_at"), j.get("started_at"), j.get("completed_at"),
                 seconds(j.get("created_at"), j.get("started_at")) if j.get("status") != "queued" else None,
                 seconds(j.get("started_at"), j.get("completed_at")) if j.get("status") != "queued" else None,
                 j.get("runner_kind"), runner_size(j.get("labels") or []), json.dumps(j.get("labels") or []),
                 failure_class, f.get("failed_step"),
-                "\n".join(f["excerpt"]) if f.get("excerpt") else None, j.get("status"),
+                "\n".join(f["excerpt"]) if f.get("excerpt") else None, j.get("status"), j.get("runner_name"),
             ))
             for s in j.get("steps") or []:
                 db.execute("INSERT OR REPLACE INTO steps VALUES (?,?,?,?,?,?,?)", (

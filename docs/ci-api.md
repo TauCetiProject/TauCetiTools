@@ -44,13 +44,32 @@ do not recreate that unbounded database history or add a polling service.
 Before posting, trusted reporting saves small JSON intents outside the candidate
 sandbox. Successful publication removes them. Failed publication retains them
 as `ci-status-intents-sandbox` or `ci-status-intents-finalizer` artifacts for seven
-days. A failure-only reporting workflow downloads intents from the exact source
+days. On a build failure, the reporting workflow downloads intents from the exact source
 run, validates their schema and run/attempt binding, and retries publication.
 It never rebuilds or executes candidate code. Changed PR heads/base branches,
 canceled sources, and superseded attempts cannot receive stale passing statuses.
 Finalization recovery rechecks publisher and Bors evidence when it was not yet
 available before the interruption. Normal reporting waits at most ten minutes;
 the isolated recovery workflow allows a quota-reset wait up to 3,700 seconds.
+
+The same workflow runs an hourly sweep for open, non-draft PRs whose current
+head has no `build` status after a terminal build, or no build was ever started.
+It checks all contributors,
+skips active replacements (including manual dispatches whose run SHA is main),
+and rechecks the PR head and status before dispatching the ordinary trusted
+default-branch `pr-build`. A 90-minute grace lets retained-status replay finish.
+Each sweep recovers up to 20 builds, trying the least recently retried PRs first.
+Existing Actions run history supplies retry timing; there is no separate ledger
+or daemon. Quota failures defer work to the next sweep. Existing build, review,
+and merge checks still decide the result.
+
+For a larger backlog, preview or apply a batch of the same recovery from a
+trusted Tools checkout. Normal project runner routing and capacity still apply:
+
+```sh
+python3 tauceti_tools/assets/scripts/ci_recovery.py --repo OWNER/REPO --limit 50
+python3 tauceti_tools/assets/scripts/ci_recovery.py --repo OWNER/REPO --limit 50 --apply
+```
 
 An explicit trusted failed `GitHub API quota unavailable` step identifies quota
 exhaustion to Fleet using job metadata it already reads. With healthy host/setup
