@@ -26,6 +26,7 @@ permissions:
   pull-requests: read
   statuses: write
   actions: read
+  id-token: write  # reusable build job uses a telemetry-only OIDC audience
 jobs:
   validate:
     uses: __TOOLS_REPO__/.github/workflows/pr-build.yml@__TOOLS_REF__

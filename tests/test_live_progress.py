@@ -19,6 +19,8 @@ class WorkflowIsolation(unittest.TestCase):
         workflow = yaml.safe_load((ROOT / ".github/workflows/pr-build.yml").read_text())
         job = workflow["jobs"]["sandboxed-build"]
         self.assertEqual(job["permissions"]["id-token"], "write")
+        caller = yaml.safe_load((ROOT / "tauceti_tools/assets/project/.github/workflows/pr-build.yml").read_text())
+        self.assertEqual(caller["permissions"]["id-token"], "write")
         build = next(s["run"] for s in job["steps"] if s.get("id") == "build")
         self.assertIn('"${progress_observer[@]}" "${resource_observer[@]}" env -i /usr/bin/bwrap', build)
         self.assertNotIn("--setenv ACTIONS_ID_TOKEN", build)
