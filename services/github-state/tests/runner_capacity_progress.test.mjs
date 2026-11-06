@@ -362,3 +362,20 @@ test('cold queued metadata preserves allowance for a warm refresh instead of spe
   assert.ok(result.retry_at>Date.now()+150000,'wait for actual allowance instead of repeating a doomed scan');
  }finally{db.close();}
 });
+
+test('metadata reserve accounts for allowance that expires before the next warm refresh',async t=>{
+ const f=fixture(4),db=new DatabaseSync(':memory:'),values=new Map();const clock=Date.now();t.mock.method(Date,'now',()=>clock);
+ values.set('runner-capacity-attempts',Array.from({length:2390},(_,i)=>clock-3600000+i*3600000/2390));
+ const storage={get:async key=>values.get(key),put:async(key,value)=>values.set(key,structuredClone(value)),sql:{exec(q,...args){
+  let rows=[];if(!args.length && q.includes(';'))db.exec(q);else{const s=db.prepare(q);if(s.columns().length)rows=s.all(...args);else s.run(...args);}
+  return {toArray:()=>rows,one:()=>{assert.equal(rows.length,1);return rows[0];}};
+ }}};
+ try{
+  const owner=new InstallationScheduler({storage,waitUntil(promise){promise.catch(()=>{});}},{});owner.token=async()=> 'token';owner.usable=()=>5000;
+  owner.http=async(path,token,method,body)=>f.read(path,body);
+  const result=await(await owner.runnerCapacity({name:'org/repo',installation:'200'})).json();
+  assert.equal(result.routing_version,2);assert.equal(result.namespace_busy,4);
+  assert.ok(result.job_cache_reusable_writes>0);assert.equal(result.retry_at-result.observed_at,145000);
+  assert.ok(values.get('runner-capacity-attempts').length<=2400);
+ }finally{db.close();}
+});

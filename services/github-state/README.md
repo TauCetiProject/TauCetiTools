@@ -601,12 +601,15 @@ installation charges every provider attempt durably against the existing 2400
 attempts per rolling hour, preserving the 1500 core and 1000 GraphQL reserves.
 Normal refreshes target 145 seconds from the running observation while the rolling hour has enough room for
 another warm inventory. Near exhaustion they wait until enough actual attempts
-age out of that hour. Cold queued-job label fills preserve allowance for one
-warm refresh; live running discovery can use that reserve. Existing freshness
+age out of that hour. The estimate survives failed scans and grows when an
+underfunded pass exhausts its allowance. Only fills proven reusable by a live
+job inventory reduce the estimated recurring cost. Cold queued-job label fills
+preserve allowance for a warm refresh at its projected next cadence; recurring
+REST reads and live running discovery can use that reserve. Existing freshness
 guards still reject stale snapshots during quota exhaustion. No activity or
 coverage is inferred from the immutable-label cache.
 Queued repositories and range branches progress concurrently under one global
-three-request gate. Snapshot freshness is dated when running discovery finishes,
+three-request gate. Snapshot freshness is dated when running discovery begins,
 so queued discovery cannot make an old running count appear current. Snapshots expose elapsed time and the running-inventory
 request subtotal to distinguish request exhaustion from slow provider responses.
 

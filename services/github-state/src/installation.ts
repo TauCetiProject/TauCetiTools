@@ -488,8 +488,10 @@ export class InstallationScheduler extends DurableObject<Env> {
       // caps cannot multiply scans on every two-minute cache expiry.
       const target=Math.max(namespaceTarget,saved?.namespace_discovery_target || 0);
       const attempts=await this.ctx.storage.get<number[]>('runner-capacity-attempts') || [];
-      let used=0,metadataReads=0,metadataWrites=0;
-      const priorWarmNeed=Math.max(0,(saved?.requests || 0)-(saved?.job_cache_writes || 0));
+      let used=0,reusableWrites=0;
+      const estimateKey='runner-capacity-next-cost:'+organization;
+      const lastGood=await this.ctx.storage.get<any>('runner-capacity-last-good:'+organization);
+      const priorWarmNeed=await this.ctx.storage.get<number>(estimateKey) || Math.max(0,((saved?.requests?saved:lastGood)?.requests || 0)-((saved?.requests?saved:lastGood)?.job_cache_reusable_writes || 0));
       const retryAt=(need:number,observedAt=Date.now())=>{
         const now=Date.now(),recent=attempts.filter(at=>at>=now-3600000);
         const shortage=Math.max(0,recent.length+Math.max(1,Math.min(2400,need))-2400);
@@ -529,27 +531,32 @@ export class InstallationScheduler extends DurableObject<Env> {
             this.ctx.storage.sql.exec('UPDATE runner_capacity_jobs SET seen_at=? WHERE key=?',Date.now(),key);
             return jobs;
           },
-          put:(key:string,revision:string,jobs:any[])=>{
-            this.ctx.storage.sql.exec('INSERT INTO runner_capacity_jobs VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET revision=excluded.revision,jobs=excluded.jobs,seen_at=excluded.seen_at',key,revision,JSON.stringify(jobs),Date.now());metadataWrites++;
+          put:(key:string,revision:string,jobs:any[],reusable=false)=>{
+            this.ctx.storage.sql.exec('INSERT INTO runner_capacity_jobs VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET revision=excluded.revision,jobs=excluded.jobs,seen_at=excluded.seen_at',key,revision,JSON.stringify(jobs),Date.now());if(reusable)reusableWrites++;
           },
         };
         const token=await this.token(repo.installation);
-        const snapshot=await scanHostedCapacity(organization,async (path,body,phase)=>{
+        const observationAt=Date.now();
+        const snapshot=await scanHostedCapacity(organization,async (path,body,context)=>{
           const api=body?'graphql':'core';
           const until=await this.ctx.storage.get<number>('secondary_until') || 0;
           if(until>Date.now() || this.usable('core')<=1500)throw new Error('capacity_quota_reserve');
           if(api==='graphql' && this.usable('graphql')<=1000)throw new Error('capacity_graphql_reserve');
           while(attempts.length && attempts[0]<Date.now()-3600000)attempts.shift();
           if(attempts.length>=2400)throw new Error('capacity_hourly_budget');
-          const metadata=path.includes('/jobs');
+          const metadata=/\/actions\/runs\/\d+\/jobs(?:\?|$)/.test(path);
           // Cold label fills must leave enough allowance for a warm refresh.
           // Running discovery and live listings/witnesses can use that reserve.
-          if(phase==='queued' && metadata && 2400-attempts.length<=Math.max(1,priorWarmNeed,used-metadataReads))throw new Error('capacity_metadata_reserve');
+          const warmNeed=Math.max(1,priorWarmNeed,used-reusableWrites);
+          const nextAt=Math.max(observationAt+145000,Date.now()+warmNeed*1500);
+          if(context?.phase==='queued' && metadata && context.reusableFill && attempts.filter(at=>at>=nextAt-3600000).length+1+warmNeed>2400)throw new Error('capacity_metadata_reserve');
           // Persist before launching: a lost network response still consumes allowance.
           attempts.push(Date.now());await this.ctx.storage.put('runner-capacity-attempts',attempts);
-          used++;if(metadata)metadataReads++;
+          used++;
           const deadline=Date.now()+20000;
           for(;;) {
+            if(this.usable('core')<=1500)throw new Error('capacity_quota_reserve');
+            if(api==='graphql' && this.usable('graphql')<=1000)throw new Error('capacity_graphql_reserve');
             try {return await this.http(path,token,body?'POST':'GET',body,'runner_capacity',api);}
             catch(error) {
               if(!(error instanceof QuotaDeferred) || error.result.category!=='capacity' || Date.now()+250>deadline)throw error;
@@ -559,14 +566,19 @@ export class InstallationScheduler extends DurableObject<Env> {
             }
           }
         },target,queuedCache);
-        const warmNeed=Math.max(1,snapshot.requests-snapshot.job_cache_writes);
-        const need=snapshot.placement_unavailable==='capacity_metadata_reserve'?2*warmNeed+1:warmNeed;
+        const warmNeed=Math.max(1,snapshot.requests-snapshot.job_cache_reusable_writes);
+        const exhausted=['capacity_hourly_budget','capacity_metadata_reserve'].includes(snapshot.placement_unavailable || '');
+        const need=Math.min(2400,exhausted?Math.max(priorWarmNeed,2*used+1):warmNeed);
+        await this.ctx.storage.put(estimateKey,need);
         const value={complete:true,organization,namespace_discovery_target:target,...snapshot,retry_at:retryAt(need,snapshot.observed_at),coverage:snapshot.routing_version===2?'organization_repository_inventory':'organization_running_inventory'};
         await this.ctx.storage.put(key,value);
         await this.ctx.storage.put('runner-capacity-last-good:'+organization,value);
         return value;
       } catch(error) {
-        const value={complete:false,organization,namespace_discovery_target:target,reason:error instanceof QuotaDeferred?'capacity_deferred':error instanceof Error && error.message.startsWith('capacity_')?error.message:classify(error),retry_at:Math.max(retryAt(Math.max(priorWarmNeed,used-metadataWrites)),error instanceof QuotaDeferred?error.result.retry_at || 0:0)};
+        const exhausted=error instanceof Error && error.message==='capacity_hourly_budget';
+        const need=Math.min(2400,Math.max(1,priorWarmNeed,exhausted?2*used+1:used-reusableWrites));
+        await this.ctx.storage.put(estimateKey,need);
+        const value={complete:false,organization,namespace_discovery_target:target,reason:error instanceof QuotaDeferred?'capacity_deferred':error instanceof Error && error.message.startsWith('capacity_')?error.message:classify(error),retry_at:Math.max(retryAt(need),error instanceof QuotaDeferred?error.result.retry_at || 0:0)};
         await this.ctx.storage.put(key,value);return value;
       }
     })().finally(()=>{this.capacityFlight=undefined;});

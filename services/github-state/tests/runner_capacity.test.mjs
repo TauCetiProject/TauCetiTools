@@ -122,7 +122,7 @@ function schedulerFixture(){
  const values=new Map(),background=[];let slots=0;
  const storage={get:async k=>values.get(k),put:async(k,v)=>values.set(k,structuredClone(v)),sql:{exec(q){return {toArray:()=>[],one:()=>({n:q.includes('COUNT(*)')?slots:0,cost:0})};}}};
  const scheduler=new InstallationScheduler({storage,waitUntil(promise){background.push(promise);}},{});scheduler.token=async()=> 'token';scheduler.usable=()=>5000;
- return {scheduler,values,background,setSlots:n=>{slots=n}};
+ return {scheduler,values,storage,background,setSlots:n=>{slots=n}};
 }
 test('cached-only reads retain expired snapshots without token or provider work',async()=>{
  const {scheduler,values}=schedulerFixture();
@@ -453,4 +453,33 @@ test('queued discovery time does not push refresh beyond the client freshness wi
  assert.equal(result.routing_version,2);assert.ok(result.observed_at<clock);
  assert.equal(result.retry_at-result.observed_at,145000);
  assert.ok(result.retry_at<result.observed_at+150000);
+});
+
+test('uniform hourly exhaustion accumulates enough headroom for the next pass across owner replacement',async t=>{
+ const {scheduler,values,storage}=schedulerFixture();let clock=Date.now(),calls=0;
+ t.mock.method(Date,'now',()=>clock);
+ values.set('runner-capacity-attempts',Array.from({length:2300},(_,i)=>clock-3600000+i*3600000/2300));
+ const http=async path=>{
+  calls++;
+  if(path.startsWith('/orgs/'))return envelope(null,Array.from({length:51},(_,i)=>({name:'repo'+i,archived:false})));
+  if(path.includes('/actions/runs?'))return envelope('workflow_runs',[{id:1}]);
+  return envelope('jobs',[hosted]);
+ };
+ scheduler.http=http;
+ const failed=await(await scheduler.runnerCapacity({name:'org/repo',installation:'200'})).json();
+ assert.equal(failed.reason,'capacity_hourly_budget');
+ const spent=calls,estimate=values.get('runner-capacity-next-cost:org');assert.ok(estimate>spent);
+ assert.ok(failed.retry_at>clock+150000,'failed scans must let more allowance accumulate than the amount that failed');
+ clock=failed.retry_at+1;
+ const replacement=new InstallationScheduler({storage,waitUntil(promise){promise.catch(()=>{});}},{});replacement.token=async()=> 'token';replacement.usable=()=>5000;replacement.http=http;
+ const recovered=await(await replacement.runnerCapacity({name:'org/repo',installation:'200'})).json();
+ assert.equal(recovered.routing_version,2);assert.equal(recovered.busy,51);
+ assert.equal(recovered.job_cache_reusable_writes,0,'REST reads with no live witness are recurring work');
+ assert.equal(values.get('runner-capacity-next-cost:org'),recovered.requests);
+ assert.ok(values.get('runner-capacity-attempts').length<=2400);
+});
+
+test('repository names beginning with jobs do not turn run listings into job-detail reads',async()=>{
+ const value=await scanHostedCapacity('org',async path=>path.startsWith('/orgs/')?envelope(null,[{name:'jobs-queue',archived:false}]):envelope('workflow_runs',[]));
+ assert.equal(value.request_types.run_listings,2);assert.equal(value.request_types.job_details,undefined);
 });
