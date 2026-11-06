@@ -404,3 +404,28 @@ test('a shared scan retains its lifetime and publishes for later callers without
  assert.equal((await(await scheduler.runnerCapacity({name:'org/repo',installation:'200'})).json()).cached,true);
  await abandoned;
 });
+
+test('large passes finish beyond 96 calls but cannot exceed remaining hourly allowance',async()=>{
+ for(const [repositories,spent] of [[40,0],[51,2300]]){
+  const {scheduler,values}=schedulerFixture();let calls=0;
+  values.set('runner-capacity-attempts',Array(spent).fill(Date.now()));
+  scheduler.http=async path=>{
+   calls++;
+   if(path.startsWith('/orgs/'))return envelope(null,Array.from({length:repositories},(_,i)=>({name:'repo'+i,archived:false})));
+   if(path.includes('/actions/runs?'))return envelope('workflow_runs',[{id:1}]);
+   return envelope('jobs',[hosted]);
+  };
+  const result=await(await scheduler.runnerCapacity({name:'org/repo',installation:'200'})).json();
+  assert.equal(values.get('runner-capacity-attempts').length,spent+calls);
+  assert.ok(spent+calls<=2400);
+  if(!spent){
+   assert.equal(result.routing_version,2);assert.equal(result.busy,repositories);assert.ok(calls>96);
+   assert.ok(result.retry_at-result.observed_at>=calls*1500);
+  }else{
+   assert.equal(result.complete,false);assert.equal(result.reason,'capacity_hourly_budget');assert.equal(calls,100);
+  }
+  const previous=calls;
+  assert.equal((await(await scheduler.runnerCapacity({name:'org/repo',installation:'200'})).json()).cached,true);
+  assert.equal(calls,previous);
+ }
+});
