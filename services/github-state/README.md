@@ -596,18 +596,12 @@ and subdivides any newly overfull range. No coverage or activity is cached.
 Fresh leaf counts merge sparse neighboring ranges and remove all splits when a
 queue drains, so old bursts do not permanently multiply listing requests.
 
-A discovery pass has no independent request-count or scan-clock cutoff. The
-installation charges every provider attempt durably against the existing 2400
-attempts per rolling hour, preserving the 1500 core and 1000 GraphQL reserves.
-Normal refreshes target 145 seconds from the running observation while the rolling hour has enough room for
-another warm inventory. Near exhaustion they wait until enough actual attempts
-age out of that hour. The estimate survives failed scans and grows when an
-underfunded pass exhausts its allowance. Only fills proven reusable by a live
-job inventory reduce the estimated recurring cost. Cold queued-job label fills
-preserve allowance for a warm refresh at its projected next cadence; recurring
-REST reads and live running discovery can use that reserve. Existing freshness
-guards still reject stale snapshots during quota exhaustion. No activity or
-coverage is inferred from the immutable-label cache.
+Discovery has no separate per-pass or rolling-hour request allowance. It uses
+actual shared installation quota accounting, the provider's secondary cooldowns,
+and the existing core/GraphQL reserves. Old cached allowance failures are ignored
+on upgrade without discarding immutable job labels or search boundaries.
+Normal refreshes target 145 seconds from the running observation. No cooldown
+is derived from a previous scan's cost. Cached-only reports never start a scan.
 Queued repositories and range branches progress concurrently under one global
 three-request gate. Snapshot freshness is dated when running discovery begins,
 so queued discovery cannot make an old running count appear current. Snapshots expose elapsed time and the running-inventory
@@ -633,8 +627,8 @@ through its configured destinations and native GitHub fallback. Logs show the
 lower bound, inventory coverage, cap state, and partial-scan reason.
 
 Refresh uses existing installation quota accounting, honors secondary cooldowns,
-leaves at least 1,500 core requests for repository work, and spends at most 2,400
-read attempts per rolling hour, including lost network responses on this operation. Brief request-slot
+leaves at least 1,500 core requests for repository work, and shares the installation
+provider accounting with other operations. Brief request-slot
 contention yields within each request's acquisition window rather than invalidating the snapshot. At most three reads run simultaneously; individual requests retain their existing timeout. There is no alarm, CI event storage, or new polling task.
 
 Pickers without a configured shared service retain bounded direct discovery.
@@ -642,7 +636,7 @@ Shared-service failure or partial coverage never fans out into a direct scan
 from every picker. Visiting ordinary reports/status does not invoke capacity discovery.
 
 Capacity discovery has no independent pass cutoff. The existing three concurrent
-reads and hourly provider allowance still apply.
+reads and actual shared provider quota controls still apply.
 A picker may stop waiting on its HTTP request; the installation object retains
 the shared scan with `waitUntil`, so a complete result can serve later pickers.
 Freshness checks and incomplete-inventory handling remain in force.

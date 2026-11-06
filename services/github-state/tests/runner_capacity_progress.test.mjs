@@ -216,7 +216,7 @@ const ownerBundle=await build({entryPoints:['src/installation.ts'],bundle:true,f
  name:'owner-context',setup(b){b.onResolve({filter:/^cloudflare:workers$/},()=>({path:'context',namespace:'owner-context'}));b.onLoad({filter:/.*/,namespace:'owner-context'},()=>({contents:'export class DurableObject{constructor(ctx,env){this.ctx=ctx;this.env=env}}',loader:'js'}));}
 }]});
 const {InstallationScheduler}=await import('data:text/javascript;base64,'+Buffer.from(ownerBundle.outputFiles[0].text).toString('base64'));
-test('productive passes survive owner replacement, coalesce callers, respect cooldown and retain hourly quota',async()=>{
+test('productive passes survive owner replacement, coalesce callers, respect cooldown and ignore obsolete operation counters',async()=>{
  const f=fixture(400,{repositories:14,runningCount:45,activeCount:30}),db=new DatabaseSync(':memory:'),values=new Map();let calls=0;
  const storage={get:async key=>values.get(key),put:async(key,value)=>values.set(key,structuredClone(value)),sql:{exec(q,...args){
   let rows=[];
@@ -238,13 +238,11 @@ test('productive passes survive owner replacement, coalesce callers, respect coo
   }while(last.routing_version!==2 && passes<20);
   assert.equal(last.routing_version,2);assert.equal(last.namespace_busy,4);
   assert.equal(db.prepare('SELECT COUNT(*) n FROM runner_capacity_jobs').get().n,430);
-  assert.equal(values.get('runner-capacity-attempts').length,calls);
   const coldCalls=calls;
   while(clock<started+3600000) {
    clock+=31000;
    const current=await(await make().runnerCapacity({name:'org/repo',installation:'200'})).json();
    assert.equal(current.complete,true);assert.equal(current.routing_version,2);assert.equal(current.namespace_busy,4);
-   assert.ok(calls<2400);
   }
   console.log(JSON.stringify({repos:14,running_runs:45,queued_runs:400,cold_passes:passes,cold_requests:coldCalls,hour_requests:calls}));
   let count=calls;assert.equal((await(await make().runnerCapacity({name:'org/repo',installation:'200'})).json()).cached,true);assert.equal(calls,count);
@@ -254,8 +252,8 @@ test('productive passes survive owner replacement, coalesce callers, respect coo
   assert.equal(recovered.routing_version,2);assert.equal(recovered.namespace_busy,4);assert.equal(recovered.job_cache_writes,1);
   assert.doesNotThrow(()=>JSON.parse(db.prepare('SELECT jobs FROM runner_capacity_jobs WHERE key=?').get(key).jobs));count=calls;
   values.set('runner-capacity-attempts',Array(2400).fill(clock));clock+=146000;
-  const blocked=await(await make().runnerCapacity({name:'org/repo',installation:'200'})).json();
-  assert.equal(blocked.complete,false);assert.equal(blocked.reason,'capacity_hourly_budget');assert.equal(calls,count);
+  const refreshed=await(await make().runnerCapacity({name:'org/repo',installation:'200'})).json();
+  assert.equal(refreshed.routing_version,2);assert.ok(calls>count);
  }finally{Date.now=original;db.close();}
 });
 
@@ -281,7 +279,7 @@ test('warm production-sized discovery completes with measured provider-like late
  console.log(JSON.stringify({provider_latency_test_ms:v.elapsed_ms,requests:v.requests,peak_reads:peak}));
 });
 
-test('initial recovery can progress behind historical scan spending without changing the hourly ceiling',async()=>{
+test('initial recovery ignores obsolete operation-specific allowance records',async()=>{
  const f=fixture(400,{repositories:14,runningCount:45,activeCount:30}),db=new DatabaseSync(':memory:'),values=new Map();let calls=0;
  const original=Date.now;let clock=original();const started=clock;Date.now=()=>clock;
  values.set('runner-capacity-attempts',Array.from({length:1840},(_,i)=>started-3600000+i*3600000/1840));
@@ -295,7 +293,6 @@ test('initial recovery can progress behind historical scan spending without chan
    const owner=new InstallationScheduler({storage,waitUntil(promise){promise.catch(()=>{});}},{});owner.token=async()=> 'token';owner.usable=()=>5000;
    owner.http=async(path,token,method,body)=>{calls++;return f.read(path,body);};
    result=await(await owner.runnerCapacity({name:'org/repo',installation:'200'})).json();
-   assert.ok(values.get('runner-capacity-attempts').length<=2400);
    if(result.routing_version===2)break;
    clock=result.retry_at+1;
   }
@@ -343,39 +340,4 @@ test('other nonterminal check states retain REST fallback instead of hiding queu
   assert.equal(value.routing_version,2);assert.equal(value.namespace_busy,2);
  }
  assert.equal(f.reads.get(100),2);
-});
-
-test('cold queued metadata preserves allowance for a warm refresh instead of spending the whole hour',async()=>{
- const f=fixture(4),db=new DatabaseSync(':memory:'),values=new Map();let calls=0;
- values.set('runner-capacity-attempts',Array(2390).fill(Date.now()));
- const storage={get:async key=>values.get(key),put:async(key,value)=>values.set(key,structuredClone(value)),sql:{exec(q,...args){
-  let rows=[];if(!args.length && q.includes(';'))db.exec(q);else{const s=db.prepare(q);if(s.columns().length)rows=s.all(...args);else s.run(...args);}
-  return {toArray:()=>rows,one:()=>{assert.equal(rows.length,1);return rows[0];}};
- }}};
- try{
-  const owner=new InstallationScheduler({storage,waitUntil(promise){promise.catch(()=>{});}},{});owner.token=async()=> 'token';owner.usable=()=>5000;
-  owner.http=async(path,token,method,body)=>{calls++;return f.read(path,body);};
-  const result=await(await owner.runnerCapacity({name:'org/repo',installation:'200'})).json();
-  assert.equal(result.complete,true);assert.equal(result.busy,1);assert.equal(result.routing_version,1);
-  assert.equal(result.placement_unavailable,'capacity_metadata_reserve');assert.equal(result.namespace_busy,undefined);
-  assert.ok(values.get('runner-capacity-attempts').length<2400);assert.equal(values.get('runner-capacity-attempts').length,2390+calls);
-  assert.ok(result.retry_at>Date.now()+150000,'wait for actual allowance instead of repeating a doomed scan');
- }finally{db.close();}
-});
-
-test('metadata reserve accounts for allowance that expires before the next warm refresh',async t=>{
- const f=fixture(4),db=new DatabaseSync(':memory:'),values=new Map();const clock=Date.now();t.mock.method(Date,'now',()=>clock);
- values.set('runner-capacity-attempts',Array.from({length:2390},(_,i)=>clock-3600000+i*3600000/2390));
- const storage={get:async key=>values.get(key),put:async(key,value)=>values.set(key,structuredClone(value)),sql:{exec(q,...args){
-  let rows=[];if(!args.length && q.includes(';'))db.exec(q);else{const s=db.prepare(q);if(s.columns().length)rows=s.all(...args);else s.run(...args);}
-  return {toArray:()=>rows,one:()=>{assert.equal(rows.length,1);return rows[0];}};
- }}};
- try{
-  const owner=new InstallationScheduler({storage,waitUntil(promise){promise.catch(()=>{});}},{});owner.token=async()=> 'token';owner.usable=()=>5000;
-  owner.http=async(path,token,method,body)=>f.read(path,body);
-  const result=await(await owner.runnerCapacity({name:'org/repo',installation:'200'})).json();
-  assert.equal(result.routing_version,2);assert.equal(result.namespace_busy,4);
-  assert.ok(result.job_cache_reusable_writes>0);assert.equal(result.retry_at-result.observed_at,145000);
-  assert.ok(values.get('runner-capacity-attempts').length<=2400);
- }finally{db.close();}
 });
