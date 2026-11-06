@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # lint-scope.sh OUT_DIR — decide what the environment lint (scripts/lint-env.sh) covers.
 #
-# Environment lint normally checks the TauCeti modules a change touches. unusedArguments also
-# checks their transitive importers, selected from compiled imports in LintEnvDriver.lean.
-# The other linters keep the changed-module scope. A change can still break lint elsewhere (a
+# This script selects the TauCeti modules a change touches. The workflow enables
+# LINT_CHANGED_ONLY for ordinary PR preflight; staging and local scoped runs also check
+# downstream unusedArguments, selected from compiled imports in LintEnvDriver.lean.
+# Other environment linters keep the changed-module scope. A change can still break lint elsewhere (a
 # new simp lemma can take an existing one out of simp normal form); the daily full lint
 # (.github/workflows/lint-full.yml) catches that and opens a repair PR on `lint-repair/main`.
 #

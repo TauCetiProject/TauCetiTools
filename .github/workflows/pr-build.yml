@@ -1010,11 +1010,14 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "${LINT_ONLY_MODULES:-}" ] && [ "${{ env.IS_BATCH }}" != "true" ] \
-             && [ "${BUMP:-0}" != "1" ] && [ ! -s "$LINT_SCOPE_DIR/unmatched.txt" ]; then
+             && [ "${BUMP:-0}" != "1" ] && [ -f "$LINT_ONLY_MODULES" ] \
+             && [ -f "$LINT_SCOPE_DIR/unmatched.txt" ] && [ ! -s "$LINT_SCOPE_DIR/unmatched.txt" ]; then
+            echo "LINT_CHANGED_ONLY=1" >> "$GITHUB_ENV"
             echo "AXIOMS_ONLY_MODULES=$LINT_ONLY_MODULES" >> "$GITHUB_ENV"
             echo "DOT_ONLY_MODULES=$LINT_ONLY_MODULES" >> "$GITHUB_ENV"
             echo "audit scope: the $(grep -c . "$LINT_ONLY_MODULES" || true) changed module(s)"
           else
+            echo "LINT_CHANGED_ONLY=0" >> "$GITHUB_ENV"
             echo "AXIOMS_ONLY_MODULES=" >> "$GITHUB_ENV"
             echo "DOT_ONLY_MODULES=" >> "$GITHUB_ENV"
             echo "audit scope: the whole library"
@@ -1136,8 +1139,9 @@ jobs:
           bash gate/scripts/build-audit-driver.sh pr gate/scripts "$out"
           echo "LINT_DRIVER_DIR=$out" >> "$GITHUB_ENV"
 
-      # Which modules the environment lint covers: the ${{ inputs.lean_root }} modules this change touches, or the
-      # whole library for `full-lint`-labelled and lint-repair PRs (scripts/lint-scope.sh). Computed
+      # Environment lint checks changed modules; staging also checks downstream unusedArguments.
+      # Full-lint and repair PRs select all modules (scripts/lint-scope.sh). Docstrings and style
+      # use changed modules only in ordinary PR preflight, and global checks at staging. Computed
       # on the host from GitHub metadata and immutable Git objects using trusted tooling,
       # and mounted read-only into the sandbox.
       - name: Build exact candidate under bwrap with workflow-pinned audits, offline
@@ -1210,6 +1214,7 @@ jobs:
             --setenv LAKE_CACHE_DIR "${LAKE_CACHE_DIR:-}" \
             --setenv WATCHDOG_TOOLCHAIN "${WATCHDOG_TOOLCHAIN:-}" \
             --setenv LINT_DRIVER_EXE "$LINT_DRIVER_DIR/lint-env-driver" \
+            --setenv LINT_CHANGED_ONLY "${LINT_CHANGED_ONLY:-0}" \
             --setenv LINT_ONLY_MODULES "${LINT_ONLY_MODULES:-}" \
             --setenv AXIOMS_ONLY_MODULES "${AXIOMS_ONLY_MODULES:-}" \
             --setenv STAGE_LAKE_CACHE "${STAGE_LAKE_CACHE:-}" \

@@ -195,13 +195,19 @@ ROOT='TauCeti'
 ALLOWLIST="$TRUSTED_SCRIPTS/lint-nolints-allowlist.txt"
 UPDATE=0
 [ "${1:-}" = "--update" ] && UPDATE=1
-# Scoped mode: LINT_ONLY_MODULES names a file listing modules, one per line (in pr-build.yml a
-# trusted, read-only file computed from the PR's changed files). The #lint driver then imports and
-# lints those TauCeti modules. Only unusedArguments also checks their transitive importers:
-# project API changes can remove arguments from elaborated downstream declarations. The
-# daily full lint (lint-full.yml) covers the rest. The docstring scan and the nolint ratchet stay
-# library-wide: they are cheap, and their coverage guards need the whole library.
+# Full runs retain the coverage floors, sentinels and baseline-visibility guards below.
+# Changed-only PR runs instead calibrate imported documentation independently and
+# verify every selected module was loaded, without claiming global inventory coverage.
+# Ordinary PR preflight opts into checking only declarations owned by changed modules.
+# Default/local scoped runs retain downstream unusedArguments and global docstring coverage.
+# Staging, full-lint, dependency changes and uncertain scope leave this option disabled.
 ONLY_MODULES="${LINT_ONLY_MODULES:-}"
+CHANGED_ONLY="${LINT_CHANGED_ONLY:-0}"
+case "$CHANGED_ONLY" in 0|1) ;; *) echo 'invalid LINT_CHANGED_ONLY' >&2; exit 1 ;; esac
+if [ "$CHANGED_ONLY" = 1 ] && [ -z "$ONLY_MODULES" ]; then
+  echo 'LINT_CHANGED_ONLY requires LINT_ONLY_MODULES' >&2
+  exit 1
+fi
 
 # In the required sandboxed build, route this script's two direct `lean`
 # invocations through the same trusted watchdog as `lake build`; they do not go
@@ -300,6 +306,14 @@ if [ -n "$ONLY_MODULES" ]; then
 fi
 lint_mods=$(wc -l < "$LINT_LIST")
 
+DOC_IMPORT_LIST="$MODULE_IMPORT_LIST"
+if [ "$CHANGED_ONLY" = 1 ]; then DOC_IMPORT_LIST="$LINT_LIST"; fi
+# These names came from validated source paths, not from candidate Lean text.
+SELECTED_LEAN=
+if [ "$CHANGED_ONLY" = 1 ]; then
+  SELECTED_LEAN=$(sed 's/^/`/; s/$/, /' "$DOC_IMPORT_LIST" | tr -d '\n' | sed 's/, $//')
+fi
+
 # --- 1. docstring scan (fast; see the docBlame exclusion rationale above) ----------
 # A LEGACY (non-module) driver with plain imports: the non-module root imports the
 # closure at the `private` olean level, where docstrings and true declaration kinds
@@ -307,7 +321,8 @@ lint_mods=$(wc -l < "$LINT_LIST")
 {
   echo 'import Mathlib.Init'
   echo 'import Mathlib.Tactic.SetNotationForOrder'
-  sed 's/^/import /' "$MODULE_IMPORT_LIST"
+  echo 'import Mathlib.Algebra.Group.Defs'
+  sed 's/^/import /' "$DOC_IMPORT_LIST"
   cat <<EOF
 
 open Lean Meta in
@@ -351,11 +366,22 @@ run_meta do
       linter's findings)"
   IO.println s!"LINTERSET {selected} $LINTERSETMARKER"
   let modNames := env.allImportedModuleNames
+  let selectedModules : Array Name := #[$SELECTED_LEAN]
+  let changedOnly := $([ "$CHANGED_ONLY" = 1 ] && echo true || echo false)
+  if changedOnly then
+    for m in selectedModules do
+      unless modNames.contains m do throwError "selected module was not imported: {m}"
+  -- Run this calibration in full mode too: dependency bumps must validate the
+  -- imported canary before subsequent PRs depend on it.
+  unless (← findDocString? env \`Monoid).isSome do
+    throwError "docstring visibility calibration failed for imported Monoid"
+  let inScope := fun m => if changedOnly then selectedModules.contains m
+    else m == \`TauCeti || (\`TauCeti).isPrefixOf m
   let candidates : Array Name := env.constants.fold (init := #[]) fun acc declName _ =>
     match env.getModuleIdxFor? declName with
     | some idx =>
       match modNames[idx.toNat]? with
-      | some m => if m == \`TauCeti || (\`TauCeti).isPrefixOf m then acc.push declName else acc
+      | some m => if inScope m then acc.push declName else acc
       | none => acc
     | none => acc
   let mut scanned := 0
@@ -387,7 +413,7 @@ run_meta do
     let entries := Batteries.Tactic.Lint.nolintAttr.ext.getModuleEntries env midx
     importedNolintEntries := importedNolintEntries + entries.size
     if let some m := modNames[idx]? then
-      if m == \`TauCeti || (\`TauCeti).isPrefixOf m then
+      if inScope m then
         for (decl, linterNames) in entries do
           for l in linterNames do
             IO.println s!"NOLINT {l} {decl}"
@@ -445,6 +471,7 @@ nall_undoc=$(awk '$1 == "DOCSCAN-ALL" && $3 == "undocumented"' "$TMP/docscan.txt
   || fail "docstring scan summary is inconsistent: scanned=$scanned != documented=$documented + undocumented=$undocumented"
 # A starter library may have no declarations. Existing projects can require scan coverage
 # with a policy file: minimum count on its first line, documented sentinel names thereafter.
+if [ "$CHANGED_ONLY" != 1 ]; then
 POLICY="$TRUSTED_SCRIPTS/lint-docscan-sentinels.txt"
 floor=0
 if [ -f "$POLICY" ]; then
@@ -475,6 +502,7 @@ if [ "$UPDATE" != 1 ]; then
       || fail "docstring-scan coverage loss: baseline entry 'docString $d' is no longer scanned at all (not merely fixed) — fix the scan, do not ratchet this entry away"
   done
 fi
+fi
 LC_ALL=C sed -n 's/^DOCSCAN \([^ ]*\).*/docString \1/p' "$TMP/docscan.txt" > "$TMP/violations-docscan.txt"
 echo "lint-env: docstring scan: $scanned scanned, $documented documented, $undocumented undocumented."
 
@@ -494,7 +522,7 @@ if [ -s "$TMP/nolints-new.txt" ]; then
   fail "unaccounted '@[nolint]' application(s); see the list above"
 fi
 LC_ALL=C comm -13 "$TMP/nolints.txt" "$ALLOWLIST" > "$TMP/nolints-fixed.txt"
-if [ -s "$TMP/nolints-fixed.txt" ]; then
+if [ "$CHANGED_ONLY" != 1 ] && [ -s "$TMP/nolints-fixed.txt" ]; then
   echo "lint-env: RATCHET — allowlist entr(y/ies) in $ALLOWLIST no longer correspond to a"
   echo "@[nolint] application; please delete these lines (a follow-up PR is fine):"
   sed 's/^/  /' "$TMP/nolints-fixed.txt"
@@ -543,8 +571,12 @@ if [ "$lint_mods" -eq 0 ]; then
   status=0
 else
   driver_flags=()
-  [ -n "$ONLY_MODULES" ] && \
-    driver_flags=(--only-listed --downstream-unused-arguments "$MODULE_IMPORT_LIST")
+  if [ -n "$ONLY_MODULES" ]; then
+    driver_flags=(--only-listed)
+    if [ "$CHANGED_ONLY" != 1 ]; then
+      driver_flags+=(--downstream-unused-arguments "$MODULE_IMPORT_LIST")
+    fi
+  fi
   if run_driver "$DRIVER_EXE" "${driver_flags[@]}" "$DRIVER" "$TMP/marker.txt" "$LINT_LIST" \
       $LINTERS > "$TMP/out.txt" 2>&1; then
     status=0
@@ -684,7 +716,9 @@ fi
 # --- 5. combine, then --update or compare against the grandfathered baseline ------
 LC_ALL=C sort -u "$TMP/violations-lint.txt" "$TMP/violations-docscan.txt" > "$TMP/violations.txt"
 total=$(wc -l < "$TMP/violations.txt")
-if [ -n "$ONLY_MODULES" ]; then
+if [ "$CHANGED_ONLY" = 1 ]; then
+  echo "lint-env: PR preflight: $lint_mods changed module(s) of $mods; all linters, docstrings and nolint checks use changed declarations; $total violation(s)."
+elif [ -n "$ONLY_MODULES" ]; then
   echo "lint-env: linted $lint_mods changed module(s) of $mods (unusedArguments: also transitive importers; docstrings: all $mods); $total (linter, declaration) violation(s)."
 else
   echo "lint-env: linted $mods modules; $total (linter, declaration) violation(s)."
@@ -699,7 +733,9 @@ fi
 # Baseline entries that no longer violate: a ratchet reminder, never a failure. In scoped mode
 # only the docstring scan covered the whole library, so only its entries can be judged.
 LC_ALL=C comm -13 "$TMP/violations.txt" "$BASELINE" > "$TMP/fixed.txt"
-if [ -n "$ONLY_MODULES" ]; then
+if [ "$CHANGED_ONLY" = 1 ]; then
+  : > "$TMP/fixed.txt"
+elif [ -n "$ONLY_MODULES" ]; then
   { grep '^docString ' "$TMP/fixed.txt" || true; } > "$TMP/fixed-doc.txt"
   mv "$TMP/fixed-doc.txt" "$TMP/fixed.txt"
 fi

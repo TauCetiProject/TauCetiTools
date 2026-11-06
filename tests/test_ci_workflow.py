@@ -221,5 +221,39 @@ class DotContextProducerTests(unittest.TestCase):
         self.assertNotIn("Save main's dot-notation parsing context", WORKFLOW.read_text())
 
 
+class PreflightScopeTests(unittest.TestCase):
+    def test_pr_scope_and_full_gate_fallbacks(self):
+        for batch, bump, scoped, unmatched in [
+            (False, False, True, ""), (True, False, True, ""),
+            (False, True, True, ""), (False, False, False, ""),
+            (False, False, True, "web/Main.lean\n"),
+            (False, False, True, None),
+        ]:
+            with self.subTest(batch=batch, bump=bump, scoped=scoped, unmatched=unmatched):
+                with tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp)
+                    modules = root / "modules"
+                    modules.write_text("TauCeti.Changed\n")
+                    if unmatched is not None:
+                        (root / "unmatched.txt").write_text(unmatched)
+                    envfile = root / "env"
+                    shell = shell_for("Decide the audit scope").replace(
+                        "${{ env.IS_BATCH }}", "true" if batch else "false")
+                    out = subprocess.run(["bash", "-euo", "pipefail", "-c", shell],
+                        text=True, capture_output=True, env={**os.environ,
+                        "GITHUB_ENV": str(envfile), "LINT_SCOPE_DIR": str(root),
+                        "LINT_ONLY_MODULES": str(modules) if scoped else "",
+                        "BUMP": "1" if bump else "0"})
+                    self.assertEqual(out.returncode, 0, out.stderr)
+                    values = dict(line.split("=", 1) for line in envfile.read_text().splitlines())
+                    fast = not batch and not bump and scoped and unmatched == ""
+                    self.assertEqual(values["LINT_CHANGED_ONLY"], "1" if fast else "0")
+                    self.assertEqual(values["AXIOMS_ONLY_MODULES"], str(modules) if fast else "")
+                    self.assertEqual(values["DOT_ONLY_MODULES"], str(modules) if fast else "")
+                    # Preserve the inventory for staging's downstream driver and
+                    # advisory declaration-name records, even when preflight is disabled.
+                    self.assertNotIn("LINT_ONLY_MODULES", values)
+
+
 if __name__ == "__main__":
     unittest.main()

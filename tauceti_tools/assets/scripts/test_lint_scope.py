@@ -665,7 +665,7 @@ class PrBuildWiringTest(unittest.TestCase):
         self.assertIn('--ro-bind "$LINT_SCOPE_DIR" "$LINT_SCOPE_DIR"', run)
         self.assertIn('--setenv LINT_ONLY_MODULES "${LINT_ONLY_MODULES:-}"', run)
 
-    def test_batch_audits_stay_whole_library_with_scoped_environment_lint(self):
+    def test_batch_audits_are_global_with_scoped_environment_lint(self):
         wf = yaml.safe_load((ROOT / ".github" / "workflows" / "pr-build.yml").read_text())
         self.assertIn("github.event_name == 'repository_dispatch'", wf["env"]["IS_BATCH"])
         self.assertIn("github.event_name == 'merge_group'", wf["env"]["IS_BATCH"])
@@ -682,7 +682,7 @@ class PrBuildWiringTest(unittest.TestCase):
                      "LINT_ONLY_MODULES": str(d / "modules.txt"), "BUMP": "0"},
                 capture_output=True, text=True)
             self.assertEqual(out.returncode, 0, out.stderr)
-            self.assertEqual(github_env.read_text(), "AXIOMS_ONLY_MODULES=\nDOT_ONLY_MODULES=\n")
+            self.assertEqual(github_env.read_text(), "LINT_CHANGED_ONLY=0\nAXIOMS_ONLY_MODULES=\nDOT_ONLY_MODULES=\n")
 
     def repair_exemption(self, event, files, env=None, api=None):
         """Run pr-build's empty-repair-PR exemption, extracted from the Scope guard step, with a fake
