@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import pathlib
+import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import lean_source as lint
 
@@ -468,6 +471,120 @@ end TauCeti
                 self.assertEqual(lint.main(args), 0)
             self.assertIn("1 new", stdout.getvalue())
             self.assertIn("1 ratchetable", stdout.getvalue())
+
+
+class ParsingContextTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = pathlib.Path(temporary.name)
+        self.path = self.root / "context.json"
+
+    def test_warm_context_parses_no_unchanged_content(self):
+        text = "namespace TauCeti\nstructure Foo where\n  x : Nat\nend TauCeti\n"
+        context = lint.ParsingContext(self.path)
+        expected = context.collect("ownership", [text])
+        namespaces = context.collect("namespaces", ["namespace Foo\nend Foo\n"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            context.save()
+        warm = lint.ParsingContext(self.path)
+        with patch.object(lint, "_parse_context_chunk", side_effect=AssertionError("parsed unchanged source")):
+            self.assertEqual(warm.collect("ownership", [text, text]), expected)
+            self.assertEqual(warm.collect("namespaces", ["namespace Foo\nend Foo\n"]), namespaces)
+        self.assertEqual(warm.parsed, {"namespaces": 0, "ownership": 0})
+
+    def test_only_new_content_is_parsed_and_deleted_types_are_not_retained(self):
+        old = "namespace TauCeti\nstructure Foo where\n  x : Nat\nend TauCeti\n"
+        unchanged = "namespace TauCeti\ndef unrelated := 1\nend TauCeti\n"
+        context = lint.ParsingContext(self.path)
+        context.collect("ownership", [old, unchanged])
+        with contextlib.redirect_stdout(io.StringIO()):
+            context.save()
+        warm = lint.ParsingContext(self.path)
+        self.assertEqual(warm.collect("ownership", ["module\n", unchanged]), set())
+        self.assertEqual(warm.parsed["ownership"], 1)
+
+    def test_changed_mathlib_content_is_reparsed(self):
+        context = lint.ParsingContext(self.path)
+        self.assertEqual(context.collect("namespaces", ["namespace Foo\nend Foo\n"]), {"Foo"})
+        with contextlib.redirect_stdout(io.StringIO()):
+            context.save()
+        warm = lint.ParsingContext(self.path)
+        self.assertEqual(warm.collect("namespaces", ["namespace Bar\nend Bar\n"]), {"Bar"})
+        self.assertEqual(warm.parsed["namespaces"], 1)
+
+    def test_invalid_cache_and_parser_changes_fall_back_to_parsing(self):
+        context = lint.ParsingContext(self.path)
+        context.collect("namespaces", ["namespace Foo\n"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            context.save()
+        stale = json.loads(self.path.read_text())
+        stale["parser"] = "0" * 64
+        for data in ("{", "[]", json.dumps(stale),
+                     json.dumps({"version": 1, "parser": context.parser,
+                                 "entries": {"namespaces": [], "ownership": {}}})):
+            with self.subTest(data=data):
+                self.path.write_text(data)
+                warm = lint.ParsingContext(self.path)
+                self.assertEqual(warm.collect("namespaces", ["namespace Foo\n"]), {"Foo"})
+                self.assertEqual(warm.parsed["namespaces"], 1)
+
+    def test_scoped_cached_lint_matches_full_oracle_on_type_removal(self):
+        mathlib = self.root / "Mathlib"
+        mathlib.mkdir()
+        (mathlib / "Foo.lean").write_text("namespace Foo\nend Foo\n")
+        source = self.root / "candidate/TauCeti"
+        source.mkdir(parents=True)
+        (source / "Types.lean").write_text(
+            "namespace TauCeti\nstructure Foo where\n  x : Nat\nend TauCeti\n")
+        (source / "Use.lean").write_text(
+            "namespace TauCeti.Foo\ndef misplaced (x : Foo) := x\nend TauCeti.Foo\n")
+        base = self.root / "base/TauCeti"
+        shutil.copytree(source, base)
+        baseline = self.root / "baseline.txt"
+        baseline.write_text("")
+        modules = self.root / "modules.txt"
+        modules.write_text("TauCeti.Types\n")
+        args = ["--mathlib-root", str(mathlib), "--source-root", str(source),
+                "--baseline", str(baseline), "--context-cache", str(self.path)]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(lint.main(args), 0)
+        (source / "Types.lean").write_text("module\n")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = lint.main([*args, "--only-modules", str(modules), "--base-source-root", str(base)])
+            oracle = lint.main(args[:-2])
+        self.assertEqual(result, oracle)
+        self.assertEqual(result, 1)
+        self.assertIn("checking every file", output.getvalue())
+        self.assertIn("0 Mathlib and 1 TauCeti new source contents", output.getvalue())
+
+    def test_small_scoped_edit_reuses_context_but_recomputes_findings(self):
+        mathlib = self.root / "Mathlib"
+        mathlib.mkdir()
+        (mathlib / "Foo.lean").write_text("namespace Foo\nend Foo\n")
+        source = self.root / "candidate/TauCeti"
+        source.mkdir(parents=True)
+        (source / "Use.lean").write_text("namespace Foo\ndef correct (x : Foo) := x\nend Foo\n")
+        base = self.root / "base/TauCeti"
+        shutil.copytree(source, base)
+        baseline = self.root / "baseline.txt"
+        baseline.write_text("")
+        modules = self.root / "modules.txt"
+        modules.write_text("TauCeti.Use\n")
+        args = ["--mathlib-root", str(mathlib), "--source-root", str(source),
+                "--baseline", str(baseline), "--context-cache", str(self.path)]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(lint.main(args), 0)
+        (source / "Use.lean").write_text(
+            "namespace TauCeti.Foo\ndef misplaced (x : Foo) := x\nend TauCeti.Foo\n")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(lint.main([*args, "--only-modules", str(modules),
+                                        "--base-source-root", str(base)]), 1)
+        self.assertIn("0 Mathlib and 1 TauCeti new source contents", output.getvalue())
+        self.assertNotIn("checking every file", output.getvalue())
+        self.assertIn("1 new", output.getvalue())
 
 
 if __name__ == "__main__":

@@ -742,6 +742,26 @@ store it only in the trusted publication job; ordinary PR builds never publish s
 Use the configured repository identity in cache mappings. No downstream inherits Tau Ceti's
 writer credentials or bucket permissions.
 
+Dot-notation lint has a separate, optional parsing-context cache:
+
+```sh
+python3 scripts/lint-dot-notation.py --context-cache /trusted-cache/dot-notation/context.json
+```
+
+This stores Mathlib namespace components and TauCeti type-namespace ownership per source-content
+SHA-256. Each invocation inventories and hashes current source bytes, but parses only new contents;
+the base-tree ownership comparison uses the same entries. The parser's source hash, Python version, and Unicode tables invalidate
+the complete cache when parsing semantics change. Unknown or damaged formats fall back to parsing. Findings,
+baseline comparisons, and the full-lint fallback after ownership changes are always recomputed.
+
+The CI template creates the JSON directory (about 2 MB for TauCeti) from a fresh full scan,
+then saves it from the default branch before any library code executes. Main never restores it. Cache service failures do not
+block the build. The reusable PR build restores it before candidate execution and
+never publishes it. Treat it as trusted derived data, like a build cache: do not restore
+candidate-produced records or save from an untrusted PR run. Older entries remain useful because
+each source's content hash is checked independently. Removing the flag restores uncached behavior.
+To abandon existing snapshots, increment `dot-notation-context-v1` in both workflow keys.
+
 ## Bors
 
 Bors is always operated by the downstream. `hosted` supplies its PostgreSQL database as a
