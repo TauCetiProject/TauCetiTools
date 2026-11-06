@@ -67,3 +67,19 @@ to be `1`. Otherwise the sandbox command runs directly. Successful PR phase
 artifacts are sampled one in twenty; a resource experiment can collect the
 additional telemetry explicitly. These observations do not authorize merging or
 cache publication.
+
+The trusted build workflow optionally wraps its existing bwrap launcher with
+`scripts/ci_live_progress.py`. The wrapper stays outside the candidate sandbox,
+retains the launcher's exit status and forwards cancellation. Its background
+reporter samples bounded candidate phase/module counters and descendant CPU/Lean
+process evidence every fifteen seconds. Candidate text is untrusted telemetry;
+only fixed phases, validated module names and numeric counters are sent. The
+reporter never sends raw logs, paths, commands or environment values.
+
+Publication uses a short-lived GitHub OIDC grant with audience
+`tauceti-operations-progress`. The CI receiver binds the signed repository,
+run/attempt and check-run identity to its existing stored job facts, and treats
+these counters as observations only. OIDC request credentials stay outside
+bwrap's `env -i` environment and mounts. Telemetry/authentication/network failure
+cannot change the build result. The backend reader must be deployed before the
+workflow/tool pin is activated in a consuming repository.
