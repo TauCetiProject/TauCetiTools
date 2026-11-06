@@ -153,24 +153,20 @@ jobs:
           path: ${{ steps.mathlib_ltar_restore.outputs.cache-dir }}/*.ltar
           key: ${{ steps.mathlib_ltar_restore.outputs.cache-primary-key }}
 
-      # Publish only parsing data produced before any TauCeti code executes.
-      - name: Restore dot-notation parsing context
-        continue-on-error: true
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ runner.temp }}/dot-notation-context
-          key: dot-notation-context-v1-${{ hashFiles('scripts/lean_source.py') }}-${{ github.sha }}
-          restore-keys: dot-notation-context-v1-${{ hashFiles('scripts/lean_source.py') }}-
-
+      # Main checks from fresh parsing; only PRs consume cached parsing context.
+      # Generate and publish before any candidate Lean code executes. Bump the v1 key
+      # in both workflows to abandon a bad cache snapshot.
       - name: Dot-notation namespace lint (Mathlib type namespaces stay at root)
-        run: python3 scripts/lint-dot-notation.py --context-cache "$RUNNER_TEMP/dot-notation-context/context.json"
+        run: |
+          rm -rf .ci-dot-notation-context
+          python3 scripts/lint-dot-notation.py --context-cache ".ci-dot-notation-context/context.json"
 
       - name: Save main's dot-notation parsing context
         if: github.ref_name == github.event.repository.default_branch
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
-          path: ${{ runner.temp }}/dot-notation-context
+          path: .ci-dot-notation-context
           key: dot-notation-context-v1-${{ hashFiles('scripts/lean_source.py') }}-${{ github.sha }}
 
       # --- Lake artifact-cache restore (dormant until configured) --------------------

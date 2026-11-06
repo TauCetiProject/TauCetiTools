@@ -22,6 +22,7 @@ import pathlib
 import re
 import sys
 import tempfile
+import unicodedata
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from collections.abc import Callable, Iterable
@@ -924,7 +925,8 @@ class ParsingContext:
 
     def __init__(self, path: pathlib.Path):
         self.path = path
-        self.parser = hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest()
+        self.parser = hashlib.sha256(pathlib.Path(__file__).read_bytes() +
+                                     repr((sys.version_info[:2], unicodedata.unidata_version)).encode()).hexdigest()
         self.entries = {"namespaces": {}, "ownership": {}}
         self.used = {"namespaces": {}, "ownership": {}}
         self.parsed = {"namespaces": 0, "ownership": 0}

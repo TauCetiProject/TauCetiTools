@@ -193,7 +193,7 @@ class ParsingContextWorkflowTests(unittest.TestCase):
         self.assertLess(lint, build)
         self.assertIn("hashFiles('gate/scripts/lean_source.py')", text[restore:lint])
         self.assertIn("steps.pr.outputs.base_sha", text[restore:lint])
-        self.assertIn('--context-cache "$RUNNER_TEMP/dot-notation-context/context.json"',
+        self.assertIn('--context-cache ".ci-dot-notation-context/context.json"',
                       shell_for("Dot-notation namespace lint (Mathlib type namespaces stay at root)"))
         self.assertNotIn("Save main's dot-notation", text)
 
@@ -207,7 +207,18 @@ class ParsingContextWorkflowTests(unittest.TestCase):
         self.assertLess(start, text.index("      - name: Build\n"))
         self.assertLess(start, text.index("      - name: Environment lint"))
         self.assertIn("hashFiles('scripts/lean_source.py')", step)
-        self.assertIn('--context-cache "$RUNNER_TEMP/dot-notation-context/context.json"', text)
+        self.assertIn('--context-cache ".ci-dot-notation-context/context.json"', text)
+
+
+class DotContextProducerTests(unittest.TestCase):
+    def test_main_produces_fresh_context_before_building(self):
+        workflow = ROOT / "tauceti_tools/assets/project/.github/workflows/ci.yml"
+        text = workflow.read_text()
+        self.assertNotIn("Restore dot-notation parsing context", text)
+        self.assertIn("rm -rf .ci-dot-notation-context", text)
+        self.assertLess(text.index("Save main's dot-notation parsing context"),
+                        text.index("      - name: Build"))
+        self.assertNotIn("Save main's dot-notation parsing context", WORKFLOW.read_text())
 
 
 if __name__ == "__main__":
