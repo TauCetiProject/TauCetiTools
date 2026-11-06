@@ -608,7 +608,8 @@ window. The returned timestamp is never advanced; response validity ends at that
 observation's true freshness boundary. Cold or expired callers await the shared
 refresh. Cached-only reports never start a scan.
 Queued repositories and range branches progress concurrently under one global
-three-request gate. Snapshot freshness is dated when running discovery begins,
+three-request gate, including when only a few Namespace slots remain. Saturation
+still stops discovery and drains reads already in flight. Snapshot freshness is dated when running discovery begins,
 so queued discovery cannot make an old running count appear current. Snapshots expose elapsed time and the running-inventory
 request subtotal to distinguish request exhaustion from slow provider responses.
 
