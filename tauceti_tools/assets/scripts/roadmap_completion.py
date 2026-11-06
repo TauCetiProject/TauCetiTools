@@ -27,7 +27,7 @@ import tempfile
 
 import loc_graph
 import roadmap_progress as progress
-from chart_style import BAR_BG, BG, FONT_FAMILY, MUTED, PALETTE, PANEL, TEXT, base_css, card_rect
+from chart_style import BAR_BG, BG, FONT_FAMILY, MUTED, PALETTE, PANEL, TEXT, base_css, card_rect, hover_metadata
 
 ASSET_NAMES = ("loc-roadmap.svg", "roadmap-layers.svg", "roadmap-exhaustion.html",
                "roadmap-completion.json")
@@ -289,8 +289,14 @@ def render_history(rows, total_key, done_key, unknown_key, title, unit, out):
         edge += [(x(row["date"]), y(row["known"])) for row in reversed(known)]
         shapes += ('<polygon points="' + " ".join(f"{a:.1f},{b:.1f}" for a, b in edge)
                    + f'" fill="{MUTED}" fill-opacity="0.25"/>')
+    metrics = [{"label": labels[0][1], "unit": unit, "values": [row[total_key] for row in rows]},
+               {"label": labels[1][1], "unit": unit, "values": [row[done_key] for row in rows]}]
+    if unknown_key:
+        metrics.append({"label": "Unassessed", "unit": unit, "values": [row[unknown_key] for row in rows]})
+    metadata = hover_metadata([{"bounds": [left, top, plot_w, plot_h], "x": [x(row["date"]) for row in rows],
+                                "labels": [row["date"] for row in rows], "series": metrics}])
     svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" '
-           f'aria-label="{html.escape(title + ": " + subtitle)}"><style>{base_css(width)}</style>'
+           f'aria-label="{html.escape(title + ": " + subtitle)}">{metadata}<style>{base_css(width)}</style>'
            f'{card_rect(width,height)}<text class="title" x="{left}" y="32">{html.escape(title)}</text>'
            f'<text class="subtitle" x="{left}" y="55">{html.escape(subtitle)}</text>{legend}{ticks}{shapes}</svg>\n')
     pathlib.Path(out).write_text(svg)

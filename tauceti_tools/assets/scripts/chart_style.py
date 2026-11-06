@@ -1,5 +1,18 @@
 """Shared visual language for SVG charts on the Tau Ceti statistics page."""
 
+import html
+import json
+
+
+def hover_metadata(plots):
+    """Exact plotted values and SVG-space bounds for progressive HTML tooltips.
+
+    Metadata stays inside its SVG, so cached/fallback charts never acquire tooltips
+    from a different snapshot. The page reads it as data; it does not inline SVG markup.
+    """
+    return '<metadata id="chart-hover">' + html.escape(
+        json.dumps(plots, separators=(",", ":"), allow_nan=False)) + '</metadata>'
+
 BG = "#101936"
 PANEL = "#1b2547"
 BAR_BG = "#27335a"

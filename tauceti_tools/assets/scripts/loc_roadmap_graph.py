@@ -34,7 +34,7 @@ import sys
 
 from pr_stats_graphs import apply_bors_merges, fetch_bors_merges
 
-from chart_style import MUTED, PALETTE, TEXT, base_css, card_rect, css_px
+from chart_style import MUTED, PALETTE, TEXT, base_css, card_rect, css_px, hover_metadata
 
 AREA_PREFIX = "roadmap/"
 EXCLUDE = {"roadmap/none", "roadmap/Unknown"}
@@ -298,8 +298,15 @@ def render(dates, order, series, totals, title, out, omitted=0):
     # The true number of roadmaps, not the number of bands: bundling the tail must not make the
     # chart claim the project has sixteen roadmaps when it has forty.
     roadmaps = len(order) - 1 + omitted if omitted else len(order)
+    metadata = hover_metadata([{
+        "bounds": [L, T, pw, ph], "x": xs, "labels": dates,
+        "series": [{"label": "Total", "unit": "net LOC", "values": stack_top}]
+                  + [{"label": legend_label(a), "unit": "net LOC", "values": series[a]}
+                     for a in order],
+    }])
     svg = f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" role="img"
      aria-label="{html.escape(title)}: {grand:,} net lines across {roadmaps} roadmaps as of {dates[-1]}">
+  {metadata}
   <style>
     {base_css(W)}
     .ytick{{text-anchor:end}}
