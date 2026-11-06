@@ -156,6 +156,15 @@ def TauCeti.changedUnused (n m : Nat) : Nat := n
             return subprocess.run(["bash", str(scripts / "lint-env.sh")], cwd=root,
                                   env=lint_env, text=True, capture_output=True)
 
+        # The workflow opts ordinary PRs into checking changed declarations only.
+        # The pre-existing local scoped path continues checking downstream declarations.
+        lint_env["LINT_CHANGED_ONLY"] = "1"
+        fast = shell()
+        assert fast.returncode == 1, fast.stdout + fast.stderr
+        assert "LINT-ENV: FAIL — 1 new violation(s)" in fast.stdout, fast.stdout + fast.stderr
+        assert "PR preflight: 1 changed module(s)" in fast.stdout, fast.stdout + fast.stderr
+        assert "RATCHET" not in fast.stdout, fast.stdout + fast.stderr
+        lint_env.pop("LINT_CHANGED_ONLY")
         failed = shell()
         assert failed.returncode == 1, failed.stdout + failed.stderr
         assert "LINT-ENV: FAIL — 3 new violation(s)" in failed.stdout, failed.stdout + failed.stderr
@@ -166,7 +175,58 @@ def TauCeti.changedUnused (n m : Nat) : Nat := n
         (trusted / "lint-baseline.txt").write_text("\n".join(baseline) + "\n")
         passed = shell()
         assert passed.returncode == 0 and "LINT-ENV: PASS" in passed.stdout, passed.stdout + passed.stderr
-        print("Real Lean downstream-only unusedArguments regression passed")
+        # An undocumented declaration outside the selected module is deferred to staging.
+        unrelated = root / "TauCeti/Unrelated.lean"
+        unrelated.write_text(unrelated.read_text() + "\ndef TauCeti.undocumentedOutside : Nat := 1\n")
+        build()
+        lint_env["LINT_CHANGED_ONLY"] = "1"
+        fast = shell()
+        assert fast.returncode == 0, fast.stdout + fast.stderr
+        assert "RATCHET" not in fast.stdout, fast.stdout + fast.stderr
+        lint_env.pop("LINT_CHANGED_ONLY")
+        lint_env.pop("LINT_ONLY_MODULES")
+        staging = shell()
+        assert staging.returncode == 1, staging.stdout + staging.stderr
+        assert "TauCeti.undocumentedOutside" in staging.stdout, staging.stdout + staging.stderr
+        # Missing docs in the selected module must fail even if it has no documented defs.
+        selected = root / "TauCeti/Unrelated.lean"
+        selected.write_text("module\npublic import Mathlib.Algebra.Group.Defs\npublic section\n"
+                            "def TauCeti.undocumentedInside : Nat := 1\n")
+        build()
+        (root / "changed").write_text("TauCeti.Unrelated\n")
+        lint_env["LINT_ONLY_MODULES"] = str(root / "changed")
+        lint_env["LINT_CHANGED_ONLY"] = "1"
+        missing = shell()
+        assert missing.returncode == 1, missing.stdout + missing.stderr
+        assert "[docString]" in missing.stdout and "#check TauCeti.undocumentedInside" in missing.stdout, missing.stdout + missing.stderr
+        assert "driver failure" not in missing.stdout, missing.stdout + missing.stderr
+        # Deleted modules leave a valid empty scope, calibrated by an imported docstring.
+        (root / "changed").write_text("TauCeti.Deleted\n")
+        empty = shell()
+        assert empty.returncode == 0, empty.stdout + empty.stderr
+        assert "0 changed module(s)" in empty.stdout, empty.stdout + empty.stderr
+        # Suppressions are filtered by defining module, not import reachability.
+        upstream = root / "TauCeti/Upstream.lean"
+        upstream.write_text(upstream.read_text() +
+                           "\nattribute [nolint unusedArguments] TauCeti.upstreamUnused\n")
+        build()
+        (root / "changed").write_text("TauCeti.Changed\n")
+        fast = shell()
+        assert fast.returncode == 0, fast.stdout + fast.stderr
+        lint_env.pop("LINT_CHANGED_ONLY")
+        lint_env.pop("LINT_ONLY_MODULES")
+        full = shell()
+        assert full.returncode == 1 and "unaccounted '@[nolint]'" in full.stdout, full.stdout + full.stderr
+        changed.write_text(changed.read_text() +
+                           "\nattribute [nolint unusedArguments] TauCeti.choose\n")
+        build()
+        lint_env["LINT_CHANGED_ONLY"] = "1"
+        lint_env["LINT_ONLY_MODULES"] = str(root / "changed")
+        suppression = shell()
+        assert suppression.returncode == 1, suppression.stdout + suppression.stderr
+        assert "unaccounted '@[nolint]'" in suppression.stdout, suppression.stdout + suppression.stderr
+        assert "unusedArguments TauCeti.choose" in suppression.stdout, suppression.stdout + suppression.stderr
+        print("Real Lean PR/full lint scope, docstrings and suppression regressions passed")
 
 
 if __name__ == "__main__":

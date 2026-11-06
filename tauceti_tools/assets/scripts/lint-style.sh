@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the source-based style checks over every TauCeti source file.
+# Run source style checks over all sources, or validated changed modules in PR preflight.
 #
 # lint-style treats its module arguments as import roots and lints only their imports. The
 # library root TauCeti.lean is intentionally empty, so generate a temporary import-all module
@@ -11,6 +11,9 @@ set -euo pipefail
 PROJECT_ROOT="${TAUCETI_PROJECT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 TRUSTED_SCRIPTS="${TAUCETI_TRUSTED_SCRIPTS:-$PROJECT_ROOT/scripts}"
 cd "$PROJECT_ROOT"
+case "${LINT_CHANGED_ONLY:-0}" in
+  0|1) ;; *) echo 'lint-style: invalid LINT_CHANGED_ONLY' >&2; exit 1 ;;
+esac
 
 lint_src="$(mktemp -d "$PWD/.lake/lint-style-src.XXXXXX")"
 trap 'rm -rf "$lint_src"' EXIT
@@ -19,6 +22,14 @@ mkdir -p "$(dirname "$lint_module")"
 
 . "$TRUSTED_SCRIPTS/source-modules.sh"
 tauceti_source_modules "$lint_src/files" "$lint_src/modules"
+if [ "${LINT_CHANGED_ONLY:-0}" = 1 ]; then
+  [ -f "${LINT_ONLY_MODULES:-}" ] || { echo 'lint-style: missing scope file' >&2; exit 1; }
+  LC_ALL=C comm -12 <(LC_ALL=C sort -u "$LINT_ONLY_MODULES") \
+    <(LC_ALL=C sort -u "$lint_src/modules") > "$lint_src/selected"
+  mv "$lint_src/selected" "$lint_src/modules"
+  # Convert only names validated by source discovery into file paths. Deleted files drop out.
+  sed 's@\.@/@g; s@$@.lean@' "$lint_src/modules" | tr '\n' '\0' > "$lint_src/files"
+fi
 mapfile -d '' files < "$lint_src/files"
 printf 'import TauCeti\n' > "$lint_module"
 sed 's/^/import /' "$lint_src/modules" >> "$lint_module"
@@ -32,7 +43,9 @@ fi
 # Use the validated discovery list for the copyright/Authors audit. Keep going after a header
 # failure so contributors also see Mathlib's text-style diagnostics in the same CI round.
 status=0
-if ! lake env lean --run "$TRUSTED_SCRIPTS/HeaderStyle.lean" "${files[@]}"; then
+if ((${#files[@]} == 0)); then
+  echo "lint-style: no remaining changed source files; skipping header audit."
+elif ! lake env lean --run "$TRUSTED_SCRIPTS/HeaderStyle.lean" "${files[@]}"; then
   status=1
 fi
 
