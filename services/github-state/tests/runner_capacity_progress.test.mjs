@@ -225,7 +225,7 @@ test('productive passes survive owner replacement, coalesce callers, respect coo
   else {const statement=db.prepare(q);if(statement.columns().length)rows=statement.all(...args);else statement.run(...args);}
   return {toArray:()=>rows,one:()=>{assert.equal(rows.length,1);return rows[0];}};
  }}};
- const make=()=>{const owner=new InstallationScheduler({storage},{});owner.token=async()=> 'token';owner.usable=()=>5000;
+ const make=()=>{const owner=new InstallationScheduler({storage,waitUntil(promise){promise.catch(()=>{});}},{});owner.token=async()=> 'token';owner.usable=()=>5000;
   owner.http=async(path,token,method,body)=>{calls++;return f.read(path,body);};return owner;};
  const original=Date.now;let clock=original();const started=clock;Date.now=()=>clock;
  try {
@@ -293,7 +293,7 @@ test('initial recovery can progress behind historical scan spending without chan
  try {
   let result,sawQuick=false;
   for(let i=0;i<25;i++) {
-   const owner=new InstallationScheduler({storage},{});owner.token=async()=> 'token';owner.usable=()=>5000;
+   const owner=new InstallationScheduler({storage,waitUntil(promise){promise.catch(()=>{});}},{});owner.token=async()=> 'token';owner.usable=()=>5000;
    owner.http=async(path,token,method,body)=>{calls++;return f.read(path,body);};
    result=await(await owner.runnerCapacity({name:'org/repo',installation:'200'})).json();
    assert.ok(values.get('runner-capacity-attempts').length<=2400);

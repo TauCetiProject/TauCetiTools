@@ -12,9 +12,9 @@ export async function scanHostedCapacity(
   namespaceTarget=20,
   cache?:JobLabelCache,
 ):Promise<{routing_version:number;busy:number;running_jobs:Record<string,number>;namespace_busy?:number;namespace_busy_lower_bound?:number;queued_fleet?:string[][];placement_unavailable?:string;requests:number;repositories:number;runs:number;observed_at:number;job_cache_hits:number;job_cache_writes:number;elapsed_ms:number;running_requests:number;request_types:Record<string,number>;cache_fallbacks:Record<string,{count:number;run:string}>}> {
-  // Warm production scans exceed fifteen seconds during ordinary queue churn.
-  // Keep five seconds of drain headroom inside the existing 25-second client.
-  let requests=0;const started=Date.now(),deadline=started+20000;
+  // Provider request/concurrency/hourly budgets bound discovery. Valid cold
+  // scans may outlive the caller; the owner retains their background lifetime.
+  let requests=0;const started=Date.now();
   let job_cache_hits=0,job_cache_writes=0;
   const request_types:Record<string,number>={},cache_fallbacks:Record<string,{count:number;run:string}>={};
   if(!Number.isSafeInteger(namespaceTarget) || namespaceTarget<1 || namespaceTarget>10000)throw new Error('capacity_invalid_namespace_target');
@@ -24,7 +24,7 @@ export async function scanHostedCapacity(
   async function request(path:string,body?:unknown) {
     if(active<concurrency)active++;else await new Promise<void>(resolve=>waiters.push(resolve));
     try {
-      if(requests>=96 || Date.now()>deadline)throw new Error('capacity_scan_limit');
+      if(requests>=96)throw new Error('capacity_scan_limit');
       requests++;
       const kind=path==='/graphql'?'check_suites':path.includes('/jobs')?'job_details':path.includes('/actions/runs')?'run_listings':'repositories';
       request_types[kind]=(request_types[kind] || 0)+1;

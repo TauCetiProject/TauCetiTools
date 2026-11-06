@@ -572,6 +572,9 @@ export class InstallationScheduler extends DurableObject<Env> {
         await this.ctx.storage.put(key,value);return value;
       }
     })().finally(()=>{this.capacityFlight=undefined;});
+    // Pickers retain their ordinary HTTP wait. A disconnect must not discard
+    // a valid shared scan just before it can publish the complete pool count.
+    this.ctx.waitUntil(this.capacityFlight);
     const value=await this.capacityFlight;return json({cached:false,...value},value.complete?200:503);
   }
   private releaseCapacityHints(count:number):void {
