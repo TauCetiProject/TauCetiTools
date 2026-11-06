@@ -106,8 +106,10 @@ export default {
         if(rawCap!==null && !/^[1-9]\d{0,4}$/.test(rawCap))return json({error:'invalid_namespace_cap'},400);
         const namespaceCap=rawCap===null?20:Number(rawCap);
         if(namespaceCap>10000)return json({error:'invalid_namespace_cap'},400);
-        return stub(env.INSTALLATIONS,repo.installation).fetch('https://internal/runner-capacity',{
+        const refresh=stub(env.INSTALLATIONS,repo.installation).fetch('https://internal/runner-capacity',{
           method:'POST',body:JSON.stringify({...repo,namespace_cap:namespaceCap})});
+        ctx.waitUntil(refresh.then(()=>{},()=>{}));
+        return refresh;
       }
       if (url.pathname==='/v1/activity' && req.method==='POST') {
         if (!await authorize(req,env)) return json({error:'unauthorized'},401);
