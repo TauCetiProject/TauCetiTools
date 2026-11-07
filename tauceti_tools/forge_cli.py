@@ -15,7 +15,7 @@ import sys
 import urllib.parse
 
 from .forge import GITHUB, Forge, ForgeError, Forgejo, Incomplete, RepositoryRef, Unsupported
-from .project import ConfigError, configuration_source, load
+from .project import ConfigError, load
 
 
 def _emit(value, fields, query):
@@ -111,94 +111,54 @@ def _require_origin(env, name, forge):
         raise ForgeError(f"credential origin must match the destination: set {name} explicitly")
 
 
-def _arguments(argv):
-    """Extract wrapper options without interpreting native option values as flags.
-
-    Native arguments are retained verbatim for GitHub delegation. The value
-    options cover standard gh payload/filter inputs, including literal text
-    beginning with --conf or --repo. Unsupported Forgejo commands still fail.
-    """
-    options = {"--conf": "conf", "--repo": "repo", "-R": "repo", "--json": "json", "--jq": "jq", "-q": "jq"}
-    native_values = {
-        "-b",
-        "-t",
-        "-B",
-        "--body",
-        "--body-file",
-        "--title",
-        "--subject",
-        "--input",
-        "--template",
-        "--search",
-        "--header",
-        "-H",
-        "--field",
-        "-f",
-        "--raw-field",
-        "-F",
-        "--head",
-        "--base",
-        "--hostname",
-        "--author",
-        "--assignee",
-        "--label",
-        "--milestone",
-    }
-    args = argparse.Namespace(conf=None, repo=None, json=None, jq=None)
-    command, native = [], []
-    index = 0
-    while index < len(argv):
-        token = argv[index]
-        if token == "--":
-            command.extend(argv[index:])
-            native.extend(argv[index:])
-            break
-        option, equals, value = token.partition("=")
-        if option in native_values:
-            size = 1 if equals else 2
-            if index + size > len(argv):
-                raise ValueError(f"{option} requires a value")
-            command.extend(argv[index : index + size])
-            native.extend(argv[index : index + size])
-            index += size
-            continue
-        if token.startswith("-R") and token != "-R":
-            option, equals, value = "-R", "=", token[2:].removeprefix("=")
-        if option in options:
-            size = 1 if equals else 2
-            if index + size > len(argv):
-                raise ValueError(f"{option} requires a value")
-            setattr(args, options[option], value if equals else argv[index + 1])
-            if option != "--conf":
-                native.extend(argv[index : index + size])
-            index += size
-            continue
-        command.append(token)
-        native.append(token)
-        index += 1
-    return args, command, native
-
-
 def run(argv, *, environment=None):
     env = os.environ if environment is None else environment
-    parser = argparse.ArgumentParser(prog="tauceti-gh", description=__doc__, allow_abbrev=False)
-    parser.add_argument("--conf")
+    parser = argparse.ArgumentParser(
+        prog="tauceti-gh",
+        description=__doc__,
+        allow_abbrev=False,
+        add_help=False,
+        epilog="Place --conf PATH before the native command, or set TAUCETI_CONF.",
+    )
     parser.add_argument("-R", "--repo")
     parser.add_argument("--json")
     parser.add_argument("--jq", "-q")
     if argv in (["--help"], ["-h"]):
         parser.print_help()
         return 0
-    args, command, native = _arguments(argv)
-    source = configuration_source(args.conf or env.get("TAUCETI_CONF"))
+    native = list(argv)
+    source = env.get("TAUCETI_CONF")
+    if native and native[0] == "--conf":
+        if len(native) < 2:
+            parser.error("--conf requires a value")
+        source, native = native[1], native[2:]
+    elif native and native[0].startswith("--conf="):
+        source, native = native[0].partition("=")[2], native[1:]
     if not source:
         return _delegate(native, env)
-    project = load(source)
-    selected = args.repo or env.get("GH_REPO")
+    snapshot = env.get("TAUCETI_CONF_SNAPSHOT") if env.get("TAUCETI_CONF_SOURCE") == source else None
+    project = load(snapshot or source)
     refs = [project.repository_ref(role) for role in project.raw["repositories"]]
+    if all(ref.forge == GITHUB for ref in refs):
+        return _delegate(native, env)
+    # The mixed-host foundation supports only these read commands. Validate the
+    # entire command before selecting a server or credential; native options on
+    # other subcommands have incompatible meanings (e.g. -f can be boolean).
+    args, command = parser.parse_known_args(native)
+    options = None
+    if command[:2] == ["pr", "view"] and len(command) == 3:
+        int(command[2])
+    elif command[:2] == ["pr", "list"]:
+        listing = argparse.ArgumentParser(prog="gh pr list", allow_abbrev=False)
+        listing.add_argument("--state", "-s", choices=["open", "closed", "merged", "all"], default="open")
+        listing.add_argument("--limit", "-L", type=int, default=30)
+        options = listing.parse_args(command[2:])
+        if options.limit < 1:
+            raise ValueError("limit must be positive")
+    else:
+        raise Unsupported("mixed-project commands currently support pr view and pr list; no delegation was attempted")
+    selected = args.repo or env.get("GH_REPO")
     if not selected:
-        if all(ref.forge == GITHUB for ref in refs):
-            return _delegate(native, env)
         repository = _checkout_repository(refs)
     else:
         matches = [
@@ -262,14 +222,16 @@ def run(argv, *, environment=None):
                 for row in comments
             ]
     elif command[:2] == ["pr", "list"]:
-        listing = argparse.ArgumentParser(prog="gh pr list")
-        listing.add_argument("--state", choices=["open", "closed", "merged", "all"], default="open")
-        listing.add_argument("--limit", type=int, default=30)
-        options = listing.parse_args(command[2:])
-        if options.limit < 1:
-            raise ValueError("limit must be positive")
         rows = api.pulls(repository, state="closed" if options.state == "merged" else options.state)
-        value = [_pull(row) for row in rows if options.state != "merged" or row.get("merged")][: options.limit]
+        by_number = {}
+        for row in rows:
+            if not isinstance(row, dict) or type(row.get("number")) is not int:
+                raise Incomplete("Forgejo list response did not identify a PR")
+            if options.state == "merged" and "merged" not in row:
+                raise Incomplete("Forgejo list response did not identify merge state")
+            if options.state != "merged" or row["merged"]:
+                by_number[row["number"]] = row
+        value = [_pull(by_number[number]) for number in sorted(by_number, reverse=True)[: options.limit]]
     else:
         raise Unsupported(
             "Forgejo command is not implemented yet; supported: pr view, pr list. No GitHub fallback was attempted."

@@ -10,7 +10,7 @@ from unittest.mock import patch
 from tauceti_tools.forge import GITHUB, ForgeError, Incomplete, Unsupported
 from tauceti_tools.forge_cli import _checkout_repository as checkout_repository
 from tauceti_tools.forge_cli import run
-from tauceti_tools.project import ConfigError, parse
+from tauceti_tools.project import ConfigError, load, parse
 
 CONFIG = """schema_version = 2
 [forges.source]
@@ -184,6 +184,9 @@ class CommandTests(unittest.TestCase):
         )
 
     def test_native_payloads_that_look_like_flags_are_preserved(self):
+        self.config.write_text(
+            CONFIG.replace('content = {forge="source", name="one/Project"}', 'content = "one/Project"')
+        )
         for payload in ["--conf=private-text", "--repo=literal-text", "-R", "--json"]:
             with self.subTest(payload=payload), patch("subprocess.run") as command:
                 run(
@@ -206,6 +209,9 @@ class CommandTests(unittest.TestCase):
                 )
 
     def test_native_short_body_option_preserves_flag_text(self):
+        self.config.write_text(
+            CONFIG.replace('content = {forge="source", name="one/Project"}', 'content = "one/Project"')
+        )
         with patch("subprocess.run") as command:
             run(
                 [
@@ -222,6 +228,59 @@ class CommandTests(unittest.TestCase):
                 environment={**os.environ, "TAUCETI_REAL_GH": "/usr/bin/real-gh"},
             )
         self.assertIn("--conf=literal", command.call_args.args[0])
+
+    def test_boolean_native_flags_cannot_bypass_mixed_origin_checks(self):
+        with patch("tauceti_tools.forge_cli._delegate") as delegated, self.assertRaises(Unsupported):
+            run(
+                ["--conf", str(self.config), "pr", "create", "-f", "-R", "git.example.org/one/Project"],
+                environment={"GH_ENTERPRISE_TOKEN": "test-only-sentinel"},
+            )
+        delegated.assert_not_called()
+
+    def test_checkout_configuration_is_not_implicitly_trusted(self):
+        (Path(self.temp.name) / "tauceti.toml").write_text(CONFIG)
+        with (
+            patch("tauceti_tools.forge_cli.load") as loader,
+            patch("tauceti_tools.forge_cli._delegate", return_value=0) as delegated,
+        ):
+            run(["pr", "view", "12", "-R", "one/Project"], environment={})
+        loader.assert_not_called()
+        delegated.assert_called_once_with(["pr", "view", "12", "-R", "one/Project"], {})
+
+    def test_inherited_snapshot_prevents_online_configuration_refetch(self):
+        source = "https://configuration.example.invalid/project.toml"
+        with (
+            patch("tauceti_tools.forge_cli.load", wraps=load) as loader,
+            patch("tauceti_tools.forge_cli.Forgejo") as client,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            client.return_value.pull.return_value = {"number": 12}
+            run(
+                ["pr", "view", "12", "--json", "number"],
+                environment={
+                    "TAUCETI_CONF": source,
+                    "TAUCETI_CONF_SOURCE": source,
+                    "TAUCETI_CONF_SNAPSHOT": str(self.config),
+                },
+            )
+        loader.assert_called_once_with(str(self.config))
+
+    def test_list_returns_newest_distinct_prs_before_limit(self):
+        with patch("tauceti_tools.forge_cli.Forgejo") as client, contextlib.redirect_stdout(io.StringIO()) as output:
+            client.return_value.pulls.return_value = [{"number": 1}, {"number": 3}, {"number": 2}, {"number": 3}]
+            run(["--conf", str(self.config), "pr", "list", "--limit", "2", "--json", "number"])
+        self.assertEqual(json.loads(output.getvalue()), [{"number": 3}, {"number": 2}])
+
+    def test_merged_filter_precedes_ordering_and_limit(self):
+        with patch("tauceti_tools.forge_cli.Forgejo") as client, contextlib.redirect_stdout(io.StringIO()) as output:
+            client.return_value.pulls.return_value = [
+                {"number": 1, "merged": True},
+                {"number": 3, "merged": True},
+                {"number": 4, "merged": False},
+            ]
+            run(["--conf", str(self.config), "pr", "list", "-s", "merged", "-L", "1", "--json", "number"])
+        self.assertEqual(json.loads(output.getvalue()), [{"number": 3}])
+        self.assertEqual(client.return_value.pulls.call_args.kwargs["state"], "closed")
 
 
 if __name__ == "__main__":

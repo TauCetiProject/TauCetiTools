@@ -34,6 +34,8 @@ Schema v1 continues to resolve repository strings to GitHub and retains state ke
 Schema v2 adds named forge connections and `{forge, name}` references; string
 references still mean GitHub. The independent `[ci]` execution repository initially
 supports `github-actions`. Immutable tool-pin validation still applies.
+`[ci].repository` selects build execution; `[repositories].ci` remains the CI
+archive. Their accessors are `ci_repository_ref()` and `repository_ref("ci")`.
 
 New clients use `project.repository_ref(role)` and `project.ci_repository_ref()`.
 Legacy owner/name/environment access rejects non-GitHub bindings, preventing an
@@ -43,6 +45,13 @@ only as each caller obtains full qualified-reference support.
 The experimental `tauceti-gh` executable supports `pr list` and `pr view`, JSON
 projection, `--jq`, configured repository selection, and explicit GitHub delegation.
 It is not installed over the operator's `gh` and is not yet wired into workers.
+Forgejo/mixed-project use requires a leading `--conf PATH` or trusted `TAUCETI_CONF`;
+the wrapper never discovers configuration from the current checkout. Inherited
+worker snapshots are reused rather than fetching mutable online configuration.
+All-GitHub configurations delegate native arguments unchanged (apart from the
+leading wrapper option). Mixed-project delegation is limited to the implemented
+`pr view` and `pr list` read commands; other subcommands fail before routing or
+credential selection. Full command coverage remains preparation work.
 Forgejo authentication uses a private `TAUCETI_FORGEJO_TOKEN_FILE` and requires
 `TAUCETI_FORGEJO_ORIGIN` to match the normalized destination origin. Set both in
 trusted process configuration outside the checkout. Public reads can omit them.
@@ -54,8 +63,12 @@ repository. Otherwise specify `-R HOST/OWNER/REPO` explicitly.
 Unsupported JSON fields and commands are errors; missing source data is incomplete.
 Additional commands
 and GraphQL operations remain implementation work, not silently fabricated data.
+PR lists are de-duplicated and ordered newest-first before applying limits. The
+experimental list currently scans the complete paginated history; bounded-prefix
+retrieval for very large histories remains a prerequisite for worker integration.
 
-Example against a disposable instance or an existing authorized repository:
+Example from a checkout whose origin matches the configured content repository
+(otherwise add `-R HOST/OWNER/REPO`):
 
 ```sh
 tauceti-gh --conf project.toml pr list --json number,title
