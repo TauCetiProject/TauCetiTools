@@ -78,7 +78,7 @@ export async function scanHostedCapacity(
       // Parent visitation synchronously records its run IDs before awaiting
       // witnesses. Child listings can overlap that latency without recounting
       // boundary jobs; the one request gate still limits all work to three.
-      if(children && visit && cache && namespaceTarget-namespace_busy>5) {
+      if(children && visit && cache) {
         await settle([visit(values),...children.map(child=>pages(ranged(path,child),key,visit,child,onSplit,onLeaf))]);
         return rows;
       }
@@ -279,8 +279,7 @@ export async function scanHostedCapacity(
       };
       try {
         const scan=(range:Range)=>pages(boundaries.length?ranged(path,range):path,'workflow_runs',visit,range,at=>learned.add(at),(range,count)=>leaves.push({range,count})).then(()=>{});
-        if(namespaceTarget-namespace_busy>5)await each(ranges,scan);
-        else for(const range of ranges)await scan(range);
+        await each(ranges,scan);
         complete=true;
       }finally {
         // Only search boundaries survive a scan, never activity or coverage.

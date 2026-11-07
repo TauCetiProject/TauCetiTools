@@ -341,3 +341,20 @@ test('other nonterminal check states retain REST fallback instead of hiding queu
  }
  assert.equal(f.reads.get(100),2);
 });
+
+test('a warm near-cap inventory keeps independent queued ranges parallel within the global gate',async()=>{
+ const f=fixture(700);const cold=await scanHostedCapacity('org',f.read,20,f.cache);assert.equal(cold.routing_version,2);
+ assert.ok(f.ranges.get('/repos/org/repo').length>2,'fixture must exercise independent stored ranges');
+ let queuedActive=0,queuedPeak=0,active=0,peak=0,calls=0,queuedListings=0;
+ const started=Date.now();
+ const value=await scanHostedCapacity('org',async(path,body)=>{
+  const listing=path.includes('status=queued');calls++;active++;peak=Math.max(peak,active);
+  if(listing){queuedListings++;queuedActive++;queuedPeak=Math.max(queuedPeak,queuedActive);}
+  try{await new Promise(resolve=>setTimeout(resolve,2));return await f.read(path,body);}
+  finally{active--;if(listing)queuedActive--;}
+ },6,f.cache);
+ assert.equal(value.routing_version,2);assert.equal(value.namespace_busy,4);assert.equal(value.job_cache_writes,0);
+ assert.equal(value.requests,calls);assert.equal(active,0);assert.ok(peak<=3);
+ console.log(JSON.stringify({queue:700,cap:6,namespace:value.namespace_busy,requests:calls,queued_listings:queuedListings,queued_listing_peak:queuedPeak,all_request_peak:peak,elapsed_ms:Date.now()-started}));
+ assert.equal(queuedPeak,3,'a nearly full pool still needs prompt complete discovery of its spare slots');
+});
