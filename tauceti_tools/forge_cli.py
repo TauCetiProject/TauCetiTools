@@ -120,6 +120,9 @@ def _arguments(argv):
     """
     options = {"--conf": "conf", "--repo": "repo", "-R": "repo", "--json": "json", "--jq": "jq", "-q": "jq"}
     native_values = {
+        "-b",
+        "-t",
+        "-B",
         "--body",
         "--body-file",
         "--title",

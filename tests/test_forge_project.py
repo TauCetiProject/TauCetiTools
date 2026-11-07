@@ -205,6 +205,24 @@ class CommandTests(unittest.TestCase):
                     ["/usr/bin/real-gh", "pr", "comment", "12", "--body", payload, "-R", "github.com/one/Project"],
                 )
 
+    def test_native_short_body_option_preserves_flag_text(self):
+        with patch("subprocess.run") as command:
+            run(
+                [
+                    "--conf",
+                    str(self.config),
+                    "pr",
+                    "comment",
+                    "12",
+                    "-b",
+                    "--conf=literal",
+                    "-R",
+                    "github.com/one/Project",
+                ],
+                environment={**os.environ, "TAUCETI_REAL_GH": "/usr/bin/real-gh"},
+            )
+        self.assertIn("--conf=literal", command.call_args.args[0])
+
 
 if __name__ == "__main__":
     unittest.main()
