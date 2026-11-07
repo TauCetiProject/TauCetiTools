@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/pr-build.yml"
 
@@ -123,6 +125,96 @@ else:
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(calls, [])
         self.assertEqual(outputs, {})
+
+    def test_complete_source_fetch_is_separate_and_retains_known_identity_on_failure(self):
+        shell = shell_for("Fetch complete immutable source histories")
+        self.assertIn('exec python3 gate/scripts/ci_checkout.py fetch', shell)
+        self.assertNotIn('$(python3', shell)
+        report = shell_for("Report build and bump-guard statuses to the PR head commit")
+        self.assertLess(report.index('steps.source_fetch.outcome'), report.index('elif [ "$identity_ok" != 1 ]'))
+        for failed in (False, True):
+            with self.subTest(failed=failed), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "gate/scripts").mkdir(parents=True)
+                script = root / "gate/scripts/ci_checkout.py"
+                script.write_text(
+                    "import json,os,sys\nfrom pathlib import Path\n"
+                    'if os.environ.get("FETCH_FAIL"):sys.exit(7)\n'
+                    'assert sys.argv[1]=="fetch"\n'
+                    'assert sys.argv[sys.argv.index("--head")+1]=="a"*40\n'
+                    'with open(sys.argv[sys.argv.index("--github-env")+1],"a") as f:\n'
+                    ' f.write("CI_SOURCE_OBJECTS="+str(Path(os.environ["GITHUB_WORKSPACE"]).resolve()/".ci-source.git/objects")+"\\n")\n'
+                    'print(json.dumps({"store":str(Path(os.environ["GITHUB_WORKSPACE"]).resolve()/".ci-source.git")}))\n'
+                )
+                environment = root / "environment"
+                environment.write_text("existing=kept\n")
+                result = subprocess.run(
+                    ["bash", "-euo", "pipefail", "-c", shell],
+                    cwd=root,
+                    env={
+                        **os.environ,
+                        "GITHUB_WORKSPACE": str(root),
+                        "GITHUB_ENV": str(environment),
+                        "SOURCE_REPOSITORY": "owner/Project",
+                        "SOURCE_HEAD_REPOSITORY": "fork/Project",
+                        "SOURCE_HEAD": "a" * 40,
+                        "SOURCE_BASE": "b" * 40,
+                        "SOURCE_MERGEBASE": "c" * 40,
+                        "FETCH_FAIL": "1" if failed else "",
+                    },
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 7 if failed else 0, result.stderr)
+                text = environment.read_text()
+                self.assertNotIn("INFRA=1", text)
+                self.assertEqual("CI_SOURCE_OBJECTS=" in text, not failed)
+                self.assertIn("existing=kept", text)
+
+    def test_all_sandboxes_mount_source_objects_for_frozen_and_ordinary_candidates(self):
+        steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["sandboxed-build"]["steps"]
+        build = next(s["run"] for s in steps if s.get("id") == "build")
+        probes = [s["run"] for s in steps if "probe_mounts=(" in s.get("run", "")]
+        self.assertEqual(len(probes), 2)
+        for batch in ("true", "false"):
+            for text, name, end in [
+                (build, "object_mounts", "progress_observer=()"),
+                *((probe, "probe_mounts", "env -i /usr/bin/bwrap") for probe in probes),
+            ]:
+                with self.subTest(batch=batch, name=name), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    for p in (
+                        root / ".ci-source.git/objects",
+                        root / "pr-raw-head/.git/objects",
+                        root / "base/.git/objects",
+                    ):
+                        p.mkdir(parents=True)
+                    start = text.index(name + "=(")
+                    # YAML has already removed indentation from the shell body.
+                    stop = text.find(end.strip(), start)
+                    self.assertGreater(stop, start)
+                    snippet = text[start:stop].replace("${{ env.IS_BATCH }}", batch)
+                    snippet += f'\nprintf "%s\\0" "${{{name}[@]}}"\n'
+                    result = subprocess.run(
+                        ["bash", "-euo", "pipefail", "-c", snippet],
+                        cwd=root,
+                        env={
+                            **os.environ,
+                            "CI_SOURCE_OBJECTS": str(root / ".ci-source.git/objects"),
+                            "CI_RESOURCE_EXPERIMENT": "0",
+                            "RUNNER_TEMP": str(root),
+                            "BASE_SHIM_REGISTRY": "",
+                            "BASE_SHIM_ROOT": "",
+                        },
+                        capture_output=True,
+                        check=True,
+                    )
+                    args = result.stdout.decode().split("\0")[:-1]
+                    self.assertEqual(
+                        args[:3],
+                        ["--ro-bind", str(root / ".ci-source.git/objects"), str(root / ".ci-source.git/objects")],
+                    )
+                    self.assertEqual(len(args), 3 if batch == "true" else 9)
 
     def test_retry_discovery_accepts_only_small_unique_original_run_intents(self):
         workflow = ROOT / ".github/workflows/retry-ci-status.yml"
