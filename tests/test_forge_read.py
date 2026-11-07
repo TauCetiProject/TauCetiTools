@@ -151,7 +151,7 @@ class ReadContracts(unittest.TestCase):
             self.reader.pull(self.repo, 3, ["files"])
 
     def test_system_actor_and_unrequested_bad_metadata_do_not_break_numbers(self):
-        for native_id in [-1, -2, 0]:
+        for native_id in [-1, -2, -3, 0]:
             self.api.pull.return_value["user"] = {"id": native_id, "login": "system"}
             actor = self.reader.pull(self.repo, 3, ["author"])["author"]
             self.assertNotIn("id", actor)

@@ -1,4 +1,4 @@
-"""Experimental gh-compatible direct Forgejo reads, with explicit GitHub delegation.
+"""Experimental gh-compatible direct Forgejo operations, with explicit GitHub delegation.
 
 Invoked as tauceti-gh while the worker integration is prepared. This does not
 install a global gh replacement or activate Forgejo in legacy worker bindings.
@@ -6,33 +6,16 @@ install a global gh replacement or activate Forgejo in legacy worker bindings.
 
 from __future__ import annotations
 
-import argparse
-import json
 import os
 import shutil
 import subprocess
 import sys
 import urllib.parse
 
-from .forge import GITHUB, Forge, ForgeError, Forgejo, RepositoryRef, Unsupported
-from .forge_read import ForgejoReader
-from .project import ConfigError, load
-
-
-class _Parser(argparse.ArgumentParser):
-    def error(self, message):
-        raise Unsupported(message)
-
-
-def _emit(value, query):
-    rendered = json.dumps(value, ensure_ascii=False) + "\n"
-    if query:
-        result = subprocess.run(["jq", "-r", query], input=rendered, text=True, capture_output=True)
-        sys.stdout.write(result.stdout)
-        sys.stderr.write(result.stderr)
-        return result.returncode
-    sys.stdout.write(rendered)
-    return 0
+from .forge import GITHUB, AmbiguousWrite, Forge, ForgeError, Forgejo, RepositoryRef, Unsupported
+from .forge_command import parse_command
+from .forge_commands import execute, render
+from .project import ConfigError, load, resolve_repository
 
 
 def _checkout_repository(refs):
@@ -60,103 +43,103 @@ def _require_origin(env, name, forge):
         raise ForgeError(f"credential origin must match the destination: set {name} explicitly")
 
 
+def _known_forges(refs):
+    return {ref.forge for ref in refs} | {GITHUB}
+
+
+def _host_forge(host, refs):
+    matches = [
+        forge for forge in _known_forges(refs) if urllib.parse.urlsplit(forge.url).netloc.casefold() == host.casefold()
+    ]
+    if len(matches) != 1:
+        raise Unsupported("hostname is not uniquely configured")
+    return matches[0]
+
+
+def _selected_repository(selected, refs, primary):
+    matches = {
+        ref
+        for ref in refs
+        if selected.casefold().rstrip("/")
+        in {
+            ref.name.casefold(),
+            ref.url.casefold(),
+            urllib.parse.urlsplit(ref.url).netloc.casefold() + "/" + ref.name.casefold(),
+        }
+    }
+    if len(matches) > 1:
+        raise Unsupported("ambiguous repository; specify HOST/OWNER/REPO")
+    if matches:
+        return matches.pop()
+    if selected.startswith(("https://", "http://")):
+        parsed = urllib.parse.urlsplit(selected)
+        if parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment:
+            raise Unsupported("repository URL must not contain credentials, queries or fragments")
+        origin = parsed.scheme + "://" + parsed.netloc
+        candidates = [forge for forge in _known_forges(refs) if forge.url.casefold() == origin.casefold()]
+        if len(candidates) != 1:
+            raise Unsupported("repository origin is not uniquely configured")
+        return RepositoryRef(candidates[0], parsed.path.strip("/"))
+    parts = selected.split("/")
+    if len(parts) == 3:
+        return RepositoryRef(_host_forge(parts[0], refs), "/".join(parts[1:]))
+    if len(parts) == 2:
+        raise Unsupported("unconfigured bare repository; specify HOST/OWNER/REPO")
+    raise Unsupported("repository requires OWNER/REPO or HOST/OWNER/REPO")
+
+
 def run(argv, *, environment=None):
     env = os.environ if environment is None else environment
-    parser = _Parser(
-        prog="tauceti-gh",
-        description=__doc__,
-        allow_abbrev=False,
-        add_help=False,
-        epilog="Place --conf PATH before the native command, or set TAUCETI_CONF.",
-    )
-    parser.add_argument("-R", "--repo")
-    parser.add_argument("--json")
-    parser.add_argument("--jq", "-q")
     if argv in (["--help"], ["-h"]):
-        parser.print_help()
+        print("tauceti-gh [--conf PATH] COMMAND: direct Forgejo operations with native GitHub delegation")
         return 0
     native = list(argv)
     source = env.get("TAUCETI_CONF")
     if native and native[0] == "--conf":
-        if len(native) < 2:
-            parser.error("--conf requires a value")
+        if len(native) < 2 or not native[1]:
+            raise Unsupported("--conf requires a nonempty value")
         source, native = native[1], native[2:]
     elif native and native[0].startswith("--conf="):
         source, native = native[0].partition("=")[2], native[1:]
+        if not source:
+            raise Unsupported("--conf requires a nonempty value")
     if not source:
         return _delegate(native, env)
     snapshot = env.get("TAUCETI_CONF_SNAPSHOT") if env.get("TAUCETI_CONF_SOURCE") == source else None
     project = load(snapshot or source)
     refs = [project.repository_ref(role) for role in project.raw["repositories"]]
+    refs += [
+        resolve_repository(value["repo"], project.raw.get("forges")) for value in project.raw.get("tools", {}).values()
+    ]
+    refs += [resolve_repository(value["repo"], project.raw.get("forges")) for value in project.raw.get("upstreams", [])]
+    if "ci" in project.raw:
+        refs.append(project.ci_repository_ref())
     if all(ref.forge == GITHUB for ref in refs):
         return _delegate(native, env)
-    # Read commands share a complete parser before routing or credentials.
-    # Other commands still fail closed; their flags have different meanings.
-    args, command = parser.parse_known_args(native)
-    options = None
-    if command[:2] in (["pr", "view"], ["issue", "view"]) and len(command) == 3:
-        if not command[2].isascii() or not command[2].isdigit():
-            raise ValueError("issue/PR number must be an ASCII integer")
-        number = int(command[2])
-        if number < 1:
-            raise ValueError("issue/PR number must be positive")
-    elif command[:2] in (["pr", "list"], ["issue", "list"]):
-        listing = _Parser(prog="gh " + " ".join(command[:2]), allow_abbrev=False)
-        listing.add_argument(
-            "--state",
-            "-s",
-            choices=["open", "closed", "all"] + (["merged"] if command[0] == "pr" else []),
-            default="open",
-        )
-        listing.add_argument("--limit", "-L", type=int, default=30)
-        listing.add_argument("--author", "-A")
-        listing.add_argument("--label", "-l", action="append", default=[])
-        if command[0] == "pr":
-            listing.add_argument("--base", "-B")
-            listing.add_argument("--head", "-H")
-        options = listing.parse_args(command[2:])
-        if options.limit < 1:
-            raise ValueError("limit must be positive")
-        if any(not name.strip() for group in options.label for name in group.split(",")):
-            raise ValueError("labels must have nonempty names")
-    elif command[:2] == ["repo", "view"] and len(command) in {2, 3}:
-        if len(command) == 3:
-            if args.repo:
-                raise ValueError("specify the repository once")
-            args.repo = command[2]
+    command = parse_command(native)
+    opts = command.options
+    primary = project.repository_ref("content")
+    selected = opts.get("repo") or env.get("GH_REPO")
+    if command.group == "repo" and command.action in {"view", "fork"} and command.args:
+        if opts.get("repo"):
+            raise Unsupported("specify the repository once")
+        selected = command.args[0]
+    if command.group == "auth" or command.key == ("repo", "list"):
+        host = opts.get("hostname") or env.get("GH_HOST")
+        repository = RepositoryRef(_host_forge(host, refs), primary.name) if host else primary
+    elif selected:
+        repository = _selected_repository(selected, refs, primary)
     else:
-        raise Unsupported(
-            "mixed-project commands currently support pr/issue view/list and repo view; no delegation was attempted"
-        )
-    selected = args.repo or env.get("GH_REPO")
-    if not selected:
         repository = _checkout_repository(refs)
-    else:
-        matches = [
-            ref
-            for ref in refs
-            if selected in {ref.name, ref.url, urllib.parse.urlsplit(ref.url).netloc + "/" + ref.name}
-        ]
-        if len(set(matches)) > 1:
-            raise Unsupported("ambiguous repository; specify HOST/OWNER/REPO")
-        if matches:
-            repository = matches[0]
-        elif selected.startswith(("github.com/", "https://github.com/")):
-            repository = RepositoryRef(GITHUB, selected.removeprefix("https://").removeprefix("github.com/"))
-        else:
-            raise Unsupported(
-                "repository is not configured; specify an explicit GitHub host or add its forge reference"
-            )
     if repository.forge.kind == "github":
         if repository.forge != GITHUB and any(
             env.get(key) for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
         ):
             _require_origin(env, "TAUCETI_GITHUB_ORIGIN", repository.forge)
-        # Fully qualify the chosen target: the checkout may have a Forgejo origin.
         host = urllib.parse.urlsplit(repository.forge.url).netloc
         return _delegate(native, {**env, "GH_REPO": host + "/" + repository.name, "GH_HOST": host})
-    if not command:
-        parser.error("a command is required")
+    if opts.get("jq", "").startswith("-"):
+        raise Unsupported("jq filters beginning with a dash are unsupported; wrap the expression in parentheses")
     token_file = env.get("TAUCETI_FORGEJO_TOKEN_FILE")
     token = None
     if token_file:
@@ -170,28 +153,17 @@ def run(argv, *, environment=None):
         if not token:
             raise ForgeError("Forgejo token file is empty")
     api = Forgejo(repository.forge, token=token)
-    fields = args.json.split(",") if args.json else None
-    reader = ForgejoReader(api)
-    if command[:2] == ["pr", "view"]:
-        value = reader.pull(repository, number, fields)
-    elif command[:2] == ["issue", "view"]:
-        value = reader.issue(repository, number, fields)
-    elif command[:2] == ["repo", "view"]:
-        value = reader.repository(repository, fields)
-    else:
-        author = api.current_user()["login"] if options.author == "@me" else options.author
-        filters = {
-            "state": options.state,
-            "limit": options.limit,
-            "author": author,
-            "labels": [name for group in options.label for name in group.split(",")],
-        }
-        if command[0] == "pr":
-            filters.update(base=options.base, head=options.head)
-            value = reader.pulls(repository, fields, **filters)
-        else:
-            value = reader.issues(repository, fields, **filters)
-    return _emit(value, args.jq)
+    value, json_output = execute(
+        command, repository, api, token=token, expected_user_id=env.get("TAUCETI_FORGEJO_USER_ID")
+    )
+    rendered = render(value, json_output)
+    if opts.get("jq"):
+        result = subprocess.run(["jq", "-r", opts["jq"]], input=rendered, text=True, capture_output=True)
+        sys.stdout.write(result.stdout)
+        sys.stderr.write(result.stderr)
+        return result.returncode
+    sys.stdout.write(rendered)
+    return 0
 
 
 def _delegate(argv, env):
@@ -204,6 +176,9 @@ def _delegate(argv, env):
 def main():
     try:
         return run(sys.argv[1:])
+    except AmbiguousWrite as error:
+        print(f"gh: ambiguous-write: {error}", file=sys.stderr)
+        return 2
     except (ForgeError, ConfigError, ValueError, OSError) as error:
         print(f"gh: {error}", file=sys.stderr)
         return 1
