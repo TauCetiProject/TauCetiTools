@@ -51,6 +51,7 @@ import threading
 import time
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import parse_qsl, urlencode
 
 import core
 import labels
@@ -120,15 +121,46 @@ def open_heads() -> dict[str, list[int]]:
 
 
 def workflow_runs(workflow: str, query: str) -> list[dict]:
-    # A filtered listing stops at 1,000 results however far it is paged; beyond that runs would go
-    # missing silently, so refuse instead (the run fails and the next covers the window again).
+    """Read every matching run, splitting saturated listings into creation-time windows.
+
+    Active runs can have been queued long before the checkpoint. Never bound those
+    by the recent-activity window: an old run can still finish or paint CI running.
+    """
     total = int(core.gh_api(f"/repos/{REPO}/actions/workflows/{workflow}/runs?{query}&per_page=1",
                             jq=".total_count").strip() or 0)
-    if total >= 1000:
-        raise core.RateLimited(f"{workflow} {query}: {total} runs, past the listing's 1,000-result cap")
-    rows = lines(f"/repos/{REPO}/actions/workflows/{workflow}/runs?{query}&per_page=100",
-                 jq='.workflow_runs[] | {head_sha, head_branch, display_title, event, status, created_at, updated_at} | tojson', paginate=True)
-    return [json.loads(r) for r in rows]
+    if total == 0:
+        return []
+    if total < 1000:
+        rows = lines(f"/repos/{REPO}/actions/workflows/{workflow}/runs?{query}&per_page=100",
+                     jq='.workflow_runs[] | {head_sha, head_branch, display_title, event, status, created_at, updated_at} | tojson', paginate=True)
+        # The listing can grow between the count and pagination. Split rather
+        # than accepting a response that might have reached GitHub's cap.
+        if len(rows) < 1000:
+            return [json.loads(r) for r in rows]
+
+    params = dict(parse_qsl(query))
+    created = params.pop('created', None)
+    if created is None:
+        start = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
+        end = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    elif created.startswith('>='):
+        start = dt.datetime.fromisoformat(created[2:].replace('Z', '+00:00'))
+        end = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    else:
+        lower, upper = created.split('..')
+        start = dt.datetime.fromisoformat(lower.replace('Z', '+00:00'))
+        end = dt.datetime.fromisoformat(upper.replace('Z', '+00:00'))
+    seconds = int((end - start).total_seconds())
+    if seconds <= 0:
+        raise core.RateLimited(f"{workflow} {query}: at least 1,000 runs in one second; cannot split listing")
+    middle = start + dt.timedelta(seconds=seconds // 2)
+    log(f"{workflow}: splitting saturated run listing ({total} runs)")
+    # GitHub's ranges include both ends; use adjacent whole seconds so no run
+    # is lost at the boundary or reconciled twice merely because of splitting.
+    out = []
+    for lower, upper in ((start, middle), (middle + dt.timedelta(seconds=1), end)):
+        out.extend(workflow_runs(workflow, urlencode({**params, 'created': f'{iso(lower)}..{iso(upper)}'})))
+    return out
 
 
 ACTIVE = ("requested", "queued", "pending", "waiting", "in_progress")

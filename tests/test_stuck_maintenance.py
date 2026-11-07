@@ -18,6 +18,7 @@ class MaintenanceScriptTests(unittest.TestCase):
     def test_dispatched_build_discovery_regressions(self):
         result = subprocess.run([
             sys.executable, str(ROOT / "tauceti_tools/assets/scripts/pr_status/test_batch.py"),
+            "WorkflowRunTests",
             "ResumeTests.test_dispatched_builds_recheck_prs_without_trusting_the_workflow_head",
             "ResumeTests.test_only_an_exact_dispatched_head_can_be_painted_running",
         ], capture_output=True, text=True, timeout=60)
