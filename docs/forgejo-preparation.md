@@ -130,7 +130,7 @@ per_page plus `--paginate`/`--slurp` (`--slurp` cannot be combined with `--jq`),
 smaller native server pages. Single-page reads stop after their requested prefix.
 Commit/tree identities use the hash-verified raw Git object bytes available
 through Forgejo 17's native object reader. Commit headers supply the exact tree
-SHA, including legacy noncanonical trees; native commit DTOs can mislabel it
+SHA, including legacy noncanonical trees; native commit DTOs label it
 with the commit SHA. A server that does not expose these bytes raises an explicit
 incomplete-data error. Complete trees resolve the immutable tree SHA, then join bounded native
 pages only while that SHA and total count remain stable. As in GitHub, the

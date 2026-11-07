@@ -212,7 +212,12 @@ def _git_object(api, base, revision, kind):
 
 
 def _commit_tree(api, base, revision):
-    raw = _git_object(api, base, revision, "commit")
+    try:
+        raw = _git_object(api, base, revision, "commit")
+    except ForgeError as error:
+        if 400 <= error.status < 500:
+            raise Incomplete("known commit exists, but its raw object bytes are unavailable") from None
+        raise
     first, separator, _ = raw.partition(b"\n")
     try:
         tree_sha = first.removeprefix(b"tree ").decode("ascii")
@@ -303,7 +308,9 @@ def execute(request, api):
         target = int(query.get("page", "1")) * int(query.get("per_page", "30"))
         rows = _collection(api, path, stop_after=None if opts.get("paginate") else target)
     elif kind in {"matching_refs", "ref"}:
-        native_path = path.replace("/git/matching-refs/", "/git/refs/", 1).replace("/git/ref/", "/git/refs/", 1)
+        base = "repos/" + request.repository_name
+        prefix_path = path[len(base) + 1 :].split("/", 2)[2]
+        native_path = base + "/git/refs/" + prefix_path
         try:
             rows = api.request("GET", native_path, response_headers=headers, response_meta=meta)
         except ForgeError as error:
@@ -317,7 +324,7 @@ def execute(request, api):
             rows = [rows]
         if not isinstance(rows, list):
             raise Incomplete("Forgejo refs were not an array")
-        prefix = urllib.parse.unquote(native_path.split("/git/refs/", 1)[1])
+        prefix = urllib.parse.unquote(prefix_path)
         if any(
             not isinstance(row, dict)
             or not isinstance(row.get("ref"), str)

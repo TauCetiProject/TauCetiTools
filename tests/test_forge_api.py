@@ -6,7 +6,7 @@ import urllib.parse
 from unittest.mock import Mock
 
 from tauceti_tools.forge import Forge, ForgeError, Incomplete, RepositoryRef, Unsupported
-from tauceti_tools.forge_api import _tree, execute, plan
+from tauceti_tools.forge_api import _commit_tree, _tree, execute, plan
 from tauceti_tools.forge_command import parse_command
 
 EMPTY_TREE = hashlib.sha1(b"tree 0\0").hexdigest()
@@ -231,6 +231,68 @@ class ApiContracts(unittest.TestCase):
             self.api.request.side_effect = reply
             with self.subTest(kind=kind), self.assertRaises(Incomplete):
                 execute(self.request("repos/one/project/git/commits/" + COMMIT_SHA), self.api)
+
+    def test_ref_namespace_names_do_not_change_the_route(self):
+        self.value = [{"ref": "refs/heads/main", "object": {"sha": "a" * 40}}]
+        for name, suffix in [
+            ("git/ref", "git/ref/heads/main"),
+            ("git/refs", "git/refs/heads/main"),
+            ("git/matching-refs", "git/matching-refs/heads/"),
+        ]:
+            with self.subTest(name=name):
+                execute(self.request("repos/" + name + "/" + suffix), self.api)
+                self.assertEqual(
+                    self.api.request.call_args.args[:2],
+                    ("GET", "repos/" + name + "/git/refs/heads/" + ("" if "matching-refs" in suffix else "main")),
+                )
+
+    def test_known_commit_raw_unsupported_status_is_not_reported_as_absent(self):
+        def reply(method, path, **kwargs):
+            if "/git/commits/" in path:
+                return native_commit()
+            raise ForgeError("unsupported raw object type", status=404)
+
+        self.api.request.side_effect = reply
+        with self.assertRaises(Incomplete) as incomplete:
+            execute(self.request("repos/one/project/git/commits/" + COMMIT_SHA), self.api)
+        self.assertEqual(incomplete.exception.status, 0)
+
+    def test_an_actual_commit_object_cannot_be_accepted_as_a_tree(self):
+        def reply(method, path, **kwargs):
+            if "/git/commits/" in path:
+                raise ForgeError("not a commit", status=404)
+            return git_object(RAW_COMMIT, "commit")
+
+        self.api.request.side_effect = reply
+        with self.assertRaises(Incomplete):
+            execute(self.request("repos/one/project/git/trees/" + COMMIT_SHA), self.api)
+
+    def test_commit_header_parsing_rejects_wrong_order_or_hash_width(self):
+        for raw, algorithm in [
+            (b"parent " + b"b" * 40 + b"\ntree " + EMPTY_TREE.encode() + b"\n\nMessage\n", "sha1"),
+            (RAW_COMMIT, "sha256"),
+        ]:
+            digest = hashlib.new(algorithm, f"commit {len(raw)}\0".encode() + raw).hexdigest()
+            self.api.request.side_effect = None
+            self.api.request.return_value = {
+                "sha": digest,
+                "size": len(raw),
+                "encoding": "base64",
+                "content": base64.b64encode(raw).decode(),
+            }
+            with self.subTest(algorithm=algorithm), self.assertRaises(Incomplete):
+                _commit_tree(self.api, "repos/one/project", digest)
+
+    def test_commit_tree_preserves_a_noncanonical_tree_object_id(self):
+        # This tree writes a directory with a leading zero in its mode. The
+        # commit header identifies these exact bytes, not a re-serialization.
+        legacy_tree = b"040000 nested\0" + bytes.fromhex(EMPTY_TREE)
+        legacy_sha = hashlib.sha1(f"tree {len(legacy_tree)}\0".encode() + legacy_tree).hexdigest()
+        raw = RAW_COMMIT.replace(EMPTY_TREE.encode(), legacy_sha.encode(), 1)
+        digest = hashlib.sha1(f"commit {len(raw)}\0".encode() + raw).hexdigest()
+        self.api.request.side_effect = None
+        self.api.request.return_value = git_object(raw, "commit")
+        self.assertEqual(_commit_tree(self.api, "repos/one/project", digest)["sha"], legacy_sha)
 
     def test_missing_ref_namespace_requires_confirmed_code_visibility(self):
         self.api.request.side_effect = ForgeError("not found", status=404)
