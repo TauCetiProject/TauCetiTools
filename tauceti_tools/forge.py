@@ -147,7 +147,9 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 class Forgejo:
     """Direct reads and single-attempt mutations; never follows credential-bearing redirects.
 
-    Complete pagination succeeds as a unit or raises. No shared state service,
+    Page failures raise rather than returning a partial collection. Page-number
+    listings are observations, not atomic snapshots of a changing repository.
+    No shared state service,
     implicit GitHub fallback, or mutation retry is involved.
     """
 
@@ -162,7 +164,10 @@ class Forgejo:
             raise ValueError("Forgejo token must be nonempty printable ASCII without whitespace")
         self.forge, self.timeout, self.max_pages, self.max_bytes = forge, timeout, max_pages, max_bytes
         self._token = token
-        self._opener = urllib.request.build_opener(_NoRedirect)
+        if urllib.parse.urlsplit(forge.url).hostname in {"localhost", "127.0.0.1", "::1"}:
+            self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+        else:
+            self._opener = urllib.request.build_opener(_NoRedirect)
 
     def request(self, method, path, data=None):
         parsed = urllib.parse.urlsplit(path)
@@ -240,7 +245,7 @@ class Forgejo:
     def pulls(self, repository, *, state="open"):
         if state not in {"open", "closed", "all"}:
             raise ValueError("invalid pull request state")
-        return self.collection(f"{self._repo(repository)}/pulls?state={state}")
+        return self.collection(f"{self._repo(repository)}/pulls?state={state}&sort=oldest")
 
     def comments(self, repository, number):
         repository.pull_url(number)

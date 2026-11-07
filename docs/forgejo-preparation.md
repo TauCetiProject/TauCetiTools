@@ -25,7 +25,9 @@ rehearsal. It does not activate production Forgejo bindings or shut down service
 `tauceti_tools.forge` provides qualified `Forge`, `RepositoryRef`, and
 `PrincipalRef` records, immutable source links, reference resolution, and a bounded
 direct Forgejo REST client. Mutations are attempted once; ambiguous failures require
-reconciliation. Pagination returns a complete list or raises. HTTP redirects are
+reconciliation. Page failures raise rather than returning partial success. Listings
+use page numbers and are observations, not atomic snapshots of changing repositories.
+HTTP redirects are
 not followed with credentials. HTTP origins are accepted only on loopback for tests.
 
 Schema v1 continues to resolve repository strings to GitHub and retains state keys.
@@ -41,8 +43,16 @@ only as each caller obtains full qualified-reference support.
 The experimental `tauceti-gh` executable supports `pr list` and `pr view`, JSON
 projection, `--jq`, configured repository selection, and explicit GitHub delegation.
 It is not installed over the operator's `gh` and is not yet wired into workers.
-Forgejo authentication uses a private `TAUCETI_FORGEJO_TOKEN_FILE`; public reads
-can omit it. Unsupported JSON fields and commands are errors. Additional commands
+Forgejo authentication uses a private `TAUCETI_FORGEJO_TOKEN_FILE` and requires
+`TAUCETI_FORGEJO_ORIGIN` to match the normalized destination origin. Set both in
+trusted process configuration outside the checkout. Public reads can omit them.
+Ambient tokens for GitHub Enterprise destinations similarly require a matching
+`TAUCETI_GITHUB_ORIGIN`. Configured destinations cannot redirect a credential to
+another origin. Without `-R`/`GH_REPO`, all-GitHub projects retain native gh checkout
+detection; mixed projects require a checkout origin matching exactly one configured
+repository. Otherwise specify `-R HOST/OWNER/REPO` explicitly.
+Unsupported JSON fields and commands are errors; missing source data is incomplete.
+Additional commands
 and GraphQL operations remain implementation work, not silently fabricated data.
 
 Example against a disposable instance or an existing authorized repository:

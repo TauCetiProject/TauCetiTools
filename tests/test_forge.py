@@ -4,6 +4,7 @@ import json
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 
 from tauceti_tools.forge import (
     GITHUB,
@@ -129,6 +130,15 @@ class DirectTests(unittest.TestCase):
             self.api.request("GET", "user")
         with self.assertRaises(AmbiguousWrite):
             self.api.request("POST", "user", {})
+
+    def test_loopback_credentials_bypass_environment_proxy(self):
+        with patch.dict(
+            "os.environ",
+            {"HTTP_PROXY": "http://127.0.0.1:1", "http_proxy": "http://127.0.0.1:1", "NO_PROXY": "", "no_proxy": ""},
+        ):
+            api = Forgejo(self.forge, token="local-token")
+            self.assertEqual(api.request("GET", "user"), [])
+        self.assertEqual(self.calls[0][1], "/api/v1/user")
 
 
 if __name__ == "__main__":

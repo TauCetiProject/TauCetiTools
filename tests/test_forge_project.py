@@ -7,7 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_tools.forge import GITHUB, Unsupported
+from tauceti_tools.forge import GITHUB, ForgeError, Incomplete, Unsupported
+from tauceti_tools.forge_cli import _checkout_repository as checkout_repository
 from tauceti_tools.forge_cli import run
 from tauceti_tools.project import ConfigError, parse
 
@@ -54,6 +55,18 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             parse((CONFIG + '\n[tools.tools]\nrepo="one/Tools"\nref="main"\n').encode())
 
+    def test_qualified_github_upstreams_are_normalized_for_legacy_consumers(self):
+        project = parse(
+            (
+                CONFIG.replace('kind = "forgejo"', 'kind = "github"').replace(
+                    "https://git.example.org", "https://github.com"
+                )
+                + '\n[[upstreams]]\nrepo={forge="source",name="one/Dependency"}\npackage="dep"\n'
+            ).encode()
+        )
+        self.assertEqual(project.upstreams[0]["repo"], "one/Dependency")
+        self.assertEqual(json.loads(project.environment()["TAUCETI_UPSTREAMS"])[0]["repo"], "one/Dependency")
+
 
 class CommandTests(unittest.TestCase):
     def setUp(self):
@@ -61,6 +74,69 @@ class CommandTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.config = Path(self.temp.name) / "project.toml"
         self.config.write_text(CONFIG)
+        routing = patch(
+            "tauceti_tools.forge_cli._checkout_repository",
+            return_value=parse(CONFIG.encode()).repository_ref("content"),
+        )
+        routing.start()
+        self.addCleanup(routing.stop)
+
+    def test_foreign_origin_never_receives_token(self):
+        with patch("tauceti_tools.forge_cli.Forgejo") as client:
+            for origin in [None, "https://other.example.org", "http://127.0.0.1:1234"]:
+                env = {"TAUCETI_FORGEJO_TOKEN_FILE": "/private/token"}
+                if origin:
+                    env["TAUCETI_FORGEJO_ORIGIN"] = origin
+                with self.subTest(origin=origin), self.assertRaises(ForgeError):
+                    run(["--conf", str(self.config), "pr", "view", "12"], environment=env)
+            client.assert_not_called()
+
+    def test_implicit_github_delegation_preserves_checkout_detection(self):
+        self.config.write_text(
+            CONFIG.replace('content = {forge="source", name="one/Project"}', 'content = "one/Project"')
+        )
+        with patch("tauceti_tools.forge_cli._delegate", return_value=0) as delegate:
+            run(["--conf", str(self.config), "pr", "view", "12"], environment={})
+        self.assertEqual(delegate.call_args.args[1], {})
+
+    def test_attacker_config_cannot_select_a_credential_origin(self):
+        self.config.write_text(CONFIG.replace("https://git.example.org", "http://127.0.0.1:2345"))
+        with patch("tauceti_tools.forge_cli.Forgejo") as client:
+            with self.assertRaises(ForgeError):
+                run(
+                    ["--conf", str(self.config), "pr", "view", "12", "-R", "127.0.0.1:2345/one/Project"],
+                    environment={
+                        "TAUCETI_FORGEJO_TOKEN_FILE": "/private/nonexistent-token",
+                        "TAUCETI_FORGEJO_ORIGIN": "http://127.0.0.1:2346",
+                    },
+                )
+            client.assert_not_called()
+
+    def test_enterprise_token_requires_trusted_origin(self):
+        self.config.write_text(CONFIG.replace('kind = "forgejo"', 'kind = "github"'))
+        with patch("tauceti_tools.forge_cli._delegate") as delegated, self.assertRaises(ForgeError):
+            run(
+                ["--conf", str(self.config), "pr", "view", "12", "-R", "git.example.org/one/Project"],
+                environment={"GH_ENTERPRISE_TOKEN": "test-only-sentinel"},
+            )
+        delegated.assert_not_called()
+
+    def test_mixed_project_requires_checkout_match(self):
+        ref = parse(CONFIG.encode()).repository_ref("content")
+        with patch("subprocess.run") as git:
+            git.return_value.returncode = 0
+            git.return_value.stdout = "git@git.example.org:one/Project.git\n"
+            self.assertEqual(checkout_repository([ref]), ref)
+            git.return_value.stdout = "https://other.example.org/one/Project.git\n"
+            with self.assertRaises(Unsupported):
+                checkout_repository([ref])
+
+    def test_missing_source_fields_are_unknown(self):
+        with patch("tauceti_tools.forge_cli.Forgejo") as client:
+            client.return_value.pull.return_value = {"number": 12}
+            for field in ["isDraft", "state", "headRefOid", "author"]:
+                with self.subTest(field=field), self.assertRaises(Incomplete):
+                    run(["--conf", str(self.config), "pr", "view", "12", "--json", field])
 
     def test_forgejo_view_json_projection(self):
         with patch("tauceti_tools.forge_cli.Forgejo") as client, contextlib.redirect_stdout(io.StringIO()) as output:
@@ -99,14 +175,35 @@ class CommandTests(unittest.TestCase):
 
     def test_delegation_removes_wrapper_flags(self):
         with patch("subprocess.run") as command:
-            from tauceti_tools.forge_cli import _delegate
-
-            _delegate(
-                ["--conf=a", "pr", "view", "12", "-R", "github.com/one/Project"],
-                {**os.environ, "TAUCETI_REAL_GH": "/usr/bin/real-gh"},
-                remove_conf=True,
+            run(
+                ["--conf", str(self.config), "pr", "view", "12", "-R", "github.com/one/Project"],
+                environment={**os.environ, "TAUCETI_REAL_GH": "/usr/bin/real-gh"},
             )
-        self.assertEqual(command.call_args.args[0], ["/usr/bin/real-gh", "pr", "view", "12"])
+        self.assertEqual(
+            command.call_args.args[0], ["/usr/bin/real-gh", "pr", "view", "12", "-R", "github.com/one/Project"]
+        )
+
+    def test_native_payloads_that_look_like_flags_are_preserved(self):
+        for payload in ["--conf=private-text", "--repo=literal-text", "-R", "--json"]:
+            with self.subTest(payload=payload), patch("subprocess.run") as command:
+                run(
+                    [
+                        "--conf",
+                        str(self.config),
+                        "pr",
+                        "comment",
+                        "12",
+                        "--body",
+                        payload,
+                        "-R",
+                        "github.com/one/Project",
+                    ],
+                    environment={**os.environ, "TAUCETI_REAL_GH": "/usr/bin/real-gh"},
+                )
+                self.assertEqual(
+                    command.call_args.args[0],
+                    ["/usr/bin/real-gh", "pr", "comment", "12", "--body", payload, "-R", "github.com/one/Project"],
+                )
 
 
 if __name__ == "__main__":

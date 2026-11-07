@@ -174,7 +174,11 @@ roadmap="operator/roadmap"
                                     "--json",
                                     "number,title,comments",
                                 ],
-                                environment={"TAUCETI_FORGEJO_TOKEN_FILE": str(token_file)},
+                                environment={
+                                    "TAUCETI_FORGEJO_TOKEN_FILE": str(token_file),
+                                    "TAUCETI_FORGEJO_ORIGIN": url,
+                                    "GH_REPO": "operator/content",
+                                },
                             ),
                             0,
                         )

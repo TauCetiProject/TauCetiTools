@@ -291,7 +291,7 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
             ".github/workflows/auto-merge.yml",
             ".github/workflows/pr-status.yml",
         ]
-        if not project.legacy and any(u.get("update") for u in project.raw.get("upstreams", [])):
+        if not project.legacy and any(u.get("update") for u in project.upstreams):
             required_files.append(".github/workflows/update-upstreams.yml")
         for path in required_files:
             value, error = gh.read(f"repos/{repo}/contents/{path}?ref={project.branch}")
@@ -861,7 +861,7 @@ def dependency_findings(project, gh, again):
             raise ValueError(f"Cannot read {repo}@{revision}/{name}: {error}")
         return base64.b64decode(value["content"]).decode().strip()
 
-    policy = project.raw.get("upstreams", [])
+    policy = project.upstreams
     if not any(u.get("update") for u in policy):
         return []
     problems = []

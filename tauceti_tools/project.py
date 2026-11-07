@@ -71,7 +71,15 @@ class Project:
         return resolve_repository(self.raw["repositories"][role], self.raw.get("forges"))
 
     def ci_repository_ref(self):
+        if "ci" not in self.raw:
+            raise ConfigError("No CI execution repository is configured in [ci]")
         return resolve_repository(self.raw["ci"]["repository"], self.raw.get("forges"))
+
+    @property
+    def upstreams(self):
+        self._legacy_bindings()
+        return [{**upstream, "repo": resolve_repository(upstream["repo"], self.raw.get("forges")).name}
+                for upstream in self.raw.get("upstreams", [])]
 
     def _legacy_bindings(self):
         values = list(self.raw["repositories"].values())
@@ -194,7 +202,7 @@ class Project:
             if self.service("bors").get("mode") != "off"
             else "",
             "TAUCETI_BORS_REPOSITORY_ID": str(self.service("bors").get("repository_id", "")),
-            "TAUCETI_UPSTREAMS": json.dumps(self.raw.get("upstreams", [])),
+            "TAUCETI_UPSTREAMS": json.dumps(self.upstreams),
         }
 
 
