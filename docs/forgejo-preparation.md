@@ -200,9 +200,14 @@ historical data is usable only when those same checks succeed. This is a whole
 REST-record contract: even `.title` projection is unavailable when its required
 head/diff proof fails. AGit PRs explicitly require a separate retained-head/diff
 adapter; a lagging retained ref or missing zero-stat proof is unavailable too.
+Imported merged history missing its merge timestamp or commit is unavailable as
+a whole REST record. AGit raises a data-dependent `Unsupported` after reading
+the PR; unsupported request forms still fail before credentials or I/O.
 Stable-field-only callers can instead use the familiar `pr view --json FIELDS`
 contract. `head.ref` is the source branch name from native `label`; the native
-retained-ref name is preserved as `head.forgejo_ref`. `base.sha` remains
+retained-ref name is preserved as `head.forgejo_ref`. `head.label` retains its
+native bare branch name, rather than guessing GitHub's `owner:branch` form when
+fork metadata is absent. `base.sha` remains
 the live base tip, not an inferred historical merge base. Issue reads require an
 issue. Forgejo's false `mergeable` becomes null (unknown), since false also covers
 checking, errors and drafts. Positive native mergeability remains a true
@@ -212,7 +217,9 @@ IDs and adds the same origin-qualified opaque `node_id` namespaces as familiar
 commands, including actors, labels, milestones and branch repositories. Native
 null label/assignee/requested-reviewer slices normalize to empty arrays. Plain
 issues omit the `pull_request` key. Required identity/lifecycle fields must be
-present, and merged timestamps/commits must agree with the native merged flag.
+present. The merged timestamp must agree with the native merged flag, and merged
+PRs must identify a merged commit. `merged_by` and `closed_at` remain native
+observations; their presence is not inferred from lifecycle state.
 
 Forgejo17 issue comments have one unpaginated, byte-bounded native response. The
 wrapper slices it into requested `page`/`per_page` output rather than repeatedly

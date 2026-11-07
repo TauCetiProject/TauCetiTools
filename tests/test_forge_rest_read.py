@@ -102,6 +102,21 @@ class SourceRestReads(unittest.TestCase):
         self.assertEqual(self.read("pulls/12")["head"]["sha"], "a" * 40)
         self.api.pull_ref.assert_called_once_with(self.repo, 12)
 
+    def test_positive_merged_record_and_missing_imported_merge_identity(self):
+        self.pull.update(state="closed", merged=True, merged_at="2026-11-07T01:00:00Z", closed_at="2026-11-07T01:00:00Z",
+                         merge_commit_sha="c" * 40, merged_by=self.user)
+        row = self.read("pulls/12")
+        self.assertTrue(row["merged"])
+        self.assertEqual(row["merge_commit_sha"], "c" * 40)
+        self.assertEqual(row["merged_by"]["node_id"], self.forge.key + "/users/4")
+        self.pull["merge_commit_sha"] = ""
+        with self.assertRaises(Incomplete):
+            self.read("pulls/12")
+        self.pull["merge_commit_sha"] = "c" * 40
+        self.pull["merged_at"] = None
+        with self.assertRaises(Incomplete):
+            self.read("pulls/12")
+
     def test_zero_stats_reuse_verified_reconstruction_and_propagate_missing_proof(self):
         self.pull.update(changed_files=0, additions=0, deletions=0)
         with patch("tauceti_tools.forge_rest_read.ForgejoReader._hydrate", side_effect=Incomplete("unbound diff")):

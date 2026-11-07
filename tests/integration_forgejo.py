@@ -22,6 +22,7 @@ import unittest
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tauceti_tools.forge import Forge, ForgeError, Forgejo, Incomplete, RepositoryRef
@@ -845,9 +846,19 @@ roadmap="operator/roadmap"
                         with self.assertRaises(Incomplete):
                             reader.pull(repo, closed_fork["number"], ["files"])
                         for proposal in [fork_pull, closed_fork]:
-                            with self.subTest(stock_rest_deleted_fork=proposal["number"]), self.assertRaises(ForgeError) as unavailable:
+                            requests = []
+                            original_request = Forgejo.request
+
+                            def recorded_request(client, method, path, *args, requests=requests, original_request=original_request, **kwargs):
+                                requests.append((method, path))
+                                return original_request(client, method, path, *args, **kwargs)
+
+                            with (self.subTest(stock_rest_deleted_fork=proposal["number"]),
+                                  patch.object(Forgejo, "request", recorded_request), self.assertRaises(ForgeError) as unavailable):
                                 rest_native("api", f"repos/operator/content/pulls/{proposal['number']}")
                             self.assertIn(unavailable.exception.status, {0, 500})
+                            self.assertEqual(requests[-1][0], "GET")
+                            self.assertEqual(urllib.parse.urlsplit(requests[-1][1]).path, f"repos/operator/content/pulls/{proposal['number']}/files")
                             for field in ["changedFiles", "additions", "deletions", "files"]:
                                 with (
                                     self.subTest(deleted_source_proposal=proposal["number"], field=field),
