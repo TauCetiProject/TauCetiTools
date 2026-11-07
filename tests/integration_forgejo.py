@@ -192,6 +192,20 @@ ROOT_PATH = {root}/log
                     )
                     repo = RepositoryRef(api.forge, "operator/content")
                     reader = ForgejoReader(api)
+
+                    def await_mergeability(candidate):
+                        # Native checking is asynchronous. Observe readiness
+                        # before the one mutation, never retry a failed merge.
+                        deadline = time.monotonic() + 15
+                        while time.monotonic() < deadline:
+                            observed = api.pull(repo, candidate["number"])
+                            self.assertEqual(observed["head"]["sha"], candidate["head"]["sha"])
+                            self.assertEqual(observed["state"], "open")
+                            if observed["mergeable"] is True:
+                                return
+                            time.sleep(0.05)
+                        self.fail("local candidate did not become mergeable")
+
                     api.post_comment(repo, pull["number"], "Review finding")
                     self.assertEqual(len(api.pulls(repo)), 1)
                     review = api.request(
@@ -732,6 +746,7 @@ roadmap="operator/roadmap"
                     )
                     self.assertEqual(len(reader.pull(repo, many["number"], ["files"])["files"]), 65)
                     api.request("PATCH", f"repos/operator/content/pulls/{second_pull['number']}", {"state": "closed"})
+                    await_mergeability(pull)
                     api.request(
                         "POST",
                         f"repos/operator/content/pulls/{pull['number']}/merge",
@@ -765,6 +780,7 @@ roadmap="operator/roadmap"
                         "repos/operator/content/pulls",
                         {"head": "reviewer:fork-proof", "base": "main", "title": "Fork proof"},
                     )
+                    await_mergeability(fork_pull)
                     api.request(
                         "POST",
                         f"repos/operator/content/pulls/{fork_pull['number']}/merge",
@@ -813,6 +829,7 @@ roadmap="operator/roadmap"
                         "repos/operator/content/pulls",
                         {"head": "reviewer:closed-fork", "base": "main", "title": "Superseding proposal"},
                     )
+                    await_mergeability(superseding)
                     api.request(
                         "POST",
                         f"repos/operator/content/pulls/{superseding['number']}/merge",
