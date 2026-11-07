@@ -77,13 +77,15 @@ class ForgejoWriter:
         for name in names:
             matches = [row for row in labels if row["name"] == name]
             if not matches:
-                matches = [row for row in labels if row["name"].casefold() == name.casefold()]
-            if not matches:
                 if org_labels is None:
                     org_labels = self.labels(repository, organization=True)
-                matches = [row for row in org_labels if row["name"] == name] or [
-                    row for row in org_labels if row["name"].casefold() == name.casefold()
-                ]
+                org_exact = [row for row in org_labels if row["name"] == name]
+                repo_fold = [row for row in labels if row["name"].casefold() == name.casefold()]
+                # The name-first delete route can prefer the repository label
+                # under a case-insensitive database collation. Refuse this clash.
+                if org_exact and repo_fold:
+                    raise Incomplete("requested label name is ambiguous across repository and organization")
+                matches = org_exact or [row for row in labels + org_labels if row["name"].casefold() == name.casefold()]
             if not matches:
                 raise ForgeError("requested label does not exist")
             if len({row["id"] for row in matches}) != 1:
@@ -157,6 +159,14 @@ class ForgejoWriter:
                 data["title"] = prefix + " " + data["title"]
             if not draft and self.wip_prefix(data["title"]):
                 raise Unsupported("title edits cannot change draft state; use an explicit draft operation")
+        if "title" in data and (not isinstance(data["title"], str) or not data["title"].strip()):
+            raise ValueError("title must be nonempty")
+        if "base" in data:
+            if not isinstance(data["base"], str) or not data["base"]:
+                raise ValueError("base branch must be nonempty")
+            branch = self.api.request("GET", path + "/branches/" + quote(data["base"], safe=""))
+            if not isinstance(branch, dict) or branch.get("name") != data["base"]:
+                raise Incomplete("Forgejo base branch could not be verified")
         adds = self.label_ids(repository, add_labels)
         remove_rows = self.resolve_labels(repository, remove_labels)
         removes = [row["id"] for row in remove_rows]

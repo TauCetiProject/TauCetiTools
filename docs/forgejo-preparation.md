@@ -82,8 +82,10 @@ Label names and edit inputs are resolved before writing. Label additions/removal
 use native additive operations rather than replacing another actor's label set.
 Forgejo scoped labels can replace another label in the same scope. Label edits
 run before title/body edits, enforcing native issue/PR write authority before
-applying fields that an issue author can edit. Repository labels work without
-organization read scope; inherited label lookup requests that scope explicitly. Duplicate names are rejected on creation/rename, and
+applying fields that an issue author can edit. Base-branch existence and nonempty
+titles are checked before writing; other server field-validation failures after
+label changes are reported as ambiguous. Repository labels work without
+organization read scope; inherited label lookup requires that scope explicitly. Duplicate names are rejected on creation/rename, and
 ambiguous requested names fail explicitly.
 If a later step fails after an earlier write, the entire command reports an
 ambiguous outcome requiring reconciliation; no mutation is retried automatically.

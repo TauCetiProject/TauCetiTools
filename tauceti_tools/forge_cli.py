@@ -1,4 +1,4 @@
-"""Experimental gh-compatible direct Forgejo reads, with explicit GitHub delegation.
+"""Experimental gh-compatible direct Forgejo operations, with explicit GitHub delegation.
 
 Invoked as tauceti-gh while the worker integration is prepared. This does not
 install a global gh replacement or activate Forgejo in legacy worker bindings.

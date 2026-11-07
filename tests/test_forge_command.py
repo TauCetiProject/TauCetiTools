@@ -135,6 +135,21 @@ class Writes(unittest.TestCase):
             self.writer.review(self.repo, 12, event="APPROVED")
         self.api.request.assert_not_called()
 
+    def test_repo_org_case_variants_cannot_remove_the_wrong_label(self):
+        self.api.collection.side_effect = lambda path: (
+            [{"id": 3, "name": "Ready"}] if path.startswith("repos/") else [{"id": 4, "name": "ready"}]
+        )
+        with self.assertRaises(Incomplete):
+            self.writer.edit(self.repo, 12, pull=True, remove_labels=["ready"])
+        self.api.request.assert_not_called()
+
+    def test_invalid_base_is_checked_before_any_label_mutation(self):
+        self.api.request.side_effect = ForgeError("missing branch", status=404)
+        with self.assertRaises(ForgeError):
+            self.writer.edit(self.repo, 12, pull=True, changes={"base": "missing/branch"}, add_labels=["ready"])
+        self.api.request.assert_called_once_with("GET", "repos/one/project/branches/missing%2Fbranch")
+        self.api.collection.assert_not_called()
+
     def test_repo_labels_work_without_organization_scope(self):
         self.api.collection.side_effect = lambda path: (
             [{"id": 3, "name": "ready"}]
@@ -187,7 +202,6 @@ class Writes(unittest.TestCase):
         self.api.request.assert_called_once_with("DELETE", "repos/one/project/issues/12/labels/ready", None)
 
     def test_denied_label_edit_does_not_partially_edit_body(self):
-        self.api.repository.return_value = {"permissions": {"push": False}}
         self.api.collection.return_value = [{"id": 3, "name": "ready"}]
         self.api.request.side_effect = ForgeError("forbidden", status=403)
         with self.assertRaises(ForgeError):
