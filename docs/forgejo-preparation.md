@@ -192,25 +192,38 @@ GitHub requests use their original argv and normal CLI implementation. No global
 `gh` replacement or production configuration is installed by these changes.
 
 Source discussion contracts additionally support `gh api repos/OWNER/REPO/pulls/N`,
-`issues/N`, `issues/N/comments` and `pulls/N/reviews`. PR reads reuse the explicit
-retained-head and zero-stat recovery checks before exposing head/diff metadata;
+`issues/N`, `issues/N/comments` and `pulls/N/reviews`. Closed PR reads verify their
+retained head, and zero-stat reads reuse the bound diff reconstruction before
+exposing head/diff metadata;
 a stock server that describes a reused closed branch is unavailable. Deleted-fork
-historical data is usable only when those same checks succeed. `base.sha` remains
+historical data is usable only when those same checks succeed. This is a whole
+REST-record contract: even `.title` projection is unavailable when its required
+head/diff proof fails. AGit PRs explicitly require a separate retained-head/diff
+adapter; a lagging retained ref or missing zero-stat proof is unavailable too.
+Stable-field-only callers can instead use the familiar `pr view --json FIELDS`
+contract. `head.ref` is the source branch name from native `label`; the native
+retained-ref name is preserved as `head.forgejo_ref`. `base.sha` remains
 the live base tip, not an inferred historical merge base. Issue reads require an
 issue. Forgejo's false `mergeable` becomes null (unknown), since false also covers
-checking, errors and drafts. Positive native mergeability remains true. The
+checking, errors and drafts. Positive native mergeability remains a true
+observation; it does not prove current merge eligibility. The
 issue route does not alias PR metadata. REST preserves native numeric
 IDs and adds the same origin-qualified opaque `node_id` namespaces as familiar
 commands, including actors, labels, milestones and branch repositories. Native
-null label/assignee slices normalize to empty arrays; missing fields are errors.
+null label/assignee/requested-reviewer slices normalize to empty arrays. Plain
+issues omit the `pull_request` key. Required identity/lifecycle fields must be
+present, and merged timestamps/commits must agree with the native merged flag.
 
 Forgejo17 issue comments have one unpaginated, byte-bounded native response. The
 wrapper slices it into requested `page`/`per_page` output rather than repeatedly
 fetching the same history. Reviews exhaust counted native pages across hidden
-drafts before applying synthetic pages. Other actors' pending reviews and
+drafts before applying synthetic pages. A changing native total count aborts
+the traversal; listings remain observations, not atomic snapshots during
+concurrent edits (including same-count removals and insertions). Other actors' pending reviews and
 reviewer-request placeholders are excluded, including when using a site-admin
 credential. Review state maps to GitHub REST spellings, pending `submitted_at`
-is null, and native `official`, `stale` and `dismissed` remain present. These flags
+is null, and an own web-started draft may have an empty URL before its summary
+comment exists. Native `official`, `stale` and `dismissed` remain present. These flags
 are observations, not grants of approval authority. Discussion URLs must bind
 the configured origin, repository and issue/PR number; duplicate IDs and missing
 metadata fail explicitly. Collections enforce aggregate byte and page bounds.

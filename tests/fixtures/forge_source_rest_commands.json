@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "scope": "Accepted source REST request shapes and required fields, using synthetic repository/number values. These cases do not activate consumers, replace their GraphQL calls or prove approval/merge authority. The Worker fallback still needs qualified routing and unavailable-field handling; Review also requires comparison and eligibility adapters.",
+  "scope": "Accepted source REST request shapes and required fields, using synthetic repository/number values. These cases do not activate consumers, replace their GraphQL calls or prove approval/merge authority. The Worker fallback still needs qualified routing and unavailable-field handling; Review also requires comparison and eligibility adapters. PR REST is a whole-record contract: projections of stable metadata are unavailable when head/diff proof is missing (stock deleted/reused-branch history, lagging retained refs); AGit needs a separate adapter. Use familiar field-selective reads where appropriate.",
   "cases": [
     {
       "id": "progress-pr-details",

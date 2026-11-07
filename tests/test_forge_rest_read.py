@@ -1,5 +1,6 @@
 import copy
 import json
+import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -7,6 +8,7 @@ from unittest.mock import Mock, patch
 
 from tauceti_tools.forge import Forge, ForgeError, Incomplete, RepositoryRef, Unsupported
 from tauceti_tools.forge_api import execute, plan
+from tauceti_tools.forge_cli import run
 from tauceti_tools.forge_command import parse_command
 
 
@@ -22,10 +24,10 @@ class SourceRestReads(unittest.TestCase):
             "created_at": "2026-11-07T00:00:00Z", "updated_at": "2026-11-07T00:00:00Z",
             "user": self.user, "labels": [{"id": 4, "name": "ready"}], "assignees": [self.user],
             "state": "open", "merged": False, "draft": False, "mergeable": True, "is_locked": False, "flow": 0,
-            "head": {"sha": "a" * 40, "repo": {"id": 3, "full_name": self.repo.name}},
-            "base": {"sha": "b" * 40, "repo": {"id": 3, "full_name": self.repo.name}},
+            "head": {"sha": "a" * 40, "ref": "refs/pull/12/head", "label": "proof", "repo": {"id": 3, "full_name": self.repo.name}},
+            "base": {"sha": "b" * 40, "ref": "main", "label": "main", "repo": {"id": 3, "full_name": self.repo.name}},
             "changed_files": 1, "additions": 1, "deletions": 0, "merge_commit_sha": None,
-            "merged_at": None,
+            "merged_at": None, "closed_at": None, "merged_by": None, "requested_reviewers": None,
         }
         self.api.pull.return_value = self.pull
         self.api.pull_ref.return_value = "a" * 40
@@ -55,6 +57,9 @@ class SourceRestReads(unittest.TestCase):
         self.assertEqual(row["id"], 5)
         self.assertEqual(row["node_id"], self.forge.key + "/pulls/5")
         self.assertEqual(row["head"]["sha"], "a" * 40)
+        self.assertEqual(row["head"]["ref"], "proof")
+        self.assertEqual(row["head"]["forgejo_ref"], "refs/pull/12/head")
+        self.assertEqual(row["requested_reviewers"], [])
         self.assertEqual(row["changed_files"], 1)
         self.assertFalse(row["locked"])
         self.assertNotIn("is_locked", row)
@@ -113,6 +118,7 @@ class SourceRestReads(unittest.TestCase):
         self.assertEqual(row["node_id"], self.forge.key + "/issues/5")
         self.assertEqual(row["url"], self.forge.api_url + "/repos/one/project/issues/12")
         self.assertEqual(row["state"], "open")
+        self.assertNotIn("pull_request", row)
         self.api.issue.side_effect = Incomplete("not an issue")
         with self.assertRaises(Incomplete):
             self.read("issues/12")
@@ -198,6 +204,27 @@ class SourceRestReads(unittest.TestCase):
         with self.assertRaises(Incomplete):
             self.read("pulls/12/reviews")
 
+    def test_own_web_started_draft_may_have_no_summary_url(self):
+        self.review.update(state="PENDING", html_url="")
+        self.assertEqual(self.read("pulls/12/reviews")[0]["html_url"], "")
+        self.review["state"] = "APPROVED"
+        with self.assertRaises(Incomplete):
+            self.read("pulls/12/reviews")
+
+    def test_agit_and_missing_or_inconsistent_lifecycle_are_unavailable(self):
+        self.pull["flow"] = 1
+        with self.assertRaisesRegex(Unsupported, "AGit"):
+            self.read("pulls/12")
+        self.pull["flow"] = 0
+        for key in ("merged_at", "closed_at", "merge_commit_sha", "merged_by", "requested_reviewers"):
+            original = self.pull.pop(key)
+            with self.subTest(key=key), self.assertRaises(Incomplete):
+                self.read("pulls/12")
+            self.pull[key] = original
+        self.pull["merged_at"] = "2026-11-07T00:00:00Z"
+        with self.assertRaises(Incomplete):
+            self.read("pulls/12")
+
     def test_aggregate_byte_and_page_bounds_apply_to_normalized_collections(self):
         self.api.max_bytes = 10
         for suffix in ["pulls/12", "issues/12", "issues/12/comments", "pulls/12/reviews"]:
@@ -220,6 +247,28 @@ class SourceRestReads(unittest.TestCase):
             with self.subTest(suffix=suffix, options=options), self.assertRaises(Unsupported):
                 self.request(suffix, *options)
         self.api.request.assert_not_called()
+
+    def test_cli_rejects_unsupported_source_forms_before_credentials(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = Path(root) / "project.toml"
+            config.write_text('''schema_version=2
+[forges.source]
+kind="forgejo"
+url="https://git.example.org"
+[repositories]
+content={forge="source",name="one/project"}
+roadmap={forge="source",name="one/roadmap"}
+''')
+            for args in [["repos/one/project/pulls/12", "--include"], ["repos/one/project/issues/12/comments?since=2026-01-01"],
+                         ["repos/one/project/pulls/12/reviews", "-X", "POST"]]:
+                with (self.subTest(args=args), patch("tauceti_tools.forge_cli.Forgejo") as client,
+                      patch("tauceti_tools.forge_cli._delegate") as delegate, self.assertRaises(Unsupported)):
+                    run(["--conf", str(config), "api", "--hostname", "git.example.org", *args], environment={
+                        "TAUCETI_FORGEJO_TOKEN_FILE": str(Path(root) / "must-not-open-token"),
+                        "TAUCETI_FORGEJO_ORIGIN": "https://git.example.org",
+                    })
+                client.assert_not_called()
+                delegate.assert_not_called()
 
 
 if __name__ == "__main__":

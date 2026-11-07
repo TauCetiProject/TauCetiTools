@@ -7,16 +7,20 @@ loopback, disables Actions/registration/SSH, and is stopped even on test failure
 import base64
 import contextlib
 import getpass
+import http.cookiejar
 import io
 import json
 import os
 import re
+import secrets
 import socket
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -106,6 +110,7 @@ ROOT_PATH = {root}/log
             tokens = re.findall(r"(?m)^[a-f0-9]{40}$", output)
             self.assertEqual(len(tokens), 1, "expected one local token (output withheld)")
             token = tokens[0]
+            reviewer_password = "local-fixture-only-" + secrets.token_urlsafe(24)
             admin(
                 "admin",
                 "user",
@@ -114,7 +119,8 @@ ROOT_PATH = {root}/log
                 "reviewer",
                 "--email",
                 "reviewer@example.invalid",
-                "--random-password",
+                "--password",
+                reviewer_password,
                 "--must-change-password=false",
             )
             output = admin(
@@ -489,14 +495,19 @@ roadmap="operator/roadmap"
                     rest_pull = json.loads(rest_native("api", f"repos/operator/content/pulls/{pull['number']}"))
                     self.assertEqual(rest_pull["head"]["sha"], pull["head"]["sha"])
                     self.assertEqual(rest_pull["changed_files"], 1)
+                    self.assertEqual(rest_pull["head"]["ref"], "proof")
                     self.assertEqual(rest_pull["user"]["node_id"], api.forge.key + "/users/" + str(rest_pull["user"]["id"]))
                     rest_issue = json.loads(native("api", f"repos/operator/content/issues/{second_issue['number']}"))
                     self.assertEqual(rest_issue["title"], "Both labels")
                     self.assertEqual(rest_issue["node_id"], api.forge.key + "/issues/" + str(rest_issue["id"]))
+                    api.post_comment(repo, pull["number"], "Follow-up finding")
                     rest_comments = json.loads(native(
                         "api", f"repos/operator/content/issues/{pull['number']}/comments?per_page=1", "--paginate", "--slurp"
                     ))
-                    self.assertEqual([[c["body"] for c in page] for page in rest_comments], [["Review finding"]])
+                    self.assertEqual([[c["body"] for c in page] for page in rest_comments], [["Review finding"], ["Follow-up finding"]])
+                    self.assertNotEqual(rest_comments[0][0]["id"], rest_comments[1][0]["id"])
+                    with self.assertRaises(Incomplete):
+                        native("api", f"repos/operator/content/issues/{pull['number']}")
                     rest_reviews = json.loads(native(
                         "api", f"repos/operator/content/pulls/{pull['number']}/reviews?per_page=1", "--paginate", "--slurp", review=True
                     ))
@@ -531,6 +542,32 @@ roadmap="operator/roadmap"
                     reviewer.request(
                         "DELETE", f"repos/operator/content/pulls/{pull['number']}/reviews/{pending_review['id']}"
                     )
+                    # A web-started review creates only the pending review and
+                    # code comment, without the API's summary issue comment.
+                    browser = urllib.request.build_opener(
+                        urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+                    )
+
+                    with browser.open(url + "/user/login", timeout=5) as response:
+                        self.assertEqual(response.status, 200)
+                    login = urllib.parse.urlencode({"user_name": "reviewer", "password": reviewer_password}).encode()
+                    with browser.open(urllib.request.Request(url + "/user/login", login, {"Origin": url}), timeout=5) as response:
+                        self.assertNotIn("/user/login", response.url)
+                    web_path = f"/operator/content/pulls/{pull['number']}/files"
+                    form = urllib.parse.urlencode({
+                        "origin": "diff", "content": "Web draft finding", "side": "proposed",
+                        "line": "1", "path": "Proof.lean", "before_commit_id": pull["base"]["sha"],
+                        "latest_commit_id": pull["head"]["sha"],
+                    }).encode()
+                    with browser.open(urllib.request.Request(url + web_path + "/reviews/comments", form, {"Origin": url}), timeout=5) as response:
+                        self.assertEqual(response.status, 200)
+                    web_pending = [row for row in reviewer.reviews(repo, pull["number"]) if row["state"] == "PENDING"]
+                    self.assertEqual(len(web_pending), 1)
+                    self.assertEqual(web_pending[0]["html_url"], "")
+                    own_web_reviews = json.loads(native("api", f"repos/operator/content/pulls/{pull['number']}/reviews", review=True))
+                    self.assertTrue(any(row["id"] == web_pending[0]["id"] and row["html_url"] == "" for row in own_web_reviews))
+                    self.assertTrue(all(row["id"] != web_pending[0]["id"] for row in json.loads(native("api", f"repos/operator/content/pulls/{pull['number']}/reviews"))))
+                    reviewer.request("DELETE", f"repos/operator/content/pulls/{pull['number']}/reviews/{web_pending[0]['id']}")
                     native("label", "create", "cli", "--color", "123456", "--description", "--repo=literal")
                     with self.assertRaises(ForgeError):
                         native("label", "create", "cli")
@@ -699,6 +736,10 @@ roadmap="operator/roadmap"
                         f"repos/operator/content/pulls/{pull['number']}/merge",
                         {"Do": "merge", "head_commit_id": pull["head"]["sha"]},
                     )
+                    rest_merged = json.loads(rest_native("api", f"repos/operator/content/pulls/{pull['number']}"))
+                    self.assertTrue(rest_merged["merged"])
+                    self.assertIsInstance(rest_merged["merged_at"], str)
+                    self.assertIsInstance(rest_merged["merge_commit_sha"], str)
                     self.assertEqual([r["number"] for r in api.pulls(repo, state="closed")], [second_pull["number"]])
                     self.assertEqual([r["number"] for r in api.pulls(repo, state="merged")], [pull["number"]])
                     api.request("DELETE", "repos/operator/content/branches/proof")
@@ -804,6 +845,9 @@ roadmap="operator/roadmap"
                         with self.assertRaises(Incomplete):
                             reader.pull(repo, closed_fork["number"], ["files"])
                         for proposal in [fork_pull, closed_fork]:
+                            with self.subTest(stock_rest_deleted_fork=proposal["number"]), self.assertRaises(ForgeError) as unavailable:
+                                rest_native("api", f"repos/operator/content/pulls/{proposal['number']}")
+                            self.assertIn(unavailable.exception.status, {0, 500})
                             for field in ["changedFiles", "additions", "deletions", "files"]:
                                 with (
                                     self.subTest(deleted_source_proposal=proposal["number"], field=field),

@@ -232,6 +232,7 @@ class Forgejo:
         if any(k in {"page", "limit"} for k, _ in query):
             raise ValueError("collection owns page and limit parameters")
         page_size = 50
+        expected_total = None
         if counted:
             settings = self.request("GET", "settings/api")
             cap = settings.get("max_response_items") if isinstance(settings, dict) else None
@@ -255,6 +256,9 @@ class Forgejo:
                         raise ValueError
                 except (KeyError, ValueError):
                     raise Incomplete("Forgejo collection count is unavailable") from None
+                if expected_total is not None and total != expected_total:
+                    raise Incomplete("Forgejo collection count changed during pagination")
+                expected_total = total
                 yield batch
                 if page * page_size >= total:
                     return

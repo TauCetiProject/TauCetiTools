@@ -10,7 +10,7 @@ import json
 import re
 import urllib.parse
 
-from .forge import Incomplete, RepositoryRef
+from .forge import Incomplete, RepositoryRef, Unsupported
 from .forge_read import ForgejoReader
 
 
@@ -111,12 +111,15 @@ def source_read(request, api):
             if native_id in seen:
                 raise Incomplete("Forgejo reviews repeated an identity")
             seen.add(native_id)
-            _bound_url(row.get("html_url"), repo, number)
             states = {"PENDING": "PENDING", "COMMENT": "COMMENTED", "APPROVED": "APPROVED", "REQUEST_CHANGES": "CHANGES_REQUESTED"}
             if row.get("state") not in states or any(type(row.get(key)) is not bool for key in ("dismissed", "official", "stale")):
                 raise Incomplete("Forgejo review state/authority metadata is unavailable")
             if any(not isinstance(row.get(key), str) for key in ("body", "submitted_at", "updated_at", "commit_id")) or "user" not in row:
                 raise Incomplete("Forgejo review metadata is unavailable")
+            # Web-started own drafts have no summary comment yet, hence no URL.
+            # review_records has already restricted PENDING rows to this actor.
+            if row["state"] != "PENDING" or row.get("html_url") != "":
+                _bound_url(row.get("html_url"), repo, number)
             _actor(row["user"])
             result.append({**row, "state": "DISMISSED" if row["dismissed"] else states[row["state"]],
                            "submitted_at": None if row["state"] == "PENDING" else row["submitted_at"],
@@ -126,10 +129,36 @@ def source_read(request, api):
     _common(row, repo, number)
     value = {**row, "labels": row["labels"] or [], "assignees": row["assignees"] or []}
     if request.kind == "pull":
+        if type(row.get("flow")) is not int:
+            raise Incomplete("Forgejo PR flow is unavailable")
+        if row["flow"] != 0:
+            raise Unsupported("AGit PR metadata requires a retained-head/diff adapter")
         if any(type(row.get(key)) is not bool for key in ("draft", "merged", "mergeable")):
             raise Incomplete("Forgejo PR lifecycle/mergeability metadata is unavailable")
         if row["merged"] and row["state"] != "closed":
             raise Incomplete("Forgejo merged PR lifecycle is inconsistent")
+        for key in ("merged_at", "closed_at", "merge_commit_sha", "merged_by", "requested_reviewers"):
+            if key not in row:
+                raise Incomplete(f"Forgejo PR {key} is unavailable")
+        if ((row["merged"] and not isinstance(row["merged_at"], str))
+                or (not row["merged"] and row["merged_at"] is not None)):
+            raise Incomplete("Forgejo PR merged timestamp disagrees with its lifecycle")
+        if row["closed_at"] is not None and not isinstance(row["closed_at"], str):
+            raise Incomplete("Forgejo PR closed timestamp is unavailable")
+        if row["merge_commit_sha"] is not None and (not isinstance(row["merge_commit_sha"], str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", row["merge_commit_sha"])):
+            raise Incomplete("Forgejo merged commit identity is unavailable")
+        if row["merged"] and row["merge_commit_sha"] is None:
+            raise Incomplete("Forgejo merged PR has no merged commit identity")
+        _actor(row["merged_by"])
+        if row["requested_reviewers"] is not None and not isinstance(row["requested_reviewers"], list):
+            raise Incomplete("Forgejo requested reviewers are unavailable")
+        value["requested_reviewers"] = row["requested_reviewers"] or []
+        for actor in value["requested_reviewers"]:
+            _actor(actor)
+        for side in ("head", "base"):
+            branch = row.get(side)
+            if not isinstance(branch, dict) or any(not isinstance(branch.get(key), str) or not branch[key] for key in ("ref", "label")):
+                raise Incomplete("Forgejo PR branch name is unavailable")
         branch = row.get("base")
         if not isinstance(branch, dict) or not isinstance(branch.get("sha"), str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", branch["sha"]):
             raise Incomplete("Forgejo PR base identity is unavailable")
@@ -141,13 +170,14 @@ def source_read(request, api):
             raise Incomplete("Forgejo PR diff statistics are unavailable")
         # Never expose current source-branch metadata as historical proposal data.
         value.update(changed_files=verified["changedFiles"], additions=verified["additions"], deletions=verified["deletions"])
-        value["head"] = {**row["head"], "sha": verified["headRefOid"]}
+        value["head"] = {**row["head"], "sha": verified["headRefOid"], "ref": row["head"]["label"], "forgejo_ref": row["head"]["ref"]}
         # Forgejo false also covers checking/error/draft; GitHub REST uses null
         # for unknown. Do not turn uncertainty into a claimed merge conflict.
         value["mergeable"] = True if row["mergeable"] else None
         value["locked"] = value.pop("is_locked")
         value["url"] = base + "/pulls/" + str(number)
     else:
+        value.pop("pull_request", None)  # GitHub omits the PR marker for plain issues.
         value["locked"] = value.pop("is_locked")
         value["url"] = base + "/issues/" + str(number)
     return _bounded(value, api)
