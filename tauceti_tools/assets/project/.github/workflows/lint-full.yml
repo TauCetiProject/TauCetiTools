@@ -226,6 +226,9 @@ jobs:
       - name: Open or refresh the lint repair PR
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # The login the repair PR is opened under: the app of `APP_ID`, Tau Ceti's review bot or the
+          # project's own.
+          BOT_LOGIN: ${{ steps.app-token.outputs.app-slug }}[bot]
           REPO: ${{ github.repository }}
           MAIN_SHA: ${{ needs.lint.outputs.sha }}
           REPORT: ${{ needs.lint.outputs.report }}
@@ -247,7 +250,7 @@ jobs:
           # shellcheck disable=SC2016 # the jq program is single-quoted on purpose
           existing=$(gh api "repos/$REPO/pulls?state=open&head=${REPO%%/*}:$branch" \
             --jq '[.[] | select(.head.repo.full_name == $ENV.REPO
-              and .user.login == "tauceti-review-bot[bot]")][0].number // empty')
+              and .user.login == $ENV.BOT_LOGIN)][0].number // empty')
           if [ -n "$existing" ]; then
             echo "Repair PR #$existing is already open; commenting the current violations."
             gh pr comment "$existing" -R "$REPO" --body-file report.md
