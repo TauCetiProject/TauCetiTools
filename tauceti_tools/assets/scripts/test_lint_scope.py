@@ -745,7 +745,8 @@ class PrBuildWiringTest(unittest.TestCase):
             out = subprocess.run(
                 ["bash", "-c", f"set -uo pipefail\nfiles={shlex.quote(files)}\n{block}"],
                 env={**os.environ, "GITHUB_ENV": str(github_env),
-                     "PR_HEAD_REF": "", "PR_HEAD_REPO": "", "PR_USER": "", **(env or {})},
+                     "PR_HEAD_REF": "", "PR_HEAD_REPO": "", "PR_USER": "",
+                     "REPAIR_BOT_LOGIN": self.BOT, **(env or {})},
                 capture_output=True, text=True)
             self.assertEqual(out.returncode, 0, out.stderr)
             return ("repair_pr=1" in out.stdout, "INFRA=1" in github_env.read_text())
@@ -766,6 +767,24 @@ class PrBuildWiringTest(unittest.TestCase):
             with self.subTest(api=api):
                 self.assertEqual(self.repair_exemption("workflow_dispatch", "", api=api),
                                  (False, True))
+
+    def test_a_project_app_repair_pr_is_built(self):
+        # A project whose `APP_ID` is its own app passes that app's login as `repair_bot_login`.
+        app = {"REPAIR_BOT_LOGIN": "project-app[bot]"}
+        env = {"PR_HEAD_REF": "lint-repair/main", "PR_HEAD_REPO": "o/r", "PR_USER": "project-app[bot]"}
+        self.assertEqual(self.repair_exemption("pull_request_target", "", env={**app, **env}),
+                         (True, False))
+        self.assertEqual(self.repair_exemption(
+            "workflow_dispatch", "", env=app, api="lint-repair/main\to/r\tproject-app[bot]"),
+            (True, False))
+        # Then Tau Ceti's review bot is just another author.
+        self.assertEqual(self.repair_exemption(
+            "workflow_dispatch", "", env=app, api=f"lint-repair/main\to/r\t{self.BOT}"),
+            (False, True))
+
+    def test_an_empty_repair_login_exempts_nothing(self):
+        env = {"PR_HEAD_REF": "lint-repair/main", "PR_HEAD_REPO": "o/r", "REPAIR_BOT_LOGIN": ""}
+        self.assertEqual(self.repair_exemption("pull_request_target", "", env=env), (False, True))
 
     def test_api_failure_goes_to_a_human(self):
         self.assertEqual(self.repair_exemption("workflow_dispatch", "", api=None), (False, True))

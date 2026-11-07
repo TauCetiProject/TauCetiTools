@@ -149,6 +149,20 @@ def repair_cache_url(project: Project) -> str:
     return str(service.get("url", "")).rstrip("/")
 
 
+def automation_login(project: Project) -> str:
+    """The login of the project's automation App, which opens its lint repair PRs.
+
+    Tau Ceti's is its review bot. Other projects register `REPOSITORY-automation`; set
+    `services.automation.app_slug` when the App has another slug.
+    """
+    if project.legacy:
+        return "tauceti-review-bot[bot]"
+    # The repository name through the qualified reference, which a project on any forge has
+    # (`project.content` is GitHub-only).
+    default = project.repository_ref("content").name.split("/")[1].lower() + "-automation"
+    return project.service("automation").get("app_slug", default) + "[bot]"
+
+
 def substitutions(project: Project, *, source_ci=False, qualified=False) -> list[tuple[str, str]]:
     """Render only trusted tool templates, never contributor/agent content."""
     root = project.roots[0]
@@ -234,6 +248,7 @@ def substitutions(project: Project, *, source_ci=False, qualified=False) -> list
         ("https://taucetiproject.github.io/TauCeti/docs", project.raw.get("publication", {}).get("docs_url", "")),
         ("roadmap_dir: TauCetiRoadmap", "roadmap_dir: " + project.roadmap_dir),
         ("lean_root: TauCeti", "lean_root: " + project.roots[0]),
+        ("repair_bot_login: tauceti-review-bot[bot]", "repair_bot_login: " + automation_login(project)),
         ("TauCetiRoadmap", project.roadmap_dir),
         ("TauCeti.lean", root.replace(".", "/") + ".lean"),
         ("TauCeti/", root.replace(".", "/") + "/"),
