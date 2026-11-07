@@ -40,9 +40,42 @@ READ = (REPO, JSON, JQ)
 WRITE = (REPO,)
 CONTENT = (TITLE, BODY, BODY_FILE)
 
+# GitHub Actions commands are parsed only to route to the native CLI. In
+# particular workflow run's --json is boolean, unlike run/list's JSON projection;
+# fields, refs, templates and artifact paths must never be scanned for -R.
+CI_JSON = (JSON, JQ, option("template", "-t"))
+CI_COMMANDS = {
+    ("run", "list"): (
+        REPO, *CI_JSON, LIMIT, option("all", "-a", kind="bool"), option("branch", "-b"),
+        option("commit", "-c"), option("created"), option("event", "-e"), option("status", "-s"),
+        option("user", "-u"), option("workflow", "-w"),
+    ),
+    ("run", "view"): (
+        REPO, *CI_JSON, option("attempt", "-a"), option("job", "-j"),
+        option("exit_status", kind="bool"), option("log", kind="bool"), option("log_failed", kind="bool"),
+        option("verbose", "-v", kind="bool"), option("web", "-w", kind="bool"),
+    ),
+    ("run", "watch"): (
+        REPO, option("interval", "-i"), option("exit_status", kind="bool"), option("compact", kind="bool"),
+    ),
+    ("run", "rerun"): (REPO, option("job", "-j"), option("debug", "-d", kind="bool"), option("failed", kind="bool")),
+    ("run", "cancel"): (REPO, option("force", kind="bool")),
+    ("run", "delete"): (REPO,),
+    ("run", "download"): (REPO, option("dir", "-D"), option("name", "-n", kind="repeat"), option("pattern", "-p", kind="repeat")),
+    ("workflow", "list"): (REPO, *CI_JSON, LIMIT, option("all", "-a", kind="bool")),
+    ("workflow", "view"): (REPO, option("ref", "-r"), option("web", "-w", kind="bool"), option("yaml", "-y", kind="bool")),
+    ("workflow", "run"): (
+        REPO, option("ref", "-r"), option("field", "-F", kind="repeat"), option("raw_field", "-f", kind="repeat"),
+        option("json", kind="bool"),
+    ),
+    ("workflow", "enable"): (REPO,),
+    ("workflow", "disable"): (REPO,),
+}
+
 # This table is intentionally explicit. Unsupported commands/flags never reach
 # a credential or an implicit native-GitHub fallback.
 COMMANDS = {
+    **CI_COMMANDS,
     ("pr", "view"): READ,
     ("pr", "list"): (*READ, STATE, LIMIT, AUTHOR, LABEL, BASE, HEAD),
     ("pr", "create"): (*WRITE, *CONTENT, BASE, HEAD, LABEL, option("draft", "-d", kind="bool")),
@@ -177,8 +210,11 @@ def parse_command(argv):
             raise Unsupported("--slurp requires --paginate")
         return Command("api", "request", tuple(positional), values)
 
+    inherited = (REPO,) if group in {"run", "workflow"} else READ
+    if group in {"run", "workflow"} and set(values) - {"repo"}:
+        raise Unsupported("only repository flags are supported before a CI subcommand")
     while index < len(tokens) and tokens[index].startswith("-"):
-        index = _consume(tokens, index, READ, values)
+        index = _consume(tokens, index, inherited, values)
     if index >= len(tokens):
         raise Unsupported("a subcommand is required")
     action = tokens[index]
@@ -205,6 +241,14 @@ def parse_command(argv):
 
 def _validate(cmd):
     opts = cmd.options
+    if cmd.key in CI_COMMANDS:
+        allowed = {0} if cmd.action == "list" else {0, 1}
+        if len(cmd.args) not in allowed:
+            raise Unsupported("incorrect number of command arguments")
+        if "repo" in opts and not opts["repo"]:
+            raise Unsupported("repository must not be empty")
+        # Native gh owns execution, value validation, prompts, files and stdin.
+        return
     counts = {
         ("repo", "view"): {0, 1},
         ("repo", "list"): {0, 1},

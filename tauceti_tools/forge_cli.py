@@ -15,7 +15,7 @@ import urllib.parse
 
 from . import forge_api
 from .forge import GITHUB, AmbiguousWrite, Forge, ForgeError, Forgejo, RepositoryRef, Unsupported
-from .forge_command import parse_command
+from .forge_command import CI_COMMANDS, parse_command
 from .forge_commands import execute, render
 from .project import ConfigError, load, resolve_repository
 
@@ -167,8 +167,12 @@ def run(argv, *, environment=None):
         repository = RepositoryRef(_host_forge(host, refs), primary.name) if host else primary
     elif selected:
         repository = _selected_repository(selected, refs, primary)
+    elif command.key in CI_COMMANDS:
+        repository = project.ci_repository_ref()
     else:
         repository = _checkout_repository(refs)
+    if command.key in CI_COMMANDS and repository.forge.kind != "github":
+        raise Unsupported("GitHub Actions commands require a GitHub repository; select -R HOST/OWNER/REPO")
     if repository.forge.kind == "github":
         if repository.forge != GITHUB and any(
             env.get(key) for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")

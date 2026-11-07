@@ -55,6 +55,31 @@ All-GitHub configurations delegate native arguments unchanged (apart from the
 leading wrapper option). Mixed-project delegation is limited to the implemented
 commands and flags; other subcommands fail before routing or
 credential selection. Full command coverage remains preparation work.
+
+Mixed projects also support native GitHub Actions `run list/view/watch/rerun/`
+`cancel/delete/download` and `workflow list/view/run/enable/disable`, with their
+explicit command-specific flags. Without `-R` or `GH_REPO`, these commands select
+the trusted `[ci].repository`; a missing CI configuration is an error. Explicit
+selectors retain their host and override the configured CI default. A Forgejo
+selector is rejected, and a bare name shared by Forgejo and GitHub remains
+ambiguous. Callers must qualify those names, for example
+`-R github.com/TauCetiProject/TauCeti`. No source repository is automatically
+rewritten to its mirror. Native gh receives the original arguments, stdin and
+file references, plus the selected `GH_HOST` and qualified `GH_REPO`; output and
+exit status pass through. `workflow run --json` reads stdin in native gh, while
+`run view --json FIELDS` consumes a field list. Ref, field, template and artifact
+path values cannot select a server. The wrapper does not open Forgejo credentials
+for these commands. The existing Enterprise credential-origin guard still applies.
+Unknown commands and flags fail before delegation in mixed projects.
+
+`tests/fixtures/forge_ci_commands.json` records four accepted CI-routing cases
+with immutable Worker/Tools source provenance and synthetic values. These cases
+test the required host-qualification adaptation; their source consumers are not
+yet migrated. The process-boundary regression uses a local native-CLI stand-in
+to verify stdin, argument, output and exit-status forwarding. Neither check
+demonstrates a hosted CI run or candidate/run/attempt provenance. The queue must
+still implement and verify that provenance before Forgejo activation.
+
 Forgejo authentication uses a private `TAUCETI_FORGEJO_TOKEN_FILE` and requires
 `TAUCETI_FORGEJO_ORIGIN` to match the normalized destination origin. Set both in
 trusted process configuration outside the checkout. Public reads can omit them.

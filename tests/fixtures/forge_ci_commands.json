@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "scope": "Accepted native-CI routing cases only. Repository, workflow, run, branch and input values are synthetic substitutions into the cited source expressions. Qualified argv records the required caller adaptation; these cases do not prove those consumers are adapted or exact-candidate admission is implemented.",
+  "native_contract": "Installed gh 2.103.3 command help; workflow run --json is boolean, while run/list/view --json consumes a field list.",
+  "cases": [
+    {
+      "id": "worker-maintenance-dispatch",
+      "source": {
+        "repository": "https://github.com/TauCetiProject/TauCetiWorker",
+        "revision": "f1bbc941696791028fdc523df5cb4e8a10ac25b6",
+        "path": "tauceti_worker/workflow_backstop.py",
+        "blob": "f32746e60705b66dce36d709963dc9337df9f3e2",
+        "symbol": "GitHub.dispatch"
+      },
+      "source_argv": [
+        "workflow",
+        "run",
+        "build.yml",
+        "--repo=one/Project",
+        "--ref=main"
+      ],
+      "qualified_argv": [
+        "workflow",
+        "run",
+        "build.yml",
+        "--repo=github.com/one/Project",
+        "--ref=main"
+      ]
+    },
+    {
+      "id": "tools-doctor-run-log",
+      "source": {
+        "repository": "https://github.com/TauCetiProject/TauCetiTools",
+        "revision": "b97c515e4a9a10018cc0d785e9ab19fcea76db5f",
+        "path": "tauceti_tools/doctor.py",
+        "blob": "80cc92c458ffbf591624d2bc7de5421321d47519",
+        "symbol": "extra_findings"
+      },
+      "source_argv": [
+        "run",
+        "view",
+        "123",
+        "--repo",
+        "one/Project",
+        "--log"
+      ],
+      "qualified_argv": [
+        "run",
+        "view",
+        "123",
+        "--repo",
+        "github.com/one/Project",
+        "--log"
+      ]
+    },
+    {
+      "id": "tools-doctor-progress-retry",
+      "source": {
+        "repository": "https://github.com/TauCetiProject/TauCetiTools",
+        "revision": "b97c515e4a9a10018cc0d785e9ab19fcea76db5f",
+        "path": "tauceti_tools/doctor.py",
+        "blob": "80cc92c458ffbf591624d2bc7de5421321d47519",
+        "symbol": "extra_findings"
+      },
+      "source_argv": [
+        "workflow",
+        "run",
+        "progress-merge.yml",
+        "--repo",
+        "one/Project",
+        "-f",
+        "pr=12"
+      ],
+      "qualified_argv": [
+        "workflow",
+        "run",
+        "progress-merge.yml",
+        "--repo",
+        "github.com/one/Project",
+        "-f",
+        "pr=12"
+      ]
+    },
+    {
+      "id": "tools-online-dispatch",
+      "source": {
+        "repository": "https://github.com/TauCetiProject/TauCetiTools",
+        "revision": "b97c515e4a9a10018cc0d785e9ab19fcea76db5f",
+        "path": "tauceti_tools/cli.py",
+        "blob": "a478345c5d7e44bfd2482249fba53e956e22e7f7",
+        "symbol": "main"
+      },
+      "source_argv": [
+        "workflow",
+        "run",
+        "build.yml",
+        "--repo",
+        "one/Project",
+        "--ref",
+        "main",
+        "--field",
+        "request=@request.json"
+      ],
+      "qualified_argv": [
+        "workflow",
+        "run",
+        "build.yml",
+        "--repo",
+        "github.com/one/Project",
+        "--ref",
+        "main",
+        "--field",
+        "request=@request.json"
+      ]
+    }
+  ]
+}
