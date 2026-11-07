@@ -422,6 +422,126 @@ useful completions, interrupted work, and recovery afterward.
 
 ## Qualified CI source histories
 
+### Qualified candidate execution
+
+The opt-in `tauceti-source-candidate-v2` event executes a retained Forgejo
+candidate in the trusted GitHub `pr-build.yml` workflow. The project caller must
+set `source_candidate_enabled`; generated callers obtain it from
+`FORGEJO_SOURCE_CI_ENABLED`. The default is false. Receiving a source event never
+selects the legacy GitHub PR path, including when the opt-in check fails.
+
+The execution repository's immutable workflow checkout contains `tauceti.toml`
+and `.tauceti/ci-source.json`. The latter uses this policy shape:
+
+```json
+{
+  "schema": "tauceti-ci.source-candidate/v2",
+  "source": {"forge": {"kind": "forgejo", "url": "https://git.example.org"}, "name": "team/Math", "id": 41},
+  "execution": {"forge": {"kind": "github", "url": "https://github.com"}, "name": "team/Execution", "id": 42},
+  "credential_origin": {"kind": "forgejo", "url": "https://git.example.org"},
+  "workflow": ".github/workflows/pr-build.yml",
+  "harness": {"forge": {"kind": "github", "url": "https://github.com"}, "name": "team/Tools", "id": 43},
+  "harness_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "base_branch": "main",
+  "execution_branch": "main",
+  "require_publication": true
+}
+```
+
+The example IDs and revision must be replaced with independently verified
+deployment values. The policy digest includes the SHA-256 of the exact trusted
+`tauceti.toml` bytes. The queue must independently pin that policy, configuration,
+caller workflow SHA and shared harness SHA before sending a request. A policy
+file cannot contain its own enclosing commit SHA; the request carries the caller
+SHA and CI compares it with the actual GitHub workflow context. The workflow
+also compares its tooling inputs with the actual reusable workflow identity
+before checking out executable tooling. GitHub.com's `job.workflow_sha`,
+`job.workflow_repository` and `job.workflow_file_path` identify the reusable
+workflow; the `github` context identifies its caller. These properties are not
+available on GitHub Enterprise Server. See the [GitHub context reference](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#job-context).
+
+Requests bind a 128-bit queue epoch and request ID, native source and execution
+repository IDs, batch version, exact base, candidate commit/tree and accepted
+member heads. The current inline transport bounds the request to 60 KiB and 128
+members. The production-shaped large-batch rehearsal requires a retained member
+manifest transport before queue activation; silently splitting existing batches
+or treating this inline bound as a capacity proof is insufficient.
+Retained branch names are derived from the epoch and request ID:
+`refs/heads/tauceti-ci/EPOCH/REQUEST/candidate` and `member-PR`. The queue must
+protect these refs from subsequent mutation. CI fetches all retained heads in
+one transfer, verifies each SHA and candidate tree, and checks that the base is
+the candidate's merge base. It rechecks the native repository ID before and after
+source transfers. Complete histories and sandbox materialization use the existing
+qualified Git helpers. The native read token is provided only to explicit host
+read steps before dependency executables run; it is never a candidate sandbox
+variable or merge credential. Native branch/label policy is saved with the
+request digest in runner temporary storage. The later lint step reads that
+observation and local Git objects without native credentials or network access.
+
+Source bootstrap materializes portable build scripts without exporting legacy
+unqualified source bindings. Native PR branch/label reads select lint scope;
+unavailable, changed-head or full-lint observations select full-library lint.
+The GitHub helper permits only configured execution/dependency reads and refuses
+source metadata or status writes before credential selection. Candidate audits,
+scope and pin guards continue to run. Exact retained members receive the same
+per-PR line/file/new-Lean-file caps as GitHub PRs, using local complete histories
+and each member's merge base. A size rejection stops the build after saving its
+evidence. Binary files retain GitHub's zero line count and still count as files;
+unrelated or ambiguous member history is a policy rejection. Pin changes retain the existing line-cap exemption;
+the trusted bump guard must still validate them. Missing completion markers
+produce infrastructure verdicts rather than policy failures. Native restricted-path approval is not yet
+integrated; a legacy Bors waiver cannot authorize a Forgejo candidate.
+Source bump checks use the configured GitHub dependency guard with an explicit
+GitHub host. Lookup or trusted resolver failures remain infrastructure; decided
+pin-policy failures remain rejections. Late lint/report steps receive neither
+the native token nor a GitHub API token in source mode.
+
+The isolated trusted finalizer produces `source-candidate-result.json` in an
+artifact named for the request, run and attempt. It binds all four verdicts
+(build, scope, bump guard and publication) to the request and tested commit/tree.
+Missing tested identity produces an infrastructure result. A required publication
+cannot be skipped by a build output: the finalizer checks this attempt's unique
+publisher job, separate hosted runner and successful exact-map confirmation step.
+The publisher reads only the toolchain pin, bound through the verified commit,
+root tree, ordinary blob entry and blob hash; it never checks out candidate code.
+
+`GitHubEvidence.result()` checks fresh authenticated run and artifact metadata,
+execution repository ID, expected workflow/caller SHA, pinned reusable harness,
+latest attempt, artifact name, archive digest and its single bounded JSON entry.
+It checks the run again after downloading. GitHub credentials go only to the API;
+the signed artifact storage redirect receives no authorization header. Run titles
+and commit statuses do not grant a verdict. Result verification is execution
+evidence, not source approval or merge authority. Metadata fields follow the
+[workflow run API](https://docs.github.com/en/rest/actions/workflow-runs) and
+[artifact API](https://docs.github.com/en/rest/actions/artifacts).
+
+`classify_verdicts()` gives decided scope or bump failures precedence over an
+unrelated infrastructure failure, followed by source build failure, infrastructure
+and a passed result. A skipped build cannot hide a policy rejection. The queue
+must route rejected source work to review/repair; it must not repeatedly dispatch
+the same rejected candidate. A completed run without valid result evidence uses
+bounded infrastructure recovery rather than indefinite polling of that attempt.
+
+The queue's qualified request producer, durable payload/configuration binding,
+native approval/retention adapter and result-consumer wiring remain required.
+This component is not a hosted end-to-end rehearsal, capacity proof or production
+activation. Source migration, main mirroring and service retirement are separate
+operations.
+
+Cache reads, probes and publication use the explicit GitHub execution-repository
+cache scope (`TAUCETI_CACHE_REPOSITORY`), separate from source repository identity.
+The queue composes candidates by squashing members, so raw accepted member heads
+need not be candidate ancestors. CI verifies their exact retained objects; the
+queue is responsible for the composition and fresh source approval assertion.
+Use a full workflow rerun when retrying publication, so build and publisher
+evidence belong to the same run attempt. Required publication with missing cache
+configuration remains an infrastructure failure.
+
+The general project generator still refuses native source bindings. The execution
+repository must currently be prepared with the explicit caller, policy and project
+configuration described above; native installer/generator integration is follow-up
+work. No source build activation follows from updating the caller template alone.
+
 The trusted `ci_git.resolve()` and `ci_checkout.fetch_sources()` helpers accept
 explicit `RepositoryRef` inputs for source and head repositories. Both must use
 the same forge. Legacy string inputs keep their fixed GitHub meaning and schema-1

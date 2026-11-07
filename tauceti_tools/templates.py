@@ -145,14 +145,14 @@ def repair_cache_url(project: Project) -> str:
     return str(service.get("url", "")).rstrip("/")
 
 
-def substitutions(project: Project) -> list[tuple[str, str]]:
+def substitutions(project: Project, *, source_ci=False) -> list[tuple[str, str]]:
     """Render only trusted tool templates, never contributor/agent content."""
     root = project.roots[0]
     if len(project.roots) != 1:
         raise ValueError(
             "This release's build harness supports one Lean library root; split the library or keep its existing custom build workflow"
         )
-    pairs = [
+    repository_pairs = [
         ("__MAINTENANCE_RUNNER__", MAINTENANCE_CONTROL_RUNNER if project.legacy else "ubuntu-latest"),
         ("TauCetiProject/TauCetiRoadmap", project.repos["roadmap"]),
         ("TauCetiProject/TauCetiReview", project.tool("review").get("repo", "TauCetiProject/TauCetiReview")),
@@ -164,6 +164,11 @@ def substitutions(project: Project) -> list[tuple[str, str]]:
         ("owner: TauCetiProject\n", "owner: " + project.content.split("/")[0] + "\n"),
         ("repositories: TauCeti\n", "repositories: " + project.content.split("/")[1] + "\n"),
         ("repositories: tauceti-claims\n", "repositories: " + project.repos.get("claims", "/").split("/")[1] + "\n"),
+    ] if not source_ci else [
+        ("https://github.com/" + CANONICAL, project.repository_ref("content").url),
+    ]
+    pairs = [
+        *repository_pairs,
         ("https://bors.taucetiproject.org", project.service("bors").get("url", "")),
         ("/repositories/1/active-batches", "/repositories/" + str(project.service("bors").get("repository_id", 1 if project.legacy else "")) + "/active-batches"),
         # The repair worker's cache, read by staging CI (lake-cache-services.sh). Off renders an
@@ -201,10 +206,10 @@ def substitutions(project: Project) -> list[tuple[str, str]]:
     return pairs
 
 
-def render(text: str, project: Project) -> str:
+def render(text: str, project: Project, *, source_ci=False) -> str:
     import re
 
-    pairs = dict(substitutions(project))
+    pairs = dict(substitutions(project, source_ci=source_ci))
     pattern = re.compile("|".join(
         r"\bTauCeti\b" if key == "TauCeti" else
         re.escape(key) + r"(?![A-Za-z0-9_-])" if key == CANONICAL else re.escape(key)
@@ -212,7 +217,7 @@ def render(text: str, project: Project) -> str:
     return pattern.sub(lambda m: pairs[m.group()], text)
 
 
-def materialize(project: Project, destination: Path, *, policy_dir: Path | None = None):
+def materialize(project: Project, destination: Path, *, policy_dir: Path | None = None, source_ci=False):
     # Read policy first: local callers may materialize directly over scripts/.
     policies = (
         [
@@ -230,7 +235,7 @@ def materialize(project: Project, destination: Path, *, policy_dir: Path | None 
         target = destination / source.relative_to(ASSETS / "scripts")
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
-            content = render(source.read_text(), project)
+            content = render(source.read_text(), project, source_ci=source_ci)
         except UnicodeError:
             shutil.copyfile(source, target)
         else:

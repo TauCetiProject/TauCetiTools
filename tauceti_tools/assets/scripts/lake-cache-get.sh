@@ -39,6 +39,9 @@
 set -euo pipefail
 
 PROJECT_DIR="${1:?usage: lake-cache-get.sh <project-dir>}"
+if [ "${TAUCETI_SOURCE_CANDIDATE:-}" = true ]; then
+  : "${TAUCETI_CACHE_REPOSITORY:?source candidate cache scope is required}"
+fi
 PUBLIC_ARTIFACT_ENDPOINT="${PUBLIC_ARTIFACT_ENDPOINT:-https://cache.taucetiproject.org/artifacts}"
 PUBLIC_REVISION_ENDPOINT="${PUBLIC_REVISION_ENDPOINT:-https://cache.taucetiproject.org/revisions}"
 LAKE_CACHE_MAX_REVS="${LAKE_CACHE_MAX_REVS:-100}"
@@ -97,7 +100,7 @@ lookup() {
     rc=0
     started=$SECONDS
     ( cd "$PROJECT_DIR" && LAKE_CONFIG="$CFG" lake cache get --service tauceti-public \
-        --repo TauCetiProject/TauCeti "$@" ) > "$LOG" 2>&1 || rc=$?
+        --repo "${TAUCETI_CACHE_REPOSITORY:-TauCetiProject/TauCeti}" "$@" ) > "$LOG" 2>&1 || rc=$?
     # Native --quiet/--log-level still replay informational logs on cache failure
     # (Lake v4.36.0-rc2 LogConfig). Keep complete raw attempts and filter only
     # recognized success records so partial-failure retries are quiet too.

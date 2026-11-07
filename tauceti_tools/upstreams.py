@@ -14,8 +14,35 @@ from pathlib import Path
 from .project import ConfigError
 
 
+class ResolutionUnavailable(ConfigError):
+    """Trusted dependency resolution could not run; this is not a pin-policy rejection."""
+
+
 def api(path):
-    return json.loads(subprocess.check_output(["gh", "api", path], text=True))
+    from .assets.scripts.github_api import response
+
+    def query(target):
+        try:
+            reply = subprocess.run(["gh", "api", "--hostname", "github.com", "--include", target],
+                                   capture_output=True, text=True, timeout=30)
+            status, _headers, value = response(reply.stdout)
+        except (OSError, subprocess.SubprocessError, RuntimeError, ValueError):
+            raise ResolutionUnavailable("GitHub dependency lookup is unavailable") from None
+        return status, value
+
+    status, value = query(path)
+    if status in {404, 422}:
+        parts = path.split("/")
+        if len(parts) >= 4 and parts[0] == "repos":
+            repo_status, repository_metadata = query("/".join(parts[:3]))
+            if repo_status == 200 and isinstance(repository_metadata, dict) and repository_metadata.get("private") is False:
+                raise ConfigError("The selected public dependency revision or required file does not exist")
+        # A private repository can hide missing access behind 404. That is not
+        # evidence that the candidate selected an invalid revision.
+        raise ResolutionUnavailable("Dependency reference is unavailable with the configured read credential")
+    if not 200 <= status < 300:
+        raise ResolutionUnavailable(f"GitHub dependency lookup returned HTTP {status}")
+    return value
 
 
 def file_at(repo, revision, name):
@@ -32,6 +59,11 @@ def release(value):
 
 
 def packages(manifest):
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("packages"), list):
+        raise ConfigError("Lake manifest must contain a package list")
+    if any(not isinstance(row, dict) or not isinstance(row.get("name"), str) or not row["name"]
+           or ("rev" in row and not isinstance(row["rev"], str)) for row in manifest["packages"]):
+        raise ConfigError("Lake manifest packages require names and string revisions")
     result = {row["name"]: row for row in manifest["packages"]}
     if len(result) != len(manifest["packages"]):
         raise ConfigError("Duplicate package names in lake-manifest.json; run lake update and review the manifest")
@@ -70,7 +102,7 @@ def inspect(project, checkout: Path):
     require_toml(checkout)
     current = packages(json.loads((checkout / "lake-manifest.json").read_text()))
     proposed = []
-    for upstream in project.upstreams:
+    for upstream in project.github_upstreams:
         if not upstream.get("update", False):
             continue
         name, repo, branch = upstream["package"], upstream["repo"], upstream.get("branch", "main")
@@ -92,7 +124,7 @@ def inspect(project, checkout: Path):
 def sandbox_command(directory, sysroot, driver):
     bwrap = shutil.which("bwrap")
     if not bwrap:
-        raise ConfigError("Lake resolution requires bubblewrap on Linux. On Ubuntu run sudo apt-get install bubblewrap; alternatively open the project's Actions page → Update configured upstreams → Run workflow")
+        raise ResolutionUnavailable("Lake resolution requires bubblewrap on Linux. On Ubuntu run sudo apt-get install bubblewrap; alternatively open the project's Actions page → Update configured upstreams → Run workflow")
     command = [bwrap, "--tmpfs", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
     for path in ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/nix", "/run/current-system/sw",
                  "/etc/ssl", "/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf"):
@@ -119,7 +151,7 @@ def resolve(checkout, direct, toolchain):
     release(toolchain)
     require_toml(checkout)
     if not shutil.which("elan"):
-        raise ConfigError("Lake resolution needs elan. Install it using https://lean-lang.org/install/manual/ or run Actions → Update configured upstreams → Run workflow on GitHub")
+        raise ResolutionUnavailable("Lake resolution needs elan. Install it using https://lean-lang.org/install/manual/ or run Actions → Update configured upstreams → Run workflow on GitHub")
     subprocess.run(["elan", "toolchain", "install", toolchain], check=True)
     compiler = Path(subprocess.check_output(["elan", "which", "lean"], env={**os.environ, "ELAN_TOOLCHAIN": toolchain}, text=True).strip())
     sysroot = compiler.resolve().parent.parent
@@ -136,7 +168,7 @@ def resolve(checkout, direct, toolchain):
             # Empty launcher environment also hides secrets from bwrap's PID 1.
             subprocess.run(sandbox_command(directory, sysroot, driver), env={}, check=True, timeout=1200)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-            raise ConfigError("Lake resolution failed; no project pins changed. Read the Lake error above, check the direct requirements with your Lean maintainer, then rerun upstreams update --apply. If the log reports missing Lake APIs or driver compilation errors, this Tools resolver may need updating for the selected Lean version. Resolution uses the committed root TOML and does not run post-update hooks") from error
+            raise ResolutionUnavailable("Lake resolution failed; no project pins changed. Read the Lake error above, check the direct requirements with your Lean maintainer, then rerun upstreams update --apply. If the log reports missing Lake APIs or driver compilation errors, this Tools resolver may need updating for the selected Lean version. Resolution uses the committed root TOML and does not run post-update hooks") from error
         return json.loads((directory / "lake-manifest.json").read_text())
 
 
@@ -179,17 +211,24 @@ def guard(project, base: Path, merge_base: Path, candidate: Path):
     for name in paths[:2]:
         if contents(base, name) != contents(candidate, name):
             raise ConfigError(f"{name} changes are human-owned")
-    before = json.loads(contents(base, "lake-manifest.json"))
-    after = json.loads(contents(candidate, "lake-manifest.json"))
+    try:
+        before = json.loads(contents(base, "lake-manifest.json"))
+        before_packages = packages(before)
+    except (ValueError, TypeError, RecursionError, ConfigError) as error:
+        raise ResolutionUnavailable("Trusted base manifest is unavailable or malformed") from error
+    try:
+        after = json.loads(contents(candidate, "lake-manifest.json"))
+    except (ValueError, TypeError, RecursionError) as error:
+        raise ConfigError("Candidate manifest is malformed") from error
     actual = packages(after)
-    allowed = {u["package"]: u for u in project.upstreams if u.get("update")}
+    allowed = {u["package"]: u for u in project.github_upstreams if u.get("update")}
     direct = []
-    for package in packages(before).values():
+    for package in before_packages.values():
         if package.get("inherited", False):
             continue
         name, repo = package["name"], repository(package)
         target = actual.get(name)
-        if not target or target.get("inherited", False) or not re.fullmatch(r"[0-9a-f]{40}", target.get("rev", "")):
+        if not target or target.get("inherited", False) or not isinstance(target.get("rev"), str) or not re.fullmatch(r"[0-9a-f]{40}", target["rev"]):
             raise ConfigError(f"Direct dependency {name} removed or not pinned to an immutable Git revision")
         revision = target["rev"]
         if package["rev"] != revision:

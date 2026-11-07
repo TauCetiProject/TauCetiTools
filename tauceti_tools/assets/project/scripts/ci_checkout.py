@@ -23,10 +23,16 @@ import tempfile
 import time
 from pathlib import Path
 
-from ci_git import (
-    Git, cli_source_arguments, cli_source_repositories, github_url, repository_from_record,
-    repository_record, sha, source_urls,
-)
+if __package__:
+    from .ci_git import (
+        Git, cli_source_arguments, cli_source_repositories, github_url, repository_from_record,
+        repository_record, sha, source_urls,
+    )
+else:
+    from ci_git import (
+        Git, cli_source_arguments, cli_source_repositories, github_url, repository_from_record,
+        repository_record, sha, source_urls,
+    )
 
 STORE = ".ci-source.git"
 ROLES = {"head": "pr", "base": "base", "mergebase": "mergebase"}

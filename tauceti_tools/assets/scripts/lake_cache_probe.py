@@ -26,7 +26,9 @@ TOOLCHAIN = re.compile(r"\Aleanprover/lean4:[0-9A-Za-z][0-9A-Za-z._+-]*\Z")
 INPUT_HASH = re.compile(r"\A[0-9a-f]{16}\Z")
 ARTIFACT = re.compile(r"\A[0-9a-f]{16}\.ltar\Z")
 REPOSITORY = re.compile(r"\A[0-9A-Za-z_.-]+/[0-9A-Za-z_.-]+\Z")
-DEFAULT_REPOSITORY = os.environ.get("TAUCETI_REPO", "TauCetiProject/TauCeti")
+DEFAULT_REPOSITORY = os.environ.get("TAUCETI_CACHE_REPOSITORY") or os.environ.get("TAUCETI_REPO", "TauCetiProject/TauCeti")
+if os.environ.get("TAUCETI_SOURCE_CANDIDATE") == "true" and not os.environ.get("TAUCETI_CACHE_REPOSITORY"):
+    raise ValueError("source candidate cache scope is required")
 
 
 def plain_https_endpoint(value: str) -> str:

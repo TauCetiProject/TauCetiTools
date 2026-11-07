@@ -1,0 +1,25 @@
+name: check-workflow-identity
+on:
+  workflow_call:
+    inputs:
+      caller_repository: {type: string, required: true}
+      caller_revision: {type: string, required: true}
+permissions: {}
+jobs:
+  identity:
+    runs-on:
+      - nscloud-ubuntu-24.04-amd64-2x4-with-features
+      - namespace-features:github.run-id=${{ github.run_id }}
+    steps:
+      - name: Verify GitHub supplies the reusable workflow identity
+        env:
+          EXPECTED_REPOSITORY: ${{ inputs.caller_repository }}
+          EXPECTED_REVISION: ${{ inputs.caller_revision }}
+          ACTUAL_REPOSITORY: ${{ job.workflow_repository }}
+          ACTUAL_REVISION: ${{ job.workflow_sha }}
+          ACTUAL_FILE: ${{ job.workflow_file_path }}
+        run: |
+          test "$ACTUAL_REPOSITORY" = "$EXPECTED_REPOSITORY"
+          test "$ACTUAL_REVISION" = "$EXPECTED_REVISION"
+          test "$ACTUAL_FILE" = .github/workflows/check-workflow-identity.yml
+          printf 'Reusable workflow identity verified: %s/%s@%s\n' "$ACTUAL_REPOSITORY" "$ACTUAL_FILE" "$ACTUAL_REVISION"

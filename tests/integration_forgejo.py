@@ -28,6 +28,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tauceti_tools.forge import Forge, ForgeError, Forgejo, Incomplete, RepositoryRef
 from tauceti_tools.forge_cli import run
 from tauceti_tools.forge_read import ForgejoReader
+from tauceti_tools import ci_candidate, ci_candidate_workflow
+from tauceti_tools.forge import GITHUB
 
 
 class Integration(unittest.TestCase):
@@ -217,6 +219,10 @@ ROOT_PATH = {root}/log
                             "content": base64.b64encode(b"example : True := trivial\n").decode(),
                         },
                     )
+                    api.request("POST", "repos/operator/ci-source/contents/lean-toolchain", {
+                        "branch": "candidate", "message": "Pin the candidate toolchain",
+                        "content": base64.b64encode(b"leanprover/lean4:v4.35.0\n").decode(),
+                    })
                     ci_pull = api.request(
                         "POST",
                         "repos/operator/ci-source/pulls",
@@ -315,6 +321,110 @@ ROOT_PATH = {root}/log
                         self.assertNotIn(base64.b64encode(f"x-access-token:{native_tokens[0]}".encode()).decode(),
                                          child.stdout + child.stderr)
                     self.assertEqual((cli_job / "pr/Source.lean").read_text(), "example : True := trivial\n")
+
+                    source_metadata = api.request("GET", "repos/operator/ci-source")
+                    with ci_git.object_reader(ci_job / "pr") as ci_reader:
+                        ci_tree = ci_reader.run("show", "-s", "--format=%T", ci_head).stdout.decode().strip()
+                    candidate_policy = ci_candidate.ExecutionPolicy(
+                        ci_candidate.RepositoryIdentity(native_repo, source_metadata["id"]),
+                        ci_candidate.RepositoryIdentity(RepositoryRef(GITHUB, "example/Execution"), 42),
+                        api.forge, ".github/workflows/pr-build.yml",
+                        ci_candidate.RepositoryIdentity(RepositoryRef(GITHUB, "example/Tools"), 43),
+                        "a" * 40, "main", "main", True, "1" * 64,
+                    )
+                    candidate_configuration = root / "ci-source-project.toml"
+                    candidate_configuration.write_text(
+                        'schema_version=2\n[forges.native]\nkind="forgejo"\nurl=' + json.dumps(api.forge.url)
+                        + '\n[repositories]\ncontent={forge="native",name="operator/ci-source"}\n'
+                        + 'roadmap={forge="native",name="operator/ci-source"}\n'
+                        + '[lean]\nroots=["Source"]\n[ci]\nbackend="github-actions"\nrepository="example/Execution"\n'
+                    )
+                    candidate_policy = ci_candidate.ExecutionPolicy.parse(
+                        candidate_policy.record(with_config=False), configuration=candidate_configuration.read_bytes(),
+                    )
+                    candidate_request = ci_candidate.CandidateRequest(
+                        "1" * 32, "2" * 32, candidate_policy.digest, candidate_policy.source,
+                        candidate_policy.execution, "b" * 40, candidate_policy.harness_revision,
+                        candidate_policy.config_digest, 1, 1, ci_head, ci_base, ci_tree,
+                        (ci_candidate.Member(ci_pull["number"], ci_head),),
+                    )
+                    candidate_context = {
+                        "event_name": "repository_dispatch", "action": ci_candidate.EVENT,
+                        "repository": "example/Execution", "repository_id": "42", "workflow_sha": "b" * 40,
+                        "workflow_ref": "example/Execution/.github/workflows/pr-build.yml@refs/heads/main",
+                        "harness_repository": "example/Tools", "harness_sha": "a" * 40,
+                        "harness_file": ".github/workflows/pr-build.yml", "run_id": 101, "attempt": 1,
+                    }
+                    for retained in (candidate_request.retained_ref, candidate_request.member_ref(candidate_request.members[0])):
+                        api.request("POST", "repos/operator/ci-source/branches", {
+                            "new_branch_name": retained.removeprefix("refs/heads/"), "old_branch_name": "candidate",
+                        })
+                    resolved_candidate = ci_candidate_workflow.resolve(
+                        candidate_request, candidate_policy, candidate_context, root / "ci-qualified-request.git",
+                        token=native_tokens[0],
+                    )
+                    self.assertEqual(resolved_candidate["request_digest"], candidate_request.digest)
+                    self.assertEqual(resolved_candidate["tree"], ci_tree)
+                    request_job = root / "ci-qualified-request-job"
+                    request_job.mkdir()
+                    ci_candidate_workflow.fetch(
+                        candidate_request, candidate_policy, candidate_context, request_job, token=native_tokens[0],
+                    )
+                    ci_checkout.materialize(request_job, "head", ci_head)
+                    self.assertEqual((request_job / "pr/Source.lean").read_text(), "example : True := trivial\n")
+                    self.assertFalse((request_job / "pr/Later.lean").exists())
+                    publisher_context = dict(candidate_context, harness_file=".github/workflows/publish-lake-cache.yml")
+                    pin = ci_candidate_workflow.toolchain_pin(
+                        candidate_request, candidate_policy, publisher_context, root / "ci-publisher-pin.git",
+                        token=native_tokens[0],
+                    )
+                    self.assertEqual(pin, b"leanprover/lean4:v4.35.0\n")
+                    candidate_policy_path, candidate_event = root / "ci-source-policy.json", root / "ci-source-event.json"
+                    candidate_policy_path.write_bytes(ci_candidate.canonical(candidate_policy.record(with_config=False)))
+                    candidate_event.write_bytes(ci_candidate.canonical({"action": ci_candidate.EVENT, "client_payload": candidate_request.dispatch()["client_payload"]}))
+                    ingress_env = dict(os.environ, PYTHONPATH=str(ci_scripts.parents[2]),
+                        CI_SOURCE_READ_TOKEN=native_tokens[0], GH_TOKEN="github-token-must-not-be-used",
+                        GITHUB_EVENT_NAME="repository_dispatch", CI_SOURCE_EVENT_ACTION=ci_candidate.EVENT,
+                        GITHUB_REPOSITORY="example/Execution", GITHUB_REPOSITORY_ID="42",
+                        GITHUB_WORKFLOW_SHA="b" * 40,
+                        GITHUB_WORKFLOW_REF="example/Execution/.github/workflows/pr-build.yml@refs/heads/main",
+                        GITHUB_RUN_ID="101", GITHUB_RUN_ATTEMPT="1",
+                        CI_SOURCE_HARNESS_REPOSITORY="example/Tools", CI_SOURCE_HARNESS_SHA="a" * 40,
+                        CI_SOURCE_HARNESS_FILE=".github/workflows/pr-build.yml")
+                    child = subprocess.run([
+                        sys.executable, "-B", "-S", "-m", "tauceti_tools.ci_candidate_workflow", "resolve",
+                        "--policy", str(candidate_policy_path), "--configuration", str(candidate_configuration),
+                        "--event", str(candidate_event), "--store", str(root / "ci-source-module-cli.git"),
+                        "--output", str(root / "ci-source-module-output.json"),
+                    ], cwd=root, env=ingress_env, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(child.returncode, 0, "source workflow module failed; credential diagnostics withheld")
+                    self.assertEqual(json.loads((root / "ci-source-module-output.json").read_text())["request_digest"], candidate_request.digest)
+                    self.assertNotIn(native_tokens[0], child.stdout + child.stderr)
+                    lint_scope = ci_candidate_workflow.lint_scope(
+                        candidate_request, candidate_policy, candidate_context, request_job / "pr",
+                        root / "ci-native-lint-scope", candidate_configuration, observation=resolved_candidate,
+                    )
+                    self.assertEqual(lint_scope["LINT_ONLY_MODULES"], str(root / "ci-native-lint-scope/modules.txt"))
+                    self.assertEqual((root / "ci-native-lint-scope/unmatched.txt").read_text(), "Source.lean\n")
+                    native_full_lint = api.request("POST", "repos/operator/ci-source/labels", {"name": "full-lint", "color": "aabbcc"})
+                    api.request("PUT", f"repos/operator/ci-source/issues/{ci_pull['number']}/labels", {"labels": [native_full_lint["id"]]})
+                    lint_observation = dict(request_digest=candidate_request.digest,
+                        lint_scoped=ci_candidate_workflow.native_lint_policy(candidate_request, candidate_policy, candidate_context,
+                            client=Forgejo(api.forge, token=native_tokens[0])))
+                    lint_scope = ci_candidate_workflow.lint_scope(
+                        candidate_request, candidate_policy, candidate_context, request_job / "pr",
+                        root / "ci-native-full-lint", candidate_configuration, observation=lint_observation,
+                    )
+                    self.assertEqual(lint_scope["LINT_ONLY_MODULES"], "")
+                    self.assertEqual(ci_candidate_workflow.member_size_policy(candidate_request, candidate_policy,
+                        candidate_context, request_job), {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
+                    from dataclasses import replace
+                    wrong_tree = replace(candidate_request, tree="3" * 40)
+                    with self.assertRaisesRegex(ValueError, "tree"):
+                        ci_candidate_workflow.resolve(
+                            wrong_tree, candidate_policy, candidate_context, root / "ci-qualified-wrong-tree.git",
+                            token=native_tokens[0],
+                        )
 
 
                     def await_mergeability(candidate):
