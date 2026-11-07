@@ -7,6 +7,7 @@ loopback, disables Actions/registration/SSH, and is stopped even on test failure
 import base64
 import contextlib
 import getpass
+import hashlib
 import http.cookiejar
 import io
 import json
@@ -419,6 +420,92 @@ ROOT_PATH = {root}/log
                     self.assertEqual(ci_candidate_workflow.member_size_policy(candidate_request, candidate_policy,
                         candidate_context, request_job), {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
                     from dataclasses import replace
+                    # Membership can live in a retained data-only Git commit.
+                    # Only resolve reads it from the native host; later steps
+                    # verify the saved bytes with no native credential.
+                    manifest_count = int(os.environ.get("FORGEJO_MANIFEST_MEMBERS", "1"))
+                    self.assertTrue(1 <= manifest_count <= ci_candidate.MAX_RETAINED_MEMBERS)
+                    manifest_members = tuple(ci_candidate.Member(number, ci_head)
+                        for number in range(1, manifest_count + 1))
+                    writer = ci_git.Git(root / "manifest-writer.git", root,
+                        token=token, token_origin=api.forge, follow_redirects=False)
+                    writer.env.update(GIT_AUTHOR_NAME="Fixture", GIT_AUTHOR_EMAIL="fixture@example.invalid",
+                        GIT_COMMITTER_NAME="Fixture", GIT_COMMITTER_EMAIL="fixture@example.invalid")
+
+                    def write_git(*args, data=None):
+                        try:
+                            child = subprocess.run(writer.command + list(args), input=data,
+                                env=writer.env, capture_output=True, timeout=30)
+                        except subprocess.TimeoutExpired:
+                            self.fail("manifest Git operation exceeded30seconds; credential diagnostics and arguments withheld")
+                        self.assertEqual(child.returncode, 0, "manifest write failed; credential diagnostics withheld")
+                        return child.stdout.decode().strip()
+
+                    write_git("fetch", "--quiet", native_repo.clone_url, "candidate")
+                    if os.environ.get("FORGEJO_MANIFEST_DISTINCT") == "1":
+                        manifest_members = tuple(ci_candidate.Member(number,
+                            write_git("commit-tree", ci_tree, "-p", ci_base,
+                                data=f"Synthetic transport member {number}\n".encode()))
+                            for number in range(1, manifest_count + 1))
+                    member_raw = ci_candidate.member_manifest_bytes(candidate_request.epoch, "3" * 32, manifest_members)
+                    member_blob = write_git("hash-object", "-w", "--stdin", data=member_raw)
+                    member_tree = write_git("mktree", data=f"100644 blob {member_blob}\t{ci_candidate.MEMBER_MANIFEST_FILE}\n".encode())
+                    parents = tuple(dict.fromkeys(member.head for member in manifest_members))
+                    member_commit = write_git("commit-tree", member_tree,
+                        *(arg for parent in parents for arg in ("-p", parent)), data=b"Retain accepted source heads\n")
+                    retained_request = replace(candidate_request, request_id="3" * 32, members=manifest_members,
+                        member_manifest=ci_candidate.MemberManifest(member_commit, hashlib.sha256(member_raw).hexdigest(),
+                            len(manifest_members), len(member_raw)))
+                    write_git("push", "--quiet", "--atomic", native_repo.clone_url,
+                        f"{member_commit}:{retained_request.manifest_ref}", f"{ci_head}:{retained_request.retained_ref}")
+                    unbound = ci_candidate.CandidateRequest.parse(retained_request.record(), policy=candidate_policy)
+                    bound, actual_raw = ci_candidate_workflow.retained_members(unbound, candidate_policy,
+                        candidate_context, token=native_tokens[0])
+                    self.assertEqual(bound.accepted_members, retained_request.members)
+                    self.assertEqual(actual_raw, member_raw)
+                    bad_manifest = replace(unbound, member_manifest=replace(unbound.member_manifest, commit="9" * 40))
+                    with self.assertRaisesRegex(ValueError, "commit differs"):
+                        ci_candidate_workflow.retained_members(bad_manifest, candidate_policy,
+                            candidate_context, token=native_tokens[0])
+                    with self.assertRaises(subprocess.CalledProcessError):
+                        ci_candidate_workflow.retained_members(replace(unbound, request_id="4" * 32),
+                            candidate_policy, candidate_context, token=native_tokens[0])
+                    candidate_event.write_bytes(ci_candidate.canonical({"action": ci_candidate.EVENT,
+                        "client_payload": retained_request.dispatch()["client_payload"]}))
+                    manifest_path = root / "verified-members.json"
+                    manifest_job = root / "manifest-job"
+                    manifest_job.mkdir()
+                    common = ["--policy", str(candidate_policy_path), "--configuration", str(candidate_configuration),
+                        "--event", str(candidate_event)]
+                    commands = [
+                        ["resolve", *common, "--store", str(root / "manifest-cli-resolve.git"),
+                         "--members-output", str(manifest_path), "--output", str(root / "manifest-resolved.json")],
+                        ["fetch", *common, "--workspace", str(manifest_job), "--members-file", str(manifest_path),
+                         "--output", str(root / "manifest-fetched.json")],
+                        ["member-policy", *common, "--workspace", str(manifest_job), "--members-file", str(manifest_path),
+                         "--output", str(root / "manifest-policy.json")],
+                    ]
+                    manifest_metrics = {"members": manifest_count, "manifest_bytes": len(member_raw),
+                        "dispatch_bytes": len(ci_candidate.canonical(retained_request.dispatch())), "seconds": {}}
+                    for command in commands:
+                        env = ingress_env if command[0] != "member-policy" else dict(ingress_env,
+                            CI_SOURCE_READ_TOKEN="", GH_TOKEN="", GH_READ_TOKEN="")
+                        started = time.monotonic()
+                        child = subprocess.run([sys.executable, "-B", "-S", "-m", "tauceti_tools.ci_candidate_workflow", *command],
+                            cwd=root, env=env, capture_output=True, text=True, timeout=30)
+                        manifest_metrics["seconds"][command[0]] = time.monotonic() - started
+                        self.assertEqual(child.returncode, 0, "retained membership CLI failed; credential diagnostics withheld")
+                        self.assertNotIn(native_tokens[0], child.stdout + child.stderr)
+                    self.assertEqual(manifest_path.read_bytes(), member_raw)
+                    self.assertEqual(json.loads((root / "manifest-policy.json").read_text()), {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
+                    manifest_path.write_bytes(member_raw + b"\n")
+                    child = subprocess.run([sys.executable, "-B", "-S", "-m", "tauceti_tools.ci_candidate_workflow", *commands[-1]],
+                        cwd=root, env=dict(ingress_env, CI_SOURCE_READ_TOKEN="", GH_TOKEN="", GH_READ_TOKEN=""),
+                        capture_output=True, text=True, timeout=30)
+                    self.assertNotEqual(child.returncode, 0)
+                    self.assertNotIn(native_tokens[0], child.stdout + child.stderr)
+                    if os.environ.get("FORGEJO_MANIFEST_METRICS"):
+                        Path(os.environ["FORGEJO_MANIFEST_METRICS"]).write_text(json.dumps(manifest_metrics, indent=2) + "\n")
                     wrong_tree = replace(candidate_request, tree="3" * 40)
                     with self.assertRaisesRegex(ValueError, "tree"):
                         ci_candidate_workflow.resolve(

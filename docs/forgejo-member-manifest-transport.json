@@ -1,0 +1,36 @@
+{
+  "schema": "tauceti-ci.member-manifest-transport-validation/v1",
+  "date": "2026-11-07",
+  "scope": "Isolated local transport and member-policy tests; no production changes or capacity claim. Each synthetic member has a distinct Git commit, sharing its base and tree. The two disposable profiles ran concurrently on one local host. No source approval, hosted candidate build or full fleet load is demonstrated here.",
+  "retention": {
+    "refs": 2,
+    "member_reachability": "exact ordered deduplicated manifest parents",
+    "baseline": "Pushing 1,197 individual member refs exceeded the test writer's own 30-second timeout; this was not a Forgejo server limit. Manifest-parent retention completes the same bounded writer with two refs."
+  },
+  "profiles": [
+    {
+      "members": 1197,
+      "manifest_bytes": 73253,
+      "dispatch_bytes": 1194,
+      "seconds": {
+        "resolve": 1.1203520519775338,
+        "fetch": 1.10825053404551,
+        "member-policy": 4.618897788983304
+      },
+      "server": "Forgejo 17.0.1",
+      "result": "pass"
+    },
+    {
+      "members": 2394,
+      "manifest_bytes": 147467,
+      "dispatch_bytes": 1195,
+      "seconds": {
+        "resolve": 2.1425949330441654,
+        "fetch": 2.15987644798588,
+        "member-policy": 8.909559104009531
+      },
+      "server": "private Forgejo 1d9e70752dcdd52c091aa0842046a253937d5d60",
+      "result": "pass"
+    }
+  ]
+}

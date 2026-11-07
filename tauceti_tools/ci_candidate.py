@@ -14,7 +14,8 @@ import io
 import json
 import re
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import cached_property
 
 from .forge import GITHUB, Forge, RepositoryRef
 
@@ -22,6 +23,10 @@ SCHEMA = "tauceti-ci.source-candidate/v2"
 EVENT = "tauceti-source-candidate-v2"
 MAX_REQUEST_BYTES = 60 * 1024
 MAX_MEMBERS = 128
+MAX_RETAINED_MEMBERS = 8192
+MAX_MEMBER_MANIFEST_BYTES = 1024 * 1024
+MEMBER_MANIFEST_SCHEMA = "tauceti-ci.accepted-members/v1"
+MEMBER_MANIFEST_FILE = "accepted-members.json"
 MAX_RESULT_BYTES = MAX_REQUEST_BYTES + 16 * 1024
 MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
 RESULT_FILE = "source-candidate-result.json"
@@ -218,6 +223,72 @@ class Member:
         return {"pr": self.pr, "head": self.head}
 
 
+def member_manifest_bytes(epoch, request_id, members):
+    """Create data-only retained membership, bound to one persisted queue request."""
+    _hex(epoch, 32, "queue epoch")
+    _hex(request_id, 32, "request ID")
+    if (
+        not isinstance(members, tuple)
+        or not 1 <= len(members) <= MAX_RETAINED_MEMBERS
+        or not all(isinstance(member, Member) for member in members)
+        or len({member.pr for member in members}) != len(members)
+    ):
+        raise ValueError("invalid retained members")
+    raw = canonical(
+        {
+            "schema": MEMBER_MANIFEST_SCHEMA,
+            "epoch": epoch,
+            "request_id": request_id,
+            "members": [member.record() for member in members],
+        }
+    )
+    if len(raw) > MAX_MEMBER_MANIFEST_BYTES:
+        raise ValueError("retained member manifest exceeds its byte bound")
+    return raw
+
+
+@dataclass(frozen=True)
+class MemberManifest:
+    commit: str
+    sha256: str
+    count: int
+    size: int
+
+    def __post_init__(self):
+        _hex(self.commit, 40, "member manifest commit")
+        _hex(self.sha256, 64, "member manifest digest")
+        _positive(self.count, "member manifest count")
+        _positive(self.size, "member manifest size")
+        if self.count > MAX_RETAINED_MEMBERS or self.size > MAX_MEMBER_MANIFEST_BYTES:
+            raise ValueError("retained member manifest exceeds its bounds")
+
+    @classmethod
+    def parse(cls, value):
+        _object(value, {"commit", "sha256", "count", "size"}, "member manifest")
+        return cls(value["commit"], value["sha256"], value["count"], value["size"])
+
+    def record(self):
+        return {"commit": self.commit, "sha256": self.sha256, "count": self.count, "size": self.size}
+
+    def read(self, raw, *, epoch, request_id):
+        if not isinstance(raw, bytes) or len(raw) != self.size or hashlib.sha256(raw).hexdigest() != self.sha256:
+            raise ValueError("retained membership differs from the request")
+        value = read_json(raw, max_bytes=MAX_MEMBER_MANIFEST_BYTES)
+        _object(value, {"schema", "epoch", "request_id", "members"}, "retained member manifest")
+        if (
+            value["schema"] != MEMBER_MANIFEST_SCHEMA
+            or value["epoch"] != epoch
+            or value["request_id"] != request_id
+            or not isinstance(value["members"], list)
+            or len(value["members"]) != self.count
+        ):
+            raise ValueError("retained member manifest identity differs from the request")
+        members = tuple(Member.parse(member) for member in value["members"])
+        if member_manifest_bytes(epoch, request_id, members) != raw:
+            raise ValueError("retained member manifest must use canonical encoding")
+        return members
+
+
 @dataclass(frozen=True)
 class CandidateRequest:
     request_id: str
@@ -234,6 +305,7 @@ class CandidateRequest:
     base: str
     tree: str
     members: tuple[Member, ...]
+    member_manifest: MemberManifest | None = None
 
     def __post_init__(self):
         for value, label in ((self.request_id, "request ID"), (self.epoch, "queue epoch")):
@@ -254,21 +326,60 @@ class CandidateRequest:
         _positive(self.batch_version, "batch version")
         if self.head == self.base:
             raise ValueError("candidate must advance its exact base")
+        limit = MAX_MEMBERS if self.member_manifest is None else MAX_RETAINED_MEMBERS
         if (
             not isinstance(self.members, tuple)
-            or not 1 <= len(self.members) <= MAX_MEMBERS
+            or len(self.members) > limit
             or not all(isinstance(m, Member) for m in self.members)
         ):
             raise ValueError("invalid accepted members")
+        if self.member_manifest is None:
+            if not self.members:
+                raise ValueError("candidate must have accepted members")
+        elif not isinstance(self.member_manifest, MemberManifest):
+            raise ValueError("invalid retained member manifest")
+        elif self.members:
+            self.member_manifest.read(
+                member_manifest_bytes(self.epoch, self.request_id, self.members),
+                epoch=self.epoch,
+                request_id=self.request_id,
+            )
         if len({m.pr for m in self.members}) != len(self.members):
             raise ValueError("duplicate source PR in candidate")
+
+    @property
+    def accepted_members(self):
+        if not self.members:
+            raise ValueError("retained membership has not been verified")
+        return self.members
+
+    @cached_property
+    def _member_set(self):
+        return frozenset(self.accepted_members)
+
+    @cached_property
+    def accepted_heads(self):
+        return tuple(dict.fromkeys(member.head for member in self.accepted_members))
+
+    @property
+    def manifest_ref(self):
+        if self.member_manifest is None:
+            raise ValueError("inline candidate has no retained member manifest")
+        return f"refs/heads/tauceti-ci/{self.epoch}/{self.request_id}/members"
+
+    def bind_members(self, raw):
+        if self.member_manifest is None:
+            raise ValueError("inline candidate cannot bind external membership")
+        return replace(self, members=self.member_manifest.read(raw, epoch=self.epoch, request_id=self.request_id))
 
     @property
     def retained_ref(self):
         return f"refs/heads/tauceti-ci/{self.epoch}/{self.request_id}/candidate"
 
     def member_ref(self, member):
-        if member not in self.members:
+        if self.member_manifest is not None:
+            raise ValueError("retained membership uses manifest parents rather than per-member branches")
+        if member not in self._member_set:
             raise ValueError("member does not belong to candidate")
         return f"refs/heads/tauceti-ci/{self.epoch}/{self.request_id}/member-{member.pr}"
 
@@ -293,10 +404,19 @@ class CandidateRequest:
             },
             "candidate request",
         )
-        if value["schema"] != SCHEMA or not isinstance(value["members"], list):
+        if value["schema"] != SCHEMA or not isinstance(value["members"], (list, dict)):
             raise ValueError("invalid candidate request schema")
-        if len(canonical(value)) > MAX_REQUEST_BYTES or len(value["members"]) > MAX_MEMBERS:
+        if len(canonical(value)) > MAX_REQUEST_BYTES:
             raise ValueError("candidate request exceeds its bounds")
+        manifest = None
+        if isinstance(value["members"], dict):
+            _object(value["members"], {"manifest"}, "retained membership reference")
+            manifest = MemberManifest.parse(value["members"]["manifest"])
+            members = ()
+        else:
+            if len(value["members"]) > MAX_MEMBERS:
+                raise ValueError("inline candidate request exceeds its member bound")
+            members = tuple(Member.parse(member) for member in value["members"])
         candidate = _object(value["candidate"], {"head", "base", "tree", "retained_ref"}, "candidate")
         request = cls(
             value["request_id"],
@@ -312,7 +432,8 @@ class CandidateRequest:
             candidate["head"],
             candidate["base"],
             candidate["tree"],
-            tuple(Member.parse(m) for m in value["members"]),
+            members,
+            manifest,
         )
         request.check_policy(policy)
         if candidate["retained_ref"] != request.retained_ref:
@@ -343,7 +464,9 @@ class CandidateRequest:
             "batch_id": self.batch_id,
             "batch_version": self.batch_version,
             "candidate": {"head": self.head, "base": self.base, "tree": self.tree, "retained_ref": self.retained_ref},
-            "members": [member.record() for member in self.members],
+            "members": {"manifest": self.member_manifest.record()}
+            if self.member_manifest is not None
+            else [member.record() for member in self.members],
         }
 
     @property
@@ -469,7 +592,7 @@ def verify_result(request, policy, result, run, *, run_id, attempt):
     if result["schema"] != SCHEMA or result["request_digest"] != request.digest:
         raise ValueError("result answers a different candidate request")
     returned = CandidateRequest.parse(result["request"], policy=policy)
-    if returned != request:
+    if returned.record() != request.record():
         raise ValueError("result changed the candidate request")
     expected_producer = {
         "repository": policy.execution.record(),
