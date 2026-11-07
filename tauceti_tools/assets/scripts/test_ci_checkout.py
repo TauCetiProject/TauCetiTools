@@ -119,6 +119,32 @@ class Checkouts(unittest.TestCase):
             self.git(self.workspace / "pr", "remote", "get-url", "origin"), "https://github.com/Fork/Repo.git"
         )
 
+    def test_fetch_cannot_detach_maintenance_before_connectivity_validation(self):
+        trace = self.root / "source-trace.jsonl"
+        initialize = checkout.SourceGit.__init__
+
+        def aggressive_maintenance(git, *args, **kwargs):
+            initialize(git, *args, **kwargs)
+            git.env["GIT_TRACE2_EVENT"] = str(trace)
+            git.command += ["-c", "gc.autoPackLimit=1", "-c", "gc.autoDetach=true", "-c", "fetch.unpackLimit=1"]
+
+        fork = self.root / "fork"
+        self.git(self.root, "clone", "-q", self.repo, fork)
+        self.git(fork, "checkout", "-q", "feature")
+        (fork / "fork-only").write_text("candidate objects absent upstream\n")
+        head = self.commit(fork, "fork head")
+        with patch.object(checkout.SourceGit, "__init__", aggressive_maintenance):
+            self.fetch(head_repository="Fork/Repo", head=head)
+        events = [json.loads(line) for line in trace.read_text().splitlines()]
+        children = [event.get("argv", []) for event in events if event.get("event") == "child_start"]
+        self.assertFalse([argv for argv in children if "maintenance" in argv or "gc" in argv])
+        commands = [event.get("argv", []) for event in events if event.get("event") == "start"]
+        self.assertEqual(sum("fetch" in argv for argv in commands), 2)
+        self.assertTrue(any("fsck" in argv and "--connectivity-only" in argv for argv in commands))
+        self.materialize("head", head)
+        self.materialize("base", self.tip)
+        self.assertEqual(self.git(self.workspace / "pr", "merge-base", head, self.tip), self.base)
+
     def test_bad_identities_existing_paths_and_symlinks_are_not_overwritten(self):
         for values in (dict(head="main"), dict(repository="../bad"), dict(head="0" * 40)):
             with self.subTest(values=values), self.assertRaises(ValueError):

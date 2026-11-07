@@ -52,6 +52,9 @@ class SourceGit(Git):
     def transfer(self, url, references):
         command = self.command + [
             "fetch",
+            # The store lives for one job. Detached automatic repacking can
+            # remove packs while the following fsck or offline readers use them.
+            "--no-auto-maintenance",
             "--no-tags",
             "--no-recurse-submodules",
             url,
