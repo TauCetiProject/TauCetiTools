@@ -169,7 +169,7 @@ class Forgejo:
         else:
             self._opener = urllib.request.build_opener(_NoRedirect)
 
-    def request(self, method, path, data=None, *, response_headers=None):
+    def request(self, method, path, data=None, *, response_headers=None, response_meta=None):
         parsed = urllib.parse.urlsplit(path)
         if (
             parsed.scheme
@@ -191,6 +191,10 @@ class Forgejo:
         req = urllib.request.Request(self.forge.api_url + "/" + path.lstrip("/"), body, headers, method=method)
         try:
             with self._opener.open(req, timeout=self.timeout) as response:
+                if response_meta is not None:
+                    response_meta.update(
+                        status=response.status, reason=response.reason, version=getattr(response, "version", 11)
+                    )
                 if response_headers is not None:
                     response_headers.update({key.lower(): value for key, value in response.headers.items()})
                 raw = response.read(self.max_bytes + 1)
