@@ -8,12 +8,68 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+from urllib.parse import parse_qs, urlsplit
 
 import batch
 import core
 
 REAL_UPDATED = batch.updated_prs
 REAL_TOUCHED = batch.touched_by_runs
+
+
+class WorkflowRunTests(unittest.TestCase):
+    def fetch(self, rows, query, *, initial_count=None):
+        self.calls = []
+
+        def api(path, *, jq=None, paginate=False):
+            params = parse_qs(urlsplit(path).query)
+            self.calls.append(params)
+            selected = [r for r in rows if all(r[k] == params[k][0]
+                        for k in ('status', 'event') if k in params)]
+            created = params.get('created', [''])[0]
+            if created.startswith('>='):
+                selected = [r for r in selected if r['created_at'] >= created[2:]]
+            elif created:
+                lower, upper = created.split('..')
+                selected = [r for r in selected if lower <= r['created_at'] <= upper]
+            if jq == '.total_count':
+                if len(self.calls) == 1 and initial_count is not None:
+                    return str(initial_count)
+                return str(len(selected))
+            self.assertTrue(paginate)
+            # Model the API's silent truncation even when pagination is requested.
+            return '\n'.join(json.dumps(r) for r in selected[:1000])
+
+        with patch.object(batch.core, 'gh_api', side_effect=api):
+            return batch.workflow_runs('pr-build.yml', query)
+
+    def rows(self, stamp, count, **fields):
+        return [dict(head_sha=f'{stamp}-{i}', created_at=stamp, status='queued',
+                     event='pull_request_target', **fields) for i in range(count)]
+
+    def test_large_active_backlog_keeps_old_runs_and_filters(self):
+        rows = (self.rows('2025-01-01T00:00:00Z', 600)
+                + self.rows('2026-10-19T09:00:00Z', 501))
+        unrelated = {**rows[0], 'head_sha': 'unrelated', 'event': 'push'}
+        actual = self.fetch(rows + [unrelated], 'status=queued&event=pull_request_target')
+        self.assertCountEqual(actual, rows)
+        self.assertTrue(all(c['status'] == ['queued'] and c['event'] == ['pull_request_target']
+                            for c in self.calls))
+
+    def test_completed_window_preserves_lower_bound_and_adjacent_seconds(self):
+        rows = self.rows('2026-10-19T09:00:00Z', 600) + self.rows('2026-10-19T09:00:01Z', 501)
+        rows = [{**r, 'status': 'completed'} for r in rows]
+        older = [{**r, 'status': 'completed'} for r in self.rows('2025-01-01T00:00:00Z', 1100)]
+        actual = self.fetch(older + rows, 'status=completed&created=>=2026-10-19T09:00:00Z')
+        self.assertCountEqual(actual, rows)
+
+    def test_growth_after_count_still_splits_the_listing(self):
+        rows = self.rows('2026-10-19T09:00:00Z', 500) + self.rows('2026-10-19T09:00:01Z', 501)
+        self.assertCountEqual(self.fetch(rows, 'status=queued', initial_count=999), rows)
+
+    def test_unsplittable_second_fails_instead_of_accepting_partial_results(self):
+        with self.assertRaisesRegex(core.RateLimited, 'one second'):
+            self.fetch(self.rows('2026-10-19T09:00:00Z', 1001), 'status=queued')
 
 
 class ResumeTests(unittest.TestCase):
