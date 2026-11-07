@@ -325,8 +325,8 @@ class CommandTests(unittest.TestCase):
             )
         self.assertEqual(json.loads(output.getvalue()), {"name": "Project", "defaultBranchRef": {"name": "main"}})
 
-    def test_mutating_commands_still_fail_before_credential_or_delegation(self):
-        for command in [["issue", "create", "-t", "hello"], ["pr", "review", "3", "--approve"], ["repo", "fork"]]:
+    def test_unsupported_commands_fail_before_credential_or_delegation(self):
+        for command in [["issue", "create", "--editor"], ["pr", "merge", "3"], ["repo", "clone", "one/Project"]]:
             with (
                 patch("tauceti_tools.forge_cli._delegate") as delegate,
                 patch("tauceti_tools.forge_cli.Forgejo") as client,
@@ -335,6 +335,53 @@ class CommandTests(unittest.TestCase):
                     run(["--conf", str(self.config), *command], environment={"TAUCETI_FORGEJO_TOKEN_FILE": "/missing"})
                 delegate.assert_not_called()
                 client.assert_not_called()
+
+    def test_supported_mutations_still_require_credential_origin(self):
+        with patch("tauceti_tools.forge_cli.Forgejo") as client, self.assertRaises(ForgeError):
+            run(
+                ["--conf", str(self.config), "issue", "create", "-t", "Title", "-b", "body"],
+                environment={"TAUCETI_FORGEJO_TOKEN_FILE": "/missing"},
+            )
+        client.assert_not_called()
+
+    def test_mixed_github_comment_preserves_flag_like_body_and_native_argv(self):
+        argv = ["issue", "comment", "12", "--body", "-R", "--repo", "github.com/one/Project"]
+        with patch("tauceti_tools.forge_cli._delegate", return_value=0) as delegate:
+            run(["--conf", str(self.config), *argv], environment={})
+        self.assertEqual(delegate.call_args.args[0], argv)
+        self.assertEqual(delegate.call_args.args[1]["GH_HOST"], "github.com")
+
+    def test_auth_hostname_has_authority_over_repository_environment(self):
+        with (
+            patch("tauceti_tools.forge_cli.Forgejo") as client,
+            patch("tauceti_tools.forge_cli._delegate") as delegate,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            client.return_value.current_user.return_value = {"id": 2, "login": "native-user"}
+            run(
+                ["--conf", str(self.config), "auth", "status", "--hostname", "git.example.org"],
+                environment={"GH_REPO": "github.com/one/Project", "GH_HOST": "github.com"},
+            )
+        delegate.assert_not_called()
+        self.assertEqual(client.call_args.args[0].url, "https://git.example.org")
+
+    def test_configured_host_allows_qualified_fork_without_extra_config(self):
+        with patch("tauceti_tools.forge_cli.Forgejo") as client, contextlib.redirect_stdout(io.StringIO()):
+            client.return_value.pull.return_value = {"number": 12, "title": "Fork proof"}
+            run(
+                [
+                    "--conf",
+                    str(self.config),
+                    "pr",
+                    "view",
+                    "12",
+                    "-R",
+                    "git.example.org/contributor/custom-fork",
+                    "--json",
+                    "title",
+                ]
+            )
+        self.assertEqual(client.return_value.pull.call_args.args[0].name, "contributor/custom-fork")
 
     def test_invalid_read_arguments_fail_before_routing(self):
         for command in [["pr", "list", "-l", "bug,"], ["pr", "list", "--search", "anything"], ["pr", "view", "1_2"]]:

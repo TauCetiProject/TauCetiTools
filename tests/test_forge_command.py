@@ -1,0 +1,148 @@
+import unittest
+from unittest.mock import Mock
+
+from tauceti_tools.forge import AmbiguousWrite, Forge, ForgeError, Incomplete, RepositoryRef, Unsupported
+from tauceti_tools.forge_command import parse_command
+from tauceti_tools.forge_write import ForgejoWriter
+
+
+class Parsing(unittest.TestCase):
+    def test_payload_flags_are_not_routing_flags(self):
+        for payload in ["-R", "--repo=github.com/attacker/repo", "--conf=other", "--approve", "--json"]:
+            for option in ["--body", "-b"]:
+                with self.subTest(payload=payload, option=option):
+                    cmd = parse_command(["pr", "comment", "12", option, payload, "-R", "git.example/one/project"])
+                    self.assertEqual(cmd.options, {"body": payload, "repo": "git.example/one/project"})
+
+    def test_short_values_and_boolean_values(self):
+        cmd = parse_command(["-Rgit.example/one/project", "repo", "fork", "--clone=false", "--remote=false"])
+        self.assertFalse(cmd.options["clone"])
+        self.assertFalse(cmd.options["remote"])
+        cmd = parse_command(["pr", "create", "-tTitle", "-b--repo=literal", "-Hproof", "-d"])
+        self.assertEqual(cmd.options["body"], "--repo=literal")
+        self.assertTrue(cmd.options["draft"])
+
+    def test_review_action_and_body_are_distinct(self):
+        cmd = parse_command(["pr", "review", "12", "-c", "-b", "--approve"])
+        self.assertTrue(cmd.options["comment"])
+        self.assertNotIn("approve", cmd.options)
+        self.assertEqual(cmd.options["body"], "--approve")
+
+    def test_invalid_input_is_rejected_before_execution(self):
+        for args in [
+            ["pr", "merge", "12"],
+            ["pr", "create", "-t", "Title"],
+            ["pr", "review", "12", "--approve", "--comment"],
+            ["pr", "comment", "1_2", "-b", "text"],
+            ["issue", "edit", "12", "-b", "text", "-F", "file"],
+            ["issue", "list", "--label", "bug,"],
+            ["repo", "fork", "--clone=true"],
+            ["label", "list", "--limit", "0"],
+            ["pr", "create", "-R", "a/b", "-R", "other/repo", "-t", "Title", "-H", "branch"],
+            ["--json", "number", "pr", "comment", "12", "-b", "text"],
+        ]:
+            with self.subTest(args=args), self.assertRaises(Unsupported):
+                parse_command(args)
+
+
+class Writes(unittest.TestCase):
+    def setUp(self):
+        self.repo = RepositoryRef(Forge("forgejo", "https://git.example.org"), "one/project")
+        self.api = Mock()
+        self.api._repo.return_value = "repos/one/project"
+        self.api.current_user.return_value = {"id": 2, "login": "operator"}
+        self.api.pull.return_value = {"number": 12, "state": "open", "head": {"sha": "a" * 40}}
+        self.api.pull_ref.return_value = "a" * 40
+        self.writer = ForgejoWriter(self.api, expected_user_id="2")
+
+    def test_wrong_account_never_mutates(self):
+        self.api.current_user.return_value["id"] = 3
+        with self.assertRaises(ForgeError):
+            self.writer.comment(self.repo, 12, "body")
+        self.api.request.assert_not_called()
+
+    def test_review_binds_to_synchronized_immutable_head(self):
+        self.api.request.return_value = {"commit_id": "a" * 40}
+        self.writer.review(self.repo, 12, event="APPROVED")
+        self.api.request.assert_called_once_with(
+            "POST",
+            "repos/one/project/pulls/12/reviews",
+            {
+                "event": "APPROVED",
+                "body": "",
+                "commit_id": "a" * 40,
+            },
+        )
+
+    def test_unsynchronized_head_prevents_review(self):
+        self.api.pull_ref.return_value = "b" * 40
+        with self.assertRaises(Incomplete):
+            self.writer.review(self.repo, 12, event="APPROVED")
+        self.api.request.assert_not_called()
+
+    def test_unknown_review_response_is_ambiguous_not_retried(self):
+        self.api.request.return_value = {}
+        with self.assertRaises(AmbiguousWrite):
+            self.writer.review(self.repo, 12, event="APPROVED")
+        self.assertEqual(self.api.request.call_count, 1)
+
+    def test_all_label_names_are_checked_before_any_edit(self):
+        self.api.collection.return_value = [{"id": 3, "name": "ready"}]
+        with self.assertRaises(ForgeError):
+            self.writer.edit(self.repo, 12, pull=True, changes={"body": "new"}, add_labels=["missing"])
+        self.api.request.assert_not_called()
+
+    def test_label_edits_are_additive_and_partial_failure_requires_reconciliation(self):
+        self.api.collection.return_value = [{"id": 3, "name": "ready"}]
+        self.api.request.side_effect = [{"number": 12}, ForgeError("forbidden", status=403)]
+        with self.assertRaises(AmbiguousWrite):
+            self.writer.edit(self.repo, 12, pull=True, changes={"body": "new"}, add_labels=["ready"])
+        self.assertEqual(
+            self.api.request.call_args.args, ("POST", "repos/one/project/issues/12/labels", {"labels": [3]})
+        )
+        self.assertEqual(self.api.request.call_count, 2)
+
+    def test_already_closed_is_a_noop_even_with_comment(self):
+        self.api.pull.return_value["state"] = "closed"
+        self.writer.lifecycle(self.repo, 12, pull=True, state="closed", comment="close finding")
+        self.api.request.assert_not_called()
+
+    def test_merged_pr_cannot_be_reopened_or_commented_as_part_of_reopen(self):
+        self.api.pull.return_value.update(state="closed", merged=True)
+        with self.assertRaises(ForgeError):
+            self.writer.lifecycle(self.repo, 12, pull=True, state="open", comment="reopen finding")
+        self.api.request.assert_not_called()
+
+    def test_wip_creation_verifies_native_draft_state(self):
+        self.api.request.return_value = {"number": 12}
+        self.api.pull.return_value["draft"] = True
+        self.assertEqual(
+            self.writer.create(self.repo, pull=True, title="Proof", head="proof", base="main", draft=True), 12
+        )
+        self.assertEqual(self.api.request.call_args.args[2]["title"], "WIP: Proof")
+
+    def test_unsupported_wip_prefix_is_an_ambiguous_creation_outcome(self):
+        self.api.request.return_value = {"number": 12}
+        self.api.pull.return_value["draft"] = False
+        with self.assertRaises(AmbiguousWrite):
+            self.writer.create(self.repo, pull=True, title="Proof", head="proof", base="main", draft=True)
+        self.assertEqual(self.api.request.call_count, 1)
+
+    def test_fork_reuse_checks_parent_and_never_overwrites_a_clash(self):
+        self.api.repository.return_value = {"fork": True, "parent": {"full_name": self.repo.name}}
+        self.assertEqual(self.writer.fork(self.repo).name, "operator/project")
+        self.api.request.assert_not_called()
+        self.api.repository.return_value = {"fork": False}
+        with self.assertRaises(ForgeError):
+            self.writer.fork(self.repo)
+        self.api.request.assert_not_called()
+
+    def test_ambiguous_post_is_never_retried(self):
+        self.api.request.side_effect = AmbiguousWrite("transport failed")
+        with self.assertRaises(AmbiguousWrite):
+            self.writer.comment(self.repo, 12, "body")
+        self.assertEqual(self.api.request.call_count, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

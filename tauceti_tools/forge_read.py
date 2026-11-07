@@ -111,7 +111,7 @@ def _user(row, repository):
         raise Incomplete("Forgejo user has no login")
     result = {"login": row["login"]}
     if "id" in row:
-        if type(row["id"]) is int and row["id"] in {-2, -1, 0}:
+        if type(row["id"]) is int and row["id"] <= 0:
             # Actions, ghost and imported replacement actors cannot authenticate
             # as a native database user. Do not grant them a user ID.
             if row["id"] == -2:
@@ -470,6 +470,8 @@ class ForgejoReader:
                 value["parent"] = None
             elif isinstance(parent, dict) and "full_name" in parent and "name" in parent:
                 value["parent"] = {"nameWithOwner": parent["full_name"], "name": parent["name"]}
+                if "owner" in parent:
+                    value["parent"]["owner"] = _user(parent["owner"], repository)
         permissions = row.get("permissions")
         if isinstance(permissions, dict) and all(
             isinstance(permissions.get(k), bool) for k in ("admin", "push", "pull")

@@ -130,6 +130,9 @@ ROOT_PATH = {root}/log
             token_file = root / "token"
             token_file.write_text(token)
             token_file.chmod(0o600)
+            reviewer_token_file = root / "reviewer-token"
+            reviewer_token_file.write_text(reviewer_tokens[0])
+            reviewer_token_file.chmod(0o600)
             api = Forgejo(Forge("forgejo", url), token=token, timeout=3)
             with (root / "server.log").open("w") as logs:
                 process = subprocess.Popen([*base, "web"], stdout=logs, stderr=logs)
@@ -342,6 +345,108 @@ roadmap="operator/roadmap"
                         cli("repo", "view", "--json", "defaultBranchRef,viewerPermission"),
                         {"defaultBranchRef": {"name": "main"}, "viewerPermission": "ADMIN"},
                     )
+
+                    def native(*args, review=False):
+                        with contextlib.redirect_stdout(io.StringIO()) as rendered:
+                            self.assertEqual(
+                                run(
+                                    ["--conf", str(project), *args],
+                                    environment={
+                                        "TAUCETI_FORGEJO_TOKEN_FILE": str(
+                                            reviewer_token_file if review else token_file
+                                        ),
+                                        "TAUCETI_FORGEJO_ORIGIN": url,
+                                        "GH_REPO": "operator/content",
+                                    },
+                                ),
+                                0,
+                            )
+                        return rendered.getvalue()
+
+                    native("label", "create", "cli", "--color", "123456", "--description", "--repo=literal")
+                    native("label", "create", "cli", "--force", "--color", "654321")
+                    native("label", "edit", "cli", "--name", "cli-renamed", "--description", "Updated")
+                    listed_labels = json.loads(native("label", "list", "--json", "name,color,description"))
+                    self.assertIn({"name": "cli-renamed", "color": "654321", "description": "Updated"}, listed_labels)
+                    issue_url = native("issue", "create", "-t", "CLI issue", "-b", "-R", "-l", "bug").strip()
+                    issue_number = int(issue_url.rsplit("/", 1)[1])
+                    self.assertEqual(api.issue(repo, issue_number)["body"], "-R")
+                    body_file = root / "body.txt"
+                    body_file.write_text("Literal --repo and --conf\nSecond line: λ\n")
+                    native(
+                        "issue",
+                        "edit",
+                        str(issue_number),
+                        "-F",
+                        str(body_file),
+                        "--add-label",
+                        "ready",
+                        "--remove-label",
+                        "bug",
+                    )
+                    native("issue", "comment", str(issue_number), "--body", "--conf=literal")
+                    native("issue", "close", str(issue_number), "--comment", "Close finding")
+                    self.assertEqual(api.issue(repo, issue_number)["state"], "closed")
+                    native("issue", "reopen", str(issue_number))
+                    api.request(
+                        "POST",
+                        "repos/operator/content/branches",
+                        {"new_branch_name": "cli-base", "old_branch_name": "main"},
+                    )
+                    api.request(
+                        "POST",
+                        "repos/operator/content/contents/CLI.lean",
+                        {
+                            "branch": "main",
+                            "new_branch": "cli-proof",
+                            "message": "CLI proof",
+                            "content": base64.b64encode(b"example : True := trivial\n").decode(),
+                        },
+                    )
+                    pr_url = native(
+                        "pr",
+                        "create",
+                        "--head",
+                        "cli-proof",
+                        "--base",
+                        "cli-base",
+                        "-t",
+                        "CLI proof",
+                        "-F",
+                        str(body_file),
+                        "-l",
+                        "bug",
+                        "--draft",
+                    ).strip()
+                    pr_number = int(pr_url.rsplit("/", 1)[1])
+                    self.assertTrue(api.pull(repo, pr_number)["draft"])
+                    native(
+                        "pr", "edit", str(pr_number), "-t", "CLI proof", "--add-label", "ready", "--remove-label", "bug"
+                    )
+                    self.assertFalse(api.pull(repo, pr_number)["draft"])
+                    native("pr", "review", str(pr_number), "--approve", review=True)
+                    native("pr", "review", str(pr_number), "--request-changes", "-b", "--repo=literal", review=True)
+                    native("pr", "comment", str(pr_number), "-b", "-R")
+                    native("pr", "close", str(pr_number), "--comment", "Close finding")
+                    self.assertEqual(api.pull(repo, pr_number)["state"], "closed")
+                    native("pr", "reopen", str(pr_number))
+                    state = cli("pr", "view", str(pr_number), "--json", "body,labels,reviews")
+                    self.assertEqual(state["body"], body_file.read_text())
+                    self.assertEqual([label["name"] for label in state["labels"]], ["ready"])
+                    self.assertIn("CHANGES_REQUESTED", {row["state"] for row in state["reviews"]})
+                    fork_url = native(
+                        "repo", "fork", "--clone=false", "--remote=false", "--fork-name", "cli-fork", review=True
+                    ).strip()
+                    self.assertEqual(fork_url, url + "/reviewer/cli-fork")
+                    self.assertEqual(
+                        native("repo", "fork", "--clone=false", "--fork-name", "cli-fork", review=True).strip(),
+                        fork_url,
+                    )
+                    forks = json.loads(native("repo", "list", "--fork", "--json", "nameWithOwner,parent", review=True))
+                    self.assertEqual(forks[0]["nameWithOwner"], "reviewer/cli-fork")
+                    self.assertEqual(forks[0]["parent"]["owner"]["login"], "operator")
+                    self.assertIn("as reviewer", native("auth", "status", review=True))
+                    api.request("DELETE", "repos/reviewer/cli-fork")
                     api.request(
                         "POST",
                         "repos/operator/content/contents",

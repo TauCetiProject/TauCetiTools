@@ -42,9 +42,10 @@ Legacy owner/name/environment access rejects non-GitHub bindings, preventing an
 unfinished adapter from acting on the GitHub mirror. This guard must be removed
 only as each caller obtains full qualified-reference support.
 
-The experimental `tauceti-gh` executable supports `pr list/view`, `issue list/view`
-and `repo view`, JSON projection, `--jq`, configured repository selection, and
-explicit GitHub delegation. Lists support state, limit, author (including `@me`),
+The experimental `tauceti-gh` executable supports PR and issue list/view,
+create/edit/comment/close/reopen, PR reviews, repository view/list/fork, label
+list/create/edit, and account status/token commands. Read commands support JSON
+projection and `--jq`. Lists support state, limit, author (including `@me`),
 and repeated/comma-separated labels. PR lists also support base/head branches.
 It is not installed over the operator's `gh` and is not yet wired into workers.
 Forgejo/mixed-project use requires a leading `--conf PATH` or trusted `TAUCETI_CONF`;
@@ -52,7 +53,7 @@ the wrapper never discovers configuration from the current checkout. Inherited
 worker snapshots are reused rather than fetching mutable online configuration.
 All-GitHub configurations delegate native arguments unchanged (apart from the
 leading wrapper option). Mixed-project delegation is limited to the implemented
-read commands; other subcommands fail before routing or
+commands and flags; other subcommands fail before routing or
 credential selection. Full command coverage remains preparation work.
 Forgejo authentication uses a private `TAUCETI_FORGEJO_TOKEN_FILE` and requires
 `TAUCETI_FORGEJO_ORIGIN` to match the normalized destination origin. Set both in
@@ -62,6 +63,37 @@ Ambient tokens for GitHub Enterprise destinations similarly require a matching
 another origin. Without `-R`/`GH_REPO`, all-GitHub projects retain native gh checkout
 detection; mixed projects require a checkout origin matching exactly one configured
 repository. Otherwise specify `-R HOST/OWNER/REPO` explicitly.
+Qualified repositories on an already configured Forgejo origin may be selected
+without adding each fork to the project registry. Bare names matching multiple
+configured forges are ambiguous. Explicit auth hostnames take precedence over
+repository environment variables; account commands never infer a server from
+`GH_REPO`.
+
+The command parser follows each command's option arity before routing. String
+payloads such as `--body '-R'` or `--body '--repo=literal'` remain payload text.
+All-GitHub projects retain native argv unchanged. Unsupported flags fail without
+falling through to GitHub. File/stdin bodies are read only on the selected Forgejo
+path; they are not materialized when delegating to native GitHub.
+
+`ForgejoWriter` authenticates the selected account before mutations. Trusted
+automation can require its stable native ID using `TAUCETI_FORGEJO_USER_ID`.
+Label names and edit inputs are resolved before writing. Label additions/removals
+use native additive operations rather than replacing another actor's label set.
+If a later step fails after an earlier write, the entire command reports an
+ambiguous outcome requiring reconciliation; no mutation is retried automatically.
+Reviews bind to a synchronized retained PR head and submit that exact commit ID.
+
+Noninteractive creation needs a title, and PR creation needs an explicit head.
+`--draft` uses Forgejo 17's native `WIP:` title convention and verifies the returned
+draft state. A server configured with incompatible WIP prefixes produces an
+ambiguous creation outcome to reconcile, rather than a claimed draft success.
+Fork creation currently requires `--clone=false` and does not alter Git remotes.
+An existing destination is reused only after verifying its native parent.
+Already-closed/reopened lifecycle commands are no-ops, and merged PRs cannot be
+reopened. Raw `gh api`, structural GraphQL translation, checkout/clone operations,
+remaining command flags, trusted outbox integration and worker activation remain
+required preparation work. Token-output commands require explicit credential
+access and must not be admitted as ordinary tokenless agent reads.
 Unsupported JSON fields and commands are errors; missing source data is incomplete.
 Additional commands
 and GraphQL operations remain implementation work, not silently fabricated data.
