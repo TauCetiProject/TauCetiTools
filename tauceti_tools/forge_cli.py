@@ -171,8 +171,11 @@ def run(argv, *, environment=None):
         repository = project.ci_repository_ref()
     else:
         repository = _checkout_repository(refs)
-    if command.key in CI_COMMANDS and repository.forge.kind != "github":
-        raise Unsupported("GitHub Actions commands require a GitHub repository; select -R HOST/OWNER/REPO")
+    if command.key in CI_COMMANDS:
+        if repository.forge.kind != "github":
+            raise Unsupported("GitHub Actions commands require a GitHub repository; select -R HOST/OWNER/REPO")
+        if repository.key not in {ref.key for ref in refs if ref.forge.kind == "github"}:
+            raise Unsupported("GitHub Actions commands require a configured GitHub repository")
     if repository.forge.kind == "github":
         if repository.forge != GITHUB and any(
             env.get(key) for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
@@ -221,7 +224,11 @@ def _delegate(argv, env):
     executable = env.get("TAUCETI_REAL_GH") or shutil.which("gh", path=env.get("PATH"))
     if not executable or os.path.realpath(executable) == os.path.realpath(sys.argv[0]):
         raise Unsupported("real GitHub CLI not found; set TAUCETI_REAL_GH")
-    return subprocess.run([executable, *argv], env=env).returncode
+    try:
+        status = subprocess.run([executable, *argv], env=env).returncode
+    except KeyboardInterrupt:
+        return 130
+    return status if status >= 0 else 128 - status
 
 
 def main():

@@ -21,6 +21,7 @@ url = "https://git.example.org"
 [repositories]
 content = {forge="source", name="one/Project"}
 roadmap = {forge="source", name="one/Roadmap"}
+ci_archive = "other/Builds"
 [ci]
 backend = "github-actions"
 repository = "one/Project"
@@ -49,11 +50,11 @@ class CIRouting(unittest.TestCase):
         self.assertEqual(delegate.call_args.args[0], argv)
         return delegate.call_args.args[1]
 
-    def refuse(self, argv, env=None, error=Unsupported):
+    def refuse(self, argv, env=None, error=Unsupported, message=""):
         with (
             patch("tauceti_tools.forge_cli._delegate") as delegate,
             patch("tauceti_tools.forge_cli.Forgejo") as forgejo,
-            self.assertRaises(error),
+            self.assertRaisesRegex(error, message),
         ):
             run(["--conf", str(self.config), *argv], environment=self.env if env is None else env)
         delegate.assert_not_called()
@@ -91,9 +92,12 @@ class CIRouting(unittest.TestCase):
             with self.subTest(case=case["id"]):
                 # A bare source name may identify two hosts; qualification is a
                 # required caller adaptation, not an automatic mirror rewrite.
-                self.refuse(case["source_argv"])
-                env = self.invoke(case["qualified_argv"])
-                self.assertEqual(env["GH_REPO"], "github.com/one/Project")
+                self.refuse(case["source_argv"], message=case["source_refusal"])
+                if case["qualified_result"] == "refused-unconfigured-ci-target":
+                    self.refuse(case["qualified_argv"], message="configured GitHub repository")
+                else:
+                    env = self.invoke(case["qualified_argv"])
+                    self.assertEqual(env["GH_REPO"], "github.com/one/Project")
 
     def test_string_values_never_select_a_repository(self):
         for prefix in [
@@ -143,7 +147,13 @@ class CIRouting(unittest.TestCase):
     def test_missing_ci_config_requires_explicit_github_selection(self):
         self.config.write_text(CONFIG.partition("[ci]")[0])
         self.refuse(["run", "view", "123"], error=ConfigError)
-        self.invoke(["run", "view", "123", "-R", "github.com/one/Project"])
+        self.invoke(["run", "view", "123", "-R", "github.com/other/Builds"])
+
+    def test_explicit_github_selectors_require_a_configured_repository(self):
+        for selected in ["github.com/one/Roadmap", "github.com/unconfigured/Builds", "https://github.com/one/Roadmap"]:
+            with self.subTest(selected=selected):
+                self.refuse(["workflow", "run", "build.yml", "-R", selected], message="configured GitHub repository")
+        self.invoke(["run", "view", "123", "-R", "github.com/OTHER/builds"])
 
     def test_unknown_commands_flags_conflicts_and_extra_arguments_fail_closed(self):
         for argv in [
@@ -169,8 +179,8 @@ class CIRouting(unittest.TestCase):
         )
         argv = ["run", "view", "123", "-R", "ghe.example.org/one/Project"]
         env = {**self.env, "GH_ENTERPRISE_TOKEN": "test-only-sentinel"}
-        self.refuse(argv, env, error=ForgeError)
-        self.refuse(argv, {**env, "TAUCETI_GITHUB_ORIGIN": "https://github.com"}, error=ForgeError)
+        self.refuse(argv, env, error=ForgeError, message="TAUCETI_GITHUB_ORIGIN")
+        self.refuse(argv, {**env, "TAUCETI_GITHUB_ORIGIN": "https://github.com"}, error=ForgeError, message="TAUCETI_GITHUB_ORIGIN")
         delegated = self.invoke(argv, {**env, "TAUCETI_GITHUB_ORIGIN": "https://ghe.example.org"})
         self.assertEqual(delegated["GH_HOST"], "ghe.example.org")
 
@@ -193,7 +203,8 @@ sys.exit(7)
         argv = ["workflow", "run", "build.yml", "--json", "-Rgithub.com/one/Project"]
         result = subprocess.run(
             [sys.executable, "-m", "tauceti_tools.forge_cli", "--conf", str(self.config), *argv],
-            env={**os.environ, **self.env, "TAUCETI_REAL_GH": str(native)},
+            env={"PATH": os.defpath, **self.env, "TAUCETI_REAL_GH": str(native)},
+            cwd=Path(__file__).resolve().parents[1],
             input='{"request":"--repo=git.example.org/attacker/project"}\n', text=True, capture_output=True,
         )
         self.assertEqual(result.returncode, 7, result.stderr)
@@ -202,6 +213,37 @@ sys.exit(7)
             "argv": argv, "stdin": '{"request":"--repo=git.example.org/attacker/project"}\n',
             "host": "github.com", "repo": "github.com/one/Project",
         })
+
+    def test_native_signal_and_interrupt_have_shell_exit_statuses(self):
+        from tauceti_tools.forge_cli import _delegate
+
+        with patch("subprocess.run") as child:
+            child.return_value.returncode = -15
+            self.assertEqual(_delegate(["run", "watch", "123"], {"TAUCETI_REAL_GH": "/native-gh"}), 143)
+            child.side_effect = KeyboardInterrupt
+            self.assertEqual(_delegate(["run", "watch", "123"], {"TAUCETI_REAL_GH": "/native-gh"}), 130)
+
+    @unittest.skipIf(os.name != "posix", "POSIX signal statuses")
+    def test_real_native_termination_and_parent_interrupt(self):
+        native = Path(self.temp.name) / "signalling-gh"
+        native.write_text(f'''#!{sys.executable}
+import os, signal, time
+if os.environ["TEST_NATIVE_SIGNAL"] == "TERM":
+    os.kill(os.getpid(), signal.SIGTERM)
+else:
+    os.kill(os.getppid(), signal.SIGINT)
+    time.sleep(10)
+''')
+        native.chmod(0o700)
+        for mode, status in [("TERM", 143), ("INT", 130)]:
+            with self.subTest(mode=mode):
+                result = subprocess.run(
+                    [sys.executable, "-m", "tauceti_tools.forge_cli", "--conf", str(self.config), "run", "watch", "123"],
+                    env={"PATH": os.defpath, "TAUCETI_REAL_GH": str(native), "TEST_NATIVE_SIGNAL": mode},
+                    cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=15,
+                )
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertEqual(result.stderr, "")
 
 
 if __name__ == "__main__":

@@ -60,8 +60,10 @@ Mixed projects also support native GitHub Actions `run list/view/watch/rerun/`
 `cancel/delete/download` and `workflow list/view/run/enable/disable`, with their
 explicit command-specific flags. Without `-R` or `GH_REPO`, these commands select
 the trusted `[ci].repository`; a missing CI configuration is an error. Explicit
-selectors retain their host and override the configured CI default. A Forgejo
-selector is rejected, and a bare name shared by Forgejo and GitHub remains
+selectors retain their host and override the configured CI default. CI selectors
+must identify a configured GitHub repository (CI, repository role, tool or
+upstream); an unconfigured GitHub twin of a Forgejo repository is rejected.
+A Forgejo selector is rejected, and a bare name shared by Forgejo and GitHub remains
 ambiguous. Callers must qualify those names, for example
 `-R github.com/TauCetiProject/TauCeti`. No source repository is automatically
 rewritten to its mirror. Native gh receives the original arguments, stdin and
@@ -71,11 +73,19 @@ exit status pass through. `workflow run --json` reads stdin in native gh, while
 path values cannot select a server. The wrapper does not open Forgejo credentials
 for these commands. The existing Enterprise credential-origin guard still applies.
 Unknown commands and flags fail before delegation in mixed projects.
+Signal termination uses shell exit status `128 + signal`, and Ctrl-C returns 130
+without a Python traceback. Flag arities were checked against gh 2.103.3; native
+CLI versions and option arities must be verified when preparing integrated
+installer pins. A worker inheriting a Forgejo `GH_REPO` must supply an explicit
+configured GitHub selector for CI commands.
 
 `tests/fixtures/forge_ci_commands.json` records four accepted CI-routing cases
-with immutable Worker/Tools source provenance and synthetic values. These cases
-test the required host-qualification adaptation; their source consumers are not
-yet migrated. The process-boundary regression uses a local native-CLI stand-in
+with immutable Worker/Tools source provenance and synthetic values. Three cases
+check content-CI host qualification. The progress retry targets Roadmap and is
+refused because its GitHub execution identity is not configured; adding a host
+prefix is insufficient. Their source consumers are not yet migrated: legacy
+configuration accessors still reject mixed projects, and callers need qualified
+source and CI identities. The process-boundary regression uses a local native-CLI stand-in
 to verify stdin, argument, output and exit-status forwarding. Neither check
 demonstrates a hosted CI run or candidate/run/attempt provenance. The queue must
 still implement and verify that provenance before Forgejo activation.

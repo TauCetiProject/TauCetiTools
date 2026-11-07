@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "scope": "Accepted native-CI routing cases only. Repository, workflow, run, branch and input values are synthetic substitutions into the cited source expressions. Qualified argv records the required caller adaptation; these cases do not prove those consumers are adapted or exact-candidate admission is implemented.",
+  "scope": "Accepted native-CI routing and refusal cases only. Values are synthetic substitutions into the cited source expressions. Qualified forms test routing, not complete consumer adaptations; legacy config accessors still reject mixed projects. Roadmap retry has no configured GitHub execution identity and must be refused even after host qualification. Exact-candidate admission is not implemented by these cases.",
   "native_contract": "Installed gh 2.103.3 command help; workflow run --json is boolean, while run/list/view --json consumes a field list.",
   "cases": [
     {
@@ -25,7 +25,9 @@
         "build.yml",
         "--repo=github.com/one/Project",
         "--ref=main"
-      ]
+      ],
+      "source_refusal": "ambiguous repository",
+      "qualified_result": "delegate"
     },
     {
       "id": "tools-doctor-run-log",
@@ -51,7 +53,9 @@
         "--repo",
         "github.com/one/Project",
         "--log"
-      ]
+      ],
+      "source_refusal": "ambiguous repository",
+      "qualified_result": "delegate"
     },
     {
       "id": "tools-doctor-progress-retry",
@@ -67,7 +71,7 @@
         "run",
         "progress-merge.yml",
         "--repo",
-        "one/Project",
+        "one/Roadmap",
         "-f",
         "pr=12"
       ],
@@ -76,10 +80,12 @@
         "run",
         "progress-merge.yml",
         "--repo",
-        "github.com/one/Project",
+        "github.com/one/Roadmap",
         "-f",
         "pr=12"
-      ]
+      ],
+      "source_refusal": "require a GitHub repository",
+      "qualified_result": "refused-unconfigured-ci-target"
     },
     {
       "id": "tools-online-dispatch",
@@ -111,7 +117,9 @@
         "main",
         "--field",
         "request=@request.json"
-      ]
+      ],
+      "source_refusal": "ambiguous repository",
+      "qualified_result": "delegate"
     }
   ]
 }
