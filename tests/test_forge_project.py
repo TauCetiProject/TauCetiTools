@@ -175,6 +175,7 @@ class CommandTests(unittest.TestCase):
 
     def test_delegation_removes_wrapper_flags(self):
         with patch("subprocess.run") as command:
+            command.return_value.returncode = 0
             run(
                 ["--conf", str(self.config), "pr", "view", "12", "-R", "github.com/one/Project"],
                 environment={**os.environ, "TAUCETI_REAL_GH": "/usr/bin/real-gh"},
@@ -189,6 +190,7 @@ class CommandTests(unittest.TestCase):
         )
         for payload in ["--conf=private-text", "--repo=literal-text", "-R", "--json"]:
             with self.subTest(payload=payload), patch("subprocess.run") as command:
+                command.return_value.returncode = 0
                 run(
                     [
                         "--conf",
@@ -213,6 +215,7 @@ class CommandTests(unittest.TestCase):
             CONFIG.replace('content = {forge="source", name="one/Project"}', 'content = "one/Project"')
         )
         with patch("subprocess.run") as command:
+            command.return_value.returncode = 0
             run(
                 [
                     "--conf",
