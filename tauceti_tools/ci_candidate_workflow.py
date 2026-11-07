@@ -11,6 +11,7 @@ import re
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .assets.scripts import ci_checkout, ci_git
@@ -490,6 +491,67 @@ def lint_scope(request, policy, context, checkout, destination, configuration_pa
     return {"LINT_ONLY_MODULES": str(destination / "modules.txt"), "LINT_SCOPE_DIR": str(destination)}
 
 
+class PublicationPending(EvidenceUnavailable):
+    """Authenticated job/step evidence is not complete yet; retry within the deadline."""
+
+
+def publication_timestamp(value):
+    """Normalize bounded RFC3339 times to the job/run API's whole-second precision."""
+    if value is None:
+        raise PublicationPending("missing publication execution timestamp")
+    if not isinstance(value, str) or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})", value, re.ASCII
+    ):
+        raise EvidenceUnavailable("invalid publication execution timestamp")
+    try:
+        # Fractions are intentionally discarded before parsing, including on
+        # Python 3.10 whose fromisoformat accepts fewer fractional formats.
+        seconds = re.sub(r"\.\d{1,9}(?=Z|[+-])", "", value)
+        return datetime.fromisoformat(seconds.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except (ValueError, OverflowError) as error:
+        raise EvidenceUnavailable("invalid publication execution timestamp") from error
+
+
+def publication_execution(run, builder, publisher):
+    """Reused jobs can have new IDs/current run_attempt but retain old timestamps."""
+    attempt_start = publication_timestamp(run.get("run_started_at"))
+    build_start = publication_timestamp(builder.get("started_at"))
+    if build_start <= attempt_start:
+        return False
+    build_end = publication_timestamp(builder.get("completed_at"))
+    publish_start = publication_timestamp(publisher.get("started_at"))
+    publish_end = publication_timestamp(publisher.get("completed_at"))
+    steps = publisher.get("steps")
+    if steps is None:
+        raise PublicationPending("missing publisher step evidence")
+    if not isinstance(steps, list):
+        raise EvidenceUnavailable("missing publisher step evidence")
+    confirmations = [
+        step
+        for step in steps
+        if isinstance(step, dict) and step.get("name") == "Confirm the exact revision map on the public endpoint"
+    ]
+    if not confirmations and not steps:
+        raise PublicationPending("missing publisher confirmation")
+    if len(confirmations) != 1:
+        raise EvidenceUnavailable("missing or ambiguous publisher confirmation")
+    confirmation = confirmations[0]
+    for entry in (builder, publisher, confirmation):
+        if entry.get("status") in {None, "queued", "in_progress", "waiting", "pending", "requested"}:
+            raise PublicationPending("publication execution is not complete")
+        if entry.get("status") != "completed":
+            return False
+        if entry.get("conclusion") is None:
+            raise PublicationPending("publication conclusion is not available")
+        if entry.get("conclusion") != "success":
+            return False
+    confirm_start = publication_timestamp(confirmation.get("started_at"))
+    confirm_end = publication_timestamp(confirmation.get("completed_at"))
+    # Strictly later: equal second-resolution timestamps cannot distinguish a
+    # reused job from a fresh execution in an immediately requested rerun.
+    return attempt_start < build_start <= build_end <= publish_start <= confirm_start <= confirm_end <= publish_end
+
+
 def publication_verdict(request, policy, context, reader, *, clock=time.monotonic, sleep=time.sleep):
     """Require this attempt's isolated publisher and its exact-map confirmation."""
     if not policy.require_publication:
@@ -532,6 +594,7 @@ def publication_verdict(request, policy, context, reader, *, clock=time.monotoni
         if publishers:
             job = publishers[0]
             runner = job.get("runner_id")
+            isolated = False
             if type(runner) is int and runner > 0:
                 acquired = True
                 build_runner = builders[0].get("runner_id")
@@ -544,14 +607,16 @@ def publication_verdict(request, policy, context, reader, *, clock=time.monotoni
                     or build_runner == runner
                 ):
                     raise EvidenceUnavailable("publisher did not acquire an isolated hosted runner")
+                isolated = True
             if job.get("status") == "completed":
-                confirmed = any(
-                    isinstance(step, dict)
-                    and step.get("name") == "Confirm the exact revision map on the public endpoint"
-                    and step.get("conclusion") == "success"
-                    for step in job.get("steps", [])
-                )
-                return "success" if acquired and job.get("conclusion") == "success" and confirmed else "infrastructure"
+                if isolated and job.get("conclusion") == "success":
+                    try:
+                        if publication_execution(run, builders[0], job):
+                            return "success"
+                    except PublicationPending:
+                        sleep(30)
+                        continue
+                return "infrastructure"
         if not acquired and clock() - start >= 300:
             return "infrastructure"
         sleep(30)

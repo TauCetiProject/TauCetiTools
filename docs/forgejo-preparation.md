@@ -565,6 +565,18 @@ artifact named for the request, run and attempt. It binds all four verdicts
 Missing tested identity produces an infrastructure result. A required publication
 cannot be skipped by a build output: the finalizer checks this attempt's unique
 publisher job, separate hosted runner and successful exact-map confirmation step.
+GitHub can relabel a reused job with a new ID and the latest `run_attempt`.
+Publication therefore also requires authenticated execution timestamps: the
+successful builder must start strictly after the current `run_started_at`, finish
+before the publisher starts, and the successful confirmation must execute within
+the publisher's execution interval. Missing, malformed, ambiguous or old timing
+evidence yields infrastructure failure. Missing or incomplete API evidence is
+retried within the existing bounded publication deadline. Documented RFC3339
+timestamps with fractions or timezone offsets are normalized to UTC at the
+observed whole-second job/run precision before comparing intervals. See the
+[workflow jobs API](https://docs.github.com/en/rest/actions/workflow-jobs).
+Equal builder/attempt start timestamps
+also fail closed because the API's second precision cannot establish freshness.
 The publisher reads only the toolchain pin, bound through the verified commit,
 root tree, ordinary blob entry and blob hash; it never checks out candidate code.
 
@@ -597,7 +609,9 @@ The queue composes candidates by squashing members, so raw accepted member heads
 need not be candidate ancestors. CI verifies their exact retained objects; the
 queue is responsible for the composition and fresh source approval assertion.
 Use a full workflow rerun when retrying publication, so build and publisher
-evidence belong to the same run attempt. Required publication with missing cache
+evidence belong to the same run attempt. Choose **Re-run all jobs**; **Re-run
+failed jobs** after a successful builder reuses that builder and cannot provide
+fresh publication evidence. Required publication with missing cache
 configuration remains an infrastructure failure.
 
 The general project generator still refuses native source bindings. The execution
