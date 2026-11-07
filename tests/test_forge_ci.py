@@ -1,7 +1,12 @@
 """GitHub CI routing in a mixed-source project, including the native process boundary."""
 
+import contextlib
+import io
 import json
 import os
+import selectors
+import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -219,10 +224,20 @@ sys.exit(7)
     def test_interrupt_before_native_execution_is_clean(self):
         from tauceti_tools.forge_cli import main
 
-        with patch("tauceti_tools.forge_cli.load", side_effect=KeyboardInterrupt), patch(
-            "sys.argv", ["tauceti-gh", "--conf", str(self.config), "run", "watch", "123"]
+        stderr = io.StringIO()
+        with (
+            patch("tauceti_tools.forge_cli.load", side_effect=KeyboardInterrupt),
+            patch("sys.argv", ["tauceti-gh", "--conf", str(self.config), "run", "watch", "123"]),
+            patch("tauceti_tools.forge_cli.os.execvpe", side_effect=AssertionError("unexpected native exec")),
+            patch("tauceti_tools.forge_cli.signal.signal") as disposition,
+            patch("tauceti_tools.forge_cli.os.kill") as terminate,
+            contextlib.redirect_stderr(stderr),
         ):
             self.assertEqual(main(), 130)
+        disposition.assert_called_once_with(signal.SIGINT, signal.SIG_DFL)
+        terminate.assert_called_once_with(os.getpid(), signal.SIGINT)
+        self.assertIn("reconcile any in-flight write", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
 
     @unittest.skipIf(os.name != "posix", "POSIX signal statuses")
     def test_real_native_signals_are_preserved(self):
@@ -230,6 +245,7 @@ sys.exit(7)
         native.write_text(f'''#!{sys.executable}
 import os, signal
 if os.environ["TEST_NATIVE_SIGNAL"] == "TERM":
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
     os.kill(os.getpid(), signal.SIGTERM)
 else:
     signal.signal(signal.SIGINT, signal.SIG_DFL)
@@ -250,7 +266,8 @@ else:
     def test_cli_exec_keeps_caller_pid_and_timeout_ownership(self):
         native = Path(self.temp.name) / "waiting-gh"
         native.write_text(f'''#!{sys.executable}
-import os, time
+import os, signal, time
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
 print(os.getpid(), flush=True)
 time.sleep(60)
 ''')
@@ -263,6 +280,9 @@ time.sleep(60)
                 start_new_session=True,
             ) as process:
                 try:
+                    with selectors.DefaultSelector() as ready:
+                        ready.register(process.stdout, selectors.EVENT_READ)
+                        self.assertTrue(ready.select(timeout=10), "native process did not report its PID")
                     line = process.stdout.readline()
                     self.assertEqual(int(line), process.pid)
                     process.send_signal(termination)
@@ -277,6 +297,27 @@ time.sleep(60)
                     except ProcessLookupError:
                         pass
                     process.wait(timeout=10)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux native signal masks")
+    def test_native_signal_dispositions_match_direct_execution(self):
+        native = Path(self.temp.name) / "native-signals"
+        cat = shutil.which("cat")
+        if not cat:
+            self.skipTest("native cat unavailable")
+        native.write_text("#!/bin/sh\nexec " + shlex.quote(cat) + " /proc/self/status\n")
+        native.chmod(0o700)
+        env = {"PATH": os.defpath, "TAUCETI_REAL_GH": str(native)}
+        direct = subprocess.run([str(native)], env=env, capture_output=True, text=True, check=True, timeout=10)
+        delegated = subprocess.run(
+            [sys.executable, "-m", "tauceti_tools.forge_cli", "--conf", str(self.config), "run", "list"],
+            env=env, cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, check=True, timeout=10,
+        )
+
+        def masks(output):
+            return {line.split(":")[0]: line.split(":", 1)[1].strip() for line in output.splitlines() if line.startswith(("SigIgn:", "SigBlk:"))}
+
+        self.assertEqual(masks(delegated.stdout), masks(direct.stdout))
+        self.assertEqual(len(masks(delegated.stdout)), 2)
 
 
 if __name__ == "__main__":

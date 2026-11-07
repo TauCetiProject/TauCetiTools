@@ -78,8 +78,10 @@ for these commands. The existing Enterprise credential-origin guard still applie
 Unknown commands and flags fail before delegation in mixed projects.
 The CLI replaces its process with native gh, preserving the caller's PID,
 timeout ownership and native signal/exit behavior. In-process Python `run()`
-callers retain a subprocess and its return code. An interrupt before native
-execution returns 130 without a Python traceback. Flag arities were checked against gh 2.103.3; native
+callers retain a subprocess and its return code. Python's ignored pipe/file-size
+signals are restored before exec. An interrupt in the wrapper terminates by
+SIGINT without a Python traceback and reports that any in-flight write needs
+reconciliation. Flag arities were checked against gh 2.103.3; native
 CLI versions and option arities must be verified when preparing integrated
 installer pins. A worker inheriting a Forgejo `GH_REPO` must supply an explicit
 configured GitHub selector for CI commands.

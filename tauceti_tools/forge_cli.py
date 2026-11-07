@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import urllib.parse
@@ -229,7 +230,22 @@ def _delegate(argv, env, *, replace_process=False):
     if replace_process:
         # Keep the caller's PID/timeout/signal ownership. A subprocess wrapper
         # could be killed while a dispatched workflow or download keeps running.
-        os.execvpe(executable, [executable, *argv], env)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        handlers = {}
+        try:
+            # Match subprocess's restore_signals=True: Python ignores these at
+            # startup, but ignored dispositions survive exec into native code.
+            for name in ("SIGPIPE", "SIGXFZ", "SIGXFSZ"):
+                number = getattr(signal, name, None)
+                if number is not None and number not in handlers:
+                    handlers[number] = signal.getsignal(number)
+                    signal.signal(number, signal.SIG_DFL)
+            os.execvpe(executable, [executable, *argv], env)
+        finally:
+            # exec only returns on failure; keep this Python process usable.
+            for number, handler in handlers.items():
+                signal.signal(number, handler)
     return subprocess.run([executable, *argv], env=env).returncode
 
 
@@ -237,6 +253,9 @@ def main():
     try:
         return run(sys.argv[1:], native_exec=True)
     except KeyboardInterrupt:
+        print("gh: interrupted; reconcile any in-flight write before retrying", file=sys.stderr)
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGINT)
         return 130
     except AmbiguousWrite as error:
         print(f"gh: ambiguous-write: {error}", file=sys.stderr)
