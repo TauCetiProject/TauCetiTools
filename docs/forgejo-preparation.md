@@ -71,19 +71,32 @@ They do not assume that imported issue numbers follow creation timestamps.
 Repeated labels require every named label; native issue filtering uses OR and
 discards unknown labels, so the client applies this predicate itself. Sparse
 matches may still require more pages and raise on exhausting the page bound.
-Full-collection callers omit the limit and must reach the final empty page.
+Full-collection callers omit the limit and must exhaust pagination. Creation
+ordering does not give snapshot isolation: a row leaving a filter during a scan
+can shift later rows across page boundaries and cause an omission. Consumers must
+reconcile subsequent observations; this is not an atomic queue-admission snapshot.
+Review pagination uses the server's page cap and native total count because
+visibility filtering can produce empty intermediate pages containing hidden drafts.
 
 `ForgejoReader` provides the same explicit read contracts to internal consumers.
 PR JSON fields include source/base/head metadata, comments, historical reviews,
 changed files and latest commit status per context. Expensive histories are only
 fetched when requested. A file listing must match the native changed-file count;
-head/base are rechecked afterward. Status requests bind to the immutable head ID.
+each file's contents URL must identify the immutable head, and head/base are
+rechecked afterward. Status requests bind to the immutable head ID. Native diff
+statistics are unavailable for AGit and missing-head-repository responses, whose
+zero-value stats do not prove an empty change set.
 Forgejo's false mergeability also covers checking/error/draft, so it maps to
 `UNKNOWN`, never a proven conflict. Historical approvals do not imply a current
 `reviewDecision`; that field remains unsupported until native approval policy is
 integrated. Reviewer requests are distinct from submitted reviews. Dismissed
 reviews retain their dismissal state. IDs are opaque, case-normalized,
-forge-qualified strings; missing bot/type information is not invented.
+forge-qualified strings based on global table IDs, independent of repository
+names. Ghost, imported replacement, and Actions system actors receive no
+authenticatable user ID. Actions' fixed system actor is identified as a bot;
+other missing bot/type information is not invented. Only the viewer's own pending
+reviews are exposed, including when a native admin token can see more drafts.
+Unrequested optional metadata is not validated or fetched.
 
 Repository reads expose native effective permissions and the default branch.
 The direct client's `current_user()` validates the authenticated account response;
@@ -116,7 +129,10 @@ and verifies an unauthenticated edit is refused,
 and stops the server afterward. SSH, Actions and registration are disabled and
 credentials are never printed. It also exercises separate operator/reviewer
 accounts, reviewer requests and approvals, superseded commit statuses, issue
-label filtering, repository permissions, CLI reads and a 65-file PR. Forgejo 17's
+label/author/branch filtering, repository permissions, CLI reads, merged/closed
+PRs with deleted branches, ghost actors, draft visibility and a 65-file PR. The
+server caps pages at one item, exercising empty intermediate review pages and
+server caps below the client's requested limit. Forgejo 17's
 issue-comment and review-comment endpoints are unpaginated; PR/file listings use
 pagination. File listings end in JSON `null`, unlike other collection endpoints.
 Only that known endpoint accepts a null terminal page; empty HTTP read bodies

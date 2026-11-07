@@ -169,7 +169,7 @@ class Forgejo:
         else:
             self._opener = urllib.request.build_opener(_NoRedirect)
 
-    def request(self, method, path, data=None):
+    def request(self, method, path, data=None, *, response_headers=None):
         parsed = urllib.parse.urlsplit(path)
         if (
             parsed.scheme
@@ -191,6 +191,8 @@ class Forgejo:
         req = urllib.request.Request(self.forge.api_url + "/" + path.lstrip("/"), body, headers, method=method)
         try:
             with self._opener.open(req, timeout=self.timeout) as response:
+                if response_headers is not None:
+                    response_headers.update({key.lower(): value for key, value in response.headers.items()})
                 raw = response.read(self.max_bytes + 1)
                 if len(raw) > self.max_bytes:
                     error = Incomplete if method == "GET" else AmbiguousWrite
@@ -213,7 +215,7 @@ class Forgejo:
             error = ForgeError if method == "GET" else AmbiguousWrite
             raise error(f"Forgejo {method} transport failed") from None
 
-    def pages(self, path, *, empty_null=False):
+    def pages(self, path, *, empty_null=False, counted=False):
         """Yield bounded pages, without claiming the caller consumed a complete collection.
 
         A consumer may stop after its requested prefix. Consumers requiring the
@@ -225,21 +227,40 @@ class Forgejo:
         query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
         if any(k in {"page", "limit"} for k, _ in query):
             raise ValueError("collection owns page and limit parameters")
+        page_size = 50
+        if counted:
+            settings = self.request("GET", "settings/api")
+            cap = settings.get("max_response_items") if isinstance(settings, dict) else None
+            if type(cap) is not int or cap < 1:
+                raise Incomplete("Forgejo pagination settings are unavailable")
+            page_size = min(page_size, cap)
         for page in range(1, self.max_pages + 1):
-            parameters = urllib.parse.urlencode(query + [("limit", "50"), ("page", str(page))])
-            batch = self.request("GET", parsed.path + "?" + parameters)
+            parameters = urllib.parse.urlencode(query + [("limit", str(page_size)), ("page", str(page))])
+            headers = {}
+            batch = self.request("GET", parsed.path + "?" + parameters, response_headers=headers)
             if batch is None and empty_null:
                 return  # Explicit native nil slice; only endpoints known to use it.
             if not isinstance(batch, list):
                 raise Incomplete("Forgejo collection response was not an array")
+            if counted:
+                try:
+                    total = int(headers["x-total-count"])
+                    if total < 0:
+                        raise ValueError
+                except (KeyError, ValueError):
+                    raise Incomplete("Forgejo collection count is unavailable") from None
+                yield batch
+                if page * page_size >= total:
+                    return
+                continue
             # Only an empty page proves completion: server-side limits may be below 50.
             if not batch:
                 return
             yield batch
         raise Incomplete("Forgejo collection exceeded the configured page limit")
 
-    def collection(self, path, *, empty_null=False):
-        return [row for batch in self.pages(path, empty_null=empty_null) for row in batch]
+    def collection(self, path, *, empty_null=False, counted=False):
+        return [row for batch in self.pages(path, empty_null=empty_null, counted=counted) for row in batch]
 
     def _numbered(self, path, *, limit=None, predicate=None):
         """Newest distinct issues/PRs, filtered before applying an optional limit.
@@ -263,6 +284,22 @@ class Forgejo:
                     if limit is not None and len(rows) == limit:
                         return rows
         return rows
+
+    def _listing(self, repository, path, *, author=None, **options):
+        try:
+            return self._numbered(path, **options)
+        except ForgeError as error:
+            if error.status != 404 or author is None:
+                raise
+            # Do not turn an inaccessible repository into an empty result.
+            self.repository(repository)
+            try:
+                self.request("GET", "users/" + urllib.parse.quote(author, safe=""))
+            except ForgeError as user_error:
+                if user_error.status == 404:
+                    return []
+                raise
+            raise error
 
     def _repo(self, repository):
         if repository.forge != self.forge:
@@ -290,13 +327,24 @@ class Forgejo:
                     raise Incomplete("Forgejo listing did not identify merge state")
                 if row["merged"] != (state == "merged"):
                     return False
+            for side, name in [("base", base), ("head", head)]:
+                if name is not None:
+                    branch = row.get(side)
+                    if not isinstance(branch, dict) or not isinstance(branch.get("label"), str):
+                        raise Incomplete("Forgejo listing did not identify its branch name")
+                    if branch["label"] != name:
+                        return False
             return self._labels_match(row, labels) and self._author_match(row, author)
 
         # Omitting sort uses Forgejo 17's creation-descending default. 'oldest'
         # cannot serve a bounded newest-first prefix. Preserve server creation
         # order: imported issues can have timestamps out of index order.
-        return self._numbered(
-            f"{self._repo(repository)}/pulls?{urllib.parse.urlencode(query)}", limit=limit, predicate=matches
+        return self._listing(
+            repository,
+            f"{self._repo(repository)}/pulls?{urllib.parse.urlencode(query)}",
+            author=author,
+            limit=limit,
+            predicate=matches,
         )
 
     @staticmethod
@@ -329,10 +377,14 @@ class Forgejo:
         query = {"state": state, "type": "issues", "sort": "latest"}
         if author is not None:
             query["created_by"] = author
-        return self._numbered(
+        return self._listing(
+            repository,
             f"{self._repo(repository)}/issues?{urllib.parse.urlencode(query)}",
+            author=author,
             limit=limit,
-            predicate=lambda row: self._labels_match(row, labels) and self._author_match(row, author),
+            predicate=lambda row: (
+                row.get("pull_request") is None and self._labels_match(row, labels) and self._author_match(row, author)
+            ),
         )
 
     def issue(self, repository, number):
@@ -362,7 +414,9 @@ class Forgejo:
 
     def reviews(self, repository, number):
         repository.pull_url(number)
-        return self.collection(f"{self._repo(repository)}/pulls/{number}/reviews")
+        # Visibility filtering happens after native pagination: an empty page
+        # can hide only other users' drafts while later submitted reviews exist.
+        return self.collection(f"{self._repo(repository)}/pulls/{number}/reviews", counted=True)
 
     def review_comments(self, repository, number, review_id):
         repository.pull_url(number)

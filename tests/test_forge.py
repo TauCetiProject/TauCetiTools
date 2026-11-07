@@ -146,6 +146,45 @@ class DirectTests(unittest.TestCase):
                 call()
         self.assertEqual(len(self.calls), 1)
 
+    def test_hidden_draft_review_page_does_not_hide_later_submitted_reviews(self):
+        def reply(path):
+            if path.endswith("settings/api"):
+                return 200, {"max_response_items": 1}, {}
+            return 200, ([{"id": 2}] if "page=2" in path else []), {"X-Total-Count": "2"}
+
+        self.reply = reply
+        self.assertEqual(self.api.reviews(self.repo, 1), [{"id": 2}])
+        self.assertEqual(len(self.calls), 3)
+        self.assertIn("limit=1", self.calls[1][1])
+
+    def test_review_pages_require_count_metadata(self):
+        self.reply = lambda path: (200, {"max_response_items": 1} if path.endswith("settings/api") else [], {})
+        with self.assertRaises(Incomplete):
+            self.api.reviews(self.repo, 1)
+
+    def test_unknown_author_is_empty_only_after_repository_access_is_verified(self):
+        def reply(path):
+            if path == "/api/v1/repos/one/project":
+                return 200, {"full_name": "one/project"}, {}
+            return 404, {}, {}
+
+        self.reply = reply
+        self.assertEqual(self.api.issues(self.repo, author="unknown"), [])
+        self.reply = lambda path: (404, {}, {})
+        with self.assertRaises(ForgeError):
+            self.api.issues(self.repo, author="unknown")
+
+    def test_branch_filters_are_checked_against_native_labels(self):
+        self.reply = lambda path: (
+            200,
+            [
+                {"number": 3, "head": {"label": "wrong"}, "base": {"label": "main"}},
+                {"number": 2, "head": {"label": "proof", "ref": "refs/pull/2/head"}, "base": {"label": "main"}},
+            ],
+            {},
+        )
+        self.assertEqual([r["number"] for r in self.api.pulls(self.repo, head="proof", base="main", limit=1)], [2])
+
     def test_repository_and_account_responses_must_identify_target(self):
         for data, call in [
             ({"full_name": "other/project"}, lambda: self.api.repository(self.repo)),

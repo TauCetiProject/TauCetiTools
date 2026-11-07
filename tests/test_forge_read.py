@@ -11,13 +11,14 @@ class ReadContracts(unittest.TestCase):
         self.api = Mock()
         self.reader = ForgejoReader(self.api)
         self.api.pull.return_value = {
+            "flow": 0,
             "id": 21,
             "number": 3,
             "title": "Proof",
             "state": "open",
             "merged": False,
             "draft": False,
-            "head": {"sha": "a" * 40, "ref": "proof"},
+            "head": {"sha": "a" * 40, "ref": "proof", "label": "proof", "repo": {}},
             "base": {"sha": "b" * 40, "ref": "main"},
             "user": {"id": 1, "login": "operator"},
         }
@@ -97,7 +98,14 @@ class ReadContracts(unittest.TestCase):
 
     def test_file_metadata_does_not_turn_missing_data_into_zero(self):
         self.api.pull.return_value["changed_files"] = 1
-        self.api.files.return_value = [{"filename": "Proof.lean", "additions": 1, "deletions": 0}]
+        self.api.files.return_value = [
+            {
+                "filename": "Proof.lean",
+                "additions": 1,
+                "deletions": 0,
+                "contents_url": "https://git.example.org/api/v1/repos/one/Project/contents/Proof.lean?ref=" + "a" * 40,
+            }
+        ]
         value = self.reader.pull(self.repo, 3, ["files"])
         self.assertEqual(value["files"], [{"path": "Proof.lean", "additions": 1, "deletions": 0}])
         del self.api.files.return_value[0]["deletions"]
@@ -106,7 +114,14 @@ class ReadContracts(unittest.TestCase):
 
     def test_file_truncation_and_head_changes_are_not_complete_observations(self):
         self.api.pull.return_value["changed_files"] = 2
-        self.api.files.return_value = [{"filename": "Proof.lean", "additions": 1, "deletions": 0}]
+        self.api.files.return_value = [
+            {
+                "filename": "Proof.lean",
+                "additions": 1,
+                "deletions": 0,
+                "contents_url": "https://git.example.org/api/v1/repos/one/Project/contents/Proof.lean?ref=" + "a" * 40,
+            }
+        ]
         with self.assertRaises(Incomplete):
             self.reader.pull(self.repo, 3, ["files"])
         self.api.pull.return_value["changed_files"] = 1
@@ -114,6 +129,65 @@ class ReadContracts(unittest.TestCase):
         self.api.pull.side_effect = [before, {**before, "head": {"sha": "c" * 40}}]
         with self.assertRaises(Incomplete):
             self.reader.pull(self.repo, 3, ["files"])
+
+    def test_retained_pull_ref_is_not_a_branch_name(self):
+        self.api.pull.return_value["head"]["ref"] = "refs/pull/3/head"
+        self.assertEqual(self.reader.pull(self.repo, 3, ["headRefName"]), {"headRefName": "proof"})
+
+    def test_file_ref_must_match_head_even_when_branch_tip_is_stable(self):
+        self.api.pull.return_value["changed_files"] = 1
+        self.api.files.return_value = [
+            {
+                "filename": "Proof.lean",
+                "additions": 1,
+                "deletions": 0,
+                "contents_url": "https://git.example.org/contents/Proof.lean?ref=" + "b" * 40,
+            }
+        ]
+        with self.assertRaises(Incomplete):
+            self.reader.pull(self.repo, 3, ["files"])
+
+    def test_system_actor_and_unrequested_bad_metadata_do_not_break_numbers(self):
+        for native_id in [-1, -2, 0]:
+            self.api.pull.return_value["user"] = {"id": native_id, "login": "system"}
+            actor = self.reader.pull(self.repo, 3, ["author"])["author"]
+            self.assertNotIn("id", actor)
+            self.assertEqual(actor.get("is_bot"), True if native_id == -2 else None)
+        self.api.pull.return_value.update(user="bad", labels="bad", assignees="bad")
+        self.assertEqual(self.reader.pull(self.repo, 3, ["number"]), {"number": 3})
+        with self.assertRaises(Incomplete):
+            self.reader.pull(self.repo, 3, ["author"])
+
+    def test_diff_statistics_are_unknown_without_native_git_flow_and_head_repository(self):
+        self.api.pull.return_value.update(changed_files=0, additions=0, deletions=0, flow=1)
+        with self.assertRaises(Incomplete):
+            self.reader.pull(self.repo, 3, ["changedFiles"])
+        self.api.pull.return_value.update(flow=0)
+        self.api.pull.return_value["head"]["repo"] = None
+        with self.assertRaises(Incomplete):
+            self.reader.pull(self.repo, 3, ["additions"])
+
+    def test_pending_reviews_belong_only_to_the_current_viewer(self):
+        base = {
+            "id": 8,
+            "state": "PENDING",
+            "dismissed": False,
+            "body": "Draft",
+            "commit_id": "a" * 40,
+            "user": {"id": 2, "login": "reviewer"},
+            "submitted_at": "2026-01-01T00:00:00Z",
+            "html_url": self.repo.pull_url(3),
+        }
+        self.api.reviews.return_value = [base]
+        self.api.current_user.return_value = {"id": 1, "login": "operator"}
+        self.assertEqual(self.reader.pull(self.repo, 3, ["reviews"]), {"reviews": []})
+        self.api.current_user.return_value = {"id": 2, "login": "reviewer"}
+        self.assertEqual(self.reader.pull(self.repo, 3, ["reviews"])["reviews"][0]["state"], "PENDING")
+
+    def test_global_ids_survive_repository_rename(self):
+        before = pull_record(self.api.pull.return_value, self.repo)
+        renamed = RepositoryRef(self.repo.forge, "another/NewName")
+        self.assertEqual(before["id"], pull_record(self.api.pull.return_value, renamed)["id"])
 
     def test_latest_status_per_context_is_bound_to_immutable_head(self):
         def status(native_id, context, state):

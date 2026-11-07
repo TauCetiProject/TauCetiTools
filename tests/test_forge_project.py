@@ -336,6 +336,12 @@ class CommandTests(unittest.TestCase):
                 delegate.assert_not_called()
                 client.assert_not_called()
 
+    def test_invalid_read_arguments_fail_before_routing(self):
+        for command in [["pr", "list", "-l", "bug,"], ["pr", "list", "--search", "anything"], ["pr", "view", "1_2"]]:
+            with patch("tauceti_tools.forge_cli.Forgejo") as client, self.assertRaises((Unsupported, ValueError)):
+                run(["--conf", str(self.config), *command])
+            client.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

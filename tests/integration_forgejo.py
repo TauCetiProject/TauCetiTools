@@ -57,6 +57,9 @@ DEFAULT_BRANCH = main
 DISABLE_REGISTRATION = true
 [actions]
 ENABLED = false
+[api]
+MAX_RESPONSE_ITEMS = 1
+DEFAULT_PAGING_NUM = 1
 [log]
 MODE = file
 ROOT_PATH = {root}/log
@@ -195,6 +198,21 @@ ROOT_PATH = {root}/log
                         {r["state"] for r in reader.pull(repo, pull["number"], ["reviews"])["reviews"]},
                         {"COMMENTED", "APPROVED"},
                     )
+                    # The hidden draft occupies a whole native page; its empty
+                    # visible page must not hide a later submitted review.
+                    api.request(
+                        "POST",
+                        f"repos/operator/content/pulls/{pull['number']}/reviews",
+                        {"event": "PENDING", "body": "Operator draft"},
+                    )
+                    reviewer.request(
+                        "POST",
+                        f"repos/operator/content/pulls/{pull['number']}/reviews",
+                        {"event": "COMMENT", "body": "Later submitted review"},
+                    )
+                    public_reviews = ForgejoReader(reviewer).pull(repo, pull["number"], ["reviews"])["reviews"]
+                    self.assertTrue(any(r["body"] == "Later submitted review" for r in public_reviews))
+                    self.assertTrue(all(r["state"] != "PENDING" for r in public_reviews))
                     for state in ["pending", "success"]:
                         api.request(
                             "POST",
@@ -242,6 +260,20 @@ ROOT_PATH = {root}/log
                     )
                     prefix = Forgejo(api.forge, token=token, max_pages=1).pulls(repo, limit=1)
                     self.assertEqual([r["number"] for r in prefix], [second_pull["number"]])
+                    self.assertEqual(api.pulls(repo, head="missing-branch", limit=1), [])
+                    self.assertEqual(
+                        [r["number"] for r in api.pulls(repo, head="proof", base="main", limit=1)], [pull["number"]]
+                    )
+                    reviewer.request(
+                        "POST",
+                        f"repos/operator/content/pulls/{second_pull['number']}/reviews",
+                        {"event": "PENDING", "body": "Private draft"},
+                    )
+                    self.assertEqual(reader.pull(repo, second_pull["number"], ["reviews"]), {"reviews": []})
+                    self.assertEqual(
+                        ForgejoReader(reviewer).pull(repo, second_pull["number"], ["reviews"])["reviews"][0]["state"],
+                        "PENDING",
+                    )
                     with self.assertRaises(ForgeError) as forbidden:
                         Forgejo(api.forge).edit_comment(repo, code_comment["id"], "Unauthorized replacement")
                     self.assertIn(forbidden.exception.status, {401, 403})
@@ -333,6 +365,21 @@ roadmap="operator/roadmap"
                         {"head": "many-files", "base": "main", "title": "Many files"},
                     )
                     self.assertEqual(len(reader.pull(repo, many["number"], ["files"])["files"]), 65)
+                    api.request("PATCH", f"repos/operator/content/pulls/{second_pull['number']}", {"state": "closed"})
+                    api.request(
+                        "POST",
+                        f"repos/operator/content/pulls/{pull['number']}/merge",
+                        {"Do": "merge", "head_commit_id": pull["head"]["sha"]},
+                    )
+                    self.assertEqual([r["number"] for r in api.pulls(repo, state="closed")], [second_pull["number"]])
+                    self.assertEqual([r["number"] for r in api.pulls(repo, state="merged")], [pull["number"]])
+                    api.request("DELETE", "repos/operator/content/branches/proof")
+                    self.assertEqual(reader.pull(repo, pull["number"], ["headRefName"]), {"headRefName": "proof"})
+                    reviewer.post_comment(repo, pull["number"], "Preserved after account deletion")
+                    api.request("DELETE", "admin/users/reviewer")
+                    comments = reader.pull(repo, pull["number"], ["comments"])["comments"]
+                    self.assertEqual(comments[-1]["author"], {"login": "Ghost"})
+                    self.assertEqual(api.issues(repo, author="definitely-unknown-user"), [])
                 finally:
                     process.terminate()
                     try:

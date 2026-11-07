@@ -19,6 +19,11 @@ from .forge_read import ForgejoReader
 from .project import ConfigError, load
 
 
+class _Parser(argparse.ArgumentParser):
+    def error(self, message):
+        raise Unsupported(message)
+
+
 def _emit(value, query):
     rendered = json.dumps(value, ensure_ascii=False) + "\n"
     if query:
@@ -57,7 +62,7 @@ def _require_origin(env, name, forge):
 
 def run(argv, *, environment=None):
     env = os.environ if environment is None else environment
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         prog="tauceti-gh",
         description=__doc__,
         allow_abbrev=False,
@@ -90,11 +95,13 @@ def run(argv, *, environment=None):
     args, command = parser.parse_known_args(native)
     options = None
     if command[:2] in (["pr", "view"], ["issue", "view"]) and len(command) == 3:
+        if not command[2].isascii() or not command[2].isdigit():
+            raise ValueError("issue/PR number must be an ASCII integer")
         number = int(command[2])
         if number < 1:
             raise ValueError("issue/PR number must be positive")
     elif command[:2] in (["pr", "list"], ["issue", "list"]):
-        listing = argparse.ArgumentParser(prog="gh " + " ".join(command[:2]), allow_abbrev=False)
+        listing = _Parser(prog="gh " + " ".join(command[:2]), allow_abbrev=False)
         listing.add_argument(
             "--state",
             "-s",
@@ -110,6 +117,8 @@ def run(argv, *, environment=None):
         options = listing.parse_args(command[2:])
         if options.limit < 1:
             raise ValueError("limit must be positive")
+        if any(not name.strip() for group in options.label for name in group.split(",")):
+            raise ValueError("labels must have nonempty names")
     elif command[:2] == ["repo", "view"] and len(command) in {2, 3}:
         if len(command) == 3:
             if args.repo:

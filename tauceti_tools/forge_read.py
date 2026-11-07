@@ -7,6 +7,8 @@ opaque, forge-qualified strings; numeric IDs remain native to their own server.
 
 from __future__ import annotations
 
+import urllib.parse
+
 from .forge import Incomplete, Unsupported
 
 COMMON_FIELDS = {
@@ -97,7 +99,8 @@ def _positive(value, name):
 
 
 def _identity(repository, kind, native_id):
-    return f"{repository.forge.key}/{kind.lower()}/{_positive(native_id, kind)}"
+    # Native table IDs survive repository rename/transfer and label reuse.
+    return f"{repository.forge.key}/{kind.rsplit('/', 1)[-1].lower()}/{_positive(native_id, kind)}"
 
 
 def _user(row, repository):
@@ -108,7 +111,13 @@ def _user(row, repository):
         raise Incomplete("Forgejo user has no login")
     result = {"login": row["login"]}
     if "id" in row:
-        result["id"] = _identity(repository, "users", row["id"])
+        if type(row["id"]) is int and row["id"] in {-2, -1, 0}:
+            # Actions, ghost and imported replacement actors cannot authenticate
+            # as a native database user. Do not grant them a user ID.
+            if row["id"] == -2:
+                result["is_bot"] = True
+        else:
+            result["id"] = _identity(repository, "users", row["id"])
     return result
 
 
@@ -135,7 +144,7 @@ def _labels(rows, repository):
     return result
 
 
-def _common(row, repository, *, pull):
+def _common(row, repository, *, pull, fields=None):
     _object(row, "PR" if pull else "issue")
     number = _positive(row.get("number"), "issue/PR")
     result = {"number": number, "url": repository.pull_url(number) if pull else f"{repository.url}/issues/{number}"}
@@ -152,19 +161,20 @@ def _common(row, repository, *, pull):
             "closedAt": "closed_at",
         },
     )
-    if "id" in row:
+    wanted = COMMON_FIELDS if fields is None else set(fields)
+    if "id" in row and "id" in wanted:
         result["id"] = _identity(repository, f"repos/{repository.name}/{'pulls' if pull else 'issues'}", row["id"])
-    if "labels" in row:
+    if "labels" in row and "labels" in wanted:
         result["labels"] = _labels(row["labels"], repository)
-    if "user" in row:
+    if "user" in row and "author" in wanted:
         result["author"] = _user(row["user"], repository)
-    if "assignees" in row:
+    if "assignees" in row and "assignees" in wanted:
         if row["assignees"] is not None and not isinstance(row["assignees"], list):
             raise Incomplete("Forgejo assignees were not an array")
         result["assignees"] = [_user(user, repository) for user in row["assignees"] or []]
     if isinstance(row.get("is_locked"), bool):
         result["isLocked"] = row["is_locked"]
-    if "milestone" in row:
+    if "milestone" in row and "milestone" in wanted:
         milestone = row["milestone"]
         if milestone is None:
             result["milestone"] = None
@@ -178,18 +188,13 @@ def _common(row, repository, *, pull):
     return result
 
 
-def pull_record(row, repository):
-    result = _common(row, repository, pull=True)
-    _copy(
-        row,
-        result,
-        {
-            "mergedAt": "merged_at",
-            "additions": "additions",
-            "deletions": "deletions",
-            "changedFiles": "changed_files",
-        },
-    )
+def pull_record(row, repository, fields=None):
+    result = _common(row, repository, pull=True, fields=fields)
+    wanted = PR_FIELDS if fields is None else set(fields)
+    _copy(row, result, {"mergedAt": "merged_at"})
+    head = row.get("head")
+    if row.get("flow") == 0 and isinstance(head, dict) and isinstance(head.get("repo"), dict) and head.get("sha"):
+        _copy(row, result, {"additions": "additions", "deletions": "deletions", "changedFiles": "changed_files"})
     if isinstance(row.get("merged"), bool) and row.get("state") in {"open", "closed"}:
         result["state"] = "MERGED" if row["merged"] else row["state"].upper()
     if isinstance(row.get("draft"), bool):
@@ -197,7 +202,7 @@ def pull_record(row, repository):
     if isinstance(row.get("mergeable"), bool):
         # Forgejo false also means checking/error/draft. It does not prove a conflict.
         result["mergeable"] = "MERGEABLE" if row["mergeable"] else "UNKNOWN"
-    if "merged_by" in row:
+    if "merged_by" in row and "mergedBy" in wanted:
         result["mergedBy"] = _user(row["merged_by"], repository)
     if "merge_commit_sha" in row:
         result["mergeCommit"] = {"oid": row["merge_commit_sha"]} if row["merge_commit_sha"] else None
@@ -205,8 +210,9 @@ def pull_record(row, repository):
         branch = row.get(side)
         if not isinstance(branch, dict):
             continue
-        _copy(branch, result, {side + "RefOid": "sha", side + "RefName": "ref"})
-        if "repo" in branch:
+        _copy(branch, result, {side + "RefOid": "sha", side + "RefName": "label"})
+        side_fields = {side + "Repository"} | ({"headRepositoryOwner"} if side == "head" else set())
+        if "repo" in branch and (side_fields & wanted):
             repo = branch["repo"]
             if repo is None:
                 result[side + "Repository"] = None
@@ -217,7 +223,7 @@ def pull_record(row, repository):
                 result[side + "Repository"] = {k: repo[k] for k in ("name",) if k in repo}
                 if "full_name" in repo:
                     result[side + "Repository"]["nameWithOwner"] = repo["full_name"]
-                if side == "head" and "owner" in repo:
+                if side == "head" and "headRepositoryOwner" in wanted and "owner" in repo:
                     result["headRepositoryOwner"] = _user(repo["owner"], repository)
     head, base = row.get("head"), row.get("base")
     if isinstance(head, dict) and isinstance(base, dict):
@@ -227,8 +233,8 @@ def pull_record(row, repository):
     return result
 
 
-def issue_record(row, repository):
-    result = _common(row, repository, pull=False)
+def issue_record(row, repository, fields=None):
+    result = _common(row, repository, pull=False, fields=fields)
     if row.get("state") in {"open", "closed"}:
         result["state"] = row["state"].upper()
     if row.get("pull_request") is not None:
@@ -253,6 +259,7 @@ class ForgejoReader:
 
     def _reviews(self, repository, number):
         result = []
+        viewer = None
         states = {
             "PENDING": "PENDING",
             "COMMENT": "COMMENTED",
@@ -263,6 +270,11 @@ class ForgejoReader:
             _object(row, "review")
             if row.get("state") == "REQUEST_REVIEW":
                 continue  # A reviewer request is not a submitted review.
+            if row.get("state") == "PENDING":
+                if viewer is None:
+                    viewer = self.api.current_user()["id"]
+                if not isinstance(row.get("user"), dict) or row["user"].get("id") != viewer:
+                    continue  # Native site admins can see other users' drafts.
             if row.get("state") not in states or not isinstance(row.get("dismissed"), bool):
                 raise Incomplete("Forgejo review state is unavailable")
             value = {
@@ -277,10 +289,15 @@ class ForgejoReader:
             result.append(project(value, ["id", "state", "body", "submittedAt", "url", "commit", "author"]))
         return result
 
-    def _files(self, repository, number):
+    def _files(self, repository, number, revision):
         result = []
         for row in self.api.files(repository, number):
             _object(row, "changed file")
+            link = row.get("contents_url")
+            if not isinstance(link, str) or urllib.parse.parse_qs(urllib.parse.urlsplit(link).query).get("ref") != [
+                revision
+            ]:
+                raise Incomplete("Forgejo files did not identify the requested immutable head")
             result.append(
                 project(
                     {
@@ -333,14 +350,19 @@ class ForgejoReader:
         ]
 
     def _hydrate(self, row, repository, fields, *, pull):
-        value = pull_record(row, repository) if pull else issue_record(row, repository)
         wanted = set(fields or ())
+        base_fields = (
+            None if fields is None else wanted | ({"headRefOid"} if {"files", "statusCheckRollup"} & wanted else set())
+        )
+        value = pull_record(row, repository, base_fields) if pull else issue_record(row, repository, base_fields)
         if "comments" in wanted:
             value["comments"] = self._comments(repository, value["number"])
         if "reviews" in wanted:
             value["reviews"] = self._reviews(repository, value["number"])
         if "files" in wanted:
-            value["files"] = self._files(repository, value["number"])
+            if "changedFiles" not in pull_record(row, repository, ["changedFiles"]):
+                raise Incomplete("Forgejo PR diff metadata is unavailable")
+            value["files"] = self._files(repository, value["number"], value.get("headRefOid"))
             count = row.get("changed_files")
             if type(count) is not int or count < 0 or len(value["files"]) != count:
                 raise Incomplete("Forgejo file listing did not match the PR's changed-file count")
@@ -380,6 +402,7 @@ class ForgejoReader:
 
     def repository(self, repository, fields=None):
         validate_fields(fields, REPO_FIELDS)
+        wanted = REPO_FIELDS if fields is None else set(fields)
         row = self.api.repository(repository)
         value = {}
         _copy(
@@ -398,13 +421,13 @@ class ForgejoReader:
             },
         )
         value["url"] = repository.url
-        if "id" in row:
+        if "id" in row and "id" in wanted:
             value["id"] = _identity(repository, "repositories", row["id"])
-        if "owner" in row:
+        if "owner" in row and "owner" in wanted:
             value["owner"] = _user(row["owner"], repository)
         if "default_branch" in row:
             value["defaultBranchRef"] = {"name": row["default_branch"]} if row["default_branch"] else None
-        if "parent" in row:
+        if "parent" in row and "parent" in wanted:
             parent = row["parent"]
             if parent is None:
                 value["parent"] = None
