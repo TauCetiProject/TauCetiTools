@@ -289,7 +289,7 @@ class Forgejo:
         try:
             return self._numbered(path, **options)
         except ForgeError as error:
-            if error.status != 404 or author is None:
+            if error.status not in {400, 404} or author is None:
                 raise
             # Do not turn an inaccessible repository into an empty result.
             self.repository(repository)
@@ -312,6 +312,19 @@ class Forgejo:
         if not isinstance(row, dict) or row.get("number") != number:
             raise Incomplete("Forgejo pull response did not identify the requested PR")
         return row
+
+    def pull_ref(self, repository, number):
+        repository.pull_url(number)
+        ref = f"refs/pull/{number}/head"
+        rows = self.request("GET", f"{self._repo(repository)}/git/refs/pull/{number}/head")
+        matches = (
+            [row for row in rows if isinstance(row, dict) and row.get("ref") == ref] if isinstance(rows, list) else []
+        )
+        obj = matches[0].get("object") if len(matches) == 1 else None
+        sha = obj.get("sha") if isinstance(obj, dict) else None
+        if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
+            raise Incomplete("Forgejo did not identify the retained pull head")
+        return sha
 
     def pulls(self, repository, *, state="open", limit=None, author=None, base=None, head=None, labels=()):
         if state not in {"open", "closed", "merged", "all"}:

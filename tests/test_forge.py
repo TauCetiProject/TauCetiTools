@@ -196,6 +196,20 @@ class DirectTests(unittest.TestCase):
             with self.assertRaises(Incomplete):
                 call()
 
+    def test_pull_ref_requires_exact_native_ref_and_immutable_object(self):
+        self.reply = lambda path: (
+            200,
+            [
+                {"ref": "refs/pull/1/headExtra", "object": {"sha": "b" * 40}},
+                {"ref": "refs/pull/1/head", "object": {"sha": "a" * 40}},
+            ],
+            {},
+        )
+        self.assertEqual(self.api.pull_ref(self.repo, 1), "a" * 40)
+        self.reply = lambda path: (200, [{"ref": "refs/pull/1/headExtra", "object": {"sha": "a" * 40}}], {})
+        with self.assertRaises(Incomplete):
+            self.api.pull_ref(self.repo, 1)
+
     def test_later_page_failure_is_not_partial_success(self):
         self.reply = lambda path: (503, {}, {}) if "page=2" in path else (200, [1], {})
         with self.assertRaises(ForgeError):

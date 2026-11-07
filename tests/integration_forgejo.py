@@ -375,11 +375,45 @@ roadmap="operator/roadmap"
                     self.assertEqual([r["number"] for r in api.pulls(repo, state="merged")], [pull["number"]])
                     api.request("DELETE", "repos/operator/content/branches/proof")
                     self.assertEqual(reader.pull(repo, pull["number"], ["headRefName"]), {"headRefName": "proof"})
+                    reviewer.request("POST", "repos/operator/content/forks", {})
+                    reviewer.request(
+                        "POST",
+                        "repos/reviewer/content/branches",
+                        {"new_branch_name": "fork-proof", "old_branch_name": "main"},
+                    )
+                    reviewer.request(
+                        "POST",
+                        "repos/reviewer/content/contents/Fork.lean",
+                        {
+                            "branch": "fork-proof",
+                            "message": "Fork proof",
+                            "content": base64.b64encode(b"example : True := trivial\n").decode(),
+                        },
+                    )
+                    fork_pull = reviewer.request(
+                        "POST",
+                        "repos/operator/content/pulls",
+                        {"head": "reviewer:fork-proof", "base": "main", "title": "Fork proof"},
+                    )
+                    api.request(
+                        "POST",
+                        f"repos/operator/content/pulls/{fork_pull['number']}/merge",
+                        {"Do": "merge", "head_commit_id": fork_pull["head"]["sha"]},
+                    )
+                    reviewer.request("DELETE", "repos/reviewer/content/branches/fork-proof")
+                    # Forgejo's converter now serializes failed GetShortStat as
+                    # zeros. The reader must recover the retained PR's real diff.
+                    self.assertEqual(
+                        reader.pull(repo, fork_pull["number"], ["changedFiles", "additions", "deletions"]),
+                        {"changedFiles": 1, "additions": 1, "deletions": 0},
+                    )
+                    api.request("DELETE", "repos/reviewer/content")
                     reviewer.post_comment(repo, pull["number"], "Preserved after account deletion")
                     api.request("DELETE", "admin/users/reviewer")
                     comments = reader.pull(repo, pull["number"], ["comments"])["comments"]
                     self.assertEqual(comments[-1]["author"], {"login": "Ghost"})
                     self.assertEqual(api.issues(repo, author="definitely-unknown-user"), [])
+                    self.assertEqual(api.pulls(repo, author="definitely-unknown-user"), [])
                 finally:
                     process.terminate()
                     try:

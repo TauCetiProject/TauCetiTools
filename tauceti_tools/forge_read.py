@@ -127,6 +127,21 @@ def _copy(row, result, mappings):
             result[target] = row[source]
 
 
+def _diff_source(row):
+    head = row.get("head")
+    return (
+        row.get("flow") == 0
+        and isinstance(head, dict)
+        and isinstance(head.get("repo"), dict)
+        and bool(head.get("sha"))
+        and all(type(row.get(key)) is int and row[key] >= 0 for key in ("changed_files", "additions", "deletions"))
+    )
+
+
+def _zero_stats(row):
+    return _diff_source(row) and all(row[key] == 0 for key in ("changed_files", "additions", "deletions"))
+
+
 def _labels(rows, repository):
     if rows is None:
         return []  # Forgejo serializes an explicitly empty native slice as null.
@@ -192,8 +207,7 @@ def pull_record(row, repository, fields=None):
     result = _common(row, repository, pull=True, fields=fields)
     wanted = PR_FIELDS if fields is None else set(fields)
     _copy(row, result, {"mergedAt": "merged_at"})
-    head = row.get("head")
-    if row.get("flow") == 0 and isinstance(head, dict) and isinstance(head.get("repo"), dict) and head.get("sha"):
+    if _diff_source(row) and not _zero_stats(row):
         _copy(row, result, {"additions": "additions", "deletions": "deletions", "changedFiles": "changed_files"})
     if isinstance(row.get("merged"), bool) and row.get("state") in {"open", "closed"}:
         result["state"] = "MERGED" if row["merged"] else row["state"].upper()
@@ -293,6 +307,8 @@ class ForgejoReader:
         result = []
         for row in self.api.files(repository, number):
             _object(row, "changed file")
+            if any(type(row.get(key)) is not int or row[key] < 0 for key in ("additions", "deletions")):
+                raise Incomplete("Forgejo file line counts are unavailable")
             link = row.get("contents_url")
             if not isinstance(link, str) or urllib.parse.parse_qs(urllib.parse.urlsplit(link).query).get("ref") != [
                 revision
@@ -351,20 +367,25 @@ class ForgejoReader:
 
     def _hydrate(self, row, repository, fields, *, pull):
         wanted = set(fields or ())
+        recover_stats = pull and _zero_stats(row) and bool({"changedFiles", "additions", "deletions"} & wanted)
         base_fields = (
-            None if fields is None else wanted | ({"headRefOid"} if {"files", "statusCheckRollup"} & wanted else set())
+            None
+            if fields is None
+            else wanted | ({"headRefOid"} if {"files", "statusCheckRollup"} & wanted or recover_stats else set())
         )
         value = pull_record(row, repository, base_fields) if pull else issue_record(row, repository, base_fields)
         if "comments" in wanted:
             value["comments"] = self._comments(repository, value["number"])
         if "reviews" in wanted:
             value["reviews"] = self._reviews(repository, value["number"])
-        if "files" in wanted:
-            if "changedFiles" not in pull_record(row, repository, ["changedFiles"]):
+        if "files" in wanted or recover_stats:
+            if not _diff_source(row):
                 raise Incomplete("Forgejo PR diff metadata is unavailable")
+            if _zero_stats(row) and self.api.pull_ref(repository, value["number"]) != value.get("headRefOid"):
+                raise Incomplete("Forgejo retained pull head does not match the PR")
             value["files"] = self._files(repository, value["number"], value.get("headRefOid"))
             count = row.get("changed_files")
-            if type(count) is not int or count < 0 or len(value["files"]) != count:
+            if not _zero_stats(row) and len(value["files"]) != count:
                 raise Incomplete("Forgejo file listing did not match the PR's changed-file count")
             # Unlike status requests, the native file endpoint follows a mutable
             # PR. Refuse to combine files from a new head/base with old metadata.
@@ -378,6 +399,15 @@ class ForgejoReader:
                     or before_ref["sha"] != after_ref.get("sha")
                 ):
                     raise Incomplete("Forgejo PR head/base changed while reading files")
+            if _zero_stats(row):
+                # GetShortStat errors are only logged by Forgejo and serialized
+                # as 0/0/0. Reconstruct from complete, immutable-ref-bound files;
+                # an actual empty diff remains a verified zero.
+                value.update(
+                    changedFiles=len(value["files"]),
+                    additions=sum(file["additions"] for file in value["files"]),
+                    deletions=sum(file["deletions"] for file in value["files"]),
+                )
         if "statusCheckRollup" in wanted:
             if "headRefOid" not in value:
                 raise Incomplete("Forgejo PR head is unavailable for statuses")

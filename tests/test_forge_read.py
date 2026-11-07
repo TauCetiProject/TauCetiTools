@@ -12,6 +12,9 @@ class ReadContracts(unittest.TestCase):
         self.reader = ForgejoReader(self.api)
         self.api.pull.return_value = {
             "flow": 0,
+            "changed_files": 1,
+            "additions": 1,
+            "deletions": 0,
             "id": 21,
             "number": 3,
             "title": "Proof",
@@ -166,6 +169,30 @@ class ReadContracts(unittest.TestCase):
         self.api.pull.return_value["head"]["repo"] = None
         with self.assertRaises(Incomplete):
             self.reader.pull(self.repo, 3, ["additions"])
+
+    def test_zero_statistics_are_reconstructed_from_retained_head_files(self):
+        self.api.pull.return_value.update(changed_files=0, additions=0, deletions=0)
+        self.api.pull_ref.return_value = "a" * 40
+        self.api.files.return_value = [
+            {
+                "filename": "Proof.lean",
+                "additions": 2,
+                "deletions": 1,
+                "contents_url": "https://git.example.org/contents/Proof.lean?ref=" + "a" * 40,
+            }
+        ]
+        self.assertEqual(
+            self.reader.pull(self.repo, 3, ["changedFiles", "additions", "deletions"]),
+            {"changedFiles": 1, "additions": 2, "deletions": 1},
+        )
+        self.api.files.return_value = []
+        self.assertEqual(
+            self.reader.pull(self.repo, 3, ["changedFiles", "additions", "deletions"]),
+            {"changedFiles": 0, "additions": 0, "deletions": 0},
+        )
+        self.api.pull_ref.return_value = "b" * 40
+        with self.assertRaises(Incomplete):
+            self.reader.pull(self.repo, 3, ["changedFiles"])
 
     def test_pending_reviews_belong_only_to_the_current_viewer(self):
         base = {

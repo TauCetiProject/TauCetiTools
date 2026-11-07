@@ -86,6 +86,11 @@ each file's contents URL must identify the immutable head, and head/base are
 rechecked afterward. Status requests bind to the immutable head ID. Native diff
 statistics are unavailable for AGit and missing-head-repository responses, whose
 zero-value stats do not prove an empty change set.
+Forgejo also serializes failed diff calculations as all-zero stats for some
+deleted fork branches and unsynchronized fork pushes. Those zeros are not exposed
+directly: the reader verifies the retained pull ref, reads its complete file list,
+and reconstructs the counts. A genuinely empty diff remains a verified zero;
+mismatched refs or unavailable file histories raise `Incomplete`.
 Forgejo's false mergeability also covers checking/error/draft, so it maps to
 `UNKNOWN`, never a proven conflict. Historical approvals do not imply a current
 `reviewDecision`; that field remains unsupported until native approval policy is
