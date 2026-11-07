@@ -127,6 +127,16 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(render(source, project),
                          "find Arcturus -name '*.lean'\nTauCetiProject/TauCetiTools\nTauCetiProject/TauCetiReview\n")
 
+    def test_repair_bot_login_is_the_project_automation_app(self):
+        from tauceti_tools.templates import render
+        source = "      repair_bot_login: tauceti-review-bot[bot]\n"
+        project = parse(initial_configuration("kim-em/Arcturus", "human").encode())
+        self.assertEqual(render(source, project), "      repair_bot_login: arcturus-automation[bot]\n")
+        project.raw.setdefault("services", {})["automation"] = {"app_slug": "arcturus-bot"}
+        self.assertEqual(render(source, project), "      repair_bot_login: arcturus-bot[bot]\n")
+        tauceti = parse(initial_configuration("TauCetiProject/TauCeti", "human").encode())
+        self.assertEqual(render(source, tauceti), source)
+
     def test_configuration_snapshot_does_not_follow_file_edits(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"XDG_STATE_HOME": tmp}, clear=True):
             config = Path(tmp) / "project.toml"
