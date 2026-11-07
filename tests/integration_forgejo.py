@@ -370,7 +370,14 @@ roadmap="operator/roadmap"
                     native("label", "edit", "cli", "--name", "cli-renamed", "--description", "Updated")
                     listed_labels = json.loads(native("label", "list", "--json", "name,color,description"))
                     self.assertIn({"name": "cli-renamed", "color": "654321", "description": "Updated"}, listed_labels)
-                    issue_url = native("issue", "create", "-t", "CLI issue", "-b", "-R", "-l", "bug").strip()
+                    bug_id = next(
+                        row["id"] for row in api.collection("repos/operator/content/labels") if row["name"] == "bug"
+                    )
+                    numeric_name = str(bug_id)
+                    native("label", "create", numeric_name, "--color", "123456")
+                    issue_url = native(
+                        "issue", "create", "-t", "CLI issue", "-b", "-R", "-l", "bug," + numeric_name
+                    ).strip()
                     issue_number = int(issue_url.rsplit("/", 1)[1])
                     self.assertEqual(api.issue(repo, issue_number)["body"], "-R")
                     body_file = root / "body.txt"
@@ -385,6 +392,9 @@ roadmap="operator/roadmap"
                         "ready",
                         "--remove-label",
                         "bug",
+                    )
+                    self.assertEqual(
+                        {label["name"] for label in api.issue(repo, issue_number)["labels"]}, {"ready", numeric_name}
                     )
                     native("issue", "comment", str(issue_number), "--body", "--conf=literal")
                     native("issue", "close", str(issue_number), "--comment", "Close finding")
