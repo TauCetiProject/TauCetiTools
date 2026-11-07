@@ -462,21 +462,32 @@ available on GitHub Enterprise Server. See the [GitHub context reference](https:
 
 Requests bind a 128-bit queue epoch and request ID, native source and execution
 repository IDs, batch version, exact base, candidate commit/tree and accepted
-member heads. Retained branch names are derived from the epoch and request ID:
+member heads. The current inline transport bounds the request to 60 KiB and 128
+members. The production-shaped large-batch rehearsal requires a retained member
+manifest transport before queue activation; silently splitting existing batches
+or treating this inline bound as a capacity proof is insufficient.
+Retained branch names are derived from the epoch and request ID:
 `refs/heads/tauceti-ci/EPOCH/REQUEST/candidate` and `member-PR`. The queue must
 protect these refs from subsequent mutation. CI fetches all retained heads in
 one transfer, verifies each SHA and candidate tree, and checks that the base is
 the candidate's merge base. It rechecks the native repository ID before and after
 source transfers. Complete histories and sandbox materialization use the existing
 qualified Git helpers. The native read token is provided only to explicit host
-read steps; it is never a candidate sandbox variable or merge credential.
+read steps before dependency executables run; it is never a candidate sandbox
+variable or merge credential. Native branch/label policy is saved with the
+request digest in runner temporary storage. The later lint step reads that
+observation and local Git objects without native credentials or network access.
 
 Source bootstrap materializes portable build scripts without exporting legacy
 unqualified source bindings. Native PR branch/label reads select lint scope;
 unavailable, changed-head or full-lint observations select full-library lint.
 The GitHub helper permits only configured execution/dependency reads and refuses
 source metadata or status writes before credential selection. Candidate audits,
-scope and pin guards continue to run. Native restricted-path approval is not yet
+scope and pin guards continue to run. Exact retained members receive the same
+per-PR line/file/new-Lean-file caps as GitHub PRs, using local complete histories
+and each member's merge base. Pin changes retain the existing line-cap exemption;
+the trusted bump guard must still validate them. Missing completion markers
+produce infrastructure verdicts rather than policy failures. Native restricted-path approval is not yet
 integrated; a legacy Bors waiver cannot authorize a Forgejo candidate.
 
 The isolated trusted finalizer produces `source-candidate-result.json` in an
@@ -503,6 +514,20 @@ native approval/retention adapter and result-consumer wiring remain required.
 This component is not a hosted end-to-end rehearsal, capacity proof or production
 activation. Source migration, main mirroring and service retirement are separate
 operations.
+
+Cache reads, probes and publication use the explicit GitHub execution-repository
+cache scope (`TAUCETI_CACHE_REPOSITORY`), separate from source repository identity.
+The queue composes candidates by squashing members, so raw accepted member heads
+need not be candidate ancestors. CI verifies their exact retained objects; the
+queue is responsible for the composition and fresh source approval assertion.
+Use a full workflow rerun when retrying publication, so build and publisher
+evidence belong to the same run attempt. Required publication with missing cache
+configuration remains an infrastructure failure.
+
+The general project generator still refuses native source bindings. The execution
+repository must currently be prepared with the explicit caller, policy and project
+configuration described above; native installer/generator integration is follow-up
+work. No source build activation follows from updating the caller template alone.
 
 The trusted `ci_git.resolve()` and `ci_checkout.fetch_sources()` helpers accept
 explicit `RepositoryRef` inputs for source and head repositories. Both must use

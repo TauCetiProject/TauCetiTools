@@ -83,7 +83,7 @@ jobs:
   # Other Namespace builds retain 8CPU/16GB; rollback is the staging shape expression below.
   # https://namespace.so/docs/solutions/github-actions/runner-controls/job-ordering
   pick-runner:
-    if: github.event_name != 'merge_group' && (github.event_name != 'repository_dispatch' || (github.event.action != 'tauceti-bors-staging' && github.event.action != 'tauceti-source-candidate-v2') || vars.FLEET_CI_ENABLED == 'true')
+    if: github.event_name != 'merge_group' && !(github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-source-candidate-v2') && (github.event_name != 'repository_dispatch' || github.event.action != 'tauceti-bors-staging' || vars.FLEET_CI_ENABLED == 'true')
     uses: ./.github/workflows/pick-runner.yml
     with:
       fleet-staging: ${{ github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-source-candidate-v2') }}
@@ -128,6 +128,12 @@ jobs:
       reported-toolchain: ${{ steps.cache_stage.outputs.toolchain }}
       source-scope: ${{ steps.report.outputs.scope-state }}
       source-bump-guard: ${{ steps.report.outputs.bump-guard-state }}
+      source-scope-complete: ${{ steps.report.outputs.source-scope-complete }}
+      source-pins-known: ${{ steps.report.outputs.source-pins-known }}
+      source-bump-complete: ${{ steps.report.outputs.source-bump-complete }}
+      source-size-complete: ${{ steps.report.outputs.source-size-complete }}
+      source-infrastructure: ${{ steps.report.outputs.source-infrastructure }}
+      source-build-outcome: ${{ steps.build.outcome }}
       tested-sha: ${{ steps.integration.outputs.tested_sha }}
       tested-tree: ${{ steps.integration.outputs.tested_tree }}
     env:
@@ -202,10 +208,13 @@ jobs:
           CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
           CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
           CI_SOURCE_HARNESS_FILE: ${{ job.workflow_file_path }}
+          CI_SOURCE_LEAN_ROOT: ${{ inputs.lean_root }}
+          CI_SOURCE_ROADMAP_DIR: ${{ inputs.roadmap_dir }}
         run: |
           if [ "${SOURCE_CANDIDATE:-false}" = true ]; then
             python3 -m tauceti_tools.ci_candidate_workflow bootstrap \
               --policy gate/.tauceti/ci-source.json --configuration gate/tauceti.toml \
+              --lean-root "$CI_SOURCE_LEAN_ROOT" --roadmap-dir "$CI_SOURCE_ROADMAP_DIR" \
               --scripts "$RUNNER_TEMP/tauceti-shared-scripts" --policy-dir gate/scripts \
               --output "$RUNNER_TEMP/source-bootstrap.json" --github-env "$GITHUB_ENV"
           else
@@ -215,6 +224,7 @@ jobs:
           cp -a "$RUNNER_TEMP/tauceti-shared-scripts/." gate/scripts/
           echo "PYTHONPATH=$PYTHONPATH" >> "$GITHUB_ENV"
       - name: Select CI API credentials
+        if: ${{ env.SOURCE_CANDIDATE != 'true' }}
         id: ci-api
         uses: ./.tauceti-tools/.github/actions/ci-credentials
         with:
@@ -223,16 +233,16 @@ jobs:
           workflow-token: ${{ github.token }}
           read-app-id: ${{ secrets.CI_READ_APP_ID }}
           read-app-private-key: ${{ secrets.CI_READ_APP_PRIVATE_KEY }}
-          status-app-id: ${{ secrets.CI_STATUS_APP_ID }}
-          status-app-private-key: ${{ secrets.CI_STATUS_APP_PRIVATE_KEY }}
+          status-app-id: ${{ env.SOURCE_CANDIDATE != 'true' && secrets.CI_STATUS_APP_ID || '' }}
+          status-app-private-key: ${{ env.SOURCE_CANDIDATE != 'true' && secrets.CI_STATUS_APP_PRIVATE_KEY || '' }}
 
       - name: Resolve PR head
         id: pr
         env:
-          GH_TOKEN: ${{ steps.ci-api.outputs.read-token }}
-          GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token }}
+          GH_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
+          GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
           TAUCETI_GITHUB_READ_ROLE: ${{ steps.ci-api.outputs.read-role }}
-          CI_GIT_TOKEN: ${{ steps.ci-api.outputs.read-token }}
+          CI_GIT_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
           BORS_HEAD_SHA: ${{ github.event.client_payload.head_sha }}
           BORS_BASE_SHA: ${{ github.event.client_payload.base_sha }}
           BORS_BATCH_ID: ${{ github.event.client_payload.batch_id }}
@@ -339,7 +349,7 @@ jobs:
         # checkout-equivalent retry backoff and local connectivity validation.
         timeout-minutes: 80
         env:
-          CI_GIT_TOKEN: ${{ steps.ci-api.outputs.read-token }}
+          CI_GIT_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
           SOURCE_REPOSITORY: ${{ github.repository }}
           SOURCE_HEAD_REPOSITORY: ${{ steps.pr.outputs.repo }}
           SOURCE_HEAD: ${{ steps.pr.outputs.sha }}
@@ -372,8 +382,8 @@ jobs:
 
       - name: Scope guard — allow ${{ inputs.lean_root }} sources and validated pins
         env:
-          GH_TOKEN: ${{ steps.ci-api.outputs.read-token }}
-          GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token }}
+          GH_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
+          GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
           TAUCETI_GITHUB_READ_ROLE: ${{ steps.ci-api.outputs.read-role }}
           # Attacker-chosen strings: read them from the environment, never interpolate them.
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
@@ -517,6 +527,18 @@ jobs:
           # API or shell failure above cannot be misreported as a green scope decision.
           echo "SCOPE_OK=1" >> "$GITHUB_ENV"
 
+      - name: Validate exact source member review sizes
+        if: ${{ env.SOURCE_CANDIDATE == 'true' && env.INFRA != '1' }}
+        env:
+          CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
+          CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
+          CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
+          CI_SOURCE_HARNESS_FILE: ${{ job.workflow_file_path }}
+        run: |
+          python3 -m tauceti_tools.ci_candidate_workflow member-policy \
+            --policy gate/.tauceti/ci-source.json --configuration gate/tauceti.toml \
+            --workspace "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/source-member-policy.json" --github-env "$GITHUB_ENV"
+
       - name: Diff size guard — additions, deletions, and changed files each ≤ 2000 (trusted GitHub PR totals; Lake-pin bumps exempt from the line caps)
         # Per-PR cap, enforced when each PR is built on pull_request_target (its entry condition to the
         # queue). A merge_group batch is the sum of already-capped PRs, so we don't re-cap the combined
@@ -527,8 +549,8 @@ jobs:
         # bump validator before anything builds, and the file cap still applies.
         if: ${{ env.IS_BATCH != 'true' }}
         env:
-          GH_TOKEN: ${{ steps.ci-api.outputs.read-token }}
-          GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token }}
+          GH_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
+          GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
           TAUCETI_GITHUB_READ_ROLE: ${{ steps.ci-api.outputs.read-role }}
           TAUCETI_GITHUB_WRITE_ROLE: ${{ steps.ci-api.outputs.status-role }}
         run: |
@@ -560,8 +582,8 @@ jobs:
         # diff lists every line as an addition, so `.additions` is its line count.
         if: ${{ env.IS_BATCH != 'true' }}
         env:
-          GH_TOKEN: ${{ steps.ci-api.outputs.read-token }}
-          GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token }}
+          GH_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
+          GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
           TAUCETI_GITHUB_READ_ROLE: ${{ steps.ci-api.outputs.read-role }}
           TAUCETI_GITHUB_WRITE_ROLE: ${{ steps.ci-api.outputs.status-role }}
         run: |
@@ -816,8 +838,8 @@ jobs:
       - name: Validate the Lake-pin bump before building
         if: ${{ env.INFRA != '1' && env.BUMP == '1' }}
         env:
-          GH_TOKEN: ${{ steps.ci-api.outputs.read-token }}
-          GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token }}
+          GH_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
+          GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
           TAUCETI_GITHUB_READ_ROLE: ${{ steps.ci-api.outputs.read-role }}
           TAUCETI_GITHUB_WRITE_ROLE: ${{ steps.ci-api.outputs.status-role }}
         run: |
@@ -1056,8 +1078,8 @@ jobs:
       - name: Decide the environment-lint scope
         if: ${{ env.INFRA != '1' }}
         env:
-          GH_TOKEN: ${{ steps.ci-api.outputs.read-token }}
-          GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token }}
+          GH_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
+          GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
           TAUCETI_GITHUB_READ_ROLE: ${{ steps.ci-api.outputs.read-role }}
           TAUCETI_GITHUB_WRITE_ROLE: ${{ steps.ci-api.outputs.status-role }}
           REPO: ${{ github.repository }}
@@ -1072,7 +1094,6 @@ jobs:
           SCOPE_REPO: pr
           TESTED_BASE: ${{ steps.pr.outputs.base_sha }}
           TESTED_HEAD: ${{ steps.integration.outputs.tested_sha }}
-          CI_SOURCE_READ_TOKEN: ${{ secrets.CI_SOURCE_READ_TOKEN }}
           CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
           CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
           CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
@@ -1083,7 +1104,7 @@ jobs:
           if [ "${SOURCE_CANDIDATE:-false}" = true ]; then
             exec python3 -m tauceti_tools.ci_candidate_workflow lint-scope \
               --policy gate/.tauceti/ci-source.json --configuration gate/tauceti.toml \
-              --checkout pr --destination "$out" --output "$RUNNER_TEMP/source-lint-scope.json" --github-env "$GITHUB_ENV"
+              --observation "$RUNNER_TEMP/source-identity.json" --checkout pr --destination "$out" --output "$RUNNER_TEMP/source-lint-scope.json" --github-env "$GITHUB_ENV"
           fi
           bash gate/scripts/lint-scope.sh "$out"
           echo "LINT_SCOPE_DIR=$out" >> "$GITHUB_ENV"
@@ -1151,6 +1172,13 @@ jobs:
           if [ "${SOURCE_CANDIDATE:-false}" = true ]; then
             test "$PUBLIC_ARTIFACT_ENDPOINT" = "$TAUCETI_CACHE_ARTIFACT_URL"
             test "$PUBLIC_REVISION_ENDPOINT" = "$TAUCETI_CACHE_REVISION_URL"
+            if [ "$CI_SOURCE_REQUIRE_PUBLICATION" = true ] \
+               && { [ -z "$S3_ARTIFACT_ENDPOINT" ] || [ -z "$S3_REVISION_ENDPOINT" ] \
+                    || [ -z "$PUBLIC_ARTIFACT_ENDPOINT" ] || [ -z "$PUBLIC_REVISION_ENDPOINT" ]; }; then
+              echo 'INFRA=1' >> "$GITHUB_ENV"
+              echo '::error::trusted source CI policy requires cache publication; configure all upload and public read endpoints'
+              exit 1
+            fi
           fi
           if [ -n "$PUBLIC_ARTIFACT_ENDPOINT" ] && [ -n "$PUBLIC_REVISION_ENDPOINT" ]; then
             {
@@ -1402,11 +1430,11 @@ jobs:
         id: report
         if: always()
         env:
-          CI_STATUS_APP_ID: ${{ secrets.CI_STATUS_APP_ID }}
-          CI_STATUS_APP_PRIVATE_KEY: ${{ secrets.CI_STATUS_APP_PRIVATE_KEY }}
+          CI_STATUS_APP_ID: ${{ env.SOURCE_CANDIDATE != 'true' && secrets.CI_STATUS_APP_ID || '' }}
+          CI_STATUS_APP_PRIVATE_KEY: ${{ env.SOURCE_CANDIDATE != 'true' && secrets.CI_STATUS_APP_PRIVATE_KEY || '' }}
           CI_STATUS_MERGE_BACKEND: ${{ vars.MERGE_BACKEND || 'queue' }}
           GH_TOKEN: ${{ steps.ci-api.outputs.status-token }}
-          GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token }}
+          GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
           TAUCETI_GITHUB_READ_ROLE: ${{ steps.ci-api.outputs.read-role }}
           TAUCETI_GITHUB_WRITE_ROLE: ${{ steps.ci-api.outputs.status-role }}
           RAW_HEAD: ${{ steps.pr.outputs.sha }}
@@ -1579,7 +1607,9 @@ jobs:
             # This is an intent, not a published verdict. ci_status.py verifies
             # the current approval immediately before posting and after waits;
             # a revoked approval publishes scope=failure instead of stale green.
-            if [ "$MERGE_BACKEND" = bors ]; then
+            if [ "${SOURCE_CANDIDATE:-false}" = true ]; then
+              sc_state=failure; sc_desc="restricted paths require fresh native administrator approval; legacy bors approval is not source authority"
+            elif [ "$MERGE_BACKEND" = bors ]; then
               sc_state=success; sc_desc="restricted paths approved by a repository admin through bors; other scope guards passed"
             else
               sc_state=failure; sc_desc="restricted paths need an administrator's admin merge; ordinary automation cannot merge this PR"
@@ -1588,6 +1618,17 @@ jobs:
             sc_state=success; sc_desc="changes are in scope (${{ inputs.lean_root }}/, the allowed root files, and the bibliography only)"
           fi
           post_status scope "$sc_state" "$sc_desc"
+          if [ "${SOURCE_CANDIDATE:-false}" = true ]; then
+            {
+              echo "source-scope-complete=${SCOPE_OK:-}"
+              echo "source-pins-known=${PINS_KNOWN:-}"
+              if [ "${PINS_KNOWN:-}" = 1 ] && { [ "${BUMP:-}" != 1 ] || [ "${BUMP_BAD:-}" = 1 ] || [ "${BUMP_VALIDATED:-}" = 1 ]; }; then
+                echo 'source-bump-complete=1'
+              fi
+              echo "source-size-complete=${SOURCE_SIZE_POLICY_COMPLETE:-}"
+              echo "source-infrastructure=${INFRA:-}"
+            } >> "$GITHUB_OUTPUT"
+          fi
 
           if [ "${SOURCE_CANDIDATE:-false}" != true ]; then
             CI_STATUS_MAX_WAIT=600 python3 gate/scripts/ci_status.py resume "$RUNNER_TEMP/tauceti-status-intents" || post_fail=1
@@ -1797,10 +1838,13 @@ jobs:
           CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
           CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
           CI_SOURCE_HARNESS_FILE: ${{ job.workflow_file_path }}
+          CI_SOURCE_LEAN_ROOT: ${{ inputs.lean_root }}
+          CI_SOURCE_ROADMAP_DIR: ${{ inputs.roadmap_dir }}
         run: |
           if [ "${SOURCE_CANDIDATE:-false}" = true ]; then
             python3 -m tauceti_tools.ci_candidate_workflow bootstrap \
               --policy .tauceti/ci-source.json --configuration tauceti.toml \
+              --lean-root "$CI_SOURCE_LEAN_ROOT" --roadmap-dir "$CI_SOURCE_ROADMAP_DIR" \
               --scripts "$RUNNER_TEMP/tauceti-shared-scripts" --policy-dir scripts \
               --output "$RUNNER_TEMP/source-bootstrap.json" --github-env "$GITHUB_ENV"
           else
@@ -1810,6 +1854,7 @@ jobs:
           cp -a "$RUNNER_TEMP/tauceti-shared-scripts/." ./scripts/
           echo "PYTHONPATH=$PYTHONPATH" >> "$GITHUB_ENV"
       - name: Select CI API credentials
+        if: ${{ env.SOURCE_CANDIDATE != 'true' }}
         id: ci-api
         uses: ./.tauceti-tools/.github/actions/ci-credentials
         with:
@@ -1818,16 +1863,16 @@ jobs:
           workflow-token: ${{ github.token }}
           read-app-id: ${{ secrets.CI_READ_APP_ID }}
           read-app-private-key: ${{ secrets.CI_READ_APP_PRIVATE_KEY }}
-          status-app-id: ${{ secrets.CI_STATUS_APP_ID }}
-          status-app-private-key: ${{ secrets.CI_STATUS_APP_PRIVATE_KEY }}
+          status-app-id: ${{ env.SOURCE_CANDIDATE != 'true' && secrets.CI_STATUS_APP_ID || '' }}
+          status-app-private-key: ${{ env.SOURCE_CANDIDATE != 'true' && secrets.CI_STATUS_APP_PRIVATE_KEY || '' }}
 
       - name: Post the terminal merge-group build status
         if: ${{ env.SOURCE_CANDIDATE != 'true' }}
         env:
-          CI_STATUS_APP_ID: ${{ secrets.CI_STATUS_APP_ID }}
-          CI_STATUS_APP_PRIVATE_KEY: ${{ secrets.CI_STATUS_APP_PRIVATE_KEY }}
+          CI_STATUS_APP_ID: ${{ env.SOURCE_CANDIDATE != 'true' && secrets.CI_STATUS_APP_ID || '' }}
+          CI_STATUS_APP_PRIVATE_KEY: ${{ env.SOURCE_CANDIDATE != 'true' && secrets.CI_STATUS_APP_PRIVATE_KEY || '' }}
           GH_TOKEN: ${{ steps.ci-api.outputs.status-token }}
-          GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token }}
+          GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
           TAUCETI_GITHUB_READ_ROLE: ${{ steps.ci-api.outputs.read-role }}
           TAUCETI_GITHUB_WRITE_ROLE: ${{ steps.ci-api.outputs.status-role }}
         run: python3 scripts/finalize_batch.py
@@ -1852,6 +1897,12 @@ jobs:
           SOURCE_PUBLICATION_STAGED: ${{ needs.sandboxed-build.outputs.publication-required }}
           SOURCE_TESTED_COMMIT: ${{ needs.sandboxed-build.outputs.tested-sha }}
           SOURCE_TESTED_TREE: ${{ needs.sandboxed-build.outputs.tested-tree }}
+          SOURCE_SCOPE_COMPLETE: ${{ needs.sandboxed-build.outputs.source-scope-complete }}
+          SOURCE_PINS_KNOWN: ${{ needs.sandboxed-build.outputs.source-pins-known }}
+          SOURCE_BUMP_COMPLETE: ${{ needs.sandboxed-build.outputs.source-bump-complete }}
+          SOURCE_SIZE_COMPLETE: ${{ needs.sandboxed-build.outputs.source-size-complete }}
+          SOURCE_INFRASTRUCTURE: ${{ needs.sandboxed-build.outputs.source-infrastructure }}
+          SOURCE_BUILD_OUTCOME: ${{ needs.sandboxed-build.outputs.source-build-outcome }}
           CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
           CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
           CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
@@ -1863,7 +1914,11 @@ jobs:
           fields = {"job_result": "SOURCE_JOB_RESULT", "build_state": "SOURCE_BUILD_STATE",
                     "scope": "SOURCE_SCOPE_STATE", "bump_guard": "SOURCE_BUMP_STATE",
                     "publication_staged": "SOURCE_PUBLICATION_STAGED",
-                    "tested_commit": "SOURCE_TESTED_COMMIT", "tested_tree": "SOURCE_TESTED_TREE"}
+                    "tested_commit": "SOURCE_TESTED_COMMIT", "tested_tree": "SOURCE_TESTED_TREE",
+                    "scope_complete": "SOURCE_SCOPE_COMPLETE", "pins_known": "SOURCE_PINS_KNOWN",
+                    "bump_complete": "SOURCE_BUMP_COMPLETE",
+                    "size_complete": "SOURCE_SIZE_COMPLETE", "infrastructure": "SOURCE_INFRASTRUCTURE",
+                    "build_outcome": "SOURCE_BUILD_OUTCOME"}
           value = {key: os.environ.get(name) for key, name in fields.items()}
           (Path(os.environ["RUNNER_TEMP"]) / "source-build-evidence.json").write_text(json.dumps(value))
           PYTHON

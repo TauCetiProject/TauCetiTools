@@ -402,17 +402,22 @@ ROOT_PATH = {root}/log
                     self.assertNotIn(native_tokens[0], child.stdout + child.stderr)
                     lint_scope = ci_candidate_workflow.lint_scope(
                         candidate_request, candidate_policy, candidate_context, request_job / "pr",
-                        root / "ci-native-lint-scope", candidate_configuration, token=native_tokens[0],
+                        root / "ci-native-lint-scope", candidate_configuration, observation=resolved_candidate,
                     )
                     self.assertEqual(lint_scope["LINT_ONLY_MODULES"], str(root / "ci-native-lint-scope/modules.txt"))
                     self.assertEqual((root / "ci-native-lint-scope/unmatched.txt").read_text(), "Source.lean\n")
                     native_full_lint = api.request("POST", "repos/operator/ci-source/labels", {"name": "full-lint", "color": "aabbcc"})
                     api.request("PUT", f"repos/operator/ci-source/issues/{ci_pull['number']}/labels", {"labels": [native_full_lint["id"]]})
+                    lint_observation = dict(request_digest=candidate_request.digest,
+                        lint_scoped=ci_candidate_workflow.native_lint_policy(candidate_request, candidate_policy, candidate_context,
+                            client=Forgejo(api.forge, token=native_tokens[0])))
                     lint_scope = ci_candidate_workflow.lint_scope(
                         candidate_request, candidate_policy, candidate_context, request_job / "pr",
-                        root / "ci-native-full-lint", candidate_configuration, token=native_tokens[0],
+                        root / "ci-native-full-lint", candidate_configuration, observation=lint_observation,
                     )
                     self.assertEqual(lint_scope["LINT_ONLY_MODULES"], "")
+                    self.assertEqual(ci_candidate_workflow.member_size_policy(candidate_request, candidate_policy,
+                        candidate_context, request_job), {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
                     from dataclasses import replace
                     wrong_tree = replace(candidate_request, tree="3" * 40)
                     with self.assertRaisesRegex(ValueError, "tree"):

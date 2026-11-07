@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.parse
 import urllib.request
 
-from .ci_candidate import MAX_ARTIFACT_BYTES, artifact_name, check_run_metadata, verify_artifact
+from .ci_candidate import MAX_ARTIFACT_BYTES, EvidenceUnavailable, artifact_name, check_run_metadata, verify_artifact
 from .forge import GITHUB
-
-
-class EvidenceUnavailable(RuntimeError):
-    """Evidence is missing, incomplete or unavailable; no source verdict is granted."""
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -50,7 +47,7 @@ class GitHubEvidence:
                 if response.status != 200 or len(raw) > limit:
                     raise EvidenceUnavailable("execution evidence exceeded its bounds")
                 return raw
-        except (OSError, urllib.error.URLError) as error:
+        except (OSError, urllib.error.URLError, http.client.HTTPException) as error:
             if isinstance(error, urllib.error.HTTPError):
                 error.close()
             raise EvidenceUnavailable("execution evidence transport failed") from None
@@ -99,7 +96,7 @@ class GitHubEvidence:
             error.close()
             if status != 302 or not isinstance(location, str):
                 raise EvidenceUnavailable("execution artifact is unavailable") from None
-        except (OSError, urllib.error.URLError):
+        except (OSError, urllib.error.URLError, http.client.HTTPException):
             raise EvidenceUnavailable("execution artifact transport failed") from None
         parsed = urllib.parse.urlsplit(location)
         if (

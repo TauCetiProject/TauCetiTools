@@ -79,6 +79,8 @@ def bootstrap(request, policy, context, configuration_path, scripts, *, policy_d
         "TAUCETI_SOURCE_REPOSITORY": json.dumps(policy.source.record(), sort_keys=True),
         "TAUCETI_CI_EXECUTION_REPOSITORY": json.dumps(policy.execution.record(), sort_keys=True),
         "TAUCETI_BASE_BRANCH": project.branch,
+        "TAUCETI_CACHE_REPOSITORY": policy.execution.repository.name,
+        "CI_SOURCE_REQUIRE_PUBLICATION": "true" if policy.require_publication else "false",
         "TAUCETI_PROJECT_KEY": project.key,
         "TAUCETI_LEAN_ROOT": project.roots[0],
         "TAUCETI_LEAN_ROOTS": json.dumps(project.roots),
@@ -138,13 +140,15 @@ def resolve(request, policy, context, store, *, token=None, client=None):
         if tree != request.tree:
             raise ValueError("candidate tree differs from the request")
     check_source_repository(policy, client)
-    return {
+    result = {
         "request_digest": request.digest,
         "head": request.head,
         "base": request.base,
         "mergebase": request.base,
         "tree": request.tree,
     }
+    result["lint_scoped"] = native_lint_policy(request, policy, context, client=client)
+    return result
 
 
 def fetch(request, policy, context, workspace, *, token=None, client=None):
@@ -162,8 +166,65 @@ def fetch(request, policy, context, workspace, *, token=None, client=None):
         token=token,
         credential_origin=policy.credential_origin,
     )
+    with tempfile.TemporaryDirectory(prefix="source-member-home-") as home:
+        git = ci_checkout.SourceGit(
+            Path(value["store"]), home, token=token, token_origin=policy.credential_origin, follow_redirects=False
+        )
+        git.fetch_sources(
+            policy.source.repository.clone_url, [(m.head, f"refs/ci/member-{m.pr}") for m in request.members]
+        )
+        for member in request.members:
+            if git.run("rev-parse", f"refs/ci/member-{member.pr}").stdout.decode().strip() != member.head:
+                raise ValueError("fetched member differs from the accepted head")
     check_source_repository(policy, client)
     return value
+
+
+def member_size_policy(request, policy, context, workspace):
+    """Apply existing per-PR caps to exact retained members using only local Git objects."""
+    check_workflow_context(request, policy, context)
+    objects = Path(workspace) / ci_checkout.STORE / "objects"
+    values = {"SOURCE_SIZE_POLICY_COMPLETE": "1"}
+    with tempfile.TemporaryDirectory(prefix="source-member-policy-") as home:
+        git = ci_git.Git(Path(home) / "reader.git", home, objects=objects)
+        for member in request.members:
+            git.commit(member.head)
+            bases = git.run("merge-base", "--all", request.base, member.head).stdout.decode().splitlines()
+            if len(bases) != 1:
+                raise ValueError("member review diff has no unique merge base")
+            rows = git.run(
+                "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--numstat", "-z", bases[0], member.head, "--"
+            ).stdout.split(b"\0")
+            changed = {}
+            for row in rows:
+                if not row:
+                    continue
+                adds, deletes, name = row.split(b"\t", 2)
+                if not adds.isdigit() or not deletes.isdigit():
+                    values["DIFF_UNKNOWN"] = "1"
+                    values["SOURCE_SIZE_POLICY_COMPLETE"] = "0"
+                    continue
+                changed[name] = (int(adds), int(deletes))
+            pins = bool({b"lake-manifest.json", b"lean-toolchain"} & changed.keys())
+            if len(changed) > 2000 or (
+                not pins and (sum(a for a, _ in changed.values()) > 2000 or sum(d for _, d in changed.values()) > 2000)
+            ):
+                values["TOO_LARGE"] = "1"
+            added = git.run(
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                "--name-only",
+                "--diff-filter=A",
+                "-z",
+                bases[0],
+                member.head,
+                "--",
+            ).stdout.split(b"\0")
+            if any(name.endswith(b".lean") and changed.get(name, (0, 0))[0] > 1000 for name in added if name):
+                values["NEWFILE_TOO_LONG"] = "1"
+    return values
 
 
 def toolchain_pin(request, policy, context, store, *, token=None, client=None):
@@ -224,13 +285,10 @@ def toolchain_pin(request, policy, context, store, *, token=None, client=None):
     return raw
 
 
-def lint_scope(request, policy, context, checkout, destination, configuration_path, *, token=None, client=None):
-    """Native label/branch policy plus an immutable local diff; uncertainty means full lint."""
+def native_lint_policy(request, policy, context, *, client):
+    """Collect native metadata before any dependency executable runs on the job."""
     check_workflow_context(request, policy, context)
-    destination = Path(destination)
-    destination.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
-    client = client or Forgejo(policy.credential_origin, token=token, timeout=15, max_bytes=1024 * 1024)
     try:
         check_source_repository(policy, client)
         for member in request.members:
@@ -262,6 +320,20 @@ def lint_scope(request, policy, context, checkout, destination, configuration_pa
                 raise ValueError("native full-lint label is present")
         check_source_repository(policy, client)
     except (ForgeError, ValueError, OSError):
+        return False
+    return True
+
+
+def lint_scope(request, policy, context, checkout, destination, configuration_path, *, observation):
+    """Only saved trusted native policy and local objects; no credential/network use."""
+    check_workflow_context(request, policy, context)
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    if (
+        not isinstance(observation, dict)
+        or observation.get("request_digest") != request.digest
+        or observation.get("lint_scoped") is not True
+    ):
         return {"LINT_ONLY_MODULES": "", "LINT_SCOPE_DIR": str(destination)}
     from .assets.scripts import lint_scope_files
 
@@ -279,7 +351,9 @@ def lint_scope(request, policy, context, checkout, destination, configuration_pa
     prefix = project.roots[0].replace(".", "/") + "/"
     modules, unmatched = [], []
     for name in files:
-        if name.startswith(prefix) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_'/]*\.lean", name):
+        if name.startswith(prefix) and re.fullmatch(
+            re.escape(prefix[:-1]) + r"(/[A-Za-z_][A-Za-z0-9_']*)+\.lean", name
+        ):
             modules.append(name[:-5].replace("/", "."))
         elif name.endswith(".lean"):
             unmatched.append(name)
@@ -295,11 +369,17 @@ def publication_verdict(request, policy, context, reader, *, clock=time.monotoni
     start = clock()
     acquired = False
     while clock() - start < 1200:
-        run = reader.get(f"/actions/runs/{context['run_id']}")
+        try:
+            run = reader.get(f"/actions/runs/{context['run_id']}")
+            value = reader.get(f"/actions/runs/{context['run_id']}/attempts/{context['attempt']}/jobs?per_page=100")
+        except EvidenceUnavailable:
+            if not acquired and clock() - start >= 300:
+                return "infrastructure"
+            sleep(30)
+            continue
         check_run_metadata(
             request, policy, run, run_id=context["run_id"], attempt=context["attempt"], require_completed=False
         )
-        value = reader.get(f"/actions/runs/{context['run_id']}/attempts/{context['attempt']}/jobs?per_page=100")
         if (
             not isinstance(value, dict)
             or not isinstance(value.get("jobs"), list)
@@ -360,6 +440,12 @@ def finalize(request, policy, context, evidence, *, reader=None):
         "publication_staged",
         "tested_commit",
         "tested_tree",
+        "scope_complete",
+        "pins_known",
+        "bump_complete",
+        "size_complete",
+        "infrastructure",
+        "build_outcome",
     }:
         raise ValueError("invalid trusted build evidence")
     tested_commit, tested_tree = evidence.get("tested_commit"), evidence.get("tested_tree")
@@ -369,7 +455,11 @@ def finalize(request, policy, context, evidence, *, reader=None):
     state = evidence.get("build_state")
     build = (
         state
-        if identity and state in {"success", "failure"} and evidence.get("job_result") in {"success", "failure"}
+        if identity
+        and state in {"success", "failure"}
+        and evidence.get("job_result") in {"success", "failure"}
+        and evidence.get("infrastructure") != "1"
+        and evidence.get("build_outcome") in {"success", "failure"}
         else "infrastructure"
     )
     if build == "success" and evidence.get("job_result") != "success":
@@ -382,6 +472,10 @@ def finalize(request, policy, context, evidence, *, reader=None):
         else "infrastructure",
         "publication": "infrastructure" if policy.require_publication else "not_required",
     }
+    if evidence.get("scope_complete") != "1" or evidence.get("size_complete") != "1":
+        verdicts["scope"] = "infrastructure"
+    if evidence.get("pins_known") != "1" or evidence.get("bump_complete") != "1":
+        verdicts["bump_guard"] = "infrastructure"
     if build == "success":
         if policy.require_publication and evidence.get("publication_staged") != "true":
             verdicts["publication"] = "infrastructure"
@@ -424,7 +518,9 @@ def context_from_environment(env):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("bootstrap", "resolve", "fetch", "toolchain", "lint-scope", "finalize"))
+    parser.add_argument(
+        "command", choices=("bootstrap", "resolve", "fetch", "toolchain", "lint-scope", "member-policy", "finalize")
+    )
     parser.add_argument("--policy", required=True)
     parser.add_argument("--configuration", required=True)
     parser.add_argument("--event", default=os.environ.get("GITHUB_EVENT_PATH"))
@@ -439,6 +535,11 @@ def main(argv=None):
     parser.add_argument("--checkout")
     parser.add_argument("--destination")
     parser.add_argument("--evidence")
+    parser.add_argument("--observation")
+    parser.add_argument("--revision")
+    parser.add_argument("--artifact-name")
+    parser.add_argument("--lean-root")
+    parser.add_argument("--roadmap-dir")
     args = parser.parse_args(argv)
     context = context_from_environment(os.environ)
     request, policy = load_request(
@@ -456,6 +557,8 @@ def main(argv=None):
         if not args.scripts:
             parser.error("bootstrap requires --scripts")
         result = bootstrap(request, policy, context, args.configuration, args.scripts, policy_dir=args.policy_dir)
+        if args.lean_root != result["TAUCETI_LEAN_ROOT"] or args.roadmap_dir != result["TAUCETI_ROADMAP_DIR"]:
+            raise ValueError("workflow library/roadmap inputs differ from trusted project")
     elif args.command == "resolve":
         if not args.store:
             parser.error("resolve requires --store")
@@ -467,13 +570,22 @@ def main(argv=None):
     elif args.command == "toolchain":
         if not args.store or not args.toolchain_output:
             parser.error("toolchain requires --store and --toolchain-output")
+        if args.revision != request.head or args.artifact_name != "lake-cache-staging-" + request.head:
+            raise ValueError("publisher revision or staged artifact differs from source request")
         raw = toolchain_pin(request, policy, context, args.store, token=token)
         Path(args.toolchain_output).write_bytes(raw)
         result = {"head": request.head, "tree": request.tree, "toolchain": raw.decode().strip()}
     elif args.command == "lint-scope":
         if not args.checkout or not args.destination:
             parser.error("lint-scope requires --checkout and --destination")
-        result = lint_scope(request, policy, context, args.checkout, args.destination, args.configuration, token=token)
+        observation = read_json(Path(args.observation).read_bytes()) if args.observation else None
+        result = lint_scope(
+            request, policy, context, args.checkout, args.destination, args.configuration, observation=observation
+        )
+    elif args.command == "member-policy":
+        if not args.workspace:
+            parser.error("member-policy requires --workspace")
+        result = member_size_policy(request, policy, context, args.workspace)
     else:
         if not args.evidence:
             parser.error("finalize requires --evidence")
@@ -490,7 +602,7 @@ def main(argv=None):
             )
     if args.github_env:
         with open(args.github_env, "a") as output:
-            if args.command in {"bootstrap", "lint-scope"}:
+            if args.command in {"bootstrap", "lint-scope", "member-policy"}:
                 for key, value in result.items():
                     if not isinstance(value, str) or "\n" in value or "\r" in value:
                         raise ValueError("invalid workflow environment setting")
@@ -503,6 +615,7 @@ def main(argv=None):
                 project = load(args.configuration)
                 cache = project.service("cache")
                 for name, value in (
+                    ("TAUCETI_CACHE_REPOSITORY", policy.execution.repository.name),
                     ("TAUCETI_CACHE_ARTIFACT_URL", cache.get("artifact_url", "")),
                     ("TAUCETI_CACHE_REVISION_URL", cache.get("revision_url", "")),
                 ):
@@ -520,7 +633,7 @@ def main(argv=None):
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (ValueError, OSError, ForgeError, subprocess.SubprocessError) as error:
+    except (ValueError, OSError, ForgeError, EvidenceUnavailable, subprocess.SubprocessError) as error:
         # Remote/API exceptions are already scrubbed; avoid replaying Git stderr
         # or attacker-controlled JSON into GitHub workflow command syntax.
         raise SystemExit(f"source candidate {type(error).__name__}") from None

@@ -118,6 +118,8 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}/publisher-tools
           CI_SOURCE_READ_TOKEN: ${{ secrets.CI_SOURCE_READ_TOKEN }}
+          SOURCE_REVISION: ${{ inputs.revision }}
+          SOURCE_ARTIFACT: ${{ inputs.artifact-name }}
           CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
           CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
           CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
@@ -125,6 +127,7 @@ jobs:
         run: |
           python3 -m tauceti_tools.ci_candidate_workflow toolchain \
             --policy publisher-gate/.tauceti/ci-source.json --configuration publisher-gate/tauceti.toml \
+            --revision "$SOURCE_REVISION" --artifact-name "$SOURCE_ARTIFACT" \
             --store "$RUNNER_TEMP/source-publisher.git" --toolchain-output lean-toolchain \
             --output "$RUNNER_TEMP/source-toolchain.json" --github-env "$GITHUB_ENV"
 

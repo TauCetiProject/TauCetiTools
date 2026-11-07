@@ -28,6 +28,10 @@ RESULT_FILE = "source-candidate-result.json"
 VERDICTS = frozenset({"build", "scope", "bump_guard", "publication"})
 
 
+class EvidenceUnavailable(RuntimeError):
+    """Execution evidence is transiently unavailable or superseded; no verdict is granted."""
+
+
 def _object(value, keys, label):
     if not isinstance(value, dict) or set(value) != set(keys):
         raise ValueError(f"invalid {label} fields")
@@ -375,6 +379,8 @@ def check_run_metadata(request, policy, run, *, run_id, attempt, require_complet
     request.check_policy(policy)
     _positive(run_id, "workflow run ID")
     _positive(attempt, "workflow attempt")
+    if isinstance(run, dict) and type(run.get("run_attempt")) is int and run["run_attempt"] != attempt:
+        raise EvidenceUnavailable("workflow attempt has been superseded")
     if not isinstance(run, dict) or any(
         run.get(key) != value
         for key, value in {
@@ -386,7 +392,7 @@ def check_run_metadata(request, policy, run, *, run_id, attempt, require_complet
     ):
         raise ValueError("result does not belong to the expected completed workflow attempt")
     if run.get("status") not in ({"completed"} if require_completed else {"queued", "in_progress", "completed"}):
-        raise ValueError("workflow execution is not in an expected state")
+        raise EvidenceUnavailable("workflow execution is not in an expected state")
     if (
         type(run.get("id")) is not int
         or type(run.get("run_attempt")) is not int
@@ -500,7 +506,7 @@ def verify_result(request, policy, result, run, *, run_id, attempt):
         raise ValueError("result tested another candidate")
     passed = all(value in {"success", "not_required"} for value in verdicts.values())
     if run.get("conclusion") not in {"success", "failure"} or (passed and run["conclusion"] != "success"):
-        raise ValueError("result is not confirmed by the completed workflow conclusion")
+        raise EvidenceUnavailable("result is not confirmed by the completed workflow conclusion")
     return dict(verdicts)
 
 

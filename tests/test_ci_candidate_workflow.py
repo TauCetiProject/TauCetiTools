@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 import urllib.error
@@ -56,6 +57,12 @@ class Workflow(unittest.TestCase):
             "scope": "success",
             "bump_guard": "success",
             "publication_staged": "true",
+            "scope_complete": "1",
+            "pins_known": "1",
+            "bump_complete": "1",
+            "size_complete": "1",
+            "infrastructure": "",
+            "build_outcome": "success",
             "job_result": "success",
         }
 
@@ -71,6 +78,41 @@ class Workflow(unittest.TestCase):
             self.assertEqual(env["TAUCETI_GITHUB_STATE_URL"], "")
             self.assertEqual(env["TAUCETI_BORS_URL"], "")
             self.assertEqual(env["TAUCETI_LEAN_ROOT"], "Math")
+            self.assertEqual(env["TAUCETI_CACHE_REPOSITORY"], "team/Execution")
+            self.assertIn('--repo "${TAUCETI_CACHE_REPOSITORY:-', (root / "scripts/lake-cache-get.sh").read_text())
+            (root / "bin").mkdir()
+            fake_lake = root / "bin/lake"
+            fake_lake.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$CAPTURE_CACHE_ARGS"\n')
+            fake_lake.chmod(0o755)
+            (root / "candidate").mkdir()
+            cache_env = dict(
+                os.environ,
+                **env,
+                PATH=str(root / "bin") + os.pathsep + os.environ["PATH"],
+                RUNNER_TEMP=str(root),
+                CAPTURE_CACHE_ARGS=str(root / "cache-args"),
+            )
+            child = subprocess.run(
+                ["bash", str(root / "scripts/lake-cache-get.sh"), str(root / "candidate")],
+                env=cache_env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
+            arguments = (root / "cache-args").read_text().splitlines()
+            self.assertEqual(arguments[arguments.index("--repo") + 1], self.policy.execution.repository.name)
+            child = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from tauceti_tools.assets.scripts.lake_cache_probe import DEFAULT_REPOSITORY; print(DEFAULT_REPOSITORY)",
+                ],
+                env=cache_env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(child.returncode, 0, child.stderr)
+            self.assertEqual(child.stdout.strip(), self.policy.execution.repository.name)
             self.assertIn('module_re="^Math(', (root / "scripts/lint-scope.sh").read_text())
             project = parse(CONFIG)
             self.assertEqual(project.roots, ["Math"])
@@ -140,6 +182,29 @@ class Workflow(unittest.TestCase):
             result = cw.finalize(self.request, self.policy, self.context, self.evidence, reader=reader)
             self.assertEqual(result["verdicts"]["publication"], "infrastructure")
 
+    def test_publication_observation_retries_a_transient_api_failure_within_the_deadline(self):
+        reader = self.publisher_reader()
+        original = reader.get
+        reads, elapsed = [], [0]
+
+        def transient(path):
+            reads.append(path)
+            if len(reads) == 1:
+                raise EvidenceUnavailable("transient API outage")
+            return original(path)
+
+        reader.get = transient
+        verdict = cw.publication_verdict(
+            self.request,
+            self.policy,
+            self.context,
+            reader,
+            clock=lambda: elapsed[0],
+            sleep=lambda delay: elapsed.__setitem__(0, elapsed[0] + delay),
+        )
+        self.assertEqual(verdict, "success")
+        self.assertEqual(elapsed, [30])
+
     def test_no_tested_identity_is_an_infrastructure_result_without_a_publication_claim(self):
         evidence = dict(self.evidence, tested_commit="", tested_tree="", build_state="failure", job_result="failure")
         result = cw.finalize(self.request, self.policy, self.context, evidence)
@@ -152,6 +217,23 @@ class Workflow(unittest.TestCase):
     def test_required_publication_cannot_be_downgraded_by_job_outputs(self):
         result = cw.finalize(self.request, self.policy, self.context, dict(self.evidence, publication_staged="false"))
         self.assertEqual(result["verdicts"]["publication"], "infrastructure")
+
+    def test_uncompleted_scope_pin_and_member_size_checks_are_infrastructure(self):
+        for field, verdict in (
+            ("scope_complete", "scope"),
+            ("size_complete", "scope"),
+            ("pins_known", "bump_guard"),
+            ("bump_complete", "bump_guard"),
+        ):
+            with self.subTest(field=field):
+                result = cw.finalize(
+                    self.request,
+                    self.policy,
+                    self.context,
+                    dict(self.evidence, **{field: "", verdict if verdict != "bump_guard" else "bump_guard": "failure"}),
+                    reader=self.publisher_reader(),
+                )
+                self.assertEqual(result["verdicts"][verdict], "infrastructure")
 
     def test_explicitly_unrequired_publication_remains_bound_to_policy(self):
         config = replace(self.policy, require_publication=False)
@@ -204,7 +286,7 @@ class Evidence(unittest.TestCase):
         self.assertEqual(result["verdicts"], self.fixture.verdicts)
         self.assertEqual(reader.run_reads, 2)
         self.assertIn("/actions/artifacts/202", reader.reads)
-        with self.assertRaises(ValueError):
+        with self.assertRaises(EvidenceUnavailable):
             self.reader(current_attempt=3).result(self.fixture.request, run_id=101, attempt=2)
 
     def test_evidence_reader_rejects_partial_or_duplicate_artifacts(self):
@@ -257,6 +339,65 @@ class Evidence(unittest.TestCase):
 
 
 class PinGuard(unittest.TestCase):
+    def member_policy(self, *, added_lines=0, existing_lines=0, pin_changed=False, binary=False):
+        config = policy()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            writer = root / "writer"
+            subprocess.run(["git", "init", "-q", str(writer)], check=True)
+            env = dict(
+                os.environ,
+                GIT_AUTHOR_NAME="Fixture",
+                GIT_AUTHOR_EMAIL="fixture@example.invalid",
+                GIT_COMMITTER_NAME="Fixture",
+                GIT_COMMITTER_EMAIL="fixture@example.invalid",
+                GIT_CONFIG_GLOBAL="/dev/null",
+                GIT_CONFIG_NOSYSTEM="1",
+            )
+
+            def git(*args):
+                return (
+                    subprocess.check_output(["git", "-C", str(writer), *args], env=env, stderr=subprocess.DEVNULL)
+                    .decode()
+                    .strip()
+                )
+
+            (writer / "Old.lean").write_text("old\n")
+            (writer / "lean-toolchain").write_text("leanprover/lean4:v4.35.0\n")
+            git("add", ".")
+            git("commit", "-qm", "base")
+            base = git("rev-parse", "HEAD")
+            if added_lines:
+                (writer / "New.lean").write_text("new\n" * added_lines)
+            if existing_lines:
+                (writer / "Old.lean").write_text("old\n" + "new\n" * existing_lines)
+            if pin_changed:
+                (writer / "lean-toolchain").write_text("leanprover/lean4:v4.36.0\n")
+            if binary:
+                (writer / "Binary.lean").write_bytes(b"\0unreadable line statistics\n")
+            git("add", ".")
+            git("commit", "-qm", "candidate")
+            head, tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+            workspace = root / "job"
+            workspace.mkdir()
+            subprocess.run(
+                ["git", "clone", "-q", "--bare", str(writer), str(workspace / ".ci-source.git")], check=True, env=env
+            )
+            req = replace(request(config), head=head, base=base, tree=tree, members=(cc.Member(17, head),))
+            return cw.member_size_policy(req, config, context(req, config), workspace)
+
+    def test_retained_member_new_file_and_total_size_guards_use_real_local_objects(self):
+        self.assertEqual(
+            self.member_policy(added_lines=1001), {"SOURCE_SIZE_POLICY_COMPLETE": "1", "NEWFILE_TOO_LONG": "1"}
+        )
+        self.assertEqual(
+            self.member_policy(existing_lines=2001), {"SOURCE_SIZE_POLICY_COMPLETE": "1", "TOO_LARGE": "1"}
+        )
+        self.assertEqual(
+            self.member_policy(existing_lines=2001, pin_changed=True), {"SOURCE_SIZE_POLICY_COMPLETE": "1"}
+        )
+        self.assertEqual(self.member_policy(binary=True), {"SOURCE_SIZE_POLICY_COMPLETE": "0", "DIFF_UNKNOWN": "1"})
+
     def test_source_pin_changes_use_the_configured_upstream_guard_without_legacy_source_bindings(self):
         root_tools = Path(__file__).resolve().parents[1]
         script = root_tools / "tauceti_tools/assets/scripts/check-bump.sh"
@@ -384,6 +525,42 @@ class ShippedWorkflow(unittest.TestCase):
             self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
             self.assertEqual(output.read_text(), "scope-state=success\n")
 
+    def test_source_restricted_paths_cannot_inherit_a_legacy_bors_waiver(self):
+        shell = self.step("Report build and bump-guard statuses to the PR head commit")["run"]
+        values = {
+            "env.SCOPE_OK": "1",
+            "env.PINS_KNOWN": "1",
+            "env.OUT_OF_SCOPE": "1",
+            "env.IS_BATCH": "true",
+            "steps.build.outcome": "success",
+            "inputs.lean_root": "Math",
+        }
+        shell = re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda match: values.get(match[1], ""), shell)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "gate/scripts").mkdir(parents=True)
+            (root / "gate/scripts/prepare_pr_integration.py").touch()
+            output = root / "outputs"
+            env = dict(
+                os.environ,
+                SOURCE_CANDIDATE="true",
+                MERGE_BACKEND="bors",
+                IS_BATCH="true",
+                OUT_OF_SCOPE="1",
+                RAW_HEAD="a" * 40,
+                CAPTURED_BASE="b" * 40,
+                CANDIDATE_MODE="frozen-candidate",
+                TESTED_SHA="a" * 40,
+                TESTED_TREE="c" * 40,
+                RUNNER_TEMP=str(root),
+                GITHUB_OUTPUT=str(output),
+            )
+            child = subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", shell], cwd=root, env=env, capture_output=True, text=True
+            )
+            self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
+            self.assertIn("scope-state=failure\n", output.read_text())
+
     def test_native_secret_is_only_in_explicit_source_read_steps(self):
         jobs = self.value["jobs"]
         for job in jobs.values():
@@ -397,7 +574,6 @@ class ShippedWorkflow(unittest.TestCase):
                         {
                             "Resolve PR head",
                             "Fetch complete immutable source histories",
-                            "Decide the environment-lint scope",
                         },
                     )
                 if step.get("id") == "build":

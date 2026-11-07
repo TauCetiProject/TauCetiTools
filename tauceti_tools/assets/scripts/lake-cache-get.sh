@@ -97,7 +97,7 @@ lookup() {
     rc=0
     started=$SECONDS
     ( cd "$PROJECT_DIR" && LAKE_CONFIG="$CFG" lake cache get --service tauceti-public \
-        --repo TauCetiProject/TauCeti "$@" ) > "$LOG" 2>&1 || rc=$?
+        --repo "${TAUCETI_CACHE_REPOSITORY:-TauCetiProject/TauCeti}" "$@" ) > "$LOG" 2>&1 || rc=$?
     # Native --quiet/--log-level still replay informational logs on cache failure
     # (Lake v4.36.0-rc2 LogConfig). Keep complete raw attempts and filter only
     # recognized success records so partial-failure retries are quiet too.

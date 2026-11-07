@@ -220,7 +220,7 @@ class CandidateContracts(unittest.TestCase):
         ):
             value = copy.deepcopy(self.run)
             modify(value)
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=value), self.assertRaises((ValueError, cc.EvidenceUnavailable)):
                 self.verify(run_value=value)
 
     def test_verified_failed_build_remains_a_failure_result(self):
