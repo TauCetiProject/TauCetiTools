@@ -6,7 +6,7 @@ import urllib.parse
 from unittest.mock import Mock
 
 from tauceti_tools.forge import Forge, ForgeError, Incomplete, RepositoryRef, Unsupported
-from tauceti_tools.forge_api import execute, plan
+from tauceti_tools.forge_api import _tree, execute, plan
 from tauceti_tools.forge_command import parse_command
 
 
@@ -18,6 +18,9 @@ def native_commit():
         "parents": [],
         "commit": {"message": "Proof commit", "tree": {"sha": "a" * 40}, "author": identity, "committer": identity},
     }
+
+
+EMPTY_TREE = hashlib.sha1(b"tree 0\0").hexdigest()
 
 
 class ApiContracts(unittest.TestCase):
@@ -140,9 +143,9 @@ class ApiContracts(unittest.TestCase):
             }
 
         self.api.request.side_effect = page
-        result, _, _ = execute(self.request("repos/one/project/git/trees/main?recursive=1"), self.api)
-        self.assertEqual([entry["path"] for entry in json.loads(result)["tree"]], ["1", "2", "3"])
-        self.assertFalse(json.loads(result)["truncated"])
+        result = _tree(self.api, "repos/one/project/git/trees/" + "a" * 40, [], {}, {})
+        self.assertEqual([entry["path"] for entry in result["tree"]], ["1", "2", "3"])
+        self.assertFalse(result["truncated"])
 
         def changed(method, path, **kwargs):
             value = page(method, path, **kwargs)
@@ -152,7 +155,7 @@ class ApiContracts(unittest.TestCase):
 
         self.api.request.side_effect = changed
         with self.assertRaises(Incomplete):
-            execute(self.request("repos/one/project/git/trees/main?recursive=1"), self.api)
+            _tree(self.api, "repos/one/project/git/trees/" + "a" * 40, [], {}, {})
 
     def test_missing_tree_page_or_aggregate_overflow_is_not_complete(self):
         self.api.request.return_value = {"sha": "a" * 40, "total_count": 1, "page": 1, "tree": []}
@@ -174,14 +177,23 @@ class ApiContracts(unittest.TestCase):
         self.assertEqual([row["id"] for row in json.loads(result)], [1, 2])
 
     def test_commit_endpoints_have_their_distinct_github_shapes(self):
-        self.value = native_commit()
+        def reply(method, path, **kwargs):
+            if "/git/commits/" in path:
+                return native_commit()
+            selector = path.split("/git/trees/", 1)[1].split("?")[0]
+            return {"sha": selector, "page": 1, "total_count": 0, "tree": []}
+
+        self.api.request.side_effect = reply
         result, _, _ = execute(self.request("repos/one/project/git/commits/" + "c" * 40), self.api)
         row = json.loads(result)
         self.assertEqual(row["message"], "Proof commit")
-        self.assertEqual(row["tree"]["sha"], "a" * 40)
+        self.assertEqual(row["tree"]["sha"], EMPTY_TREE)
+        self.assertNotEqual(row["sha"], row["tree"]["sha"])
         result, _, _ = execute(self.request("repos/one/project/commits/main"), self.api)
         self.assertEqual(json.loads(result)["commit"]["message"], "Proof commit")
-        self.assertEqual(self.api.request.call_args.args[:2], ("GET", "repos/one/project/git/commits/main"))
+        self.assertEqual(json.loads(result)["commit"]["tree"]["sha"], EMPTY_TREE)
+        with self.assertRaises(ForgeError):
+            execute(self.request("repos/one/project/git/commits/" + "b" * 40), self.api)
 
     def test_missing_ref_namespace_requires_confirmed_code_visibility(self):
         self.api.request.side_effect = ForgeError("not found", status=404)
@@ -209,12 +221,24 @@ class ApiContracts(unittest.TestCase):
             paths.append(path)
             if "/git/commits/" in path:
                 return native_commit()
-            return {"sha": "a" * 40, "page": 1, "total_count": 0, "tree": []}
+            return {"sha": path.split("/git/trees/", 1)[1].split("?")[0], "page": 1, "total_count": 0, "tree": []}
 
         self.api.request.side_effect = reply
         result, _, _ = execute(self.request("repos/one/project/git/trees/main?recursive=false"), self.api)
-        self.assertEqual(json.loads(result)["sha"], "a" * 40)
-        self.assertIn("/git/trees/" + "a" * 40 + "?recursive=1", paths[-1])
+        self.assertEqual(json.loads(result)["sha"], EMPTY_TREE)
+        self.assertIn("/git/trees/" + EMPTY_TREE + "?recursive=1", paths[-1])
+
+    def test_real_tree_object_fallback_verifies_the_tree_hash(self):
+        def reply(method, path, **kwargs):
+            if "/git/commits/" in path:
+                raise ForgeError("not a commit", status=404)
+            return {"sha": path.split("/git/trees/", 1)[1].split("?")[0], "page": 1, "total_count": 0, "tree": []}
+
+        self.api.request.side_effect = reply
+        result, _, _ = execute(self.request("repos/one/project/git/trees/" + EMPTY_TREE), self.api)
+        self.assertEqual(json.loads(result)["sha"], EMPTY_TREE)
+        with self.assertRaises(Incomplete):
+            execute(self.request("repos/one/project/git/trees/" + "a" * 40), self.api)
 
     def test_sha256_blob_content_is_checked_in_json_mode(self):
         content = "λ\n".encode()

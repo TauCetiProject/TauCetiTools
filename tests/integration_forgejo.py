@@ -404,6 +404,7 @@ roadmap="operator/roadmap"
                     self.assertEqual(git_commit["sha"], pull["head"]["sha"])
                     self.assertEqual(git_commit["message"].strip(), "Add proof")
                     self.assertIn("sha", git_commit["tree"])
+                    self.assertNotEqual(git_commit["tree"]["sha"], git_commit["sha"])
                     self.assertEqual(
                         native("api", "repos/operator/content/commits/proof", "--jq", ".sha").strip(),
                         pull["head"]["sha"],
@@ -452,6 +453,10 @@ roadmap="operator/roadmap"
                     recursive_false = json.loads(
                         native("api", "repos/operator/content/git/trees/tree-proof?recursive=false")
                     )
+                    subtree_sha = next(row["sha"] for row in recursive_false["tree"] if row["path"] == "nested")
+                    subtree = json.loads(native("api", "repos/operator/content/git/trees/" + subtree_sha))
+                    self.assertEqual(subtree["sha"], subtree_sha)
+                    self.assertEqual([row["path"] for row in subtree["tree"]], ["Leaf.lean"])
                     self.assertIn("nested/Leaf.lean", {row["path"] for row in recursive_false["tree"]})
                     blob_sha = next(row["sha"] for row in full_tree["tree"] if row["path"] == "Proof.lean")
                     self.assertEqual(
