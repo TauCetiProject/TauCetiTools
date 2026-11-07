@@ -156,7 +156,7 @@ def _sha(value):
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value)
 
 
-def _content(value):
+def _content(value, *, kind="blob"):
     if not isinstance(value, dict) or value.get("encoding") != "base64" or not isinstance(value.get("content"), str):
         raise Incomplete("Forgejo file/blob content is unavailable")
     try:
@@ -167,7 +167,7 @@ def _content(value):
     if type(value.get("size")) is not int or value["size"] != len(content) or not _sha(sha):
         raise Incomplete("Forgejo content size or Git blob identity is unavailable")
     digest = hashlib.new("sha1" if len(sha) == 40 else "sha256")
-    digest.update(f"blob {len(content)}\0".encode() + content)
+    digest.update(f"{kind} {len(content)}\0".encode() + content)
     if digest.hexdigest() != sha:
         raise Incomplete("Forgejo content does not match its Git blob identity")
     return content
@@ -201,36 +201,26 @@ def _git_commit(value):
     }
 
 
-def _canonical_tree(api, base, immutable_selector, *, is_tree=False):
-    tree = _tree(api, base + "/git/trees/" + immutable_selector, [], {}, {})
-    entries = sorted(
-        tree["tree"], key=lambda entry: entry["path"].encode() + (b"/" if entry["type"] == "tree" else b"\0")
-    )
-    if any("/" in entry["path"] or "\0" in entry["path"] for entry in entries):
-        raise Incomplete("Forgejo root tree entries are invalid")
-    body = b"".join(
-        (entry["mode"].lstrip("0") or "0").encode()
-        + b" "
-        + entry["path"].encode()
-        + b"\0"
-        + bytes.fromhex(entry["sha"])
-        for entry in entries
-    )
-    digest = hashlib.new(
-        "sha1" if len(immutable_selector) == 40 else "sha256", f"tree {len(body)}\0".encode() + body
-    ).hexdigest()
-    # Forgejo 17 labels a commit-selected tree with the commit SHA. Rebuild
-    # the canonical tree object and verify it exists before exposing its ID.
-    if is_tree and digest != immutable_selector:
-        raise Incomplete("Forgejo tree content does not match the requested object")
-    if digest != immutable_selector:
-        try:
-            verified = api.request("GET", base + "/git/trees/" + digest + "?per_page=1")
-        except ForgeError:
-            raise Incomplete("Forgejo tree identity could not be verified") from None
-        if not isinstance(verified, dict) or verified.get("sha") != digest:
-            raise Incomplete("Forgejo tree identity could not be verified")
-    return {"sha": digest, "url": api.forge.api_url + "/" + base + "/git/trees/" + digest}
+def _git_object(api, base, revision, kind):
+    # Forgejo 17's native blob reader returns the raw object bytes for any
+    # object type. Bind the bytes to the requested type and full object ID;
+    # the public blob adapter still accepts only actual blob hashes.
+    value = api.request("GET", base + "/git/blobs/" + revision)
+    if not isinstance(value, dict) or value.get("sha") != revision:
+        raise Incomplete("Forgejo Git object response changed its identity")
+    return _content(value, kind=kind)
+
+
+def _commit_tree(api, base, revision):
+    raw = _git_object(api, base, revision, "commit")
+    first, separator, _ = raw.partition(b"\n")
+    try:
+        tree_sha = first.removeprefix(b"tree ").decode("ascii")
+    except UnicodeError:
+        raise Incomplete("Git commit tree header is unavailable") from None
+    if not separator or not first.startswith(b"tree ") or not _sha(tree_sha) or len(tree_sha) != len(revision):
+        raise Incomplete("Git commit tree header is unavailable")
+    return {"sha": tree_sha, "url": api.forge.api_url + "/" + base + "/git/trees/" + tree_sha}
 
 
 def _resolve_tree(api, path):
@@ -242,10 +232,9 @@ def _resolve_tree(api, path):
             raise
         if not _sha(selector):
             raise Incomplete("Forgejo did not identify the requested tree or commit") from None
-        immutable, is_tree = selector, True
-    else:
-        immutable, is_tree = _git_commit(commit)["sha"], False
-    return base + "/git/trees/" + _canonical_tree(api, base, immutable, is_tree=is_tree)["sha"]
+        _git_object(api, base, selector, "tree")
+        return path
+    return base + "/git/trees/" + _commit_tree(api, base, _git_commit(commit)["sha"])["sha"]
 
 
 def _collection(api, path, *, stop_after=None):
@@ -352,7 +341,7 @@ def execute(request, api):
     else:
         native_path = path
         if kind == "repo_commit":
-            native_path = path.replace("/commits/", "/git/commits/", 1)
+            native_path = "repos/" + request.repository_name + "/git/commits/" + path.rsplit("/", 1)[1]
         if kind == "git_commit":
             native_path += "?stat=false&files=false"
         elif request.parameters:
@@ -362,8 +351,8 @@ def execute(request, api):
             commit = _git_commit(value)
             if kind == "git_commit" and commit["sha"] != path.rsplit("/", 1)[1]:
                 raise ForgeError("requested Git commit returned a different object (HTTP 404)", status=404)
-            base = path.split("/git/commits/", 1)[0] if kind == "git_commit" else path.split("/commits/", 1)[0]
-            tree = _canonical_tree(api, base, commit["sha"])
+            base = "repos/" + request.repository_name
+            tree = _commit_tree(api, base, commit["sha"])
             if kind == "git_commit":
                 value = {**commit, "tree": tree}
             else:

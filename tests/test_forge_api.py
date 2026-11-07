@@ -9,18 +9,28 @@ from tauceti_tools.forge import Forge, ForgeError, Incomplete, RepositoryRef, Un
 from tauceti_tools.forge_api import _tree, execute, plan
 from tauceti_tools.forge_command import parse_command
 
+EMPTY_TREE = hashlib.sha1(b"tree 0\0").hexdigest()
+RAW_COMMIT = f"tree {EMPTY_TREE}\nauthor Operator <operator@example.invalid> 0 +0000\ncommitter Operator <operator@example.invalid> 0 +0000\n\nProof commit\n".encode()
+COMMIT_SHA = hashlib.sha1(f"commit {len(RAW_COMMIT)}\0".encode() + RAW_COMMIT).hexdigest()
+
+
+def git_object(raw, kind, revision=None):
+    return {
+        "sha": revision or hashlib.sha1(f"{kind} {len(raw)}\0".encode() + raw).hexdigest(),
+        "size": len(raw),
+        "encoding": "base64",
+        "content": base64.b64encode(raw).decode(),
+    }
+
 
 def native_commit():
     identity = {"name": "Operator", "email": "operator@example.invalid", "date": "2026-11-07T00:00:00Z"}
     return {
-        "sha": "c" * 40,
-        "url": "https://git.example.org/api/v1/repos/one/project/git/commits/" + "c" * 40,
+        "sha": COMMIT_SHA,
+        "url": "https://git.example.org/api/v1/repos/one/project/git/commits/" + COMMIT_SHA,
         "parents": [],
-        "commit": {"message": "Proof commit", "tree": {"sha": "a" * 40}, "author": identity, "committer": identity},
+        "commit": {"message": "Proof commit", "tree": {"sha": COMMIT_SHA}, "author": identity, "committer": identity},
     }
-
-
-EMPTY_TREE = hashlib.sha1(b"tree 0\0").hexdigest()
 
 
 class ApiContracts(unittest.TestCase):
@@ -180,11 +190,13 @@ class ApiContracts(unittest.TestCase):
         def reply(method, path, **kwargs):
             if "/git/commits/" in path:
                 return native_commit()
+            if "/git/blobs/" in path:
+                return git_object(RAW_COMMIT, "commit")
             selector = path.split("/git/trees/", 1)[1].split("?")[0]
             return {"sha": selector, "page": 1, "total_count": 0, "tree": []}
 
         self.api.request.side_effect = reply
-        result, _, _ = execute(self.request("repos/one/project/git/commits/" + "c" * 40), self.api)
+        result, _, _ = execute(self.request("repos/one/project/git/commits/" + COMMIT_SHA), self.api)
         row = json.loads(result)
         self.assertEqual(row["message"], "Proof commit")
         self.assertEqual(row["tree"]["sha"], EMPTY_TREE)
@@ -194,6 +206,31 @@ class ApiContracts(unittest.TestCase):
         self.assertEqual(json.loads(result)["commit"]["tree"]["sha"], EMPTY_TREE)
         with self.assertRaises(ForgeError):
             execute(self.request("repos/one/project/git/commits/" + "b" * 40), self.api)
+
+    def test_commit_namespace_names_do_not_change_the_route(self):
+        paths = []
+
+        def reply(method, path, **kwargs):
+            paths.append(path)
+            return git_object(RAW_COMMIT, "commit") if "/git/blobs/" in path else native_commit()
+
+        self.api.request.side_effect = reply
+        result, _, _ = execute(self.request("repos/git/commits/commits/main"), self.api)
+        self.assertEqual(json.loads(result)["sha"], COMMIT_SHA)
+        self.assertEqual(paths[0], "repos/git/commits/git/commits/main")
+        self.assertEqual(paths[1], "repos/git/commits/git/blobs/" + COMMIT_SHA)
+
+    def test_raw_object_type_or_hash_mismatch_is_not_a_tree_identity(self):
+        for kind in ["blob", "commit"]:
+
+            def reply(method, path, kind=kind, **kwargs):
+                if "/git/commits/" in path:
+                    return native_commit()
+                return git_object(b"unexpected", kind, COMMIT_SHA)
+
+            self.api.request.side_effect = reply
+            with self.subTest(kind=kind), self.assertRaises(Incomplete):
+                execute(self.request("repos/one/project/git/commits/" + COMMIT_SHA), self.api)
 
     def test_missing_ref_namespace_requires_confirmed_code_visibility(self):
         self.api.request.side_effect = ForgeError("not found", status=404)
@@ -221,6 +258,8 @@ class ApiContracts(unittest.TestCase):
             paths.append(path)
             if "/git/commits/" in path:
                 return native_commit()
+            if "/git/blobs/" in path:
+                return git_object(RAW_COMMIT, "commit")
             return {"sha": path.split("/git/trees/", 1)[1].split("?")[0], "page": 1, "total_count": 0, "tree": []}
 
         self.api.request.side_effect = reply
@@ -232,6 +271,8 @@ class ApiContracts(unittest.TestCase):
         def reply(method, path, **kwargs):
             if "/git/commits/" in path:
                 raise ForgeError("not a commit", status=404)
+            if "/git/blobs/" in path:
+                return git_object(b"", "tree", revision=path.rsplit("/", 1)[1])
             return {"sha": path.split("/git/trees/", 1)[1].split("?")[0], "page": 1, "total_count": 0, "tree": []}
 
         self.api.request.side_effect = reply

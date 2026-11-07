@@ -128,7 +128,11 @@ Read contracts support `--method GET`, simple query fields, `--jq`, `--silent`,
 and source HTTP status/cache-header output for single resources. Lists support page and
 per_page plus `--paginate`/`--slurp` (`--slurp` cannot be combined with `--jq`), preserving logical page boundaries despite
 smaller native server pages. Single-page reads stop after their requested prefix.
-Complete trees first resolve an immutable tree SHA, then join bounded native
+Commit/tree identities use the hash-verified raw Git object bytes available
+through Forgejo 17's native object reader. Commit headers supply the exact tree
+SHA, including legacy noncanonical trees; native commit DTOs can mislabel it
+with the commit SHA. A server that does not expose these bytes raises an explicit
+incomplete-data error. Complete trees resolve the immutable tree SHA, then join bounded native
 pages only while that SHA and total count remain stable. As in GitHub, the
 presence of `recursive` enables recursion, including values `0` and `false`,
 following the [GitHub tree API contract](https://docs.github.com/en/rest/git/trees). Collections and trees enforce aggregate byte and page bounds;
