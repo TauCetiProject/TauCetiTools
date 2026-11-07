@@ -53,6 +53,7 @@ class Writes(unittest.TestCase):
         self.api.current_user.return_value = {"id": 2, "login": "operator"}
         self.api.pull.return_value = {"number": 12, "state": "open", "head": {"sha": "a" * 40}}
         self.api.collection.return_value = []
+        self.api.reviews.return_value = []
         self.api.pull_ref.return_value = "a" * 40
         self.api.repository.return_value = {"permissions": {"push": True}}
         self.writer = ForgejoWriter(self.api, expected_user_id="2")
@@ -99,9 +100,7 @@ class Writes(unittest.TestCase):
         self.api.request.side_effect = [{"number": 12}, ForgeError("forbidden", status=403)]
         with self.assertRaises(AmbiguousWrite):
             self.writer.edit(self.repo, 12, pull=True, changes={"body": "new"}, add_labels=["ready"])
-        self.assertEqual(
-            self.api.request.call_args.args, ("POST", "repos/one/project/issues/12/labels", {"labels": [3]})
-        )
+        self.assertEqual(self.api.request.call_args.args, ("PATCH", "repos/one/project/pulls/12", {"body": "new"}))
         self.assertEqual(self.api.request.call_count, 2)
 
     def test_already_closed_is_a_noop_even_with_comment(self):
@@ -131,10 +130,38 @@ class Writes(unittest.TestCase):
         self.assertEqual(self.api.request.call_count, 1)
 
     def test_review_does_not_publish_an_existing_pending_draft(self):
-        self.api.collection.return_value = [{"state": "PENDING", "user": {"id": 2}}]
+        self.api.reviews.return_value = [{"user": None}, {"state": "PENDING", "user": {"id": 2}}]
         with self.assertRaises(Unsupported):
             self.writer.review(self.repo, 12, event="APPROVED")
         self.api.request.assert_not_called()
+
+    def test_repo_labels_work_without_organization_scope(self):
+        self.api.collection.side_effect = lambda path: (
+            [{"id": 3, "name": "ready"}]
+            if path.startswith("repos/")
+            else (_ for _ in ()).throw(ForgeError("scope", status=403))
+        )
+        self.assertEqual(self.writer.label_ids(self.repo, ["ready"]), [3])
+        self.api.collection.assert_called_once_with("repos/one/project/labels")
+        with self.assertRaisesRegex(ForgeError, "organization read scope"):
+            self.writer.label_ids(self.repo, ["inherited"])
+        self.api.collection.side_effect = lambda path: (
+            [] if path.startswith("repos/") else (_ for _ in ()).throw(ForgeError("not org", status=404))
+        )
+        with self.assertRaisesRegex(ForgeError, "does not exist"):
+            self.writer.label_ids(self.repo, ["missing"])
+
+    def test_issue_edit_rejects_a_pr_before_writing(self):
+        self.api.issue.side_effect = Incomplete("not an issue")
+        with self.assertRaises(Incomplete):
+            self.writer.edit(self.repo, 12, pull=False, changes={"title": "Ready"})
+        self.api.request.assert_not_called()
+
+    def test_custom_prefix_draft_transition_is_an_ambiguous_edit(self):
+        self.api.pull.side_effect = [{"title": "Old", "draft": False}, {"title": "Draft: New", "draft": True}]
+        with self.assertRaises(AmbiguousWrite):
+            self.writer.edit(self.repo, 12, pull=True, changes={"title": "Draft: New"})
+        self.api.request.assert_called_once()
 
     def test_label_create_rejects_duplicate_and_rename_collision(self):
         self.api.collection.return_value = [{"id": 3, "name": "ready"}, {"id": 4, "name": "other"}]
@@ -159,12 +186,13 @@ class Writes(unittest.TestCase):
         self.writer.edit(self.repo, 12, pull=True, remove_labels=["ready"])
         self.api.request.assert_called_once_with("DELETE", "repos/one/project/issues/12/labels/ready", None)
 
-    def test_mixed_edit_without_push_permission_does_not_partially_apply(self):
+    def test_denied_label_edit_does_not_partially_edit_body(self):
         self.api.repository.return_value = {"permissions": {"push": False}}
         self.api.collection.return_value = [{"id": 3, "name": "ready"}]
-        with self.assertRaises(Unsupported):
+        self.api.request.side_effect = ForgeError("forbidden", status=403)
+        with self.assertRaises(ForgeError):
             self.writer.edit(self.repo, 12, pull=True, changes={"body": "new"}, add_labels=["ready"])
-        self.api.request.assert_not_called()
+        self.api.request.assert_called_once_with("POST", "repos/one/project/issues/12/labels", {"labels": [3]})
 
     def test_draft_title_edit_preserves_state_and_ready_title_cannot_draft(self):
         self.api.pull.return_value.update(draft=True, title="[wip] Old")

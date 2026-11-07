@@ -45,16 +45,20 @@ class ForgejoWriter:
             completed.append(f"{method} {path}")
         return result
 
-    def labels(self, repository):
-        path = self._path(repository)
-        labels = list(self.api.collection(path + "/labels"))
-        # Repository listings omit inherited organization labels. The org
-        # endpoint returns 404 for a personal owner; other errors stay explicit.
-        try:
-            labels += self.api.collection("orgs/" + quote(repository.name.split("/")[0], safe="") + "/labels")
-        except ForgeError as error:
-            if error.status != 404:
+    def labels(self, repository, *, organization=False):
+        if organization:
+            try:
+                labels = self.api.collection("orgs/" + quote(repository.name.split("/")[0], safe="") + "/labels")
+            except ForgeError as error:
+                if error.status == 404:
+                    return []
+                if error.status == 403:
+                    raise ForgeError(
+                        "organization label lookup requires organization read scope", status=403
+                    ) from error
                 raise
+        else:
+            labels = self.api.collection(self._path(repository) + "/labels")
         for label in labels:
             if (
                 not isinstance(label, dict)
@@ -69,11 +73,17 @@ class ForgejoWriter:
         if not names:
             return []
         labels = self.labels(repository)
-        result = []
+        result, org_labels = [], None
         for name in names:
             matches = [row for row in labels if row["name"] == name]
             if not matches:
                 matches = [row for row in labels if row["name"].casefold() == name.casefold()]
+            if not matches:
+                if org_labels is None:
+                    org_labels = self.labels(repository, organization=True)
+                matches = [row for row in org_labels if row["name"] == name] or [
+                    row for row in org_labels if row["name"].casefold() == name.casefold()
+                ]
             if not matches:
                 raise ForgeError("requested label does not exist")
             if len({row["id"] for row in matches}) != 1:
@@ -87,6 +97,8 @@ class ForgejoWriter:
 
     @staticmethod
     def wip_prefix(title):
+        if not isinstance(title, str):
+            raise Incomplete("Forgejo title is unavailable")
         return next((title[: len(prefix)] for prefix in ["WIP:", "[WIP]"] if title.upper().startswith(prefix)), "")
 
     def create(self, repository, *, pull, title, body="", base=None, head=None, labels=(), draft=False):
@@ -133,7 +145,7 @@ class ForgejoWriter:
         allowed = {"title", "body", "base"} if pull else {"title", "body"}
         if not data.keys() <= allowed:
             raise Unsupported("unsupported edit fields")
-        current = self.api.pull(repository, number) if pull else None
+        current = self.api.pull(repository, number) if pull else self.api.issue(repository, number)
         if pull and "title" in data:
             draft = current.get("draft")
             if not isinstance(draft, bool):
@@ -148,13 +160,9 @@ class ForgejoWriter:
         adds = self.label_ids(repository, add_labels)
         remove_rows = self.resolve_labels(repository, remove_labels)
         removes = [row["id"] for row in remove_rows]
-        if (adds or removes) and self.api.repository(repository).get("permissions", {}).get("push") is not True:
-            raise Unsupported("label edits require confirmed repository write permission")
         if set(adds) & set(removes):
             raise ValueError("a label cannot be added and removed in the same command")
         operations = []
-        if data:
-            operations.append(("PATCH", f"{path}/{'pulls' if pull else 'issues'}/{number}", data))
         if adds:
             operations.append(("POST", f"{path}/issues/{number}/labels", {"labels": adds}))
         # Forgejo resolves the route parameter by name before ID. Use the exact
@@ -162,9 +170,24 @@ class ForgejoWriter:
         operations.extend(
             ("DELETE", f"{path}/issues/{number}/labels/{quote(row['name'], safe='')}", None) for row in remove_rows
         )
+        # Labels require issue/PR write access, while an author may edit their
+        # body without it. Test label authority before applying body/title edits.
+        if data:
+            operations.append(("PATCH", f"{path}/{'pulls' if pull else 'issues'}/{number}", data))
         if not operations:
             raise ValueError("no changes were requested")
         self._steps(operations)
+        if pull and "title" in data:
+            try:
+                after = self.api.pull(repository, number)
+            except ForgeError as error:
+                raise AmbiguousWrite(
+                    f"title edit on {repository.pull_url(number)} could not verify draft state; reconcile before retrying"
+                ) from error
+            if after.get("draft") is not draft:
+                raise AmbiguousWrite(
+                    f"title edit on {repository.pull_url(number)} changed draft state; reconcile before retrying"
+                )
 
     def comment(self, repository, number, body, *, pull=False):
         repository.pull_url(number)
@@ -215,11 +238,12 @@ class ForgejoWriter:
             raise Incomplete("Forgejo has not synchronized the requested review head")
         # Native submission takes over a pending review, including its inline
         # drafts. Do not publish unrelated draft work through a simple gh review.
-        pending = self.api.collection(f"{path}/pulls/{number}/reviews")
+        pending = self.api.reviews(repository, number)
         if any(
             isinstance(item, dict)
             and item.get("state") == "PENDING"
-            and item.get("user", {}).get("id") == self.actor()["id"]
+            and isinstance(item.get("user"), dict)
+            and item["user"].get("id") == self.actor()["id"]
             for item in pending
         ):
             raise Unsupported("a pending review exists; submit or discard it explicitly before gh pr review")

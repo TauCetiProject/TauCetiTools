@@ -81,12 +81,14 @@ automation can require its stable native ID using `TAUCETI_FORGEJO_USER_ID`.
 Label names and edit inputs are resolved before writing. Label additions/removals
 use native additive operations rather than replacing another actor's label set.
 Forgejo scoped labels can replace another label in the same scope. Label edits
-require confirmed repository push permission; custom issue-only roles are not yet
-supported for these edits. Duplicate names are rejected on creation/rename, and
+run before title/body edits, enforcing native issue/PR write authority before
+applying fields that an issue author can edit. Repository labels work without
+organization read scope; inherited label lookup requests that scope explicitly. Duplicate names are rejected on creation/rename, and
 ambiguous requested names fail explicitly.
 If a later step fails after an earlier write, the entire command reports an
 ambiguous outcome requiring reconciliation; no mutation is retried automatically.
-The CLI returns status 2 with the stable `gh: ambiguous-write:` prefix for these
+Consumers identify ambiguous writes by their stderr prefix (delegated tools may
+reuse the same exit status). The CLI returns status 2 with the stable `gh: ambiguous-write:` prefix for these
 outcomes. Partial commands identify completed request paths; verified creation
 URLs are retained in draft-verification errors.
 Reviews bind to a synchronized retained PR head and submit that exact commit ID.

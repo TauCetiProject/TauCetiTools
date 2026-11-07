@@ -128,7 +128,21 @@ ROOT_PATH = {root}/log
             reviewer_tokens = re.findall(r"(?m)^[a-f0-9]{40}$", output)
             self.assertEqual(len(reviewer_tokens), 1, "expected one reviewer token (output withheld)")
             token_file = root / "token"
-            token_file.write_text(token)
+            limited_output = admin(
+                "admin",
+                "user",
+                "generate-access-token",
+                "--username",
+                "operator",
+                "--token-name",
+                "cli-limited",
+                "--scopes",
+                "read:user,write:repository,write:issue",
+                "--raw",
+            )
+            limited_tokens = re.findall(r"(?m)^[a-f0-9]{40}$", limited_output)
+            self.assertEqual(len(limited_tokens), 1, "expected one scoped token (output withheld)")
+            token_file.write_text(limited_tokens[0])
             token_file.chmod(0o600)
             reviewer_token_file = root / "reviewer-token"
             reviewer_token_file.write_text(reviewer_tokens[0])
@@ -363,6 +377,22 @@ roadmap="operator/roadmap"
                             )
                         return rendered.getvalue()
 
+                    pending_review = reviewer.request(
+                        "POST",
+                        f"repos/operator/content/pulls/{pull['number']}/reviews",
+                        {"event": "PENDING", "body": "Reviewer draft must stay private"},
+                    )
+                    with self.assertRaises(ForgeError):
+                        native("pr", "review", str(pull["number"]), "--approve", review=True)
+                    self.assertTrue(
+                        any(
+                            row["id"] == pending_review["id"] and row["state"] == "PENDING"
+                            for row in reviewer.reviews(repo, pull["number"])
+                        )
+                    )
+                    reviewer.request(
+                        "DELETE", f"repos/operator/content/pulls/{pull['number']}/reviews/{pending_review['id']}"
+                    )
                     native("label", "create", "cli", "--color", "123456", "--description", "--repo=literal")
                     with self.assertRaises(ForgeError):
                         native("label", "create", "cli")
@@ -435,6 +465,9 @@ roadmap="operator/roadmap"
                     native(
                         "pr", "edit", str(pr_number), "-t", "CLI proof", "--add-label", "ready", "--remove-label", "bug"
                     )
+                    self.assertTrue(api.pull(repo, pr_number)["draft"])
+                    with self.assertRaises(ForgeError):
+                        native("issue", "edit", str(pr_number), "-t", "Cannot clear WIP through issues")
                     self.assertTrue(api.pull(repo, pr_number)["draft"])
                     # Only an explicit native draft transition readies it; a gh
                     # title edit preserves draft state.
