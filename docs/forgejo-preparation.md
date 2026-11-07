@@ -108,10 +108,47 @@ and ready creation verify the returned state.
 Fork creation currently requires `--clone=false` and does not alter Git remotes.
 An existing destination is reused only after verifying its native parent.
 Already-closed/reopened lifecycle commands are no-ops, and merged PRs cannot be
-closed or reopened. Raw `gh api`, structural GraphQL translation, checkout/clone operations,
+closed or reopened. Remaining REST paths/methods, structural GraphQL translation, checkout/clone operations,
 remaining command flags, trusted outbox integration and worker activation remain
 required preparation work. Token-output commands require explicit credential
 access and must not be admitted as ordinary tokenless agent reads.
+The REST read adapter supports `gh api user`, `users/LOGIN`, repository metadata
+and collaborator permissions/lists, repository labels, exact and matching Git
+refs, repository commits by ref, Git commits by full SHA, blobs, file contents
+and complete Git trees. Use `--hostname` or
+`GH_HOST` when an endpoint's repository exists on multiple configured forges.
+Endpoint names select the repository; explicit hostnames remain authoritative.
+`GH_REPO` provides `{owner}`/`{repo}` placeholders and keeps its qualified host.
+Non-repository endpoints default to the project content forge; use an explicit
+host for GitHub account or GraphQL operations. GitHub delegation preserves the
+caller's `GH_REPO` for placeholders in fields. Mixed projects require relative
+API endpoints; absolute endpoint URLs are rejected before delegation or credentials.
+
+Read contracts support `--method GET`, simple query fields, `--jq`, `--silent`,
+and source HTTP status/cache-header output for single resources. Lists support page and
+per_page plus `--paginate`/`--slurp` (`--slurp` cannot be combined with `--jq`), preserving logical page boundaries despite
+smaller native server pages. Single-page reads stop after their requested prefix.
+Commit/tree identities use the hash-verified raw Git object bytes available
+through Forgejo 17's native object reader. Commit headers supply the exact tree
+SHA, including legacy noncanonical trees; native commit DTOs label it
+with the commit SHA. A server that does not expose these bytes raises an explicit
+incomplete-data error. Complete trees resolve the immutable tree SHA, then join bounded native
+pages only while that SHA and total count remain stable. As in GitHub, the
+presence of `recursive` enables recursion, including values `0` and `false`,
+following the [GitHub tree API contract](https://docs.github.com/en/rest/git/trees). Collections and trees enforce aggregate byte and page bounds;
+incomplete observations raise errors. JSON preserves native numeric IDs and adds
+origin-qualified opaque `node_id` identities. It does not invent account types,
+GitHub API quotas, ETags, or approval authority.
+
+File/blob content is checked against its byte size and Git blob hash in JSON
+and raw mode; omitted large content raises an incomplete-data error. Raw Accept
+headers decode the verified content as UTF-8 text. File-based fields,
+request bodies, collection HTTP headers, conditional requests, binary raw output,
+REST mutations, other REST paths and structural GraphQL translation still require
+adapters. Unsupported Forgejo requests fail before opening the credential file.
+GitHub requests use their original argv and normal CLI implementation. No global
+`gh` replacement or production configuration is installed by these changes.
+
 Unsupported JSON fields and commands are errors; missing source data is incomplete.
 Additional commands
 and GraphQL operations remain implementation work, not silently fabricated data.

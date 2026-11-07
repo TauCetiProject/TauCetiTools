@@ -87,6 +87,21 @@ COMMANDS = {
 }
 
 
+API_OPTIONS = (
+    option("hostname"),
+    option("method", "-X"),
+    option("field", "-F", kind="repeat"),
+    option("raw_field", "-f", kind="repeat"),
+    option("header", "-H", kind="repeat"),
+    option("input"),
+    JQ,
+    option("paginate", kind="bool"),
+    option("slurp", kind="bool"),
+    option("include", "-i", kind="bool"),
+    option("silent", kind="bool"),
+)
+
+
 @dataclass(frozen=True)
 class Command:
     group: str
@@ -141,6 +156,27 @@ def parse_command(argv):
         raise Unsupported("a command is required")
     group = tokens[index]
     index += 1
+    if group == "api":
+        if values:
+            raise Unsupported("gh api does not accept repository/JSON flags")
+        positional = []
+        while index < len(tokens):
+            if tokens[index] == "--":
+                positional.extend(tokens[index + 1 :])
+                break
+            if tokens[index].startswith("-"):
+                index = _consume(tokens, index, API_OPTIONS, values)
+            else:
+                positional.append(tokens[index])
+                index += 1
+        if len(positional) != 1:
+            raise Unsupported("gh api requires exactly one endpoint")
+        if values.get("slurp") and values.get("jq"):
+            raise Unsupported("--slurp cannot be combined with --jq")
+        if values.get("slurp") and not values.get("paginate"):
+            raise Unsupported("--slurp requires --paginate")
+        return Command("api", "request", tuple(positional), values)
+
     while index < len(tokens) and tokens[index].startswith("-"):
         index = _consume(tokens, index, READ, values)
     if index >= len(tokens):

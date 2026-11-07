@@ -155,7 +155,7 @@ class ForgejoWriter:
             prefix = self.wip_prefix(current.get("title", ""))
             if draft and not prefix:
                 raise Unsupported("cannot preserve this server's custom WIP prefix on a title edit")
-            if draft and not self.wip_prefix(data["title"]):
+            if draft and self.wip_prefix(data["title"]).casefold() != prefix.casefold():
                 data["title"] = prefix + " " + data["title"]
             if not draft and self.wip_prefix(data["title"]):
                 raise Unsupported("title edits cannot change draft state; use an explicit draft operation")

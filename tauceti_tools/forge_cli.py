@@ -7,11 +7,13 @@ install a global gh replacement or activate Forgejo in legacy worker bindings.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
 import urllib.parse
 
+from . import forge_api
 from .forge import GITHUB, AmbiguousWrite, Forge, ForgeError, Forgejo, RepositoryRef, Unsupported
 from .forge_command import parse_command
 from .forge_commands import execute, render
@@ -88,6 +90,39 @@ def _selected_repository(selected, refs, primary):
     raise Unsupported("repository requires OWNER/REPO or HOST/OWNER/REPO")
 
 
+def _api_repository(command, refs, primary, env):
+    host = command.options.get("hostname") or env.get("GH_HOST")
+    forge = _host_forge(host, refs) if host else None
+    endpoint = command.args[0]
+    parsed_endpoint = urllib.parse.urlsplit(endpoint)
+    if parsed_endpoint.scheme or parsed_endpoint.netloc or parsed_endpoint.fragment or "\\" in endpoint:
+        raise Unsupported("API endpoint must be relative; select its configured origin with --hostname")
+    context = primary
+    from_context = "{owner}" in endpoint or "{repo}" in endpoint
+    if from_context:
+        selected = env.get("GH_REPO")
+        if selected and forge and len(selected.split("/")) == 2:
+            context = RepositoryRef(forge, selected)
+        elif selected:
+            context = _selected_repository(selected, refs, primary)
+        else:
+            context = _checkout_repository(refs)
+        owner, name = context.name.split("/")
+        endpoint = endpoint.replace("{owner}", owner).replace("{repo}", name)
+    path = urllib.parse.urlsplit(endpoint).path.lstrip("/")
+    match = re.match(r"repos/([^/]+/[^/]+)(?:/|$)", path)
+    name = match.group(1) if match else None
+    if forge:
+        repository = RepositoryRef(forge, name or context.name)
+    elif name and from_context:
+        repository = RepositoryRef(context.forge, name)
+    elif name:
+        repository = _selected_repository(name, refs, primary)
+    else:
+        repository = primary
+    return repository, context
+
+
 def run(argv, *, environment=None):
     env = os.environ if environment is None else environment
     if argv in (["--help"], ["-h"]):
@@ -124,7 +159,10 @@ def run(argv, *, environment=None):
         if opts.get("repo"):
             raise Unsupported("specify the repository once")
         selected = command.args[0]
-    if command.group == "auth" or command.key == ("repo", "list"):
+    api_plan = None
+    if command.group == "api":
+        repository, api_context = _api_repository(command, refs, primary, env)
+    elif command.group == "auth" or command.key == ("repo", "list"):
         host = opts.get("hostname") or env.get("GH_HOST")
         repository = RepositoryRef(_host_forge(host, refs), primary.name) if host else primary
     elif selected:
@@ -137,7 +175,11 @@ def run(argv, *, environment=None):
         ):
             _require_origin(env, "TAUCETI_GITHUB_ORIGIN", repository.forge)
         host = urllib.parse.urlsplit(repository.forge.url).netloc
+        if command.group == "api":
+            return _delegate(native, {**env, "GH_HOST": host})
         return _delegate(native, {**env, "GH_REPO": host + "/" + repository.name, "GH_HOST": host})
+    if command.group == "api":
+        api_plan = forge_api.plan(command, context=api_context)
     if opts.get("jq", "").startswith("-"):
         raise Unsupported("jq filters beginning with a dash are unsupported; wrap the expression in parentheses")
     token_file = env.get("TAUCETI_FORGEJO_TOKEN_FILE")
@@ -153,6 +195,11 @@ def run(argv, *, environment=None):
         if not token:
             raise ForgeError("Forgejo token file is empty")
     api = Forgejo(repository.forge, token=token)
+    if api_plan is not None:
+        rendered, diagnostic, status = forge_api.execute(api_plan, api)
+        sys.stdout.write(rendered)
+        sys.stderr.write(diagnostic)
+        return status
     value, json_output = execute(
         command, repository, api, token=token, expected_user_id=env.get("TAUCETI_FORGEJO_USER_ID")
     )

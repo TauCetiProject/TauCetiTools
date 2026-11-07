@@ -365,6 +365,83 @@ class CommandTests(unittest.TestCase):
         delegate.assert_not_called()
         self.assertEqual(client.call_args.args[0].url, "https://git.example.org")
 
+    def test_api_explicit_hostname_overrides_ambiguous_repo_context(self):
+        with patch("tauceti_tools.forge_cli.Forgejo") as client, contextlib.redirect_stdout(io.StringIO()):
+            client.return_value.forge = parse(CONFIG.encode()).repository_ref("content").forge
+            client.return_value.max_bytes = 16 * 1024 * 1024
+            client.return_value.request.return_value = {"id": 2, "full_name": "one/Project"}
+            run(
+                ["--conf", str(self.config), "api", "repos/{owner}/{repo}", "--hostname", "git.example.org"],
+                environment={"GH_REPO": "one/Project"},
+            )
+        self.assertEqual(client.return_value.request.call_args.args[:2], ("GET", "repos/one/Project"))
+
+    def test_api_qualified_placeholder_context_keeps_its_origin(self):
+        for name in ["one/Project", "one/Roadmap"]:
+            with (
+                self.subTest(name=name),
+                patch("tauceti_tools.forge_cli.Forgejo") as client,
+                patch("tauceti_tools.forge_cli._delegate") as delegate,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                client.return_value.forge = parse(CONFIG.encode()).repository_ref("content").forge
+                client.return_value.max_bytes = 16 * 1024 * 1024
+                client.return_value.request.return_value = {"id": 2, "full_name": name}
+                run(
+                    ["--conf", str(self.config), "api", "repos/{owner}/{repo}"],
+                    environment={"GH_REPO": "git.example.org/" + name},
+                )
+            delegate.assert_not_called()
+            self.assertEqual(client.return_value.request.call_args.args[:2], ("GET", "repos/" + name))
+
+    def test_github_api_keeps_the_callers_field_placeholder_context(self):
+        env = {"GH_REPO": "github.com/different/Repository"}
+        argv = ["api", "graphql", "--hostname", "github.com", "-F", "owner={owner}", "-f", "query=query{viewer{login}}"]
+        with patch("tauceti_tools.forge_cli._delegate", return_value=0) as delegate:
+            run(["--conf", str(self.config), *argv], environment=env)
+        self.assertEqual(delegate.call_args.args[0], argv)
+        self.assertEqual(delegate.call_args.args[1]["GH_REPO"], env["GH_REPO"])
+
+    def test_github_api_mutation_delegates_original_payload(self):
+        argv = ["api", "repos/one/Roadmap/issues", "-X", "POST", "-f", "body=--hostname=git.example.org"]
+        with (
+            patch("tauceti_tools.forge_cli._delegate", return_value=0) as delegate,
+            patch("tauceti_tools.forge_cli.Forgejo") as client,
+        ):
+            self.assertEqual(run(["--conf", str(self.config), *argv], environment={}), 0)
+        self.assertEqual(delegate.call_args.args[0], argv)
+        self.assertEqual(delegate.call_args.args[1]["GH_HOST"], "github.com")
+        client.assert_not_called()
+
+    def test_api_unknown_paths_headers_and_writes_never_open_credentials(self):
+        env = {
+            "TAUCETI_FORGEJO_TOKEN_FILE": "/private/does-not-exist",
+            "TAUCETI_FORGEJO_ORIGIN": "https://git.example.org",
+        }
+        for args in [
+            ["user", "-X", "POST"],
+            ["graphql", "-f", "query=query{viewer{login}}"],
+            ["user", "-H", "Authorization: secret"],
+            ["user", "--input", "/private/body"],
+        ]:
+            with (
+                self.subTest(args=args),
+                patch("tauceti_tools.forge_cli.Forgejo") as client,
+                self.assertRaises(Unsupported),
+            ):
+                run(["--conf", str(self.config), "api", *args], environment=env)
+            client.assert_not_called()
+
+    def test_api_absolute_url_cannot_choose_a_fallback_host(self):
+        with (
+            patch("tauceti_tools.forge_cli._delegate") as delegate,
+            patch("tauceti_tools.forge_cli.Forgejo") as client,
+            self.assertRaises(Unsupported),
+        ):
+            run(["--conf", str(self.config), "api", "https://attacker.example/repos/one/Roadmap"], environment={})
+        delegate.assert_not_called()
+        client.assert_not_called()
+
     def test_ambiguous_write_has_distinct_exit_status_and_stderr_marker(self):
         from tauceti_tools.forge_cli import main
 

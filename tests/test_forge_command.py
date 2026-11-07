@@ -218,6 +218,11 @@ class Writes(unittest.TestCase):
             self.writer.edit(self.repo, 12, pull=True, changes={"title": "WIP: New"})
         self.api.request.assert_not_called()
 
+    def test_draft_edit_preserves_the_prefix_known_to_be_enabled(self):
+        self.api.pull.return_value.update(draft=True, title="WIP: Old")
+        self.writer.edit(self.repo, 12, pull=True, changes={"title": "[WIP] Literal title"})
+        self.assertEqual(self.api.request.call_args.args[2], {"title": "WIP: [WIP] Literal title"})
+
     def test_wrong_type_pr_comments_and_label_edits_do_not_mutate_issues(self):
         self.api.pull.side_effect = ForgeError("not a pull request", status=404)
         for operation in [

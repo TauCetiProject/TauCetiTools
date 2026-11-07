@@ -78,6 +78,14 @@ class DirectTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join()
 
+    def test_response_metadata_comes_from_the_real_http_response(self):
+        self.reply = lambda path: (200, {"id": 2, "login": "operator"}, {"ETag": '"version"'})
+        headers, meta = {}, {}
+        value = self.api.request("GET", "user", response_headers=headers, response_meta=meta)
+        self.assertEqual(value["id"], 2)
+        self.assertEqual(headers["etag"], '"version"')
+        self.assertEqual(meta, {"status": 200, "reason": "OK", "version": 10})
+
     def test_complete_pagination_despite_server_cap(self):
         self.reply = lambda path: (200, [] if "page=3" in path else [{"number": 1 if "page=2" in path else 2}], {})
         self.assertEqual(len(self.api.pulls(self.repo)), 2)

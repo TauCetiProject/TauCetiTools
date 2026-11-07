@@ -53,6 +53,8 @@ INSTALL_LOCK = true
 [repository]
 ROOT = {root}/repos
 DEFAULT_BRANCH = main
+[repository.pull-request]
+WORK_IN_PROGRESS_PREFIXES = WIP:
 [service]
 DISABLE_REGISTRATION = true
 [actions]
@@ -60,6 +62,7 @@ ENABLED = false
 [api]
 MAX_RESPONSE_ITEMS = 1
 DEFAULT_PAGING_NUM = 1
+DEFAULT_GIT_TREES_PER_PAGE = 1
 [log]
 MODE = file
 ROOT_PATH = {root}/log
@@ -377,6 +380,117 @@ roadmap="operator/roadmap"
                             )
                         return rendered.getvalue()
 
+                    self.assertEqual(native("api", "user", "--jq", ".login").strip(), "operator")
+                    repository_json = json.loads(native("api", "repos/{owner}/{repo}"))
+                    self.assertEqual(repository_json["full_name"], "operator/content")
+                    self.assertTrue(repository_json["node_id"].startswith(api.forge.key + "/repositories/"))
+                    included = native("api", "repos/operator/content", "--include")
+                    self.assertTrue(included.startswith("HTTP/1.1 200 OK\n"))
+                    self.assertEqual(json.loads(included.split("\n\n", 1)[1])["full_name"], "operator/content")
+                    self.assertEqual(
+                        native(
+                            "api", "repos/operator/content/collaborators/operator/permission", "--jq", ".permission"
+                        ).strip(),
+                        "admin",
+                    )
+                    api.request("PUT", "repos/operator/content/collaborators/reviewer", {"permission": "read"})
+                    collaborator_pages = json.loads(
+                        native("api", "repos/operator/content/collaborators", "--paginate", "--slurp")
+                    )
+                    self.assertIn("reviewer", {row["login"] for page in collaborator_pages for row in page})
+                    git_ref = json.loads(native("api", "repos/operator/content/git/refs/heads/proof"))
+                    self.assertEqual(git_ref["object"]["sha"], pull["head"]["sha"])
+                    git_commit = json.loads(native("api", "repos/operator/content/git/commits/" + pull["head"]["sha"]))
+                    self.assertEqual(git_commit["sha"], pull["head"]["sha"])
+                    self.assertEqual(git_commit["message"].strip(), "Add proof")
+                    self.assertIn("sha", git_commit["tree"])
+                    self.assertNotEqual(git_commit["tree"]["sha"], git_commit["sha"])
+                    self.assertEqual(
+                        native("api", "repos/operator/content/commits/proof", "--jq", ".sha").strip(),
+                        pull["head"]["sha"],
+                    )
+                    self.assertEqual(
+                        json.loads(native("api", "repos/operator/content/git/matching-refs/heads/no-such-prefix/")), []
+                    )
+                    full_tree = json.loads(
+                        native("api", "repos/operator/content/git/trees/" + pull["head"]["sha"] + "?recursive=1")
+                    )
+                    self.assertEqual(full_tree["sha"], git_commit["tree"]["sha"])
+                    same_tree = json.loads(
+                        native("api", "repos/operator/content/git/trees/" + full_tree["sha"] + "?recursive=1")
+                    )
+                    self.assertEqual(same_tree["sha"], full_tree["sha"])
+                    self.assertFalse(full_tree["truncated"])
+                    self.assertEqual({row["path"] for row in full_tree["tree"]}, {"README.md", "Proof.lean"})
+                    api.request(
+                        "POST",
+                        "repos/operator/content/contents/nested/Leaf.lean",
+                        {
+                            "branch": "main",
+                            "new_branch": "tree-proof",
+                            "message": "Nested tree",
+                            "content": base64.b64encode(b"nested\n").decode(),
+                        },
+                    )
+                    api.request(
+                        "POST",
+                        "repos/operator/content/contents/%CE%94.lean",
+                        {
+                            "branch": "tree-proof",
+                            "message": "Unicode path",
+                            "content": base64.b64encode("-- λ\n".encode()).decode(),
+                        },
+                    )
+                    self.assertEqual(
+                        native(
+                            "api",
+                            "repos/operator/content/contents/Δ.lean?ref=tree-proof",
+                            "-H",
+                            "Accept: application/vnd.github.raw",
+                        ),
+                        "-- λ\n",
+                    )
+                    recursive_false = json.loads(
+                        native("api", "repos/operator/content/git/trees/tree-proof?recursive=false")
+                    )
+                    subtree_sha = next(row["sha"] for row in recursive_false["tree"] if row["path"] == "nested")
+                    subtree = json.loads(native("api", "repos/operator/content/git/trees/" + subtree_sha))
+                    self.assertEqual(subtree["sha"], subtree_sha)
+                    self.assertEqual([row["path"] for row in subtree["tree"]], ["Leaf.lean"])
+                    self.assertIn("nested/Leaf.lean", {row["path"] for row in recursive_false["tree"]})
+                    blob_sha = next(row["sha"] for row in full_tree["tree"] if row["path"] == "Proof.lean")
+                    self.assertEqual(
+                        native(
+                            "api",
+                            "repos/operator/content/git/blobs/" + blob_sha,
+                            "-H",
+                            "Accept: application/vnd.github.raw",
+                        ),
+                        "example : True := trivial\n",
+                    )
+                    file_text = native(
+                        "api",
+                        "repos/operator/content/contents/Proof.lean",
+                        "-X",
+                        "GET",
+                        "-f",
+                        "ref=proof",
+                        "-H",
+                        "Accept: application/vnd.github.raw",
+                    )
+                    self.assertEqual(file_text, "example : True := trivial\n")
+                    label_pages = json.loads(
+                        native("api", "repos/operator/content/labels?per_page=1", "--paginate", "--slurp")
+                    )
+                    self.assertTrue(all(len(page) == 1 for page in label_pages))
+                    self.assertEqual({row["name"] for page in label_pages for row in page}, {"bug", "ready"})
+                    ref_pages = json.loads(
+                        native(
+                            "api", "repos/operator/content/git/matching-refs/heads/?per_page=1", "--paginate", "--slurp"
+                        )
+                    )
+                    self.assertTrue(all(len(page) == 1 for page in ref_pages))
+                    self.assertTrue(any(row["ref"] == "refs/heads/proof" for page in ref_pages for row in page))
                     pending_review = reviewer.request(
                         "POST",
                         f"repos/operator/content/pulls/{pull['number']}/reviews",
@@ -469,6 +583,9 @@ roadmap="operator/roadmap"
                     with self.assertRaises(ForgeError):
                         native("issue", "edit", str(pr_number), "-t", "Cannot clear WIP through issues")
                     self.assertTrue(api.pull(repo, pr_number)["draft"])
+                    native("pr", "edit", str(pr_number), "-t", "[WIP] Literal title")
+                    self.assertTrue(api.pull(repo, pr_number)["draft"])
+                    self.assertEqual(api.pull(repo, pr_number)["title"], "WIP: [WIP] Literal title")
                     # Only an explicit native draft transition readies it; a gh
                     # title edit preserves draft state.
                     api.request("PATCH", f"repos/operator/content/pulls/{pr_number}", {"title": "CLI proof"})
