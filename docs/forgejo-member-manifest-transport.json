@@ -5,7 +5,7 @@
   "retention": {
     "refs": 2,
     "member_reachability": "exact ordered deduplicated manifest parents",
-    "baseline": "Pushing1197 individual member refs hit the fixture30-second write timeout; the manifest-parent design completes the same bounded writer with two refs."
+    "baseline": "Pushing 1,197 individual member refs exceeded the test writer's own 30-second timeout; this was not a Forgejo server limit. Manifest-parent retention completes the same bounded writer with two refs."
   },
   "profiles": [
     {

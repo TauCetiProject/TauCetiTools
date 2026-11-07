@@ -99,7 +99,8 @@ class RetainedReader(unittest.TestCase):
                             self.assertEqual(bound.accepted_members, members)
                             self.assertEqual(actual, raw)
                         else:
-                            with self.assertRaises(ValueError):
+                            reason = "exactly one data file" if index == 1 else "ordinary data file"
+                            with self.assertRaisesRegex(ValueError, reason):
                                 cw.retained_members(req, config, context(req, config), client=Client(good_blob))
                 tree = git("mktree", data=ordinary.encode())
                 commit = git("commit-tree", tree, "-p", parent, data=b"Valid retention\n")
@@ -114,7 +115,10 @@ class RetainedReader(unittest.TestCase):
                     ("content", "!invalid!"),
                     ("content", base64.b64encode(b"x" * len(raw)).decode()),
                 ):
-                    with self.subTest(key=key, invalid=str(invalid)[:80]), self.assertRaises(ValueError):
+                    reason = "invalid retained membership blob"
+                    if key == "content":
+                        reason = "base64" if invalid == "!invalid!" else "differs from its Git blob"
+                    with self.subTest(key=key, invalid=str(invalid)[:80]), self.assertRaisesRegex(ValueError, reason):
                         cw.retained_members(
                             req, config, context(req, config), client=Client(dict(good_blob, **{key: invalid}))
                         )
