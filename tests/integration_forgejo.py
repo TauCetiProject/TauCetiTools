@@ -364,6 +364,8 @@ roadmap="operator/roadmap"
                         return rendered.getvalue()
 
                     native("label", "create", "cli", "--color", "123456", "--description", "--repo=literal")
+                    with self.assertRaises(ForgeError):
+                        native("label", "create", "cli")
                     native("label", "create", "cli", "--force", "--color", "654321")
                     native("label", "edit", "cli", "--name", "cli-renamed", "--description", "Updated")
                     listed_labels = json.loads(native("label", "list", "--json", "name,color,description"))
@@ -423,7 +425,14 @@ roadmap="operator/roadmap"
                     native(
                         "pr", "edit", str(pr_number), "-t", "CLI proof", "--add-label", "ready", "--remove-label", "bug"
                     )
-                    self.assertFalse(api.pull(repo, pr_number)["draft"])
+                    self.assertTrue(api.pull(repo, pr_number)["draft"])
+                    # Only an explicit native draft transition readies it; a gh
+                    # title edit preserves draft state.
+                    api.request("PATCH", f"repos/operator/content/pulls/{pr_number}", {"title": "CLI proof"})
+                    with self.assertRaises(ForgeError):
+                        native("pr", "comment", str(issue_number), "-b", "wrong type")
+                    with self.assertRaises(ForgeError):
+                        native("pr", "edit", str(issue_number), "--add-label", "bug")
                     native("pr", "review", str(pr_number), "--approve", review=True)
                     native("pr", "review", str(pr_number), "--request-changes", "-b", "--repo=literal", review=True)
                     native("pr", "comment", str(pr_number), "-b", "-R")

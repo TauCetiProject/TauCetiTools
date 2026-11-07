@@ -90,15 +90,16 @@ def execute(command, repository, api, *, token=None, expected_user_id=None):
             full_name = row.get("full_name")
             if not isinstance(full_name, str):
                 raise Incomplete("Forgejo repository identity is unavailable")
-            ref = RepositoryRef(repository.forge, full_name)
-            # Native owned-repository listings can omit the parent. The full
-            # repository endpoint is authoritative for fork parent matching.
-            value = reader.repository(ref, fields)
             if isinstance(row.get("updated_at"), str):
-                result.append((row["updated_at"], value))
+                result.append((row["updated_at"], row))
             else:
                 raise Incomplete("Forgejo repository update time is unavailable")
-        return [value for _, value in sorted(result, key=lambda pair: pair[0], reverse=True)[:limit]], True
+        values = []
+        for _, row in sorted(result, key=lambda pair: pair[0], reverse=True)[:limit]:
+            ref = RepositoryRef(repository.forge, row["full_name"])
+            # Only hydrate the selected prefix, rather than every owned repo.
+            values.append(reader.repository(ref, fields))
+        return values, True
     writer = ForgejoWriter(api, expected_user_id=expected_user_id)
     if command.key == ("auth", "status"):
         actor = writer.actor()
@@ -149,7 +150,7 @@ def execute(command, repository, api, *, token=None, expected_user_id=None):
             remove_labels=names(opts.get("remove_label", [])),
         )
     elif action == "comment":
-        native_id = writer.comment(repository, number, body(opts))
+        native_id = writer.comment(repository, number, body(opts), pull=pull)
         url = repository.pull_url(number) if pull else f"{repository.url}/issues/{number}"
         return f"{url}#issuecomment-{native_id}\n", False
     elif action in {"close", "reopen"}:
@@ -158,7 +159,11 @@ def execute(command, repository, api, *, token=None, expected_user_id=None):
         )
     elif action == "review":
         event = "APPROVED" if opts.get("approve") else "REQUEST_CHANGES" if opts.get("request_changes") else "COMMENT"
-        writer.review(repository, number, event=event, body=body(opts))
+        review = writer.review(repository, number, event=event, body=body(opts))
+        return (
+            f"Submitted {event} on {repository.pull_url(number)}; official={review.get('official', 'unknown')}, stale={review.get('stale', 'unknown')}\n",
+            False,
+        )
     else:
         raise Unsupported("command has no Forgejo implementation")
     return "", False

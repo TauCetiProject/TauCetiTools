@@ -8,6 +8,7 @@ reconciliation; this layer never retries mutations.
 from __future__ import annotations
 
 import re
+from urllib.parse import quote
 
 from .forge import AmbiguousWrite, ForgeError, Incomplete, RepositoryRef, Unsupported
 
@@ -31,22 +32,29 @@ class ForgejoWriter:
 
     def _steps(self, operations):
         self.actor()
-        completed, result = 0, None
+        completed, result = [], None
         for method, path, data in operations:
             try:
                 result = self.api.request(method, path, data)
             except (ForgeError, ValueError) as error:
                 if completed:
-                    raise AmbiguousWrite("Forgejo command partially applied; reconcile before retrying") from error
+                    raise AmbiguousWrite(
+                        f"Forgejo command partially applied; completed {completed}; failed {method} {path}; reconcile before retrying"
+                    ) from error
                 raise
-            completed += 1
+            completed.append(f"{method} {path}")
         return result
 
-    def label_ids(self, repository, names):
-        if not names:
-            return []
-        labels = self.api.collection(self._path(repository) + "/labels")
-        found = {}
+    def labels(self, repository):
+        path = self._path(repository)
+        labels = list(self.api.collection(path + "/labels"))
+        # Repository listings omit inherited organization labels. The org
+        # endpoint returns 404 for a personal owner; other errors stay explicit.
+        try:
+            labels += self.api.collection("orgs/" + quote(repository.name.split("/")[0], safe="") + "/labels")
+        except ForgeError as error:
+            if error.status != 404:
+                raise
         for label in labels:
             if (
                 not isinstance(label, dict)
@@ -55,14 +63,31 @@ class ForgejoWriter:
                 or label["id"] < 1
             ):
                 raise Incomplete("Forgejo label identity is unavailable")
-            name = label["name"].casefold()
-            if name in found and found[name] != label["id"]:
-                raise Incomplete("Forgejo returned ambiguous label names")
-            found[name] = label["id"]
-        missing = [name for name in names if name.casefold() not in found]
-        if missing:
-            raise ForgeError("requested label does not exist")
-        return list(dict.fromkeys(found[name.casefold()] for name in names))
+        return labels
+
+    def resolve_labels(self, repository, names):
+        if not names:
+            return []
+        labels = self.labels(repository)
+        result = []
+        for name in names:
+            matches = [row for row in labels if row["name"] == name]
+            if not matches:
+                matches = [row for row in labels if row["name"].casefold() == name.casefold()]
+            if not matches:
+                raise ForgeError("requested label does not exist")
+            if len({row["id"] for row in matches}) != 1:
+                raise Incomplete("requested label name is ambiguous")
+            if matches[0]["id"] not in {row["id"] for row in result}:
+                result.append(matches[0])
+        return result
+
+    def label_ids(self, repository, names):
+        return [row["id"] for row in self.resolve_labels(repository, names)]
+
+    @staticmethod
+    def wip_prefix(title):
+        return next((title[: len(prefix)] for prefix in ["WIP:", "[WIP]"] if title.upper().startswith(prefix)), "")
 
     def create(self, repository, *, pull, title, body="", base=None, head=None, labels=(), draft=False):
         path = self._path(repository)
@@ -72,7 +97,9 @@ class ForgejoWriter:
             raise ValueError("head branch is required")
         if draft and not pull:
             raise Unsupported("issues do not have draft state")
-        data = {"title": "WIP: " + title if draft else title, "body": body}
+        if pull and self.wip_prefix(title) and not draft:
+            raise Unsupported("WIP titles require --draft; Forgejo derives draft state from its title")
+        data = {"title": "WIP: " + title if draft and not self.wip_prefix(title) else title, "body": body}
         if labels:
             data["labels"] = self.label_ids(repository, labels)
         if pull:
@@ -84,17 +111,19 @@ class ForgejoWriter:
         row = self._steps([("POST", path + ("/pulls" if pull else "/issues"), data)])
         if not isinstance(row, dict) or type(row.get("number")) is not int or row["number"] < 1:
             raise AmbiguousWrite("Forgejo created an issue/PR without a usable response; reconcile before retrying")
-        if draft:
+        if pull:
             # Forgejo 17 represents WIP using title prefixes, not a draft input
             # field (unknown JSON fields would otherwise be silently ignored).
             try:
                 created = self.api.pull(repository, row["number"])
             except ForgeError as error:
                 raise AmbiguousWrite(
-                    "Forgejo draft creation could not be verified; reconcile before retrying"
+                    f"Forgejo creation {repository.pull_url(row['number'])} draft state could not be verified; reconcile before retrying"
                 ) from error
-            if created.get("draft") is not True:
-                raise AmbiguousWrite("Forgejo did not confirm native WIP state; reconcile before retrying")
+            if created.get("draft") is not draft:
+                raise AmbiguousWrite(
+                    f"Forgejo creation {repository.pull_url(row['number'])} did not confirm requested draft state; reconcile before retrying"
+                )
         return row["number"]
 
     def edit(self, repository, number, *, pull, changes=None, add_labels=(), remove_labels=()):
@@ -104,7 +133,23 @@ class ForgejoWriter:
         allowed = {"title", "body", "base"} if pull else {"title", "body"}
         if not data.keys() <= allowed:
             raise Unsupported("unsupported edit fields")
-        adds, removes = self.label_ids(repository, add_labels), self.label_ids(repository, remove_labels)
+        current = self.api.pull(repository, number) if pull else None
+        if pull and "title" in data:
+            draft = current.get("draft")
+            if not isinstance(draft, bool):
+                raise Incomplete("Forgejo draft state is unavailable")
+            prefix = self.wip_prefix(current.get("title", ""))
+            if draft and not prefix:
+                raise Unsupported("cannot preserve this server's custom WIP prefix on a title edit")
+            if draft and not self.wip_prefix(data["title"]):
+                data["title"] = prefix + " " + data["title"]
+            if not draft and self.wip_prefix(data["title"]):
+                raise Unsupported("title edits cannot change draft state; use an explicit draft operation")
+        adds = self.label_ids(repository, add_labels)
+        remove_rows = self.resolve_labels(repository, remove_labels)
+        removes = [row["id"] for row in remove_rows]
+        if (adds or removes) and self.api.repository(repository).get("permissions", {}).get("push") is not True:
+            raise Unsupported("label edits require confirmed repository write permission")
         if set(adds) & set(removes):
             raise ValueError("a label cannot be added and removed in the same command")
         operations = []
@@ -112,14 +157,20 @@ class ForgejoWriter:
             operations.append(("PATCH", f"{path}/{'pulls' if pull else 'issues'}/{number}", data))
         if adds:
             operations.append(("POST", f"{path}/issues/{number}/labels", {"labels": adds}))
-        operations.extend(("DELETE", f"{path}/issues/{number}/labels/{native_id}", None) for native_id in removes)
+        # Forgejo resolves the route parameter by name before ID. Use the exact
+        # resolved name, avoiding collisions with another label named "3".
+        operations.extend(
+            ("DELETE", f"{path}/issues/{number}/labels/{quote(row['name'], safe='')}", None) for row in remove_rows
+        )
         if not operations:
             raise ValueError("no changes were requested")
         self._steps(operations)
 
-    def comment(self, repository, number, body):
+    def comment(self, repository, number, body, *, pull=False):
         repository.pull_url(number)
         path = self._path(repository)
+        if pull:
+            self.api.pull(repository, number)
         row = self._steps([("POST", f"{path}/issues/{number}/comments", {"body": body})])
         if not isinstance(row, dict) or type(row.get("id")) is not int or row["id"] < 1:
             raise AmbiguousWrite("Forgejo comment response was incomplete; reconcile before retrying")
@@ -133,8 +184,8 @@ class ForgejoWriter:
         current = self.api.pull(repository, number) if pull else self.api.issue(repository, number)
         if current.get("state") not in {"open", "closed"}:
             raise Incomplete("Forgejo lifecycle state is unavailable")
-        if pull and current.get("merged") is True and state == "open":
-            raise ForgeError("merged pull requests cannot be reopened")
+        if pull and current.get("merged") is True:
+            raise ForgeError("merged pull requests cannot be closed or reopened")
         if current["state"] == state:
             return
         operations = []
@@ -162,11 +213,24 @@ class ForgejoWriter:
             raise Incomplete("Forgejo review requires an open PR with a known head")
         if self.api.pull_ref(repository, number) != revision:
             raise Incomplete("Forgejo has not synchronized the requested review head")
+        # Native submission takes over a pending review, including its inline
+        # drafts. Do not publish unrelated draft work through a simple gh review.
+        pending = self.api.collection(f"{path}/pulls/{number}/reviews")
+        if any(
+            isinstance(item, dict)
+            and item.get("state") == "PENDING"
+            and item.get("user", {}).get("id") == self.actor()["id"]
+            for item in pending
+        ):
+            raise Unsupported("a pending review exists; submit or discard it explicitly before gh pr review")
         review = self._steps(
             [("POST", f"{path}/pulls/{number}/reviews", {"event": event, "body": body, "commit_id": revision})]
         )
         if not isinstance(review, dict) or review.get("commit_id") != revision:
-            raise AmbiguousWrite("Forgejo review did not confirm the intended commit; reconcile before retrying")
+            raise AmbiguousWrite(
+                f"Forgejo review on {repository.pull_url(number)} did not confirm the intended commit; reconcile before retrying"
+            )
+        return review
 
     def label(self, repository, name, *, color=None, description=None, edit=False, rename=None, force=False):
         path = self._path(repository)
@@ -179,15 +243,18 @@ class ForgejoWriter:
             data["color"] = color.removeprefix("#")
         if description is not None:
             data["description"] = description
-        existing = None
-        if edit or force:
-            rows = self.api.collection(path + "/labels")
-            matches = [
-                row for row in rows if isinstance(row, dict) and str(row.get("name", "")).casefold() == name.casefold()
-            ]
-            if len(matches) > 1:
-                raise Incomplete("Forgejo returned ambiguous label names")
-            existing = matches[0] if matches else None
+        rows = self.labels(repository)
+        matches = [row for row in rows if row["name"].casefold() == name.casefold()]
+        if len(matches) > 1:
+            raise Incomplete("Forgejo returned ambiguous label names")
+        existing = matches[0] if matches else None
+        if existing is not None and not edit and not force:
+            raise ForgeError("label already exists; use --force to update it")
+        if rename is not None and any(
+            row["name"].casefold() == rename.casefold() and (existing is None or row["id"] != existing["id"])
+            for row in rows
+        ):
+            raise ForgeError("new label name already exists")
         if edit and existing is None:
             raise ForgeError("requested label does not exist")
         if existing is not None:

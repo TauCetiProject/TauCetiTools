@@ -65,7 +65,8 @@ detection; mixed projects require a checkout origin matching exactly one configu
 repository. Otherwise specify `-R HOST/OWNER/REPO` explicitly.
 Qualified repositories on an already configured Forgejo origin may be selected
 without adding each fork to the project registry. Bare names matching multiple
-configured forges are ambiguous. Explicit auth hostnames take precedence over
+configured forges are ambiguous. Unconfigured bare names are rejected; qualify
+the host explicitly. The registry includes CI, tool and upstream repositories. Explicit auth hostnames take precedence over
 repository environment variables; account commands never infer a server from
 `GH_REPO`.
 
@@ -79,18 +80,31 @@ path; they are not materialized when delegating to native GitHub.
 automation can require its stable native ID using `TAUCETI_FORGEJO_USER_ID`.
 Label names and edit inputs are resolved before writing. Label additions/removals
 use native additive operations rather than replacing another actor's label set.
+Forgejo scoped labels can replace another label in the same scope. Label edits
+require confirmed repository push permission; custom issue-only roles are not yet
+supported for these edits. Duplicate names are rejected on creation/rename, and
+ambiguous requested names fail explicitly.
 If a later step fails after an earlier write, the entire command reports an
 ambiguous outcome requiring reconciliation; no mutation is retried automatically.
+The CLI returns status 2 with the stable `gh: ambiguous-write:` prefix for these
+outcomes. Partial commands identify completed request paths; verified creation
+URLs are retained in draft-verification errors.
 Reviews bind to a synchronized retained PR head and submit that exact commit ID.
+An existing pending review must be submitted/discarded explicitly to avoid
+publishing unrelated draft comments. Output reports native official/stale state;
+a successful review submission does not grant approval authority.
 
 Noninteractive creation needs a title, and PR creation needs an explicit head.
 `--draft` uses Forgejo 17's native `WIP:` title convention and verifies the returned
 draft state. A server configured with incompatible WIP prefixes produces an
 ambiguous creation outcome to reconcile, rather than a claimed draft success.
+Title edits preserve draft state for the stock prefixes; unknown custom prefixes
+are rejected. Non-draft creation with a stock WIP title is rejected. Both draft
+and ready creation verify the returned state.
 Fork creation currently requires `--clone=false` and does not alter Git remotes.
 An existing destination is reused only after verifying its native parent.
 Already-closed/reopened lifecycle commands are no-ops, and merged PRs cannot be
-reopened. Raw `gh api`, structural GraphQL translation, checkout/clone operations,
+closed or reopened. Raw `gh api`, structural GraphQL translation, checkout/clone operations,
 remaining command flags, trusted outbox integration and worker activation remain
 required preparation work. Token-output commands require explicit credential
 access and must not be admitted as ordinary tokenless agent reads.

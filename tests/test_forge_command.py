@@ -52,7 +52,9 @@ class Writes(unittest.TestCase):
         self.api._repo.return_value = "repos/one/project"
         self.api.current_user.return_value = {"id": 2, "login": "operator"}
         self.api.pull.return_value = {"number": 12, "state": "open", "head": {"sha": "a" * 40}}
+        self.api.collection.return_value = []
         self.api.pull_ref.return_value = "a" * 40
+        self.api.repository.return_value = {"permissions": {"push": True}}
         self.writer = ForgejoWriter(self.api, expected_user_id="2")
 
     def test_wrong_account_never_mutates(self):
@@ -127,6 +129,62 @@ class Writes(unittest.TestCase):
         with self.assertRaises(AmbiguousWrite):
             self.writer.create(self.repo, pull=True, title="Proof", head="proof", base="main", draft=True)
         self.assertEqual(self.api.request.call_count, 1)
+
+    def test_review_does_not_publish_an_existing_pending_draft(self):
+        self.api.collection.return_value = [{"state": "PENDING", "user": {"id": 2}}]
+        with self.assertRaises(Unsupported):
+            self.writer.review(self.repo, 12, event="APPROVED")
+        self.api.request.assert_not_called()
+
+    def test_label_create_rejects_duplicate_and_rename_collision(self):
+        self.api.collection.return_value = [{"id": 3, "name": "ready"}, {"id": 4, "name": "other"}]
+        for kwargs in [{}, {"edit": True, "rename": "other"}]:
+            with self.subTest(kwargs=kwargs), self.assertRaises(ForgeError):
+                self.writer.label(self.repo, "ready", **kwargs)
+        self.api.request.assert_not_called()
+
+    def test_unrelated_duplicate_labels_do_not_block_requested_label(self):
+        self.api.collection.return_value = [
+            {"id": 1, "name": "dup"},
+            {"id": 2, "name": "dup"},
+            {"id": 3, "name": "Ready"},
+            {"id": 4, "name": "ready"},
+        ]
+        self.assertEqual(self.writer.label_ids(self.repo, ["Ready"]), [3])
+        with self.assertRaises(Incomplete):
+            self.writer.label_ids(self.repo, ["READY"])
+
+    def test_numeric_label_name_cannot_redirect_removal(self):
+        self.api.collection.return_value = [{"id": 3, "name": "ready"}, {"id": 4, "name": "3"}]
+        self.writer.edit(self.repo, 12, pull=True, remove_labels=["ready"])
+        self.api.request.assert_called_once_with("DELETE", "repos/one/project/issues/12/labels/ready", None)
+
+    def test_mixed_edit_without_push_permission_does_not_partially_apply(self):
+        self.api.repository.return_value = {"permissions": {"push": False}}
+        self.api.collection.return_value = [{"id": 3, "name": "ready"}]
+        with self.assertRaises(Unsupported):
+            self.writer.edit(self.repo, 12, pull=True, changes={"body": "new"}, add_labels=["ready"])
+        self.api.request.assert_not_called()
+
+    def test_draft_title_edit_preserves_state_and_ready_title_cannot_draft(self):
+        self.api.pull.return_value.update(draft=True, title="[wip] Old")
+        self.writer.edit(self.repo, 12, pull=True, changes={"title": "New"})
+        self.assertEqual(self.api.request.call_args.args[2], {"title": "[wip] New"})
+        self.api.request.reset_mock()
+        self.api.pull.return_value.update(draft=False, title="Old")
+        with self.assertRaises(Unsupported):
+            self.writer.edit(self.repo, 12, pull=True, changes={"title": "WIP: New"})
+        self.api.request.assert_not_called()
+
+    def test_wrong_type_pr_comments_and_label_edits_do_not_mutate_issues(self):
+        self.api.pull.side_effect = ForgeError("not a pull request", status=404)
+        for operation in [
+            lambda: self.writer.comment(self.repo, 12, "body", pull=True),
+            lambda: self.writer.edit(self.repo, 12, pull=True, add_labels=["ready"]),
+        ]:
+            with self.assertRaises(ForgeError):
+                operation()
+        self.api.request.assert_not_called()
 
     def test_fork_reuse_checks_parent_and_never_overwrites_a_clash(self):
         self.api.repository.return_value = {"fork": True, "parent": {"full_name": self.repo.name}}

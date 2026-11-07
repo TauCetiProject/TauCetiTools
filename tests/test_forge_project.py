@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_tools.forge import GITHUB, ForgeError, Incomplete, Unsupported
+from tauceti_tools.forge import GITHUB, AmbiguousWrite, ForgeError, Incomplete, Unsupported
 from tauceti_tools.forge_cli import _checkout_repository as checkout_repository
 from tauceti_tools.forge_cli import run
 from tauceti_tools.project import ConfigError, load, parse
@@ -364,6 +364,35 @@ class CommandTests(unittest.TestCase):
             )
         delegate.assert_not_called()
         self.assertEqual(client.call_args.args[0].url, "https://git.example.org")
+
+    def test_ambiguous_write_has_distinct_exit_status_and_stderr_marker(self):
+        from tauceti_tools.forge_cli import main
+
+        stderr = io.StringIO()
+        with (
+            patch("tauceti_tools.forge_cli.run", side_effect=AmbiguousWrite("POST may have applied")),
+            contextlib.redirect_stderr(stderr),
+        ):
+            self.assertEqual(main(), 2)
+        self.assertTrue(stderr.getvalue().startswith("gh: ambiguous-write:"))
+
+    def test_unconfigured_bare_repository_is_rejected_before_credentials(self):
+        with patch("tauceti_tools.forge_cli.Forgejo") as client, self.assertRaises(Unsupported):
+            run(["--conf", str(self.config), "issue", "create", "-t", "Title", "-R", "unknown/repo"], environment={})
+        client.assert_not_called()
+
+    def test_ci_repository_is_included_in_host_ambiguity(self):
+        with patch("tauceti_tools.forge_cli.Forgejo") as client, self.assertRaisesRegex(Unsupported, "ambiguous"):
+            run(["--conf", str(self.config), "pr", "view", "12", "-R", "one/Project"], environment={})
+        client.assert_not_called()
+
+    def test_jq_option_payload_rejected_before_credentials(self):
+        with patch("tauceti_tools.forge_cli.Forgejo") as client, self.assertRaises(Unsupported):
+            run(
+                ["--conf", str(self.config), "pr", "view", "12", "-R", "git.example.org/one/Project", "--jq", "-n"],
+                environment={},
+            )
+        client.assert_not_called()
 
     def test_configured_host_allows_qualified_fork_without_extra_config(self):
         with patch("tauceti_tools.forge_cli.Forgejo") as client, contextlib.redirect_stdout(io.StringIO()):

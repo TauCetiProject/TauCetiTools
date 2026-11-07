@@ -12,10 +12,10 @@ import subprocess
 import sys
 import urllib.parse
 
-from .forge import GITHUB, Forge, ForgeError, Forgejo, RepositoryRef, Unsupported
+from .forge import GITHUB, AmbiguousWrite, Forge, ForgeError, Forgejo, RepositoryRef, Unsupported
 from .forge_command import parse_command
 from .forge_commands import execute, render
-from .project import ConfigError, load
+from .project import ConfigError, load, resolve_repository
 
 
 def _checkout_repository(refs):
@@ -84,7 +84,7 @@ def _selected_repository(selected, refs, primary):
     if len(parts) == 3:
         return RepositoryRef(_host_forge(parts[0], refs), "/".join(parts[1:]))
     if len(parts) == 2:
-        return RepositoryRef(primary.forge, selected)
+        raise Unsupported("unconfigured bare repository; specify HOST/OWNER/REPO")
     raise Unsupported("repository requires OWNER/REPO or HOST/OWNER/REPO")
 
 
@@ -108,6 +108,12 @@ def run(argv, *, environment=None):
     snapshot = env.get("TAUCETI_CONF_SNAPSHOT") if env.get("TAUCETI_CONF_SOURCE") == source else None
     project = load(snapshot or source)
     refs = [project.repository_ref(role) for role in project.raw["repositories"]]
+    refs += [
+        resolve_repository(value["repo"], project.raw.get("forges")) for value in project.raw.get("tools", {}).values()
+    ]
+    refs += [resolve_repository(value["repo"], project.raw.get("forges")) for value in project.raw.get("upstreams", [])]
+    if "ci" in project.raw:
+        refs.append(project.ci_repository_ref())
     if all(ref.forge == GITHUB for ref in refs):
         return _delegate(native, env)
     command = parse_command(native)
@@ -132,6 +138,8 @@ def run(argv, *, environment=None):
             _require_origin(env, "TAUCETI_GITHUB_ORIGIN", repository.forge)
         host = urllib.parse.urlsplit(repository.forge.url).netloc
         return _delegate(native, {**env, "GH_REPO": host + "/" + repository.name, "GH_HOST": host})
+    if opts.get("jq", "").startswith("-"):
+        raise Unsupported("jq filters beginning with a dash are unsupported; wrap the expression in parentheses")
     token_file = env.get("TAUCETI_FORGEJO_TOKEN_FILE")
     token = None
     if token_file:
@@ -168,6 +176,9 @@ def _delegate(argv, env):
 def main():
     try:
         return run(sys.argv[1:])
+    except AmbiguousWrite as error:
+        print(f"gh: ambiguous-write: {error}", file=sys.stderr)
+        return 2
     except (ForgeError, ConfigError, ValueError, OSError) as error:
         print(f"gh: {error}", file=sys.stderr)
         return 1
