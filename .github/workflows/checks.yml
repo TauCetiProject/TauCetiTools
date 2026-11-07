@@ -3,6 +3,11 @@ on: [push, pull_request]
 permissions:
   contents: read
 jobs:
+  workflow-identity:
+    uses: ./.github/workflows/check-workflow-identity.yml
+    with:
+      caller_repository: ${{ github.repository }}
+      caller_revision: ${{ github.workflow_sha }}
   # Reuse small Namespace runners rather than queue release fixes behind GitHub builds.
   # Leave priority unspecified so Bors control (0) and staging builds (1) go first.
   package:

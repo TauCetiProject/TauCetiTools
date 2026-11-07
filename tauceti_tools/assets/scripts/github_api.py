@@ -169,8 +169,22 @@ class GitHub:
         """
         if path.startswith(("http:", "https:", "//")):
             raise ValueError("GitHub requests must use a relative API path")
+        source_candidate = os.environ.get("TAUCETI_SOURCE_CANDIDATE") == "true"
+        if source_candidate:
+            # The build's legacy GitHub helper owns execution/dependency reads,
+            # never Forgejo PR metadata, approvals or publication. Refuse before
+            # selecting credentials, including accidental reads of the mirror.
+            allowed = json.loads(os.environ.get("TAUCETI_CI_GITHUB_READ_REPOSITORIES", "[]"))
+            execution = json.loads(os.environ.get("TAUCETI_CI_EXECUTION_REPOSITORY", "{}"))
+            parts = path.lstrip("/").split("?", 1)[0].split("/")
+            repo = "/".join(parts[1:3]) if len(parts) >= 4 and parts[0] == "repos" else ""
+            if (method != "GET" or repo not in allowed
+                    or (repo == execution.get("name") and parts[3] != "actions")):
+                raise ValueError("source metadata/publication requires the native source adapter")
         read = method == "GET" if read is None else read
         credential, env = self._credential(read)
+        if source_candidate:
+            env["GH_HOST"] = "github.com"
         now = time.time()
         if self.blocked.get(credential, 0) > now:
             raise Deferred(credential, self.blocked[credential])
@@ -180,6 +194,8 @@ class GitHub:
             if not read and self.last_write is not None:
                 time.sleep(max(0, self.last_write + 1 - time.monotonic()))
             argv = ["gh", "api", "--include", "--method", method, path]
+            if source_candidate:
+                argv += ["--hostname", "github.com"]
             cache_key = (credential, path)
             cached = self.cached.get(cache_key) if conditional and method == "GET" else None
             if cached:
