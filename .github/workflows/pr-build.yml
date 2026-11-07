@@ -507,6 +507,10 @@ jobs:
               "100644 blob "*) ;;
               *) pins_known=0
                  echo "::error::$f is not an ordinary file at the head ($head_entry)"
+                 if [ "${SOURCE_CANDIDATE:-false}" = true ]; then
+                   echo "CONFIG_BAD=1" >> "$GITHUB_ENV"
+                   echo "INFRA=1" >> "$GITHUB_ENV"
+                 fi
                  continue ;;
             esac
             if [ "$mb_entry" != "$head_entry" ]; then

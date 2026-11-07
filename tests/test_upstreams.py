@@ -31,9 +31,9 @@ class UpstreamTests(unittest.TestCase):
                 (root / "lakefile.toml").write_text('name = "Project"\n')
                 (root / "lean-toolchain").write_text(PIN + "\n")
             (base / "lake-manifest.json").write_text(json.dumps({"packages": [direct]}))
-            for value in malformed:
-                with self.subTest(value=value), patch("tauceti_tools.upstreams.api") as lookup:
-                    (candidate / "lake-manifest.json").write_text(json.dumps(value))
+            for raw in [*(json.dumps(value) for value in malformed), "[" * 2000 + "]" * 2000]:
+                with self.subTest(raw=raw[:80]), patch("tauceti_tools.upstreams.api") as lookup:
+                    (candidate / "lake-manifest.json").write_text(raw)
                     with self.assertRaises(ConfigError) as error:
                         guard(SimpleNamespace(github_upstreams=[]), base, base, candidate)
                     self.assertNotIsInstance(error.exception, ResolutionUnavailable)

@@ -214,11 +214,11 @@ def guard(project, base: Path, merge_base: Path, candidate: Path):
     try:
         before = json.loads(contents(base, "lake-manifest.json"))
         before_packages = packages(before)
-    except (ValueError, TypeError, ConfigError) as error:
+    except (ValueError, TypeError, RecursionError, ConfigError) as error:
         raise ResolutionUnavailable("Trusted base manifest is unavailable or malformed") from error
     try:
         after = json.loads(contents(candidate, "lake-manifest.json"))
-    except (ValueError, TypeError) as error:
+    except (ValueError, TypeError, RecursionError) as error:
         raise ConfigError("Candidate manifest is malformed") from error
     actual = packages(after)
     allowed = {u["package"]: u for u in project.github_upstreams if u.get("update")}

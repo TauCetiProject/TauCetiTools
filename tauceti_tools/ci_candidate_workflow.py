@@ -190,7 +190,12 @@ def member_size_policy(request, policy, context, workspace):
         git = ci_git.Git(Path(home) / "reader.git", home, objects=objects)
         for member in request.members:
             git.commit(member.head)
-            bases = git.run("merge-base", "--all", request.base, member.head).stdout.decode().splitlines()
+            comparison = git.run("merge-base", "--all", request.base, member.head, check=False)
+            if comparison.returncode == 1 and not comparison.stdout:
+                values["SOURCE_MEMBER_POLICY_REJECTED"] = "1"
+                continue
+            comparison.check_returncode()
+            bases = comparison.stdout.decode().splitlines()
             if len(bases) != 1:
                 values["SOURCE_MEMBER_POLICY_REJECTED"] = "1"
                 continue

@@ -401,7 +401,7 @@ class PinGuard(unittest.TestCase):
             self.assertEqual(json.loads((root / "member-policy.json").read_text()), rejection)
             self.assertIn("TOO_LARGE=1\n", (root / "environment").read_text())
 
-    def member_policy(self, *, added_lines=0, existing_lines=0, pin_changed=False, binary=False):
+    def member_policy(self, *, added_lines=0, existing_lines=0, pin_changed=False, binary=False, orphan=False):
         config = policy()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -440,12 +440,17 @@ class PinGuard(unittest.TestCase):
             git("add", ".")
             git("commit", "-qm", "candidate")
             head, tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+            member_head = head
+            if orphan:
+                git("checkout", "--orphan", "unrelated", "-q")
+                git("commit", "-qm", "unrelated root")
+                member_head = git("rev-parse", "HEAD")
             workspace = root / "job"
             workspace.mkdir()
             subprocess.run(
                 ["git", "clone", "-q", "--bare", str(writer), str(workspace / ".ci-source.git")], check=True, env=env
             )
-            req = replace(request(config), head=head, base=base, tree=tree, members=(cc.Member(17, head),))
+            req = replace(request(config), head=head, base=base, tree=tree, members=(cc.Member(17, member_head),))
             return cw.member_size_policy(req, config, context(req, config), workspace)
 
     def test_retained_member_new_file_and_total_size_guards_use_real_local_objects(self):
@@ -459,6 +464,10 @@ class PinGuard(unittest.TestCase):
             self.member_policy(existing_lines=2001, pin_changed=True), {"SOURCE_SIZE_POLICY_COMPLETE": "1"}
         )
         self.assertEqual(self.member_policy(binary=True), {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
+        self.assertEqual(
+            self.member_policy(added_lines=1, orphan=True),
+            {"SOURCE_SIZE_POLICY_COMPLETE": "1", "SOURCE_MEMBER_POLICY_REJECTED": "1"},
+        )
 
     def test_source_pin_changes_use_the_configured_upstream_guard_without_legacy_source_bindings(self):
         root_tools = Path(__file__).resolve().parents[1]
@@ -568,6 +577,37 @@ class ShippedWorkflow(unittest.TestCase):
             )
             self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
             self.assertTrue((root / "source-called.json").is_file())
+
+    def test_source_executable_pin_mode_is_a_decided_rejection_even_with_unchanged_blob(self):
+        shell = self.step("Scope guard — allow ${{ inputs.lean_root }} sources and validated pins")["run"]
+        shell = shell[shell.index("pins_changed=0") : shell.index('if [ "$pins_changed" = "1" ]')]
+        shell = shell.replace("${{ steps.pr.outputs.mergebase }}", "base").replace(
+            "${{ steps.pr.outputs.sha }}", "head"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "gate/scripts").mkdir(parents=True)
+            (root / "gate/scripts/ci_git.py").write_text(
+                "import os,sys\n"
+                "mode=os.environ['PIN_MODE'] if sys.argv[sys.argv.index('--commit')+1]=='head' else '100644'\n"
+                "print(mode+' blob '+('a'*40))\n"
+            )
+            for mode in ("100644", "100755", "120000"):
+                with self.subTest(mode=mode):
+                    output = root / "env"
+                    output.write_text("")
+                    child = subprocess.run(
+                        ["bash", "-euo", "pipefail", "-c", "pins_known=1\n" + shell],
+                        cwd=root,
+                        env=dict(os.environ, SOURCE_CANDIDATE="true", PIN_MODE=mode, GITHUB_ENV=str(output)),
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
+                    if mode == "100644":
+                        self.assertEqual(output.read_text(), "PINS_KNOWN=1\n")
+                    else:
+                        self.assertEqual(output.read_text(), "CONFIG_BAD=1\nINFRA=1\nCONFIG_BAD=1\nINFRA=1\n")
 
     def test_source_result_reporting_records_verdicts_without_github_status_writes(self):
         shell = self.step("Report build and bump-guard statuses to the PR head commit")["run"]
