@@ -201,7 +201,10 @@ class GitHubEvidence:
                 owned.append((previous, row))
             if not owned:
                 raise EvidenceUnavailable("workflow request receipt is unavailable")
-            receipt_attempt, selected = max(owned, key=lambda item: item[0])
+            available = [(previous, row) for previous, row in owned if row.get("expired") is False]
+            if not available:
+                raise EvidenceUnavailable("workflow request receipts have expired or are unavailable")
+            receipt_attempt, selected = max(available, key=lambda item: item[0])
             matches = [selected]
         else:
             matches = [row for row in rows if row["name"] == name]
@@ -210,6 +213,8 @@ class GitHubEvidence:
         metadata = self.get(f"/actions/artifacts/{matches[0]['id']}")
         if not isinstance(metadata, dict) or metadata.get("id") != matches[0]["id"]:
             raise EvidenceUnavailable("execution artifact identity changed")
+        if metadata.get("expired") is True:
+            raise EvidenceUnavailable("execution artifact has expired")
         raw = self.artifact_bytes(metadata.get("id"))
         if receipt:
             verified = verify_receipt_artifact(

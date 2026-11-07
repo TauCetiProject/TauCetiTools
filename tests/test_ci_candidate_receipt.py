@@ -145,7 +145,6 @@ class Receipts(unittest.TestCase):
         for change in (
             {"name": cc.receipt_artifact_name(self.request, 101, 1)},
             {"digest": "sha256:" + "0" * 64},
-            {"expired": True},
             {"workflow_run": {"id": 102, "repository_id": 42, "head_sha": self.request.workflow_revision}},
         ):
             with self.subTest(change=change), self.assertRaises(ValueError):
@@ -159,6 +158,18 @@ class Receipts(unittest.TestCase):
                     observed_attempt=2,
                     receipt_attempt=2,
                 )
+
+        with self.assertRaises(cc.EvidenceUnavailable):
+            cc.verify_receipt_artifact(
+                self.request,
+                self.policy,
+                dict(metadata, expired=True),
+                raw,
+                self.run,
+                run_id=101,
+                observed_attempt=2,
+                receipt_attempt=2,
+            )
 
     def reader(self, *, current_attempt=None, observed_attempt=2):
         fixture = self
@@ -240,6 +251,57 @@ class Receipts(unittest.TestCase):
                 self.request, self.policy, metadata, raw, self.run, run_id=101, observed_attempt=2, receipt_attempt=3
             )
 
+        changed = copy.deepcopy(self.receipt)
+        changed["producer"]["attempt"] = 5
+        metadata, raw = self.archive(receipt=changed)
+        with self.assertRaisesRegex(ValueError, "producer differs from its artifact attempt"):
+            cc.verify_receipt_artifact(
+                self.request,
+                self.policy,
+                metadata,
+                raw,
+                dict(self.run, run_attempt=3),
+                run_id=101,
+                observed_attempt=3,
+                receipt_attempt=2,
+            )
+
+    def test_expired_receipts_are_unavailable_and_an_older_live_receipt_can_own_a_rerun(self):
+        metadata, _raw = self.archive()
+        reader = self.reader()
+        original = reader.get
+        reader.get = lambda path: (
+            {"total_count": 1, "artifacts": [dict(metadata, expired=True)]} if "/artifacts?" in path else original(path)
+        )
+        with patch.object(reader, "artifact_bytes") as download, self.assertRaises(cc.EvidenceUnavailable):
+            reader.receipt(self.request, run_id=101, observed_attempt=2)
+        download.assert_not_called()
+        earlier = copy.deepcopy(self.receipt)
+        earlier["producer"]["attempt"] = 1
+        old_metadata, old_raw = self.archive(receipt=earlier)
+        old_metadata.update(id=203, name=cc.receipt_artifact_name(self.request, 101, 1))
+        reader = self.reader()
+        original = reader.get
+
+        def get(path):
+            if "/artifacts?" in path:
+                return {"total_count": 2, "artifacts": [dict(metadata, expired=True), old_metadata]}
+            if path == "/actions/artifacts/203":
+                return old_metadata
+            return original(path)
+
+        reader.get = get
+        with patch.object(reader, "artifact_bytes", return_value=old_raw) as download:
+            proof = reader.receipt(self.request, run_id=101, observed_attempt=2)
+        download.assert_called_once_with(203)
+        self.assertEqual((proof["receipt_attempt"], proof["observed_attempt"]), (1, 2))
+        reader = self.reader()
+        original = reader.get
+        reader.get = lambda path: dict(metadata, expired=True) if path == "/actions/artifacts/202" else original(path)
+        with patch.object(reader, "artifact_bytes") as download, self.assertRaises(cc.EvidenceUnavailable):
+            reader.receipt(self.request, run_id=101, observed_attempt=2)
+        download.assert_not_called()
+
     def test_multiple_request_receipts_and_future_attempts_cannot_be_adopted(self):
         metadata, _raw = self.archive()
         for name in (
@@ -308,7 +370,7 @@ class Receipts(unittest.TestCase):
                     cw.main(args)
                 self.assertEqual(receipt.read_bytes(), before)
 
-    def test_failed_setup_or_receipt_upload_leaves_only_infrastructure_verdicts(self):
+    def test_incomplete_job_outputs_after_early_failure_are_infrastructure(self):
         fixture = workflow_fixtures.Workflow()
         fixture.setUp()
         evidence = dict.fromkeys(fixture.evidence, "")

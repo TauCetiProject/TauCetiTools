@@ -597,7 +597,7 @@ def _verify_request_claim(request, policy, value, *, run_id, attempt):
         raise ValueError("evidence producer differs from the verified workflow attempt")
 
 
-def verify_receipt(request, policy, receipt, run, *, run_id, observed_attempt):
+def verify_receipt(request, policy, receipt, run, *, run_id, observed_attempt, expected_receipt_attempt=None):
     """Verify request ownership of a run, including one that is still running.
 
     The receipt proves trusted setup accepted the request. It does not prove
@@ -611,6 +611,10 @@ def verify_receipt(request, policy, receipt, run, *, run_id, observed_attempt):
     if not isinstance(producer, dict):
         raise ValueError("invalid request receipt producer")
     receipt_attempt = _positive(producer.get("attempt"), "receipt attempt")
+    if expected_receipt_attempt is not None:
+        _positive(expected_receipt_attempt, "expected receipt attempt")
+        if receipt_attempt != expected_receipt_attempt:
+            raise ValueError("receipt producer differs from its artifact attempt")
     if receipt_attempt > observed_attempt:
         raise EvidenceUnavailable("receipt belongs to a newer workflow attempt")
     # GitHub reruns retain the original event payload, workflow SHA and run ID.
@@ -761,6 +765,8 @@ def verify_receipt_artifact(request, policy, metadata, archive, run, *, run_id, 
     _positive(receipt_attempt, "receipt attempt")
     if receipt_attempt > observed_attempt:
         raise EvidenceUnavailable("receipt belongs to a newer workflow attempt")
+    if isinstance(metadata, dict) and metadata.get("expired") is True:
+        raise EvidenceUnavailable("request receipt has expired")
     receipt = _artifact_payload(
         request,
         policy,
@@ -773,7 +779,12 @@ def verify_receipt_artifact(request, policy, metadata, archive, run, *, run_id, 
         filename=RECEIPT_FILE,
         completed=False,
     )
-    proof = verify_receipt(request, policy, receipt, run, run_id=run_id, observed_attempt=observed_attempt)
-    if proof["receipt_attempt"] != receipt_attempt:
-        raise ValueError("receipt producer differs from its artifact attempt")
-    return proof
+    return verify_receipt(
+        request,
+        policy,
+        receipt,
+        run,
+        run_id=run_id,
+        observed_attempt=observed_attempt,
+        expected_receipt_attempt=receipt_attempt,
+    )
