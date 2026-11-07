@@ -285,10 +285,10 @@ class Forgejo:
                 query[key] = value
 
         def matches(row):
-            if state == "merged":
+            if state in {"closed", "merged"}:
                 if not isinstance(row.get("merged"), bool):
                     raise Incomplete("Forgejo listing did not identify merge state")
-                if not row["merged"]:
+                if row["merged"] != (state == "merged"):
                     return False
             return self._labels_match(row, labels) and self._author_match(row, author)
 

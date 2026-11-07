@@ -109,6 +109,10 @@ class DirectTests(unittest.TestCase):
         with self.assertRaises(Incomplete):
             self.api.pulls(self.repo, state="merged", limit=1)
 
+    def test_closed_pr_state_excludes_merged_prs(self):
+        self.reply = lambda path: (200, [{"number": 4, "merged": True}, {"number": 3, "merged": False}], {})
+        self.assertEqual([r["number"] for r in self.api.pulls(self.repo, state="closed", limit=1)], [3])
+
     def test_issue_filters_keep_prs_out_and_require_all_labels(self):
         self.reply = lambda path: (
             200,
