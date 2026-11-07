@@ -152,21 +152,26 @@ GitHub requests use their original argv and normal CLI implementation. No global
 Unsupported JSON fields and commands are errors; missing source data is incomplete.
 Additional commands
 and GraphQL operations remain implementation work, not silently fabricated data.
-Historical PR reads require the native head SHA to match the retained pull ref,
-including default output without `--json`. A deleted source fork is allowed only
+Explicit historical PR diff/head reads require the native head SHA to match
+the retained pull ref. Default closed-PR output omits these unverified fields
+and requires no retained-ref lookup. `baseRefOid` identifies the live base branch,
+not a historical comparison base. A deleted source fork is allowed only
 when the remaining native diff metadata is complete; requested files still need
-immutable head binding and a stable metadata re-read. Closed, unmerged file reads and zero-stat reconstruction require every native
+immutable head binding and a stable metadata re-read. Closed, unmerged file reads and every zero-stat reconstruction require every native
 file page to identify `X-Forgejo-Diff-Base` and `X-Forgejo-Diff-Head`, matching the
 stored comparison base and retained head. Stock Forgejo has no such headers and
 can partially or entirely erase a historical proposal by comparing it with today's
-base. Such observations are unavailable. Nonzero native file listings must also
+base. Such observations are unavailable. Stock pure-rename pages also disagree
+with native line statistics; those reads are incomplete until the server preserves
+rename source paths during pagination. Nonzero native file listings must also
 match both the file count and the total additions/deletions.
 
 The real-server fixture defaults to stock behavior. Set
 `FORGEJO_RETAINED_METADATA=1` only when explicitly testing a binary with the native
 historical-metadata fixes. This profile asserts accurate scalar stats and files
 after source-fork deletion, retained heads after source-branch reuse, and a closed
-proposal whose changes reached main through a superseding PR. The stock profile
+proposal whose changes reached main through a superseding PR, plus pure-rename
+file metadata. The stock profile
 asserts errors for unavailable history. This test switch does not change runtime
 selection or activate a server capability in production.
 
@@ -189,8 +194,9 @@ changed files and latest commit status per context. Expensive histories are only
 fetched when requested. A file listing must match the native changed-file count;
 each file's contents URL must identify the immutable head, and head/base are
 rechecked afterward. Status requests bind to the immutable head ID. Native diff
-statistics are unavailable for AGit and missing-head-repository responses, whose
-zero-value stats do not prove an empty change set.
+statistics are unavailable for AGit and responses without a verified immutable
+head and complete comparison metadata. A deleted source repository alone does
+not invalidate history retained by the base repository.
 Forgejo also serializes failed diff calculations as all-zero stats for some
 deleted fork branches and unsynchronized fork pushes. Those zeros are not exposed
 directly: the reader verifies the retained pull ref, reads its complete file list,

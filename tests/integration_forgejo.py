@@ -715,10 +715,16 @@ roadmap="operator/roadmap"
                         if retained_metadata
                         else {"changed_files": 0, "additions": 0, "deletions": 0},
                     )
-                    self.assertEqual(
-                        reader.pull(repo, fork_pull["number"], ["changedFiles", "additions", "deletions"]),
-                        {"changedFiles": 1, "additions": 1, "deletions": 0},
-                    )
+                    if retained_metadata:
+                        self.assertEqual(
+                            reader.pull(repo, fork_pull["number"], ["changedFiles", "additions", "deletions"]),
+                            {"changedFiles": 1, "additions": 1, "deletions": 0},
+                        )
+                    else:
+                        # Stock per-file rename statistics cannot safely reconstruct
+                        # failed scalar stats without native comparison evidence.
+                        with self.assertRaises(Incomplete):
+                            reader.pull(repo, fork_pull["number"], ["changedFiles", "additions", "deletions"])
                     reviewer.request(
                         "POST",
                         "repos/reviewer/content/contents/ClosedFork.lean",
