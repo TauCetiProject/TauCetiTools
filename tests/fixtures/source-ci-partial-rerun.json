@@ -1,0 +1,98 @@
+{
+  "source": "https://github.com/TauCetiProject/forgejo-preparation-rehearsal-20261107-4e8582/actions/runs/42411210198",
+  "observation": "Reused receipt job in partial rerun 2; new logical ID/current run_attempt, original execution timestamps and steps. This is protocol evidence, not a source build or cache publication.",
+  "run_started_at": "2026-11-07T20:37:33Z",
+  "job": {
+    "id": 128521820800,
+    "run_id": 42411210198,
+    "run_attempt": 2,
+    "name": "exercise / receipt",
+    "status": "completed",
+    "conclusion": "success",
+    "started_at": "2026-11-07T20:28:34Z",
+    "completed_at": "2026-11-07T20:33:40Z",
+    "runner_id": 2,
+    "steps": [
+      {
+        "name": "Set up job",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 1,
+        "started_at": "2026-11-07T20:28:34Z",
+        "completed_at": "2026-11-07T20:28:35Z"
+      },
+      {
+        "name": "Set up runner",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 2,
+        "started_at": "2026-11-07T20:28:35Z",
+        "completed_at": "2026-11-07T20:28:35Z"
+      },
+      {
+        "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 3,
+        "started_at": "2026-11-07T20:28:35Z",
+        "completed_at": "2026-11-07T20:28:36Z"
+      },
+      {
+        "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 4,
+        "started_at": "2026-11-07T20:28:36Z",
+        "completed_at": "2026-11-07T20:28:37Z"
+      },
+      {
+        "name": "Validate trusted setup and write receipt",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 5,
+        "started_at": "2026-11-07T20:28:37Z",
+        "completed_at": "2026-11-07T20:28:37Z"
+      },
+      {
+        "name": "Upload immutable receipt",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 6,
+        "started_at": "2026-11-07T20:28:37Z",
+        "completed_at": "2026-11-07T20:28:38Z"
+      },
+      {
+        "name": "Keep the run open for REST receipt verification",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 7,
+        "started_at": "2026-11-07T20:28:38Z",
+        "completed_at": "2026-11-07T20:33:38Z"
+      },
+      {
+        "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 13,
+        "started_at": "2026-11-07T20:33:38Z",
+        "completed_at": "2026-11-07T20:33:38Z"
+      },
+      {
+        "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 14,
+        "started_at": "2026-11-07T20:33:38Z",
+        "completed_at": "2026-11-07T20:33:38Z"
+      },
+      {
+        "name": "Complete job",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 15,
+        "started_at": "2026-11-07T20:33:38Z",
+        "completed_at": "2026-11-07T20:33:38Z"
+      }
+    ]
+  }
+}

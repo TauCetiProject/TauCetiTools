@@ -9,6 +9,7 @@ import tempfile
 import unittest
 import urllib.error
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from unittest.mock import patch
 
@@ -48,6 +49,15 @@ branch="master"
 
 class Workflow(unittest.TestCase):
     def setUp(self):
+        # All incomplete-evidence waits in these tests advance a bounded fake
+        # clock; a missing field must not turn a regression into a wall-time wait.
+        self.elapsed = 0
+        original_publication = cw.publication_verdict
+        publication_patch = patch.object(
+            cw, "publication_verdict", partial(original_publication, clock=lambda: self.elapsed, sleep=self.advance)
+        )
+        publication_patch.start()
+        self.addCleanup(publication_patch.stop)
         self.policy = cc.ExecutionPolicy.parse(policy().record(with_config=False), configuration=CONFIG)
         self.request = request(self.policy)
         self.context = context(self.request, self.policy)
@@ -67,6 +77,9 @@ class Workflow(unittest.TestCase):
             "build_outcome": "success",
             "job_result": "success",
         }
+
+    def advance(self, seconds):
+        self.elapsed += seconds
 
     def test_source_build_bootstrap_uses_qualified_settings_without_enabling_legacy_consumers(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -224,15 +237,42 @@ class Workflow(unittest.TestCase):
                 )
                 self.assertEqual(result["verdicts"]["publication"], "infrastructure")
 
+    def test_publication_rejects_captured_reused_job_execution(self):
+        observation = json.loads((Path(__file__).parent / "fixtures/source-ci-partial-rerun.json").read_bytes())
+        reused = dict(observation["job"])
+        self.assertEqual(reused["run_attempt"], self.context["attempt"])
+        # Project the captured successful receipt job into the builder role;
+        # execution timestamps/steps and the relabelled ID stay exactly as read.
+        reused["name"] = "validate / sandboxed-build"
+        result = cw.finalize(
+            self.request,
+            self.policy,
+            self.context,
+            self.evidence,
+            reader=self.publisher_reader(
+                builder_changes=reused, run_changes={"run_started_at": observation["run_started_at"]}
+            ),
+        )
+        self.assertEqual(result["verdicts"]["publication"], "infrastructure")
+
     def test_publication_requires_complete_ordered_successful_execution_evidence(self):
         baseline = self.publisher_reader()
         path = "/actions/runs/101/attempts/2/jobs?per_page=100"
         good_step = baseline.get(path)["jobs"][1]["steps"][0]
         cases = [
             {"run_changes": {"run_started_at": value}}
-            for value in (None, "", True, "2026-11-07", "2026-02-30T00:00:00Z", "2026-11-07T20:37:33+01:00")
+            for value in (None, "", True, "2026-11-07", "2026-02-30T00:00:00Z", "2026-11-07T20:37:33+25:00")
         ]
-        cases += [{"builder_changes": {"completed_at": None}}, {"builder_changes": {"conclusion": "failure"}}]
+        cases += [
+            {"builder_changes": {"completed_at": None}},
+            {"builder_changes": {"started_at": None}},
+            {"builder_changes": {"status": "in_progress"}},
+            {"builder_changes": {"conclusion": "failure"}},
+            {"builder_changes": {"completed_at": "2026-11-07T20:37:39Z"}},
+            {"publisher_changes": {"started_at": None}},
+            {"publisher_changes": {"completed_at": None}},
+            {"publisher_changes": {"started_at": "bad timestamp"}},
+        ]
         cases += [{"builder_changes": {"completed_at": "2026-11-07T20:40:01Z"}}]
         cases += [{"publisher_changes": {"steps": value}} for value in (None, [], [good_step, good_step])]
         cases += [
@@ -242,6 +282,7 @@ class Workflow(unittest.TestCase):
                 {"conclusion": "failure"},
                 {"started_at": "2026-11-07T20:33:10Z"},
                 {"completed_at": "2026-11-07T20:41:01Z"},
+                {"completed_at": "2026-11-07T20:40:29Z"},
                 {"completed_at": None},
             )
         ]
@@ -255,6 +296,36 @@ class Workflow(unittest.TestCase):
                     reader=self.publisher_reader(**changes),
                 )
                 self.assertEqual(result["verdicts"]["publication"], "infrastructure")
+
+    def test_publication_normalizes_documented_fractional_offset_step_times_and_boundaries(self):
+        step = self.publisher_reader().get("/actions/runs/101/attempts/2/jobs?per_page=100")["jobs"][1]["steps"][0]
+        step.update(started_at="2026-11-07T12:40:00.000-08:00", completed_at="2026-11-07T12:41:00.999-08:00")
+        reader = self.publisher_reader(
+            builder_changes={"started_at": "2026-11-07T20:37:34Z", "completed_at": "2026-11-07T20:40:00Z"},
+            publisher_changes={"steps": [None, step]},
+        )
+        result = cw.finalize(self.request, self.policy, self.context, self.evidence, reader=reader)
+        self.assertEqual(result["verdicts"]["publication"], "success")
+
+    def test_publication_retries_incomplete_job_evidence_then_accepts_complete_evidence(self):
+        complete = self.publisher_reader()
+        incomplete = self.publisher_reader(publisher_changes={"steps": None})
+        reader = self.publisher_reader()
+        reader.get = lambda path: (incomplete if self.elapsed < 30 else complete).get(path)
+        result = cw.finalize(self.request, self.policy, self.context, self.evidence, reader=reader)
+        self.assertEqual(result["verdicts"]["publication"], "success")
+        self.assertEqual(self.elapsed, 30)
+
+    def test_publication_incomplete_evidence_wait_is_bounded(self):
+        result = cw.finalize(
+            self.request,
+            self.policy,
+            self.context,
+            self.evidence,
+            reader=self.publisher_reader(publisher_changes={"steps": []}),
+        )
+        self.assertEqual(result["verdicts"]["publication"], "infrastructure")
+        self.assertEqual(self.elapsed, 1200)
 
     def test_publication_observation_retries_a_transient_api_failure_within_the_deadline(self):
         reader = self.publisher_reader()

@@ -570,7 +570,12 @@ Publication therefore also requires authenticated execution timestamps: the
 successful builder must start strictly after the current `run_started_at`, finish
 before the publisher starts, and the successful confirmation must execute within
 the publisher's execution interval. Missing, malformed, ambiguous or old timing
-evidence yields infrastructure failure. Equal builder/attempt start timestamps
+evidence yields infrastructure failure. Missing or incomplete API evidence is
+retried within the existing bounded publication deadline. Documented RFC3339
+timestamps with fractions or timezone offsets are normalized to UTC at the
+job/run API's whole-second precision before comparing intervals. See the
+[workflow jobs API](https://docs.github.com/en/rest/actions/workflow-jobs).
+Equal builder/attempt start timestamps
 also fail closed because the API's second precision cannot establish freshness.
 The publisher reads only the toolchain pin, bound through the verified commit,
 root tree, ordinary blob entry and blob hash; it never checks out candidate code.
