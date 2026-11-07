@@ -267,6 +267,7 @@ class Workflow(unittest.TestCase):
             {"builder_changes": {"completed_at": None}},
             {"builder_changes": {"started_at": None}},
             {"builder_changes": {"status": "in_progress"}},
+            {"builder_changes": {"status": "requested"}},
             {"builder_changes": {"conclusion": "failure"}},
             {"builder_changes": {"completed_at": "2026-11-07T20:37:39Z"}},
             {"publisher_changes": {"started_at": None}},
@@ -275,6 +276,10 @@ class Workflow(unittest.TestCase):
         ]
         cases += [{"builder_changes": {"completed_at": "2026-11-07T20:40:01Z"}}]
         cases += [{"publisher_changes": {"steps": value}} for value in (None, [], [good_step, good_step])]
+        cases += [
+            {"publisher_changes": {"steps": [dict(good_step, name="Different step")]}},
+            {"publisher_changes": {"steps": [good_step, dict(good_step, conclusion="failure")]}},
+        ]
         cases += [
             {"publisher_changes": {"steps": [dict(good_step, **change)]}}
             for change in (
@@ -288,6 +293,23 @@ class Workflow(unittest.TestCase):
         ]
         for changes in cases:
             with self.subTest(changes=changes):
+                self.elapsed = 0
+                steps = changes.get("publisher_changes", {}).get("steps", [good_step])
+                incomplete = (
+                    any(
+                        value is None or (key == "status" and value in {"in_progress", "requested"})
+                        for fields in changes.values()
+                        for key, value in fields.items()
+                    )
+                    or steps == []
+                )
+                if isinstance(steps, list):
+                    incomplete = incomplete or any(
+                        value is None or (key == "status" and value == "in_progress")
+                        for step in steps
+                        if isinstance(step, dict)
+                        for key, value in step.items()
+                    )
                 result = cw.finalize(
                     self.request,
                     self.policy,
@@ -296,6 +318,24 @@ class Workflow(unittest.TestCase):
                     reader=self.publisher_reader(**changes),
                 )
                 self.assertEqual(result["verdicts"]["publication"], "infrastructure")
+                self.assertEqual(self.elapsed, 1200 if incomplete else 0)
+
+    def test_publication_accepts_all_bounded_fraction_lengths_on_supported_python_versions(self):
+        for digits in ("1", "12", "123", "1234", "12345", "123456", "1234567", "12345678", "123456789"):
+            with self.subTest(fraction=digits):
+                self.assertEqual(
+                    cw.publication_timestamp("2026-11-07T12:40:00." + digits + "-08:00"),
+                    cw.publication_timestamp("2026-11-07T20:40:00Z"),
+                )
+
+    def test_publication_requires_runner_isolation_in_the_accepting_response(self):
+        initial = self.publisher_reader(publisher_changes={"steps": None})
+        later = self.publisher_reader(publisher_changes={"runner_id": None})
+        reader = self.publisher_reader()
+        reader.get = lambda path: (initial if self.elapsed < 30 else later).get(path)
+        result = cw.finalize(self.request, self.policy, self.context, self.evidence, reader=reader)
+        self.assertEqual(result["verdicts"]["publication"], "infrastructure")
+        self.assertEqual(self.elapsed, 30)
 
     def test_publication_normalizes_documented_fractional_offset_step_times_and_boundaries(self):
         step = self.publisher_reader().get("/actions/runs/101/attempts/2/jobs?per_page=100")["jobs"][1]["steps"][0]

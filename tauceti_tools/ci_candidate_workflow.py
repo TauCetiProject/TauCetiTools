@@ -504,7 +504,10 @@ def publication_timestamp(value):
     ):
         raise EvidenceUnavailable("invalid publication execution timestamp")
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc).replace(microsecond=0)
+        # Fractions are intentionally discarded before parsing, including on
+        # Python 3.10 whose fromisoformat accepts fewer fractional formats.
+        seconds = re.sub(r"\.\d{1,9}(?=Z|[+-])", "", value)
+        return datetime.fromisoformat(seconds.replace("Z", "+00:00")).astimezone(timezone.utc)
     except (ValueError, OverflowError) as error:
         raise EvidenceUnavailable("invalid publication execution timestamp") from error
 
@@ -513,6 +516,8 @@ def publication_execution(run, builder, publisher):
     """Reused jobs can have new IDs/current run_attempt but retain old timestamps."""
     attempt_start = publication_timestamp(run.get("run_started_at"))
     build_start = publication_timestamp(builder.get("started_at"))
+    if build_start <= attempt_start:
+        return False
     build_end = publication_timestamp(builder.get("completed_at"))
     publish_start = publication_timestamp(publisher.get("started_at"))
     publish_end = publication_timestamp(publisher.get("completed_at"))
@@ -526,13 +531,13 @@ def publication_execution(run, builder, publisher):
         for step in steps
         if isinstance(step, dict) and step.get("name") == "Confirm the exact revision map on the public endpoint"
     ]
-    if not confirmations:
+    if not confirmations and not steps:
         raise PublicationPending("missing publisher confirmation")
     if len(confirmations) != 1:
         raise EvidenceUnavailable("missing or ambiguous publisher confirmation")
     confirmation = confirmations[0]
     for entry in (builder, publisher, confirmation):
-        if entry.get("status") in {None, "queued", "in_progress", "waiting", "pending"}:
+        if entry.get("status") in {None, "queued", "in_progress", "waiting", "pending", "requested"}:
             raise PublicationPending("publication execution is not complete")
         if entry.get("status") != "completed":
             return False
@@ -589,6 +594,7 @@ def publication_verdict(request, policy, context, reader, *, clock=time.monotoni
         if publishers:
             job = publishers[0]
             runner = job.get("runner_id")
+            isolated = False
             if type(runner) is int and runner > 0:
                 acquired = True
                 build_runner = builders[0].get("runner_id")
@@ -601,8 +607,9 @@ def publication_verdict(request, policy, context, reader, *, clock=time.monotoni
                     or build_runner == runner
                 ):
                     raise EvidenceUnavailable("publisher did not acquire an isolated hosted runner")
+                isolated = True
             if job.get("status") == "completed":
-                if acquired and job.get("conclusion") == "success":
+                if isolated and job.get("conclusion") == "success":
                     try:
                         if publication_execution(run, builders[0], job):
                             return "success"
