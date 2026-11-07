@@ -165,12 +165,13 @@ class ReadContracts(unittest.TestCase):
         self.api.pull.return_value.update(changed_files=0, additions=0, deletions=0, flow=1)
         with self.assertRaises(Incomplete):
             self.reader.pull(self.repo, 3, ["changedFiles"])
-        self.api.pull.return_value.update(flow=0)
+        self.api.pull.return_value.update(flow=0, merge_base="c" * 40)
         self.api.pull.return_value["head"]["repo"] = None
         self.api.pull_ref.return_value = "a" * 40
         self.api.files.side_effect = Incomplete("native files unavailable")
         with self.assertRaises(Incomplete):
             self.reader.pull(self.repo, 3, ["additions"])
+        self.api.files.assert_called_once_with(self.repo, 3, comparison_base="c" * 40, revision="a" * 40)
 
     def test_zero_statistics_are_reconstructed_from_retained_head_files(self):
         self.api.pull.return_value.update(changed_files=0, additions=0, deletions=0, merge_base="c" * 40)

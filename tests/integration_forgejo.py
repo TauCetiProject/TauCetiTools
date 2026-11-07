@@ -721,9 +721,9 @@ roadmap="operator/roadmap"
                             {"changedFiles": 1, "additions": 1, "deletions": 0},
                         )
                     else:
-                        # Stock per-file rename statistics cannot safely reconstruct
-                        # failed scalar stats without native comparison evidence.
-                        with self.assertRaises(Incomplete):
+                        # Missing comparison/format headers prevent reconstruction;
+                        # on stock, rename pages cannot prove correct line totals.
+                        with self.assertRaisesRegex(Incomplete, "did not bind the requested comparison"):
                             reader.pull(repo, fork_pull["number"], ["changedFiles", "additions", "deletions"])
                     reviewer.request(
                         "POST",
@@ -795,6 +795,45 @@ roadmap="operator/roadmap"
                         self.assertEqual(historical["headRefOid"], fork_pull["head"]["sha"])
                         self.assertEqual(historical["changedFiles"], 1)
                         self.assertEqual(historical["files"], [{"path": "Fork.lean", "additions": 1, "deletions": 0}])
+
+                    if retained_metadata:
+                        # A source can be reset onto its target while the PR stays
+                        # open. Real zero scalars must traverse bound empty pages.
+                        api.request(
+                            "POST",
+                            "repos/operator/content/contents/EmptyProof.lean",
+                            {
+                                "branch": "main",
+                                "new_branch": "empty-proof",
+                                "message": "Empty proof setup",
+                                "content": base64.b64encode(b"example : True := trivial\n").decode(),
+                            },
+                        )
+                        empty = api.request(
+                            "POST",
+                            "repos/operator/content/pulls",
+                            {
+                                "head": "empty-proof",
+                                "base": "main",
+                                "title": "Empty comparison proof",
+                            },
+                        )
+                        zero = empty["base"]["sha"]
+                        subprocess.run(
+                            ["git", "--git-dir", str(root / "repos/operator/content.git"), "update-ref", "--stdin"],
+                            input=f"update refs/heads/empty-proof {zero}\nupdate refs/pull/{empty['number']}/head {zero}\n",
+                            text=True,
+                            check=True,
+                            capture_output=True,
+                        )
+                        native_empty = api.pull(repo, empty["number"])
+                        self.assertEqual(
+                            [native_empty[k] for k in ["changed_files", "additions", "deletions"]], [0, 0, 0]
+                        )
+                        self.assertEqual(
+                            reader.pull(repo, empty["number"], ["files", "changedFiles", "additions", "deletions"]),
+                            {"files": [], "changedFiles": 0, "additions": 0, "deletions": 0},
+                        )
 
                     reviewer.post_comment(repo, pull["number"], "Preserved after account deletion")
                     api.request("DELETE", "admin/users/reviewer")

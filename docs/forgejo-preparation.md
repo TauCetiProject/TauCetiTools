@@ -159,7 +159,10 @@ not a historical comparison base. A deleted source fork is allowed only
 when the remaining native diff metadata is complete; requested files still need
 immutable head binding and a stable metadata re-read. Closed, unmerged file reads and every zero-stat reconstruction require every native
 file page to identify `X-Forgejo-Diff-Base` and `X-Forgejo-Diff-Head`, matching the
-stored comparison base and retained head. Stock Forgejo has no such headers and
+stored comparison base and retained head, plus `X-Forgejo-Diff-Format: 1`.
+Format 1 requires rename-preserving pagination and accurate per-file line totals;
+base/head headers alone are insufficient proof for reconstructing zero scalars.
+Stock Forgejo has no such headers and
 can partially or entirely erase a historical proposal by comparing it with today's
 base. Such observations are unavailable. Stock pure-rename pages also disagree
 with native line statistics; those reads are incomplete until the server preserves

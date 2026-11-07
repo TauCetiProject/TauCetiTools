@@ -87,11 +87,11 @@ class DirectTests(unittest.TestCase):
         self.assertEqual(meta, {"status": 200, "reason": "OK", "version": 10})
 
     def test_historical_file_pages_bind_both_commits_even_on_the_empty_last_page(self):
-        expected = {"X-Forgejo-Diff-Base": "b" * 40, "X-Forgejo-Diff-Head": "a" * 40}
+        expected = {"X-Forgejo-Diff-Base": "b" * 40, "X-Forgejo-Diff-Head": "a" * 40, "X-Forgejo-Diff-Format": "1"}
         self.reply = lambda path: (200, None if "page=2" in path else [{"filename": "Proof.lean"}], expected)
         rows = self.api.files(self.repo, 3, comparison_base="b" * 40, revision="a" * 40)
         self.assertEqual(rows, [{"filename": "Proof.lean"}])
-        for missing in ["X-Forgejo-Diff-Base", "X-Forgejo-Diff-Head"]:
+        for missing in ["X-Forgejo-Diff-Base", "X-Forgejo-Diff-Head", "X-Forgejo-Diff-Format"]:
             headers = {key: value for key, value in expected.items() if key != missing}
             self.reply = lambda path, headers=headers: (
                 200,

@@ -459,7 +459,11 @@ class Forgejo:
                 for value in [comparison_base, revision]
             ):
                 raise Incomplete("file comparison commit identities are unavailable")
-            expected = {"x-forgejo-diff-base": comparison_base, "x-forgejo-diff-head": revision}
+            expected = {
+                "x-forgejo-diff-base": comparison_base,
+                "x-forgejo-diff-head": revision,
+                "x-forgejo-diff-format": "1",
+            }
         # Forgejo 17 serializes apiFiles' nil slice as JSON null beyond the end.
         return self.collection(
             f"{self._repo(repository)}/pulls/{number}/files", empty_null=True, expected_headers=expected
