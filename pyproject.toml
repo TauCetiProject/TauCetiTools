@@ -15,6 +15,7 @@ test = ["PyYAML>=6"]
 
 [project.scripts]
 tauceti-tools = "tauceti_tools.cli:main"
+tauceti-gh = "tauceti_tools.forge_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["tauceti_tools"]

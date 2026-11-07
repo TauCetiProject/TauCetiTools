@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from tauceti_tools.project import ConfigError
+from tauceti_tools.project import ConfigError, Project
 from tauceti_tools.upstreams import guard, release, toolchain_for, update
 
 PIN = "leanprover/lean4:v4.36.0-rc1"
@@ -26,8 +26,9 @@ class UpstreamTests(unittest.TestCase):
                   "type": "git", "rev": "b" * 40, "inherited": True}
         before = {"packages": [direct, shared], "name": "Project"}
         expected = {"packages": [dict(direct, rev="c" * 40), dict(shared, rev="d" * 40)], "name": "Project"}
-        project = SimpleNamespace(raw={"upstreams": [{"package": "cslib", "repo": "leanprover/cslib",
-                                                     "branch": "main", "update": True}]})
+        project = Project({"repositories": {"content": "one/Project", "roadmap": "one/Roadmap"},
+                           "upstreams": [{"package": "cslib", "repo": "leanprover/cslib",
+                                          "branch": "main", "update": True}]})
         with tempfile.TemporaryDirectory() as tmp:
             base, candidate = (Path(tmp) / name for name in ("base", "candidate"))
             for root in (base, candidate):
