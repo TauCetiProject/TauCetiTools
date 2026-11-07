@@ -23,7 +23,10 @@ import tempfile
 import time
 from pathlib import Path
 
-from ci_git import Git, github_url, sha
+from ci_git import (
+    Git, cli_source_arguments, cli_source_repositories, github_url, repository_from_record,
+    repository_record, sha, source_urls,
+)
 
 STORE = ".ci-source.git"
 ROLES = {"head": "pr", "base": "base", "mergebase": "mergebase"}
@@ -118,10 +121,13 @@ def fetch_sources(
     workspace,
     *,
     token=None,
+    credential_origin=None,
     fetch_timeout=FETCH_TIMEOUT,
     attempts=FETCH_ATTEMPTS,
 ):
-    upstream, candidate = github_url(repository), github_url(head_repository)
+    upstream, candidate, forge = source_urls(
+        repository, head_repository, token=token, credential_origin=credential_origin, legacy_url=github_url
+    )
     head, base, mergebase = map(sha, (head, base, mergebase))
     workspace = workspace_path(workspace)
     store = workspace / STORE
@@ -131,7 +137,8 @@ def fetch_sources(
     started = time.monotonic()
     try:
         with tempfile.TemporaryDirectory(prefix="ci-source-home-") as home:
-            git = SourceGit(store, home, token=token, fetch_timeout=fetch_timeout)
+            git = SourceGit(store, home, token=token, token_origin=forge,
+                            follow_redirects=forge is None, fetch_timeout=fetch_timeout)
             if upstream.lower() == candidate.lower():
                 git.fetch_sources(upstream, [(base, "refs/ci/base"), (head, "refs/ci/head")], attempts=attempts)
             else:
@@ -154,9 +161,9 @@ def fetch_sources(
                 timeout=FETCH_TIMEOUT,
             )
             identity = dict(
-                schema=1,
-                repository=repository,
-                head_repository=head_repository,
+                schema=2 if forge is not None else 1,
+                repository=repository_record(repository) if forge is not None else repository,
+                head_repository=repository_record(head_repository) if forge is not None else head_repository,
                 head=head,
                 base=base,
                 mergebase=mergebase,
@@ -187,12 +194,17 @@ def materialize(workspace, role, commit):
     if (
         not isinstance(identity, dict)
         or type(identity.get("schema")) is not int
-        or identity["schema"] != 1
+        or identity["schema"] not in (1, 2)
         or identity.get(role) != commit
     ):
         raise ValueError("checkout differs from the fetched immutable identity")
-    upstream = github_url(identity["repository"])
-    candidate = github_url(identity["head_repository"])
+    if identity["schema"] == 2:
+        repository = repository_from_record(identity["repository"])
+        head_repository = repository_from_record(identity["head_repository"])
+        upstream, candidate, _forge = source_urls(repository, head_repository)
+    else:
+        upstream = github_url(identity["repository"])
+        candidate = github_url(identity["head_repository"])
     objects = store / "objects"
     if objects.is_symlink() or not objects.is_dir():
         raise ValueError("missing ordinary source objects")
@@ -250,6 +262,7 @@ def main():
     fetch.add_argument("--workspace", default=".")
     fetch.add_argument("--fetch-timeout", type=float, default=FETCH_TIMEOUT)
     fetch.add_argument("--github-env", type=Path)
+    cli_source_arguments(fetch)
     checkout = actions.add_parser("materialize")
     checkout.add_argument("--workspace", default=".")
     checkout.add_argument("--role", choices=ROLES, required=True)
@@ -259,7 +272,14 @@ def main():
     try:
         if action == "fetch":
             environment = args.pop("github_env")
-            result = fetch_sources(**args, token=os.environ.get("CI_GIT_TOKEN"))
+            source_kind = args.pop("source_kind")
+            repository, head_repository, credential = cli_source_repositories(
+                args["repository"], args["head_repository"], source_kind=source_kind,
+                source_origin=args.pop("source_origin"), credential_origin=args.pop("credential_origin"),
+            )
+            args.update(repository=repository, head_repository=head_repository)
+            token = os.environ.get("CI_SOURCE_GIT_TOKEN" if source_kind is not None else "CI_GIT_TOKEN")
+            result = fetch_sources(**args, token=token, credential_origin=credential)
             if environment is not None:
                 # Let the workflow exec Python directly, so runner cancellation
                 # reaches this process rather than a command-substitution shell.

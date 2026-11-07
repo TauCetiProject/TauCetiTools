@@ -192,6 +192,130 @@ ROOT_PATH = {root}/log
                     )
                     repo = RepositoryRef(api.forge, "operator/content")
                     reader = ForgejoReader(api)
+                    # Trusted CI helpers fetch complete histories directly from a
+                    # private source, with a source-only read token. No GitHub twin
+                    # or candidate-controlled Git metadata supplies these objects.
+                    ci_scripts = Path(__file__).resolve().parents[1] / "tauceti_tools/assets/scripts"
+                    with patch.object(sys, "path", [str(ci_scripts), *sys.path]):
+                        import ci_checkout
+                        import ci_git
+                    api.request("POST", "user/repos", {"name": "ci-source", "private": True, "auto_init": True})
+                    api.request(
+                        "POST",
+                        "repos/operator/ci-source/branches",
+                        {
+                            "new_branch_name": "candidate",
+                            "old_branch_name": "main",
+                        },
+                    )
+                    api.request(
+                        "POST",
+                        "repos/operator/ci-source/contents/Source.lean",
+                        {
+                            "branch": "candidate",
+                            "message": "CI source candidate",
+                            "content": base64.b64encode(b"example : True := trivial\n").decode(),
+                        },
+                    )
+                    ci_pull = api.request(
+                        "POST",
+                        "repos/operator/ci-source/pulls",
+                        {
+                            "head": "candidate",
+                            "base": "main",
+                            "title": "CI source candidate",
+                        },
+                    )
+                    native_repo = RepositoryRef(api.forge, "operator/ci-source")
+                    native_token_output = admin(
+                        "admin",
+                        "user",
+                        "generate-access-token",
+                        "--username",
+                        "operator",
+                        "--token-name",
+                        "ci-source-reader",
+                        "--scopes",
+                        "read:repository",
+                        "--raw",
+                    )
+                    native_tokens = re.findall(r"(?m)^[a-f0-9]{40}$", native_token_output)
+                    self.assertEqual(len(native_tokens), 1, "expected one source-only read token (output withheld)")
+                    ci_head, ci_base = ci_pull["head"]["sha"], ci_pull["base"]["sha"]
+                    resolved = ci_git.resolve(
+                        native_repo,
+                        native_repo,
+                        ci_head,
+                        "main",
+                        root / "ci-resolver.git",
+                        staging_ref="candidate",
+                        token=native_tokens[0],
+                        credential_origin=api.forge,
+                    )
+                    self.assertEqual(resolved["base_sha"], ci_base)
+                    self.assertEqual(resolved["mergebase"], ci_base)
+                    # Advance main after resolution: complete fetch/materialization
+                    # must retain B, rather than silently reading a newer main.
+                    api.request(
+                        "POST",
+                        "repos/operator/ci-source/contents/Later.lean",
+                        {
+                            "branch": "main",
+                            "message": "Main advanced",
+                            "content": base64.b64encode(b"example : True := trivial\n").decode(),
+                        },
+                    )
+                    ci_job = root / "ci-job"
+                    ci_job.mkdir()
+                    fetched = ci_checkout.fetch_sources(
+                        native_repo,
+                        native_repo,
+                        ci_head,
+                        ci_base,
+                        ci_base,
+                        ci_job,
+                        token=native_tokens[0],
+                        credential_origin=api.forge,
+                        attempts=1,
+                    )
+                    for role, commit in [("head", ci_head), ("base", ci_base), ("mergebase", ci_base)]:
+                        ci_checkout.materialize(ci_job, role, commit)
+                    self.assertEqual((ci_job / "pr/Source.lean").read_text(), "example : True := trivial\n")
+                    self.assertFalse((ci_job / "base/Source.lean").exists())
+                    self.assertFalse((ci_job / "base/Later.lean").exists())
+                    identity = json.loads((Path(fetched["store"]) / "identity.json").read_text())
+                    self.assertEqual(identity["schema"], 2)
+                    self.assertEqual(identity["repository"]["forge"]["url"], api.forge.url)
+                    self.assertNotIn(native_tokens[0], (Path(fetched["store"]) / "config").read_text())
+                    # Match the reusable workflow bootstrap: the helpers run
+                    # without installed packages, using only the pinned trusted
+                    # Tools checkout, even from an unrelated working directory.
+                    cli_env = dict(os.environ, PYTHONPATH=str(ci_scripts.parents[2]),
+                                   CI_SOURCE_GIT_TOKEN=native_tokens[0],
+                                   CI_GIT_TOKEN="execution-token-must-not-be-used", GH_TOKEN="another-execution-token")
+                    cli_job = root / "ci-cli-job"
+                    cli_job.mkdir()
+                    source_args = ["--repository", native_repo.name, "--head-repository", native_repo.name,
+                                   "--head", ci_head, "--source-kind", "forgejo", "--source-origin", api.forge.url,
+                                   "--credential-origin", api.forge.url]
+                    commands = [
+                        [str(ci_scripts / "ci_git.py"), "resolve", *source_args, "--base-ref", ci_base,
+                         "--staging-ref", "candidate", "--store", str(root / "ci-cli-resolver.git")],
+                        [str(ci_scripts / "ci_checkout.py"), "fetch", *source_args, "--base", ci_base,
+                         "--mergebase", ci_base, "--workspace", str(cli_job)],
+                        [str(ci_scripts / "ci_checkout.py"), "materialize", "--role", "head",
+                         "--commit", ci_head, "--workspace", str(cli_job)],
+                    ]
+                    for command in commands:
+                        child = subprocess.run([sys.executable, "-B", "-S", *command], cwd=root, env=cli_env,
+                                               capture_output=True, text=True, timeout=30)
+                        self.assertEqual(child.returncode, 0, "qualified CLI failed; credential diagnostics withheld")
+                        self.assertIsInstance(json.loads(child.stdout), dict)
+                        self.assertNotIn(native_tokens[0], child.stdout + child.stderr)
+                        self.assertNotIn(base64.b64encode(f"x-access-token:{native_tokens[0]}".encode()).decode(),
+                                         child.stdout + child.stderr)
+                    self.assertEqual((cli_job / "pr/Source.lean").read_text(), "example : True := trivial\n")
+
 
                     def await_mergeability(candidate):
                         # Native checking is asynchronous. Observe readiness

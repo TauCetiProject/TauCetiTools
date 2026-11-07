@@ -419,3 +419,41 @@ Use isolated configurations to test new pins. Production forge activation, live
 imports, mirroring, and state-service shutdown are separate migration operations.
 Fleet updates use the live path with admissions enabled and verify revisions,
 useful completions, interrupted work, and recovery afterward.
+
+## Qualified CI source histories
+
+The trusted `ci_git.resolve()` and `ci_checkout.fetch_sources()` helpers accept
+explicit `RepositoryRef` inputs for source and head repositories. Both must use
+the same forge. Legacy string inputs keep their fixed GitHub meaning and schema-1
+checkout identities. Qualified fetches write schema-2 identities with embedded
+forge/repository records; materialization preserves that source in credential-free
+remotes. Immutable head/base/merge-base verification, complete histories, fresh
+Git metadata, candidate-config isolation and read-only object mounts stay in place.
+
+When a token is supplied for a qualified source, the caller must independently
+supply its trusted `credential_origin` as a `Forge`. A request-controlled source
+cannot rebind that credential. Git receives only a source-origin-scoped header in
+a clean child environment; qualified transfers refuse redirects. Neither the
+identity file, persistent Git configuration nor command arguments contain the
+token. A different source/head forge, mixed legacy/qualified identities or a
+credential-origin mismatch fails before creating a store or starting Git.
+
+Both helper CLIs opt in with `--source-kind`, `--source-origin`, and, for
+authenticated reads, `--credential-origin`. This mode reads only
+`CI_SOURCE_GIT_TOKEN`, never the execution credentials `CI_GIT_TOKEN` or `GH_TOKEN`.
+Qualified operations require `tauceti_tools.forge` from the same pinned Tools
+package. The current reusable workflow exposes its trusted `.tauceti-tools`
+checkout through `PYTHONPATH` before invoking these helpers; standalone consumers
+must provide that dependency too. Never import it from candidate content.
+The workflow must obtain the credential origin from trusted configuration, not
+copy it from the dispatched request. Source arguments and these helpers do not
+validate queue admission, dispatch authorization or execution results.
+Existing workflows keep their legacy behavior until their trusted configuration,
+request validation and explicit source arguments are integrated.
+
+The real-server fixture fetches a private Forgejo repository using a read-only
+source token. It resolves a retained candidate, advances main, fetches the exact
+previous head/base histories and materializes isolated checkouts. The loopback
+redirect test verifies a second origin receives no request or credential. These
+are checkout proofs; the hosted HTTPS, real GitHub CI and complete queue cycle
+remain required.
