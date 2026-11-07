@@ -169,7 +169,7 @@ class Forgejo:
         else:
             self._opener = urllib.request.build_opener(_NoRedirect)
 
-    def request(self, method, path, data=None):
+    def request(self, method, path, data=None, *, response_headers=None):
         parsed = urllib.parse.urlsplit(path)
         if (
             parsed.scheme
@@ -191,11 +191,15 @@ class Forgejo:
         req = urllib.request.Request(self.forge.api_url + "/" + path.lstrip("/"), body, headers, method=method)
         try:
             with self._opener.open(req, timeout=self.timeout) as response:
+                if response_headers is not None:
+                    response_headers.update({key.lower(): value for key, value in response.headers.items()})
                 raw = response.read(self.max_bytes + 1)
                 if len(raw) > self.max_bytes:
                     error = Incomplete if method == "GET" else AmbiguousWrite
                     raise error("Forgejo response exceeded the configured byte limit")
                 if not raw:
+                    if method == "GET":
+                        raise Incomplete("Forgejo returned an empty read response")
                     return None
                 try:
                     return json.loads(raw)
@@ -211,24 +215,91 @@ class Forgejo:
             error = ForgeError if method == "GET" else AmbiguousWrite
             raise error(f"Forgejo {method} transport failed") from None
 
-    def collection(self, path):
+    def pages(self, path, *, empty_null=False, counted=False):
+        """Yield bounded pages, without claiming the caller consumed a complete collection.
+
+        A consumer may stop after its requested prefix. Consumers requiring the
+        entire history must exhaust the iterator; hitting the page bound raises.
+        """
         parsed = urllib.parse.urlsplit(path)
         if parsed.scheme or parsed.netloc or parsed.fragment:
             raise ValueError("collection path must be relative to the configured Forgejo API")
         query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
         if any(k in {"page", "limit"} for k, _ in query):
             raise ValueError("collection owns page and limit parameters")
-        rows = []
+        page_size = 50
+        if counted:
+            settings = self.request("GET", "settings/api")
+            cap = settings.get("max_response_items") if isinstance(settings, dict) else None
+            if type(cap) is not int or cap < 1:
+                raise Incomplete("Forgejo pagination settings are unavailable")
+            page_size = min(page_size, cap)
         for page in range(1, self.max_pages + 1):
-            parameters = urllib.parse.urlencode(query + [("limit", "50"), ("page", str(page))])
-            batch = self.request("GET", parsed.path + "?" + parameters)
+            parameters = urllib.parse.urlencode(query + [("limit", str(page_size)), ("page", str(page))])
+            headers = {}
+            batch = self.request("GET", parsed.path + "?" + parameters, response_headers=headers)
+            if batch is None and empty_null:
+                return  # Explicit native nil slice; only endpoints known to use it.
             if not isinstance(batch, list):
                 raise Incomplete("Forgejo collection response was not an array")
-            rows.extend(batch)
+            if counted:
+                try:
+                    total = int(headers["x-total-count"])
+                    if total < 0:
+                        raise ValueError
+                except (KeyError, ValueError):
+                    raise Incomplete("Forgejo collection count is unavailable") from None
+                yield batch
+                if page * page_size >= total:
+                    return
+                continue
             # Only an empty page proves completion: server-side limits may be below 50.
             if not batch:
-                return rows
+                return
+            yield batch
         raise Incomplete("Forgejo collection exceeded the configured page limit")
+
+    def collection(self, path, *, empty_null=False, counted=False):
+        return [row for batch in self.pages(path, empty_null=empty_null, counted=counted) for row in batch]
+
+    def _numbered(self, path, *, limit=None, predicate=None):
+        """Newest distinct issues/PRs, filtered before applying an optional limit.
+
+        Native listings must use creation-descending order. De-duplication handles
+        overlap when concurrent inserts shift page boundaries, not snapshot isolation.
+        """
+        if limit is not None and (type(limit) is not int or limit < 1):
+            raise ValueError("limit must be a positive integer")
+        rows, seen = [], set()
+        for batch in self.pages(path):
+            for row in batch:
+                if not isinstance(row, dict) or type(row.get("number")) is not int or row["number"] < 1:
+                    raise Incomplete("Forgejo listing did not identify an issue or PR")
+                number = row["number"]
+                if number in seen:
+                    continue
+                seen.add(number)
+                if predicate is None or predicate(row):
+                    rows.append(row)
+                    if limit is not None and len(rows) == limit:
+                        return rows
+        return rows
+
+    def _listing(self, repository, path, *, author=None, **options):
+        try:
+            return self._numbered(path, **options)
+        except ForgeError as error:
+            if error.status not in {400, 404} or author is None:
+                raise
+            # Do not turn an inaccessible repository into an empty result.
+            self.repository(repository)
+            try:
+                self.request("GET", "users/" + urllib.parse.quote(author, safe=""))
+            except ForgeError as user_error:
+                if user_error.status == 404:
+                    return []
+                raise
+            raise error
 
     def _repo(self, repository):
         if repository.forge != self.forge:
@@ -242,10 +313,142 @@ class Forgejo:
             raise Incomplete("Forgejo pull response did not identify the requested PR")
         return row
 
-    def pulls(self, repository, *, state="open"):
-        if state not in {"open", "closed", "all"}:
+    def pull_ref(self, repository, number):
+        repository.pull_url(number)
+        ref = f"refs/pull/{number}/head"
+        rows = self.request("GET", f"{self._repo(repository)}/git/refs/pull/{number}/head")
+        matches = (
+            [row for row in rows if isinstance(row, dict) and row.get("ref") == ref] if isinstance(rows, list) else []
+        )
+        obj = matches[0].get("object") if len(matches) == 1 else None
+        sha = obj.get("sha") if isinstance(obj, dict) else None
+        if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
+            raise Incomplete("Forgejo did not identify the retained pull head")
+        return sha
+
+    def pulls(self, repository, *, state="open", limit=None, author=None, base=None, head=None, labels=()):
+        if state not in {"open", "closed", "merged", "all"}:
             raise ValueError("invalid pull request state")
-        return self.collection(f"{self._repo(repository)}/pulls?state={state}&sort=oldest")
+        query = {"state": "closed" if state == "merged" else state}
+        for key, value in [("poster", author), ("base", base), ("head", head)]:
+            if value is not None:
+                query[key] = value
+
+        def matches(row):
+            if state in {"closed", "merged"}:
+                if not isinstance(row.get("merged"), bool):
+                    raise Incomplete("Forgejo listing did not identify merge state")
+                if row["merged"] != (state == "merged"):
+                    return False
+            for side, name in [("base", base), ("head", head)]:
+                if name is not None:
+                    branch = row.get(side)
+                    if not isinstance(branch, dict) or not isinstance(branch.get("label"), str):
+                        raise Incomplete("Forgejo listing did not identify its branch name")
+                    if branch["label"] != name:
+                        return False
+            return self._labels_match(row, labels) and self._author_match(row, author)
+
+        # Omitting sort uses Forgejo 17's creation-descending default. 'oldest'
+        # cannot serve a bounded newest-first prefix. Preserve server creation
+        # order: imported issues can have timestamps out of index order.
+        return self._listing(
+            repository,
+            f"{self._repo(repository)}/pulls?{urllib.parse.urlencode(query)}",
+            author=author,
+            limit=limit,
+            predicate=matches,
+        )
+
+    @staticmethod
+    def _labels_match(row, labels):
+        if not labels:
+            return True
+        if "labels" not in row:
+            raise Incomplete("Forgejo listing did not identify labels")
+        values = row["labels"] if row["labels"] is not None else []
+        if not isinstance(values, list) or any(
+            not isinstance(v, dict) or not isinstance(v.get("name"), str) for v in values
+        ):
+            raise Incomplete("Forgejo listing did not identify labels")
+        # Native issue label filtering is OR and ignores missing labels; gh's
+        # repeated --label flags require AND. Apply the requested contract here.
+        return {label.casefold() for label in labels} <= {v["name"].casefold() for v in values}
+
+    @staticmethod
+    def _author_match(row, author):
+        if author is None:
+            return True
+        user = row.get("user")
+        if not isinstance(user, dict) or not isinstance(user.get("login"), str):
+            raise Incomplete("Forgejo listing did not identify its author")
+        return user["login"].casefold() == author.casefold()
+
+    def issues(self, repository, *, state="open", limit=None, author=None, labels=()):
+        if state not in {"open", "closed", "all"}:
+            raise ValueError("invalid issue state")
+        query = {"state": state, "type": "issues", "sort": "latest"}
+        if author is not None:
+            query["created_by"] = author
+        return self._listing(
+            repository,
+            f"{self._repo(repository)}/issues?{urllib.parse.urlencode(query)}",
+            author=author,
+            limit=limit,
+            predicate=lambda row: (
+                row.get("pull_request") is None and self._labels_match(row, labels) and self._author_match(row, author)
+            ),
+        )
+
+    def issue(self, repository, number):
+        repository.pull_url(number)
+        row = self.request("GET", f"{self._repo(repository)}/issues/{number}")
+        if not isinstance(row, dict) or row.get("number") != number or row.get("pull_request") is not None:
+            raise Incomplete("Forgejo response did not identify the requested issue")
+        return row
+
+    def repository(self, repository):
+        row = self.request("GET", self._repo(repository))
+        if not isinstance(row, dict) or str(row.get("full_name", "")).lower() != repository.name.lower():
+            raise Incomplete("Forgejo response did not identify the requested repository")
+        return row
+
+    def current_user(self):
+        row = self.request("GET", "user")
+        if (
+            not isinstance(row, dict)
+            or type(row.get("id")) is not int
+            or row["id"] < 1
+            or not isinstance(row.get("login"), str)
+            or not row["login"]
+        ):
+            raise Incomplete("Forgejo response did not identify the authenticated account")
+        return row
+
+    def reviews(self, repository, number):
+        repository.pull_url(number)
+        # Visibility filtering happens after native pagination: an empty page
+        # can hide only other users' drafts while later submitted reviews exist.
+        return self.collection(f"{self._repo(repository)}/pulls/{number}/reviews", counted=True)
+
+    def review_comments(self, repository, number, review_id):
+        repository.pull_url(number)
+        repository.pull_url(review_id)
+        # Like issue comments, this endpoint is unpaginated in Forgejo 17.
+        rows = self.request("GET", f"{self._repo(repository)}/pulls/{number}/reviews/{review_id}/comments")
+        if not isinstance(rows, list):
+            raise Incomplete("Forgejo review comments response was not an array")
+        return rows
+
+    def files(self, repository, number):
+        repository.pull_url(number)
+        # Forgejo 17 serializes apiFiles' nil slice as JSON null beyond the end.
+        return self.collection(f"{self._repo(repository)}/pulls/{number}/files", empty_null=True)
+
+    def statuses(self, repository, revision):
+        if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", revision):
+            raise ValueError("commit statuses require an immutable object ID")
+        return self.collection(f"{self._repo(repository)}/commits/{revision}/statuses?sort=highestindex")
 
     def comments(self, repository, number):
         repository.pull_url(number)

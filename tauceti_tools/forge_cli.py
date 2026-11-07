@@ -14,40 +14,17 @@ import subprocess
 import sys
 import urllib.parse
 
-from .forge import GITHUB, Forge, ForgeError, Forgejo, Incomplete, RepositoryRef, Unsupported
+from .forge import GITHUB, Forge, ForgeError, Forgejo, RepositoryRef, Unsupported
+from .forge_read import ForgejoReader
 from .project import ConfigError, load
 
 
-def _emit(value, fields, query):
-    if fields:
+class _Parser(argparse.ArgumentParser):
+    def error(self, message):
+        raise Unsupported(message)
 
-        def project(row):
-            missing = set(fields) - set(row)
-            if missing:
-                known = {
-                    "number",
-                    "title",
-                    "body",
-                    "labels",
-                    "created_at",
-                    "updated_at",
-                    "url",
-                    "state",
-                    "author",
-                    "headRefOid",
-                    "headRefName",
-                    "baseRefName",
-                    "isDraft",
-                    "mergedAt",
-                    "createdAt",
-                    "updatedAt",
-                    "comments",
-                }
-                error = Incomplete if missing <= known else Unsupported
-                raise error("unavailable JSON fields: " + ", ".join(sorted(missing)))
-            return {field: row[field] for field in fields}
 
-        value = [project(row) for row in value] if isinstance(value, list) else project(value)
+def _emit(value, query):
     rendered = json.dumps(value, ensure_ascii=False) + "\n"
     if query:
         result = subprocess.run(["jq", "-r", query], input=rendered, text=True, capture_output=True)
@@ -56,34 +33,6 @@ def _emit(value, fields, query):
         return result.returncode
     sys.stdout.write(rendered)
     return 0
-
-
-def _pull(row):
-    if not isinstance(row, dict):
-        raise Incomplete("Forgejo PR response was not an object")
-    result = {key: row[key] for key in ("number", "title", "body", "labels", "created_at", "updated_at") if key in row}
-    for target, source in {
-        "url": "html_url",
-        "mergedAt": "merged_at",
-        "createdAt": "created_at",
-        "updatedAt": "updated_at",
-    }.items():
-        if source in row:
-            result[target] = row[source]
-    if "state" in row and "merged" in row:
-        result["state"] = "MERGED" if row["merged"] else str(row["state"]).upper()
-    if isinstance(row.get("draft"), bool):
-        result["isDraft"] = row["draft"]
-    if isinstance(row.get("user"), dict) and "login" in row["user"]:
-        result["author"] = {"login": row["user"]["login"]}
-    for target, parent, field in [
-        ("headRefOid", "head", "sha"),
-        ("headRefName", "head", "ref"),
-        ("baseRefName", "base", "ref"),
-    ]:
-        if isinstance(row.get(parent), dict) and field in row[parent]:
-            result[target] = row[parent][field]
-    return result
 
 
 def _checkout_repository(refs):
@@ -113,7 +62,7 @@ def _require_origin(env, name, forge):
 
 def run(argv, *, environment=None):
     env = os.environ if environment is None else environment
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         prog="tauceti-gh",
         description=__doc__,
         allow_abbrev=False,
@@ -141,22 +90,44 @@ def run(argv, *, environment=None):
     refs = [project.repository_ref(role) for role in project.raw["repositories"]]
     if all(ref.forge == GITHUB for ref in refs):
         return _delegate(native, env)
-    # The mixed-host foundation supports only these read commands. Validate the
-    # entire command before selecting a server or credential; native options on
-    # other subcommands have incompatible meanings (e.g. -f can be boolean).
+    # Read commands share a complete parser before routing or credentials.
+    # Other commands still fail closed; their flags have different meanings.
     args, command = parser.parse_known_args(native)
     options = None
-    if command[:2] == ["pr", "view"] and len(command) == 3:
-        int(command[2])
-    elif command[:2] == ["pr", "list"]:
-        listing = argparse.ArgumentParser(prog="gh pr list", allow_abbrev=False)
-        listing.add_argument("--state", "-s", choices=["open", "closed", "merged", "all"], default="open")
+    if command[:2] in (["pr", "view"], ["issue", "view"]) and len(command) == 3:
+        if not command[2].isascii() or not command[2].isdigit():
+            raise ValueError("issue/PR number must be an ASCII integer")
+        number = int(command[2])
+        if number < 1:
+            raise ValueError("issue/PR number must be positive")
+    elif command[:2] in (["pr", "list"], ["issue", "list"]):
+        listing = _Parser(prog="gh " + " ".join(command[:2]), allow_abbrev=False)
+        listing.add_argument(
+            "--state",
+            "-s",
+            choices=["open", "closed", "all"] + (["merged"] if command[0] == "pr" else []),
+            default="open",
+        )
         listing.add_argument("--limit", "-L", type=int, default=30)
+        listing.add_argument("--author", "-A")
+        listing.add_argument("--label", "-l", action="append", default=[])
+        if command[0] == "pr":
+            listing.add_argument("--base", "-B")
+            listing.add_argument("--head", "-H")
         options = listing.parse_args(command[2:])
         if options.limit < 1:
             raise ValueError("limit must be positive")
+        if any(not name.strip() for group in options.label for name in group.split(",")):
+            raise ValueError("labels must have nonempty names")
+    elif command[:2] == ["repo", "view"] and len(command) in {2, 3}:
+        if len(command) == 3:
+            if args.repo:
+                raise ValueError("specify the repository once")
+            args.repo = command[2]
     else:
-        raise Unsupported("mixed-project commands currently support pr view and pr list; no delegation was attempted")
+        raise Unsupported(
+            "mixed-project commands currently support pr/issue view/list and repo view; no delegation was attempted"
+        )
     selected = args.repo or env.get("GH_REPO")
     if not selected:
         repository = _checkout_repository(refs)
@@ -200,43 +171,27 @@ def run(argv, *, environment=None):
             raise ForgeError("Forgejo token file is empty")
     api = Forgejo(repository.forge, token=token)
     fields = args.json.split(",") if args.json else None
-    if command[:2] == ["pr", "view"] and len(command) == 3:
-        value = _pull(api.pull(repository, int(command[2])))
-        if fields and "comments" in fields:
-            comments = api.comments(repository, int(command[2]))
-            if any(
-                not isinstance(row, dict)
-                or not {"id", "body", "user", "html_url"} <= row.keys()
-                or not isinstance(row["user"], dict)
-                or "login" not in row["user"]
-                for row in comments
-            ):
-                raise Incomplete("Forgejo returned an incomplete comment")
-            value["comments"] = [
-                {
-                    "id": row["id"],
-                    "body": row.get("body"),
-                    "author": {"login": (row.get("user") or {}).get("login")},
-                    "url": row.get("html_url"),
-                }
-                for row in comments
-            ]
-    elif command[:2] == ["pr", "list"]:
-        rows = api.pulls(repository, state="closed" if options.state == "merged" else options.state)
-        by_number = {}
-        for row in rows:
-            if not isinstance(row, dict) or type(row.get("number")) is not int:
-                raise Incomplete("Forgejo list response did not identify a PR")
-            if options.state == "merged" and "merged" not in row:
-                raise Incomplete("Forgejo list response did not identify merge state")
-            if options.state != "merged" or row["merged"]:
-                by_number[row["number"]] = row
-        value = [_pull(by_number[number]) for number in sorted(by_number, reverse=True)[: options.limit]]
+    reader = ForgejoReader(api)
+    if command[:2] == ["pr", "view"]:
+        value = reader.pull(repository, number, fields)
+    elif command[:2] == ["issue", "view"]:
+        value = reader.issue(repository, number, fields)
+    elif command[:2] == ["repo", "view"]:
+        value = reader.repository(repository, fields)
     else:
-        raise Unsupported(
-            "Forgejo command is not implemented yet; supported: pr view, pr list. No GitHub fallback was attempted."
-        )
-    return _emit(value, fields, args.jq)
+        author = api.current_user()["login"] if options.author == "@me" else options.author
+        filters = {
+            "state": options.state,
+            "limit": options.limit,
+            "author": author,
+            "labels": [name for group in options.label for name in group.split(",")],
+        }
+        if command[0] == "pr":
+            filters.update(base=options.base, head=options.head)
+            value = reader.pulls(repository, fields, **filters)
+        else:
+            value = reader.issues(repository, fields, **filters)
+    return _emit(value, args.jq)
 
 
 def _delegate(argv, env):
