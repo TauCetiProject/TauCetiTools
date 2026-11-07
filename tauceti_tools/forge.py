@@ -219,7 +219,7 @@ class Forgejo:
             error = ForgeError if method == "GET" else AmbiguousWrite
             raise error(f"Forgejo {method} transport failed") from None
 
-    def pages(self, path, *, empty_null=False, counted=False):
+    def pages(self, path, *, empty_null=False, counted=False, expected_headers=None):
         """Yield bounded pages, without claiming the caller consumed a complete collection.
 
         A consumer may stop after its requested prefix. Consumers requiring the
@@ -242,6 +242,8 @@ class Forgejo:
             parameters = urllib.parse.urlencode(query + [("limit", str(page_size)), ("page", str(page))])
             headers = {}
             batch = self.request("GET", parsed.path + "?" + parameters, response_headers=headers)
+            if expected_headers and any(headers.get(key.lower()) != value for key, value in expected_headers.items()):
+                raise Incomplete("Forgejo collection did not bind the requested comparison commits")
             if batch is None and empty_null:
                 return  # Explicit native nil slice; only endpoints known to use it.
             if not isinstance(batch, list):
@@ -263,8 +265,12 @@ class Forgejo:
             yield batch
         raise Incomplete("Forgejo collection exceeded the configured page limit")
 
-    def collection(self, path, *, empty_null=False, counted=False):
-        return [row for batch in self.pages(path, empty_null=empty_null, counted=counted) for row in batch]
+    def collection(self, path, *, empty_null=False, counted=False, expected_headers=None):
+        return [
+            row
+            for batch in self.pages(path, empty_null=empty_null, counted=counted, expected_headers=expected_headers)
+            for row in batch
+        ]
 
     def _numbered(self, path, *, limit=None, predicate=None):
         """Newest distinct issues/PRs, filtered before applying an optional limit.
@@ -444,10 +450,24 @@ class Forgejo:
             raise Incomplete("Forgejo review comments response was not an array")
         return rows
 
-    def files(self, repository, number):
+    def files(self, repository, number, *, comparison_base=None, revision=None):
         repository.pull_url(number)
+        expected = None
+        if comparison_base is not None or revision is not None:
+            if any(
+                not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value)
+                for value in [comparison_base, revision]
+            ):
+                raise Incomplete("file comparison commit identities are unavailable")
+            expected = {
+                "x-forgejo-diff-base": comparison_base,
+                "x-forgejo-diff-head": revision,
+                "x-forgejo-diff-format": "1",
+            }
         # Forgejo 17 serializes apiFiles' nil slice as JSON null beyond the end.
-        return self.collection(f"{self._repo(repository)}/pulls/{number}/files", empty_null=True)
+        return self.collection(
+            f"{self._repo(repository)}/pulls/{number}/files", empty_null=True, expected_headers=expected
+        )
 
     def statuses(self, repository, revision):
         if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", revision):

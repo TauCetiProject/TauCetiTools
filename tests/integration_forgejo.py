@@ -20,7 +20,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tauceti_tools.forge import Forge, ForgeError, Forgejo, RepositoryRef
+from tauceti_tools.forge import Forge, ForgeError, Forgejo, Incomplete, RepositoryRef
 from tauceti_tools.forge_cli import run
 from tauceti_tools.forge_read import ForgejoReader
 
@@ -28,6 +28,7 @@ from tauceti_tools.forge_read import ForgejoReader
 class Integration(unittest.TestCase):
     def test_real_pr_and_cli(self):
         binary = os.environ.get("FORGEJO_BINARY")
+        retained_metadata = os.environ.get("FORGEJO_RETAINED_METADATA") == "1"
         if not binary:
             self.skipTest("set FORGEJO_BINARY to run a disposable server")
         with tempfile.TemporaryDirectory(prefix="tauceti-forgejo-") as tmp:
@@ -633,6 +634,36 @@ roadmap="operator/roadmap"
                             ],
                         },
                     )
+                    readme = api.request("GET", "repos/operator/content/contents/README.md?ref=main")
+                    api.request(
+                        "PUT",
+                        "repos/operator/content/contents/README-renamed.md",
+                        {
+                            "branch": "main",
+                            "new_branch": "rename-proof",
+                            "from_path": "README.md",
+                            "sha": readme["sha"],
+                            "message": "Rename readme",
+                            "content": readme["content"],
+                        },
+                    )
+                    rename_pull = api.request(
+                        "POST",
+                        "repos/operator/content/pulls",
+                        {"head": "rename-proof", "base": "main", "title": "Rename proof"},
+                    )
+                    if retained_metadata:
+                        renamed = reader.pull(repo, rename_pull["number"], ["files", "additions", "deletions"])
+                        self.assertEqual(
+                            renamed["files"], [{"path": "README-renamed.md", "additions": 0, "deletions": 0}]
+                        )
+                        self.assertEqual((renamed["additions"], renamed["deletions"]), (0, 0))
+                    else:
+                        # Stock slices the renamed destination without its old
+                        # path, counting it as a new file instead of a rename.
+                        with self.assertRaises(Incomplete):
+                            reader.pull(repo, rename_pull["number"], ["files"])
+                        self.assertGreater(sum(row["additions"] for row in api.files(repo, rename_pull["number"])), 0)
                     many = api.request(
                         "POST",
                         "repos/operator/content/pulls",
@@ -680,13 +711,130 @@ roadmap="operator/roadmap"
                     native = api.pull(repo, fork_pull["number"])
                     self.assertEqual(
                         {key: native[key] for key in ("changed_files", "additions", "deletions")},
-                        {"changed_files": 0, "additions": 0, "deletions": 0},
+                        {"changed_files": 1, "additions": 1, "deletions": 0}
+                        if retained_metadata
+                        else {"changed_files": 0, "additions": 0, "deletions": 0},
                     )
-                    self.assertEqual(
-                        reader.pull(repo, fork_pull["number"], ["changedFiles", "additions", "deletions"]),
-                        {"changedFiles": 1, "additions": 1, "deletions": 0},
+                    if retained_metadata:
+                        self.assertEqual(
+                            reader.pull(repo, fork_pull["number"], ["changedFiles", "additions", "deletions"]),
+                            {"changedFiles": 1, "additions": 1, "deletions": 0},
+                        )
+                    else:
+                        # Missing comparison/format headers prevent reconstruction;
+                        # on stock, rename pages cannot prove correct line totals.
+                        with self.assertRaisesRegex(Incomplete, "did not bind the requested comparison"):
+                            reader.pull(repo, fork_pull["number"], ["changedFiles", "additions", "deletions"])
+                    reviewer.request(
+                        "POST",
+                        "repos/reviewer/content/contents/ClosedFork.lean",
+                        {
+                            "branch": "main",
+                            "new_branch": "closed-fork",
+                            "message": "Closed fork proof",
+                            "content": base64.b64encode(b"example : True := trivial\n").decode(),
+                        },
+                    )
+                    closed_fork = reviewer.request(
+                        "POST",
+                        "repos/operator/content/pulls",
+                        {"head": "reviewer:closed-fork", "base": "main", "title": "Closed proposal"},
+                    )
+                    reviewer.request(
+                        "PATCH", f"repos/operator/content/pulls/{closed_fork['number']}", {"state": "closed"}
+                    )
+                    superseding = reviewer.request(
+                        "POST",
+                        "repos/operator/content/pulls",
+                        {"head": "reviewer:closed-fork", "base": "main", "title": "Superseding proposal"},
+                    )
+                    api.request(
+                        "POST",
+                        f"repos/operator/content/pulls/{superseding['number']}/merge",
+                        {"Do": "merge", "head_commit_id": superseding["head"]["sha"]},
                     )
                     api.request("DELETE", "repos/reviewer/content")
+                    deleted_fork = api.pull(repo, fork_pull["number"])
+                    self.assertIsNone(deleted_fork["head"]["repo"])
+                    self.assertEqual(
+                        {key: deleted_fork[key] for key in ["changed_files", "additions", "deletions"]},
+                        {"changed_files": 1, "additions": 1, "deletions": 0}
+                        if retained_metadata
+                        else {"changed_files": 0, "additions": 0, "deletions": 0},
+                    )
+                    self.assertIsNone(api.pull(repo, closed_fork["number"])["head"]["repo"])
+                    if retained_metadata:
+                        self.assertEqual(
+                            {
+                                key: api.pull(repo, closed_fork["number"])[key]
+                                for key in ["changed_files", "additions", "deletions"]
+                            },
+                            {"changed_files": 1, "additions": 1, "deletions": 0},
+                        )
+                        proposal = reader.pull(repo, closed_fork["number"], ["changedFiles", "files"])
+                        self.assertEqual(proposal["changedFiles"], 1)
+                        self.assertEqual(
+                            proposal["files"], [{"path": "ClosedFork.lean", "additions": 1, "deletions": 0}]
+                        )
+                    else:
+                        self.assertEqual(api.files(repo, closed_fork["number"]), [])
+                        with self.assertRaises(Incomplete):
+                            reader.pull(repo, closed_fork["number"], ["files"])
+                        for proposal in [fork_pull, closed_fork]:
+                            for field in ["changedFiles", "additions", "deletions", "files"]:
+                                with (
+                                    self.subTest(deleted_source_proposal=proposal["number"], field=field),
+                                    self.assertRaises(ForgeError),
+                                ):
+                                    reader.pull(repo, proposal["number"], [field])
+
+                    if retained_metadata:
+                        historical = reader.pull(
+                            repo, fork_pull["number"], ["headRefOid", "changedFiles", "additions", "deletions", "files"]
+                        )
+                        self.assertEqual(historical["headRefOid"], fork_pull["head"]["sha"])
+                        self.assertEqual(historical["changedFiles"], 1)
+                        self.assertEqual(historical["files"], [{"path": "Fork.lean", "additions": 1, "deletions": 0}])
+
+                    if retained_metadata:
+                        # A source can be reset onto its target while the PR stays
+                        # open. Real zero scalars must traverse bound empty pages.
+                        api.request(
+                            "POST",
+                            "repos/operator/content/contents/EmptyProof.lean",
+                            {
+                                "branch": "main",
+                                "new_branch": "empty-proof",
+                                "message": "Empty proof setup",
+                                "content": base64.b64encode(b"example : True := trivial\n").decode(),
+                            },
+                        )
+                        empty = api.request(
+                            "POST",
+                            "repos/operator/content/pulls",
+                            {
+                                "head": "empty-proof",
+                                "base": "main",
+                                "title": "Empty comparison proof",
+                            },
+                        )
+                        zero = empty["base"]["sha"]
+                        subprocess.run(
+                            ["git", "--git-dir", str(root / "repos/operator/content.git"), "update-ref", "--stdin"],
+                            input=f"update refs/heads/empty-proof {zero}\nupdate refs/pull/{empty['number']}/head {zero}\n",
+                            text=True,
+                            check=True,
+                            capture_output=True,
+                        )
+                        native_empty = api.pull(repo, empty["number"])
+                        self.assertEqual(
+                            [native_empty[k] for k in ["changed_files", "additions", "deletions"]], [0, 0, 0]
+                        )
+                        self.assertEqual(
+                            reader.pull(repo, empty["number"], ["files", "changedFiles", "additions", "deletions"]),
+                            {"files": [], "changedFiles": 0, "additions": 0, "deletions": 0},
+                        )
+
                     reviewer.post_comment(repo, pull["number"], "Preserved after account deletion")
                     api.request("DELETE", "admin/users/reviewer")
                     comments = reader.pull(repo, pull["number"], ["comments"])["comments"]
@@ -698,6 +846,18 @@ roadmap="operator/roadmap"
                         "repos/operator/content/branches",
                         {"new_branch_name": "proof", "old_branch_name": "main"},
                     )
+                    if retained_metadata:
+                        self.assertEqual(api.pull(repo, pull["number"])["head"]["sha"], pull["head"]["sha"])
+                        historical = reader.pull(
+                            repo,
+                            pull["number"],
+                            ["headRefOid", "changedFiles", "additions", "files", "statusCheckRollup"],
+                        )
+                        self.assertEqual(historical["headRefOid"], pull["head"]["sha"])
+                        self.assertEqual(historical["changedFiles"], 1)
+                        self.assertEqual(historical["files"], [{"path": "Proof.lean", "additions": 1, "deletions": 0}])
+                        self.assertEqual(historical["statusCheckRollup"][0]["state"], "SUCCESS")
+                        return
                     self.assertNotEqual(api.pull(repo, pull["number"])["head"]["sha"], pull["head"]["sha"])
                     for field in ["changedFiles", "additions", "headRefOid", "files", "statusCheckRollup"]:
                         with self.subTest(moved_closed_field=field), self.assertRaises(ForgeError):

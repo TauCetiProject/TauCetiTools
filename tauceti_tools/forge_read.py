@@ -132,7 +132,8 @@ def _diff_source(row):
     return (
         row.get("flow") == 0
         and isinstance(head, dict)
-        and isinstance(head.get("repo"), dict)
+        and "repo" in head
+        and (head["repo"] is None or isinstance(head["repo"], dict))
         and bool(head.get("sha"))
         and all(type(row.get(key)) is int and row[key] >= 0 for key in ("changed_files", "additions", "deletions"))
     )
@@ -303,9 +304,14 @@ class ForgejoReader:
             result.append(project(value, ["id", "state", "body", "submittedAt", "url", "commit", "author"]))
         return result
 
-    def _files(self, repository, number, revision):
+    def _files(self, repository, number, revision, *, comparison_base=None):
         result = []
-        for row in self.api.files(repository, number):
+        rows = (
+            self.api.files(repository, number, comparison_base=comparison_base, revision=revision)
+            if comparison_base is not None
+            else self.api.files(repository, number)
+        )
+        for row in rows:
             _object(row, "changed file")
             if any(type(row.get(key)) is not int or row[key] < 0 for key in ("additions", "deletions")):
                 raise Incomplete("Forgejo file line counts are unavailable")
@@ -368,7 +374,7 @@ class ForgejoReader:
     def _hydrate(self, row, repository, fields, *, pull):
         wanted = set(fields or ())
         historical_fields = {"headRefOid", "files", "statusCheckRollup", "changedFiles", "additions", "deletions"}
-        if pull and row.get("state") == "closed" and historical_fields & wanted:
+        if pull and row.get("state") == "closed" and (historical_fields & wanted):
             # Forgejo computes scalar stats from the current branch tip even
             # after closure. A reused branch is not the historical PR head.
             head = row.get("head")
@@ -381,6 +387,11 @@ class ForgejoReader:
             else wanted | ({"headRefOid"} if {"files", "statusCheckRollup"} & wanted or recover_stats else set())
         )
         value = pull_record(row, repository, base_fields) if pull else issue_record(row, repository, base_fields)
+        if pull and fields is None and row.get("state") == "closed":
+            # Default listings need only stable metadata. Historical diff fields
+            # require explicit selection and verified retained objects.
+            for key in historical_fields:
+                value.pop(key, None)
         if "comments" in wanted:
             value["comments"] = self._comments(repository, value["number"])
         if "reviews" in wanted:
@@ -390,14 +401,28 @@ class ForgejoReader:
                 raise Incomplete("Forgejo PR diff metadata is unavailable")
             if _zero_stats(row) and self.api.pull_ref(repository, value["number"]) != value.get("headRefOid"):
                 raise Incomplete("Forgejo retained pull head does not match the PR")
-            value["files"] = self._files(repository, value["number"], value.get("headRefOid"))
+            closed_unmerged = row.get("state") == "closed" and row.get("merged") is not True
+            require_bound_comparison = closed_unmerged or _zero_stats(row)
+            comparison_base = row.get("merge_base") if require_bound_comparison else None
+            if require_bound_comparison and (not isinstance(comparison_base, str) or not comparison_base):
+                raise Incomplete("Forgejo PR has no bound historical comparison base")
+            value["files"] = self._files(
+                repository, value["number"], value.get("headRefOid"), comparison_base=comparison_base
+            )
             count = row.get("changed_files")
             if not _zero_stats(row) and len(value["files"]) != count:
                 raise Incomplete("Forgejo file listing did not match the PR's changed-file count")
+            if not _zero_stats(row) and any(
+                sum(file[key] for file in value["files"]) != row.get(key) for key in ["additions", "deletions"]
+            ):
+                raise Incomplete("Forgejo file line totals did not match the PR's diff statistics")
             # Unlike status requests, the native file endpoint follows a mutable
             # PR. Refuse to combine files from a new head/base with old metadata.
             after = self.api.pull(repository, value["number"])
-            for side in ("head", "base"):
+            for key in ("state", "merged", "merge_base"):
+                if row.get(key) != after.get(key):
+                    raise Incomplete("Forgejo PR comparison changed while reading files")
+            for side in ("head",) if row.get("state") == "closed" else ("head", "base"):
                 before_ref, after_ref = row.get(side), after.get(side)
                 if (
                     not isinstance(before_ref, dict)
