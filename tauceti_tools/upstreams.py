@@ -70,7 +70,7 @@ def inspect(project, checkout: Path):
     require_toml(checkout)
     current = packages(json.loads((checkout / "lake-manifest.json").read_text()))
     proposed = []
-    for upstream in project.upstreams:
+    for upstream in project.github_upstreams:
         if not upstream.get("update", False):
             continue
         name, repo, branch = upstream["package"], upstream["repo"], upstream.get("branch", "main")
@@ -182,7 +182,7 @@ def guard(project, base: Path, merge_base: Path, candidate: Path):
     before = json.loads(contents(base, "lake-manifest.json"))
     after = json.loads(contents(candidate, "lake-manifest.json"))
     actual = packages(after)
-    allowed = {u["package"]: u for u in project.upstreams if u.get("update")}
+    allowed = {u["package"]: u for u in project.github_upstreams if u.get("update")}
     direct = []
     for package in packages(before).values():
         if package.get("inherited", False):

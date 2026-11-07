@@ -1,5 +1,5 @@
 name: pr-build
-run-name: ${{ github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging' && format('bors branch={0} batch={1} head={2} base={3}', github.event.client_payload.base_ref || 'unknown', github.event.client_payload.batch_id, github.event.client_payload.head_sha, github.event.client_payload.base_sha) || format('pr-build {0}', github.event.pull_request.number || inputs.pr || github.event.client_payload.pr || github.event.merge_group.head_sha || github.run_id) }}
+run-name: ${{ github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-source-candidate-v2' && format('source request={0}', github.event.client_payload.request.request_id) || github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging' && format('bors branch={0} batch={1} head={2} base={3}', github.event.client_payload.base_ref || 'unknown', github.event.client_payload.batch_id, github.event.client_payload.head_sha, github.event.client_payload.base_sha) || format('pr-build {0}', github.event.pull_request.number || inputs.pr || github.event.client_payload.pr || github.event.merge_group.head_sha || github.run_id) }}
 
 # Builds a deterministic integration of immutable PR head H with main B captured once
 # by the existing dispatch. Scope, review and approval remain bound to raw H and its
@@ -29,7 +29,9 @@ on:
       project_ref: {type: string, required: true}
       lean_root: {type: string, required: true}
       roadmap_dir: {type: string, required: true}
+      source_candidate_enabled: {type: boolean, default: false}
     secrets:
+      CI_SOURCE_READ_TOKEN: {required: false}
       APP_ID: {required: false}
       APP_PRIVATE_KEY: {required: false}
       FLEET_READ_TOKEN: {required: false}
@@ -49,18 +51,23 @@ concurrency:
   # Bors batch IDs identify one base branch. Incomplete dispatch identities use
   # the run ID so they cannot displace another candidate.
   group: >-
-    pr-build-${{ github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging' && (
+    pr-build-${{ github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-source-candidate-v2' && (
+      github.event.client_payload.request.request_id &&
+      format('source-{0}-{1}', github.repository_id, github.event.client_payload.request.request_id)
+      || format('source-run-{0}', github.run_id)
+    ) || github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging' && (
       github.event.client_payload.batch_id && github.event.client_payload.head_sha &&
       github.event.client_payload.base_sha && github.event.client_payload.base_ref &&
       format('bors-staging-{0}-{1}-{2}-{3}-{4}', github.repository_id, github.event.client_payload.batch_id,
         github.event.client_payload.head_sha, github.event.client_payload.base_sha, github.event.client_payload.base_ref)
       || format('bors-staging-run-{0}', github.run_id)
     ) || github.event.pull_request.number || inputs.pr || github.event.client_payload.pr || github.event.merge_group.head_sha }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ !(github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-source-candidate-v2') }}
 
 env:
+  SOURCE_CANDIDATE: ${{ github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-source-candidate-v2' }}
   MERGE_BACKEND: ${{ vars.MERGE_BACKEND || 'queue' }}
-  IS_BATCH: ${{ github.event_name == 'merge_group' || (github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging') }}
+  IS_BATCH: ${{ github.event_name == 'merge_group' || (github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-source-candidate-v2')) }}
   # Temporary escape hatch for `lake exe cache get`, kept only for an easy rollback
   # during the transition to the cache tool's new default read endpoint. Set the
   # variable to `1` to send cache reads back to the legacy storage endpoint. Clear it to
@@ -76,10 +83,10 @@ jobs:
   # Other Namespace builds retain 8CPU/16GB; rollback is the staging shape expression below.
   # https://namespace.so/docs/solutions/github-actions/runner-controls/job-ordering
   pick-runner:
-    if: github.event_name != 'merge_group' && (github.event_name != 'repository_dispatch' || github.event.action != 'tauceti-bors-staging' || vars.FLEET_CI_ENABLED == 'true')
+    if: github.event_name != 'merge_group' && (github.event_name != 'repository_dispatch' || (github.event.action != 'tauceti-bors-staging' && github.event.action != 'tauceti-source-candidate-v2') || vars.FLEET_CI_ENABLED == 'true')
     uses: ./.github/workflows/pick-runner.yml
     with:
-      fleet-staging: ${{ github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging' }}
+      fleet-staging: ${{ github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-source-candidate-v2') }}
     permissions:
       actions: read
       contents: read  # immutable fleet selector checkout
@@ -119,6 +126,10 @@ jobs:
       build-description: ${{ steps.report.outputs.build-description }}
       publication-required: ${{ steps.report.outputs.publication-required }}
       reported-toolchain: ${{ steps.cache_stage.outputs.toolchain }}
+      source-scope: ${{ steps.report.outputs.scope-state }}
+      source-bump-guard: ${{ steps.report.outputs.bump-guard-state }}
+      tested-sha: ${{ steps.integration.outputs.tested_sha }}
+      tested-tree: ${{ steps.integration.outputs.tested_tree }}
     env:
       BWRAP_VER: 0.9.0-1build1
       BWRAP_DEB_SHA256: dde30d1f24da50446d647ed504ec8dc5a714f171974d054c70a589b48ba38b48
@@ -150,6 +161,22 @@ jobs:
       # --- Trusted setup: no PR code runs until the sandboxed build phase ---
       # This is the commit that supplied the pull_request_target / merge_group workflow. All
       # executable audit, watchdog, cache, and bump-validation tooling comes from here.
+      - name: Validate source workflow pins before loading tooling
+        if: ${{ env.SOURCE_CANDIDATE == 'true' }}
+        env:
+          SOURCE_ENABLED: ${{ inputs.source_candidate_enabled }}
+          PROJECT_REF: ${{ inputs.project_ref }}
+          TOOLS_REF: ${{ inputs.tools_ref }}
+          TOOLS_REPOSITORY: ${{ inputs.tools_repository }}
+          ACTUAL_TOOLS_REF: ${{ job.workflow_sha }}
+          ACTUAL_TOOLS_REPOSITORY: ${{ job.workflow_repository }}
+        run: |
+          test "$SOURCE_ENABLED" = true
+          test "$PROJECT_REF" = "$GITHUB_WORKFLOW_SHA"
+          test "$TOOLS_REF" = "$ACTUAL_TOOLS_REF"
+          test "$TOOLS_REPOSITORY" = "$ACTUAL_TOOLS_REPOSITORY"
+          [[ "$PROJECT_REF" =~ ^[0-9a-f]{40}$ && "$TOOLS_REF" =~ ^[0-9a-f]{40}$ ]]
+
       - name: Checkout workflow-pinned trusted build tooling
         if: ${{ env.INFRA != '1' }}
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -171,9 +198,20 @@ jobs:
         if: ${{ env.INFRA != '1' }}
         env:
           PYTHONPATH: ${{ github.workspace }}/.tauceti-tools
+          CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
+          CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
+          CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
+          CI_SOURCE_HARNESS_FILE: ${{ job.workflow_file_path }}
         run: |
-          python3 -m tauceti_tools config environment --conf gate/tauceti.toml --github-env "$GITHUB_ENV"
-          python3 -m tauceti_tools materialize "$RUNNER_TEMP/tauceti-shared-scripts" --conf gate/tauceti.toml --policy-dir gate/scripts
+          if [ "${SOURCE_CANDIDATE:-false}" = true ]; then
+            python3 -m tauceti_tools.ci_candidate_workflow bootstrap \
+              --policy gate/.tauceti/ci-source.json --configuration gate/tauceti.toml \
+              --scripts "$RUNNER_TEMP/tauceti-shared-scripts" --policy-dir gate/scripts \
+              --output "$RUNNER_TEMP/source-bootstrap.json" --github-env "$GITHUB_ENV"
+          else
+            python3 -m tauceti_tools config environment --conf gate/tauceti.toml --github-env "$GITHUB_ENV"
+            python3 -m tauceti_tools materialize "$RUNNER_TEMP/tauceti-shared-scripts" --conf gate/tauceti.toml --policy-dir gate/scripts
+          fi
           cp -a "$RUNNER_TEMP/tauceti-shared-scripts/." gate/scripts/
           echo "PYTHONPATH=$PYTHONPATH" >> "$GITHUB_ENV"
       - name: Select CI API credentials
@@ -200,7 +238,18 @@ jobs:
           BORS_BATCH_ID: ${{ github.event.client_payload.batch_id }}
           BORS_BASE_REF: ${{ github.event.client_payload.base_ref }}
           REQUESTED_PR: ${{ inputs.pr || github.event.client_payload.pr }}
+          CI_SOURCE_READ_TOKEN: ${{ secrets.CI_SOURCE_READ_TOKEN }}
+          CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
+          CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
+          CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
+          CI_SOURCE_HARNESS_FILE: ${{ job.workflow_file_path }}
         run: |
+          if [ "${SOURCE_CANDIDATE:-false}" = true ]; then
+            exec python3 -m tauceti_tools.ci_candidate_workflow resolve \
+              --policy gate/.tauceti/ci-source.json --configuration gate/tauceti.toml \
+              --store "$RUNNER_TEMP/source-identity.git" --output "$RUNNER_TEMP/source-identity.json" \
+              --github-output "$GITHUB_OUTPUT" --github-env "$GITHUB_ENV"
+          fi
           if [ "${{ github.event_name }}" = "merge_group" ]; then
             # Build the COMBINED merge-group commit (current base + ALL batched PRs, squash-merged by
             # GitHub onto the gh-readonly-queue ref), not any single PR — so a batch is tested as a
@@ -296,8 +345,18 @@ jobs:
           SOURCE_HEAD: ${{ steps.pr.outputs.sha }}
           SOURCE_BASE: ${{ steps.pr.outputs.base_sha }}
           SOURCE_MERGEBASE: ${{ steps.pr.outputs.mergebase }}
+          CI_SOURCE_READ_TOKEN: ${{ secrets.CI_SOURCE_READ_TOKEN }}
+          CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
+          CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
+          CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
+          CI_SOURCE_HARNESS_FILE: ${{ job.workflow_file_path }}
         run: |
           set -euo pipefail
+          if [ "${SOURCE_CANDIDATE:-false}" = true ]; then
+            exec python3 -m tauceti_tools.ci_candidate_workflow fetch \
+              --policy gate/.tauceti/ci-source.json --configuration gate/tauceti.toml \
+              --workspace "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/source-fetch.json" --github-env "$GITHUB_ENV"
+          fi
           exec python3 gate/scripts/ci_checkout.py fetch --workspace "$GITHUB_WORKSPACE" \
             --repository "$SOURCE_REPOSITORY" --head-repository "$SOURCE_HEAD_REPOSITORY" \
             --head "$SOURCE_HEAD" --base "$SOURCE_BASE" --mergebase "$SOURCE_MERGEBASE" \
@@ -1013,9 +1072,19 @@ jobs:
           SCOPE_REPO: pr
           TESTED_BASE: ${{ steps.pr.outputs.base_sha }}
           TESTED_HEAD: ${{ steps.integration.outputs.tested_sha }}
+          CI_SOURCE_READ_TOKEN: ${{ secrets.CI_SOURCE_READ_TOKEN }}
+          CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
+          CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
+          CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
+          CI_SOURCE_HARNESS_FILE: ${{ job.workflow_file_path }}
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/lint-scope"
+          if [ "${SOURCE_CANDIDATE:-false}" = true ]; then
+            exec python3 -m tauceti_tools.ci_candidate_workflow lint-scope \
+              --policy gate/.tauceti/ci-source.json --configuration gate/tauceti.toml \
+              --checkout pr --destination "$out" --output "$RUNNER_TEMP/source-lint-scope.json" --github-env "$GITHUB_ENV"
+          fi
           bash gate/scripts/lint-scope.sh "$out"
           echo "LINT_SCOPE_DIR=$out" >> "$GITHUB_ENV"
 
@@ -1079,6 +1148,10 @@ jobs:
           S3_ARTIFACT_ENDPOINT: ${{ vars.LAKE_CACHE_ARTIFACT_ENDPOINT }}
           S3_REVISION_ENDPOINT: ${{ vars.LAKE_CACHE_REVISION_ENDPOINT }}
         run: |
+          if [ "${SOURCE_CANDIDATE:-false}" = true ]; then
+            test "$PUBLIC_ARTIFACT_ENDPOINT" = "$TAUCETI_CACHE_ARTIFACT_URL"
+            test "$PUBLIC_REVISION_ENDPOINT" = "$TAUCETI_CACHE_REVISION_URL"
+          fi
           if [ -n "$PUBLIC_ARTIFACT_ENDPOINT" ] && [ -n "$PUBLIC_REVISION_ENDPOINT" ]; then
             {
               echo "LAKE_CACHE_DIR=$PWD/pr/.lake/cache"
@@ -1372,6 +1445,10 @@ jobs:
           post_fail=0
           post_status() {
             local ctx="$1" st="$2" dsc="$3"
+            if [ "${SOURCE_CANDIDATE:-false}" = true ]; then
+              echo "$ctx-state=$st" >> "$GITHUB_OUTPUT"
+              return 0
+            fi
             # Save every result before the first write. The status-only retry
             # workflow replays these records without rerunning the build.
             args=(post --record-only --sha '${{ steps.pr.outputs.status_sha }}'
@@ -1512,7 +1589,9 @@ jobs:
           fi
           post_status scope "$sc_state" "$sc_desc"
 
-          CI_STATUS_MAX_WAIT=600 python3 gate/scripts/ci_status.py resume "$RUNNER_TEMP/tauceti-status-intents" || post_fail=1
+          if [ "${SOURCE_CANDIDATE:-false}" != true ]; then
+            CI_STATUS_MAX_WAIT=600 python3 gate/scripts/ci_status.py resume "$RUNNER_TEMP/tauceti-status-intents" || post_fail=1
+          fi
 
           # A status we could not post leaves the commit in the wedged state described above, so
           # fail the job loudly. This runs only after all three have been attempted.
@@ -1642,8 +1721,11 @@ jobs:
       artifact-name: lake-cache-staging-${{ needs.sandboxed-build.outputs.status-sha }}
       reported-toolchain: ${{ needs.sandboxed-build.outputs.reported-toolchain }}
       publication-required: true
+      project_ref: ${{ inputs.project_ref }}
+      source_candidate_enabled: ${{ github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-source-candidate-v2' && inputs.source_candidate_enabled }}
     secrets:
       LAKE_CACHE_KEY: ${{ secrets.LAKE_CACHE_KEY }}
+      CI_SOURCE_READ_TOKEN: ${{ secrets.CI_SOURCE_READ_TOKEN }}
 
   # The merge queue's required `build` status is posted only here. In a configured installation,
   # green therefore means both that the combined commit passed every sandboxed audit and that a
@@ -1655,7 +1737,7 @@ jobs:
     # Start beside publication so an unacquired publisher cannot suppress terminal reporting.
     # Finalizer (2x4) + publisher (4x8) fit within the freed compiler allocation (8x16).
     needs: sandboxed-build
-    if: ${{ always() && (github.event_name == 'merge_group' || (github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging')) }}
+    if: ${{ always() && (github.event_name == 'merge_group' || (github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-source-candidate-v2'))) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -1673,12 +1755,28 @@ jobs:
       BORS_BASE_SHA: ${{ github.event.client_payload.base_sha }}
       BORS_BASE_REF: ${{ github.event.client_payload.base_ref }}
     steps:
+      - name: Validate source finalizer pins before loading tooling
+        if: ${{ env.SOURCE_CANDIDATE == 'true' }}
+        env:
+          SOURCE_ENABLED: ${{ inputs.source_candidate_enabled }}
+          PROJECT_REF: ${{ inputs.project_ref }}
+          TOOLS_REF: ${{ inputs.tools_ref }}
+          TOOLS_REPOSITORY: ${{ inputs.tools_repository }}
+          ACTUAL_TOOLS_REF: ${{ job.workflow_sha }}
+          ACTUAL_TOOLS_REPOSITORY: ${{ job.workflow_repository }}
+        run: |
+          test "$SOURCE_ENABLED" = true
+          test "$PROJECT_REF" = "$GITHUB_WORKFLOW_SHA"
+          test "$TOOLS_REF" = "$ACTUAL_TOOLS_REF"
+          test "$TOOLS_REPOSITORY" = "$ACTUAL_TOOLS_REPOSITORY"
+
       - name: Check out workflow-pinned finalization tools
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ inputs.project_ref }}
           sparse-checkout: |
             tauceti.toml
+            .tauceti/ci-source.json
             scripts/finalize_batch.py
             scripts/bors_observation.py
             scripts/bors_train_identity.py
@@ -1695,9 +1793,20 @@ jobs:
       - name: Prepare trusted project scripts
         env:
           PYTHONPATH: ${{ github.workspace }}/.tauceti-tools
+          CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
+          CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
+          CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
+          CI_SOURCE_HARNESS_FILE: ${{ job.workflow_file_path }}
         run: |
-          python3 -m tauceti_tools config environment --conf ./tauceti.toml --github-env "$GITHUB_ENV"
-          python3 -m tauceti_tools materialize "$RUNNER_TEMP/tauceti-shared-scripts" --conf ./tauceti.toml --policy-dir ./scripts
+          if [ "${SOURCE_CANDIDATE:-false}" = true ]; then
+            python3 -m tauceti_tools.ci_candidate_workflow bootstrap \
+              --policy .tauceti/ci-source.json --configuration tauceti.toml \
+              --scripts "$RUNNER_TEMP/tauceti-shared-scripts" --policy-dir scripts \
+              --output "$RUNNER_TEMP/source-bootstrap.json" --github-env "$GITHUB_ENV"
+          else
+            python3 -m tauceti_tools config environment --conf ./tauceti.toml --github-env "$GITHUB_ENV"
+            python3 -m tauceti_tools materialize "$RUNNER_TEMP/tauceti-shared-scripts" --conf ./tauceti.toml --policy-dir ./scripts
+          fi
           cp -a "$RUNNER_TEMP/tauceti-shared-scripts/." ./scripts/
           echo "PYTHONPATH=$PYTHONPATH" >> "$GITHUB_ENV"
       - name: Select CI API credentials
@@ -1713,6 +1822,7 @@ jobs:
           status-app-private-key: ${{ secrets.CI_STATUS_APP_PRIVATE_KEY }}
 
       - name: Post the terminal merge-group build status
+        if: ${{ env.SOURCE_CANDIDATE != 'true' }}
         env:
           CI_STATUS_APP_ID: ${{ secrets.CI_STATUS_APP_ID }}
           CI_STATUS_APP_PRIVATE_KEY: ${{ secrets.CI_STATUS_APP_PRIVATE_KEY }}
@@ -1722,10 +1832,51 @@ jobs:
           TAUCETI_GITHUB_WRITE_ROLE: ${{ steps.ci-api.outputs.status-role }}
         run: python3 scripts/finalize_batch.py
       - name: Retain unpublished batch status
-        if: always()
+        if: ${{ always() && env.SOURCE_CANDIDATE != 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ci-status-intents-finalizer-${{ github.run_attempt }}
           path: ${{ runner.temp }}/tauceti-status-intent.json
           if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Produce the source execution result
+        id: source_result
+        if: ${{ always() && env.SOURCE_CANDIDATE == 'true' }}
+        env:
+          GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
+          SOURCE_JOB_RESULT: ${{ needs.sandboxed-build.result }}
+          SOURCE_BUILD_STATE: ${{ needs.sandboxed-build.outputs.build-state }}
+          SOURCE_SCOPE_STATE: ${{ needs.sandboxed-build.outputs.source-scope }}
+          SOURCE_BUMP_STATE: ${{ needs.sandboxed-build.outputs.source-bump-guard }}
+          SOURCE_PUBLICATION_STAGED: ${{ needs.sandboxed-build.outputs.publication-required }}
+          SOURCE_TESTED_COMMIT: ${{ needs.sandboxed-build.outputs.tested-sha }}
+          SOURCE_TESTED_TREE: ${{ needs.sandboxed-build.outputs.tested-tree }}
+          CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
+          CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
+          CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
+          CI_SOURCE_HARNESS_FILE: ${{ job.workflow_file_path }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os
+          from pathlib import Path
+          fields = {"job_result": "SOURCE_JOB_RESULT", "build_state": "SOURCE_BUILD_STATE",
+                    "scope": "SOURCE_SCOPE_STATE", "bump_guard": "SOURCE_BUMP_STATE",
+                    "publication_staged": "SOURCE_PUBLICATION_STAGED",
+                    "tested_commit": "SOURCE_TESTED_COMMIT", "tested_tree": "SOURCE_TESTED_TREE"}
+          value = {key: os.environ.get(name) for key, name in fields.items()}
+          (Path(os.environ["RUNNER_TEMP"]) / "source-build-evidence.json").write_text(json.dumps(value))
+          PYTHON
+          python3 -m tauceti_tools.ci_candidate_workflow finalize \
+            --policy .tauceti/ci-source.json --configuration tauceti.toml \
+            --evidence "$RUNNER_TEMP/source-build-evidence.json" \
+            --output "$RUNNER_TEMP/source-candidate-result.json" --github-output "$GITHUB_OUTPUT"
+
+      - name: Retain the source execution result
+        if: ${{ always() && env.SOURCE_CANDIDATE == 'true' && steps.source_result.outputs.artifact-name != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ steps.source_result.outputs.artifact-name }}
+          path: ${{ runner.temp }}/source-candidate-result.json
+          if-no-files-found: error
           retention-days: 7

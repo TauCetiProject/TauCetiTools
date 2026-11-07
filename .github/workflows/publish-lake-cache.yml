@@ -11,6 +11,8 @@ on:
     inputs:
       tools_repository: {type: string, required: true}
       tools_ref: {type: string, required: true}
+      project_ref: {type: string, default: ""}
+      source_candidate_enabled: {type: boolean, default: false}
       revision:
         description: Immutable TauCeti revision whose output map is being published
         required: true
@@ -33,6 +35,7 @@ on:
         description: Whether the revision map was uploaded and observed on the public endpoint
         value: ${{ jobs.publish.outputs.published }}
     secrets:
+      CI_SOURCE_READ_TOKEN: {required: false}
       LAKE_CACHE_KEY:
         required: false
 
@@ -50,6 +53,7 @@ jobs:
       published: ${{ steps.result.outputs.published }}
     env:
       TAUCETI_REPO: ${{ github.repository }}
+      SOURCE_CANDIDATE: ${{ inputs.source_candidate_enabled }}
     steps:
       - name: Check publisher isolation before receiving staged data
         env:
@@ -65,7 +69,33 @@ jobs:
           fi
       # Candidate configuration/code is never loaded on this runner. Cross-check
       # only the immutable toolchain pin; executable helpers come from the workflow.
+      - name: Validate source publisher pins
+        if: ${{ inputs.source_candidate_enabled }}
+        env:
+          PROJECT_REF: ${{ inputs.project_ref }}
+          TOOLS_REF: ${{ inputs.tools_ref }}
+          TOOLS_REPOSITORY: ${{ inputs.tools_repository }}
+          ACTUAL_TOOLS_REF: ${{ job.workflow_sha }}
+          ACTUAL_TOOLS_REPOSITORY: ${{ job.workflow_repository }}
+        run: |
+          test "$PROJECT_REF" = "$GITHUB_WORKFLOW_SHA"
+          test "$TOOLS_REF" = "$ACTUAL_TOOLS_REF"
+          test "$TOOLS_REPOSITORY" = "$ACTUAL_TOOLS_REPOSITORY"
+
+      - name: Check out the source publisher policy
+        if: ${{ inputs.source_candidate_enabled }}
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.project_ref }}
+          path: publisher-gate
+          sparse-checkout: |
+            tauceti.toml
+            .tauceti/ci-source.json
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Check out the immutable toolchain pin
+        if: ${{ !inputs.source_candidate_enabled }}
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ inputs.revision }}
@@ -79,13 +109,33 @@ jobs:
           repository: ${{ inputs.tools_repository }}
           ref: ${{ inputs.tools_ref }}
           path: publisher-tools
-          sparse-checkout: |
-            tauceti_tools/assets/scripts/lake_cache_publish.py
-            tauceti_tools/assets/scripts/ci_publication_observation.py
-            tauceti_tools/assets/scripts/lake_cache_probe.py
-            tauceti_tools/assets/scripts/lake_cache_reuse.py
+          sparse-checkout: tauceti_tools
           sparse-checkout-cone-mode: false
           persist-credentials: false
+
+      - name: Read the source candidate's immutable toolchain pin
+        if: ${{ inputs.source_candidate_enabled }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}/publisher-tools
+          CI_SOURCE_READ_TOKEN: ${{ secrets.CI_SOURCE_READ_TOKEN }}
+          CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
+          CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
+          CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
+          CI_SOURCE_HARNESS_FILE: ${{ job.workflow_file_path }}
+        run: |
+          python3 -m tauceti_tools.ci_candidate_workflow toolchain \
+            --policy publisher-gate/.tauceti/ci-source.json --configuration publisher-gate/tauceti.toml \
+            --store "$RUNNER_TEMP/source-publisher.git" --toolchain-output lean-toolchain \
+            --output "$RUNNER_TEMP/source-toolchain.json" --github-env "$GITHUB_ENV"
+
+      - name: Bind source publication to its configured public cache
+        if: ${{ inputs.source_candidate_enabled }}
+        env:
+          PUBLIC_ARTIFACT_ENDPOINT: ${{ vars.LAKE_CACHE_ARTIFACT_ENDPOINT_PUBLIC }}
+          PUBLIC_REVISION_ENDPOINT: ${{ vars.LAKE_CACHE_REVISION_ENDPOINT_PUBLIC }}
+        run: |
+          test "$PUBLIC_ARTIFACT_ENDPOINT" = "$TAUCETI_CACHE_ARTIFACT_URL"
+          test "$PUBLIC_REVISION_ENDPOINT" = "$TAUCETI_CACHE_REVISION_URL"
 
       - name: Download the staged oleans
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093

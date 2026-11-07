@@ -78,6 +78,14 @@ class Project:
     @property
     def upstreams(self):
         self._legacy_bindings()
+        return self.github_upstreams
+
+    @property
+    def github_upstreams(self):
+        """GitHub dependency operations, independent of the project's source forge."""
+        if any(resolve_repository(upstream["repo"], self.raw.get("forges")).forge != GITHUB
+               for upstream in self.raw.get("upstreams", [])):
+            raise ConfigError("This dependency operation requires explicitly configured GitHub upstreams")
         return [{**upstream, "repo": resolve_repository(upstream["repo"], self.raw.get("forges")).name}
                 for upstream in self.raw.get("upstreams", [])]
 
@@ -115,11 +123,11 @@ class Project:
 
     @property
     def roots(self) -> list[str]:
-        return self.raw.get("lean", {}).get("roots", [self.content.split("/")[1]])
+        return self.raw.get("lean", {}).get("roots", [self.repository_ref("content").name.split("/")[1]])
 
     @property
     def roadmap_dir(self) -> str:
-        return self.raw.get("roadmap", {}).get("active_dir", self.repos["roadmap"].split("/")[1])
+        return self.raw.get("roadmap", {}).get("active_dir", self.repository_ref("roadmap").name.split("/")[1])
 
     @property
     def completed_dir(self) -> str:
