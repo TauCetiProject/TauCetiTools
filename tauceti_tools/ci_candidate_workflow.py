@@ -15,6 +15,9 @@ from pathlib import Path
 
 from .assets.scripts import ci_checkout, ci_git
 from .ci_candidate import (
+    MAX_MEMBER_MANIFEST_BYTES,
+    MAX_MEMBERS,
+    MEMBER_MANIFEST_FILE,
     CandidateRequest,
     ExecutionPolicy,
     artifact_name,
@@ -56,6 +59,72 @@ def check_source_repository(policy, client):
         raise ValueError("source repository identity changed")
     if value.get("full_name") != policy.source.repository.name:
         raise ValueError("source repository name changed")
+
+
+def retained_members(request, policy, context, *, token=None, client=None):
+    """Read a request-bound data blob through an independently scoped native credential.
+
+    No candidate checkout, executable configuration or request-chosen path is
+    loaded. Commit/tree/blob links are checked with Git before the bounded blob
+    read, just as they are for the publisher's toolchain pin.
+    """
+    check_workflow_context(request, policy, context)
+    if request.member_manifest is None:
+        raise ValueError("candidate does not use retained membership")
+    client = client or Forgejo(policy.credential_origin, token=token, max_bytes=2 * MAX_MEMBER_MANIFEST_BYTES)
+    check_source_repository(policy, client)
+    with tempfile.TemporaryDirectory(prefix="source-members-") as directory:
+        root = Path(directory)
+        git = ci_git.Git(
+            root / "members.git", root, token=token, token_origin=policy.credential_origin, follow_redirects=False
+        )
+        git.run(
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--depth=1",
+            "--filter=tree:1",
+            policy.source.repository.clone_url,
+            f"+{request.manifest_ref}:refs/ci/members",
+        )
+        actual = git.run("rev-parse", "refs/ci/members").stdout.decode().strip()
+        if git.commit(actual) != request.member_manifest.commit:
+            raise ValueError("retained membership commit differs from the request")
+        commit_header = git.run("cat-file", "commit", actual).stdout.split(b"\n\n", 1)[0]
+        entries = git.run("ls-tree", "-z", actual).stdout.split(b"\0")
+        if len(entries) != 2 or entries[1] != b"":
+            raise ValueError("retained membership tree must contain exactly one data file")
+        metadata, name = entries[0].split(b"\t", 1)
+        mode, kind, blob_id = metadata.split(b" ")
+        if mode != b"100644" or kind != b"blob" or name != MEMBER_MANIFEST_FILE.encode():
+            raise ValueError("retained membership must be an ordinary data file")
+        blob_id = ci_git.sha(blob_id.decode("ascii"))
+    blob = client.request("GET", f"repos/{policy.source.repository.name}/git/blobs/{blob_id}")
+    manifest = request.member_manifest
+    if (
+        not isinstance(blob, dict)
+        or blob.get("sha") != blob_id
+        or blob.get("encoding") != "base64"
+        or type(blob.get("size")) is not int
+        or blob["size"] != manifest.size
+        or not isinstance(blob.get("content"), str)
+    ):
+        raise ValueError("invalid retained membership blob")
+    raw = base64.b64decode(blob["content"], validate=True)
+    if len(raw) != manifest.size or hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest() != blob_id:
+        raise ValueError("retained membership differs from its Git blob")
+    bound = request.bind_members(raw)
+    check_member_parents(bound, commit_header)
+    check_source_repository(policy, client)
+    return bound, raw
+
+
+def check_member_parents(request, header):
+    """The sole retained manifest ref keeps every accepted source history reachable."""
+    parents = tuple(line[7:].decode("ascii") for line in header.split(b"\n") if line.startswith(b"parent "))
+    if parents != request.accepted_heads:
+        raise ValueError("retained manifest parents differ from accepted member heads")
 
 
 def bootstrap(request, policy, context, configuration_path, scripts, *, policy_dir=None):
@@ -119,16 +188,29 @@ def resolve(request, policy, context, store, *, token=None, client=None):
     with tempfile.TemporaryDirectory(prefix="source-candidate-home-") as home:
         git = ci_git.Git(store, home, token=token, token_origin=policy.credential_origin, follow_redirects=False)
         refs = [(request.retained_ref, "refs/ci/head"), (request.base, "refs/ci/base")]
-        refs.extend((request.member_ref(m), f"refs/ci/member-{m.pr}") for m in request.members)
+        if request.member_manifest is not None:
+            refs.append((request.manifest_ref, "refs/ci/members"))
+        else:
+            refs.extend((request.member_ref(m), f"refs/ci/member-{m.pr}") for m in request.accepted_members)
         git.fetch(policy.source.repository.clone_url, refs)
         for ref, expected in [
             ("refs/ci/head", request.head),
             ("refs/ci/base", request.base),
-            *((f"refs/ci/member-{m.pr}", m.head) for m in request.members),
+            *(
+                ([("refs/ci/members", request.member_manifest.commit)])
+                if request.member_manifest is not None
+                else [(f"refs/ci/member-{m.pr}", m.head) for m in request.accepted_members]
+            ),
         ]:
             actual = git.run("rev-parse", ref).stdout.decode().strip()
             if git.commit(actual) != expected:
                 raise ValueError("retained source object differs from the request")
+        if request.member_manifest is not None:
+            check_member_parents(
+                request, git.run("cat-file", "commit", request.member_manifest.commit).stdout.split(b"\n\n", 1)[0]
+            )
+            for head in request.accepted_heads:
+                git.commit(head)
         if git.run("merge-base", "--all", request.base, request.head).stdout.decode().splitlines() != [request.base]:
             raise ValueError("candidate does not advance its exact source base")
         # The identity transfer deliberately omits trees. Read the tree OID
@@ -170,13 +252,27 @@ def fetch(request, policy, context, workspace, *, token=None, client=None):
         git = ci_checkout.SourceGit(
             Path(value["store"]), home, token=token, token_origin=policy.credential_origin, follow_redirects=False
         )
-        git.fetch_sources(
-            policy.source.repository.clone_url,
-            [(request.member_ref(m), f"refs/ci/member-{m.pr}") for m in request.members],
-        )
-        for member in request.members:
-            if git.run("rev-parse", f"refs/ci/member-{member.pr}").stdout.decode().strip() != member.head:
-                raise ValueError("fetched member differs from the accepted head")
+        if request.member_manifest is not None:
+            git.fetch_sources(policy.source.repository.clone_url, [(request.manifest_ref, "refs/ci/members")])
+            if (
+                git.commit(git.run("rev-parse", "refs/ci/members").stdout.decode().strip())
+                != request.member_manifest.commit
+            ):
+                raise ValueError("fetched member manifest differs from the request")
+            check_member_parents(
+                request, git.run("cat-file", "commit", request.member_manifest.commit).stdout.split(b"\n\n", 1)[0]
+            )
+            for head in request.accepted_heads:
+                git.commit(head)
+            git.run("commit-graph", "write", "--reachable")
+        else:
+            git.fetch_sources(
+                policy.source.repository.clone_url,
+                [(request.member_ref(m), f"refs/ci/member-{m.pr}") for m in request.accepted_members],
+            )
+            for member in request.accepted_members:
+                if git.run("rev-parse", f"refs/ci/member-{member.pr}").stdout.decode().strip() != member.head:
+                    raise ValueError("fetched member differs from the accepted head")
     check_source_repository(policy, client)
     return value
 
@@ -188,7 +284,7 @@ def member_size_policy(request, policy, context, workspace):
     values = {"SOURCE_SIZE_POLICY_COMPLETE": "1"}
     with tempfile.TemporaryDirectory(prefix="source-member-policy-") as home:
         git = ci_git.Git(Path(home) / "reader.git", home, objects=objects)
-        for member in request.members:
+        for member in request.accepted_members:
             git.commit(member.head)
             comparison = git.run("merge-base", "--all", request.base, member.head, check=False)
             if comparison.returncode == 1 and not comparison.stdout:
@@ -315,10 +411,12 @@ def toolchain_pin(request, policy, context, store, *, token=None, client=None):
 def native_lint_policy(request, policy, context, *, client):
     """Collect native metadata before any dependency executable runs on the job."""
     check_workflow_context(request, policy, context)
+    if len(request.accepted_members) > MAX_MEMBERS:
+        return False
     started = time.monotonic()
     try:
         check_source_repository(policy, client)
-        for member in request.members:
+        for member in request.accepted_members:
             if time.monotonic() - started > 45:
                 raise ValueError("native lint policy time bound reached")
             pull = client.request("GET", f"repos/{policy.source.repository.name}/pulls/{member.pr}")
@@ -582,6 +680,8 @@ def main(argv=None):
     parser.add_argument("--roadmap-dir")
     parser.add_argument("--base-dir")
     parser.add_argument("--mergebase-dir")
+    parser.add_argument("--members-file")
+    parser.add_argument("--members-output")
     args = parser.parse_args(argv)
     context = context_from_environment(os.environ)
     request, policy = load_request(
@@ -595,6 +695,19 @@ def main(argv=None):
     )
     # Only the independently provisioned native read credential is used here.
     token = os.environ.get("CI_SOURCE_READ_TOKEN") or None
+    if request.member_manifest is not None:
+        if args.command == "resolve":
+            if not args.members_output:
+                parser.error("retained membership resolution requires --members-output")
+            request, raw = retained_members(request, policy, context, token=token)
+            with open(args.members_output, "xb") as output:
+                output.write(raw)
+        elif args.command in {"fetch", "member-policy"}:
+            if not args.members_file:
+                parser.error("this operation requires verified --members-file")
+            with open(args.members_file, "rb") as source:
+                raw = source.read(MAX_MEMBER_MANIFEST_BYTES + 1)
+            request = request.bind_members(raw)
     if args.command == "bootstrap":
         if not args.scripts:
             parser.error("bootstrap requires --scripts")

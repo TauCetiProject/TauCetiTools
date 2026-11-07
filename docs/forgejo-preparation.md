@@ -462,14 +462,15 @@ available on GitHub Enterprise Server. See the [GitHub context reference](https:
 
 Requests bind a 128-bit queue epoch and request ID, native source and execution
 repository IDs, batch version, exact base, candidate commit/tree and accepted
-member heads. The current inline transport bounds the request to 60 KiB and 128
-members. The production-shaped large-batch rehearsal requires a retained member
-manifest transport before queue activation; silently splitting existing batches
-or treating this inline bound as a capacity proof is insufficient.
+member heads. Inline transport bounds the request to 60 KiB and 128 members.
+Larger batches use a retained member manifest, leaving the request and result
+small without truncating or splitting membership. The manifest bounds are 8,192
+members and 1 MiB of canonical JSON. These are transport limits; they do not
+establish queue or fleet capacity.
 Retained branch names are derived from the epoch and request ID:
-`refs/heads/tauceti-ci/EPOCH/REQUEST/candidate` and `member-PR`. The queue must
-protect these refs from subsequent mutation. CI fetches all retained heads in
-one transfer, verifies each SHA and candidate tree, and checks that the base is
+`refs/heads/tauceti-ci/EPOCH/REQUEST/candidate` and, for inline requests,
+`member-PR`. The queue must protect these refs from subsequent mutation. CI
+fetches retained sources, verifies each SHA and candidate tree, and checks that the base is
 the candidate's merge base. It rechecks the native repository ID before and after
 source transfers. Complete histories and sandbox materialization use the existing
 qualified Git helpers. The native read token is provided only to explicit host
@@ -477,6 +478,39 @@ read steps before dependency executables run; it is never a candidate sandbox
 variable or merge credential. Native branch/label policy is saved with the
 request digest in runner temporary storage. The later lint step reads that
 observation and local Git objects without native credentials or network access.
+
+For retained membership, the request's `members` value is
+`{"manifest":{"commit":"…","sha256":"…","count":1197,"size":123456}}`.
+The commit must be retained at the derived `members` branch under the same
+epoch/request namespace. Its tree contains exactly one ordinary `100644` file,
+`accepted-members.json`. The canonical data binds its schema
+`tauceti-ci.accepted-members/v1`, epoch, request ID and exact ordered list of
+`{"pr":NUMBER,"head":SHA}` members. Its parents must be exactly the accepted
+heads, deduplicated in first-occurrence order. Those parent links retain all
+source histories through one manifest branch, avoiding a push and a fetch
+argument for every member. The queue must durably record and protect the
+manifest and candidate refs before dispatch; manifested requests do not use
+per-member branches.
+
+Resolve verifies the native repository ID and retained manifest commit, reads
+the Git tree locally, and checks the bounded native blob response against its
+Git blob hash, SHA-256, byte size, count and request identity. It saves those exact
+bytes in runner temporary storage before resolving candidate/member refs. Fetch
+and member policy verify the saved bytes again; missing or changed membership
+fails closed. Membership-dependent operations cannot use an unresolved manifest
+as an empty list. The publisher and finalizer use the immutable descriptor and
+need no extra source access. Hydrating members leaves the wire request, request
+digest and result identity unchanged.
+
+Both source transfers verify the manifest commit and exact parent list. The
+complete-history store receives a commit graph before per-member checks. Member
+policy has a five-minute step limit; large batches select full-library lint
+without making a PR metadata request per member. Manifest output is created
+exclusively, and every later read checks its bytes again. A missing or corrupt
+queue-owned manifest is infrastructure evidence, not an author-policy rejection;
+the consumer must stop at its recovery bound and reconcile the retained request.
+It must never retry the same broken preparation indefinitely or replace its
+manifest silently.
 
 Source bootstrap materializes portable build scripts without exporting legacy
 unqualified source bindings. Native PR branch/label reads select lint scope;

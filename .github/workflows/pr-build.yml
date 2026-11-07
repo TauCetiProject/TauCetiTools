@@ -259,6 +259,7 @@ jobs:
             exec python3 -m tauceti_tools.ci_candidate_workflow resolve \
               --policy gate/.tauceti/ci-source.json --configuration gate/tauceti.toml \
               --store "$RUNNER_TEMP/source-identity.git" --output "$RUNNER_TEMP/source-identity.json" \
+              --members-output "$RUNNER_TEMP/source-members.json" \
               --github-output "$GITHUB_OUTPUT" --github-env "$GITHUB_ENV"
           fi
           if [ "${{ github.event_name }}" = "merge_group" ]; then
@@ -366,6 +367,7 @@ jobs:
           if [ "${SOURCE_CANDIDATE:-false}" = true ]; then
             exec python3 -m tauceti_tools.ci_candidate_workflow fetch \
               --policy gate/.tauceti/ci-source.json --configuration gate/tauceti.toml \
+              --members-file "$RUNNER_TEMP/source-members.json" \
               --workspace "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/source-fetch.json" --github-env "$GITHUB_ENV"
           fi
           exec python3 gate/scripts/ci_checkout.py fetch --workspace "$GITHUB_WORKSPACE" \
@@ -539,6 +541,7 @@ jobs:
           echo "SCOPE_OK=1" >> "$GITHUB_ENV"
 
       - name: Validate exact source member review sizes
+        timeout-minutes: 5
         if: ${{ env.SOURCE_CANDIDATE == 'true' && env.INFRA != '1' }}
         env:
           CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
@@ -548,6 +551,7 @@ jobs:
         run: |
           python3 -m tauceti_tools.ci_candidate_workflow member-policy \
             --policy gate/.tauceti/ci-source.json --configuration gate/tauceti.toml \
+            --members-file "$RUNNER_TEMP/source-members.json" \
             --workspace "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/source-member-policy.json" --github-env "$GITHUB_ENV"
 
       - name: Diff size guard — additions, deletions, and changed files each ≤ 2000 (trusted GitHub PR totals; Lake-pin bumps exempt from the line caps)
