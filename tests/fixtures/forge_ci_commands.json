@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "scope": "Accepted native-CI routing and refusal cases only. Values are synthetic substitutions into the cited source expressions. Qualified forms test routing, not complete consumer adaptations; legacy config accessors still reject mixed projects. Roadmap retry has no configured GitHub execution identity and must be refused even after host qualification. Exact-candidate admission is not implemented by these cases.",
-  "native_contract": "Installed gh 2.103.3 command help; workflow run --json is boolean, while run/list/view --json consumes a field list.",
+  "native_contract": "Installed gh 2.103.3 command help; workflow run --json is boolean, while run list, run view and workflow list --json consume a field list.",
   "cases": [
     {
       "id": "worker-maintenance-dispatch",

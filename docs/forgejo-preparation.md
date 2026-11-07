@@ -56,13 +56,16 @@ leading wrapper option). Mixed-project delegation is limited to the implemented
 commands and flags; other subcommands fail before routing or
 credential selection. Full command coverage remains preparation work.
 
-Mixed projects also support native GitHub Actions `run list/view/watch/rerun/`
-`cancel/delete/download` and `workflow list/view/run/enable/disable`, with their
+Mixed projects also support native GitHub Actions `run` subcommands
+`list/view/watch/rerun/cancel/delete/download` and `workflow` subcommands
+`list/view/run/enable/disable`, with their
 explicit command-specific flags. Without `-R` or `GH_REPO`, these commands select
 the trusted `[ci].repository`; a missing CI configuration is an error. Explicit
 selectors retain their host and override the configured CI default. CI selectors
 must identify a configured GitHub repository (CI, repository role, tool or
 upstream); an unconfigured GitHub twin of a Forgejo repository is rejected.
+Registry membership permits routing; native GitHub authorization and queue
+admission remain independent requirements.
 A Forgejo selector is rejected, and a bare name shared by Forgejo and GitHub remains
 ambiguous. Callers must qualify those names, for example
 `-R github.com/TauCetiProject/TauCeti`. No source repository is automatically
@@ -73,8 +76,10 @@ exit status pass through. `workflow run --json` reads stdin in native gh, while
 path values cannot select a server. The wrapper does not open Forgejo credentials
 for these commands. The existing Enterprise credential-origin guard still applies.
 Unknown commands and flags fail before delegation in mixed projects.
-Signal termination uses shell exit status `128 + signal`, and Ctrl-C returns 130
-without a Python traceback. Flag arities were checked against gh 2.103.3; native
+The CLI replaces its process with native gh, preserving the caller's PID,
+timeout ownership and native signal/exit behavior. In-process Python `run()`
+callers retain a subprocess and its return code. An interrupt before native
+execution returns 130 without a Python traceback. Flag arities were checked against gh 2.103.3; native
 CLI versions and option arities must be verified when preparing integrated
 installer pins. A worker inheriting a Forgejo `GH_REPO` must supply an explicit
 configured GitHub selector for CI commands.

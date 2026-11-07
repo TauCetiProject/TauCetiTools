@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import urllib.parse
+from functools import partial
 
 from . import forge_api
 from .forge import GITHUB, AmbiguousWrite, Forge, ForgeError, Forgejo, RepositoryRef, Unsupported
@@ -123,8 +124,9 @@ def _api_repository(command, refs, primary, env):
     return repository, context
 
 
-def run(argv, *, environment=None):
+def run(argv, *, environment=None, native_exec=False):
     env = os.environ if environment is None else environment
+    delegate = partial(_delegate, replace_process=True) if native_exec else _delegate
     if argv in (["--help"], ["-h"]):
         print("tauceti-gh [--conf PATH] COMMAND: direct Forgejo operations with native GitHub delegation")
         return 0
@@ -139,7 +141,7 @@ def run(argv, *, environment=None):
         if not source:
             raise Unsupported("--conf requires a nonempty value")
     if not source:
-        return _delegate(native, env)
+        return delegate(native, env)
     snapshot = env.get("TAUCETI_CONF_SNAPSHOT") if env.get("TAUCETI_CONF_SOURCE") == source else None
     project = load(snapshot or source)
     refs = [project.repository_ref(role) for role in project.raw["repositories"]]
@@ -150,7 +152,7 @@ def run(argv, *, environment=None):
     if "ci" in project.raw:
         refs.append(project.ci_repository_ref())
     if all(ref.forge == GITHUB for ref in refs):
-        return _delegate(native, env)
+        return delegate(native, env)
     command = parse_command(native)
     opts = command.options
     primary = project.repository_ref("content")
@@ -183,8 +185,8 @@ def run(argv, *, environment=None):
             _require_origin(env, "TAUCETI_GITHUB_ORIGIN", repository.forge)
         host = urllib.parse.urlsplit(repository.forge.url).netloc
         if command.group == "api":
-            return _delegate(native, {**env, "GH_HOST": host})
-        return _delegate(native, {**env, "GH_REPO": host + "/" + repository.name, "GH_HOST": host})
+            return delegate(native, {**env, "GH_HOST": host})
+        return delegate(native, {**env, "GH_REPO": host + "/" + repository.name, "GH_HOST": host})
     if command.group == "api":
         api_plan = forge_api.plan(command, context=api_context)
     if opts.get("jq", "").startswith("-"):
@@ -220,20 +222,22 @@ def run(argv, *, environment=None):
     return 0
 
 
-def _delegate(argv, env):
+def _delegate(argv, env, *, replace_process=False):
     executable = env.get("TAUCETI_REAL_GH") or shutil.which("gh", path=env.get("PATH"))
     if not executable or os.path.realpath(executable) == os.path.realpath(sys.argv[0]):
         raise Unsupported("real GitHub CLI not found; set TAUCETI_REAL_GH")
-    try:
-        status = subprocess.run([executable, *argv], env=env).returncode
-    except KeyboardInterrupt:
-        return 130
-    return status if status >= 0 else 128 - status
+    if replace_process:
+        # Keep the caller's PID/timeout/signal ownership. A subprocess wrapper
+        # could be killed while a dispatched workflow or download keeps running.
+        os.execvpe(executable, [executable, *argv], env)
+    return subprocess.run([executable, *argv], env=env).returncode
 
 
 def main():
     try:
-        return run(sys.argv[1:])
+        return run(sys.argv[1:], native_exec=True)
+    except KeyboardInterrupt:
+        return 130
     except AmbiguousWrite as error:
         print(f"gh: ambiguous-write: {error}", file=sys.stderr)
         return 2

@@ -2,6 +2,7 @@
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -127,6 +128,7 @@ class CIRouting(unittest.TestCase):
             ["-Rgithub.com/other/Builds", "run", "view", "123"],
             ["run", "--repo=github.com/other/Builds", "view", "123"],
             ["run", "view", "123", "--repo", "https://github.com/other/Builds"],
+            ["run", "view", "123", "--repo", "other/Builds"],
         ]:
             with self.subTest(argv=argv):
                 env = self.invoke(argv, {**self.env, "GH_REPO": "git.example.org/one/Project", "GH_HOST": "git.example.org"})
@@ -214,28 +216,27 @@ sys.exit(7)
             "host": "github.com", "repo": "github.com/one/Project",
         })
 
-    def test_native_signal_and_interrupt_have_shell_exit_statuses(self):
-        from tauceti_tools.forge_cli import _delegate
+    def test_interrupt_before_native_execution_is_clean(self):
+        from tauceti_tools.forge_cli import main
 
-        with patch("subprocess.run") as child:
-            child.return_value.returncode = -15
-            self.assertEqual(_delegate(["run", "watch", "123"], {"TAUCETI_REAL_GH": "/native-gh"}), 143)
-            child.side_effect = KeyboardInterrupt
-            self.assertEqual(_delegate(["run", "watch", "123"], {"TAUCETI_REAL_GH": "/native-gh"}), 130)
+        with patch("tauceti_tools.forge_cli.load", side_effect=KeyboardInterrupt), patch(
+            "sys.argv", ["tauceti-gh", "--conf", str(self.config), "run", "watch", "123"]
+        ):
+            self.assertEqual(main(), 130)
 
     @unittest.skipIf(os.name != "posix", "POSIX signal statuses")
-    def test_real_native_termination_and_parent_interrupt(self):
+    def test_real_native_signals_are_preserved(self):
         native = Path(self.temp.name) / "signalling-gh"
         native.write_text(f'''#!{sys.executable}
-import os, signal, time
+import os, signal
 if os.environ["TEST_NATIVE_SIGNAL"] == "TERM":
     os.kill(os.getpid(), signal.SIGTERM)
 else:
-    os.kill(os.getppid(), signal.SIGINT)
-    time.sleep(10)
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    os.kill(os.getpid(), signal.SIGINT)
 ''')
         native.chmod(0o700)
-        for mode, status in [("TERM", 143), ("INT", 130)]:
+        for mode, status in [("TERM", -signal.SIGTERM), ("INT", -signal.SIGINT)]:
             with self.subTest(mode=mode):
                 result = subprocess.run(
                     [sys.executable, "-m", "tauceti_tools.forge_cli", "--conf", str(self.config), "run", "watch", "123"],
@@ -244,6 +245,38 @@ else:
                 )
                 self.assertEqual(result.returncode, status, result.stderr)
                 self.assertEqual(result.stderr, "")
+
+    @unittest.skipIf(os.name != "posix", "POSIX exec and termination")
+    def test_cli_exec_keeps_caller_pid_and_timeout_ownership(self):
+        native = Path(self.temp.name) / "waiting-gh"
+        native.write_text(f'''#!{sys.executable}
+import os, time
+print(os.getpid(), flush=True)
+time.sleep(60)
+''')
+        native.chmod(0o700)
+        for termination in [signal.SIGTERM, signal.SIGKILL]:
+            with self.subTest(termination=termination), subprocess.Popen(
+                [sys.executable, "-m", "tauceti_tools.forge_cli", "--conf", str(self.config), "run", "watch", "123"],
+                env={"PATH": os.defpath, "TAUCETI_REAL_GH": str(native)},
+                cwd=Path(__file__).resolve().parents[1], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                start_new_session=True,
+            ) as process:
+                try:
+                    line = process.stdout.readline()
+                    self.assertEqual(int(line), process.pid)
+                    process.send_signal(termination)
+                    _, stderr = process.communicate(timeout=10)
+                    self.assertEqual(process.returncode, -termination)
+                    self.assertEqual(stderr, "")
+                finally:
+                    # Also clean up the stand-in if a regression leaves it as
+                    # an orphan behind the wrapper being tested.
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait(timeout=10)
 
 
 if __name__ == "__main__":
