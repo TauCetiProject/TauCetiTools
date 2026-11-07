@@ -403,6 +403,11 @@ roadmap="operator/roadmap"
                     reviewer.request("DELETE", "repos/reviewer/content/branches/fork-proof")
                     # Forgejo's converter now serializes failed GetShortStat as
                     # zeros. The reader must recover the retained PR's real diff.
+                    native = api.pull(repo, fork_pull["number"])
+                    self.assertEqual(
+                        {key: native[key] for key in ("changed_files", "additions", "deletions")},
+                        {"changed_files": 0, "additions": 0, "deletions": 0},
+                    )
                     self.assertEqual(
                         reader.pull(repo, fork_pull["number"], ["changedFiles", "additions", "deletions"]),
                         {"changedFiles": 1, "additions": 1, "deletions": 0},
@@ -414,6 +419,15 @@ roadmap="operator/roadmap"
                     self.assertEqual(comments[-1]["author"], {"login": "Ghost"})
                     self.assertEqual(api.issues(repo, author="definitely-unknown-user"), [])
                     self.assertEqual(api.pulls(repo, author="definitely-unknown-user"), [])
+                    api.request(
+                        "POST",
+                        "repos/operator/content/branches",
+                        {"new_branch_name": "proof", "old_branch_name": "main"},
+                    )
+                    self.assertNotEqual(api.pull(repo, pull["number"])["head"]["sha"], pull["head"]["sha"])
+                    for field in ["changedFiles", "additions", "headRefOid", "files", "statusCheckRollup"]:
+                        with self.subTest(moved_closed_field=field), self.assertRaises(ForgeError):
+                            reader.pull(repo, pull["number"], [field])
                 finally:
                     process.terminate()
                     try:

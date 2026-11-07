@@ -194,6 +194,15 @@ class ReadContracts(unittest.TestCase):
         with self.assertRaises(Incomplete):
             self.reader.pull(self.repo, 3, ["changedFiles"])
 
+    def test_closed_branch_statistics_must_describe_the_retained_pull_head(self):
+        self.api.pull.return_value.update(state="closed", merged=True, changed_files=9, additions=12, deletions=1)
+        self.api.pull_ref.return_value = "b" * 40
+        with self.assertRaises(Incomplete):
+            self.reader.pull(self.repo, 3, ["changedFiles", "additions", "deletions"])
+        for field in ["headRefOid", "files", "statusCheckRollup"]:
+            with self.subTest(field=field), self.assertRaises(Incomplete):
+                self.reader.pull(self.repo, 3, [field])
+
     def test_pending_reviews_belong_only_to_the_current_viewer(self):
         base = {
             "id": 8,

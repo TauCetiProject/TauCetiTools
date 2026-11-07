@@ -91,6 +91,10 @@ deleted fork branches and unsynchronized fork pushes. Those zeros are not expose
 directly: the reader verifies the retained pull ref, reads its complete file list,
 and reconstructs the counts. A genuinely empty diff remains a verified zero;
 mismatched refs or unavailable file histories raise `Incomplete`.
+Closed PRs whose branch has subsequently moved also reject scalar statistics
+instead of describing a newer branch tip. Exact historical diff/status metadata
+for reused closed branches remains a required native API/adapter contract before
+the reporting consumers or workers can activate Forgejo bindings.
 Forgejo's false mergeability also covers checking/error/draft, so it maps to
 `UNKNOWN`, never a proven conflict. Historical approvals do not imply a current
 `reviewDecision`; that field remains unsupported until native approval policy is

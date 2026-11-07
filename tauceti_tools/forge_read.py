@@ -367,6 +367,13 @@ class ForgejoReader:
 
     def _hydrate(self, row, repository, fields, *, pull):
         wanted = set(fields or ())
+        historical_fields = {"headRefOid", "files", "statusCheckRollup", "changedFiles", "additions", "deletions"}
+        if pull and row.get("state") == "closed" and historical_fields & wanted:
+            # Forgejo computes scalar stats from the current branch tip even
+            # after closure. A reused branch is not the historical PR head.
+            head = row.get("head")
+            if not isinstance(head, dict) or self.api.pull_ref(repository, row["number"]) != head.get("sha"):
+                raise Incomplete("Forgejo metadata describes a moved closed-PR branch")
         recover_stats = pull and _zero_stats(row) and bool({"changedFiles", "additions", "deletions"} & wanted)
         base_fields = (
             None
