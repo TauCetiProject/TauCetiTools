@@ -11,6 +11,7 @@ import re
 import subprocess
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 
 from .assets.scripts import ci_checkout, ci_git
@@ -490,6 +491,47 @@ def lint_scope(request, policy, context, checkout, destination, configuration_pa
     return {"LINT_ONLY_MODULES": str(destination / "modules.txt"), "LINT_SCOPE_DIR": str(destination)}
 
 
+def publication_timestamp(value):
+    """Parse the bounded UTC timestamps returned by the authenticated jobs API."""
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", value, re.ASCII):
+        raise EvidenceUnavailable("missing or invalid publication execution timestamp")
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as error:
+        raise EvidenceUnavailable("invalid publication execution timestamp") from error
+
+
+def publication_execution(run, builder, publisher):
+    """Reused jobs can have new IDs/current run_attempt but retain old timestamps."""
+    attempt_start = publication_timestamp(run.get("run_started_at"))
+    build_start = publication_timestamp(builder.get("started_at"))
+    build_end = publication_timestamp(builder.get("completed_at"))
+    publish_start = publication_timestamp(publisher.get("started_at"))
+    publish_end = publication_timestamp(publisher.get("completed_at"))
+    steps = publisher.get("steps")
+    if not isinstance(steps, list):
+        raise EvidenceUnavailable("missing publisher step evidence")
+    confirmations = [
+        step
+        for step in steps
+        if isinstance(step, dict) and step.get("name") == "Confirm the exact revision map on the public endpoint"
+    ]
+    if len(confirmations) != 1:
+        raise EvidenceUnavailable("missing or ambiguous publisher confirmation")
+    confirmation = confirmations[0]
+    confirm_start = publication_timestamp(confirmation.get("started_at"))
+    confirm_end = publication_timestamp(confirmation.get("completed_at"))
+    # Strictly later: equal second-resolution timestamps cannot distinguish a
+    # reused job from a fresh execution in an immediately requested rerun.
+    return (
+        attempt_start < build_start <= build_end <= publish_start <= confirm_start <= confirm_end <= publish_end
+        and builder.get("status") == "completed"
+        and builder.get("conclusion") == "success"
+        and confirmation.get("status") == "completed"
+        and confirmation.get("conclusion") == "success"
+    )
+
+
 def publication_verdict(request, policy, context, reader, *, clock=time.monotonic, sleep=time.sleep):
     """Require this attempt's isolated publisher and its exact-map confirmation."""
     if not policy.require_publication:
@@ -545,13 +587,9 @@ def publication_verdict(request, policy, context, reader, *, clock=time.monotoni
                 ):
                     raise EvidenceUnavailable("publisher did not acquire an isolated hosted runner")
             if job.get("status") == "completed":
-                confirmed = any(
-                    isinstance(step, dict)
-                    and step.get("name") == "Confirm the exact revision map on the public endpoint"
-                    and step.get("conclusion") == "success"
-                    for step in job.get("steps", [])
-                )
-                return "success" if acquired and job.get("conclusion") == "success" and confirmed else "infrastructure"
+                if acquired and job.get("conclusion") == "success" and publication_execution(run, builders[0], job):
+                    return "success"
+                return "infrastructure"
         if not acquired and clock() - start >= 300:
             return "infrastructure"
         sleep(30)

@@ -131,9 +131,9 @@ class Workflow(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     cw.bootstrap(self.request, self.policy, self.context, conf, Path(directory) / "scripts")
 
-    def publisher_reader(self, *, publisher_changes=None, run_changes=None, jobs_changes=None):
+    def publisher_reader(self, *, publisher_changes=None, builder_changes=None, run_changes=None, jobs_changes=None):
         metadata = run(self.request, self.policy)
-        metadata.update(status="in_progress", conclusion=None)
+        metadata.update(status="in_progress", conclusion=None, run_started_at="2026-11-07T20:37:33Z")
         metadata.update(run_changes or {})
         publisher = {
             "name": "validate / publish-merge-group-cache / publish",
@@ -143,10 +143,29 @@ class Workflow(unittest.TestCase):
             "runner_group_id": 0,
             "runner_group_name": "GitHub Actions",
             "labels": ["ubuntu-24.04"],
-            "steps": [{"name": "Confirm the exact revision map on the public endpoint", "conclusion": "success"}],
+            "started_at": "2026-11-07T20:40:00Z",
+            "completed_at": "2026-11-07T20:41:00Z",
+            "steps": [
+                {
+                    "name": "Confirm the exact revision map on the public endpoint",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "started_at": "2026-11-07T20:40:30Z",
+                    "completed_at": "2026-11-07T20:40:40Z",
+                }
+            ],
         }
         publisher.update(publisher_changes or {})
-        jobs = {"total_count": 2, "jobs": [{"name": "validate / sandboxed-build", "runner_id": 9001}, publisher]}
+        builder = {
+            "name": "validate / sandboxed-build",
+            "runner_id": 9001,
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-11-07T20:37:40Z",
+            "completed_at": "2026-11-07T20:39:50Z",
+        }
+        builder.update(builder_changes or {})
+        jobs = {"total_count": 2, "jobs": [builder, publisher]}
         jobs.update(jobs_changes or {})
 
         class Reader:
@@ -183,6 +202,59 @@ class Workflow(unittest.TestCase):
         ):
             result = cw.finalize(self.request, self.policy, self.context, self.evidence, reader=reader)
             self.assertEqual(result["verdicts"]["publication"], "infrastructure")
+
+    def test_publication_rejects_relabelled_jobs_with_old_execution_timestamps(self):
+        # The live partial-rerun rehearsal returned new IDs/run_attempt=2 for
+        # reused jobs whose steps and execution timestamps still came from 1.
+        for builder_changes, publisher_changes in (
+            (
+                {"id": 128521820800, "run_attempt": 2, "started_at": "2026-11-07T20:28:34Z"},
+                {},
+            ),
+            ({}, {"id": 128521820801, "run_attempt": 2, "started_at": "2026-11-07T20:33:00Z"}),
+            ({"started_at": "2026-11-07T20:37:33Z"}, {}),
+        ):
+            with self.subTest(builder=builder_changes, publisher=publisher_changes):
+                result = cw.finalize(
+                    self.request,
+                    self.policy,
+                    self.context,
+                    self.evidence,
+                    reader=self.publisher_reader(builder_changes=builder_changes, publisher_changes=publisher_changes),
+                )
+                self.assertEqual(result["verdicts"]["publication"], "infrastructure")
+
+    def test_publication_requires_complete_ordered_successful_execution_evidence(self):
+        baseline = self.publisher_reader()
+        path = "/actions/runs/101/attempts/2/jobs?per_page=100"
+        good_step = baseline.get(path)["jobs"][1]["steps"][0]
+        cases = [
+            {"run_changes": {"run_started_at": value}}
+            for value in (None, "", True, "2026-11-07", "2026-02-30T00:00:00Z", "2026-11-07T20:37:33+01:00")
+        ]
+        cases += [{"builder_changes": {"completed_at": None}}, {"builder_changes": {"conclusion": "failure"}}]
+        cases += [{"builder_changes": {"completed_at": "2026-11-07T20:40:01Z"}}]
+        cases += [{"publisher_changes": {"steps": value}} for value in (None, [], [good_step, good_step])]
+        cases += [
+            {"publisher_changes": {"steps": [dict(good_step, **change)]}}
+            for change in (
+                {"status": "in_progress"},
+                {"conclusion": "failure"},
+                {"started_at": "2026-11-07T20:33:10Z"},
+                {"completed_at": "2026-11-07T20:41:01Z"},
+                {"completed_at": None},
+            )
+        ]
+        for changes in cases:
+            with self.subTest(changes=changes):
+                result = cw.finalize(
+                    self.request,
+                    self.policy,
+                    self.context,
+                    self.evidence,
+                    reader=self.publisher_reader(**changes),
+                )
+                self.assertEqual(result["verdicts"]["publication"], "infrastructure")
 
     def test_publication_observation_retries_a_transient_api_failure_within_the_deadline(self):
         reader = self.publisher_reader()

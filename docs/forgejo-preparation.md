@@ -565,6 +565,13 @@ artifact named for the request, run and attempt. It binds all four verdicts
 Missing tested identity produces an infrastructure result. A required publication
 cannot be skipped by a build output: the finalizer checks this attempt's unique
 publisher job, separate hosted runner and successful exact-map confirmation step.
+GitHub can relabel a reused job with a new ID and the latest `run_attempt`.
+Publication therefore also requires authenticated execution timestamps: the
+successful builder must start strictly after the current `run_started_at`, finish
+before the publisher starts, and the successful confirmation must execute within
+the publisher's execution interval. Missing, malformed, ambiguous or old timing
+evidence yields infrastructure failure. Equal builder/attempt start timestamps
+also fail closed because the API's second precision cannot establish freshness.
 The publisher reads only the toolchain pin, bound through the verified commit,
 root tree, ordinary blob entry and blob hash; it never checks out candidate code.
 
