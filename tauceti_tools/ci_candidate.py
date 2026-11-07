@@ -510,6 +510,28 @@ def verify_result(request, policy, result, run, *, run_id, attempt):
     return dict(verdicts)
 
 
+def classify_verdicts(verdicts):
+    """Policy/source failures dominate unrelated infrastructure failures.
+
+    A skipped build cannot hide a decided policy rejection. Infrastructure may
+    be retried under the queue's bounded recovery policy; policy rejection needs
+    source review/repair rather than another identical dispatch.
+    """
+    _object(verdicts, VERDICTS, "candidate verdicts")
+    if any(
+        not isinstance(value, str) or value not in {"success", "failure", "infrastructure", "not_required"}
+        for value in verdicts.values()
+    ) or any(value == "not_required" for key, value in verdicts.items() if key != "publication"):
+        raise ValueError("invalid result verdict classification")
+    if verdicts["scope"] == "failure" or verdicts["bump_guard"] == "failure":
+        return "policy_failure"
+    if verdicts["build"] == "failure":
+        return "source_failure"
+    if any(value not in {"success", "not_required"} for value in verdicts.values()):
+        return "infrastructure"
+    return "passed"
+
+
 def verify_artifact(request, policy, metadata, archive, run, *, run_id, attempt):
     """Verify an immutable GitHub artifact without extracting any archive paths."""
     check_run_metadata(request, policy, run, run_id=run_id, attempt=attempt)

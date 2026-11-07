@@ -229,6 +229,22 @@ class CandidateContracts(unittest.TestCase):
         value = dict(self.run, conclusion="failure")
         self.assertEqual(self.verify(result, value)["build"], "failure")
 
+    def test_policy_and_source_failures_dominate_infrastructure_for_queue_recovery(self):
+        self.assertEqual(
+            cc.classify_verdicts(
+                dict(self.verdicts, build="infrastructure", scope="failure", publication="infrastructure")
+            ),
+            "policy_failure",
+        )
+        self.assertEqual(
+            cc.classify_verdicts(dict(self.verdicts, build="infrastructure", bump_guard="failure")), "policy_failure"
+        )
+        self.assertEqual(
+            cc.classify_verdicts(dict(self.verdicts, build="failure", publication="infrastructure")), "source_failure"
+        )
+        self.assertEqual(cc.classify_verdicts(dict(self.verdicts, publication="infrastructure")), "infrastructure")
+        self.assertEqual(cc.classify_verdicts(self.verdicts), "passed")
+
     def test_artifact_is_bound_to_its_request_run_attempt_and_digest(self):
         metadata, raw = self.archive()
         self.assertEqual(

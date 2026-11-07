@@ -13,12 +13,76 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from tauceti_tools.project import ConfigError, Project
-from tauceti_tools.upstreams import guard, release, toolchain_for, update
+from tauceti_tools.upstreams import ResolutionUnavailable, api, guard, release, sandbox_command, toolchain_for, update
 
 PIN = "leanprover/lean4:v4.36.0-rc1"
 
 
 class UpstreamTests(unittest.TestCase):
+    def test_candidate_manifest_shape_is_rejected_before_external_lookups(self):
+        direct = {"name": "mathlib", "type": "git", "url": "https://github.com/leanprover-community/mathlib4",
+                  "rev": "a" * 40, "inputRev": "master"}
+        malformed = [{}, [], {"packages": {}}, {"packages": [{}]},
+                     {"packages": [dict(direct, rev=17)]}, {"packages": [direct, direct]}]
+        with tempfile.TemporaryDirectory() as tmp:
+            base, candidate = (Path(tmp) / name for name in ("base", "candidate"))
+            for root in (base, candidate):
+                root.mkdir()
+                (root / "lakefile.toml").write_text('name = "Project"\n')
+                (root / "lean-toolchain").write_text(PIN + "\n")
+            (base / "lake-manifest.json").write_text(json.dumps({"packages": [direct]}))
+            for value in malformed:
+                with self.subTest(value=value), patch("tauceti_tools.upstreams.api") as lookup:
+                    (candidate / "lake-manifest.json").write_text(json.dumps(value))
+                    with self.assertRaises(ConfigError) as error:
+                        guard(SimpleNamespace(github_upstreams=[]), base, base, candidate)
+                    self.assertNotIsInstance(error.exception, ResolutionUnavailable)
+                    lookup.assert_not_called()
+            (candidate / "lake-manifest.json").write_text(json.dumps({"packages": [direct]}))
+            (base / "lake-manifest.json").write_text("[]")
+            with self.assertRaises(ResolutionUnavailable):
+                guard(SimpleNamespace(github_upstreams=[]), base, base, candidate)
+
+    def test_dependency_lookup_distinguishes_public_missing_pins_from_unavailable_reads(self):
+        def reply(status, value):
+            return subprocess.CompletedProcess([], 0 if status == 200 else 1,
+                                               f"HTTP/2 {status}\r\nContent-Type: application/json\r\n\r\n{json.dumps(value)}",
+                                               "credential detail must not appear in errors")
+
+        target = "repos/owner/dependency/compare/old...new"
+        for status in (404, 422):
+            for metadata in ({"private": False}, {"private": True}, {}):
+                with self.subTest(status=status, metadata=metadata), patch(
+                    "tauceti_tools.upstreams.subprocess.run",
+                    side_effect=[reply(status, {"message": "Not Found"}), reply(200, metadata)],
+                ) as run:
+                    expected = ConfigError if metadata.get("private") is False else ResolutionUnavailable
+                    with self.assertRaises(expected) as error:
+                        api(target)
+                    if expected is ConfigError:
+                        self.assertNotIsInstance(error.exception, ResolutionUnavailable)
+                    self.assertNotIn("credential detail", str(error.exception))
+                    self.assertEqual(run.call_args_list[0].args[0],
+                                     ["gh", "api", "--hostname", "github.com", "--include", target])
+                    self.assertEqual(run.call_args_list[1].args[0][-1], "repos/owner/dependency")
+        for status in (401, 403, 429, 500, 503):
+            with self.subTest(status=status), patch("tauceti_tools.upstreams.subprocess.run",
+                                                   return_value=reply(status, {"message": "unavailable"})):
+                with self.assertRaisesRegex(ResolutionUnavailable, f"HTTP {status}"):
+                    api(target)
+        for failure in (OSError("credential detail"), subprocess.TimeoutExpired("gh", 30)):
+            with self.subTest(failure=failure), patch("tauceti_tools.upstreams.subprocess.run", side_effect=failure):
+                with self.assertRaises(ResolutionUnavailable) as error:
+                    api(target)
+                self.assertNotIn("credential detail", str(error.exception))
+        with patch("tauceti_tools.upstreams.subprocess.run", return_value=reply(200, {"status": "ahead"})):
+            self.assertEqual(api(target), {"status": "ahead"})
+
+    def test_missing_sandbox_is_infrastructure(self):
+        with patch("tauceti_tools.upstreams.shutil.which", return_value=None):
+            with self.assertRaises(ResolutionUnavailable):
+                sandbox_command(Path("work"), Path("sysroot"), Path("driver"))
+
     def test_guard_reproduces_pins_from_base_and_rejects_tampering(self):
         direct = {"name": "cslib", "url": "https://github.com/leanprover/cslib", "type": "git",
                   "rev": "a" * 40, "inputRev": "main", "inherited": False}

@@ -86,7 +86,7 @@ jobs:
     if: github.event_name != 'merge_group' && !(github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-source-candidate-v2') && (github.event_name != 'repository_dispatch' || github.event.action != 'tauceti-bors-staging' || vars.FLEET_CI_ENABLED == 'true')
     uses: ./.github/workflows/pick-runner.yml
     with:
-      fleet-staging: ${{ github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-source-candidate-v2') }}
+      fleet-staging: ${{ github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging' }}
     permissions:
       actions: read
       contents: read  # immutable fleet selector checkout
@@ -129,6 +129,7 @@ jobs:
       source-scope: ${{ steps.report.outputs.scope-state }}
       source-bump-guard: ${{ steps.report.outputs.bump-guard-state }}
       source-scope-complete: ${{ steps.report.outputs.source-scope-complete }}
+      source-scope-rejected: ${{ steps.report.outputs.source-scope-rejected }}
       source-pins-known: ${{ steps.report.outputs.source-pins-known }}
       source-bump-complete: ${{ steps.report.outputs.source-bump-complete }}
       source-size-complete: ${{ steps.report.outputs.source-size-complete }}
@@ -396,10 +397,13 @@ jobs:
           # tooling and an isolated object reader. A batch's validated base is exact;
           # ordinary PRs need an exact merge base to exclude unrelated main changes.
           # Missing objects/metadata or unsafe line-format filenames fail closed.
+          scope_diff_available=1
           if { [ "${{ env.IS_BATCH }}" != "true" ] && [ "${MERGEBASE_EXACT:-0}" != "1" ]; } \
               || ! files=$(python3 gate/scripts/lint_scope_files.py \
                    pr "$SCOPE_BASE" "$SCOPE_HEAD" --policy); then
             files=""
+            scope_diff_available=0
+            echo "SOURCE_SCOPE_DIFF_UNKNOWN=1" >> "$GITHUB_ENV"
             echo "INFRA=1" >> "$GITHUB_ENV"
             echo "::warning::cannot determine the complete immutable scope — routing to human"
           fi
@@ -449,6 +453,9 @@ jobs:
             echo "empty lint repair PR from the review bot: building it for its full lint"
           fi
           if [ -z "$files" ] && [ "$repair_pr" = 0 ]; then
+            if [ "${SOURCE_CANDIDATE:-false}" = true ] && [ "$scope_diff_available" = 1 ]; then
+              echo 'SOURCE_EMPTY_DIFF=1' >> "$GITHUB_ENV"
+            fi
             echo "INFRA=1" >> "$GITHUB_ENV"; echo "::warning::no files / unable to list — cannot determine scope, routing to human"
           elif [ -n "$files" ]; then
             if echo "$files" | grep -vqE '^${{ inputs.lean_root }}/|^${{ inputs.lean_root }}\.lean$|^lake-manifest\.json$|^lean-toolchain$|^docbuild/docs/references\.bib$'; then
@@ -842,7 +849,17 @@ jobs:
           GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
           TAUCETI_GITHUB_READ_ROLE: ${{ steps.ci-api.outputs.read-role }}
           TAUCETI_GITHUB_WRITE_ROLE: ${{ steps.ci-api.outputs.status-role }}
+          CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
+          CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
+          CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
+          CI_SOURCE_HARNESS_FILE: ${{ job.workflow_file_path }}
         run: |
+          if [ "${SOURCE_CANDIDATE:-false}" = true ]; then
+            exec python3 -m tauceti_tools.ci_candidate_workflow bump-policy \
+              --policy gate/.tauceti/ci-source.json --configuration gate/tauceti.toml \
+              --base-dir base --mergebase-dir mergebase --checkout pr \
+              --output "$RUNNER_TEMP/source-bump-policy.json" --github-env "$GITHUB_ENV"
+          fi
           if bash gate/scripts/check-bump.sh base mergebase pr; then
             echo "BUMP_VALIDATED=1" >> "$GITHUB_ENV"
             echo "Lake-pin bump validated — building the exact candidate with its new pins."
@@ -1078,8 +1095,8 @@ jobs:
       - name: Decide the environment-lint scope
         if: ${{ env.INFRA != '1' }}
         env:
-          GH_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
-          GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
+          GH_TOKEN: ${{ env.SOURCE_CANDIDATE != 'true' && (steps.ci-api.outputs.read-token || github.token) || '' }}
+          GH_READ_TOKEN: ${{ env.SOURCE_CANDIDATE != 'true' && (steps.ci-api.outputs.read-token || github.token) || '' }}
           TAUCETI_GITHUB_READ_ROLE: ${{ steps.ci-api.outputs.read-role }}
           TAUCETI_GITHUB_WRITE_ROLE: ${{ steps.ci-api.outputs.status-role }}
           REPO: ${{ github.repository }}
@@ -1433,8 +1450,8 @@ jobs:
           CI_STATUS_APP_ID: ${{ env.SOURCE_CANDIDATE != 'true' && secrets.CI_STATUS_APP_ID || '' }}
           CI_STATUS_APP_PRIVATE_KEY: ${{ env.SOURCE_CANDIDATE != 'true' && secrets.CI_STATUS_APP_PRIVATE_KEY || '' }}
           CI_STATUS_MERGE_BACKEND: ${{ vars.MERGE_BACKEND || 'queue' }}
-          GH_TOKEN: ${{ steps.ci-api.outputs.status-token }}
-          GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
+          GH_TOKEN: ${{ env.SOURCE_CANDIDATE != 'true' && (steps.ci-api.outputs.status-token) || '' }}
+          GH_READ_TOKEN: ${{ env.SOURCE_CANDIDATE != 'true' && (steps.ci-api.outputs.read-token || github.token) || '' }}
           TAUCETI_GITHUB_READ_ROLE: ${{ steps.ci-api.outputs.read-role }}
           TAUCETI_GITHUB_WRITE_ROLE: ${{ steps.ci-api.outputs.status-role }}
           RAW_HEAD: ${{ steps.pr.outputs.sha }}
@@ -1474,6 +1491,19 @@ jobs:
           post_status() {
             local ctx="$1" st="$2" dsc="$3"
             if [ "${SOURCE_CANDIDATE:-false}" = true ]; then
+              if [ "$ctx" = scope ]; then
+                if [ "${OUT_OF_SCOPE:-}" = 1 ] || [ "${BUMP_BAD:-}" = 1 ] || [ "${TOO_LARGE:-}" = 1 ] \
+                     || [ "${NEWFILE_TOO_LONG:-}" = 1 ] || [ "${CONFIG_BAD:-}" = 1 ] || [ "${SOURCE_MEMBER_POLICY_REJECTED:-}" = 1 ] || [ "${SOURCE_EMPTY_DIFF:-}" = 1 ]; then
+                  st=failure
+                elif [ "${SCOPE_OK:-}" != 1 ] || [ "${SOURCE_SIZE_POLICY_COMPLETE:-}" != 1 ] || [ "${DIFF_UNKNOWN:-}" = 1 ] || [ "${SOURCE_SCOPE_DIFF_UNKNOWN:-}" = 1 ]; then
+                  st=infrastructure
+                else
+                  st=success
+                fi
+              fi
+              if [ "$ctx" = scope ] && [ "$st" = failure ]; then
+                echo 'source-scope-rejected=1' >> "$GITHUB_OUTPUT"
+              fi
               echo "$ctx-state=$st" >> "$GITHUB_OUTPUT"
               return 0
             fi
@@ -1898,6 +1928,7 @@ jobs:
           SOURCE_TESTED_COMMIT: ${{ needs.sandboxed-build.outputs.tested-sha }}
           SOURCE_TESTED_TREE: ${{ needs.sandboxed-build.outputs.tested-tree }}
           SOURCE_SCOPE_COMPLETE: ${{ needs.sandboxed-build.outputs.source-scope-complete }}
+          SOURCE_SCOPE_REJECTED: ${{ needs.sandboxed-build.outputs.source-scope-rejected }}
           SOURCE_PINS_KNOWN: ${{ needs.sandboxed-build.outputs.source-pins-known }}
           SOURCE_BUMP_COMPLETE: ${{ needs.sandboxed-build.outputs.source-bump-complete }}
           SOURCE_SIZE_COMPLETE: ${{ needs.sandboxed-build.outputs.source-size-complete }}
@@ -1915,7 +1946,8 @@ jobs:
                     "scope": "SOURCE_SCOPE_STATE", "bump_guard": "SOURCE_BUMP_STATE",
                     "publication_staged": "SOURCE_PUBLICATION_STAGED",
                     "tested_commit": "SOURCE_TESTED_COMMIT", "tested_tree": "SOURCE_TESTED_TREE",
-                    "scope_complete": "SOURCE_SCOPE_COMPLETE", "pins_known": "SOURCE_PINS_KNOWN",
+                    "scope_complete": "SOURCE_SCOPE_COMPLETE", "scope_rejected": "SOURCE_SCOPE_REJECTED",
+                    "pins_known": "SOURCE_PINS_KNOWN",
                     "bump_complete": "SOURCE_BUMP_COMPLETE",
                     "size_complete": "SOURCE_SIZE_COMPLETE", "infrastructure": "SOURCE_INFRASTRUCTURE",
                     "build_outcome": "SOURCE_BUILD_OUTCOME"}

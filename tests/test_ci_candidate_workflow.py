@@ -20,6 +20,7 @@ from tauceti_tools.assets.scripts import github_api
 from tauceti_tools.ci_candidate_evidence import EvidenceUnavailable, GitHubEvidence
 from tauceti_tools.forge import GITHUB
 from tauceti_tools.project import ConfigError, parse
+from tauceti_tools.upstreams import ResolutionUnavailable
 from tests import test_ci_candidate as fixtures
 
 context, policy, request, run = fixtures.context, fixtures.policy, fixtures.request, fixtures.run
@@ -58,6 +59,7 @@ class Workflow(unittest.TestCase):
             "bump_guard": "success",
             "publication_staged": "true",
             "scope_complete": "1",
+            "scope_rejected": "",
             "pins_known": "1",
             "bump_complete": "1",
             "size_complete": "1",
@@ -235,6 +237,16 @@ class Workflow(unittest.TestCase):
                 )
                 self.assertEqual(result["verdicts"][verdict], "infrastructure")
 
+    def test_decided_scope_rejection_survives_later_incomplete_checks(self):
+        result = cw.finalize(
+            self.request,
+            self.policy,
+            self.context,
+            dict(self.evidence, scope="failure", scope_rejected="1", size_complete="", build_outcome="skipped"),
+        )
+        self.assertEqual(result["verdicts"]["scope"], "failure")
+        self.assertEqual(cc.classify_verdicts(result["verdicts"]), "policy_failure")
+
     def test_explicitly_unrequired_publication_remains_bound_to_policy(self):
         config = replace(self.policy, require_publication=False)
         req = request(config)
@@ -339,6 +351,56 @@ class Evidence(unittest.TestCase):
 
 
 class PinGuard(unittest.TestCase):
+    def test_source_bump_policy_distinguishes_external_failure_from_rejected_pins(self):
+        config = policy()
+        req = request(config)
+        cases = [
+            (None, {"BUMP_VALIDATED": "1"}),
+            (ConfigError("backwards pin"), {"BUMP_BAD": "1", "INFRA": "1"}),
+            (subprocess.CalledProcessError(1, ["gh", "api"]), {"INFRA": "1"}),
+            (ResolutionUnavailable("toolchain unavailable"), {"INFRA": "1"}),
+        ]
+        for error, expected in cases:
+            with (
+                self.subTest(error=error),
+                patch.object(cw, "load", return_value=parse(CONFIG)),
+                patch("tauceti_tools.upstreams.guard", side_effect=error),
+            ):
+                self.assertEqual(
+                    cw.bump_policy(req, config, context(req, config), "trusted.toml", "base", "mergebase", "pr"),
+                    expected,
+                )
+
+    def test_member_policy_cli_stops_the_build_after_persisting_rejection_evidence(self):
+        config = policy()
+        req = request(config)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rejection = {"SOURCE_SIZE_POLICY_COMPLETE": "1", "TOO_LARGE": "1"}
+            with (
+                patch.object(cw, "load_request", return_value=(req, config)),
+                patch.object(cw, "context_from_environment", return_value=context(req, config)),
+                patch.object(cw, "member_size_policy", return_value=rejection),
+            ):
+                status = cw.main(
+                    [
+                        "member-policy",
+                        "--policy",
+                        "trusted-policy.json",
+                        "--configuration",
+                        "trusted.toml",
+                        "--workspace",
+                        str(root),
+                        "--output",
+                        str(root / "member-policy.json"),
+                        "--github-env",
+                        str(root / "environment"),
+                    ]
+                )
+            self.assertEqual(status, 1)
+            self.assertEqual(json.loads((root / "member-policy.json").read_text()), rejection)
+            self.assertIn("TOO_LARGE=1\n", (root / "environment").read_text())
+
     def member_policy(self, *, added_lines=0, existing_lines=0, pin_changed=False, binary=False):
         config = policy()
         with tempfile.TemporaryDirectory() as directory:
@@ -396,7 +458,7 @@ class PinGuard(unittest.TestCase):
         self.assertEqual(
             self.member_policy(existing_lines=2001, pin_changed=True), {"SOURCE_SIZE_POLICY_COMPLETE": "1"}
         )
-        self.assertEqual(self.member_policy(binary=True), {"SOURCE_SIZE_POLICY_COMPLETE": "0", "DIFF_UNKNOWN": "1"})
+        self.assertEqual(self.member_policy(binary=True), {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
 
     def test_source_pin_changes_use_the_configured_upstream_guard_without_legacy_source_bindings(self):
         root_tools = Path(__file__).resolve().parents[1]
@@ -518,7 +580,13 @@ class ShippedWorkflow(unittest.TestCase):
             child = subprocess.run(
                 ["bash", "-euo", "pipefail", "-c", function],
                 cwd=root,
-                env=dict(os.environ, SOURCE_CANDIDATE="true", GITHUB_OUTPUT=str(output)),
+                env=dict(
+                    os.environ,
+                    SOURCE_CANDIDATE="true",
+                    SCOPE_OK="1",
+                    SOURCE_SIZE_POLICY_COMPLETE="1",
+                    GITHUB_OUTPUT=str(output),
+                ),
                 capture_output=True,
                 text=True,
             )
@@ -547,6 +615,8 @@ class ShippedWorkflow(unittest.TestCase):
                 MERGE_BACKEND="bors",
                 IS_BATCH="true",
                 OUT_OF_SCOPE="1",
+                SCOPE_OK="1",
+                SOURCE_SIZE_POLICY_COMPLETE="1",
                 RAW_HEAD="a" * 40,
                 CAPTURED_BASE="b" * 40,
                 CANDIDATE_MODE="frozen-candidate",
@@ -560,6 +630,39 @@ class ShippedWorkflow(unittest.TestCase):
             )
             self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
             self.assertIn("scope-state=failure\n", output.read_text())
+
+    def test_source_scope_reports_its_own_policy_independently_of_publication_outages(self):
+        shell = self.step("Report build and bump-guard statuses to the PR head commit")["run"]
+        start = shell.index("post_status() {")
+        function = shell[start : shell.index("\n}", start)] + '\n}\npost_status scope failure "unrelated outage"\n'
+        cases = [
+            ({"INFRA": "1"}, "success"),
+            ({"SCOPE_OK": ""}, "infrastructure"),
+            ({"SOURCE_SIZE_POLICY_COMPLETE": ""}, "infrastructure"),
+            ({"TOO_LARGE": "1"}, "failure"),
+            ({"SOURCE_MEMBER_POLICY_REJECTED": "1"}, "failure"),
+            ({"SOURCE_SCOPE_DIFF_UNKNOWN": "1"}, "infrastructure"),
+            ({"SOURCE_EMPTY_DIFF": "1", "SOURCE_SIZE_POLICY_COMPLETE": ""}, "failure"),
+        ]
+        for flags, expected in cases:
+            with self.subTest(flags=flags), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "output"
+                env = dict(
+                    os.environ,
+                    SOURCE_CANDIDATE="true",
+                    SCOPE_OK="1",
+                    SOURCE_SIZE_POLICY_COMPLETE="1",
+                    GITHUB_OUTPUT=str(output),
+                )
+                env.update(flags)
+                child = subprocess.run(
+                    ["bash", "-euo", "pipefail", "-c", function], env=env, capture_output=True, text=True
+                )
+                self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
+                self.assertEqual(
+                    output.read_text(),
+                    ("source-scope-rejected=1\n" if expected == "failure" else "") + f"scope-state={expected}\n",
+                )
 
     def test_native_secret_is_only_in_explicit_source_read_steps(self):
         jobs = self.value["jobs"]

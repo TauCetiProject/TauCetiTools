@@ -25,7 +25,7 @@ from .ci_candidate import (
 )
 from .ci_candidate_evidence import EvidenceUnavailable, GitHubEvidence
 from .forge import GITHUB, ForgeError, Forgejo
-from .project import load
+from .project import ConfigError, load
 from .templates import materialize
 
 
@@ -171,7 +171,8 @@ def fetch(request, policy, context, workspace, *, token=None, client=None):
             Path(value["store"]), home, token=token, token_origin=policy.credential_origin, follow_redirects=False
         )
         git.fetch_sources(
-            policy.source.repository.clone_url, [(m.head, f"refs/ci/member-{m.pr}") for m in request.members]
+            policy.source.repository.clone_url,
+            [(request.member_ref(m), f"refs/ci/member-{m.pr}") for m in request.members],
         )
         for member in request.members:
             if git.run("rev-parse", f"refs/ci/member-{member.pr}").stdout.decode().strip() != member.head:
@@ -191,7 +192,8 @@ def member_size_policy(request, policy, context, workspace):
             git.commit(member.head)
             bases = git.run("merge-base", "--all", request.base, member.head).stdout.decode().splitlines()
             if len(bases) != 1:
-                raise ValueError("member review diff has no unique merge base")
+                values["SOURCE_MEMBER_POLICY_REJECTED"] = "1"
+                continue
             rows = git.run(
                 "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--numstat", "-z", bases[0], member.head, "--"
             ).stdout.split(b"\0")
@@ -200,6 +202,11 @@ def member_size_policy(request, policy, context, workspace):
                 if not row:
                     continue
                 adds, deletes, name = row.split(b"\t", 2)
+                if adds == deletes == b"-":
+                    # Preserve GitHub's zero line counts for binary files;
+                    # they still count toward file limits and path scope.
+                    changed[name] = (0, 0)
+                    continue
                 if not adds.isdigit() or not deletes.isdigit():
                     values["DIFF_UNKNOWN"] = "1"
                     values["SOURCE_SIZE_POLICY_COMPLETE"] = "0"
@@ -225,6 +232,21 @@ def member_size_policy(request, policy, context, workspace):
             if any(name.endswith(b".lean") and changed.get(name, (0, 0))[0] > 1000 for name in added if name):
                 values["NEWFILE_TOO_LONG"] = "1"
     return values
+
+
+def bump_policy(request, policy, context, configuration_path, base, mergebase, checkout):
+    """Distinguish rejected pins from a failed external lookup/resolution."""
+    from .upstreams import ResolutionUnavailable, guard
+
+    check_workflow_context(request, policy, context)
+    project = load(str(configuration_path))
+    try:
+        guard(project, Path(base), Path(mergebase), Path(checkout))
+    except (ResolutionUnavailable, OSError, subprocess.SubprocessError, KeyError, TypeError):
+        return {"INFRA": "1"}
+    except (ConfigError, ValueError):
+        return {"BUMP_BAD": "1", "INFRA": "1"}
+    return {"BUMP_VALIDATED": "1"}
 
 
 def toolchain_pin(request, policy, context, store, *, token=None, client=None):
@@ -441,6 +463,7 @@ def finalize(request, policy, context, evidence, *, reader=None):
         "tested_commit",
         "tested_tree",
         "scope_complete",
+        "scope_rejected",
         "pins_known",
         "bump_complete",
         "size_complete",
@@ -472,7 +495,9 @@ def finalize(request, policy, context, evidence, *, reader=None):
         else "infrastructure",
         "publication": "infrastructure" if policy.require_publication else "not_required",
     }
-    if evidence.get("scope_complete") != "1" or evidence.get("size_complete") != "1":
+    if evidence.get("scope_rejected") == "1" and evidence.get("scope") == "failure":
+        verdicts["scope"] = "failure"
+    elif evidence.get("scope_complete") != "1" or evidence.get("size_complete") != "1":
         verdicts["scope"] = "infrastructure"
     if evidence.get("pins_known") != "1" or evidence.get("bump_complete") != "1":
         verdicts["bump_guard"] = "infrastructure"
@@ -519,7 +544,17 @@ def context_from_environment(env):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "command", choices=("bootstrap", "resolve", "fetch", "toolchain", "lint-scope", "member-policy", "finalize")
+        "command",
+        choices=(
+            "bootstrap",
+            "resolve",
+            "fetch",
+            "toolchain",
+            "lint-scope",
+            "member-policy",
+            "bump-policy",
+            "finalize",
+        ),
     )
     parser.add_argument("--policy", required=True)
     parser.add_argument("--configuration", required=True)
@@ -540,6 +575,8 @@ def main(argv=None):
     parser.add_argument("--artifact-name")
     parser.add_argument("--lean-root")
     parser.add_argument("--roadmap-dir")
+    parser.add_argument("--base-dir")
+    parser.add_argument("--mergebase-dir")
     args = parser.parse_args(argv)
     context = context_from_environment(os.environ)
     request, policy = load_request(
@@ -586,6 +623,12 @@ def main(argv=None):
         if not args.workspace:
             parser.error("member-policy requires --workspace")
         result = member_size_policy(request, policy, context, args.workspace)
+    elif args.command == "bump-policy":
+        if not args.base_dir or not args.mergebase_dir or not args.checkout:
+            parser.error("bump-policy requires --base-dir, --mergebase-dir and --checkout")
+        result = bump_policy(
+            request, policy, context, args.configuration, args.base_dir, args.mergebase_dir, args.checkout
+        )
     else:
         if not args.evidence:
             parser.error("finalize requires --evidence")
@@ -602,7 +645,7 @@ def main(argv=None):
             )
     if args.github_env:
         with open(args.github_env, "a") as output:
-            if args.command in {"bootstrap", "lint-scope", "member-policy"}:
+            if args.command in {"bootstrap", "lint-scope", "member-policy", "bump-policy"}:
                 for key, value in result.items():
                     if not isinstance(value, str) or "\n" in value or "\r" in value:
                         raise ValueError("invalid workflow environment setting")
@@ -627,6 +670,12 @@ def main(argv=None):
             with open(args.github_output, "a") as output:
                 output.write(f"artifact-name={artifact_name(request, context['run_id'], context['attempt'])}\n")
         return 0 if all(value in {"success", "not_required"} for value in result["verdicts"].values()) else 1
+    if args.command == "member-policy" and any(
+        result.get(flag) == "1"
+        for flag in ("TOO_LARGE", "DIFF_UNKNOWN", "NEWFILE_TOO_LONG", "SOURCE_MEMBER_POLICY_REJECTED")
+    ):
+        print("::error::source member review-size policy rejected this candidate; inspect source-member-policy.json")
+        return 1
     return 0
 
 

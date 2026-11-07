@@ -39,6 +39,9 @@
 set -euo pipefail
 
 PROJECT_DIR="${1:?usage: lake-cache-get.sh <project-dir>}"
+if [ "${TAUCETI_SOURCE_CANDIDATE:-}" = true ]; then
+  : "${TAUCETI_CACHE_REPOSITORY:?source candidate cache scope is required}"
+fi
 PUBLIC_ARTIFACT_ENDPOINT="${PUBLIC_ARTIFACT_ENDPOINT:-https://cache.taucetiproject.org/artifacts}"
 PUBLIC_REVISION_ENDPOINT="${PUBLIC_REVISION_ENDPOINT:-https://cache.taucetiproject.org/revisions}"
 LAKE_CACHE_MAX_REVS="${LAKE_CACHE_MAX_REVS:-100}"

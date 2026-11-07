@@ -485,10 +485,16 @@ The GitHub helper permits only configured execution/dependency reads and refuses
 source metadata or status writes before credential selection. Candidate audits,
 scope and pin guards continue to run. Exact retained members receive the same
 per-PR line/file/new-Lean-file caps as GitHub PRs, using local complete histories
-and each member's merge base. Pin changes retain the existing line-cap exemption;
+and each member's merge base. A size rejection stops the build after saving its
+evidence. Binary files retain GitHub's zero line count and still count as files;
+unrelated or ambiguous member history is a policy rejection. Pin changes retain the existing line-cap exemption;
 the trusted bump guard must still validate them. Missing completion markers
 produce infrastructure verdicts rather than policy failures. Native restricted-path approval is not yet
 integrated; a legacy Bors waiver cannot authorize a Forgejo candidate.
+Source bump checks use the configured GitHub dependency guard with an explicit
+GitHub host. Lookup or trusted resolver failures remain infrastructure; decided
+pin-policy failures remain rejections. Late lint/report steps receive neither
+the native token nor a GitHub API token in source mode.
 
 The isolated trusted finalizer produces `source-candidate-result.json` in an
 artifact named for the request, run and attempt. It binds all four verdicts
@@ -508,6 +514,13 @@ and commit statuses do not grant a verdict. Result verification is execution
 evidence, not source approval or merge authority. Metadata fields follow the
 [workflow run API](https://docs.github.com/en/rest/actions/workflow-runs) and
 [artifact API](https://docs.github.com/en/rest/actions/artifacts).
+
+`classify_verdicts()` gives decided scope or bump failures precedence over an
+unrelated infrastructure failure, followed by source build failure, infrastructure
+and a passed result. A skipped build cannot hide a policy rejection. The queue
+must route rejected source work to review/repair; it must not repeatedly dispatch
+the same rejected candidate. A completed run without valid result evidence uses
+bounded infrastructure recovery rather than indefinite polling of that attempt.
 
 The queue's qualified request producer, durable payload/configuration binding,
 native approval/retention adapter and result-consumer wiring remain required.

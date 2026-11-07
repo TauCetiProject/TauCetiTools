@@ -8,7 +8,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .ci_candidate import MAX_ARTIFACT_BYTES, EvidenceUnavailable, artifact_name, check_run_metadata, verify_artifact
+from .ci_candidate import (
+    MAX_ARTIFACT_BYTES,
+    EvidenceUnavailable,
+    artifact_name,
+    check_run_metadata,
+    classify_verdicts,
+    verify_artifact,
+)
 from .forge import GITHUB
 
 
@@ -187,4 +194,5 @@ class GitHubEvidence:
             "artifact_digest": metadata["digest"],
             "request_digest": request.digest,
             "verdicts": verdicts,
+            "classification": classify_verdicts(verdicts),
         }
