@@ -2,6 +2,7 @@
 
 import importlib.util
 import sys
+import unittest
 from pathlib import Path
 
 SCRIPT = Path(__file__).parents[1] / "tauceti_tools/assets/scripts/test_ci_checkout.py"
@@ -11,5 +12,13 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 
+class AssetCopies(unittest.TestCase):
+    def test_shipped_copies_match(self):
+        scripts = SCRIPT.parent
+        for name in ("ci_checkout.py", "test_ci_checkout.py"):
+            self.assertEqual((scripts / name).read_bytes(), (scripts.parent / "project/scripts" / name).read_bytes())
+
+
 def load_tests(loader, tests, pattern):
-    return loader.loadTestsFromModule(module)
+    tests.addTests(loader.loadTestsFromModule(module))
+    return tests

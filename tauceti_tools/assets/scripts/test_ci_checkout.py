@@ -341,11 +341,6 @@ class Checkouts(unittest.TestCase):
                 process.kill()
                 process.communicate()
 
-    def test_asset_copies_match(self):
-        scripts = Path(checkout.__file__).parent
-        for name in ("ci_checkout.py", "test_ci_checkout.py"):
-            self.assertEqual((scripts / name).read_bytes(), (scripts.parent / "project/scripts" / name).read_bytes())
-
     @unittest.skipUnless(INTEGRATION, "pass --integration with stock Lean and bwrap installed")
     def test_actual_materialization_builds_offline_in_both_modes(self):
         if not shutil.which("bwrap") or not shutil.which("lake"):
