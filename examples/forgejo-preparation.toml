@@ -1,0 +1,18 @@
+# Experimental qualified configuration for direct clients. Legacy workers refuse
+# these bindings until their Forgejo adapters have been implemented and tested.
+schema_version = 2
+
+[forges.tauceti]
+kind = "forgejo"
+url = "https://git.taucetiproject.org"
+
+[repositories]
+content = { forge = "tauceti", name = "TauCetiProject/TauCeti" }
+roadmap = { forge = "tauceti", name = "TauCetiProject/TauCetiRoadmap" }
+
+[ci]
+backend = "github-actions"
+repository = "TauCetiProject/TauCeti"
+
+[services.github_state]
+mode = "off"

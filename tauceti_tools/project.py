@@ -7,6 +7,8 @@ inherit the saved configuration path rather than fetching mutable online content
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import os
 import re
@@ -18,6 +20,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+from .forge import GITHUB, resolve_repository
 
 try:
     import tomllib
@@ -62,9 +66,24 @@ class Project:
     raw: dict[str, Any]
     source: str = ""
 
+    def repository_ref(self, role: str):
+        """Qualified identity for new clients; v1 names retain GitHub semantics."""
+        return resolve_repository(self.raw["repositories"][role], self.raw.get("forges"))
+
+    def ci_repository_ref(self):
+        return resolve_repository(self.raw["ci"]["repository"], self.raw.get("forges"))
+
+    def _legacy_bindings(self):
+        values = list(self.raw["repositories"].values())
+        values += [tool["repo"] for tool in self.raw.get("tools", {}).values()]
+        values += [upstream["repo"] for upstream in self.raw.get("upstreams", [])]
+        if any(resolve_repository(value, self.raw.get("forges")).forge != GITHUB for value in values):
+            raise ConfigError("This consumer uses GitHub-only bindings; use the qualified forge client before activating Forgejo")
+
     @property
     def repos(self) -> dict:
-        return self.raw["repositories"]
+        self._legacy_bindings()
+        return {role: self.repository_ref(role).name for role in self.raw["repositories"]}
 
     @property
     def content(self) -> str:
@@ -73,11 +92,14 @@ class Project:
     @property
     def key(self) -> str:
         # GitHub names are case-insensitive. This also works before repo creation.
-        return self.content.lower().replace("/", "__")
+        ref = self.repository_ref("content")
+        name = ref.name.lower().replace("/", "__")
+        return name if ref.forge == GITHUB else name + "__" + hashlib.sha256(ref.forge.key.encode()).hexdigest()[:16]
 
     @property
     def legacy(self) -> bool:
-        return self.content.lower() == CANONICAL.lower()
+        ref = self.repository_ref("content")
+        return ref.forge == GITHUB and ref.name.lower() == CANONICAL.lower()
 
     @property
     def branch(self) -> str:
@@ -96,7 +118,9 @@ class Project:
         return self.raw.get("roadmap", {}).get("completed_dir", "Completed")
 
     def tool(self, name: str) -> dict:
-        return self.raw.get("tools", {}).get(name, {})
+        self._legacy_bindings()
+        value = self.raw.get("tools", {}).get(name, {})
+        return {**value, "repo": resolve_repository(value["repo"], self.raw.get("forges")).name} if value else {}
 
     def service(self, name: str) -> dict:
         return self.raw.get("services", {}).get(name, {"mode": "off"})
@@ -192,6 +216,33 @@ def parse(data: bytes, source: str = "") -> Project:
 
 
 def _validate(raw: dict, source: str) -> Project:
+    if type(raw.get("schema_version")) is int and raw.get("schema_version") == 2:
+        normalized = copy.deepcopy(raw)
+        connections = normalized.pop("forges", {})
+        ci = normalized.pop("ci", {})
+        try:
+            if not isinstance(connections, dict):
+                raise ValueError("forges must be a table")
+            for spec in connections.values():
+                resolve_repository({"forge": "check", "name": "check/check"}, {"check": spec})
+            for role, value in _table(normalized, "repositories").items():
+                normalized["repositories"][role] = resolve_repository(value, connections).name
+            for tool in _table(normalized, "tools").values():
+                if not isinstance(tool, dict):
+                    raise ValueError("tools must contain tables")
+                tool["repo"] = resolve_repository(tool.get("repo"), connections).name
+            for upstream in normalized.get("upstreams", []):
+                upstream["repo"] = resolve_repository(upstream.get("repo"), connections).name
+            if "ci" in raw:
+                if not isinstance(ci, dict) or set(ci) != {"backend", "repository"} or ci["backend"] != "github-actions":
+                    raise ValueError("ci requires backend = github-actions and repository")
+                if resolve_repository(ci["repository"], connections).forge.kind != "github":
+                    raise ValueError("github-actions requires a GitHub execution repository")
+        except (ValueError, TypeError, KeyError, AttributeError) as error:
+            raise ConfigError(str(error)) from error
+        normalized["schema_version"] = 1
+        _validate(normalized, source)
+        return Project(raw, source)
     allowed = {
         "schema_version",
         "project",
