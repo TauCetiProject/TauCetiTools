@@ -42,15 +42,17 @@ Legacy owner/name/environment access rejects non-GitHub bindings, preventing an
 unfinished adapter from acting on the GitHub mirror. This guard must be removed
 only as each caller obtains full qualified-reference support.
 
-The experimental `tauceti-gh` executable supports `pr list` and `pr view`, JSON
-projection, `--jq`, configured repository selection, and explicit GitHub delegation.
+The experimental `tauceti-gh` executable supports `pr list/view`, `issue list/view`
+and `repo view`, JSON projection, `--jq`, configured repository selection, and
+explicit GitHub delegation. Lists support state, limit, author (including `@me`),
+and repeated/comma-separated labels. PR lists also support base/head branches.
 It is not installed over the operator's `gh` and is not yet wired into workers.
 Forgejo/mixed-project use requires a leading `--conf PATH` or trusted `TAUCETI_CONF`;
 the wrapper never discovers configuration from the current checkout. Inherited
 worker snapshots are reused rather than fetching mutable online configuration.
 All-GitHub configurations delegate native arguments unchanged (apart from the
 leading wrapper option). Mixed-project delegation is limited to the implemented
-`pr view` and `pr list` read commands; other subcommands fail before routing or
+read commands; other subcommands fail before routing or
 credential selection. Full command coverage remains preparation work.
 Forgejo authentication uses a private `TAUCETI_FORGEJO_TOKEN_FILE` and requires
 `TAUCETI_FORGEJO_ORIGIN` to match the normalized destination origin. Set both in
@@ -63,9 +65,31 @@ repository. Otherwise specify `-R HOST/OWNER/REPO` explicitly.
 Unsupported JSON fields and commands are errors; missing source data is incomplete.
 Additional commands
 and GraphQL operations remain implementation work, not silently fabricated data.
-PR lists are de-duplicated and ordered newest-first before applying limits. The
-experimental list currently scans the complete paginated history; bounded-prefix
-retrieval for very large histories remains a prerequisite for worker integration.
+Native lists preserve creation-descending server order, remove duplicate IDs,
+filter before applying limits, and stop once the requested prefix is found.
+They do not assume that imported issue numbers follow creation timestamps.
+Repeated labels require every named label; native issue filtering uses OR and
+discards unknown labels, so the client applies this predicate itself. Sparse
+matches may still require more pages and raise on exhausting the page bound.
+Full-collection callers omit the limit and must reach the final empty page.
+
+`ForgejoReader` provides the same explicit read contracts to internal consumers.
+PR JSON fields include source/base/head metadata, comments, historical reviews,
+changed files and latest commit status per context. Expensive histories are only
+fetched when requested. A file listing must match the native changed-file count;
+head/base are rechecked afterward. Status requests bind to the immutable head ID.
+Forgejo's false mergeability also covers checking/error/draft, so it maps to
+`UNKNOWN`, never a proven conflict. Historical approvals do not imply a current
+`reviewDecision`; that field remains unsupported until native approval policy is
+integrated. Reviewer requests are distinct from submitted reviews. Dismissed
+reviews retain their dismissal state. IDs are opaque, case-normalized,
+forge-qualified strings; missing bot/type information is not invented.
+
+Repository reads expose native effective permissions and the default branch.
+The direct client's `current_user()` validates the authenticated account response;
+ambient GitHub credentials never authenticate a Forgejo request. These contracts
+remain observations, not atomic multi-endpoint snapshots. Queue admission still
+requires fresh exact-candidate validation when that consumer is integrated.
 
 Example from a checkout whose origin matches the configured content repository
 (otherwise add `-R HOST/OWNER/REPO`):
@@ -90,8 +114,13 @@ commit, PR and comment, reads them through the direct client and command wrapper
 creates and edits a code-review comment through the native generic edit endpoint,
 and verifies an unauthenticated edit is refused,
 and stops the server afterward. SSH, Actions and registration are disabled and
-credentials are never printed. Forgejo 17's issue-comment endpoint is unpaginated;
-its PR listing endpoint uses pagination. The smoke covers both actual behaviors.
+credentials are never printed. It also exercises separate operator/reviewer
+accounts, reviewer requests and approvals, superseded commit statuses, issue
+label filtering, repository permissions, CLI reads and a 65-file PR. Forgejo 17's
+issue-comment and review-comment endpoints are unpaginated; PR/file listings use
+pagination. File listings end in JSON `null`, unlike other collection endpoints.
+Only that known endpoint accepts a null terminal page; empty HTTP read bodies
+remain errors. The integration checks these actual behaviors.
 
 ## Remaining ordered work
 

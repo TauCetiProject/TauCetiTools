@@ -160,7 +160,7 @@ class CommandTests(unittest.TestCase):
         with patch("tauceti_tools.forge_cli.Forgejo") as client:
             client.return_value.pull.return_value = {"number": 12}
             with self.assertRaises(Unsupported):
-                run(["--conf", str(self.config), "pr", "view", "12", "--json", "statusCheckRollup"])
+                run(["--conf", str(self.config), "pr", "view", "12", "--json", "inventedField"])
 
     def test_explicit_github_host_delegates_with_qualified_environment(self):
         with patch("tauceti_tools.forge_cli._delegate", return_value=0) as delegate:
@@ -265,22 +265,76 @@ class CommandTests(unittest.TestCase):
             )
         loader.assert_called_once_with(str(self.config))
 
-    def test_list_returns_newest_distinct_prs_before_limit(self):
+    def test_list_passes_bounded_request_to_direct_reader(self):
         with patch("tauceti_tools.forge_cli.Forgejo") as client, contextlib.redirect_stdout(io.StringIO()) as output:
-            client.return_value.pulls.return_value = [{"number": 1}, {"number": 3}, {"number": 2}, {"number": 3}]
+            client.return_value.pulls.return_value = [{"number": 3}, {"number": 2}]
             run(["--conf", str(self.config), "pr", "list", "--limit", "2", "--json", "number"])
         self.assertEqual(json.loads(output.getvalue()), [{"number": 3}, {"number": 2}])
+        self.assertEqual(client.return_value.pulls.call_args.kwargs["limit"], 2)
 
-    def test_merged_filter_precedes_ordering_and_limit(self):
+    def test_merged_filter_is_forwarded_to_native_reader(self):
         with patch("tauceti_tools.forge_cli.Forgejo") as client, contextlib.redirect_stdout(io.StringIO()) as output:
             client.return_value.pulls.return_value = [
-                {"number": 1, "merged": True},
                 {"number": 3, "merged": True},
-                {"number": 4, "merged": False},
             ]
             run(["--conf", str(self.config), "pr", "list", "-s", "merged", "-L", "1", "--json", "number"])
         self.assertEqual(json.loads(output.getvalue()), [{"number": 3}])
-        self.assertEqual(client.return_value.pulls.call_args.kwargs["state"], "closed")
+        self.assertEqual(client.return_value.pulls.call_args.kwargs["state"], "merged")
+
+    def test_issue_filters_and_projection(self):
+        with patch("tauceti_tools.forge_cli.Forgejo") as client, contextlib.redirect_stdout(io.StringIO()) as output:
+            client.return_value.issues.return_value = [{"number": 3, "title": "Proof", "state": "open"}]
+            run(
+                [
+                    "--conf",
+                    str(self.config),
+                    "issue",
+                    "list",
+                    "-A",
+                    "operator",
+                    "-l",
+                    "bug,ready",
+                    "--json",
+                    "number,title,state",
+                ]
+            )
+        self.assertEqual(json.loads(output.getvalue()), [{"number": 3, "title": "Proof", "state": "OPEN"}])
+        self.assertEqual(client.return_value.issues.call_args.kwargs["labels"], ["bug", "ready"])
+        self.assertEqual(client.return_value.issues.call_args.kwargs["author"], "operator")
+
+    def test_me_author_uses_selected_forge_account(self):
+        with patch("tauceti_tools.forge_cli.Forgejo") as client, contextlib.redirect_stdout(io.StringIO()):
+            client.return_value.current_user.return_value = {"id": 2, "login": "forgejo-operator"}
+            client.return_value.pulls.return_value = []
+            run(["--conf", str(self.config), "pr", "list", "-A", "@me", "--json", "number"])
+        self.assertEqual(client.return_value.pulls.call_args.kwargs["author"], "forgejo-operator")
+
+    def test_repository_positional_target_resolves_before_native_request(self):
+        with patch("tauceti_tools.forge_cli.Forgejo") as client, contextlib.redirect_stdout(io.StringIO()) as output:
+            client.return_value.repository.return_value = {"name": "Project", "default_branch": "main"}
+            run(
+                [
+                    "--conf",
+                    str(self.config),
+                    "repo",
+                    "view",
+                    "git.example.org/one/Project",
+                    "--json",
+                    "name,defaultBranchRef",
+                ]
+            )
+        self.assertEqual(json.loads(output.getvalue()), {"name": "Project", "defaultBranchRef": {"name": "main"}})
+
+    def test_mutating_commands_still_fail_before_credential_or_delegation(self):
+        for command in [["issue", "create", "-t", "hello"], ["pr", "review", "3", "--approve"], ["repo", "fork"]]:
+            with (
+                patch("tauceti_tools.forge_cli._delegate") as delegate,
+                patch("tauceti_tools.forge_cli.Forgejo") as client,
+            ):
+                with self.assertRaises(Unsupported):
+                    run(["--conf", str(self.config), *command], environment={"TAUCETI_FORGEJO_TOKEN_FILE": "/missing"})
+                delegate.assert_not_called()
+                client.assert_not_called()
 
 
 if __name__ == "__main__":

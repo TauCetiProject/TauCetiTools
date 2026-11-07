@@ -59,7 +59,7 @@ class DirectTests(unittest.TestCase):
                 for k, v in headers.items():
                     self.send_header(k, v)
                 self.end_headers()
-                self.wfile.write(json.dumps(data).encode())
+                self.wfile.write(data if isinstance(data, bytes) else json.dumps(data).encode())
 
             do_POST = do_GET
 
@@ -79,10 +79,79 @@ class DirectTests(unittest.TestCase):
         self.thread.join()
 
     def test_complete_pagination_despite_server_cap(self):
-        self.reply = lambda path: (200, [] if "page=3" in path else [{"number": 1}], {})
+        self.reply = lambda path: (200, [] if "page=3" in path else [{"number": 1 if "page=2" in path else 2}], {})
         self.assertEqual(len(self.api.pulls(self.repo)), 2)
         self.assertEqual(len(self.calls), 3)
         self.assertTrue(all(auth == "token private-test-token" for _, _, auth in self.calls))
+
+    def test_prefix_stops_without_scanning_history(self):
+        self.reply = lambda path: (200, [{"number": n} for n in [10000, 9999, 9998]], {})
+        self.assertEqual([r["number"] for r in self.api.pulls(self.repo, limit=2)], [10000, 9999])
+        self.assertEqual(len(self.calls), 1)
+        self.assertNotIn("sort=oldest", self.calls[0][1])
+
+    def test_merged_and_label_filters_precede_prefix_with_overlapping_pages(self):
+        pages = {
+            "1": [{"number": 6, "merged": False}, {"number": 5, "merged": True, "labels": [{"name": "Bug"}]}],
+            "2": [
+                {"number": 5, "merged": True},
+                {"number": 4, "merged": True, "labels": [{"name": "BUG"}, {"name": "ready"}]},
+            ],
+        }
+        self.reply = lambda path: (200, pages.get(path.rsplit("page=", 1)[1], []), {})
+        rows = self.api.pulls(self.repo, state="merged", labels=["bug", "ready"], limit=1)
+        self.assertEqual([r["number"] for r in rows], [4])
+        self.assertEqual(len(self.calls), 2)
+        self.assertIn("state=closed", self.calls[0][1])
+
+    def test_filtered_prefix_cap_raises_rather_than_partial_success(self):
+        self.reply = lambda path: (200, [{"number": int(path.rsplit("page=", 1)[1]), "merged": False}], {})
+        with self.assertRaises(Incomplete):
+            self.api.pulls(self.repo, state="merged", limit=1)
+
+    def test_issue_filters_keep_prs_out_and_require_all_labels(self):
+        self.reply = lambda path: (
+            200,
+            [
+                {"number": 8, "labels": [{"name": "bug"}], "user": {"login": "a"}},
+                {"number": 7, "labels": [{"name": "bug"}, {"name": "ready"}], "user": {"login": "b"}},
+                {"number": 6, "labels": [{"name": "bug"}, {"name": "ready"}], "user": {"login": "A"}},
+            ],
+            {},
+        )
+        self.assertEqual(
+            [r["number"] for r in self.api.issues(self.repo, labels=["bug", "ready"], author="a", limit=1)], [6]
+        )
+        self.assertIn("type=issues", self.calls[0][1])
+        self.assertIn("created_by=a", self.calls[0][1])
+
+    def test_no_numeric_order_assumption_for_imported_timestamps(self):
+        self.reply = lambda path: (200, [{"number": 1}, {"number": 3}], {})
+        self.assertEqual([r["number"] for r in self.api.pulls(self.repo, limit=2)], [1, 3])
+
+    def test_review_comments_are_unpaginated_and_cross_host_checks_apply(self):
+        self.reply = lambda path: (200, [{"id": 3}], {})
+        self.assertEqual(self.api.review_comments(self.repo, 1, 2), [{"id": 3}])
+        self.assertEqual(self.calls[0][1], "/api/v1/repos/one/project/pulls/1/reviews/2/comments")
+        for call in [
+            lambda: self.api.files(RepositoryRef(GITHUB, "one/project"), 1),
+            lambda: self.api.statuses(self.repo, "main"),
+            lambda: self.api.review_comments(self.repo, 1, -1),
+        ]:
+            with self.assertRaises(ValueError):
+                call()
+        self.assertEqual(len(self.calls), 1)
+
+    def test_repository_and_account_responses_must_identify_target(self):
+        for data, call in [
+            ({"full_name": "other/project"}, lambda: self.api.repository(self.repo)),
+            ({"number": 2}, lambda: self.api.issue(self.repo, 1)),
+            ({"number": 1, "pull_request": {}}, lambda: self.api.issue(self.repo, 1)),
+            ({"login": "a"}, self.api.current_user),
+        ]:
+            self.reply = lambda path, data=data: (200, data, {})
+            with self.assertRaises(Incomplete):
+                call()
 
     def test_later_page_failure_is_not_partial_success(self):
         self.reply = lambda path: (503, {}, {}) if "page=2" in path else (200, [1], {})
@@ -99,6 +168,15 @@ class DirectTests(unittest.TestCase):
         self.assertEqual(self.api.comments(self.repo, 1), [{"id": 1}])
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.calls[0][1], "/api/v1/repos/one/project/issues/1/comments")
+
+    def test_native_null_file_end_is_not_a_generic_successful_empty_response(self):
+        self.reply = lambda path: (200, None, {})
+        self.assertEqual(self.api.files(self.repo, 1), [])
+        with self.assertRaises(Incomplete):
+            self.api.collection("user/repos")
+        self.reply = lambda path: (200, b"", {})
+        with self.assertRaises(Incomplete):
+            self.api.files(self.repo, 1)
 
     def test_redirect_is_not_followed(self):
         self.reply = lambda path: (302, {}, {"Location": self.forge.url + "/stolen"})
