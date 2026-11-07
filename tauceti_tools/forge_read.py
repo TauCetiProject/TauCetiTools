@@ -272,24 +272,31 @@ class ForgejoReader:
             result.append(project(value, ["id", "body", "url", "author", "createdAt", "updatedAt"]))
         return result
 
-    def _reviews(self, repository, number):
+    def review_records(self, repository, number):
+        """Complete visible native reviews, excluding reviewer requests/drafts of others."""
         result = []
         viewer = None
+        for row in self.api.reviews(repository, number):
+            _object(row, "review")
+            if row.get("state") == "REQUEST_REVIEW":
+                continue
+            if row.get("state") == "PENDING":
+                if viewer is None:
+                    viewer = self.api.current_user()["id"]
+                if not isinstance(row.get("user"), dict) or row["user"].get("id") != viewer:
+                    continue
+            result.append(row)
+        return result
+
+    def _reviews(self, repository, number):
+        result = []
         states = {
             "PENDING": "PENDING",
             "COMMENT": "COMMENTED",
             "APPROVED": "APPROVED",
             "REQUEST_CHANGES": "CHANGES_REQUESTED",
         }
-        for row in self.api.reviews(repository, number):
-            _object(row, "review")
-            if row.get("state") == "REQUEST_REVIEW":
-                continue  # A reviewer request is not a submitted review.
-            if row.get("state") == "PENDING":
-                if viewer is None:
-                    viewer = self.api.current_user()["id"]
-                if not isinstance(row.get("user"), dict) or row["user"].get("id") != viewer:
-                    continue  # Native site admins can see other users' drafts.
+        for row in self.review_records(repository, number):
             if row.get("state") not in states or not isinstance(row.get("dismissed"), bool):
                 raise Incomplete("Forgejo review state is unavailable")
             value = {

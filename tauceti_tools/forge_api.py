@@ -17,6 +17,9 @@ from dataclasses import dataclass
 
 from .forge import ForgeError, Incomplete, RepositoryRef, Unsupported
 
+SOURCE_COLLECTIONS = {"issue_comments", "pull_reviews"}
+COLLECTIONS = {"labels", "collaborators", "matching_refs"} | SOURCE_COLLECTIONS
+SOURCE_READS = {"pull", "issue"} | SOURCE_COLLECTIONS
 
 @dataclass(frozen=True)
 class ApiPlan:
@@ -100,6 +103,14 @@ def plan(command, *, context=None):
             kind, allowed = "collaborators", {"page", "per_page"}
         elif suffix == "labels":
             kind, allowed = "labels", {"page", "per_page"}
+        elif re.fullmatch(r"pulls/[1-9][0-9]*", suffix):
+            kind = "pull"
+        elif re.fullmatch(r"issues/[1-9][0-9]*", suffix):
+            kind = "issue"
+        elif re.fullmatch(r"issues/[1-9][0-9]*/comments", suffix):
+            kind, allowed = "issue_comments", {"page", "per_page"}
+        elif re.fullmatch(r"pulls/[1-9][0-9]*/reviews", suffix):
+            kind, allowed = "pull_reviews", {"page", "per_page"}
         elif suffix.startswith("git/matching-refs/"):
             kind, allowed = "matching_refs", {"page", "per_page"}
         elif suffix.startswith(("git/ref/", "git/refs/")):
@@ -123,9 +134,9 @@ def plan(command, *, context=None):
             raise Unsupported("API page sizes and numbers must be positive ASCII integers")
         if key == "per_page" and int(value) > 100:
             raise Unsupported("per_page must be at most 100")
-    if opts.get("paginate") and kind not in {"labels", "collaborators", "matching_refs"}:
+    if opts.get("paginate") and kind not in COLLECTIONS:
         raise Unsupported("pagination is supported only for collection read contracts")
-    if opts.get("include") and kind in {"labels", "collaborators", "matching_refs"}:
+    if opts.get("include") and kind in COLLECTIONS | {"pull", "issue"}:
         raise Unsupported("collection response headers require a paginated HTTP adapter")
     if raw and opts.get("jq"):
         raise Unsupported("jq cannot be applied to a raw file/blob response")
@@ -144,11 +155,19 @@ def _nodes(value, forge, kind):
     native_id = result.get("id")
     if type(native_id) is int:
         result["node_id"] = f"{forge.key}/{kind}/{native_id}" if native_id > 0 else None
-    for key in ["owner", "user", "author", "committer"]:
+    for key in ["owner", "user", "author", "committer", "merged_by", "assignee"]:
         if isinstance(result.get(key), dict) and "login" in result[key]:
             result[key] = _nodes(result[key], forge, "users")
     if isinstance(result.get("parent"), dict):
         result["parent"] = _nodes(result["parent"], forge, "repositories")
+    for key, namespace in [("labels", "labels"), ("assignees", "users"), ("requested_reviewers", "users")]:
+        if isinstance(result.get(key), list):
+            result[key] = _nodes(result[key], forge, namespace)
+    if isinstance(result.get("milestone"), dict):
+        result["milestone"] = _nodes(result["milestone"], forge, "milestones")
+    for key in ("head", "base"):
+        if isinstance(result.get(key), dict) and isinstance(result[key].get("repo"), dict):
+            result[key] = {**result[key], "repo": _nodes(result[key]["repo"], forge, "repositories")}
     return result
 
 
@@ -304,7 +323,15 @@ def execute(request, api):
     headers, meta = {}, {}
     if request.repository_name:
         RepositoryRef(api.forge, request.repository_name)
-    if kind in {"labels", "collaborators"}:
+    if kind in SOURCE_READS:
+        from .forge_rest_read import source_read
+
+        result = source_read(request, api)
+        if kind in SOURCE_COLLECTIONS:
+            rows = result
+        else:
+            value = result
+    elif kind in {"labels", "collaborators"}:
         target = int(query.get("page", "1")) * int(query.get("per_page", "30"))
         rows = _collection(api, path, stop_after=None if opts.get("paginate") else target)
     elif kind in {"matching_refs", "ref"}:
@@ -366,7 +393,7 @@ def execute(request, api):
                 value = {**value, "commit": {**value["commit"], "tree": tree}}
         if kind == "blob" or (kind == "contents" and isinstance(value, dict) and value.get("type") == "file"):
             _content(value)
-    collection = kind in {"labels", "collaborators", "matching_refs"}
+    collection = kind in COLLECTIONS
     if collection:
         if not isinstance(rows, list):
             raise Incomplete("Forgejo collection was not an array")
@@ -429,7 +456,8 @@ def execute(request, api):
                     or not isinstance(row.get("name" if kind == "labels" else "login"), str)
                 ):
                     raise Incomplete("Forgejo collection entry identity is unavailable")
-    identity_kind = {"user": "users", "repository": "repositories", "labels": "labels", "collaborators": "users"}.get(
+    identity_kind = {"user": "users", "repository": "repositories", "labels": "labels", "collaborators": "users",
+                     "pull": "pulls", "issue": "issues", "issue_comments": "comments", "pull_reviews": "reviews"}.get(
         kind, kind
     )
     pages = [_nodes(value, api.forge, identity_kind) for value in pages]
