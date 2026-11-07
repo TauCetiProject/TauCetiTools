@@ -83,3 +83,31 @@ these counters as observations only. OIDC request credentials stay outside
 bwrap's `env -i` environment and mounts. Telemetry/authentication/network failure
 cannot change the build result. The backend reader must be deployed before the
 workflow/tool pin is activated in a consuming repository.
+
+## Per-job CI source checkouts
+
+`scripts/ci_git.py resolve` establishes immutable head/base/merge-base identities
+in its separate, bounded resolver store. `scripts/ci_checkout.py fetch` then
+fetches complete, unfiltered histories into a new `.ci-source.git` at the
+canonical workspace root. Same-repository heads and bases share one transfer;
+fork heads use a second immutable fetch. Transfers check object integrity and
+use three attempts, with a ten-minute deadline per attempt. Failure preserves the
+known identities for the existing checkout-failure reporting path.
+
+`ci_checkout.py materialize` creates fresh, detached `pr`, `base` and `mergebase`
+checkouts with private metadata and a stable objects alternate. Candidate config,
+hooks and credentials are never reused. Keep the source store for the entire job,
+including after integration renames `pr` to `pr-raw-head`. Every offline sandbox
+which reads these checkouts must bind the stable `objects` directory read-only,
+including frozen-candidate jobs. Normal disposable workspace cleanup owns the
+store; it is not a cross-job cache.
+
+The package suite runs the shipped checkout fixtures. With stock Lean/Lake and
+bubblewrap installed, run the native offline fixture explicitly:
+
+```sh
+python tauceti_tools/assets/scripts/test_ci_checkout.py --integration
+```
+
+It verifies that hiding the source store breaks ancestry reads and that exposing
+only its objects read-only permits native builds in ordinary and frozen modes.
