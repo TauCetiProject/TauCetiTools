@@ -188,6 +188,18 @@ class DirectTests(unittest.TestCase):
         with self.assertRaises(Incomplete):
             self.api.reviews(self.repo, 1)
 
+    def test_review_pages_enforce_aggregate_bytes_across_hidden_pages(self):
+        self.api.max_bytes = 100
+
+        def reply(path):
+            if path.endswith("settings/api"):
+                return 200, {"max_response_items": 1}, {}
+            return 200, [{"id": 2, "body": "x" * 40}], {"X-Total-Count": "2"}
+
+        self.reply = reply
+        with self.assertRaisesRegex(Incomplete, "aggregate byte"):
+            self.api.reviews(self.repo, 1)
+
     def test_unknown_author_is_empty_only_after_repository_access_is_verified(self):
         def reply(path):
             if path == "/api/v1/repos/one/project":

@@ -191,6 +191,43 @@ adapters. Unsupported Forgejo requests fail before opening the credential file.
 GitHub requests use their original argv and normal CLI implementation. No global
 `gh` replacement or production configuration is installed by these changes.
 
+Source discussion contracts additionally support `gh api repos/OWNER/REPO/pulls/N`,
+`issues/N`, `issues/N/comments` and `pulls/N/reviews`. PR reads reuse the explicit
+retained-head and zero-stat recovery checks before exposing head/diff metadata;
+a stock server that describes a reused closed branch is unavailable. Deleted-fork
+historical data is usable only when those same checks succeed. `base.sha` remains
+the live base tip, not an inferred historical merge base. Issue reads require an
+issue. Forgejo's false `mergeable` becomes null (unknown), since false also covers
+checking, errors and drafts. Positive native mergeability remains true. The
+issue route does not alias PR metadata. REST preserves native numeric
+IDs and adds the same origin-qualified opaque `node_id` namespaces as familiar
+commands, including actors, labels, milestones and branch repositories. Native
+null label/assignee slices normalize to empty arrays; missing fields are errors.
+
+Forgejo17 issue comments have one unpaginated, byte-bounded native response. The
+wrapper slices it into requested `page`/`per_page` output rather than repeatedly
+fetching the same history. Reviews exhaust counted native pages across hidden
+drafts before applying synthetic pages. Other actors' pending reviews and
+reviewer-request placeholders are excluded, including when using a site-admin
+credential. Review state maps to GitHub REST spellings, pending `submitted_at`
+is null, and native `official`, `stale` and `dismissed` remain present. These flags
+are observations, not grants of approval authority. Discussion URLs must bind
+the configured origin, repository and issue/PR number; duplicate IDs and missing
+metadata fail explicitly. Collections enforce aggregate byte and page bounds.
+No `author_association` or account type is invented. Requested consumers that
+need those fields still require an explicit policy adaptation. `--include`,
+date filters, inline-thread comments, REST writes and other source paths remain
+unsupported by these contracts.
+
+`tests/fixtures/forge_source_rest_commands.json` pins four request/field cases to
+Worker, Review and Progress source blobs, with synthetic argument values. The
+tests check accepted plans and normalized JSON before optional jq rendering;
+they do not prove complete consumer migration. Worker GraphQL and shared-state
+reads, Review comparison/eligibility, qualified claims/outboxes, caches and
+activation remain preparation work. The real-server fixture covers visible
+reviews across hidden pages, own/foreign drafts, comment pages, REST metadata,
+and historical heads with deleted/reused branches in stock/patched profiles.
+
 Unsupported JSON fields and commands are errors; missing source data is incomplete.
 Additional commands
 and GraphQL operations remain implementation work, not silently fabricated data.

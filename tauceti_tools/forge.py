@@ -439,7 +439,13 @@ class Forgejo:
         repository.pull_url(number)
         # Visibility filtering happens after native pagination: an empty page
         # can hide only other users' drafts while later submitted reviews exist.
-        return self.collection(f"{self._repo(repository)}/pulls/{number}/reviews", counted=True)
+        rows, size = [], 0
+        for batch in self.pages(f"{self._repo(repository)}/pulls/{number}/reviews", counted=True):
+            size += len(json.dumps(batch, ensure_ascii=False).encode("utf-8"))
+            if size > self.max_bytes:
+                raise Incomplete("Forgejo reviews exceeded the configured aggregate byte limit")
+            rows.extend(batch)
+        return rows
 
     def review_comments(self, repository, number, review_id):
         repository.pull_url(number)

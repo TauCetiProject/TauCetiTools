@@ -485,6 +485,25 @@ roadmap="operator/roadmap"
                     )
                     self.assertTrue(all(len(page) == 1 for page in label_pages))
                     self.assertEqual({row["name"] for page in label_pages for row in page}, {"bug", "ready"})
+                    rest_native = native
+                    rest_pull = json.loads(rest_native("api", f"repos/operator/content/pulls/{pull['number']}"))
+                    self.assertEqual(rest_pull["head"]["sha"], pull["head"]["sha"])
+                    self.assertEqual(rest_pull["changed_files"], 1)
+                    self.assertEqual(rest_pull["user"]["node_id"], api.forge.key + "/users/" + str(rest_pull["user"]["id"]))
+                    rest_issue = json.loads(native("api", f"repos/operator/content/issues/{second_issue['number']}"))
+                    self.assertEqual(rest_issue["title"], "Both labels")
+                    self.assertEqual(rest_issue["node_id"], api.forge.key + "/issues/" + str(rest_issue["id"]))
+                    rest_comments = json.loads(native(
+                        "api", f"repos/operator/content/issues/{pull['number']}/comments?per_page=1", "--paginate", "--slurp"
+                    ))
+                    self.assertEqual([[c["body"] for c in page] for page in rest_comments], [["Review finding"]])
+                    rest_reviews = json.loads(native(
+                        "api", f"repos/operator/content/pulls/{pull['number']}/reviews?per_page=1", "--paginate", "--slurp", review=True
+                    ))
+                    visible_reviews = [row for page in rest_reviews for row in page]
+                    self.assertTrue(any(row["body"] == "Later submitted review" for row in visible_reviews))
+                    self.assertTrue(all(row["state"] != "PENDING" for row in visible_reviews))
+                    self.assertTrue(all(type(row["official"]) is bool and type(row["stale"]) is bool for row in visible_reviews))
                     ref_pages = json.loads(
                         native(
                             "api", "repos/operator/content/git/matching-refs/heads/?per_page=1", "--paginate", "--slurp"
@@ -505,6 +524,10 @@ roadmap="operator/roadmap"
                             for row in reviewer.reviews(repo, pull["number"])
                         )
                     )
+                    own_rest_reviews = json.loads(native("api", f"repos/operator/content/pulls/{pull['number']}/reviews", review=True))
+                    self.assertTrue(any(row["id"] == pending_review["id"] and row["state"] == "PENDING" and row["submitted_at"] is None for row in own_rest_reviews))
+                    other_rest_reviews = json.loads(native("api", f"repos/operator/content/pulls/{pull['number']}/reviews"))
+                    self.assertTrue(all(row["id"] != pending_review["id"] for row in other_rest_reviews))
                     reviewer.request(
                         "DELETE", f"repos/operator/content/pulls/{pull['number']}/reviews/{pending_review['id']}"
                     )
@@ -793,6 +816,10 @@ roadmap="operator/roadmap"
                             repo, fork_pull["number"], ["headRefOid", "changedFiles", "additions", "deletions", "files"]
                         )
                         self.assertEqual(historical["headRefOid"], fork_pull["head"]["sha"])
+                        raw_historical = json.loads(rest_native("api", f"repos/operator/content/pulls/{fork_pull['number']}"))
+                        self.assertEqual(raw_historical["head"]["sha"], fork_pull["head"]["sha"])
+                        self.assertIsNone(raw_historical["head"]["repo"])
+                        self.assertEqual(raw_historical["changed_files"], 1)
                         self.assertEqual(historical["changedFiles"], 1)
                         self.assertEqual(historical["files"], [{"path": "Fork.lean", "additions": 1, "deletions": 0}])
 
@@ -848,6 +875,7 @@ roadmap="operator/roadmap"
                     )
                     if retained_metadata:
                         self.assertEqual(api.pull(repo, pull["number"])["head"]["sha"], pull["head"]["sha"])
+                        self.assertEqual(json.loads(rest_native("api", f"repos/operator/content/pulls/{pull['number']}"))["head"]["sha"], pull["head"]["sha"])
                         historical = reader.pull(
                             repo,
                             pull["number"],
@@ -859,6 +887,8 @@ roadmap="operator/roadmap"
                         self.assertEqual(historical["statusCheckRollup"][0]["state"], "SUCCESS")
                         return
                     self.assertNotEqual(api.pull(repo, pull["number"])["head"]["sha"], pull["head"]["sha"])
+                    with self.assertRaisesRegex(Incomplete, "moved closed-PR"):
+                        rest_native("api", f"repos/operator/content/pulls/{pull['number']}")
                     for field in ["changedFiles", "additions", "headRefOid", "files", "statusCheckRollup"]:
                         with self.subTest(moved_closed_field=field), self.assertRaises(ForgeError):
                             reader.pull(repo, pull["number"], [field])
