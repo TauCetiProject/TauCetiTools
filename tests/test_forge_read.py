@@ -161,12 +161,14 @@ class ReadContracts(unittest.TestCase):
         with self.assertRaises(Incomplete):
             self.reader.pull(self.repo, 3, ["author"])
 
-    def test_diff_statistics_are_unknown_without_native_git_flow_and_head_repository(self):
+    def test_unknown_native_git_flow_and_unavailable_deleted_fork_files_stay_unknown(self):
         self.api.pull.return_value.update(changed_files=0, additions=0, deletions=0, flow=1)
         with self.assertRaises(Incomplete):
             self.reader.pull(self.repo, 3, ["changedFiles"])
         self.api.pull.return_value.update(flow=0)
         self.api.pull.return_value["head"]["repo"] = None
+        self.api.pull_ref.return_value = "a" * 40
+        self.api.files.side_effect = Incomplete("native files unavailable")
         with self.assertRaises(Incomplete):
             self.reader.pull(self.repo, 3, ["additions"])
 
@@ -193,6 +195,71 @@ class ReadContracts(unittest.TestCase):
         self.api.pull_ref.return_value = "b" * 40
         with self.assertRaises(Incomplete):
             self.reader.pull(self.repo, 3, ["changedFiles"])
+
+    def test_closed_unmerged_empty_reconstruction_is_not_proof_of_an_empty_proposal(self):
+        self.api.pull.return_value.update(state="closed", merged=False, changed_files=0, additions=0, deletions=0)
+        self.api.pull.return_value["head"]["repo"] = None
+        self.api.pull_ref.return_value = "a" * 40
+        self.api.files.return_value = []
+        with self.assertRaises(Incomplete):
+            self.reader.pull(self.repo, 3, ["changedFiles", "files"])
+
+    def test_missing_head_repository_key_is_unavailable_not_deleted(self):
+        del self.api.pull.return_value["head"]["repo"]
+        with self.assertRaises(Incomplete):
+            self.reader.pull(self.repo, 3, ["additions"])
+
+    def test_default_closed_pull_output_cannot_publish_a_moved_branch_head(self):
+        self.api.pull.return_value.update(state="closed", merged=True)
+        self.api.pull_ref.return_value = "b" * 40
+        with self.assertRaises(Incomplete):
+            self.reader.pull(self.repo, 3)
+
+    def test_same_file_count_with_different_line_totals_is_incomplete(self):
+        self.api.files.return_value = [
+            {
+                "filename": "Proof.lean",
+                "additions": 0,
+                "deletions": 1,
+                "contents_url": "https://git.example.org/contents/Proof.lean?ref=" + "a" * 40,
+            }
+        ]
+        with self.assertRaises(Incomplete):
+            self.reader.pull(self.repo, 3, ["files"])
+
+    def test_closed_unmerged_files_request_the_exact_stored_base(self):
+        self.api.pull.return_value.update(state="closed", merged=False, merge_base="c" * 40)
+        self.api.pull_ref.return_value = "a" * 40
+        self.api.files.return_value = [
+            {
+                "filename": "Proof.lean",
+                "additions": 1,
+                "deletions": 0,
+                "contents_url": "https://git.example.org/contents/Proof.lean?ref=" + "a" * 40,
+            }
+        ]
+        self.reader.pull(self.repo, 3, ["files"])
+        self.api.files.assert_called_once_with(self.repo, 3, comparison_base="c" * 40, revision="a" * 40)
+
+    def test_deleted_fork_uses_verified_retained_head_diff_metadata(self):
+        self.api.pull.return_value.update(state="closed", merged=True)
+        self.api.pull.return_value["head"]["repo"] = None
+        self.api.pull_ref.return_value = "a" * 40
+        self.api.files.return_value = [
+            {
+                "filename": "Proof.lean",
+                "additions": 1,
+                "deletions": 0,
+                "contents_url": "https://git.example.org/api/v1/repos/one/Project/contents/Proof.lean?ref=" + "a" * 40,
+            }
+        ]
+        self.assertEqual(
+            self.reader.pull(self.repo, 3, ["files", "additions"]),
+            {"files": [{"path": "Proof.lean", "additions": 1, "deletions": 0}], "additions": 1},
+        )
+        self.api.pull_ref.return_value = "b" * 40
+        with self.assertRaises(Incomplete):
+            self.reader.pull(self.repo, 3, ["files"])
 
     def test_closed_branch_statistics_must_describe_the_retained_pull_head(self):
         self.api.pull.return_value.update(state="closed", merged=True, changed_files=9, additions=12, deletions=1)

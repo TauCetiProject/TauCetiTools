@@ -152,6 +152,24 @@ GitHub requests use their original argv and normal CLI implementation. No global
 Unsupported JSON fields and commands are errors; missing source data is incomplete.
 Additional commands
 and GraphQL operations remain implementation work, not silently fabricated data.
+Historical PR reads require the native head SHA to match the retained pull ref,
+including default output without `--json`. A deleted source fork is allowed only
+when the remaining native diff metadata is complete; requested files still need
+immutable head binding and a stable metadata re-read. Closed, unmerged file reads and zero-stat reconstruction require every native
+file page to identify `X-Forgejo-Diff-Base` and `X-Forgejo-Diff-Head`, matching the
+stored comparison base and retained head. Stock Forgejo has no such headers and
+can partially or entirely erase a historical proposal by comparing it with today's
+base. Such observations are unavailable. Nonzero native file listings must also
+match both the file count and the total additions/deletions.
+
+The real-server fixture defaults to stock behavior. Set
+`FORGEJO_RETAINED_METADATA=1` only when explicitly testing a binary with the native
+historical-metadata fixes. This profile asserts accurate scalar stats and files
+after source-fork deletion, retained heads after source-branch reuse, and a closed
+proposal whose changes reached main through a superseding PR. The stock profile
+asserts errors for unavailable history. This test switch does not change runtime
+selection or activate a server capability in production.
+
 Native lists preserve creation-descending server order, remove duplicate IDs,
 filter before applying limits, and stop once the requested prefix is found.
 They do not assume that imported issue numbers follow creation timestamps.
