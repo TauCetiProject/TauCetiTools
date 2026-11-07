@@ -70,6 +70,31 @@ def isolated_runner(data, job, run_id):
             and job["runner_name"] != sandbox[0]["runner_name"])
 
 
+def publication_job_details(job, run_id, attempt, *, fetch=api):
+    """Recover omitted step telemetry only for the same completed publisher job."""
+    job_id = job.get("id")
+    if (type(job_id) is not int or job_id <= 0 or not sha(job.get("head_sha"))
+            or job.get("name") != PUBLISHER
+            or type(job.get("run_id")) is not int or job["run_id"] != run_id
+            or type(job.get("run_attempt")) is not int or job["run_attempt"] != attempt):
+        raise ValueError("invalid publisher job identity")
+    detail = fetch(f"/actions/jobs/{job_id}")
+    if (not isinstance(detail, dict)
+            or type(detail.get("id")) is not int or detail["id"] != job_id
+            or type(detail.get("run_id")) is not int or detail["run_id"] != run_id
+            or type(detail.get("run_attempt")) is not int or detail["run_attempt"] != attempt
+            or detail.get("name") != PUBLISHER
+            or detail.get("head_sha") != job["head_sha"]
+            or detail.get("runner_name") != job.get("runner_name")
+            or detail.get("labels") != job.get("labels")
+            or detail.get("status") != "completed" or detail.get("conclusion") != "success"
+            or not isinstance(detail.get("steps"), list)
+            or not detail["steps"]
+            or not all(isinstance(step, dict) for step in detail["steps"])):
+        raise ValueError("publisher job details do not match this run and attempt")
+    return detail
+
+
 def wait_publication(run_id, attempt, *, fetch=api, clock=time.monotonic, sleep=time.sleep):
     """Return success only after the publisher and its exact-map check complete."""
     start = clock()
@@ -80,6 +105,12 @@ def wait_publication(run_id, attempt, *, fetch=api, clock=time.monotonic, sleep=
         try:
             data = fetch(f"/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
             job = publication_job(data)
+            # The run-jobs endpoint can omit all steps even after completion. The
+            # individual-job endpoint supplies them without inferring confirmation
+            # from the job conclusion or trusting a different run/attempt.
+            if (job is not None and job["status"] == "completed"
+                    and job.get("conclusion") == "success" and not job.get("steps")):
+                job = publication_job_details(job, run_id, attempt, fetch=fetch)
         except Deferred:
             raise
         except (OSError, APIError, ValueError, KeyError, TypeError) as error:
