@@ -295,6 +295,7 @@ class Evidence(unittest.TestCase):
     def test_evidence_reader_checks_authenticated_metadata_again_after_download(self):
         reader = self.reader()
         result = reader.result(self.fixture.request, run_id=101, attempt=2)
+        self.assertEqual(result["kind"], "result")
         self.assertEqual(result["verdicts"], self.fixture.verdicts)
         self.assertEqual(reader.run_reads, 2)
         self.assertIn("/actions/artifacts/202", reader.reads)

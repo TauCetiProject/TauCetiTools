@@ -30,6 +30,8 @@ MEMBER_MANIFEST_FILE = "accepted-members.json"
 MAX_RESULT_BYTES = MAX_REQUEST_BYTES + 16 * 1024
 MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
 RESULT_FILE = "source-candidate-result.json"
+RECEIPT_SCHEMA = "tauceti-ci.source-candidate-request/v1"
+RECEIPT_FILE = "source-candidate-request.json"
 VERDICTS = frozenset({"build", "scope", "bump_guard", "publication"})
 
 
@@ -513,7 +515,7 @@ def check_run_metadata(request, policy, run, *, run_id, attempt, require_complet
             "event": "repository_dispatch",
         }.items()
     ):
-        raise ValueError("result does not belong to the expected completed workflow attempt")
+        raise ValueError("evidence does not belong to the expected workflow attempt")
     if run.get("status") not in ({"completed"} if require_completed else {"queued", "in_progress", "completed"}):
         raise EvidenceUnavailable("workflow execution is not in an expected state")
     if (
@@ -526,7 +528,7 @@ def check_run_metadata(request, policy, run, *, run_id, attempt, require_complet
             f"{policy.workflow}@refs/heads/{policy.execution_branch}",
         }
     ):
-        raise ValueError("result belongs to a different workflow path")
+        raise ValueError("evidence belongs to a different workflow path")
     repository = run.get("repository")
     if (
         not isinstance(repository, dict)
@@ -534,19 +536,91 @@ def check_run_metadata(request, policy, run, *, run_id, attempt, require_complet
         or repository["id"] != policy.execution.native_id
         or repository.get("full_name") != policy.execution.repository.name
     ):
-        raise ValueError("result belongs to a different execution repository")
+        raise ValueError("evidence belongs to a different execution repository")
     required = f"{policy.harness.repository.name}/.github/workflows/pr-build.yml@{policy.harness_revision}"
     workflows = run.get("referenced_workflows")
     if not isinstance(workflows, list) or not any(
         isinstance(w, dict) and w.get("path") == required and w.get("sha") == policy.harness_revision for w in workflows
     ):
-        raise ValueError("result did not execute the pinned reusable build workflow")
+        raise ValueError("evidence did not execute the pinned reusable build workflow")
 
 
 def artifact_name(request, run_id, attempt):
     _positive(run_id, "workflow run ID")
     _positive(attempt, "workflow attempt")
     return f"source-candidate-{request.request_id}-{run_id}-{attempt}"
+
+
+def receipt_artifact_name(request, run_id, attempt):
+    _positive(run_id, "workflow run ID")
+    _positive(attempt, "workflow attempt")
+    return f"source-candidate-request-{request.request_id}-{run_id}-{attempt}"
+
+
+def _producer(request, policy, run_id, attempt):
+    return {
+        "repository": policy.execution.record(),
+        "run_id": run_id,
+        "attempt": attempt,
+        "workflow": policy.workflow,
+        "workflow_revision": request.workflow_revision,
+        "harness": policy.harness.record(),
+        "harness_revision": policy.harness_revision,
+    }
+
+
+def make_receipt(request, policy, context):
+    """Trusted bootstrap accepted this exact request; no source or build verdict is granted."""
+    check_workflow_context(request, policy, context)
+    return {
+        "schema": RECEIPT_SCHEMA,
+        "request": request.record(),
+        "request_digest": request.digest,
+        "producer": _producer(request, policy, context["run_id"], context["attempt"]),
+    }
+
+
+def _verify_request_claim(request, policy, value, *, run_id, attempt):
+    if value["request_digest"] != request.digest:
+        raise ValueError("evidence answers a different candidate request")
+    returned = CandidateRequest.parse(value["request"], policy=policy)
+    if returned.record() != request.record():
+        raise ValueError("evidence changed the candidate request")
+    expected = _producer(request, policy, run_id, attempt)
+    producer = _object(value["producer"], expected, "evidence producer")
+    if (
+        RepositoryIdentity.parse(producer["repository"]) != policy.execution
+        or RepositoryIdentity.parse(producer["harness"]) != policy.harness
+    ):
+        raise ValueError("invalid evidence producer repositories")
+    if producer != expected or type(producer["run_id"]) is not int or type(producer["attempt"]) is not int:
+        raise ValueError("evidence producer differs from the verified workflow attempt")
+
+
+def verify_receipt(request, policy, receipt, run, *, run_id, observed_attempt, expected_receipt_attempt=None):
+    """Verify request ownership of a run, including one that is still running.
+
+    The receipt proves trusted setup accepted the request. It does not prove
+    source availability, successful execution, source approval or merge authority.
+    """
+    check_run_metadata(request, policy, run, run_id=run_id, attempt=observed_attempt, require_completed=False)
+    _object(receipt, {"schema", "request", "request_digest", "producer"}, "candidate request receipt")
+    if receipt["schema"] != RECEIPT_SCHEMA:
+        raise ValueError("invalid candidate request receipt schema")
+    producer = receipt["producer"]
+    if not isinstance(producer, dict):
+        raise ValueError("invalid request receipt producer")
+    receipt_attempt = _positive(producer.get("attempt"), "receipt attempt")
+    if expected_receipt_attempt is not None:
+        _positive(expected_receipt_attempt, "expected receipt attempt")
+        if receipt_attempt != expected_receipt_attempt:
+            raise ValueError("receipt producer differs from its artifact attempt")
+    if receipt_attempt > observed_attempt:
+        raise EvidenceUnavailable("receipt belongs to a newer workflow attempt")
+    # GitHub reruns retain the original event payload, workflow SHA and run ID.
+    # Ownership survives a partial rerun, even when bootstrap is not rerun.
+    _verify_request_claim(request, policy, receipt, run_id=run_id, attempt=receipt_attempt)
+    return {"request_digest": request.digest, "receipt_attempt": receipt_attempt, "observed_attempt": observed_attempt}
 
 
 def make_result(request, policy, context, *, tested_commit, tested_tree, verdicts):
@@ -571,15 +645,7 @@ def make_result(request, policy, context, *, tested_commit, tested_tree, verdict
         "schema": SCHEMA,
         "request": request.record(),
         "request_digest": request.digest,
-        "producer": {
-            "repository": policy.execution.record(),
-            "run_id": context["run_id"],
-            "attempt": context["attempt"],
-            "workflow": policy.workflow,
-            "workflow_revision": request.workflow_revision,
-            "harness": policy.harness.record(),
-            "harness_revision": policy.harness_revision,
-        },
+        "producer": _producer(request, policy, context["run_id"], context["attempt"]),
         "tested": tested,
         "verdicts": dict(verdicts),
     }
@@ -589,28 +655,9 @@ def verify_result(request, policy, result, run, *, run_id, attempt):
     """An artifact's own producer claims are insufficient without fresh run metadata."""
     check_run_metadata(request, policy, run, run_id=run_id, attempt=attempt)
     _object(result, {"schema", "request", "request_digest", "producer", "tested", "verdicts"}, "candidate result")
-    if result["schema"] != SCHEMA or result["request_digest"] != request.digest:
+    if result["schema"] != SCHEMA:
         raise ValueError("result answers a different candidate request")
-    returned = CandidateRequest.parse(result["request"], policy=policy)
-    if returned.record() != request.record():
-        raise ValueError("result changed the candidate request")
-    expected_producer = {
-        "repository": policy.execution.record(),
-        "run_id": run_id,
-        "attempt": attempt,
-        "workflow": policy.workflow,
-        "workflow_revision": request.workflow_revision,
-        "harness": policy.harness.record(),
-        "harness_revision": policy.harness_revision,
-    }
-    producer = _object(result["producer"], expected_producer, "result producer")
-    if (
-        RepositoryIdentity.parse(producer["repository"]) != policy.execution
-        or RepositoryIdentity.parse(producer["harness"]) != policy.harness
-    ):
-        raise ValueError("invalid producer repositories")
-    if producer != expected_producer or type(producer["run_id"]) is not int or type(producer["attempt"]) is not int:
-        raise ValueError("result producer differs from the verified workflow attempt")
+    _verify_request_claim(request, policy, result, run_id=run_id, attempt=attempt)
     verdicts = _object(result["verdicts"], VERDICTS, "candidate verdicts")
     for key, value in verdicts.items():
         allowed = {"success", "failure", "infrastructure"}
@@ -655,16 +702,16 @@ def classify_verdicts(verdicts):
     return "passed"
 
 
-def verify_artifact(request, policy, metadata, archive, run, *, run_id, attempt):
+def _artifact_payload(request, policy, metadata, archive, run, *, run_id, attempt, name, filename, completed):
     """Verify an immutable GitHub artifact without extracting any archive paths."""
-    check_run_metadata(request, policy, run, run_id=run_id, attempt=attempt)
+    check_run_metadata(request, policy, run, run_id=run_id, attempt=attempt, require_completed=completed)
     if not isinstance(metadata, dict) or not isinstance(archive, bytes) or not 0 < len(archive) <= MAX_ARTIFACT_BYTES:
-        raise ValueError("invalid candidate result artifact")
+        raise ValueError("invalid candidate evidence artifact")
     _positive(metadata.get("id"), "artifact ID")
     size = metadata.get("size_in_bytes")
     if type(size) is not int or not 0 < size <= MAX_ARTIFACT_BYTES or metadata.get("expired") is not False:
-        raise ValueError("unavailable candidate result artifact")
-    if metadata.get("name") != artifact_name(request, run_id, attempt):
+        raise ValueError("unavailable candidate evidence artifact")
+    if metadata.get("name") != name:
         raise ValueError("artifact answers a different request or attempt")
     if metadata.get("digest") != "sha256:" + hashlib.sha256(archive).hexdigest():
         raise ValueError("artifact digest differs from authenticated GitHub metadata")
@@ -683,15 +730,61 @@ def verify_artifact(request, policy, metadata, archive, run, *, run_id, attempt)
             entries = bundle.infolist()
             if (
                 len(entries) != 1
-                or entries[0].filename != RESULT_FILE
+                or entries[0].filename != filename
                 or entries[0].is_dir()
                 or entries[0].flag_bits & 1
                 or entries[0].file_size > MAX_RESULT_BYTES
             ):
-                raise ValueError("invalid candidate result archive entries")
+                raise ValueError("invalid candidate evidence archive entries")
             with bundle.open(entries[0]) as stream:
                 raw = stream.read(MAX_RESULT_BYTES + 1)
             result = read_json(raw, max_bytes=MAX_RESULT_BYTES)
     except (zipfile.BadZipFile, RuntimeError, NotImplementedError) as error:
-        raise ValueError("invalid candidate result archive") from error
+        raise ValueError("invalid candidate evidence archive") from error
+    return result
+
+
+def verify_artifact(request, policy, metadata, archive, run, *, run_id, attempt):
+    result = _artifact_payload(
+        request,
+        policy,
+        metadata,
+        archive,
+        run,
+        run_id=run_id,
+        attempt=attempt,
+        name=artifact_name(request, run_id, attempt),
+        filename=RESULT_FILE,
+        completed=True,
+    )
     return verify_result(request, policy, result, run, run_id=run_id, attempt=attempt)
+
+
+def verify_receipt_artifact(request, policy, metadata, archive, run, *, run_id, observed_attempt, receipt_attempt):
+    _positive(observed_attempt, "observed workflow attempt")
+    _positive(receipt_attempt, "receipt attempt")
+    if receipt_attempt > observed_attempt:
+        raise EvidenceUnavailable("receipt belongs to a newer workflow attempt")
+    if isinstance(metadata, dict) and metadata.get("expired") is True:
+        raise EvidenceUnavailable("request receipt has expired")
+    receipt = _artifact_payload(
+        request,
+        policy,
+        metadata,
+        archive,
+        run,
+        run_id=run_id,
+        attempt=observed_attempt,
+        name=receipt_artifact_name(request, run_id, receipt_attempt),
+        filename=RECEIPT_FILE,
+        completed=False,
+    )
+    return verify_receipt(
+        request,
+        policy,
+        receipt,
+        run,
+        run_id=run_id,
+        observed_attempt=observed_attempt,
+        expected_receipt_attempt=receipt_attempt,
+    )
