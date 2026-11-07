@@ -530,6 +530,35 @@ GitHub host. Lookup or trusted resolver failures remain infrastructure; decided
 pin-policy failures remain rejections. Late lint/report steps receive neither
 the native token nor a GitHub API token in source mode.
 
+Trusted bootstrap first produces `source-candidate-request.json`, uploaded as
+`source-candidate-request-REQUEST-RUN-ATTEMPT` before native reads or dependency
+execution. Its distinct receipt schema binds the full request/digest and
+producer repository, caller/harness revisions, run and original receipt attempt. It contains no
+build verdict, source-availability assertion or source approval. This lets a
+queue verify which stored request owns an in-progress run before adopting or
+cancelling it. A run title remains only a discovery hint. Missing receipt
+evidence grants no ownership and cannot justify a blind redispatch.
+
+`GitHubEvidence.receipt()` checks authenticated run and artifact metadata,
+immutable archive digest, its single fixed JSON entry and the latest attempt
+again after download. A status transition during download does not change
+request ownership; a changed observed attempt requires a fresh read. GitHub
+[reruns keep the original event revisions](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs),
+so a previous receipt can
+still prove which request owns that run during a partial or full rerun. The
+proof names `receipt_attempt` and `observed_attempt` separately and has no
+ambiguous `attempt` field. Receipt and result
+artifact names, entry filenames and schemas are distinct, so a receipt cannot
+be consumed as a build result. Result proofs have `kind: "result"`; receipts
+have `kind: "request"` and no verdict/classification. The latest available
+receipt is selected only when the run has one request identity and at most one
+receipt per attempt. Conflicting request receipts fail closed. An upload failure
+stops source execution and leaves infrastructure evidence, never a green build.
+Source-native approval must still be checked
+freshly before promotion. The artifact is available while the workflow runs;
+this uses the immediate REST visibility documented by
+[upload-artifact v4](https://github.com/actions/upload-artifact/blob/ea165f8d65b6e75b540449e92b4886f43607fa02/README.md#improvements).
+
 The isolated trusted finalizer produces `source-candidate-result.json` in an
 artifact named for the request, run and attempt. It binds all four verdicts
 (build, scope, bump guard and publication) to the request and tested commit/tree.

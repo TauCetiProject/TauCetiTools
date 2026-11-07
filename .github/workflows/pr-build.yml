@@ -202,6 +202,7 @@ jobs:
           path: .tauceti-tools
           persist-credentials: false
       - name: Prepare trusted project scripts
+        id: trusted-setup
         if: ${{ env.INFRA != '1' }}
         env:
           PYTHONPATH: ${{ github.workspace }}/.tauceti-tools
@@ -217,13 +218,22 @@ jobs:
               --policy gate/.tauceti/ci-source.json --configuration gate/tauceti.toml \
               --lean-root "$CI_SOURCE_LEAN_ROOT" --roadmap-dir "$CI_SOURCE_ROADMAP_DIR" \
               --scripts "$RUNNER_TEMP/tauceti-shared-scripts" --policy-dir gate/scripts \
-              --output "$RUNNER_TEMP/source-bootstrap.json" --github-env "$GITHUB_ENV"
+              --output "$RUNNER_TEMP/source-bootstrap.json" --github-env "$GITHUB_ENV" \
+              --receipt-output "$RUNNER_TEMP/source-candidate-request.json" --github-output "$GITHUB_OUTPUT"
           else
             python3 -m tauceti_tools config environment --conf gate/tauceti.toml --github-env "$GITHUB_ENV"
             python3 -m tauceti_tools materialize "$RUNNER_TEMP/tauceti-shared-scripts" --conf gate/tauceti.toml --policy-dir gate/scripts
           fi
           cp -a "$RUNNER_TEMP/tauceti-shared-scripts/." gate/scripts/
           echo "PYTHONPATH=$PYTHONPATH" >> "$GITHUB_ENV"
+      - name: Publish verified source request receipt
+        if: ${{ env.SOURCE_CANDIDATE == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ steps.trusted-setup.outputs.request-artifact-name }}
+          path: ${{ runner.temp }}/source-candidate-request.json
+          if-no-files-found: error
+          retention-days: 7
       - name: Select CI API credentials
         if: ${{ env.SOURCE_CANDIDATE != 'true' }}
         id: ci-api

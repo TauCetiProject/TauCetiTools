@@ -21,10 +21,13 @@ from .ci_candidate import (
     CandidateRequest,
     ExecutionPolicy,
     artifact_name,
+    canonical,
     check_run_metadata,
     check_workflow_context,
+    make_receipt,
     make_result,
     read_json,
+    receipt_artifact_name,
 )
 from .ci_candidate_evidence import EvidenceUnavailable, GitHubEvidence
 from .forge import GITHUB, ForgeError, Forgejo
@@ -682,6 +685,7 @@ def main(argv=None):
     parser.add_argument("--mergebase-dir")
     parser.add_argument("--members-file")
     parser.add_argument("--members-output")
+    parser.add_argument("--receipt-output")
     args = parser.parse_args(argv)
     context = context_from_environment(os.environ)
     request, policy = load_request(
@@ -714,6 +718,9 @@ def main(argv=None):
         result = bootstrap(request, policy, context, args.configuration, args.scripts, policy_dir=args.policy_dir)
         if args.lean_root != result["TAUCETI_LEAN_ROOT"] or args.roadmap_dir != result["TAUCETI_ROADMAP_DIR"]:
             raise ValueError("workflow library/roadmap inputs differ from trusted project")
+        if args.receipt_output:
+            with open(args.receipt_output, "xb") as output:
+                output.write(canonical(make_receipt(request, policy, context)))
     elif args.command == "resolve":
         if not args.store:
             parser.error("resolve requires --store")
@@ -760,6 +767,11 @@ def main(argv=None):
         with open(args.github_output, "a") as output:
             output.write(
                 f"num=source-batch\nsha={request.head}\nbase_ref={request.base}\nbase_sha={request.base}\nmergebase={request.base}\nstatus_sha={request.head}\nrepo={policy.source.repository.name}\nauthor=\n"
+            )
+    if args.github_output and args.command == "bootstrap" and args.receipt_output:
+        with open(args.github_output, "a") as output:
+            output.write(
+                f"request-artifact-name={receipt_artifact_name(request, context['run_id'], context['attempt'])}\n"
             )
     if args.github_env:
         with open(args.github_env, "a") as output:

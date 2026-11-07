@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -14,7 +15,9 @@ from .ci_candidate import (
     artifact_name,
     check_run_metadata,
     classify_verdicts,
+    receipt_artifact_name,
     verify_artifact,
+    verify_receipt_artifact,
 )
 from .forge import GITHUB
 
@@ -120,8 +123,15 @@ class GitHubEvidence:
         )
 
     def result(self, request, *, run_id, attempt):
+        return self._candidate_artifact(request, run_id=run_id, attempt=attempt, receipt=False)
+
+    def receipt(self, request, *, run_id, observed_attempt):
+        """Request ownership only; this method returns no build verdict or merge approval."""
+        return self._candidate_artifact(request, run_id=run_id, attempt=observed_attempt, receipt=True)
+
+    def _candidate_artifact(self, request, *, run_id, attempt, receipt):
         request.check_policy(self.policy)
-        name = artifact_name(request, run_id, attempt)
+        name = (receipt_artifact_name if receipt else artifact_name)(request, run_id, attempt)
         harness_request = urllib.request.Request(
             GITHUB.api_url + "/repos/" + self.policy.harness.repository.name,
             headers={
@@ -144,7 +154,7 @@ class GitHubEvidence:
         ):
             raise EvidenceUnavailable("execution harness repository identity changed")
         run = self.get(f"/actions/runs/{run_id}")
-        check_run_metadata(request, self.policy, run, run_id=run_id, attempt=attempt)
+        check_run_metadata(request, self.policy, run, run_id=run_id, attempt=attempt, require_completed=not receipt)
         rows, total = [], None
         for page in range(1, self.max_pages + 1):
             value = self.get(f"/actions/runs/{run_id}/artifacts?per_page=100&page={page}")
@@ -173,26 +183,61 @@ class GitHubEvidence:
             for row in rows
         ) or len({row["id"] for row in rows}) != len(rows):
             raise EvidenceUnavailable("execution artifact listing contains invalid or duplicate identities")
-        matches = [row for row in rows if row["name"] == name]
+        receipt_attempt = None
+        if receipt:
+            pattern = re.compile(rf"source-candidate-request-([0-9a-f]{{32}})-{run_id}-([1-9][0-9]{{0,18}})")
+            owned = []
+            attempts = set()
+            for row in rows:
+                matched = pattern.fullmatch(row["name"])
+                if matched is None:
+                    continue
+                previous = int(matched[2])
+                if previous > attempt:
+                    raise EvidenceUnavailable("request receipt belongs to a newer attempt")
+                if previous in attempts or matched[1] != request.request_id:
+                    raise EvidenceUnavailable("workflow request receipts are ambiguous")
+                attempts.add(previous)
+                owned.append((previous, row))
+            if not owned:
+                raise EvidenceUnavailable("workflow request receipt is unavailable")
+            receipt_attempt, selected = max(owned, key=lambda item: item[0])
+            matches = [selected]
+        else:
+            matches = [row for row in rows if row["name"] == name]
         if len(matches) != 1:
-            raise EvidenceUnavailable("execution result artifact is missing or ambiguous")
+            raise EvidenceUnavailable("execution artifact is missing or ambiguous")
         metadata = self.get(f"/actions/artifacts/{matches[0]['id']}")
         if not isinstance(metadata, dict) or metadata.get("id") != matches[0]["id"]:
             raise EvidenceUnavailable("execution artifact identity changed")
         raw = self.artifact_bytes(metadata.get("id"))
-        verdicts = verify_artifact(request, self.policy, metadata, raw, run, run_id=run_id, attempt=attempt)
-        # A newer attempt during download invalidates this result; do not return
-        # stale green simply because an earlier metadata read was still current.
+        if receipt:
+            verified = verify_receipt_artifact(
+                request,
+                self.policy,
+                metadata,
+                raw,
+                run,
+                run_id=run_id,
+                observed_attempt=attempt,
+                receipt_attempt=receipt_attempt,
+            )
+        else:
+            verified = verify_artifact(request, self.policy, metadata, raw, run, run_id=run_id, attempt=attempt)
+        # A changed observed attempt requires a fresh read. An older receipt can
+        # still prove run ownership then; a result must match the latest attempt.
         current = self.get(f"/actions/runs/{run_id}")
-        check_run_metadata(request, self.policy, current, run_id=run_id, attempt=attempt)
-        if current.get("conclusion") != run.get("conclusion"):
+        check_run_metadata(request, self.policy, current, run_id=run_id, attempt=attempt, require_completed=not receipt)
+        if not receipt and current.get("conclusion") != run.get("conclusion"):
             raise EvidenceUnavailable("execution result changed during verification")
-        return {
+        proof = {
             "run_id": run_id,
-            "attempt": attempt,
             "artifact_id": metadata["id"],
             "artifact_digest": metadata["digest"],
             "request_digest": request.digest,
-            "verdicts": verdicts,
-            "classification": classify_verdicts(verdicts),
         }
+        if receipt:
+            proof.update(kind="request", **verified)
+        else:
+            proof.update(kind="result", attempt=attempt, verdicts=verified, classification=classify_verdicts(verified))
+        return proof
