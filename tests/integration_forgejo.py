@@ -135,6 +135,24 @@ ROOT_PATH = {root}/log
                     repo = RepositoryRef(api.forge, "operator/content")
                     api.post_comment(repo, pull["number"], "Review finding")
                     self.assertEqual(len(api.pulls(repo)), 1)
+                    review = api.request(
+                        "POST",
+                        f"repos/operator/content/pulls/{pull['number']}/reviews",
+                        {
+                            "event": "COMMENT",
+                            "commit_id": pull["head"]["sha"],
+                            "body": "Review",
+                            "comments": [{"path": "Proof.lean", "new_position": 1, "body": "Original finding"}],
+                        },
+                    )
+                    review_path = f"repos/operator/content/pulls/{pull['number']}/reviews/{review['id']}/comments"
+                    code_comment = api.request("GET", review_path)[0]
+                    api.edit_comment(repo, code_comment["id"], "Updated finding")
+                    self.assertEqual(api.request("GET", review_path)[0]["body"], "Updated finding")
+                    with self.assertRaises(ForgeError) as forbidden:
+                        Forgejo(api.forge).edit_comment(repo, code_comment["id"], "Unauthorized replacement")
+                    self.assertIn(forbidden.exception.status, {401, 403})
+                    self.assertEqual(api.request("GET", review_path)[0]["body"], "Updated finding")
                     project = root / "project.toml"
                     project.write_text(f'''schema_version=2
 [forges.local]

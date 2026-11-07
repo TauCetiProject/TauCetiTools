@@ -64,6 +64,8 @@ FORGEJO_BINARY=/path/to/forgejo python tests/integration_forgejo.py
 
 It initializes a private temporary SQLite instance, creates a repository, branch,
 commit, PR and comment, reads them through the direct client and command wrapper,
+creates and edits a code-review comment through the native generic edit endpoint,
+and verifies an unauthenticated edit is refused,
 and stops the server afterward. SSH, Actions and registration are disabled and
 credentials are never printed. Forgejo 17's issue-comment endpoint is unpaginated;
 its PR listing endpoint uses pagination. The smoke covers both actual behaviors.
@@ -76,8 +78,9 @@ its PR listing endpoint uses pagination. The smoke covers both actual behaviors.
 2. Expand direct forge operations and normalize PR/review/status/error records.
    Add credential selection and provider-specific account validation; preserve
    budget/cost history and qualify caches, outboxes, claims, and local state.
-3. Extend Forgejo's native review APIs for editing, replies, and conversation
-   resolution/reopening. Use native services and permission checks, update OpenAPI,
+3. Extend Forgejo's native review APIs for replies and conversation
+   resolution/reopening. Generic comment editing already works for code comments
+   and is covered by the real-server smoke. Use native services and permission checks, update OpenAPI,
    test webhook behavior, and submit focused PRs upstream. Publish a tested fork
    build pinned to an immutable revision.
 4. Complete the familiar `gh` command corpus, flags, pagination, exit statuses,

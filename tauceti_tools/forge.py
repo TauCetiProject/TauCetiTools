@@ -254,3 +254,9 @@ class Forgejo:
     def post_comment(self, repository, number, body):
         repository.pull_url(number)
         return self.request("POST", f"{self._repo(repository)}/issues/{number}/comments", {"body": body})
+
+    def edit_comment(self, repository, comment_id, body):
+        repository.pull_url(comment_id)  # identical positive-ID validation
+        # The generic Forgejo issue-comment edit route also edits code comments;
+        # native server permissions and ContentVersion handling remain authoritative.
+        return self.request("PATCH", f"{self._repo(repository)}/issues/comments/{comment_id}", {"body": body})
