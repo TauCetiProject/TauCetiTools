@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import threading
@@ -140,7 +141,7 @@ def qualified_claim_key(source, resource):
         raise ValueError("claim resource must be valid UTF-8") from None
     value = {
         "schema": "tauceti-claim-resource/v2",
-        "source": source.repository.key,
+        "source": source.repository.forge.key,
         "source_id": source.native_id,
         "resource": resource,
     }
@@ -165,12 +166,13 @@ class ForgejoGitClaim(GitClaim):
             or credential_origin != repository.repository.forge
         ):
             raise ValueError("native claim repository and credential origins differ")
-        if type(ttl) is not int or not -86400 <= ttl <= 86400:
+        if type(ttl) is not int or not 1 <= ttl <= 86400:
             raise ValueError("claim TTL must be a bounded integer")
         if not isinstance(owner, str) or not owner or len(owner) > 512 or any(c in owner for c in "\0\r\n"):
             raise ValueError("claim owner must be a bounded process identity")
         super().__init__(repository.repository.name, qualified_claim_key(source, resource), owner, ttl)
         self.repository_identity, self.client = repository, client
+        self.command_timeout = 30
         self.script = str(script_path())  # Never execute an ambient candidate-selected helper.
         self.env = scoped_git_environment(credential_origin, token)
         base = (
@@ -219,7 +221,15 @@ class ForgejoGitClaim(GitClaim):
                 or info.st_mode & 0o077
             ):
                 raise OSError("native claim cache lock must be an owned private regular file")
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.01)
             if self.directory.is_symlink():
                 raise OSError("native claim cache cannot be a symlink")
             if not self.directory.exists():
@@ -230,6 +240,31 @@ class ForgejoGitClaim(GitClaim):
                     capture_output=True,
                     timeout=30,
                 )
+            local = subprocess.run(
+                [self.git, "-C", str(self.directory), "config", "--local", "--null", "--list", "--no-includes"],
+                env=self.env,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            allowed = {
+                "core.repositoryformatversion": {"0"},
+                "core.bare": {"true"},
+                "core.filemode": {"true", "false"},
+                "core.ignorecase": {"true", "false"},
+                "core.precomposeunicode": {"true", "false"},
+                "remote.origin.url": {self.env["CLAIM_GIT_URL"]},
+                "remote.origin.fetch": {"+refs/heads/*:refs/remotes/origin/*"},
+            }
+            seen = set()
+            for entry in local.stdout.split("\0"):
+                if not entry:
+                    continue
+                key, separator, value = entry.partition("\n")
+                if not separator or key in seen or value not in allowed.get(key, set()):
+                    raise OSError("native claim cache contains unexpected Git configuration")
+                seen.add(key)
             remote = subprocess.run(
                 [self.git, "-C", str(self.directory), "remote", "get-url", "origin"],
                 env=self.env,
@@ -250,11 +285,39 @@ class ForgejoGitClaim(GitClaim):
         finally:
             os.close(fd)
 
+    def _run(self, verb):
+        args = ["bash", self.script, verb, self.key]
+        if verb != "release":
+            args.append(str(self.ttl))
+        process = subprocess.Popen(
+            args, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True
+        )
+        try:
+            process.communicate(timeout=self.command_timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                process.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+            # A descendant may close its pipes and outlive the shell. Kill the
+            # entire original group even when communicate already returned.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
+            return 2
+        return process.returncode
+
     def command(self, verb):
         try:
             self._bound()
             self._prepare()
-            result = super().command(verb)
+            result = self._run(verb)
             self._bound()
         except (ForgeError, Incomplete, OSError, subprocess.SubprocessError):
             result = 2
@@ -263,3 +326,13 @@ class ForgejoGitClaim(GitClaim):
         if verb in {"acquire", "renew", "holds"}:
             self.held = result == 0
         return result
+
+    def release(self):
+        self.stop.set()
+        if self.thread:
+            self.thread.join(timeout=35)
+            self.thread = None
+        # The acknowledgement may have been lost after acquiring a real lease.
+        # The protocol checks the owner and deletes only with the observed CAS.
+        self.command("release")
+        self.held = False

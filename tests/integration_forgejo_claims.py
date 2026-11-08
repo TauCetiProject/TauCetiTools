@@ -5,9 +5,11 @@ import os
 import signal
 import subprocess
 import sys
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -16,7 +18,7 @@ from fixtures.forgejo_https import source_fixture
 
 from tauceti_tools.ci_candidate import RepositoryIdentity
 from tauceti_tools.claims import ForgejoGitClaim
-from tauceti_tools.forge import Forgejo, RepositoryRef
+from tauceti_tools.forge import ForgeError, Forgejo, RepositoryRef
 
 
 @unittest.skipUnless(os.environ.get("FORGEJO_BINARY"), "set FORGEJO_BINARY for disposable HTTPS claims")
@@ -58,8 +60,23 @@ class NativeGitClaims(unittest.TestCase):
             self.assertEqual(second.acquire(), 0)
             second.release()
 
-            expired = claim("dead-holder", ttl=-1)
+            uncertain = claim("uncertain-owner", resource="review/uncertain/" + "e" * 40)
+            with patch.object(
+                client,
+                "repository",
+                side_effect=[client.repository(repository), ForgeError("lost acknowledgement", status=503)],
+            ):
+                self.assertEqual(uncertain.acquire(), 2)
+            self.assertFalse(uncertain.held)
+            waiting = claim("waiting-owner", resource="review/uncertain/" + "e" * 40)
+            self.assertEqual(waiting.acquire(), 1, "the uncertain acquire really wrote the remote lease")
+            uncertain.release()
+            self.assertEqual(waiting.acquire(), 0)
+            waiting.release()
+
+            expired = claim("dead-holder", ttl=1)
             self.assertEqual(expired.acquire(), 0)
+            time.sleep(1.1)
             replacement = claim("after-crash")
             self.assertEqual(replacement.acquire(), 0)
             expired.release()
@@ -79,7 +96,7 @@ value = json.load(sys.stdin)
 repository = RepositoryIdentity.parse(value['repository'])
 source = RepositoryIdentity.parse(value['source'])
 client = Forgejo(repository.repository.forge, token=value['token'], timeout=5)
-lease = ForgejoGitClaim(repository, value['resource'], 'crashed-process', -1,
+lease = ForgejoGitClaim(repository, value['resource'], 'crashed-process', 1,
     source=source, client=client, token=value['token'], credential_origin=repository.repository.forge,
     cache_base=value['cache'])
 if lease.acquire() != 0:
@@ -102,12 +119,13 @@ os.kill(os.getpid(), signal.SIGKILL)
                 cwd=Path(__file__).resolve().parents[1],
             )
             self.assertEqual(child.returncode, -signal.SIGKILL, "fixture process did not acquire then crash")
+            time.sleep(1.1)
             after_crash = claim("takeover", resource="review/crash/" + "d" * 40)
             self.assertEqual(after_crash.acquire(), 0)
             after_crash.release()
 
             contenders = [
-                claim("racer-" + str(n), resource="review/8/" + "b" * 40, cache=root / f"racer-{n}") for n in range(2)
+                claim("racer-" + str(n), resource="review/8/" + "b" * 40, cache=root / "shared-race") for n in range(2)
             ]
             with ThreadPoolExecutor(max_workers=2) as pool:
                 results = list(pool.map(lambda c: c.acquire(), contenders))

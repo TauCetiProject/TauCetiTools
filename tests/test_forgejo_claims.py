@@ -3,8 +3,11 @@
 import base64
 import copy
 import os
+import subprocess
+import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -12,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from tauceti_tools.ci_candidate import RepositoryIdentity
-from tauceti_tools.claims import ForgejoGitClaim, GitClaim, qualified_claim_key, script_path
+from tauceti_tools.claims import ForgejoGitClaim, qualified_claim_key, script_path
 from tauceti_tools.forge import Forge, ForgeError, RepositoryRef
 from tauceti_tools.git_credentials import scoped_git_environment
 
@@ -43,6 +46,8 @@ class NativeClaims(unittest.TestCase):
         self.assertRegex(key, r"^v2/[0-9a-f]{64}$")
         aliases = RepositoryIdentity(RepositoryRef(self.forge, "TEAM/CONTENT"), 42)
         self.assertEqual(key, qualified_claim_key(aliases, "review/7/" + "a" * 40))
+        renamed = RepositoryIdentity(RepositoryRef(self.forge, "another/transferred"), 42)
+        self.assertEqual(key, qualified_claim_key(renamed, "review/7/" + "a" * 40))
         for source in [
             RepositoryIdentity(self.source.repository, 43),
             RepositoryIdentity(RepositoryRef(Forge("forgejo", "https://other.example"), "team/content"), 42),
@@ -61,7 +66,7 @@ class NativeClaims(unittest.TestCase):
         self.assertEqual(claim.script, str(script_path()))
         self.assertNotIn("GH_TOKEN", claim.env)
         self.assertNotIn("GIT_TRACE", claim.env)
-        with patch.object(GitClaim, "command", return_value=0):
+        with patch.object(ForgejoGitClaim, "_run", return_value=0):
             self.assertEqual(claim.acquire(), 0)
         self.assertEqual(self.client.repository.call_count, 2)
         config = (claim.directory / "config").read_text()
@@ -79,7 +84,7 @@ class NativeClaims(unittest.TestCase):
             {"archived": True},
             {"mirror": True},
         ]:
-            with self.subTest(change=change), patch.object(GitClaim, "command") as git:
+            with self.subTest(change=change), patch.object(ForgejoGitClaim, "_run") as git:
                 self.client.repository.side_effect = lambda *_, change=change: self.row | change
                 claim.held = True
                 self.assertEqual(claim.command("renew"), 2)
@@ -89,21 +94,82 @@ class NativeClaims(unittest.TestCase):
     def test_post_write_identity_change_never_reports_acquired(self):
         claim = self.claim()
         self.client.repository.side_effect = [self.row, self.row | {"id": 99}]
-        with patch.object(GitClaim, "command", return_value=0):
+        with patch.object(ForgejoGitClaim, "_run", return_value=0):
             self.assertEqual(claim.acquire(), 2)
         self.assertFalse(claim.held)
 
     def test_api_outages_and_forbidden_reads_are_unavailable(self):
         claim = self.claim()
         for status in [401, 403, 404, 503]:
-            with self.subTest(status=status), patch.object(GitClaim, "command") as git:
+            with self.subTest(status=status), patch.object(ForgejoGitClaim, "_run") as git:
                 self.client.repository.side_effect = ForgeError("unavailable", status=status)
                 self.assertEqual(claim.acquire(), 2)
                 git.assert_not_called()
         self.client.repository.side_effect = lambda *_: copy.deepcopy(self.row)
-        with patch.object(GitClaim, "command", return_value=0):
+        with patch.object(ForgejoGitClaim, "_run", return_value=0):
             self.assertEqual(claim.command("holds"), 0)
         self.assertTrue(claim.held)
+
+    def test_uncertain_acquisition_still_releases_its_remote_lease(self):
+        claim = self.claim()
+        self.client.repository.side_effect = [self.row, ForgeError("lost response", status=503)]
+        with patch.object(ForgejoGitClaim, "_run", return_value=0):
+            self.assertEqual(claim.acquire(), 2)
+        self.assertFalse(claim.held)
+        self.client.repository.side_effect = lambda *_: copy.deepcopy(self.row)
+        with patch.object(ForgejoGitClaim, "_run", return_value=0) as run:
+            claim.release()
+            run.assert_called_once_with("release")
+
+    def test_native_ttl_must_be_positive_and_bounded(self):
+        for ttl in (0, -1, 86401, True, 1.5):
+            with self.subTest(ttl=ttl), self.assertRaises(ValueError):
+                self.claim(ttl=ttl)
+
+    def test_existing_cache_cannot_redirect_authenticated_git_operations(self):
+        claim = self.claim()
+        claim._prepare()
+        config = claim.directory / "config"
+        original = config.read_bytes()
+        for key, value in (
+            ("http.https://source.example/.sslVerify", "false"),
+            ("http.https://source.example/.followRedirects", "true"),
+            ("http.https://source.example/.proxy", "https://other.example"),
+            ("remote.origin.pushurl", "https://other.example/team/claims.git"),
+            ("include.path", str(self.root / "other-config")),
+        ):
+            with self.subTest(key=key):
+                config.write_bytes(original)
+                subprocess.run([claim.git, "-C", str(claim.directory), "config", "--local", key, value], check=True)
+                with patch.object(ForgejoGitClaim, "_run") as run:
+                    self.assertEqual(claim.acquire(), 2)
+                    run.assert_not_called()
+
+    def test_timeout_stops_children_even_after_their_pipes_are_closed(self):
+        claim = self.claim()
+        claim.command_timeout = 0.2
+        marker = self.root / "late-write"
+        ready = self.root / "ready"
+        child = self.root / "child.py"
+        child.write_text(
+            "import os, signal, time\n"
+            "from pathlib import Path\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "os.close(1); os.close(2)\n"
+            f"Path({str(ready)!r}).touch()\n"
+            "time.sleep(1)\n"
+            f"Path({str(marker)!r}).touch()\n"
+        )
+        helper = self.root / "timeout.sh"
+        # Only this test replaces the pinned helper with a controlled process tree.
+        import shlex
+
+        helper.write_text(f"{shlex.quote(sys.executable)} {shlex.quote(str(child))} &\nwait\n")
+        claim.script = str(helper)
+        self.assertEqual(claim._run("acquire"), 2)
+        self.assertTrue(ready.exists(), "child must have started before the timeout")
+        time.sleep(1.1)
+        self.assertFalse(marker.exists(), "a timed-out Git descendant must not perform a later write")
 
     def test_git_credentials_are_scoped_without_ambient_headers_helpers_or_traces(self):
         parent = {

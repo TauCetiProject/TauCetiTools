@@ -25,7 +25,9 @@ not a cutover requirement or an active coordination mechanism.
 Supply an origin-bound Forgejo API client, a Git token and its credential origin.
 The source/resource pair is encoded by `qualified_claim_key` into a valid Git ref;
 server identity, native repository ID and resource all participate. Repository-name
-case aliases share a key. Existing GitHub leases keep their current names.
+case aliases and renames retain the same source key. Existing GitHub leases keep
+their current names. Native TTLs must be positive integers at most 86400 seconds;
+each concurrent run must have a different owner nonce.
 
 The claims repository must have Actions disabled. Every native command checks its
 name, native ID, archive/mirror flags and Actions setting before and after Git.
@@ -40,6 +42,7 @@ scripts are disabled. The token is absent from command arguments and persisted
 Git config. The existing private local bare cache is keyed by server/native claims
 repository ID. A short local initialization lock protects cache setup; remote
 ownership still uses `--force-with-lease`.
+Unexpected local Git configuration is rejected before authenticated transport.
 
 Return values remain 0 for confirmed success/ownership, 1 for contention or lost
 ownership, and 2 for unavailable state. Network/permission failures and unreadable
@@ -47,6 +50,8 @@ or malformed history cannot become an absent or expired lease. Native callers mu
 handle 2 explicitly before starting work; the native Review caller integration is
 still required. A local `held` flag is only a hint; `command("holds")` checks the
 remote lease again.
+Cleanup attempts an owner-checked CAS release even after a lost acknowledgement;
+a timed-out command terminates its Git process group before returning unavailable.
 
 `tests/integration_forgejo_claims.py` exercises the real HTTPS Git transport on
 stock Forgejo: contributor access, custom refs, competing claims, renew/release,
