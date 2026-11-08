@@ -55,13 +55,13 @@ def auditedModules : IO (Array Name) :=
   return #[auditedRoot] ++ (← collectLeanModules (auditedRoot.toString : System.FilePath))
 
 /-- Reader/State monad for the shared axiom-reachability pass: the `Environment` is read-only
-and the `NameMap Bool` memoizes, for every constant visited, whether it transitively depends on
+and the `Std.HashMap Name Bool` memoizes, for every constant visited, whether it transitively depends on
 an axiom outside `allowedAxioms`. The map is threaded across *all* candidates so the shared
 `Mathlib`/`TauCeti` closure is walked once total, not re-walked per declaration. -/
-abbrev AxiomCacheM := ReaderT Environment (StateM (Lean.NameMap Bool))
+abbrev AxiomCacheM := ReaderT Environment (StateM (Std.HashMap Name Bool))
 
 /-- Does `c` transitively depend on an axiom outside `allowedAxioms`? Memoized in the shared
-`NameMap Bool`. Mirrors `Lean.collectAxioms`' traversal of each declaration's type and value, but
+`Std.HashMap Name Bool`. Mirrors `Lean.collectAxioms`' traversal of each declaration's type and value, but
 (a) shares one cache across every call — the stock `collectAxioms` rebuilds its state and redoes
 per-call setup on each invocation, which is the ~77ms/decl that dominated the audit — and
 (b) collapses the result to a single `Bool`, since the audit only needs "clean or not". A constant
@@ -75,7 +75,7 @@ first bad candidate's traversal therefore reaches a disallowed leaf. The `false`
 in a cyclic declaration cluster, leave other members cached clean and under-count the reported
 offenders, but cannot turn a failing run into a pass. This also holds for a scoped candidate set. -/
 partial def reachesDisallowedAxiom (c : Name) : AxiomCacheM Bool := do
-  if let some res := (← get).find? c then return res
+  if let some res := (← get)[c]? then return res
   modify (·.insert c false)
   let env ← read
   let anyExpr (es : Array Expr) : AxiomCacheM Bool :=

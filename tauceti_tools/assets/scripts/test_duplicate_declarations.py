@@ -281,6 +281,75 @@ class DuplicateDeclarationsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("bad → [counterfeit]", result.stderr)
 
+    def test_private_axiom_reference_across_modules(self):
+        # Private proofs must follow private declarations in their imported modules too.
+        result = self.fixture({
+            "Dependency": "module\nprivate axiom hidden : False\n"
+                          "public theorem visible : True := True.intro\n",
+            "TauCeti.Orphan": "module\npublic import Lean\nimport all Dependency\n"
+                              "open Lean Elab Tactic\n"
+                              "private theorem bad : False := by\n"
+                              "  run_tac do\n"
+                              '    let name := Name.str (Name.num `_private.Dependency 0) "hidden"\n'
+                              "    (← getMainGoal).assign (mkConst name)\n"
+                              "    replaceMainGoal []\n",
+        }, full=True, scope="TauCeti.Orphan\n")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("_private.Dependency.0.hidden", result.stderr)
+        self.assertIn("bad →", result.stderr)
+
+    def test_lookalike_extension_is_not_an_axiom_summary(self):
+        # An imported initializer can register a different extension with the same
+        # privateToUserName. Its invented "clean" results must never replace compiler data.
+        result = self.fixture({
+            "Dependency": "module\npublic import Lean\nopen Lean\n"
+                          "initialize counterfeitSummaries : PersistentEnvExtension "
+                          "(Name × Array Name) Unit Unit ←\n"
+                          "  registerPersistentEnvExtension {\n"
+                          "    name := mkPrivateNameCore `AAA `Lean.exportedAxiomsExt\n"
+                          "    mkInitial := pure ()\n"
+                          "    addImportedFn := fun _ => pure ()\n"
+                          "    addEntryFn := fun _ _ => ()\n"
+                          "    exportEntriesFn := fun _ =>\n"
+                          "      #[(mkPrivateNameCore `TauCeti.Orphan `counterfeit, #[]),\n"
+                          "        (mkPrivateNameCore `TauCeti.Orphan `bad, #[])].qsort "
+                          "(fun a b => Name.quickLt a.1 b.1)\n"
+                          "  }\n",
+            "TauCeti.Orphan": "module\npublic meta import Dependency\n"
+                              "private axiom counterfeit : False\n"
+                              "private theorem bad : False := counterfeit\n",
+        }, full=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("counterfeit", result.stderr)
+        self.assertIn("bad →", result.stderr)
+
+    def test_cyclic_dependency_does_not_hide_axioms(self):
+        # On stock rc2, the export pass caches incomplete axiom summaries for some of
+        # these inductives when constructors are visited before their inductive type.
+        # The audit must inspect the actual type/constructor graph, including dependencies.
+        dependency = "module\npublic def bad : Nat := by sorry\n" + "".join(
+            f"public inductive T{i} where\n  | mk : (n : Nat) → n = bad → T{i}\n"
+            for i in range(80)
+        )
+        result = self.fixture({
+            "Dependency": dependency,
+            "TauCeti.Orphan": "module\npublic import Dependency\n"
+                              "public theorem foo (_x : T3) : True := True.intro\n",
+        }, full=True, scope="TauCeti.Orphan\n")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("foo → [sorryAx]", result.stderr)
+
+    def test_kernel_declaration_can_match_another_modules_ir_helper(self):
+        # The IR helper has an owner index but is absent from A's kernel constNames.
+        # B's real kernel theorem must not disappear from the axiom candidate set.
+        result = self.fixture({
+            "TauCeti.A": "module\npublic def TauCeti.f (α : Type) (_x : α) : Nat := 0\n",
+            "TauCeti.B": "module\npublic import TauCeti.A\n"
+                         "public theorem TauCeti.f._redArg : False := by sorry\n",
+        }, full=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("TauCeti.f._redArg → [sorryAx]", result.stderr)
+
     def test_scope_checks_changed_module_without_adding_importers(self):
         result = self.fixture({
             "TauCeti.Base": "module\npublic axiom counterfeit : False\n",
