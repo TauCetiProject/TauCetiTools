@@ -52,6 +52,17 @@ still required. A local `held` flag is only a hint; `command("holds")` checks th
 remote lease again.
 Cleanup attempts an owner-checked CAS release even after a lost acknowledgement;
 a timed-out command terminates its Git process group before returning unavailable.
+Native commands serialize with release so a delayed heartbeat cannot renew a
+released run. `release()` returns the protocol result: retry a 2 after the outage
+clears, using the same object/owner. Repository checks remain required during
+cleanup; a sustained API outage can leave the lease until expiry. Create a new
+object with a new nonce for a new run. `last_error` identifies the failed phase
+without including remote output or credentials.
+
+Damaged or foreign-format lease records require operator inspection and manual
+removal; GC preserves them and continues collecting other expired leases. All
+clients sharing the namespace must use the updated canonical script for these
+failure semantics. Native transport drops ambient proxy settings.
 
 `tests/integration_forgejo_claims.py` exercises the real HTTPS Git transport on
 stock Forgejo: contributor access, custom refs, competing claims, renew/release,

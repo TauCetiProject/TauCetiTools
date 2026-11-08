@@ -126,14 +126,13 @@ push_cas() {
 push_delete() { g push --force-with-lease="$1:$2" origin ":$1" >/dev/null 2>&1; }
 
 cmd_acquire() {
-    local key="$1" ttl="${2:-$DEFAULT_TTL}" ref cur js owner exp n
+    local key="$1" ttl="${2:-$DEFAULT_TTL}" ref cur js owner n
     ref=$(ref_of "$key"); n=$(now); ensure_repo || return 2
     cur=$(remote_oid "$ref") || return 2
     if [[ -n "$cur" ]]; then
         js=$(observed_lease "$cur" "$ref" "$key") || return "$?"
         owner=$(jq -r '.owner // ""' <<<"$js" 2>/dev/null)
-        exp=$(jq -r '.expires_at // 0' <<<"$js" 2>/dev/null)
-        if [[ "$owner" != "$WID" && "$exp" =~ ^[0-9]+$ && "$exp" -gt "$n" ]]; then
+        if [[ "$owner" != "$WID" ]] && jq -e --argjson n "$n" '.expires_at > $n' <<<"$js" >/dev/null; then
             return 1   # someone else holds a live lease
         fi
         # mine (renew) or expired (takeover): CAS against the observed oid
@@ -156,32 +155,31 @@ cmd_renew() {
 }
 
 cmd_release() {
-    local key="$1" ref cur js owner
+    local key="$1" ref cur js owner rc attempt
     ref=$(ref_of "$key"); ensure_repo || return 2
-    cur=$(remote_oid "$ref") || return 2; [[ -z "$cur" ]] && return 0
-    js=$(observed_lease "$cur" "$ref" "$key") || return "$?"
-    owner=$(jq -r '.owner // ""' <<<"$js" 2>/dev/null)
-    [[ "$owner" == "$WID" ]] || return 0   # not mine — leave it
-    if push_delete "$ref" "$cur"; then return 0; fi
-    local current
-    current=$(remote_oid "$ref") || return 2
-    [[ -z "$current" ]] && return 0
-    if [[ "$current" != "$cur" ]]; then
-        js=$(observed_lease "$current" "$ref" "$key") || return 2
+    # A renewal whose response was lost can finish at the server during cleanup.
+    # Re-read and retry only owner-checked CAS deletes, never an unconditional one.
+    for attempt in 1 2 3; do
+        cur=$(remote_oid "$ref") || return 2; [[ -z "$cur" ]] && return 0
+        js=$(observed_lease "$cur" "$ref" "$key") || {
+            rc=$?
+            [[ "$rc" == 1 ]] && continue
+            return 2
+        }
         owner=$(jq -r '.owner' <<<"$js")
-        [[ "$owner" != "$WID" ]] && return 0
-    fi
+        [[ "$owner" == "$WID" ]] || return 0
+        if push_delete "$ref" "$cur"; then return 0; fi
+    done
     return 2
 }
 
 cmd_holds() {
-    local key="$1" ref cur js owner exp n
+    local key="$1" ref cur js owner n
     ref=$(ref_of "$key"); n=$(now); ensure_repo || return 2
     cur=$(remote_oid "$ref") || return 2; [[ -z "$cur" ]] && return 1
     js=$(observed_lease "$cur" "$ref" "$key") || return "$?"
     owner=$(jq -r '.owner // ""' <<<"$js" 2>/dev/null)
-    exp=$(jq -r '.expires_at // 0' <<<"$js" 2>/dev/null)
-    [[ "$owner" == "$WID" && "$exp" =~ ^[0-9]+$ && "$exp" -gt "$n" ]]
+    [[ "$owner" == "$WID" ]] && jq -e --argjson n "$n" '.expires_at > $n' <<<"$js" >/dev/null
 }
 
 cmd_read() {
@@ -203,15 +201,14 @@ cmd_list() {
 }
 
 cmd_gc() {
-    local n references oid ref js exp failed=0
+    local n references oid ref js failed=0
     n=$(now); ensure_repo || return 2
     references=$(g ls-remote origin "$NS/*" 2>/dev/null) || return 2
     while read -r oid ref; do
         [[ -z "$oid" ]] && continue
         js=$(lease_json "$oid" "$ref") || { failed=2; continue; }
         lease_valid "$js" "${ref#"$NS"/}" || { failed=2; continue; }
-        exp=$(jq -r '.expires_at' <<<"$js")
-        if [[ "$exp" =~ ^[0-9]+$ && "$exp" -le "$n" ]]; then
+        if jq -e --argjson n "$n" '.expires_at <= $n' <<<"$js" >/dev/null; then
             if push_delete "$ref" "$oid"; then
                 echo "gc: deleted expired $ref" >&2
             else

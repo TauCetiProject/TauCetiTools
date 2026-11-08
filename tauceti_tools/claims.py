@@ -172,14 +172,17 @@ class ForgejoGitClaim(GitClaim):
             raise ValueError("claim owner must be a bounded process identity")
         super().__init__(repository.repository.name, qualified_claim_key(source, resource), owner, ttl)
         self.repository_identity, self.client = repository, client
+        self._command_lock = threading.Lock()
         self.command_timeout = 30
         self.script = str(script_path())  # Never execute an ambient candidate-selected helper.
         self.env = scoped_git_environment(credential_origin, token)
         base = (
             Path(cache_base)
             if cache_base is not None
-            else Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "tauceti-claims"
+            else Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "tauceti-claims"
         )
+        if not base.is_absolute():
+            raise ValueError("native claim cache must use an absolute private path")
         scope = hashlib.sha256(
             canonical({"repository": repository.repository.key, "id": repository.native_id})
         ).hexdigest()
@@ -191,6 +194,7 @@ class ForgejoGitClaim(GitClaim):
             CLAIM_REPO=repository.repository.name,
             CLAIM_GIT_URL=repository.repository.clone_url,
             CLAIM_GITDIR=str(self.directory),
+            GIT_DIR=str(self.directory),
             CLAIM_FIXED_REMOTE="1",
             TAUCETI_WORKER_ID=owner,
         )
@@ -314,14 +318,27 @@ class ForgejoGitClaim(GitClaim):
         return process.returncode
 
     def command(self, verb):
+        with self._command_lock:
+            if self.stop.is_set() and verb in {"acquire", "renew"}:
+                return 1  # This run is releasing; no delayed heartbeat may renew it.
+            return self._command(verb)
+
+    def _command(self, verb):
+        self.last_error = None
+        phase = "repository binding"
         try:
             self._bound()
+            phase = "cache setup"
             self._prepare()
+            phase = "Git transport"
             result = self._run(verb)
+            phase = "repository binding"
             self._bound()
         except (ForgeError, Incomplete, OSError, subprocess.SubprocessError):
+            self.last_error = f"native claim {phase} unavailable"
             result = 2
         if result not in (0, 1):
+            self.last_error = self.last_error or "native claim Git transport unavailable"
             result = 2
         if verb in {"acquire", "renew", "holds"}:
             self.held = result == 0
@@ -329,10 +346,14 @@ class ForgejoGitClaim(GitClaim):
 
     def release(self):
         self.stop.set()
+        # Wait for any current renew before deleting; a queued heartbeat observes
+        # stop inside command's lock and never writes after this release.
+        # The acknowledgement may have been lost after acquiring a real lease.
+        # The protocol checks the owner and deletes only with the observed CAS.
+        with self._command_lock:
+            result = self._command("release")
+            self.held = False
         if self.thread:
             self.thread.join(timeout=35)
             self.thread = None
-        # The acknowledgement may have been lost after acquiring a real lease.
-        # The protocol checks the owner and deletes only with the observed CAS.
-        self.command("release")
-        self.held = False
+        return result

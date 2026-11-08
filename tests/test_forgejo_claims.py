@@ -3,12 +3,15 @@
 import base64
 import copy
 import os
+import shlex
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -126,6 +129,53 @@ class NativeClaims(unittest.TestCase):
             with self.subTest(ttl=ttl), self.assertRaises(ValueError):
                 self.claim(ttl=ttl)
 
+    def test_empty_xdg_cache_uses_the_home_cache_and_relative_paths_are_rejected(self):
+        with patch.dict(os.environ, XDG_CACHE_HOME=""):
+            claim = self.claim(cache_base=None)
+        self.assertEqual(claim.directory.parent, Path.home() / ".cache/tauceti-claims")
+        with self.assertRaises(ValueError):
+            self.claim(cache_base=Path("candidate-cache"))
+
+    def test_release_reports_an_outage_for_retry_without_skipping_identity_checks(self):
+        claim = self.claim()
+        self.client.repository.side_effect = ForgeError("unavailable", status=503)
+        with patch.object(ForgejoGitClaim, "_run") as run:
+            self.assertEqual(claim.release(), 2)
+            run.assert_not_called()
+        self.assertEqual(claim.last_error, "native claim repository binding unavailable")
+        self.client.repository.side_effect = lambda *_: copy.deepcopy(self.row)
+        with patch.object(ForgejoGitClaim, "_run", return_value=0):
+            self.assertEqual(claim.release(), 0)
+
+    def test_release_waits_for_an_inflight_renew_and_blocks_late_heartbeats(self):
+        claim = self.claim()
+        entered, proceed = threading.Event(), threading.Event()
+        calls = []
+
+        def run(verb):
+            if verb == "renew":
+                entered.set()
+                self.assertTrue(proceed.wait(5))
+            calls.append(verb)
+            return 0
+
+        with patch.object(ForgejoGitClaim, "_run", side_effect=run):
+            claim.thread = threading.Thread(target=lambda: claim.command("renew"))
+            claim.thread.start()
+            self.assertTrue(entered.wait(5))
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                released = pool.submit(claim.release)
+                try:
+                    self.assertTrue(claim.stop.wait(5))
+                    self.assertFalse(released.done())
+                    self.assertEqual(calls, [])
+                finally:
+                    proceed.set()
+                self.assertEqual(released.result(timeout=5), 0)
+            self.assertEqual(claim.command("renew"), 1)
+        self.assertEqual(calls, ["renew", "release"])
+        self.assertFalse(claim.held)
+
     def test_existing_cache_cannot_redirect_authenticated_git_operations(self):
         claim = self.claim()
         claim._prepare()
@@ -143,12 +193,12 @@ class NativeClaims(unittest.TestCase):
                 subprocess.run([claim.git, "-C", str(claim.directory), "config", "--local", key, value], check=True)
                 with patch.object(ForgejoGitClaim, "_run") as run:
                     self.assertEqual(claim.acquire(), 2)
+                    self.assertEqual(claim.last_error, "native claim cache setup unavailable")
                     run.assert_not_called()
 
     def test_timeout_stops_children_even_after_their_pipes_are_closed(self):
         claim = self.claim()
         claim.command_timeout = 0.2
-        marker = self.root / "late-write"
         ready = self.root / "ready"
         child = self.root / "child.py"
         child.write_text(
@@ -156,20 +206,42 @@ class NativeClaims(unittest.TestCase):
             "from pathlib import Path\n"
             "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
             "os.close(1); os.close(2)\n"
-            f"Path({str(ready)!r}).touch()\n"
-            "time.sleep(1)\n"
-            f"Path({str(marker)!r}).touch()\n"
+            f"Path({str(ready)!r}).write_text(str(os.getpid()))\n"
+            "while True: time.sleep(1)\n"
         )
         helper = self.root / "timeout.sh"
         # Only this test replaces the pinned helper with a controlled process tree.
-        import shlex
-
         helper.write_text(f"{shlex.quote(sys.executable)} {shlex.quote(str(child))} &\nwait\n")
         claim.script = str(helper)
-        self.assertEqual(claim._run("acquire"), 2)
-        self.assertTrue(ready.exists(), "child must have started before the timeout")
-        time.sleep(1.1)
-        self.assertFalse(marker.exists(), "a timed-out Git descendant must not perform a later write")
+        popen = subprocess.Popen
+
+        def started(*args, **kwargs):
+            process = popen(*args, **kwargs)
+            deadline = time.monotonic() + 5
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists(), "child must start before the communication timeout begins")
+            return process
+
+        try:
+            with patch("tauceti_tools.claims.subprocess.Popen", side_effect=started):
+                self.assertEqual(claim._run("acquire"), 2)
+            status = Path(f"/proc/{ready.read_text()}/stat")
+            deadline = time.monotonic() + 5
+            while status.exists():
+                try:
+                    if status.read_text().split()[2] == "Z":
+                        break
+                except FileNotFoundError:
+                    break
+                self.assertLess(time.monotonic(), deadline, "a timed-out child must stop executing")
+                time.sleep(0.01)
+        finally:
+            if ready.exists():
+                try:
+                    os.kill(int(ready.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
     def test_git_credentials_are_scoped_without_ambient_headers_helpers_or_traces(self):
         parent = {
