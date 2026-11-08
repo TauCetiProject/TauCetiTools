@@ -29,6 +29,11 @@
 #      CLAIM_FIXED_REMOTE=1 (require an existing matching origin).
 set -uo pipefail
 
+if [[ "${TAUCETI_QUALIFIED_ONLY:-}" == true ]]; then
+    echo "claim: qualified projects require the explicit ForgejoGitClaim client" >&2
+    exit 2
+fi
+
 REPO="${CLAIM_REPO:-${TAUCETI_REPO:-TauCetiProject/TauCeti}}"
 URL="${CLAIM_GIT_URL:-https://github.com/$REPO}"
 WID="${TAUCETI_WORKER_ID:-$(hostname)-$$}"

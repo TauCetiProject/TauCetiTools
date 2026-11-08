@@ -64,11 +64,18 @@ class NativeClaims(unittest.TestCase):
         self.assertFalse((self.root / "claims").exists())
 
     def test_native_commands_use_the_pinned_helper_and_clean_credential_environment(self):
-        with patch.dict(os.environ, TAUCETI_CLAIM_SH="/candidate/helper", GH_TOKEN="other-secret", GIT_TRACE="1"):
+        with patch.dict(
+            os.environ,
+            TAUCETI_CLAIM_SH="/candidate/helper",
+            GH_TOKEN="other-secret",
+            GIT_TRACE="1",
+            TAUCETI_QUALIFIED_ONLY="true",
+        ):
             claim = self.claim()
         self.assertEqual(claim.script, str(script_path()))
         self.assertNotIn("GH_TOKEN", claim.env)
         self.assertNotIn("GIT_TRACE", claim.env)
+        self.assertNotIn("TAUCETI_QUALIFIED_ONLY", claim.env)
         with patch.object(ForgejoGitClaim, "_run", return_value=0):
             self.assertEqual(claim.acquire(), 0)
         self.assertEqual(self.client.repository.call_count, 2)

@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .forge import GITHUB, resolve_repository
+from .forge import GITHUB, RepositoryRef, resolve_repository
 
 try:
     import tomllib
@@ -32,11 +32,22 @@ CANONICAL = "TauCetiProject/TauCeti"
 DOCS = "https://github.com/TauCetiProject/TauCetiTools/blob/main/docs/project-setup.md"
 REPO_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 REF_RE = re.compile(r"[0-9a-f]{40}\Z")
+QUALIFIED_ONLY = "qualified-only:unavailable"
+QUALIFIED_CONTEXT_VARIABLES = (
+    "TAUCETI_QUALIFIED_ONLY", "TAUCETI_SOURCE_CANDIDATE", "CLAIM_REPO", "CLAIM_GIT_URL",
+    "TAUCETI_CACHE_REPOSITORY", "TAUCETI_SOURCE_REPOSITORY", "TAUCETI_CI_EXECUTION_REPOSITORY",
+    "TAUCETI_CI_GITHUB_READ_REPOSITORIES", "MERGE_BACKEND", "SELF_TESTED_MERGE_BACKEND",
+)
 _active: Project | None = None
 
 
 class ConfigError(ValueError):
     pass
+
+
+def _check_project_export_context():
+    if os.environ.get("TAUCETI_SOURCE_CANDIDATE") == "true":
+        raise ConfigError("Project exports cannot replace a source-candidate CI context; use the trusted CI bootstrap")
 
 
 def _table(raw: dict, key: str) -> dict:
@@ -74,6 +85,33 @@ class Project:
         if "ci" not in self.raw:
             raise ConfigError("No CI execution repository is configured in [ci]")
         return resolve_repository(self.raw["ci"]["repository"], self.raw.get("forges"))
+
+    def tool_repository_ref(self, name: str):
+        """A configured tool's qualified source, or None when that tool is absent."""
+        pin = self.tool_pin(name)
+        return pin[0] if pin else None
+
+    def tool_pin(self, name: str) -> tuple[RepositoryRef, str] | None:
+        """A configured source/revision pair. None never selects a default tool."""
+        tool = self.raw.get("tools", {}).get(name)
+        return (resolve_repository(tool["repo"], self.raw.get("forges")), tool["ref"]) if tool else None
+
+    def rubrics_pin(self) -> tuple[RepositoryRef, str] | None:
+        """The configured rubric source/revision pair, without a canonical fallback."""
+        review = self.tool_pin("review")
+        repository = (
+            self.repository_ref("review") if "review" in self.raw["repositories"] else (review[0] if review else None)
+        )
+        revision = self.raw.get("review", {}).get("rubrics_ref")
+        if revision is None and review and repository == review[0]:
+            revision = review[1]
+        if repository is None:
+            if revision is not None:
+                raise ConfigError("The rubric revision requires a configured rubric or review tool repository")
+            return None
+        if revision is None:
+            raise ConfigError("The rubric repository requires an immutable review.rubrics_ref")
+        return repository, revision
 
     @property
     def upstreams(self):
@@ -155,14 +193,37 @@ class Project:
         base = Path(os.environ.get("XDG_STATE_HOME", str(home / ".local/state")))
         return base / "tauceti/projects" / self.key
 
+    def _local_environment(self) -> dict[str, str]:
+        """Non-authoritative local settings shared by launchers and trusted CI."""
+        cache = self.service("cache")
+        return {
+            "TAUCETI_RUBRICS": json.dumps(self.raw.get("review", {}).get("rubrics", [])),
+            "TAUCETI_BASE_BRANCH": self.branch,
+            "TAUCETI_LEAN_ROOT": self.roots[0],
+            "TAUCETI_LEAN_ROOTS": json.dumps(self.roots),
+            "TAUCETI_ROADMAP_DIR": self.roadmap_dir,
+            "TAUCETI_COMPLETED_DIR": self.completed_dir,
+            "TAUCETI_PROJECT_KEY": self.key,
+            "TAUCETI_PROJECT_STATE": str(self.state_root),
+            "TAUCETI_DOCS_URL": self.raw.get("publication", {}).get("docs_url", ""),
+            "TAUCETI_DOCS_REF": self.raw.get("publication", {}).get("docs_ref", "origin/docgen"),
+            "TAUCETI_ZULIP_SITE": self.raw.get("publication", {}).get("zulip_site", ""),
+            "TAUCETI_ZULIP_CHANNEL": self.raw.get("publication", {}).get("zulip_channel", ""),
+            "TAUCETI_ZULIP_TOPIC": self.raw.get("publication", {}).get("zulip_topic", ""),
+            "TAUCETI_CACHE_DOMAIN": cache.get("domain", "") if cache.get("mode") != "off" else "",
+            "TAUCETI_CACHE_SERVICE": cache.get("name", self.key) if cache.get("mode") != "off" else "",
+            "TAUCETI_CACHE_ARTIFACT_URL": cache.get("artifact_url", "") if cache.get("mode") != "off" else "",
+            "TAUCETI_CACHE_REVISION_URL": cache.get("revision_url", "") if cache.get("mode") != "off" else "",
+        }
+
     def environment(self) -> dict[str, str]:
         """Complete project bindings; absent extras never inherit Tau Ceti destinations."""
         review = self.tool("review")
         progress = self.tool("progress")
-        cache = self.service("cache")
         state = self.raw.get("services", {}).get("github_state", {})
         state_default = "https://github-state.taucetiproject.org" if self.content == "TauCetiProject/TauCeti" else ""
         return {
+            **self._local_environment(),
             **{
                 f"TAUCETI_{role.upper()}_NAME": value.split("/")[1]
                 for role in ("content", "roadmap", "review", "data", "ci", "claims")
@@ -177,7 +238,6 @@ class Project:
             "TAUCETI_ROADMAP_REPO": self.repos["roadmap"],
             "TAUCETI_REVIEW_REPO": review.get("repo", "TauCetiProject/TauCetiReview"),
             "TAUCETI_RUBRICS_REPO": self.repos.get("review", review.get("repo", "TauCetiProject/TauCetiReview")),
-            "TAUCETI_RUBRICS": json.dumps(self.raw.get("review", {}).get("rubrics", [])),
             "TAUCETI_REVIEW_REF": review.get("ref", ""),
             "TAUCETI_RUBRICS_REF": self.raw.get("review", {}).get("rubrics_ref", review.get("ref", "")),
             "TAUCETI_DATA_REPO": self.repos.get("data", "") if self.feature("archives") else "",
@@ -186,31 +246,80 @@ class Project:
             "TAUCETI_LEDGER_NAME": self.repos.get("data", self.content).split("/")[1],
             "TAUCETI_CI_REPO": self.repos.get("ci", "") if self.feature("ci_archive") else "",
             "TAUCETI_CLAIMS_REPO": self.repos.get("claims", "") if self.feature("claims") else "",
-            "TAUCETI_BASE_BRANCH": self.branch,
             "TAUCETI_MERGE_BACKEND": self.raw.get("merge", {}).get("backend", "github-queue"),
-            "TAUCETI_LEAN_ROOT": self.roots[0],
-            "TAUCETI_LEAN_ROOTS": json.dumps(self.roots),
-            "TAUCETI_ROADMAP_DIR": self.roadmap_dir,
-            "TAUCETI_COMPLETED_DIR": self.completed_dir,
-            "TAUCETI_PROJECT_KEY": self.key,
-            "TAUCETI_PROJECT_STATE": str(self.state_root),
             "TAUCETI_PROGRESS_REPO": progress.get("repo", "TauCetiProject/TauCetiProgress"),
             "TAUCETI_PROGRESS_REF": progress.get("ref", ""),
-            "TAUCETI_DOCS_URL": self.raw.get("publication", {}).get("docs_url", ""),
-            "TAUCETI_DOCS_REF": self.raw.get("publication", {}).get("docs_ref", "origin/docgen"),
-            "TAUCETI_ZULIP_SITE": self.raw.get("publication", {}).get("zulip_site", ""),
-            "TAUCETI_ZULIP_CHANNEL": self.raw.get("publication", {}).get("zulip_channel", ""),
-            "TAUCETI_ZULIP_TOPIC": self.raw.get("publication", {}).get("zulip_topic", ""),
             "TAUCETI_GITHUB_STATE_URL": state.get("url", state_default) if state.get("mode") != "off" else "",
-            "TAUCETI_CACHE_DOMAIN": cache.get("domain", "") if cache.get("mode") != "off" else "",
-            "TAUCETI_CACHE_SERVICE": cache.get("name", self.key) if cache.get("mode") != "off" else "",
-            "TAUCETI_CACHE_ARTIFACT_URL": cache.get("artifact_url", "") if cache.get("mode") != "off" else "",
-            "TAUCETI_CACHE_REVISION_URL": cache.get("revision_url", "") if cache.get("mode") != "off" else "",
             "TAUCETI_BORS_URL": self.service("bors").get("url", "")
             if self.service("bors").get("mode") != "off"
             else "",
             "TAUCETI_BORS_REPOSITORY_ID": str(self.service("bors").get("repository_id", "")),
             "TAUCETI_UPSTREAMS": json.dumps(self.upstreams),
+        }
+
+    def qualified_environment(self) -> dict[str, str]:
+        """Settings for ported consumers; repository routing stays in the snapshot.
+
+        Nonempty invalid selectors prevent shell :- defaults from selecting a
+        GitHub repository. Validated CI request bindings are supplied separately
+        by the trusted workflow, after these project-local settings.
+        """
+        _check_project_export_context()
+        try:
+            self._legacy_bindings()
+        except ConfigError:
+            pass
+        else:
+            cleanup = (
+                dict.fromkeys(QUALIFIED_CONTEXT_VARIABLES, "")
+                if os.environ.get("TAUCETI_QUALIFIED_ONLY") == "true"
+                else {}
+            )
+            return {**cleanup, **self.environment(), "TAUCETI_QUALIFIED_ONLY": ""}
+        names = {
+            "TAUCETI_REPO",
+            "TAUCETI_ROADMAP_REPO",
+            "TAUCETI_REVIEW_REPO",
+            "TAUCETI_RUBRICS_REPO",
+            "TAUCETI_DATA_REPO",
+            "TAUCETI_LEDGER_REPO",
+            "TAUCETI_LEDGER_OWNER",
+            "TAUCETI_LEDGER_NAME",
+            "TAUCETI_CI_REPO",
+            "TAUCETI_CLAIMS_REPO",
+            "TAUCETI_PROGRESS_REPO",
+            "TAUCETI_CACHE_REPOSITORY",
+            "CLAIM_REPO",
+            "TAUCETI_SOURCE_REPOSITORY",
+            "TAUCETI_CI_EXECUTION_REPOSITORY",
+            "TAUCETI_CI_GITHUB_READ_REPOSITORIES",
+        }
+        names.update(
+            f"TAUCETI_{role}_{part}"
+            for role in ("CONTENT", "ROADMAP", "REVIEW", "DATA", "CI", "CLAIMS")
+            for part in ("OWNER", "NAME")
+        )
+        names.update(QUALIFIED_CONTEXT_VARIABLES)
+        try:
+            upstreams = json.dumps(self.github_upstreams)
+        except ConfigError:
+            upstreams = QUALIFIED_ONLY  # Unported dependency access must fail, not skip checks.
+        return {
+            **self._local_environment(),
+            **dict.fromkeys(names, QUALIFIED_ONLY),
+            "TAUCETI_QUALIFIED_ONLY": "true",
+            "TAUCETI_SOURCE_CANDIDATE": QUALIFIED_ONLY,
+            "CLAIM_GIT_URL": "qualified-only://unavailable",
+            "TAUCETI_GITHUB_STATE_URL": "",
+            "TAUCETI_UPSTREAMS": upstreams,
+            "MERGE_BACKEND": "queue",
+            "TAUCETI_MERGE_BACKEND": "queue",
+            "SELF_TESTED_MERGE_BACKEND": "queue",
+            "TAUCETI_BORS_URL": "",
+            "TAUCETI_BORS_REPOSITORY_ID": "",
+            "TAUCETI_REVIEW_REF": QUALIFIED_ONLY,
+            "TAUCETI_RUBRICS_REF": QUALIFIED_ONLY,
+            "TAUCETI_PROGRESS_REF": QUALIFIED_ONLY,
         }
 
 
@@ -466,22 +575,41 @@ def configuration_source(explicit: str | None = None) -> str | None:
 
 
 def bootstrap(argv: list[str] | None = None) -> Project | None:
+    """Bootstrap existing GitHub-only consumers; reject mixed/native bindings."""
+    return _bootstrap(argv, qualified=False)
+
+
+def bootstrap_qualified(argv: list[str] | None = None) -> Project | None:
+    """Opt in a ported consumer to the same inherited configuration snapshot."""
+    return _bootstrap(argv, qualified=True)
+
+
+def _bootstrap(argv: list[str] | None, *, qualified: bool) -> Project | None:
     global _active
+    if qualified:
+        _check_project_export_context()
     args = sys.argv[1:] if argv is None else argv
     explicit, _ = conf_argument(args)
     source = configuration_source(explicit)
     if not source:
+        if _active is not None and not qualified:
+            _active._legacy_bindings()
         return _active
     inherited = os.environ.get("TAUCETI_CONF_SNAPSHOT")
     if inherited and os.environ.get("TAUCETI_CONF_SOURCE") == source:
         path = Path(inherited)
     else:
         path = save_snapshot(source)
-    _active = load(str(path))
-    os.environ.update(_active.environment())
+    project = load(str(path))
+    environment = project.qualified_environment() if qualified else project.environment()
+    # A rejected legacy configuration must not replace the active project.
+    if not qualified and os.environ.get("TAUCETI_QUALIFIED_ONLY") == "true":
+        environment = {**dict.fromkeys(QUALIFIED_CONTEXT_VARIABLES, ""), **environment}
+    os.environ.update(environment)
     os.environ["TAUCETI_CONF"] = source
     os.environ["TAUCETI_CONF_SOURCE"] = source
     os.environ["TAUCETI_CONF_SNAPSHOT"] = str(path)
+    _active = project
     return _active
 
 

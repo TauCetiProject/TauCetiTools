@@ -9,7 +9,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .project import ConfigError, bootstrap, conf_argument, configuration_source, load, save_snapshot
+from .project import (
+    ConfigError,
+    bootstrap,
+    bootstrap_qualified,
+    conf_argument,
+    configuration_source,
+    load,
+    save_snapshot,
+)
 
 
 def parser():
@@ -24,6 +32,8 @@ def parser():
     config.add_argument("action", choices=("show", "refresh", "environment"))
     config.add_argument("--resolved", action="store_true")
     config.add_argument("--github-env", type=Path)
+    config.add_argument("--qualified", action="store_true",
+                        help="Export snapshot bindings for ported forge-aware consumers")
     doctor = sub.add_parser("doctor")
     extras = doctor.add_mutually_exclusive_group()
     extras.add_argument("--no-extras", dest="extras", action="store_false", help="Report only core setup checks")
@@ -117,9 +127,12 @@ def main(argv=None):
             from .onboarding import configuration_problem
 
             raise ConfigError(configuration_problem("", "No tauceti.toml was found in this directory or its Git checkout root.", fresh=True))
-        project = (
-            bootstrap(["--conf", source]) if args.command == "config" and args.action == "environment" else load(source)
-        )
+        if args.command == "config" and args.action == "environment":
+            project = (bootstrap_qualified if args.qualified else bootstrap)(["--conf", source])
+        else:
+            if args.command == "config" and args.qualified:
+                raise ConfigError("--qualified requires config environment")
+            project = load(source)
         if args.command == "upstreams":
             from .upstreams import guard, update
 
@@ -152,7 +165,7 @@ def main(argv=None):
                     f"Saved {path}. Restart the worker with --conf {path} to adopt it; running rounds retain their current configuration."
                 )
             elif args.action == "environment":
-                env = project.environment()
+                env = project.qualified_environment() if args.qualified else project.environment()
                 env.update(
                     {key: os.environ[key] for key in ("TAUCETI_CONF", "TAUCETI_CONF_SOURCE", "TAUCETI_CONF_SNAPSHOT")}
                 )

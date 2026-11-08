@@ -37,10 +37,37 @@ supports `github-actions`. Immutable tool-pin validation still applies.
 `[ci].repository` selects build execution; `[repositories].ci` remains the CI
 archive. Their accessors are `ci_repository_ref()` and `repository_ref("ci")`.
 
-New clients use `project.repository_ref(role)` and `project.ci_repository_ref()`.
+New clients use `project.repository_ref(role)`, `project.tool_repository_ref(name)`
+and `project.ci_repository_ref()`.
 Legacy owner/name/environment access rejects non-GitHub bindings, preventing an
-unfinished adapter from acting on the GitHub mirror. This guard must be removed
-only as each caller obtains full qualified-reference support.
+unfinished adapter from acting on the GitHub mirror.
+
+Ported entrypoints explicitly call `bootstrap_qualified(argv)`. It reuses the
+existing configuration snapshot and inheritance variables, so editing the source
+configuration during a round does not change a child's selected forge. For mixed
+projects, legacy repository selectors contain the nonempty invalid value
+`qualified-only:unavailable`, so defaults using these exported selectors cannot
+select the GitHub mirror. `GH_REPO` and `GH_HOST` remain operator-owned command
+context; provider-aware consumers select their qualified role explicitly.
+The shared-state endpoint and GitHub Bors approval selectors are empty. All
+repository and execution routing comes from the qualified accessors.
+Local roots, configured publication/cache settings, and separately supplied
+credentials retain their roles. `project.tool_pin(name)` and
+`project.rubrics_pin()` return configured `(RepositoryRef, revision)` pairs; an
+absent pin never selects a default repository. Configured GitHub dependency checks
+remain available through `github_upstreams`; unported dependency selectors fail
+explicitly for other providers. Raw `claim.sh` refuses qualified-only environments;
+the explicit `ForgejoGitClaim` client uses its own origin-scoped environment.
+No API credentials or approval authority are inferred from configuration
+inheritance. A generic qualified export refuses an active source-candidate CI
+context, preserving its confinement and validated request/role bindings. Trusted
+CI continues to supply those bindings alongside the shared local settings.
+
+`tauceti-tools --conf project.toml config environment --qualified` exports this
+explicit environment and its snapshot path. All-GitHub exports retain their
+existing values. Ordinary `bootstrap()` and `config environment` keep rejecting
+mixed/native repositories, including in children of a ported entrypoint. Each
+consumer must finish its provider-specific operations before opting in.
 
 The experimental `tauceti-gh` executable supports PR and issue list/view,
 create/edit/comment/close/reopen, PR reviews, repository view/list/fork, label
