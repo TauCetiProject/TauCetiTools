@@ -14,7 +14,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from local_scope import LEAN_ROOT, POLICIES, git, local_main, scope
+from tauceti_tools.local_scope import LEAN_ROOT, POLICIES, git, local_main, scope
 
 SCRIPTS = Path(__file__).resolve().parent
 
