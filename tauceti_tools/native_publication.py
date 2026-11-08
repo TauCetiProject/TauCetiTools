@@ -33,7 +33,7 @@ RECOVERY_CONTEXT = "tauceti-recovery/"
 
 
 class PublicationSuperseded(RuntimeError):
-    """A newer native publication superseded this frozen intent; do not resend it."""
+    """Another intent owns this sequence or a newer one; reconcile before resending."""
 
     def __init__(self, message, *, sequence=None, nonce=None, actor=None):
         super().__init__(message)
@@ -164,9 +164,7 @@ class NativePublicationClient:
         self.repository_identity, self.repository, self.client = identity, identity.repository, client
         self._publication_policy = publication_policy
         self._publisher_configured = False
-        self._recovery_grants = {
-            publication_policy.publishers.generation: set(publication_policy.publishers.recoveries)
-        }
+        self._configured_record = None
 
     @property
     def publication_policy(self):
@@ -193,6 +191,8 @@ class NativePublicationClient:
 
     def configure_publisher_policy(self, store):
         """Fence trust changes in the existing queue settings, before serving work."""
+        self._publisher_configured = False
+        self._configured_record = None
         key = "state:native-publisher-policy:" + self.repository.key + ":" + str(self.repository_identity.native_id)
         current = self.publication_policy.publishers.record()
         with store.transaction():
@@ -210,6 +210,25 @@ class NativePublicationClient:
             ):
                 raise ValueError("invalid native publisher configuration history")
             previous, retired = saved["current"], saved["retired_generations"]
+            if (
+                set(previous) != set(current)
+                or previous.get("source") != current["source"]
+                or not self._valid_generation(previous.get("generation"))
+                or any(not self._valid_generation(g) for g in retired)
+                or len(set(retired)) != len(retired)
+                or previous["generation"] in retired
+            ):
+                raise ValueError("invalid native publisher configuration history")
+            for role in ("reviews", "statuses", "recoveries"):
+                ids = previous[role]
+                if (
+                    not isinstance(ids, list)
+                    or len(ids) > 256
+                    or (role != "recoveries" and not ids)
+                    or any(type(i) is not int or i < 1 for i in ids)
+                    or ids != sorted(set(ids))
+                ):
+                    raise ValueError("invalid native publisher configuration history")
             if previous != current:
                 if current["generation"] == previous.get("generation") or current["generation"] in retired:
                     raise ValueError("publisher changes require a fresh, never reused authority generation")
@@ -222,6 +241,8 @@ class NativePublicationClient:
             grants = saved["recovery_grants"]
             for record in (previous, current):
                 grants[record["generation"]] = record["recoveries"]
+            if len(grants) > 4097:
+                raise ValueError("native recovery publisher history exceeds its bound")
             for generation, ids in grants.items():
                 if (
                     not isinstance(generation, str)
@@ -231,12 +252,20 @@ class NativePublicationClient:
                     or any(type(i) is not int or i < 1 for i in ids)
                 ):
                     raise ValueError("invalid native recovery publisher history")
-            self._recovery_grants = {
-                g: {PrincipalRef(self.repository.forge, str(i)) for i in ids} for g, ids in grants.items()
-            }
             store.set_setting(key, {"current": current, "retired_generations": retired, "recovery_grants": grants})
-            self._publisher_configured = True
-            return previous != current
+        # A transaction may fail while leaving its context (including ENOSPC).
+        # Publish the fence only after the existing ledger has committed it.
+        self._configured_record = current
+        self._publisher_configured = True
+        return previous != current
+
+    @staticmethod
+    def _valid_generation(value):
+        return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{32}", value) is not None and value != "0" * 32
+
+    def _require_publisher_policy(self):
+        if not self._publisher_configured or self.publication_policy.publishers.record() != self._configured_record:
+            raise Incomplete("native publication requires the persisted current publisher-policy binding")
 
     @staticmethod
     def _positive(value):
@@ -283,8 +312,7 @@ class NativePublicationClient:
         trusted sequence. A fresh registration of that intent or a newer one can
         reconcile the barrier; no unverified sequence can grant or poison order.
         """
-        if not self._publisher_configured:
-            raise Incomplete("native publication requires the persisted publisher-policy binding")
+        self._require_publisher_policy()
         entries = []
         retired_recovery = False
         unknown_barrier = 0
@@ -477,8 +505,7 @@ class NativePublicationClient:
         intents, including intents not yet delivered. Never derive it from the
         observed remote state at retry time.
         """
-        if not self._publisher_configured:
-            raise Incomplete("native publication requires the persisted publisher-policy binding")
+        self._require_publisher_policy()
         if kind not in {"review", "recovery"} or type(clear) is not bool or clear and kind != "recovery":
             raise ValueError("unknown native publication operation")
         if type(sequence) is not int or not 0 < sequence < 2**63:
@@ -595,7 +622,12 @@ class NativePublicationClient:
                 )
             if stamp["_sequence"] == intent["sequence"]:
                 if issuer != actor or stamp["_nonce"] != intent["nonce"] or stamp["_digest"] != intent["digest"]:
-                    raise Incomplete("native publication sequence was reused for another intent")
+                    raise PublicationSuperseded(
+                        "native publication sequence was reused for another intent",
+                        sequence=stamp["_sequence"],
+                        nonce=stamp["_nonce"],
+                        actor=issuer,
+                    )
                 if stamp["_stage"] not in {"pending", "clear-pending", "unverified"}:
                     comment, state = self._publication_comment(
                         intent["number"],
@@ -648,6 +680,20 @@ class NativePublicationClient:
         self._bound(self.repository.name)
         rows = self.client.statuses(self.repository, head) if rows is None else rows
         comments = self.client.comments(self.repository, number)
+        result = self._read_publications(number, head, rows, comments)
+        self._bound(self.repository.name)
+        return result
+
+    def _read_publications(self, number, head, rows, comments, *, allow_damaged_review=False):
+        """Share one observation across standalone reads and source snapshots.
+
+        The source snapshot caller brackets this core with repository checks.
+        It can carry a damaged review as a negative state, never as approval.
+        Recovery damage still requires reconciliation before returning facts.
+        """
+        self._require_publisher_policy()
+        if type(allow_damaged_review) is not bool:
+            raise ValueError("damaged-review handling must be explicit")
         if not isinstance(comments, list):
             raise Incomplete("native discussion is unavailable")
         publishers = self.publication_policy.publishers
@@ -658,6 +704,7 @@ class NativePublicationClient:
             )
         except PublicationDamaged as error:
             review_error = error
+            review, review_state = None, "damaged"
         try:
             recovery, recovery_state = self._publication_comment(
                 number, rows, RECOVERY_CONTEXT + str(number), publishers.recoveries, comments
@@ -665,7 +712,6 @@ class NativePublicationClient:
         except PublicationDamaged as error:
             error.head = head
             raise
-        if review_error is not None:
+        if review_error is not None and not allow_damaged_review:
             raise review_error
-        self._bound(self.repository.name)
         return tuple(row for row in (review, recovery) if row is not None), review_state, recovery_state

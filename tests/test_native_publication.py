@@ -23,6 +23,7 @@ from tauceti_tools.native_publication import (
     NativePublishers,
     PublicationDamaged,
     PublicationSuperseded,
+    PublisherNotGranted,
 )
 from tauceti_tools.source_identity import SourceActor
 
@@ -169,6 +170,28 @@ class Publications(unittest.TestCase):
         fresh.configure_publisher_policy(self.store)
         self.assertEqual(fresh.read_publications(1, "a" * 40), ((), "absent", "absent"))
 
+    def test_a_failed_policy_commit_never_leaves_a_publication_fence_enabled(self):
+        class FailingCommitLedger(ExistingLedger):
+            @contextmanager
+            def transaction(self):
+                with super().transaction():
+                    yield
+                    raise OSError("disk full while committing the existing ledger")
+
+        frozen = self.prepare("team/Math", 1, "a" * 40, self.body, "review")
+        fresh = NativePublicationClient(self.identity, self.api, publication_policy=self.policy)
+        for client in [self.source, fresh]:
+            with self.subTest(client=client):
+                with self.assertRaises(OSError):
+                    client.configure_publisher_policy(FailingCommitLedger())
+                with self.assertRaises(Incomplete):
+                    client.prepare_publication("team/Math", 1, "a" * 40, self.body, "review", sequence=2)
+                with self.assertRaises(Incomplete):
+                    client.publish(frozen)
+                self.assertEqual(self.status_rows, [])
+                client.configure_publisher_policy(self.store)
+                self.assertEqual(client.read_publications(1, "a" * 40), ((), "absent", "absent"))
+
     def test_publisher_rotation_cannot_reuse_an_authority_generation(self):
         changed = replace(self.publishers, generation="2" * 32)
         fresh = NativePublicationClient(
@@ -177,6 +200,78 @@ class Publications(unittest.TestCase):
         self.assertTrue(fresh.configure_publisher_policy(self.store))
         with self.assertRaisesRegex(ValueError, "never reused"):
             self.source.configure_publisher_policy(self.store)
+
+    def test_changing_publisher_policy_requires_a_new_committed_fence(self):
+        self.policy.publishers = replace(self.publishers, generation="2" * 32)
+        with self.assertRaises(Incomplete):
+            self.source.read_publications(1, "a" * 40)
+        with self.assertRaises(Incomplete):
+            self.prepare("team/Math", 1, "a" * 40, self.body, "review")
+        self.source.configure_publisher_policy(self.store)
+        self.assertEqual(self.source.read_publications(1, "a" * 40), ((), "absent", "absent"))
+
+    def test_corrupt_policy_history_is_a_configuration_error(self):
+        key = next(iter(self.store.settings))
+        original = copy.deepcopy(self.store.settings[key])
+        for path, value in [
+            (("current",), {}),
+            (("current", "generation"), None),
+            (("current", "reviews"), []),
+            (("current", "statuses"), [True]),
+            (("current", "recoveries"), None),
+            (("current", "source"), {}),
+            (("retired_generations",), [{}]),
+            (("retired_generations",), ["2" * 32, "2" * 32]),
+            (("retired_generations",), [self.publishers.generation]),
+        ]:
+            with self.subTest(path=path, value=value):
+                record = copy.deepcopy(original)
+                parent = record
+                for name in path[:-1]:
+                    parent = parent[name]
+                parent[path[-1]] = value
+                self.store.settings[key] = record
+                with self.assertRaises(ValueError):
+                    self.source.configure_publisher_policy(self.store)
+                with self.assertRaises(Incomplete):
+                    self.prepare("team/Math", 1, "a" * 40, self.body, "review")
+
+    def test_current_publisher_access_revocation_never_reveals_an_older_verdict(self):
+        self.source.publish(self.prepare("team/Math", 1, "a" * 40, self.body, "review"))
+        self.permission = "read"
+        self.assertEqual(self.read()[1], "revoked")
+        with patch.object(self.source, "_permission", side_effect=ForgeError("deleted account", status=404)):
+            self.assertEqual(self.read()[1], "revoked")
+        with patch.object(self.source, "_permission", side_effect=ForgeError("forbidden read", status=403)):
+            with self.assertRaises(ForgeError):
+                self.read()
+
+    def test_a_source_actor_without_the_review_grant_cannot_publish(self):
+        frozen = self.prepare("team/Math", 1, "a" * 40, self.body, "review")
+        self.api.current_user.return_value = {"id": 8, "login": "queue"}
+        with self.assertRaises(PublisherNotGranted):
+            self.prepare("team/Math", 1, "a" * 40, self.body, "review")
+        with self.assertRaises(PublisherNotGranted):
+            self.source.publish(frozen)
+        self.assertEqual(self.status_rows, [])
+
+    def test_damaged_review_and_recovery_use_the_same_comment_observation(self):
+        self.source.publish(self.prepare("team/Math", 1, "a" * 40, self.body, "review"))
+        self.api.current_user.return_value = {"id": 8, "login": "queue"}
+        self.source.publish(self.prepare("team/Math", 1, "a" * 40, "Hold", "hold", kind="recovery"))
+        self.rows[0]["body"] = "Moderated review"
+        with self.assertRaises(PublicationDamaged):
+            self.read()
+        comments, review, recovery = self.source._read_publications(
+            1, "a" * 40, self.statuses(), self.rows, allow_damaged_review=True
+        )
+        self.assertEqual((review, recovery), ("damaged", "success"))
+        self.assertEqual([row["id"] for row in comments], [self.rows[1]["id"]])
+        self.rows[1]["body"] = "Moderated recovery"
+        with self.assertRaises(PublicationDamaged) as damaged:
+            self.source._read_publications(1, "a" * 40, self.statuses(), self.rows, allow_damaged_review=True)
+        self.assertEqual(damaged.exception.publication_kind, "recovery")
+        self.assertEqual(damaged.exception.head, "a" * 40)
 
     def test_origin_repository_and_producer_revision_are_explicit(self):
         with self.assertRaises(ValueError):
@@ -253,8 +348,12 @@ class Publications(unittest.TestCase):
             "team/Math", 1, "a" * 40, self.body.replace("green", "blocking_request"), "review", sequence=1
         )
         self.source.publish(first)
-        with self.assertRaises(Incomplete):
+        with self.assertRaises(PublicationSuperseded) as conflict:
             self.source.publish(second)
+
+        self.assertEqual(conflict.exception.sequence, first["sequence"])
+        self.assertEqual(conflict.exception.nonce, first["nonce"])
+        self.assertEqual(conflict.exception.actor, self.actor)
 
     def test_damaged_completed_intent_requires_republication_without_repeating_inference(self):
         intent = self.prepare("team/Math", 1, "a" * 40, self.body, "review")

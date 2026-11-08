@@ -671,6 +671,9 @@ transaction/get_setting/set_setting interface; the library creates no backend.
 Changing grants requires a fresh generation that has never been used in that
 store's history. Restore requires source/history reconciliation before resuming
 publication; a restored old policy must not reauthorize old approvals or clears.
+The fence applies only after the existing store's transaction commits. Failed
+commits and changed publisher grants leave reads and publication disabled until
+the current record has been durably configured.
 
 The caller must allocate a durable, strictly increasing sequence per PR, operation
 kind and authority generation across all publishers of that kind. Freeze the
@@ -687,10 +690,16 @@ review/recovery comments and their states. Unknown issuers and retired recovery
 history deny older facts until reconciled. A current explicit recovery clear can
 release a historical hold. Only the controller/outbox owner allocates recovery
 decisions; operator tools enqueue through it.
+Any source writer can impose this historical deny state by posting retired
+recovery history when no current decision exists. This deliberately preserves
+holds when a restored store has lost its publisher inventory; it cannot authorize
+a merge. The queue has a tested `enqueue_source_recovery(clear=True)` operation;
+its operator HTTP/CLI caller remains required before native activation.
 
 `Incomplete` means retry the frozen intent after observation becomes available.
-`PublicationSuperseded` carries the newer sequence/nonce/actor for reconciliation;
-do not resend an older decision. `PublicationDamaged` requires republication of
+`PublicationSuperseded` carries the registered sequence/nonce/actor for reconciliation;
+an equal-sequence collision is also reconciliation, rather than a transient retry.
+Do not resend the conflicting decision. `PublicationDamaged` requires republication of
 the retained result through a new intent, without repeating paid inference.
 `PublisherNotGranted` requires operator reconciliation. Reads of other publishers'
 current repository permissions require a source repository-admin credential.
