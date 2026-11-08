@@ -54,7 +54,7 @@ jobs:
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
       - name: Check compiled declarations with stock Lean
         run: |
-          elan toolchain install "$ELAN_TOOLCHAIN"
+          python tauceti_tools/assets/scripts/install_official_lean.py "$ELAN_TOOLCHAIN"
           fixture_root="$RUNNER_TEMP/axiom-audit"
           mkdir -p "$fixture_root"
           printf '%s\n' "$ELAN_TOOLCHAIN" > "$fixture_root/lean-toolchain"

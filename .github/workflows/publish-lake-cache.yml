@@ -176,7 +176,8 @@ jobs:
           ./elan-init -y --default-toolchain none
           rm -f elan.tar.gz elan-init
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
-          "$HOME/.elan/bin/elan" toolchain install "$TOOLCHAIN"
+          python3 publisher-tools/tauceti_tools/assets/scripts/install_official_lean.py \
+            "$TOOLCHAIN" --elan "$HOME/.elan/bin/elan"
           printf 'name=%s\n' "$TOOLCHAIN" >> "$GITHUB_OUTPUT"
 
       - name: Validate staged data and verify inherited objects without credentials
