@@ -3,7 +3,7 @@
 #
 # A claim is a custom git ref `refs/tauceti-claims/<key>` in the work repo, pointing at an orphan
 # commit whose message is a JSON lease {owner, expires_at, ...}. Acquire/renew/takeover/release are
-# all done with ONE atomic GitHub primitive — `git push --force-with-lease=<ref>:[<oid>]`:
+# all done with ONE atomic Git primitive — `git push --force-with-lease=<ref>:[<oid>]`:
 #   * expected EMPTY  → create-only (succeeds iff the ref does not exist)
 #   * expected <oid>  → succeeds iff the ref still points at <oid> (compare-and-swap)
 # (Validated against real GitHub: a second create is rejected "stale info"; a CAS with the wrong
@@ -25,11 +25,12 @@
 #
 # Env: CLAIM_REPO (default TauCetiProject/TauCeti), TAUCETI_WORKER_ID (default host-pid),
 #      CLAIM_TTL (default 1500), CLAIM_GITDIR_BASE (per-repo scratch parent),
-#      CLAIM_GITDIR (explicit scratch object store override).
+#      CLAIM_GITDIR (explicit scratch object store override), CLAIM_GIT_URL (validated remote),
+#      CLAIM_FIXED_REMOTE=1 (require an existing matching origin).
 set -uo pipefail
 
 REPO="${CLAIM_REPO:-${TAUCETI_REPO:-TauCetiProject/TauCeti}}"
-URL="https://github.com/$REPO"
+URL="${CLAIM_GIT_URL:-https://github.com/$REPO}"
 WID="${TAUCETI_WORKER_ID:-$(hostname)-$$}"
 DEFAULT_TTL="${CLAIM_TTL:-1500}"
 GITDIR="${CLAIM_GITDIR:-${CLAIM_GITDIR_BASE:-$HOME/.cache/tauceti-claims}/${REPO//\//__}.git}"
@@ -46,22 +47,59 @@ ensure_repo() {
         mkdir -p "$(dirname "$GITDIR")"
         git init -q --bare "$GITDIR"
     fi
-    git -C "$GITDIR" remote get-url origin >/dev/null 2>&1 \
-        || git -C "$GITDIR" remote add origin "$URL"
-    git -C "$GITDIR" remote set-url origin "$URL"
+    local configured
+    configured=$(git -C "$GITDIR" remote get-url origin 2>/dev/null) || {
+        [[ "${CLAIM_FIXED_REMOTE:-}" == "1" ]] && return 2
+        git -C "$GITDIR" remote add origin "$URL" || return 2
+        return 0
+    }
+    if [[ "$configured" != "$URL" ]]; then
+        [[ "${CLAIM_FIXED_REMOTE:-}" == "1" ]] && return 2
+        git -C "$GITDIR" remote set-url origin "$URL" || return 2
+    fi
+    return 0
 }
 g() { git -C "$GITDIR" "$@"; }
 
 empty_tree() { g hash-object -t tree -w /dev/null; }
 
 # remote_oid REF — current oid of REF on origin, or "" if absent.
-remote_oid() { g ls-remote origin "$1" 2>/dev/null | awk 'NR==1{print $1}'; }
+remote_oid() {
+    local output
+    output=$(g ls-remote origin "$1" 2>/dev/null) || return 2
+    awk 'NR==1{print $1}' <<<"$output"
+}
 
 # lease_json OID — the JSON lease stored in the orphan commit OID (fetched on demand).
 lease_json() {
     local oid="$1"
-    g cat-file -e "$oid" 2>/dev/null || g fetch -q --no-tags origin "$2" 2>/dev/null || true
+    g cat-file -e "$oid" 2>/dev/null || g fetch -q --no-tags origin "$2" 2>/dev/null || {
+        g cat-file -e "$oid" 2>/dev/null || return 2
+    }
     g cat-file commit "$oid" 2>/dev/null | sed '1,/^$/d'
+}
+
+# Unreadable/unknown leases are unavailable, never an absent or expired lease.
+lease_valid() {
+    jq -e --arg resource "$2" '
+      .schema == "tauceti-claim/v1" and .resource == $resource and
+      (.owner | type == "string" and length > 0) and
+      (.expires_at | type == "number" and . >= 0 and . < 9007199254740992 and floor == .)
+    ' <<<"$1" >/dev/null 2>&1
+}
+
+# A holder can renew between ls-remote and fetch. Distinguish that contention
+# from an unchanged but unreadable ref; legacy callers handle those differently.
+observed_lease() {
+    local js current
+    if js=$(lease_json "$1" "$2"); then
+        lease_valid "$js" "$3" || return 2
+        printf '%s\n' "$js"
+        return 0
+    fi
+    current=$(remote_oid "$2") || return 2
+    [[ "$current" != "$1" ]] && return 1
+    return 2
 }
 
 # build_oid JSON — write an orphan commit (empty tree) whose message is JSON; print its oid.
@@ -82,19 +120,19 @@ push_cas() {
     local out
     out=$(g push --force-with-lease="$1:$2" origin "$3:$1" 2>&1)
     if [[ $? -eq 0 ]]; then return 0; fi
-    grep -qiE 'stale info|cannot lock ref.*expected' <<<"$out" && return 1
+    grep -qiE 'stale info|cannot lock ref.*(expected|reference already exists)' <<<"$out" && return 1
     echo "claim: unexpected push error on $1: $out" >&2; return 2
 }
 push_delete() { g push --force-with-lease="$1:$2" origin ":$1" >/dev/null 2>&1; }
 
 cmd_acquire() {
-    local key="$1" ttl="${2:-$DEFAULT_TTL}" ref cur js owner exp n
-    ref=$(ref_of "$key"); n=$(now); ensure_repo
-    cur=$(remote_oid "$ref")
+    local key="$1" ttl="${2:-$DEFAULT_TTL}" ref cur js owner n
+    ref=$(ref_of "$key"); n=$(now); ensure_repo || return 2
+    cur=$(remote_oid "$ref") || return 2
     if [[ -n "$cur" ]]; then
-        js=$(lease_json "$cur" "$ref"); owner=$(jq -r '.owner // ""' <<<"$js" 2>/dev/null)
-        exp=$(jq -r '.expires_at // 0' <<<"$js" 2>/dev/null)
-        if [[ "$owner" != "$WID" && "$exp" =~ ^[0-9]+$ && "$exp" -gt "$n" ]]; then
+        js=$(observed_lease "$cur" "$ref" "$key") || return "$?"
+        owner=$(jq -r '.owner // ""' <<<"$js" 2>/dev/null)
+        if [[ "$owner" != "$WID" ]] && jq -e --argjson n "$n" '.expires_at > $n' <<<"$js" >/dev/null; then
             return 1   # someone else holds a live lease
         fi
         # mine (renew) or expired (takeover): CAS against the observed oid
@@ -107,40 +145,51 @@ cmd_acquire() {
 
 cmd_renew() {
     local key="$1" ttl="${2:-$DEFAULT_TTL}" ref cur js owner n
-    ref=$(ref_of "$key"); n=$(now); ensure_repo
-    cur=$(remote_oid "$ref"); [[ -z "$cur" ]] && return 1
-    js=$(lease_json "$cur" "$ref"); owner=$(jq -r '.owner // ""' <<<"$js" 2>/dev/null)
+    ref=$(ref_of "$key"); n=$(now); ensure_repo || return 2
+    cur=$(remote_oid "$ref") || return 2; [[ -z "$cur" ]] && return 1
+    js=$(observed_lease "$cur" "$ref" "$key") || return "$?"
+    owner=$(jq -r '.owner // ""' <<<"$js" 2>/dev/null)
     [[ "$owner" == "$WID" ]] || return 1   # lost / taken over
     local oid; oid=$(build_oid "$(payload "$key" "$((n+ttl))")")
     push_cas "$ref" "$cur" "$oid"
 }
 
 cmd_release() {
-    local key="$1" ref cur js owner
-    ref=$(ref_of "$key"); ensure_repo
-    cur=$(remote_oid "$ref"); [[ -z "$cur" ]] && return 0
-    js=$(lease_json "$cur" "$ref"); owner=$(jq -r '.owner // ""' <<<"$js" 2>/dev/null)
-    [[ "$owner" == "$WID" ]] || return 0   # not mine — leave it
-    push_delete "$ref" "$cur"; return 0
+    local key="$1" ref cur js owner rc attempt
+    ref=$(ref_of "$key"); ensure_repo || return 2
+    # A renewal whose response was lost can finish at the server during cleanup.
+    # Re-read and retry only owner-checked CAS deletes, never an unconditional one.
+    for attempt in 1 2 3; do
+        cur=$(remote_oid "$ref") || return 2; [[ -z "$cur" ]] && return 0
+        js=$(observed_lease "$cur" "$ref" "$key") || {
+            rc=$?
+            [[ "$rc" == 1 ]] && continue
+            return 2
+        }
+        owner=$(jq -r '.owner' <<<"$js")
+        [[ "$owner" == "$WID" ]] || return 0
+        if push_delete "$ref" "$cur"; then return 0; fi
+    done
+    return 2
 }
 
 cmd_holds() {
-    local key="$1" ref cur js owner exp n
-    ref=$(ref_of "$key"); n=$(now); ensure_repo
-    cur=$(remote_oid "$ref"); [[ -z "$cur" ]] && return 1
-    js=$(lease_json "$cur" "$ref"); owner=$(jq -r '.owner // ""' <<<"$js" 2>/dev/null)
-    exp=$(jq -r '.expires_at // 0' <<<"$js" 2>/dev/null)
-    [[ "$owner" == "$WID" && "$exp" =~ ^[0-9]+$ && "$exp" -gt "$n" ]]
+    local key="$1" ref cur js owner n
+    ref=$(ref_of "$key"); n=$(now); ensure_repo || return 2
+    cur=$(remote_oid "$ref") || return 2; [[ -z "$cur" ]] && return 1
+    js=$(observed_lease "$cur" "$ref" "$key") || return "$?"
+    owner=$(jq -r '.owner // ""' <<<"$js" 2>/dev/null)
+    [[ "$owner" == "$WID" ]] && jq -e --argjson n "$n" '.expires_at > $n' <<<"$js" >/dev/null
 }
 
 cmd_read() {
-    local ref cur; ref=$(ref_of "$1"); ensure_repo
-    cur=$(remote_oid "$ref"); [[ -z "$cur" ]] && return 0
+    local ref cur; ref=$(ref_of "$1"); ensure_repo || return 2
+    cur=$(remote_oid "$ref") || return 2; [[ -z "$cur" ]] && return 0
     lease_json "$cur" "$ref"
 }
 
 cmd_list() {
-    ensure_repo
+    ensure_repo || return 2
     g ls-remote origin "$NS/*" 2>/dev/null | while read -r oid ref; do
         local key="${ref#"$NS"/}"
         if [[ "${1:-}" == "--full" ]]; then
@@ -152,13 +201,22 @@ cmd_list() {
 }
 
 cmd_gc() {
-    local n; n=$(now); ensure_repo
-    g ls-remote origin "$NS/*" 2>/dev/null | while read -r oid ref; do
-        local js exp; js=$(lease_json "$oid" "$ref"); exp=$(jq -r '.expires_at // 0' <<<"$js" 2>/dev/null)
-        if [[ "$exp" =~ ^[0-9]+$ && "$exp" -le "$n" ]]; then
-            push_delete "$ref" "$oid" && echo "gc: deleted expired $ref" >&2
+    local n references oid ref js failed=0
+    n=$(now); ensure_repo || return 2
+    references=$(g ls-remote origin "$NS/*" 2>/dev/null) || return 2
+    while read -r oid ref; do
+        [[ -z "$oid" ]] && continue
+        js=$(lease_json "$oid" "$ref") || { failed=2; continue; }
+        lease_valid "$js" "${ref#"$NS"/}" || { failed=2; continue; }
+        if jq -e --argjson n "$n" '.expires_at <= $n' <<<"$js" >/dev/null; then
+            if push_delete "$ref" "$oid"; then
+                echo "gc: deleted expired $ref" >&2
+            else
+                failed=2
+            fi
         fi
-    done
+    done <<<"$references"
+    return "$failed"
 }
 
 cmd="${1:-}"; shift || true
