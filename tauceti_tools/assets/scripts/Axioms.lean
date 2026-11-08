@@ -231,10 +231,9 @@ partial def ownName (name : Name) : StateM (Std.HashSet Name) Name := do
     | .anonymous => pure .anonymous
     | .str parent text =>
       let parent ← ownName parent
-      let text := String.fromUTF8! <|
-        ByteArray.copySlice text.toUTF8 0 ByteArray.empty 0 text.utf8ByteSize
-      pure (.str parent text)
-    | .num parent number => return .num (← ownName parent) (toString number).toNat!
+      -- String.toUTF8 allocates a fresh byte array (its runtime representation differs).
+      pure (.str parent (String.fromUTF8! text.toUTF8))
+    | .num parent number => pure (.num (← ownName parent) (toString number).toNat!)
   modify (·.insert owned)
   return owned
 
@@ -249,12 +248,13 @@ structure NameScan where
   ownedNames : Std.HashSet Name := {}
   owners : Std.HashMap Name Owner := {}
   explicitNames : Std.HashSet Name := {}
+  parents : Std.HashSet Name := {}
   collisions : Array Name := #[]
 
-/-- Same exact extension-name lookup and typed interpretation as Lean's importer. -/
+/-- Same exact extension-name lookup, last-entry precedence and typed interpretation as Lean's importer. -/
 def moduleEntries {α β σ : Type} [Inhabited σ]
     (ext : PersistentEnvExtension α β σ) (data : ModuleData) : Array α :=
-  match data.entries.find? (·.1 == ext.name) with
+  match data.entries.findRev? (·.1 == ext.name) with
   | some (_, entries) => unsafe unsafeCast entries
   | none => #[]
 
@@ -282,17 +282,23 @@ def scanModule (mod : Name) (localModule : Bool) (parts : Array (ModuleData × C
         ownedNames := names
         seen := scan.seen.insert name
         pending := scan.pending.push name }
-  for name in data.constNames, constant in data.constants do
+  for i in [:data.constNames.size] do
+    let name := data.constNames[i]!
+    -- All local modules precede dependencies. Read dependency ConstantInfo only when
+    -- its name can collide locally or supplies a parent for a reserved-name predicate.
+    if !localModule && !scan.owners.contains name && !scan.parents.contains name then continue
     let (name, names) := (ownName name).run scan.ownedNames
     scan := { scan with ownedNames := names }
+    if localModule then scan := { scan with parents := scan.parents.insert name.getPrefix }
     if let some previous := scan.owners[name]? then
       if previous.module != mod && (localModule || previous.localModule) then
         scan := { scan with collisions := scan.collisions.push name }
       if previous.localModule && !localModule then continue
     scan := { scan with owners := scan.owners.insert name {
       module := mod, localModule,
-      safeDefinition := constant matches .defnInfo { safety := .safe, .. } } }
+      safeDefinition := data.constants[i]! matches .defnInfo { safety := .safe, .. } } }
   for (name, _) in moduleEntries declRangeExt.toPersistentEnvExtension data do
+    if !localModule && !scan.owners.contains name then continue
     let (name, names) := (ownName name).run scan.ownedNames
     scan := { scan with ownedNames := names, explicitNames := scan.explicitNames.insert name }
   return scan
@@ -324,8 +330,8 @@ def commonReservedName (scan : NameScan) (name : Name) : Bool := Id.run do
     return !base.startsWith "match_"
   return false
 
-/-- Return true when the direct scan proves the same successful ownership result.
-An actual collision or an uncommon generated-name exception uses the existing checker, with
+/-- Check declaration ownership after the kernel-checked build. Full audits also validate
+combined-import compatibility. An actual collision or an uncommon generated-name exception uses the existing checker, with
 its existing diagnostics and policy. This adds no new audit failure or persistent cache. -/
 def scanNames (modules : Array Name) : IO Bool := do
   let mut scan : NameScan := { pending := modules, seen := .ofArray modules }
