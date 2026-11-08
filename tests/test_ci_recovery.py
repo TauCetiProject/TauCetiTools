@@ -169,6 +169,23 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(recovery.inventory(api, "owner/project"), ("main", [missing]))
         self.assertEqual(query.call_args.args[1]["after"], "next")
 
+    def test_only_current_pr_success_with_label_counts_as_preflight(self):
+        pull = dict(number=7, labels=dict(nodes=[dict(name='self-tested')]))
+        commit = dict(status=dict(contexts=[dict(context='self-tested/7', state='SUCCESS')]))
+        self.assertTrue(recovery.has_preflight(pull, commit))
+        for other in (dict(pull, number=8), dict(pull, labels=dict(nodes=[])),
+                      dict(pull, labels=dict(nodes=[dict(name='self-tested'), dict(name='full-lint')]))):
+            self.assertFalse(recovery.has_preflight(other, commit))
+        commit['status']['contexts'][0]['state'] = 'FAILURE'
+        self.assertFalse(recovery.has_preflight(pull, commit))
+
+    def test_ignored_label_events_do_not_block_recovery(self):
+        ignored = run()
+        ignored.update(display_title='Ignored label event 12', status='in_progress')
+        api = GitHub(live=ignored, history=[ignored])
+        self.assertEqual(len(self.recover(api, apply=True)), 1)
+        self.assertEqual(len(api.writes), 1)
+
     def test_dispatch_rejection_fails_visibly_without_repeating_the_post(self):
         api = GitHub()
         original = api.request

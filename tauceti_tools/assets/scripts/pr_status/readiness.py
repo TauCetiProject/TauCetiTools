@@ -40,7 +40,7 @@ def diff_engine():
 def routing_state(pr):
     labels = {label["name"].lower() for label in pr.get("labels", [])}
     return (pr["head"]["sha"], pr["base"]["ref"], pr["state"], pr.get("draft"),
-            labels & sweep_engine().KEEP_LABELS)
+            labels & (sweep_engine().KEEP_LABELS | {"self-tested", "full-lint", "lint-repair"}))
 
 
 def meta_merge_base(scoreboard):
@@ -48,7 +48,7 @@ def meta_merge_base(scoreboard):
     return scoreboard[1].get("merge_base_sha") or ""
 
 
-def classify(pr, comments, statuses, paths, merge_base_sha, now=None):
+def classify(pr, comments, statuses, paths, merge_base_sha, now=None, self_tested=False):
     """Pure evaluation of a fetched PR. Reservations and queue capacity are separate.
 
     `paths` are the PR's changed paths and `merge_base_sha` the merge base its diff is taken
@@ -62,7 +62,8 @@ def classify(pr, comments, statuses, paths, merge_base_sha, now=None):
     verdict = gate.decide_from_comments(
         comments, head, set(gate.DEFAULT_RUBRICS), paths,
         statuses.get("build", ""), statuses.get("bump-guard", ""),
-        scope=statuses.get("scope", ""), now=now, merge_base_sha=merge_base_sha)
+        scope=statuses.get("scope", ""), now=now, merge_base_sha=merge_base_sha,
+        **({"self_tested": True} if self_tested else {}))
     result["gate"] = verdict
     result["reason"] = verdict["reason"]
     labels = {label["name"].lower() for label in pr.get("labels", [])}
@@ -74,7 +75,7 @@ def classify(pr, comments, statuses, paths, merge_base_sha, now=None):
         result.update(category="awaiting-author", reason="GitHub reports a merge conflict with the base")
     elif verdict["merge"]:
         result.update(category="ready-to-merge", eligible=True)
-    elif statuses.get("build", "").lower() != "success":
+    elif statuses.get("build", "").lower() != "success" and not self_tested:
         result["category"] = ("ci-failed" if statuses.get("build", "").lower()
                               in {"failure", "error"} else "awaiting-CI")
     else:
@@ -184,6 +185,9 @@ def assess(pr, repo=None, now=None):
     number = int(pr)
     current, comments, statuses = evidence(number, repo)
     head = current["head"]["sha"]
+    if any(label.get("name") == "self-tested" for label in current.get("labels", [])):
+        from self_tested import reconcile as reconcile_local_route
+        reconcile_local_route(number, repo)
     # The same compare the merge job asks, so the merge base is the one it will require;
     # core.gh_api keeps the rate-limit circuit breaker. A bare head SHA also resolves for fork
     # PRs, whose heads GitHub keeps in this repository as refs/pull/<n>/head.
@@ -191,13 +195,16 @@ def assess(pr, repo=None, now=None):
                              jq=".merge_base_commit.sha").strip()
     if not merge_base:
         raise RuntimeError(f"No merge base for #{number} from the compare API")
-    result = classify(current, comments, statuses, [], merge_base, now=now)
+    from tauceti_tools.self_tested import observe, requested
+    local = (observe(repo, number, head, lambda path: json.loads(core.gh_api(path)))
+             if requested(current.get("labels")) else False)
+    result = classify(current, comments, statuses, [], merge_base, now=now, self_tested=local)
     # The gate rejects missing/build/review evidence before inspecting paths.
     # Only otherwise approved PRs need the expensive path read, which the engine takes from git
     # without any API call (`gh pr diff` fails for PRs touching more than 300 files).
     if result["category"] in {"needs-human-review", "merge-check-failed"}:
         paths = diff_engine().git_diff(f"https://github.com/{repo}", merge_base, head)
-        result = classify(current, comments, statuses, paths, merge_base, now=now)
+        result = classify(current, comments, statuses, paths, merge_base, now=now, self_tested=local)
     after, _, _ = evidence(number, repo, comments=False)
     if routing_state(after) != routing_state(current):
         result.update(eligible=False, category="awaiting-CI" if after["state"] == "open" else None,

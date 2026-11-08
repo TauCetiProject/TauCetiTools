@@ -21,7 +21,8 @@ query($owner: String!, $name: String!, $after: String) {
                  orderBy: {field: CREATED_AT, direction: ASC}) {
       nodes {
         number headRefOid isDraft updatedAt
-        commits(last: 1) { nodes { commit { oid status { contexts { context } } } } }
+        labels(first: 100) { nodes { name } }
+        commits(last: 1) { nodes { commit { oid status { contexts { context state } } } } }
       }
       pageInfo { hasNextPage endCursor }
     }
@@ -33,8 +34,8 @@ CURRENT = """
 query($owner: String!, $name: String!, $pr: Int!, $head: GitObjectID!) {
   rateLimit { cost }
   repository(owner: $owner, name: $name) {
-    pullRequest(number: $pr) { state isDraft headRefOid }
-    object(oid: $head) { ... on Commit { status { contexts { context } } } }
+    pullRequest(number: $pr) { state isDraft headRefOid labels(first: 100) { nodes { name } } }
+    object(oid: $head) { ... on Commit { status { contexts { context state } } } }
   }
 }
 """
@@ -42,6 +43,19 @@ query($owner: String!, $name: String!, $pr: Int!, $head: GitObjectID!) {
 
 def timestamp(value):
     return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+
+
+def has_preflight(pull, commit):
+    rows = (commit.get("status") or {}).get("contexts", [])
+    labels = {l["name"].lower() for l in (pull.get("labels") or {}).get("nodes", [])}
+    return any(row["context"] == "build" for row in rows) or (
+        "self-tested" in labels
+        and not labels & {"full-lint", "lint-repair"}
+        and any(
+            row["context"] == f"self-tested/{pull['number']}" and row.get("state", "").lower() == "success"
+            for row in rows
+        )
+    )
 
 
 def inventory(api, repo):
@@ -52,10 +66,7 @@ def inventory(api, repo):
         page = data["pullRequests"]
         for pull in page["nodes"]:
             commit = pull["commits"]["nodes"][-1]["commit"]
-            if not pull["isDraft"] and (
-                commit["oid"] != pull["headRefOid"]
-                or not any(row["context"] == "build" for row in (commit.get("status") or {}).get("contexts", []))
-            ):
+            if not pull["isDraft"] and (commit["oid"] != pull["headRefOid"] or not has_preflight(pull, commit)):
                 pulls.append(pull)
         if not page["pageInfo"]["hasNextPage"]:
             return data["defaultBranchRef"]["name"], pulls
@@ -69,7 +80,7 @@ def runs(api, repo, query):
             "GET", f"repos/{repo}/actions/workflows/pr-build.yml/runs?{query}&per_page=100&page={page}"
         )
         rows = result["workflow_runs"]
-        yield from rows
+        yield from (row for row in rows if not row.get("display_title", "").startswith("Ignored label event "))
         if len(rows) < 100:
             return
         page += 1
@@ -95,7 +106,7 @@ def still_missing(api, repo, number, head):
         and pull["state"] == "OPEN"
         and not pull["isDraft"]
         and pull["headRefOid"] == head
-        and not any(row["context"] == "build" for row in (commit.get("status") or {}).get("contexts", []))
+        and not has_preflight({**pull, "number": number}, commit)
     )
 
 
