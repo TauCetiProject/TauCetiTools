@@ -177,6 +177,8 @@ def bootstrap(request, policy, context, configuration_path, scripts, *, policy_d
             )
         ),
         "TAUCETI_GITHUB_STATE_URL": "",
+        # Restricted-path approval comes from the integrated native authority;
+        # legacy GitHub Bors waivers never grant source approval.
         "MERGE_BACKEND": "queue",
         "TAUCETI_MERGE_BACKEND": "queue",
         "TAUCETI_BORS_URL": "",

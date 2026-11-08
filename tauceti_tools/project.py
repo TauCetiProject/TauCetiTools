@@ -45,6 +45,11 @@ class ConfigError(ValueError):
     pass
 
 
+def _check_project_export_context():
+    if os.environ.get("TAUCETI_SOURCE_CANDIDATE") == "true":
+        raise ConfigError("Project exports cannot replace a source-candidate CI context; use the trusted CI bootstrap")
+
+
 def _table(raw: dict, key: str) -> dict:
     value = raw.get(key, {})
     if not isinstance(value, dict):
@@ -97,7 +102,9 @@ class Project:
         repository = (
             self.repository_ref("review") if "review" in self.raw["repositories"] else (review[0] if review else None)
         )
-        revision = self.raw.get("review", {}).get("rubrics_ref") or (review[1] if review else None)
+        revision = self.raw.get("review", {}).get("rubrics_ref")
+        if revision is None and review and repository == review[0]:
+            revision = review[1]
         if repository is None:
             if revision is not None:
                 raise ConfigError("The rubric revision requires a configured rubric or review tool repository")
@@ -257,12 +264,18 @@ class Project:
         GitHub repository. Validated CI request bindings are supplied separately
         by the trusted workflow, after these project-local settings.
         """
+        _check_project_export_context()
         try:
             self._legacy_bindings()
         except ConfigError:
             pass
         else:
-            return {**self.environment(), **dict.fromkeys(QUALIFIED_CONTEXT_VARIABLES, "")}
+            cleanup = (
+                dict.fromkeys(QUALIFIED_CONTEXT_VARIABLES, "")
+                if os.environ.get("TAUCETI_QUALIFIED_ONLY") == "true"
+                else {}
+            )
+            return {**cleanup, **self.environment(), "TAUCETI_QUALIFIED_ONLY": ""}
         names = {
             "TAUCETI_REPO",
             "TAUCETI_ROADMAP_REPO",
@@ -573,6 +586,8 @@ def bootstrap_qualified(argv: list[str] | None = None) -> Project | None:
 
 def _bootstrap(argv: list[str] | None, *, qualified: bool) -> Project | None:
     global _active
+    if qualified:
+        _check_project_export_context()
     args = sys.argv[1:] if argv is None else argv
     explicit, _ = conf_argument(args)
     source = configuration_source(explicit)

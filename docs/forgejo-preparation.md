@@ -46,7 +46,9 @@ Ported entrypoints explicitly call `bootstrap_qualified(argv)`. It reuses the
 existing configuration snapshot and inheritance variables, so editing the source
 configuration during a round does not change a child's selected forge. For mixed
 projects, legacy repository selectors contain the nonempty invalid value
-`qualified-only:unavailable`, so shell defaults cannot select the GitHub mirror.
+`qualified-only:unavailable`, so defaults using these exported selectors cannot
+select the GitHub mirror. `GH_REPO` and `GH_HOST` remain operator-owned command
+context; provider-aware consumers select their qualified role explicitly.
 The shared-state endpoint and GitHub Bors approval selectors are empty. All
 repository and execution routing comes from the qualified accessors.
 Local roots, configured publication/cache settings, and separately supplied
@@ -57,8 +59,9 @@ remain available through `github_upstreams`; unported dependency selectors fail
 explicitly for other providers. Raw `claim.sh` refuses qualified-only environments;
 the explicit `ForgejoGitClaim` client uses its own origin-scoped environment.
 No API credentials or approval authority are inferred from configuration
-inheritance. Trusted CI supplies its independently validated request/role bindings
-after the shared local settings; generic project bootstrap clears stale role data.
+inheritance. A generic qualified export refuses an active source-candidate CI
+context, preserving its confinement and validated request/role bindings. Trusted
+CI continues to supply those bindings alongside the shared local settings.
 
 `tauceti-tools --conf project.toml config environment --qualified` exports this
 explicit environment and its snapshot path. All-GitHub exports retain their

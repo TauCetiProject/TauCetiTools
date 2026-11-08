@@ -105,6 +105,48 @@ class QualifiedBootstrap(unittest.TestCase):
         self.assertEqual({key: qualified[key] for key in github.environment()}, github.environment())
         self.assertEqual(qualified["TAUCETI_QUALIFIED_ONLY"], "")
 
+    def test_ordinary_github_exports_preserve_operator_owned_overrides(self):
+        github = project.parse(initial_configuration("one/Project", "human").encode())
+        overrides = dict(
+            MERGE_BACKEND="bors",
+            SELF_TESTED_MERGE_BACKEND="bors",
+            CLAIM_REPO="operator/Claims",
+            CLAIM_GIT_URL="https://github.com/operator/Claims",
+            TAUCETI_CACHE_REPOSITORY="one/Execution",
+        )
+        with patch.dict(os.environ, overrides):
+            os.environ.pop("TAUCETI_QUALIFIED_ONLY", None)
+            exported = github.qualified_environment()
+            self.assertFalse(set(overrides) & exported.keys())
+            os.environ.update(exported)
+            for key, value in overrides.items():
+                self.assertEqual(os.environ[key], value)
+
+    def test_generic_export_refuses_a_source_candidate_context_without_changing_its_guard(self):
+        from tauceti_tools.assets.scripts import github_api
+
+        native = project.parse(CONFIG.encode())
+        context = dict(
+            TAUCETI_SOURCE_CANDIDATE="true",
+            TAUCETI_SOURCE_REPOSITORY='{"name":"one/Project"}',
+            TAUCETI_CI_EXECUTION_REPOSITORY='{"name":"one/Execution"}',
+            TAUCETI_CI_GITHUB_READ_REPOSITORIES='["one/Execution"]',
+            TAUCETI_CACHE_REPOSITORY="one/Execution",
+        )
+        with patch.dict(os.environ, context), patch.object(project, "_active", None):
+            before = dict(os.environ)
+            with self.assertRaisesRegex(project.ConfigError, "source-candidate CI context"):
+                native.qualified_environment()
+            with self.assertRaises(project.ConfigError):
+                project.bootstrap_qualified([])
+            self.assertEqual(dict(os.environ), before)
+            self.assertIsNone(project.active())
+            with patch.object(
+                github_api.GitHub, "_credential", side_effect=AssertionError("must not select credentials")
+            ):
+                with self.assertRaises(ValueError):
+                    github_api.GitHub().request("POST", "repos/one/Execution/statuses/" + "a" * 40)
+
     def test_raw_claim_helper_refuses_before_git_and_shell_defaults_do_not_choose_github(self):
         native = project.parse(CONFIG.encode())
         with tempfile.TemporaryDirectory() as tmp:
@@ -157,6 +199,11 @@ class QualifiedBootstrap(unittest.TestCase):
         native = project.parse(CONFIG.encode())
         self.assertEqual(native.tool_pin("review"), (native.tool_repository_ref("review"), "a" * 40))
         self.assertEqual(native.rubrics_pin(), native.tool_pin("review"))
+        mismatched = CONFIG.replace(
+            'ci = "one/Archive"', 'ci = "one/Archive"\nreview={forge="source",name="one/Rubrics"}'
+        )
+        with self.assertRaises(project.ConfigError):
+            project.parse(mismatched.encode()).rubrics_pin()
         override = CONFIG + '\n[review]\nrubrics_ref="' + "b" * 40 + '"\n'
         self.assertEqual(project.parse(override.encode()).rubrics_pin()[1], "b" * 40)
         bare = CONFIG.split("[tools.review]")[0]
