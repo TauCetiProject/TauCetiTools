@@ -164,7 +164,8 @@ class UpstreamTests(unittest.TestCase):
         pins = re.compile(r"^\s*((?:BWRAP|ELAN)_[A-Z0-9_]+):\s*(\S+)\s*$", re.MULTILINE)
         shared = dict(pins.findall((root / ".github/workflows/pr-build.yml").read_text()))
         updater = dict(pins.findall((root / "tauceti_tools/assets/project/.github/workflows/update-upstreams.yml").read_text()))
-        self.assertEqual(len(shared), 5)
+        self.assertEqual(set(shared), {"BWRAP_VER", "BWRAP_DEB_SHA256", "BWRAP_SHA256",
+                                       "ELAN_VER", "ELAN_SHA256", "ELAN_ASSET_ID"})
         self.assertEqual(updater, shared)
 
 
