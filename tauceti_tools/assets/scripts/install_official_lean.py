@@ -28,7 +28,7 @@ def install(toolchain, elan):
     if sys.platform != "linux" or platform.machine() not in ("x86_64", "amd64"):
         raise RuntimeError("official asset fallback supports Linux x86_64 only")
     version = toolchain.split(":", 1)[1]
-    asset_name = f"lean-{version}-linux.tar.zst"
+    asset_name = f"lean-{version.removeprefix('v')}-linux.tar.zst"
     with tempfile.TemporaryDirectory(prefix="lean-release-download-") as scratch:
         scratch = Path(scratch)
         metadata = scratch / "release.json"

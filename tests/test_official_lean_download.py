@@ -22,7 +22,7 @@ class OfficialLean(unittest.TestCase):
     def fixture(self, mutate=lambda r: None, corrupt=False, success=False):
         content = b"official release fixture"
         release = {"tag_name": "v4.36.0-rc2", "draft": False, "assets": [{
-            "name": "lean-v4.36.0-rc2-linux.tar.zst", "digest": "sha256:" + hashlib.sha256(content).hexdigest(),
+            "name": "lean-4.36.0-rc2-linux.tar.zst", "digest": "sha256:" + hashlib.sha256(content).hexdigest(),
             "url": "https://api.github.com/repos/leanprover/lean4/releases/assets/123"}]}
         mutate(release)
         calls = []
