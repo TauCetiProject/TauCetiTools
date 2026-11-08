@@ -48,6 +48,22 @@ def request_ordinary(api, repo, number):
     )
 
 
+def active_build(api, repo, number):
+    # Reuse the existing recovery inventory, including dispatches on main's SHA.
+    from ci_recovery import pr_numbers, runs
+
+    return any(
+        number in pr_numbers(run)
+        for state in ("queued", "in_progress", "waiting", "pending", "requested")
+        for run in runs(api, repo, f"status={state}")
+    )
+
+
+def request_missing_build(api, repo, number, rows):
+    if not latest_status(rows, "build") and not active_build(api, repo, number):
+        request_ordinary(api, repo, number)
+
+
 def decide(api, repo, number, event=None, *, reconcile=False):
     event = event or {}
     pr = api.request("GET", f"repos/{repo}/pulls/{number}")
@@ -77,9 +93,9 @@ def decide(api, repo, number, event=None, *, reconcile=False):
     # A dedicated head status remembers which commit the label asserted. A missed
     # push event cannot carry an old label forward; reconciliation removes it.
     if "self-tested" in label_names(labels) and not prior and not bind_label:
-        if reconcile and recent_label(api, repo, number):
+        if reconcile and (recent_label(api, repo, number) or active_build(api, repo, number)):
             return False  # The picker may still be processing the new label event.
-        if reconcile:
+        if reconcile and not latest_status(rows, "build"):
             request_ordinary(api, repo, number)
         api.request("DELETE", f"repos/{repo}/issues/{number}/labels/self-tested")
         return False
@@ -121,7 +137,8 @@ def decide(api, repo, number, event=None, *, reconcile=False):
     if (
         after["head"]["sha"] != head
         or after["base"]["ref"] != pr["base"]["ref"]
-        or label_names(after.get("labels")) != label_names(labels)
+        or (label_names(after.get("labels")) & {"self-tested", "full-lint", "lint-repair"})
+        != (names & {"self-tested", "full-lint", "lint-repair"})
     ):
         return False
     if eligible:
@@ -146,7 +163,7 @@ def decide(api, repo, number, event=None, *, reconcile=False):
             )
     elif prior.get("state") == "success":
         if reconcile:
-            request_ordinary(api, repo, number)
+            request_missing_build(api, repo, number, rows)
         api.request(
             "POST",
             f"repos/{repo}/statuses/{head}",
@@ -158,6 +175,10 @@ def decide(api, repo, number, event=None, *, reconcile=False):
             },
             idempotent=True,
         )
+    if not eligible and bind_label:
+        # This picker already returns to ordinary CI; do not leave a stale label
+        # for reconciliation to dispatch the same build a second time.
+        api.request("DELETE", f"repos/{repo}/issues/{number}/labels/self-tested")
     return eligible
 
 

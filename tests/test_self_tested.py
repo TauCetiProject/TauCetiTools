@@ -37,11 +37,14 @@ class API:
         self.writes = []
         self.move = False
         self.reads = 0
+        self.runs = []
 
     def request(self, method, path, data=None, **kwargs):
         if method != "GET":
             self.writes.append((method, path, data))
             return {}
+        if "/runs?" in path:
+            return {"workflow_runs": self.runs}
         if "/memberships/" in path:
             return {"state": "active" if self.member else "pending"}
         if "/status?" in path:
@@ -94,7 +97,7 @@ class SelfTested(unittest.TestCase):
     def test_nonmember_infrastructure_and_full_lint_use_ordinary_ci(self):
         self.api.member = False
         self.assertFalse(self.decide())
-        self.assertEqual(self.api.writes, [])
+        self.assertEqual([w[0] for w in self.api.writes], ["DELETE"])
         self.api.member = True
         self.api.files[0]["filename"] = "lakefile.toml"
         self.assertFalse(self.decide())
@@ -148,7 +151,7 @@ class SelfTested(unittest.TestCase):
     def test_renaming_human_owned_files_into_library_remains_ineligible(self):
         self.api.files[0].update(status="renamed", previous_filename="scripts/tool.lean")
         self.assertFalse(self.decide())
-        self.assertEqual(self.api.writes, [])
+        self.assertEqual([w[0] for w in self.api.writes], ["DELETE"])
 
     def test_partial_diff_and_size_guards_still_use_ordinary_ci(self):
         self.api.pr["changed_files"] = 2
@@ -159,20 +162,45 @@ class SelfTested(unittest.TestCase):
 
     def test_fresh_label_reconciliation_waits_for_picker_and_dispatch_failure_keeps_retry_evidence(self):
         self.event = {}
-        with patch.object(route, 'recent_label', return_value=True):
+        with patch.object(route, "recent_label", return_value=True):
             self.assertFalse(self.decide(reconcile=True))
         self.assertEqual(self.api.writes, [])
         original = self.api.request
 
         def rejected(method, path, *args, **kwargs):
-            if '/dispatches' in path:
-                raise RuntimeError('dispatch unavailable')
+            if "/dispatches" in path:
+                raise RuntimeError("dispatch unavailable")
             return original(method, path, *args, **kwargs)
 
         self.api.request = rejected
-        with patch.object(route, 'recent_label', return_value=False), self.assertRaises(RuntimeError):
+        with patch.object(route, "recent_label", return_value=False), self.assertRaises(RuntimeError):
             self.decide(reconcile=True)
         self.assertEqual(self.api.writes, [])
+
+    def test_queued_picker_is_not_limited_by_the_five_minute_grace(self):
+        self.event = {}
+        self.api.runs = [{"pull_requests": [{"number": 7}]}]
+        with patch.object(route, "recent_label", return_value=False):
+            self.assertFalse(self.decide(reconcile=True))
+        self.assertEqual(self.api.writes, [])
+
+    def test_stale_label_with_existing_build_does_not_dispatch_again(self):
+        self.event = {}
+        self.api.statuses = [{"context": "build", "state": "failure", "id": 10}]
+        self.assertFalse(self.decide(reconcile=True))
+        self.assertEqual([w[0] for w in self.api.writes], ["DELETE"])
+
+    def test_unrelated_label_change_during_read_does_not_lose_the_assertion(self):
+        original = self.api.request
+
+        def relabel(method, path, *args, **kwargs):
+            result = original(method, path, *args, **kwargs)
+            if method == "GET" and "/pulls/" in path and self.api.reads > 1:
+                result["labels"].append({"name": "awaiting-review"})
+            return result
+
+        self.api.request = relabel
+        self.assertTrue(self.decide())
 
     def test_observer_needs_current_head_label_and_the_pr_bound_policy_status(self):
         self.api.statuses = [{"context": "self-tested/7", "state": "success", "id": 10}]
