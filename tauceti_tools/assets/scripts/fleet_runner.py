@@ -60,9 +60,10 @@ def ranked_runners(pages, *, kind, machines, reserved=()):
         for runner in found:
             labels = {str(label.get("name", "")).lower() for label in runner.get("labels", [])}
             instances = [label for label in labels if re.fullmatch(r"fleet-instance-[a-f0-9]{16}", label)]
+            identities = [label for label in labels if re.fullmatch(r"fleet-[a-f0-9]{32}", label)]
             required = {"self-hosted", "linux", "x64", "fleet-" + identity, "tauceti-fleet-" + kind}
             if (runner.get("status") == "online" and runner.get("busy") is False
-                    and runner["id"] not in reserved and required <= labels and len(instances) == 1):
+                    and runner["id"] not in reserved and required <= labels and len(instances) == 1 and len(identities) == 1):
                 ready.append(dict(machine=machine["name"], machine_id=identity, runner_id=runner["id"],
                                   staging_only=kind == "staging" and "tauceti-fleet-pr" not in labels,
                                   labels=sorted(required | {instances[0]})))
@@ -304,6 +305,22 @@ def resolve_machines(config, runners):
     return result
 
 
+def discover_machines(runners):
+    """Discover live membership within the caller's trusted runner-group inventory.
+
+    Labels identify a host; they do not grant membership in the trusted group.
+    The class, online/busy state, exact instance and queued reservation checks
+    remain in ranked_runners. Ambiguous host labels cannot advertise capacity.
+    """
+    identities = set()
+    for runner in runners:
+        labels = {str(label.get("name", "")).lower() for label in runner.get("labels", [])}
+        own = [label.removeprefix("fleet-") for label in labels if re.fullmatch(r"fleet-[a-f0-9]{32}", label)]
+        if len(own) == 1:
+            identities.add(own[0])
+    return [dict(name="fleet", machine_id=identity) for identity in sorted(identities)]
+
+
 def route(*, kind, order, machines, runner_pages, observed, github_budget, namespace_cap, excluded=(), selection_key=""):
     """Choose in the configured preference order using one bounded observation.
 
@@ -320,10 +337,11 @@ def route(*, kind, order, machines, runner_pages, observed, github_budget, names
             labels = {str(label.get("name", "")).lower() for label in runner.get("labels", [])}
             if any(queued <= labels for queued in (observed.get("queued_fleet") or [])):
                 reserved.add(runner["id"])
-        ranked = ranked_runners(runner_pages, kind=kind, machines=[resolved[n] for n in order if n in resolved], reserved=reserved) if kind in ("pr", "staging") and runner_pages else []
+        ranked = ranked_runners(runner_pages, kind=kind, machines=[resolved[n] for n in order if n in resolved and n != "fleet"], reserved=reserved) if kind in ("pr", "staging") and runner_pages else []
+        discovered = ranked_runners(runner_pages, kind=kind, machines=discover_machines(inventory(runner_pages)), reserved=reserved) if "fleet" in order and kind in ("pr", "staging") and runner_pages else []
     except (ValueError, KeyError, TypeError):
         print("::warning::Fleet configuration or inventory invalid; retaining cloud choices")
-        resolved, ranked = {}, []
+        resolved, ranked, discovered = {}, [], []
     namespace_busy = observed.get("namespace_busy")
     for name in order:
         if name in excluded or name in resolved and resolved[name]["machine_id"] in excluded:
@@ -332,7 +350,8 @@ def route(*, kind, order, machines, runner_pages, observed, github_budget, names
             return dict(pool="github")
         if name == "namespace" and namespace_busy is not None and namespace_busy < namespace_cap:
             return dict(pool="namespace")
-        candidates = [r for r in ranked if r["machine"] == name]
+        candidates = discovered if name == "fleet" else [r for r in ranked if r["machine"] == name]
+        candidates = [r for r in candidates if r["machine_id"] not in excluded]
         if candidates:
             # Spread concurrent jobs within the preferred tier. Hashing across
             # every eligible guest could strand a reserved staging slot while

@@ -733,6 +733,36 @@ Security-audit/release workers are administrator features and use the configured
 protected audit branch and explicit alert destination. Never bypass a blocked audit by changing
 worker identity.
 
+### Live fleet membership
+
+The runner picker accepts `fleet` as a pool in the existing preference lists:
+
+```toml
+[services.fleet]
+pr_order = ["github", "fleet", "namespace"]
+staging_order = ["fleet", "namespace", "github"]
+```
+
+The generic pool discovers hosts from the selected, trusted GitHub runner group.
+Adding, replacing, resizing, or retiring hosts changes the available collection
+through their registered runners; no repository machine-ID list is required.
+Each runner must be online, idle, unreserved, and advertise exactly one permanent
+`fleet-<machine-id>` and ephemeral `fleet-instance-<instance-id>` identity, plus
+the appropriate `tauceti-fleet-pr` or `tauceti-fleet-staging` class. PR-only hosts
+remain ineligible for staging. Retries exclude previously failed machine IDs.
+
+Enable fleet routing explicitly with the existing `FLEET_CI_ENABLED`,
+`FLEET_READ_TOKEN`, and `FLEET_RUNNER_GROUP_ID` settings. Inventory is read only
+from that group; labels on runners outside the group grant no eligibility.
+Partial or ambiguous inventories retain the existing cloud fallback. The picker
+continues to bind each placement to an exact host and runner instance.
+
+Named machine entries remain available as optional priority tiers. A generic
+`fleet` tier spreads jobs across the eligible registered slots in that tier;
+staging-only slots are preferred for staging. Repository configuration selects
+pool priority and job classes, while host controls govern live fleet membership
+and concurrency. No new registry service is introduced.
+
 ## Cache
 
 `services.cache.mode = "off"` leaves ordinary local builds available. Hosted or custom cache
