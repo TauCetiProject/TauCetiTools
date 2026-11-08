@@ -114,7 +114,7 @@ class LocalAxioms(unittest.TestCase):
         cls.addClassCleanup(cls.tooling.cleanup)
         wrapper = runpy.run_path(str(ROOT / "tauceti_tools/assets/scripts/local_axioms.py"))
         prefix = Path(subprocess.check_output([LEAN, "--print-prefix"], text=True).strip())
-        cls.native = wrapper["checker"](DRIVER, prefix, Path(cls.tooling.name))
+        cls.native = os.environ.get("LOCAL_AXIOMS_EXE") or wrapper["checker"](DRIVER, prefix, Path(cls.tooling.name))
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
