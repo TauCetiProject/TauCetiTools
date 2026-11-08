@@ -214,6 +214,61 @@ class Selection(unittest.TestCase):
         self.assertFalse(failed_placements(read, "Test/code", 42, 2))
 
 
+class LiveMembership(unittest.TestCase):
+    def guest(self, identity="a"*32, number=1, kinds=("pr",)):
+        return dict(id=number,status="online",busy=False,labels=[dict(name=n) for n in
+            ["self-hosted","linux","x64","fleet-"+identity,"fleet-instance-"+f'{number:016x}',
+             *["tauceti-fleet-"+kind for kind in kinds]]])
+
+    def select(self, guests, *, kind="pr", excluded=(), queued=(), total=None, order=None):
+        return route(kind=kind,order=order or ["github","fleet","namespace"],machines={},
+            runner_pages=[dict(total_count=len(guests) if total is None else total,runners=guests)],
+            observed=dict(github_busy=19,namespace_busy=0,queued_fleet=list(queued)),
+            github_budget=18,namespace_cap=20,excluded=excluded)
+
+    def test_new_host_and_replacement_join_without_configuration_edits(self):
+        first=self.select([self.guest()])
+        self.assertEqual(first['pool'],'fleet')
+        self.assertEqual(first['machine_id'],'a'*32)
+        replacement=self.select([self.guest('b'*32,2)])
+        self.assertEqual(replacement['machine_id'],'b'*32)
+        self.assertIn('fleet-instance-0000000000000002',replacement['labels'])
+        self.assertEqual(self.select([])['pool'],'namespace')
+
+    def test_busy_offline_and_queued_slots_do_not_advertise_capacity(self):
+        for field,value in [('busy',True),('status','offline')]:
+            guest=self.guest();guest[field]=value
+            self.assertEqual(self.select([guest])['pool'],'namespace')
+        guest=self.guest()
+        labels={v['name'] for v in guest['labels']}
+        self.assertEqual(self.select([guest],queued=[labels])['pool'],'namespace')
+
+    def test_class_labels_and_staging_reservation_priority_are_preserved(self):
+        pr=self.guest();mixed=self.guest('b'*32,2,('pr','staging'));staging=self.guest('c'*32,3,('staging',))
+        self.assertEqual(self.select([pr],kind='staging')['pool'],'namespace')
+        self.assertEqual(self.select([staging],kind='pr')['pool'],'namespace')
+        self.assertEqual(self.select([mixed,staging],kind='staging')['runner_id'],3)
+        self.assertEqual(self.select([pr],kind='other')['pool'],'namespace')
+
+    def test_retry_exclusions_apply_to_individual_discovered_hosts(self):
+        guests=[self.guest(),self.guest('b'*32,2)]
+        self.assertEqual(self.select(guests,excluded={'a'*32})['machine_id'],'b'*32)
+        self.assertEqual(self.select(guests,excluded={'a'*32,'b'*32})['pool'],'namespace')
+        self.assertEqual(self.select(guests,excluded={'fleet'})['pool'],'namespace')
+
+    def test_incomplete_or_ambiguous_inventory_cannot_select_a_runner(self):
+        self.assertEqual(self.select([self.guest()],total=2)['pool'],'namespace')
+        self.assertEqual(self.select([self.guest(),self.guest()])['pool'],'namespace')
+        for label in ['fleet-'+'b'*32,'fleet-instance-0000000000000002']:
+            ambiguous=self.guest();ambiguous['labels'].append(dict(name=label))
+            # Include a valid peer on the same machine so discovery alone cannot mask ambiguity.
+            selected=self.select([ambiguous,self.guest(number=3)])
+            self.assertEqual(selected['runner_id'],3)
+
+    def test_generic_membership_is_opt_in(self):
+        self.assertEqual(self.select([self.guest()],order=['github','namespace'])['pool'],'namespace')
+
+
 class CapacityScan(unittest.TestCase):
     def test_namespace_builds_include_queued_jobs_and_exclude_picker_and_control_jobs(self):
         ns = ["nscloud-ubuntu-24.04-amd64-8x16-with-features"]
@@ -296,6 +351,28 @@ class RoutingEntrypoint(unittest.TestCase):
         for machine in machines:
             config += f'[services.fleet.machines.{machine["name"]}]\nmachine_id="{machine["machine_id"]}"\nmax_jobs={machine["max_jobs"]}\nkinds={json.dumps(machine["kinds"])}\n'
         return config, inventory[0]
+
+    def test_generic_pool_uses_only_the_selected_group_and_exact_workflow_target(self):
+        guest=LiveMembership().guest()
+        endpoint='orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1'
+        config='[services.fleet]\npr_order=["fleet","namespace","github"]\n'
+        output,calls=self.pick(dict(fleet={endpoint:dict(total_count=1,runners=[guest])},
+            state=dict(shared=self.shared())),config=config,FLEET_CI_ENABLED='true',
+            FLEET_READ_TOKEN='fleet',FLEET_RUNNER_GROUP_ID='3',GITHUB_STATE_TOKEN='state')
+        self.assertEqual(output['pool'],'fleet')
+        target=json.loads(output['runner'])
+        self.assertEqual(target['group'],'TauCetiFleet')
+        self.assertIn('fleet-'+'a'*32,target['labels'])
+        self.assertIn('fleet-instance-0000000000000001',target['labels'])
+        self.assertEqual([p for token,p in calls if token=='fleet'],[endpoint])
+        self.assertFalse(any(token in ('app','repository') for token,_ in calls))
+
+    def test_generic_pool_remains_disabled_without_explicit_fleet_routing(self):
+        config='[services.fleet]\npr_order=["fleet","namespace","github"]\n'
+        output,calls=self.pick(dict(state=dict(shared=self.shared(routing_version=2,namespace_busy=0,queued_fleet=[]))),
+            config=config,GITHUB_STATE_TOKEN='state')
+        self.assertEqual(output['pool'],'namespace')
+        self.assertFalse(any('runner-groups' in path for _,path in calls))
 
     def test_staging_v1_and_missing_shared_state_choose_fleet_without_cloud_scans(self):
         config, inventory = self.staging_fixture()
