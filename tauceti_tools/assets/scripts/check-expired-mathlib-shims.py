@@ -136,17 +136,25 @@ def load_registry(
     return tuple(groups)
 
 
-def find_self_declared_shims(source_root: pathlib.Path) -> set[pathlib.Path]:
+def find_self_declared_shims(
+    source_root: pathlib.Path, candidates: Iterable[pathlib.Path] | None = None
+) -> set[pathlib.Path]:
     """Find prose that declares a temporary/pending Mathlib relationship.
 
     The registry remains authoritative after process prose is removed from module docstrings. This
     scan is one-way enforcement: newly added self-declarations must be registered, while removing
     old narrative does not discard the maintenance obligation recorded in the registry.
+    ``candidates`` restricts the scan to those repository-relative sources; by default every Lean
+    file under ``source_root`` is read.
     """
 
     repo_root = source_root.parent
     found: set[pathlib.Path] = set()
-    for source in source_root.rglob("*.lean"):
+    sources = source_root.rglob("*.lean") if candidates is None else (
+        repo_root / candidate for candidate in sorted(set(candidates))
+        if (repo_root / candidate).is_file()
+    )
+    for source in sources:
         text = source.read_text(encoding="utf-8")
         for match in SELF_DECLARED.finditer(text):
             prefix = text[max(0, match.start() - 80):match.start()]
@@ -162,17 +170,53 @@ def find_self_declared_shims(source_root: pathlib.Path) -> set[pathlib.Path]:
     return found
 
 
-def validate_registry_coverage(groups: Sequence[ShimGroup], source_root: pathlib.Path) -> None:
+def validate_registry_coverage(
+    groups: Sequence[ShimGroup], source_root: pathlib.Path,
+    candidates: Iterable[pathlib.Path] | None = None,
+) -> None:
     """Reject self-declared shims that do not name a machine-checkable replacement."""
 
     tracked = {source for group in groups for source in group.sources}
-    untracked = sorted(find_self_declared_shims(source_root) - tracked)
+    untracked = sorted(find_self_declared_shims(source_root, candidates) - tracked)
     if untracked:
         rendered = "\n".join(f"  {source}" for source in untracked)
         raise ValueError(
             "self-declared Mathlib shims are missing from TauCeti/mathlib-shims.json:\n"
             f"{rendered}"
         )
+
+
+def read_changed_paths(path: pathlib.Path) -> set[pathlib.Path]:
+    """Read the newline-separated repository-relative paths of a complete PR diff."""
+
+    changed: set[pathlib.Path] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line:
+            continue
+        changed_path = pathlib.Path(line)
+        if changed_path.is_absolute() or ".." in changed_path.parts:
+            raise ValueError(f"changed path must be repository-relative: {line!r}")
+        changed.add(changed_path)
+    return changed
+
+
+def scoped_coverage_candidates(
+    groups: Sequence[ShimGroup], base_groups: Sequence[ShimGroup], changed: Iterable[pathlib.Path],
+) -> set[pathlib.Path]:
+    """Sources whose coverage can differ from a base that already passed the full scan.
+
+    Every other source is byte-identical to the base, where the full scan held. Such a source can
+    lose coverage only when the PR drops it from the registry, so those sources are rescanned
+    along with every changed Lean file under TauCeti/.
+    """
+
+    tracked = {source for group in groups for source in group.sources}
+    base_tracked = {source for group in base_groups for source in group.sources}
+    changed_sources = {
+        path for path in changed
+        if path.suffix == ".lean" and path.parts and path.parts[0] == "TauCeti"
+    }
+    return changed_sources | (base_tracked - tracked)
 
 
 def groups_by_source(groups: Sequence[ShimGroup]) -> dict[pathlib.Path, ShimGroup]:
@@ -452,6 +496,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
                         help="validate source coverage without probing Mathlib")
     parser.add_argument("--only-new", action="store_true",
                         help="probe only entries added or changed relative to --base-manifest")
+    parser.add_argument("--changed-paths", type=pathlib.Path,
+                        help="file listing the PR's complete changed paths, one per line; scan "
+                             "only those sources and sources dropped from --base-manifest")
     parser.add_argument("--fail-on-available", action="store_true",
                         help="exit 3 when Mathlib provides a configured exact replacement")
     return parser.parse_args(argv)
@@ -465,7 +512,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     lake_root = (args.lake_root or repo_root).resolve()
     try:
         groups = load_registry(manifest, repo_root)
-        validate_registry_coverage(groups, repo_root / "TauCeti")
         base_groups: tuple[ShimGroup, ...] = ()
         if args.base_manifest is not None:
             if not args.base_manifest.is_file():
@@ -473,6 +519,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             base_groups = load_registry(
                 args.base_manifest.resolve(), repo_root, require_sources=False
             )
+        candidates: set[pathlib.Path] | None = None
+        if args.changed_paths is not None:
+            if args.base_manifest is None:
+                raise ValueError("--changed-paths requires --base-manifest")
+            candidates = scoped_coverage_candidates(
+                groups, base_groups, read_changed_paths(args.changed_paths)
+            )
+        validate_registry_coverage(groups, repo_root / "TauCeti", candidates)
+        if args.base_manifest is not None:
             base_root = (args.base_root or repo_root).resolve()
             validate_registry_ratchet(groups, base_groups, repo_root, base_root)
         if args.coverage_only:
