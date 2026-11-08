@@ -37,10 +37,26 @@ supports `github-actions`. Immutable tool-pin validation still applies.
 `[ci].repository` selects build execution; `[repositories].ci` remains the CI
 archive. Their accessors are `ci_repository_ref()` and `repository_ref("ci")`.
 
-New clients use `project.repository_ref(role)` and `project.ci_repository_ref()`.
+New clients use `project.repository_ref(role)`, `project.tool_repository_ref(name)`
+and `project.ci_repository_ref()`.
 Legacy owner/name/environment access rejects non-GitHub bindings, preventing an
-unfinished adapter from acting on the GitHub mirror. This guard must be removed
-only as each caller obtains full qualified-reference support.
+unfinished adapter from acting on the GitHub mirror.
+
+Ported entrypoints explicitly call `bootstrap_qualified(argv)`. It reuses the
+existing configuration snapshot and inheritance variables, so editing the source
+configuration during a round does not change a child's selected forge. For mixed
+projects, its environment clears legacy repository selectors and the shared-state
+endpoint; all repository and execution routing comes from the qualified accessors.
+Local roots, configured publication/cache settings, and separately supplied
+credentials retain their roles. Tool refs are read alongside their qualified
+repository from `project.raw["tools"]`. No API credentials or approval authority
+are inferred from configuration inheritance.
+
+`tauceti-tools --conf project.toml config environment --qualified` exports this
+explicit environment and its snapshot path. All-GitHub exports retain their
+existing values. Ordinary `bootstrap()` and `config environment` keep rejecting
+mixed/native repositories, including in children of a ported entrypoint. Each
+consumer must finish its provider-specific operations before opting in.
 
 The experimental `tauceti-gh` executable supports PR and issue list/view,
 create/edit/comment/close/reopen, PR reviews, repository view/list/fork, label

@@ -75,6 +75,11 @@ class Project:
             raise ConfigError("No CI execution repository is configured in [ci]")
         return resolve_repository(self.raw["ci"]["repository"], self.raw.get("forges"))
 
+    def tool_repository_ref(self, name: str):
+        """A configured tool's qualified source, or None when that tool is absent."""
+        tool = self.raw.get("tools", {}).get(name)
+        return resolve_repository(tool["repo"], self.raw.get("forges")) if tool else None
+
     @property
     def upstreams(self):
         self._legacy_bindings()
@@ -211,6 +216,70 @@ class Project:
             else "",
             "TAUCETI_BORS_REPOSITORY_ID": str(self.service("bors").get("repository_id", "")),
             "TAUCETI_UPSTREAMS": json.dumps(self.upstreams),
+        }
+
+    def qualified_environment(self) -> dict[str, str]:
+        """Local settings for ported consumers; repository routing stays in the snapshot.
+
+        Bare legacy destinations are cleared for mixed/native projects. Consumers
+        resolve every role through repository_ref, tool_repository_ref, or
+        ci_repository_ref; the environment grants no source or execution authority.
+        """
+        try:
+            self._legacy_bindings()
+        except ConfigError:
+            pass
+        else:
+            return self.environment()
+        names = {
+            "TAUCETI_REPO",
+            "TAUCETI_ROADMAP_REPO",
+            "TAUCETI_REVIEW_REPO",
+            "TAUCETI_RUBRICS_REPO",
+            "TAUCETI_DATA_REPO",
+            "TAUCETI_LEDGER_REPO",
+            "TAUCETI_LEDGER_OWNER",
+            "TAUCETI_LEDGER_NAME",
+            "TAUCETI_CI_REPO",
+            "TAUCETI_CLAIMS_REPO",
+            "TAUCETI_PROGRESS_REPO",
+            "TAUCETI_GITHUB_STATE_URL",
+        }
+        names.update(
+            f"TAUCETI_{role}_{part}"
+            for role in ("CONTENT", "ROADMAP", "REVIEW", "DATA", "CI", "CLAIMS")
+            for part in ("OWNER", "NAME")
+        )
+        cache = self.service("cache")
+        publication = self.raw.get("publication", {})
+        bors = self.service("bors")
+        return {
+            **dict.fromkeys(names, ""),
+            "TAUCETI_PROJECT_KEY": self.key,
+            "TAUCETI_PROJECT_STATE": str(self.state_root),
+            "TAUCETI_BASE_BRANCH": self.branch,
+            "TAUCETI_LEAN_ROOT": self.roots[0],
+            "TAUCETI_LEAN_ROOTS": json.dumps(self.roots),
+            "TAUCETI_ROADMAP_DIR": self.roadmap_dir,
+            "TAUCETI_COMPLETED_DIR": self.completed_dir,
+            "TAUCETI_RUBRICS": json.dumps(self.raw.get("review", {}).get("rubrics", [])),
+            "TAUCETI_DOCS_URL": publication.get("docs_url", ""),
+            "TAUCETI_DOCS_REF": publication.get("docs_ref", "origin/docgen"),
+            "TAUCETI_ZULIP_SITE": publication.get("zulip_site", ""),
+            "TAUCETI_ZULIP_CHANNEL": publication.get("zulip_channel", ""),
+            "TAUCETI_ZULIP_TOPIC": publication.get("zulip_topic", ""),
+            "TAUCETI_CACHE_DOMAIN": cache.get("domain", "") if cache.get("mode") != "off" else "",
+            "TAUCETI_CACHE_SERVICE": cache.get("name", self.key) if cache.get("mode") != "off" else "",
+            "TAUCETI_CACHE_ARTIFACT_URL": cache.get("artifact_url", "") if cache.get("mode") != "off" else "",
+            "TAUCETI_CACHE_REVISION_URL": cache.get("revision_url", "") if cache.get("mode") != "off" else "",
+            "TAUCETI_BORS_URL": bors.get("url", "") if bors.get("mode") != "off" else "",
+            "TAUCETI_BORS_REPOSITORY_ID": str(bors.get("repository_id", "")),
+            # These owner/name-based selectors belong to legacy consumers too.
+            "TAUCETI_UPSTREAMS": "[]",
+            "TAUCETI_MERGE_BACKEND": "",
+            "TAUCETI_REVIEW_REF": "",
+            "TAUCETI_RUBRICS_REF": "",
+            "TAUCETI_PROGRESS_REF": "",
         }
 
 
@@ -466,22 +535,37 @@ def configuration_source(explicit: str | None = None) -> str | None:
 
 
 def bootstrap(argv: list[str] | None = None) -> Project | None:
+    """Bootstrap existing GitHub-only consumers; reject mixed/native bindings."""
+    return _bootstrap(argv, qualified=False)
+
+
+def bootstrap_qualified(argv: list[str] | None = None) -> Project | None:
+    """Opt in a ported consumer to the same inherited configuration snapshot."""
+    return _bootstrap(argv, qualified=True)
+
+
+def _bootstrap(argv: list[str] | None, *, qualified: bool) -> Project | None:
     global _active
     args = sys.argv[1:] if argv is None else argv
     explicit, _ = conf_argument(args)
     source = configuration_source(explicit)
     if not source:
+        if _active is not None and not qualified:
+            _active._legacy_bindings()
         return _active
     inherited = os.environ.get("TAUCETI_CONF_SNAPSHOT")
     if inherited and os.environ.get("TAUCETI_CONF_SOURCE") == source:
         path = Path(inherited)
     else:
         path = save_snapshot(source)
-    _active = load(str(path))
-    os.environ.update(_active.environment())
+    project = load(str(path))
+    environment = project.qualified_environment() if qualified else project.environment()
+    # A rejected legacy configuration must not replace the active project.
+    os.environ.update(environment)
     os.environ["TAUCETI_CONF"] = source
     os.environ["TAUCETI_CONF_SOURCE"] = source
     os.environ["TAUCETI_CONF_SNAPSHOT"] = str(path)
+    _active = project
     return _active
 
 
