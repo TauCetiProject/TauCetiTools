@@ -216,6 +216,9 @@ class NativePublicationClient:
                 retired = [*retired, previous["generation"]]
                 if len(retired) > 4096:
                     raise ValueError("native publisher configuration history exceeds its bound")
+            # Preserve the persisted settings schema and operator inventory.
+            # Historical grants are not approval authority: retired recovery
+            # rows deny even when a restored store has lost that inventory.
             grants = saved["recovery_grants"]
             for record in (previous, current):
                 grants[record["generation"]] = record["recoveries"]
