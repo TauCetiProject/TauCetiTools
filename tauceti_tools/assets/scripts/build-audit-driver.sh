@@ -10,6 +10,7 @@ WS="$(mktemp -d "$OUT_DIR/audit-ws.XXXXXX")"
 trap 'rm -rf "$WS"' EXIT
 mkdir -p "$WS/scripts"
 cp "$TRUSTED_SCRIPTS/Axioms.lean" "$WS/scripts/"
+cp "$TRUSTED_SCRIPTS/LocalAxioms.lean" "$WS/scripts/"
 cp "$PROJECT_ROOT/lean-toolchain" "$WS/lean-toolchain"
 cat > "$WS/lakefile.toml" <<'TOML'
 name = "audit-driver"
@@ -17,8 +18,13 @@ name = "audit-driver"
 [[lean_exe]]
 name = "audit-driver"
 root = "scripts.Axioms"
+
+[[lean_exe]]
+name = "local-axioms"
+root = "scripts.LocalAxioms"
 TOML
 (cd "$WS" && env -u ELAN_TOOLCHAIN -u LAKE_CONFIG -u LEAN_PATH -u LEAN_SRC_PATH \
   -u LAKE_PKG_URL_MAP LAKE_CACHE_DIR= LAKE_ARTIFACT_CACHE=false LAKE_RESTORE_ARTIFACTS=false \
-  LAKE_NO_CACHE=true lake build audit-driver)
+  LAKE_NO_CACHE=true lake build audit-driver local-axioms)
 install -m 0555 "$WS/.lake/build/bin/audit-driver" "$OUT_DIR/audit-driver"
+install -m 0555 "$WS/.lake/build/bin/local-axioms" "$OUT_DIR/local-axioms"

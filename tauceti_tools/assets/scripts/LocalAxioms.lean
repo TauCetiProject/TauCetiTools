@@ -3,12 +3,12 @@ import Lean.Util.FoldConsts
 import Lean.Util.Path
 
 /-!
-Fast LOCAL diagnostics, not the authoritative transitive/global CI audit.
+Fast changed-file diagnostics and ordinary-PR axiom preflight.
 
 Read only the selected modules' own compiled declarations, including private proofs.
 Never construct an imported environment, follow imports, load IR or run candidate initializers.
 Reject new axiom declarations and direct references to Lean's built-in proof escape hatches.
-CI remains responsible for transitive dependencies, downstream importers and global ownership.
+Full CI audits cover transitive dependencies and downstream importers; ownership is checked separately.
 Run after the normal kernel-checked build; this does not certify arbitrary .olean files or freshness.
 -/
 
@@ -69,7 +69,7 @@ def run (modulesFile root : String) (artifacts : System.FilePath) : IO UInt32 :=
       IO.eprintln s!"local-axioms: {message}"
       bad := bad + 1
   IO.println s!"local-axioms: checked {modules.size} changed module(s), {declarations} declaration(s); \
-    {bad} violation(s). Transitive axiom and global ownership checks run in CI."
+    {bad} violation(s). Full CI audits check transitive dependencies and downstream importers."
   return if bad == 0 then 0 else 1
 
 end LocalAxioms

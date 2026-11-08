@@ -73,10 +73,8 @@ build_status=${PIPESTATUS[0]}
 set -e
 if [ "$build_status" != 0 ]; then exit "$build_status"; fi
 
-# One workflow-pinned native driver imports all artifact parts once. Its first check reads
-# per-module ownership (compatible duplicates must not disappear in merged constants), then
-# it checks axiom reachability. No imported initializer executes.
-# Built beside the lint driver on the host and mounted in the same read-only directory.
+# Both workflow-pinned audit executables are built beside the lint driver on the host
+# and mounted read-only. The global duplicate check remains independent of the PR scope.
 AUDIT_DRIVER_EXE="$(dirname "$LINT_DRIVER_EXE")/audit-driver"
 test -x "$AUDIT_DRIVER_EXE"
 phase audit-setup
@@ -85,8 +83,18 @@ phase audit-setup
 # into one per-module compilation budget. Phase telemetry exposes growth before tuning
 # this trusted bound; timeout remains a process/liveness failure, not an audit finding.
 AUDIT_TIMEOUT="$(command -v timeout)"
-AUDIT_PHASES_FILE="$TELEMETRY/phases.tsv" lake env "$AUDIT_TIMEOUT" --signal=TERM --kill-after=30 \
-  3000s "$AUDIT_DRIVER_EXE"
+if [ -n "${AXIOMS_ONLY_MODULES:-}" ]; then
+  AUDIT_PHASES_FILE="$TELEMETRY/phases.tsv" lake env "$AUDIT_TIMEOUT" --signal=TERM --kill-after=30 \
+    3000s "$AUDIT_DRIVER_EXE" --duplicates-only
+  # Ordinary PRs check the changed files' own compiled declarations, including private proofs.
+  # The workflow leaves this scope unset for staging, pin changes and unscopable changes.
+  phase audit-axioms
+  "$AUDIT_TIMEOUT" --signal=TERM --kill-after=30 3000s \
+    "$(dirname "$LINT_DRIVER_EXE")/local-axioms" "$AXIOMS_ONLY_MODULES" TauCeti "$PWD/.lake/build/lib/lean"
+else
+  AUDIT_PHASES_FILE="$TELEMETRY/phases.tsv" lake env "$AUDIT_TIMEOUT" --signal=TERM --kill-after=30 \
+    3000s "$AUDIT_DRIVER_EXE"
+fi
 
 # The canonical module-system check reads only the main artifact flag, without importing
 # the Mathlib environment. Keep one implementation and its existing standalone executable.

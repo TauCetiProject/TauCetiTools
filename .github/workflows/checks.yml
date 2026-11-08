@@ -57,7 +57,9 @@ jobs:
           export LEAN="$(elan which lean)"
           export LEAN_SYSROOT="$(lean --print-prefix)"
           export AUDIT_DRIVER_EXE="$fixture_root/native/audit-driver"
+          export LOCAL_AXIOMS_EXE="$fixture_root/native/local-axioms"
           python tauceti_tools/assets/scripts/test_duplicate_declarations.py
+          python -m unittest discover -s tests -p test_local_axioms.py
   github-state:
     runs-on:
       - nscloud-ubuntu-24.04-amd64-2x4-with-features

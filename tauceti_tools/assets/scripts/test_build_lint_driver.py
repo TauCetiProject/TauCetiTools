@@ -69,6 +69,7 @@ class BuildLintDriverTest(unittest.TestCase):
         run = steps()[index_of("Build the trusted environment-lint driver")]["run"]
         self.assertIn('bash gate/scripts/build-audit-driver.sh pr gate/scripts "$out"', run)
         self.assertIn('cp "$TRUSTED_SCRIPTS/Axioms.lean"', AUDIT_BUILD)
+        self.assertIn('cp "$TRUSTED_SCRIPTS/LocalAxioms.lean"', AUDIT_BUILD)
         self.assertNotIn('$PROJECT_ROOT/scripts', AUDIT_BUILD)
         self.assertNotIn('[[require]]', AUDIT_BUILD)  # Lean's pinned sysroot only.
         for setting in ("LAKE_CACHE_DIR= ", "LAKE_ARTIFACT_CACHE=false",
