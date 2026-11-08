@@ -86,6 +86,21 @@ class LocalChecks(unittest.TestCase):
                 checks.main(["test"])
         run.assert_not_called()
 
+    def test_moving_an_existing_long_file_is_not_a_new_file(self):
+        (self.root / "TauCeti/A.lean").write_text("module\n" + "-- existing content\n" * 1200)
+        self.git("add", ".")
+        self.git("commit", "-qm", "existing long module")
+        base = self.git("rev-parse", "HEAD")
+        self.git("mv", "TauCeti/A.lean", "TauCeti/Moved.lean")
+        with patch.object(checks, "run"):
+            checks.sources(self.root, checks.scope(self.root, base, "ordinary"))
+
+    def test_broad_policies_keep_whole_library_source_style(self):
+        for policy, changed_only in (("ordinary", "1"), ("bump", "0"), ("full-lint", "0")):
+            with patch.object(checks, "run") as run, contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(checks.main(["style", "--policy", policy]), 0)
+                self.assertEqual(run.call_args.kwargs["env"]["LINT_CHANGED_ONLY"], changed_only)
+
     @unittest.skipUnless(os.environ.get("TAUCETI_LAKE_FIXTURE"), "set TAUCETI_LAKE_FIXTURE for real Lake drivers")
     def test_real_lake_drivers_and_failure_exits(self):
         toolchain = os.environ.get("ELAN_TOOLCHAIN", "leanprover/lean4:v4.36.0-rc2")
@@ -104,20 +119,22 @@ class LocalChecks(unittest.TestCase):
         )
         env = dict(os.environ, LAKE_ARTIFACT_CACHE="false", LAKE_NO_CACHE="true")
 
-        def lake(*args):
-            return subprocess.run(["lake", *args], env=env, capture_output=True, text=True, timeout=120)
+        def lake(*args, cwd=None):
+            return subprocess.run(["lake", *args], cwd=cwd, env=env, capture_output=True, text=True, timeout=120)
 
         built = lake("build", "--iofail")
         self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
         tested = lake("test")
         self.assertEqual(tested.returncode, 0, tested.stdout + tested.stderr)
+        outside = lake("-d", str(self.root), "test", cwd=self.root.parent)
+        self.assertEqual(outside.returncode, 0, outside.stdout + outside.stderr)
         (self.root / "TauCeti/A.lean").write_text("module\npublic axiom bad : False\n")
         self.assertEqual(lake("build", "--iofail").returncode, 0)
         bad = lake("test")
         self.assertNotEqual(bad.returncode, 0, bad.stdout + bad.stderr)
         self.assertIn("axiom declaration", bad.stdout + bad.stderr)
         (self.root / "TauCeti/A.lean").write_text("module\nset_option maxHeartbeats 0\n")
-        lint = lake("lint")
+        lint = lake("-d", str(self.root), "lint", cwd=self.root.parent)
         self.assertNotEqual(lint.returncode, 0, lint.stdout + lint.stderr)
         self.assertIn("set_option", lint.stdout + lint.stderr)
         (self.root / "TauCeti/A.lean").write_text("module\n#check Nat\n")

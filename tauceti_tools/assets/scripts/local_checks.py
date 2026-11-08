@@ -14,7 +14,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from tauceti_tools.local_scope import LEAN_ROOT, POLICIES, git, local_main, scope
+from tauceti_tools.local_scope import LEAN_ROOT, POLICIES, git, local_main, scope, untracked
 
 SCRIPTS = Path(__file__).resolve().parent
 
@@ -39,10 +39,25 @@ def sources(root, selected):
         if boundary.search(path.read_text()):
             raise Violation(f"{path}: library sources must not import roadmap/review modules")
     # The new-file limit is relative to the same merge base as the existing local scope.
-    existing = set(git(root, "ls-tree", "-r", "--name-only", "-z", selected["merge_base"]).split(b"\0"))
+    added = {
+        name.decode(errors="surrogateescape")
+        for name in git(
+            root,
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--find-renames",
+            "--diff-filter=A",
+            "--name-only",
+            "-z",
+            selected["merge_base"],
+            "--",
+        ).split(b"\0")
+        if name
+    } | untracked(root)
     for name in selected["changed"]:
         path = root / name
-        if name.endswith(".lean") and path.is_file() and os.fsencode(name) not in existing:
+        if name.endswith(".lean") and path.is_file() and name in added:
             count = len(path.read_bytes().splitlines())
             if count > 1000:
                 raise Violation(f"{name}: new Lean files must be at most 1000 lines (found {count})")
@@ -122,7 +137,7 @@ def main(argv=None):
             modules = Path(name) / "lint-modules.txt"
             modules.write_text("".join(m + "\n" for m in sorted(lint_modules) if m))
         if args.phase in ("style", "lint", "verify"):
-            env.update(LINT_CHANGED_ONLY="1", LINT_ONLY_MODULES=str(modules))
+            env.update(LINT_CHANGED_ONLY="1" if selected["mode"] == "scoped" else "0", LINT_ONLY_MODULES=str(modules))
             run("lint-style.sh", env=env)
         if args.phase in ("environment", "lint", "verify"):
             run("local_lint.py", "--modules", modules, env=env)
