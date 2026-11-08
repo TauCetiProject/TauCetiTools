@@ -21,7 +21,7 @@ REPO = core.REPO
 # up needs no manual label creation.
 LABELS = {
     "awaiting-CI":        ("fbca04", "CI has not yet reported on the latest commit"),
-    "awaiting-review":    ("1d76db", "CI is green; waiting for review verdicts"),
+    "awaiting-review":    ("1d76db", "PR preflight accepted; waiting for review verdicts"),
     "review-in-progress": ("a371f7", "A review is running on this exact commit right now"),
     # Distinct colours on purpose: telling a red build apart from a changes request AT A GLANCE in
     # the PR list is the whole reason these are two labels rather than one.
