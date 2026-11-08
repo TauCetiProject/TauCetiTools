@@ -261,7 +261,7 @@ def run_script(name: str, args: list[str], project: Project | None = None) -> in
         destination = Path(tempfile.mkdtemp(prefix="tauceti-scripts-"))
         materialize(project, destination, policy_dir=root / "scripts")
         executable = destination / name
-    command = ["python3", str(executable)] if executable.suffix == ".py" else ["bash", str(executable)]
+    command = [sys.executable, str(executable)] if executable.suffix == ".py" else ["bash", str(executable)]
     try:
         env = dict(os.environ)
         if project is not None:
