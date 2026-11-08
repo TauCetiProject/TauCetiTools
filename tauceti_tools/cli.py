@@ -130,6 +130,8 @@ def main(argv=None):
         if args.command == "config" and args.action == "environment":
             project = (bootstrap_qualified if args.qualified else bootstrap)(["--conf", source])
         else:
+            if args.command == "config" and args.qualified:
+                raise ConfigError("--qualified requires config environment")
             project = load(source)
         if args.command == "upstreams":
             from .upstreams import guard, update

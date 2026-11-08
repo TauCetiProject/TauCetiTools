@@ -142,23 +142,30 @@ def bootstrap(request, policy, context, configuration_path, scripts, *, policy_d
     ):
         raise ValueError("project source/execution bindings differ from CI policy")
     materialize(project, Path(scripts), policy_dir=Path(policy_dir) if policy_dir else None, source_ci=True)
-    cache = project.service("cache")
+    local = project._local_environment()
     configuration_path = str(Path(configuration_path).resolve())
     return {
+        **{
+            key: local[key]
+            for key in (
+                "TAUCETI_BASE_BRANCH",
+                "TAUCETI_PROJECT_KEY",
+                "TAUCETI_LEAN_ROOT",
+                "TAUCETI_LEAN_ROOTS",
+                "TAUCETI_ROADMAP_DIR",
+                "TAUCETI_COMPLETED_DIR",
+                "TAUCETI_CACHE_ARTIFACT_URL",
+                "TAUCETI_CACHE_REVISION_URL",
+            )
+        },
         "TAUCETI_CONF": configuration_path,
         "TAUCETI_CONF_SOURCE": configuration_path,
         "TAUCETI_CONF_SNAPSHOT": configuration_path,
         "TAUCETI_SOURCE_CANDIDATE": "true",
         "TAUCETI_SOURCE_REPOSITORY": json.dumps(policy.source.record(), sort_keys=True),
         "TAUCETI_CI_EXECUTION_REPOSITORY": json.dumps(policy.execution.record(), sort_keys=True),
-        "TAUCETI_BASE_BRANCH": project.branch,
         "TAUCETI_CACHE_REPOSITORY": policy.execution.repository.name,
         "CI_SOURCE_REQUIRE_PUBLICATION": "true" if policy.require_publication else "false",
-        "TAUCETI_PROJECT_KEY": project.key,
-        "TAUCETI_LEAN_ROOT": project.roots[0],
-        "TAUCETI_LEAN_ROOTS": json.dumps(project.roots),
-        "TAUCETI_ROADMAP_DIR": project.roadmap_dir,
-        "TAUCETI_COMPLETED_DIR": project.completed_dir,
         "TAUCETI_UPSTREAMS": json.dumps(project.github_upstreams),
         "TAUCETI_CI_GITHUB_READ_REPOSITORIES": json.dumps(
             sorted(
@@ -169,11 +176,7 @@ def bootstrap(request, policy, context, configuration_path, scripts, *, policy_d
                 }
             )
         ),
-        "TAUCETI_CACHE_ARTIFACT_URL": cache.get("artifact_url", "") if cache.get("mode") != "off" else "",
-        "TAUCETI_CACHE_REVISION_URL": cache.get("revision_url", "") if cache.get("mode") != "off" else "",
         "TAUCETI_GITHUB_STATE_URL": "",
-        # Restricted-path approval must be supplied by the integrated native
-        # authority. Never turn a legacy GitHub Bors waiver into source approval.
         "MERGE_BACKEND": "queue",
         "TAUCETI_MERGE_BACKEND": "queue",
         "TAUCETI_BORS_URL": "",

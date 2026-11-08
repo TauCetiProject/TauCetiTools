@@ -45,12 +45,20 @@ unfinished adapter from acting on the GitHub mirror.
 Ported entrypoints explicitly call `bootstrap_qualified(argv)`. It reuses the
 existing configuration snapshot and inheritance variables, so editing the source
 configuration during a round does not change a child's selected forge. For mixed
-projects, its environment clears legacy repository selectors and the shared-state
-endpoint; all repository and execution routing comes from the qualified accessors.
+projects, legacy repository selectors contain the nonempty invalid value
+`qualified-only:unavailable`, so shell defaults cannot select the GitHub mirror.
+The shared-state endpoint and GitHub Bors approval selectors are empty. All
+repository and execution routing comes from the qualified accessors.
 Local roots, configured publication/cache settings, and separately supplied
-credentials retain their roles. Tool refs are read alongside their qualified
-repository from `project.raw["tools"]`. No API credentials or approval authority
-are inferred from configuration inheritance.
+credentials retain their roles. `project.tool_pin(name)` and
+`project.rubrics_pin()` return configured `(RepositoryRef, revision)` pairs; an
+absent pin never selects a default repository. Configured GitHub dependency checks
+remain available through `github_upstreams`; unported dependency selectors fail
+explicitly for other providers. Raw `claim.sh` refuses qualified-only environments;
+the explicit `ForgejoGitClaim` client uses its own origin-scoped environment.
+No API credentials or approval authority are inferred from configuration
+inheritance. Trusted CI supplies its independently validated request/role bindings
+after the shared local settings; generic project bootstrap clears stale role data.
 
 `tauceti-tools --conf project.toml config environment --qualified` exports this
 explicit environment and its snapshot path. All-GitHub exports retain their
