@@ -187,6 +187,56 @@ class ExpiredMathlibShimTests(unittest.TestCase):
         added = check.ShimGroup((two,), ("Upstream.two",), (), "added")
         self.assertEqual(check.only_new_or_changed_groups((unchanged, added), (base,)), (added,))
 
+    def test_scoped_coverage_rescans_changed_sources_and_dropped_entries(self):
+        kept = pathlib.Path("TauCeti/Kept.lean")
+        dropped = pathlib.Path("TauCeti/Dropped.lean")
+        base = (check.ShimGroup((kept, dropped), ("Upstream.done",), (), "base"),)
+        current = (check.ShimGroup((kept,), ("Upstream.done",), (), "current"),)
+        changed = {pathlib.Path("TauCeti/New.lean"), pathlib.Path("TauCeti/mathlib-shims.json"),
+                   pathlib.Path("README.md")}
+        self.assertEqual(check.scoped_coverage_candidates(current, base, changed),
+                         {pathlib.Path("TauCeti/New.lean"), dropped})
+
+    def test_changed_paths_skip_unchanged_sources_but_not_new_or_unregistered_ones(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            source_root = root / "TauCeti"
+            source_root.mkdir()
+            shim = "This is a temporary Mathlib shim.\n"
+            # Unchanged and unregistered: the base passed the full scan, so it is not reread.
+            (source_root / "Legacy.lean").write_text(shim, encoding="utf-8")
+            (source_root / "Tracked.lean").write_text(shim, encoding="utf-8")
+            entry = {"sources": ["TauCeti/Tracked.lean"], "declarations": ["Upstream.done"],
+                     "note": "exact replacement"}
+            base_manifest = root / "base-shims.json"
+            base_manifest.write_text(json.dumps([entry]), encoding="utf-8")
+            manifest = source_root / "mathlib-shims.json"
+            manifest.write_text(json.dumps([entry]), encoding="utf-8")
+            changed = root / "scope-files"
+            common = ["--repo-root", str(root), "--manifest", str(manifest),
+                      "--base-manifest", str(base_manifest), "--base-root", str(root),
+                      "--coverage-only"]
+            self.assertEqual(check.main(common), 2)
+            changed.write_text("\n", encoding="utf-8")
+            self.assertEqual(check.main([*common, "--changed-paths", str(changed)]), 0)
+            (source_root / "New.lean").write_text(shim, encoding="utf-8")
+            changed.write_text("TauCeti/New.lean\n", encoding="utf-8")
+            self.assertEqual(check.main([*common, "--changed-paths", str(changed)]), 2)
+            (source_root / "New.lean").unlink()
+            manifest.write_text("[]", encoding="utf-8")
+            changed.write_text("TauCeti/mathlib-shims.json\n", encoding="utf-8")
+            with mock.patch.object(check, "validate_registry_ratchet"):
+                self.assertEqual(check.main([*common, "--changed-paths", str(changed)]), 2)
+
+    def test_changed_paths_require_relative_paths_and_a_base(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            changed = pathlib.Path(temporary) / "scope-files"
+            changed.write_text("../outside.lean\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "repository-relative"):
+                check.read_changed_paths(changed)
+            self.assertEqual(check.main(["--repo-root", temporary, "--changed-paths",
+                                         str(changed)]), 2)
+
     def test_probe_round_trip(self):
         source = check.render_declaration_probe(["Foo.bar", "Alpha", "Foo.bar"])
         self.assertEqual(source.count("env.contains `Foo.bar"), 1)
@@ -301,6 +351,8 @@ class ExpiredMathlibShimTests(unittest.TestCase):
         self.assertIn('[ "${BUMP:-0}" = "1" ] || args+=(--only-new)', workflow)
         self.assertIn('--base-root "$BASE_SHIM_ROOT"', workflow)
         self.assertIn("env.SHIM_CHECK == '1'", workflow)
+        self.assertEqual(workflow.count('args+=(--changed-paths "$SHIM_SCOPE_FILES")'), 2)
+        self.assertIn('SHIM_SCOPE_FILES=$RUNNER_TEMP/scope-files', workflow)
 
 if __name__ == "__main__":
     unittest.main()
