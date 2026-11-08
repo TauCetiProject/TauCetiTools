@@ -654,3 +654,62 @@ previous head/base histories and materializes isolated checkouts. The loopback
 redirect test verifies a second origin receives no request or credential. These
 are checkout proofs; the hosted HTTPS, real GitHub CI and complete queue cycle
 remain required.
+
+## Authenticated native publications
+
+`tauceti_tools.native_publication` supplies the source publication protocol shared
+by Review and the queue. `source_identity.SourceActor` identifies an actor by
+origin and positive native ID; its login is display metadata. Admission and review
+policy remain in their owning components.
+
+Construct `NativePublicationPolicy` with the qualified `NativePublishers` grants,
+a fresh authority generation and the immutable producer policy revision. Construct
+`NativePublicationClient` with the resolved native repository identity and its
+origin-bound Forgejo client. Call `configure_publisher_policy(existing_store)`
+before reading or writing receipts. The caller supplies its existing durable
+transaction/get_setting/set_setting interface; the library creates no backend.
+Changing grants requires a fresh generation that has never been used in that
+store's history. Restore requires source/history reconciliation before resuming
+publication; a restored old policy must not reauthorize old approvals or clears.
+The fence applies only after the existing store's transaction commits. Failed
+commits and changed publisher grants leave reads and publication disabled until
+the current record has been durably configured.
+`configure_publisher_policy` normally owns that transaction's commit point. When
+joining an outer transaction, use `defer_activation=True`, then call
+`activate_publisher_policy(existing_store)` only after the outermost commit
+succeeds. The queue uses this sequence so publisher rotation and retirement of
+pending old clears commit together. A failed outer transaction leaves its source
+adapter fenced off.
+
+The caller must allocate a durable, strictly increasing sequence per PR, operation
+kind and authority generation across all publishers of that kind. Freeze the
+entire result of `prepare_publication(...)` in the caller's existing outbox or
+ledger before calling `publish(intent)`. Preserve that sequence and nonce across
+retries. Remote arrival order and an observed predecessor cannot allocate a new
+sequence. The client does not allocate counters or establish writer ownership.
+Review ledger integration and its ownership/restart proof remain required.
+
+Each intent owns its comment. Append-only native commit statuses authenticate the
+issuer, sequence and body digest because Forgejo writers can moderate another
+author's comment. `read_publications(number, head)` returns the authenticated
+review/recovery comments and their states. Unknown issuers and retired recovery
+history deny older facts until reconciled. A current explicit recovery clear can
+release a historical hold. Only the controller/outbox owner allocates recovery
+decisions; operator tools enqueue through it.
+Any source writer can impose this historical deny state by posting retired
+recovery history when no current decision exists. This deliberately preserves
+holds when a restored store has lost its publisher inventory; it cannot authorize
+a merge. The queue has a tested `enqueue_source_recovery(clear=True)` operation;
+its operator HTTP/CLI caller remains required before native activation.
+
+`Incomplete` means retry the frozen intent after observation becomes available.
+`PublicationSuperseded` carries the registered sequence/nonce/actor for reconciliation;
+an equal-sequence collision is also reconciliation, rather than a transient retry.
+Do not resend the conflicting decision. `PublicationDamaged` requires republication of
+the retained result through a new intent, without repeating paid inference.
+`PublisherNotGranted` requires operator reconciliation. Reads of other publishers'
+current repository permissions require a source repository-admin credential.
+
+The standalone publication contracts cover lost acknowledgements, late and
+concurrent delivery, semantic ordering, moderation, unknown issuers and policy
+rotation. They do not establish the complete lifecycle or fleet capacity.
