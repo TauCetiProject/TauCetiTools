@@ -143,6 +143,35 @@ class DuplicateDeclarationsTest(unittest.TestCase):
                          "public theorem testB : f 0 = 0 := by simp only [f]\n",
         })
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("phase audit-import", result.stdout)
+
+    def test_user_congruence_theorem_is_not_a_generated_name_exception(self):
+        self.assert_collision(self.fixture({
+            "TauCeti.Base": "module\n@[expose] public def f (n : Nat) := n\n",
+            "TauCeti.A": "module\npublic theorem f.congr_simp : True := True.intro\n",
+            "TauCeti.B": "module\npublic theorem f.congr_simp : True := True.intro\n",
+        }), "f.congr_simp")
+
+    def test_direct_scan_does_not_execute_initializers(self):
+        result = self.fixture({
+            "TauCeti.Orphan": "module\npublic import Lean\n"
+                              "initialize IO.eprintln \"INITIALIZER-RAN\"\n"
+                              "public theorem unique : True := True.intro\n",
+        })
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("INITIALIZER-RAN", result.stdout + result.stderr)
+        self.assertNotIn("phase audit-import", result.stdout)
+
+    def test_other_generated_exceptions_keep_the_existing_checker(self):
+        result = self.fixture({
+            "TauCeti.Base": "module\n@[expose] public def f : Nat → Nat | 0 => 0 | n+1 => n\n",
+            "TauCeti.A": "module\npublic import Lean\npublic import TauCeti.Base\n"
+                         "public def usesCasesA := @f.fun_cases\n",
+            "TauCeti.B": "module\npublic import Lean\npublic import TauCeti.Base\n"
+                         "public def usesCasesB := @f.fun_cases\n",
+        })
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("phase audit-import", result.stdout)
 
     def test_user_theorem_with_reserved_looking_name_is_not_exempt(self):
         self.assert_collision(self.fixture({

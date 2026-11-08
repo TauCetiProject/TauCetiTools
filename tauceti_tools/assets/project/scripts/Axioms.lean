@@ -224,6 +224,124 @@ def check (env : Environment) (localModules : NameSet) : IO UInt32 := do
     {modules.size - localModules.size} dependency modules; no duplicate declarations."
   return 0
 
+/-- Heap-owned names, shared by prefix. Nothing in the index refers to a freed module region. -/
+partial def ownName (name : Name) : StateM (Std.HashSet Name) Name := do
+  if let some owned := (← get).get? name then return owned
+  let owned ← match name with
+    | .anonymous => pure .anonymous
+    | .str parent text =>
+      let parent ← ownName parent
+      let text := String.fromUTF8! <|
+        ByteArray.copySlice text.toUTF8 0 ByteArray.empty 0 text.utf8ByteSize
+      pure (.str parent text)
+    | .num parent number => return .num (← ownName parent) (toString number).toNat!
+  modify (·.insert owned)
+  return owned
+
+structure Owner where
+  module : Name
+  localModule : Bool
+  safeDefinition : Bool
+
+structure NameScan where
+  pending : Array Name
+  seen : Std.HashSet Name
+  ownedNames : Std.HashSet Name := {}
+  owners : Std.HashMap Name Owner := {}
+  explicitNames : Std.HashSet Name := {}
+  collisions : Array Name := #[]
+
+/-- Same exact extension-name lookup and typed interpretation as Lean's importer. -/
+def moduleEntries {α β σ : Type} [Inhabited σ]
+    (ext : PersistentEnvExtension α β σ) (data : ModuleData) : Array α :=
+  match data.entries.find? (·.1 == ext.name) with
+  | some (_, entries) => unsafe unsafeCast entries
+  | none => #[]
+
+/-- Load one module's parts, without constructing an imported environment. -/
+def readParts (mod : Name) : IO (Array (ModuleData × CompactedRegion)) := do
+  let path ← findOLean mod
+  let first ← readModuleData path
+  if first.1.isModule then
+    let server ← unsafe CompactedRegion.read (α := ModuleData)
+      (OLeanLevel.server.adjustFileName path) #[first.2]
+    let priv ← unsafe CompactedRegion.read (α := ModuleData)
+      (OLeanLevel.private.adjustFileName path) #[first.2, server.2]
+    return #[first, server, priv]
+  else return #[first]
+
+/-- Consume only names, definition kinds and source declaration ranges. -/
+def scanModule (mod : Name) (localModule : Bool) (parts : Array (ModuleData × CompactedRegion))
+    (scan : NameScan) : IO NameScan := do
+  let some (data, _) := parts.back? | throw <| IO.userError s!"missing module data: {mod}"
+  let mut scan := scan
+  for imported in data.imports do
+    if !scan.seen.contains imported.module then
+      let (name, names) := (ownName imported.module).run scan.ownedNames
+      scan := { scan with
+        ownedNames := names
+        seen := scan.seen.insert name
+        pending := scan.pending.push name }
+  for name in data.constNames, constant in data.constants do
+    let (name, names) := (ownName name).run scan.ownedNames
+    scan := { scan with ownedNames := names }
+    if let some previous := scan.owners[name]? then
+      if previous.module != mod && (localModule || previous.localModule) then
+        scan := { scan with collisions := scan.collisions.push name }
+      if previous.localModule && !localModule then continue
+    scan := { scan with owners := scan.owners.insert name {
+      module := mod, localModule,
+      safeDefinition := constant matches .defnInfo { safety := .safe, .. } } }
+  for (name, _) in moduleEntries declRangeExt.toPersistentEnvExtension data do
+    let (name, names) := (ownName name).run scan.ownedNames
+    scan := { scan with ownedNames := names, explicitNames := scan.explicitNames.insert name }
+  return scan
+
+/-- A small batch overlaps module reads. Task results and all mmap-backed ModuleData references
+are destroyed before returning only owned metadata and region handles to the caller. -/
+@[noinline] def scanBatch (batch : Array Name) (firstLocal : Nat) (scan : NameScan) :
+    IO (NameScan × Array CompactedRegion) := do
+  let reads ← batch.mapM fun mod => IO.asTask (readParts mod)
+  let mut scan := scan
+  let mut regions := #[]
+  for i in [:batch.size] do
+    let parts ← IO.ofExcept reads[i]!.get
+    scan ← scanModule batch[i]! (i < firstLocal) parts scan
+    regions := regions ++ parts.map (·.2)
+  return (scan, regions)
+
+/-- Common reserved-name predicates whose answers depend only on the scanned metadata.
+Use Lean's suffix predicates. Other generated-name cases go through the existing checker.
+For equations we require the exact parent to be a safe definition and exclude matcher names:
+Lean.Meta.declFromEqLikeName then succeeds, and its body is exposed in the non-module audit
+so mkEqLikeNameFor returns this exact name. No dependency axiom summaries are involved. -/
+def commonReservedName (scan : NameScan) (name : Name) : Bool := Id.run do
+  let .str parent suffix := name | return false
+  let some info := scan.owners[parent]? | return false
+  if Meta.isHCongrReservedNameSuffix suffix || suffix == Meta.congrSimpSuffix then return true
+  if Meta.isEqnLikeSuffix suffix && info.safeDefinition then
+    let .str _ base := parent.eraseMacroScopes | return false
+    return !base.startsWith "match_"
+  return false
+
+/-- Return true when the direct scan proves the same successful ownership result.
+An actual collision or an uncommon generated-name exception uses the existing checker, with
+its existing diagnostics and policy. This adds no new audit failure or persistent cache. -/
+def scanNames (modules : Array Name) : IO Bool := do
+  let mut scan : NameScan := { pending := modules, seen := .ofArray modules }
+  let mut i := 0
+  while i < scan.pending.size do
+    let batch := scan.pending.extract i (i + 4)
+    let (next, regions) ← scanBatch batch (modules.size - i) scan
+    for region in regions.reverse do unsafe region.free
+    scan := next
+    i := i + batch.size
+  for name in scan.collisions do
+    if scan.explicitNames.contains name || !commonReservedName scan name then return false
+  IO.println s!"duplicate-declarations: checked {modules.size} TauCeti modules and \
+    {scan.pending.size - modules.size} dependency modules; no duplicate declarations."
+  return true
+
 end DuplicateDeclarations
 
 namespace ShadowAudit
@@ -312,13 +430,17 @@ def main (args : List String) : IO UInt32 := do
     IO.eprintln "usage: audit-driver [--duplicates-only|--shadow-inventory|--shadow-snapshot|--shadow-incremental]"
     return 2
   try
-    phase "audit-import"
+    if args != ["--duplicates-only"] then phase "audit-import"
     initSearchPath (← findSysroot)
     let modules ← AxiomAudit.auditedModules
     if modules.size <= 1 then
       throw <| IO.userError "duplicate-declarations: no TauCeti source modules found"
     let localModules := modules.foldl (fun s n => s.insert n) ({} : NameSet)
     let only ← AxiomAudit.scope
+    if args == ["--duplicates-only"] then
+      phase "audit-duplicates"
+      if ← DuplicateDeclarations.scanNames modules then return 0
+      phase "audit-import"
     unsafe withImportModules (modules.map fun m => { module := m }) {}
       (fun env => do
         if args == ["--shadow-inventory"] || args == ["--shadow-snapshot"] then
