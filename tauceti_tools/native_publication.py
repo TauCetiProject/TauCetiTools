@@ -189,10 +189,12 @@ class NativePublicationClient:
             raise ValueError("native publication requires a nonzero immutable commit")
         return value
 
-    def configure_publisher_policy(self, store):
+    def configure_publisher_policy(self, store, *, defer_activation=False):
         """Fence trust changes in the existing queue settings, before serving work."""
         self._publisher_configured = False
         self._configured_record = None
+        if type(defer_activation) is not bool:
+            raise ValueError("publisher activation must be explicit")
         key = "state:native-publisher-policy:" + self.repository.key + ":" + str(self.repository_identity.native_id)
         current = self.publication_policy.publishers.record()
         with store.transaction():
@@ -229,6 +231,9 @@ class NativePublicationClient:
                     or ids != sorted(set(ids))
                 ):
                     raise ValueError("invalid native publisher configuration history")
+            known_generations = set(retired) | {previous["generation"]}
+            if any(g not in known_generations for g in saved["recovery_grants"]):
+                raise ValueError("native publisher inventory contains an unrecorded generation")
             if previous != current:
                 if current["generation"] == previous.get("generation") or current["generation"] in retired:
                     raise ValueError("publisher changes require a fresh, never reused authority generation")
@@ -245,8 +250,7 @@ class NativePublicationClient:
                 raise ValueError("native recovery publisher history exceeds its bound")
             for generation, ids in grants.items():
                 if (
-                    not isinstance(generation, str)
-                    or re.fullmatch(r"[0-9a-f]{32}", generation) is None
+                    not self._valid_generation(generation)
                     or not isinstance(ids, list)
                     or len(ids) > 256
                     or any(type(i) is not int or i < 1 for i in ids)
@@ -256,8 +260,23 @@ class NativePublicationClient:
         # A transaction may fail while leaving its context (including ENOSPC).
         # Publish the fence only after the existing ledger has committed it.
         self._configured_record = current
-        self._publisher_configured = True
+        if not defer_activation:
+            self.activate_publisher_policy(store)
         return previous != current
+
+    def activate_publisher_policy(self, store):
+        """Confirm the prepared policy after the caller's outermost commit.
+
+        configure_publisher_policy must own its commit point or defer activation.
+        A caller joining a larger transaction calls this only after that commits.
+        """
+        self._publisher_configured = False
+        current = self.publication_policy.publishers.record()
+        key = "state:native-publisher-policy:" + self.repository.key + ":" + str(self.repository_identity.native_id)
+        saved = store.get_setting(key)
+        if self._configured_record != current or not isinstance(saved, dict) or saved.get("current") != current:
+            raise Incomplete("native publisher policy must be committed before activation")
+        self._publisher_configured = True
 
     @staticmethod
     def _valid_generation(value):
@@ -549,6 +568,7 @@ class NativePublicationClient:
         return PUB_DESCRIPTION + f"{intent['generation']}:{intent['sequence']}:{intent['nonce']}:"
 
     def publish(self, intent):
+        self._require_publisher_policy()
         required = {
             "schema",
             "source",

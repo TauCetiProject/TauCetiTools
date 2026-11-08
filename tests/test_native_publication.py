@@ -210,6 +210,30 @@ class Publications(unittest.TestCase):
         self.source.configure_publisher_policy(self.store)
         self.assertEqual(self.source.read_publications(1, "a" * 40), ((), "absent", "absent"))
 
+    def test_deferred_activation_waits_for_the_callers_commit(self):
+        fresh = NativePublicationClient(self.identity, self.api, publication_policy=self.policy)
+        fresh.configure_publisher_policy(self.store, defer_activation=True)
+        with self.assertRaises(Incomplete):
+            fresh.prepare_publication("team/Math", 1, "a" * 40, self.body, "review", sequence=1)
+        fresh.activate_publisher_policy(self.store)
+        self.assertEqual(fresh.read_publications(1, "a" * 40), ((), "absent", "absent"))
+        self.policy.publishers = replace(self.publishers, generation="2" * 32)
+        with self.assertRaises(OSError):
+            with self.store.transaction():
+                fresh.configure_publisher_policy(self.store, defer_activation=True)
+                raise OSError("outer ledger transaction rolled back")
+        with self.assertRaises(Incomplete):
+            fresh.activate_publisher_policy(self.store)
+        with self.assertRaises(Incomplete):
+            fresh.read_publications(1, "a" * 40)
+
+    def test_an_uncommitted_policy_change_cannot_settle_a_frozen_intent_as_revoked(self):
+        frozen = self.prepare("team/Math", 1, "a" * 40, self.body, "review")
+        self.policy.publishers = replace(self.publishers, reviews=frozenset({self.queue.principal}))
+        with self.assertRaises(Incomplete):
+            self.source.publish(frozen)
+        self.assertEqual(self.status_rows, [])
+
     def test_corrupt_policy_history_is_a_configuration_error(self):
         key = next(iter(self.store.settings))
         original = copy.deepcopy(self.store.settings[key])
@@ -223,6 +247,8 @@ class Publications(unittest.TestCase):
             (("retired_generations",), [{}]),
             (("retired_generations",), ["2" * 32, "2" * 32]),
             (("retired_generations",), [self.publishers.generation]),
+            (("recovery_grants",), {"2" * 32: []}),
+            (("recovery_grants",), {"0" * 32: []}),
         ]:
             with self.subTest(path=path, value=value):
                 record = copy.deepcopy(original)
@@ -363,6 +389,38 @@ class Publications(unittest.TestCase):
         self.assertEqual(conflict.exception.sequence, first["sequence"])
         self.assertEqual(conflict.exception.nonce, first["nonce"])
         self.assertEqual(conflict.exception.actor, self.actor)
+
+    def test_equal_sequence_from_another_publisher_never_reconciles_an_unknown_issuer_barrier(self):
+        other = SourceActor.from_native(self.repository.forge, {"id": 9, "login": "second-reviewer"})
+        self.policy.publishers = replace(
+            self.publishers, reviews=frozenset({self.actor.principal, other.principal}), generation="2" * 32
+        )
+        self.source.configure_publisher_policy(self.store)
+        for barrier in [False, True]:
+            with self.subTest(barrier=barrier):
+                self.rows, self.status_rows = [], []
+                self.api.current_user.return_value = {"id": 9, "login": "second-reviewer"}
+                remote = self.prepare("team/Math", 1, "a" * 40, self.body, "review", sequence=1)
+                self.source.publish(remote)
+                if barrier:
+                    self.status_rows.append(
+                        {
+                            "id": 1000,
+                            "context": REVIEW_CONTEXT + "1",
+                            "creator": None,
+                            "status": "pending",
+                            "description": PUB_DESCRIPTION + self.policy.publishers.generation + ":junk",
+                        }
+                    )
+                self.api.current_user.return_value = {"id": 7, "login": "reviewer"}
+                local = self.prepare("team/Math", 1, "a" * 40, self.body, "review", sequence=1)
+                count = len(self.status_rows)
+                with self.assertRaises(PublicationSuperseded) as conflict:
+                    self.source.publish(local)
+                self.assertEqual(conflict.exception.sequence, 1)
+                self.assertEqual(conflict.exception.nonce, remote["nonce"])
+                self.assertEqual(conflict.exception.actor, other)
+                self.assertEqual(len(self.status_rows), count)
 
     def test_damaged_completed_intent_requires_republication_without_repeating_inference(self):
         intent = self.prepare("team/Math", 1, "a" * 40, self.body, "review")

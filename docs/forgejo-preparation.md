@@ -674,6 +674,12 @@ publication; a restored old policy must not reauthorize old approvals or clears.
 The fence applies only after the existing store's transaction commits. Failed
 commits and changed publisher grants leave reads and publication disabled until
 the current record has been durably configured.
+`configure_publisher_policy` normally owns that transaction's commit point. When
+joining an outer transaction, use `defer_activation=True`, then call
+`activate_publisher_policy(existing_store)` only after the outermost commit
+succeeds. The queue uses this sequence so publisher rotation and retirement of
+pending old clears commit together. A failed outer transaction leaves its source
+adapter fenced off.
 
 The caller must allocate a durable, strictly increasing sequence per PR, operation
 kind and authority generation across all publishers of that kind. Freeze the
