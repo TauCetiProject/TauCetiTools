@@ -27,7 +27,7 @@ unpinned install.
 What this cannot do is recognise an arbitrary new way to obtain an elan; no textual check can.
 It fixes the approved shape and closes the routes that were actually in use.
 
-To bump the pin, change ELAN_VER and ELAN_SHA256 together in every workflow that declares them;
+To bump the pin, change ELAN_VER, ELAN_SHA256 and ELAN_ASSET_ID together in every workflow that declares them;
 the checksum is that of the release's elan-x86_64-unknown-linux-gnu.tar.gz asset.
 """
 
@@ -39,15 +39,22 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOW_DIR = ROOT / ".github/workflows"
 
 SHA = re.compile(r"^\s*ELAN_SHA256:\s*([0-9a-f]{64})\s*$", re.MULTILINE)
+ASSET = re.compile(r"^\s*ELAN_ASSET_ID:\s*([0-9]+)\s*$", re.MULTILINE)
 VER = re.compile(r"^\s*ELAN_VER:\s*(v[0-9][0-9A-Za-z.\-]*)\s*$", re.MULTILINE)
 # The approved install, as adjacent lines: fetch the pinned release, refuse it unless it hashes
 # to the pin, and only then unpack and run the installer it contains. The download must name
 # ${ELAN_VER} and the check ${ELAN_SHA256}, or the declared pin would describe a release the
 # workflow does not actually fetch, or a checksum it does not actually compare against.
+DOWNLOAD = r"curl --fail --silent --show-error --location --retry 2 --retry-all-errors --retry-delay 1 --connect-timeout 10 --max-time 60 --retry-max-time 120"
 INSTALL = re.compile(
-    r'^[ \t]*curl -sSL -H "Accept: application/octet-stream" \\\n'
+    r'^[ \t]*if ! ' + DOWNLOAD + r' \\\n'
+    r'[ \t]*-H "Accept: application/octet-stream" \\\n'
     r'[ \t]*"https://github\.com/leanprover/elan/releases/download/\$\{ELAN_VER\}/'
-    r'elan-x86_64-unknown-linux-gnu\.tar\.gz" -o elan\.tar\.gz\n'
+    r'elan-x86_64-unknown-linux-gnu\.tar\.gz" -o elan\.tar\.gz; then\n'
+    r'[ \t]*' + DOWNLOAD + r' \\\n'
+    r'[ \t]*-H "Accept: application/octet-stream" \\\n'
+    r'[ \t]*"https://api\.github\.com/repos/leanprover/elan/releases/assets/\$\{ELAN_ASSET_ID\}" -o elan\.tar\.gz\n'
+    r'[ \t]*fi\n'
     r'[ \t]*echo "\$\{ELAN_SHA256\}  elan\.tar\.gz" \| sha256sum -c -\n'
     r'[ \t]*tar -xzf elan\.tar\.gz elan-init\n'
     r'[ \t]*\./elan-init -y --default-toolchain none\n'
@@ -90,15 +97,18 @@ class ElanPin(unittest.TestCase):
         self.assertTrue(workflows(), f"no workflows found under {WORKFLOW_DIR}")
 
     def test_every_installing_workflow_pins_the_same_elan(self):
-        vers, shas = {}, {}
+        vers, shas, assets = {}, {}, {}
         for workflow in workflows():
             text = code(workflow)
             for ver in VER.findall(text):
                 vers.setdefault(ver, set()).add(workflow.name)
+            for asset in ASSET.findall(text):
+                assets.setdefault(asset, set()).add(workflow.name)
             for sha in SHA.findall(text):
                 shas.setdefault(sha, set()).add(workflow.name)
         self.assertTrue(vers, "no workflow pins an elan release")
         self.assertEqual(len(vers), 1, "workflows disagree on the elan version: " + describe(vers))
+        self.assertEqual(len(assets), 1, "workflows disagree on the elan asset: " + describe(assets))
         self.assertEqual(len(shas), 1, "workflows disagree on the elan checksum: " + describe(shas))
 
     def test_every_pin_belongs_to_a_verified_install(self):
@@ -110,6 +120,7 @@ class ElanPin(unittest.TestCase):
             if not pins:
                 continue
             with self.subTest(workflow=workflow.name):
+                self.assertEqual(len(ASSET.findall(text)), pins, "each elan pin needs an official release asset ID")
                 self.assertEqual(len(SHA.findall(text)), pins,
                                  f"{workflow.name} declares {pins} elan pin(s) but does not "
                                  "give each of them a checksum")
