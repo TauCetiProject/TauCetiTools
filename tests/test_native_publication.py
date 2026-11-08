@@ -237,9 +237,18 @@ class Publications(unittest.TestCase):
                     self.prepare("team/Math", 1, "a" * 40, self.body, "review")
 
     def test_current_publisher_access_revocation_never_reveals_an_older_verdict(self):
+        other = SourceActor.from_native(self.repository.forge, {"id": 9, "login": "second-reviewer"})
+        self.policy.publishers = replace(
+            self.publishers, reviews=frozenset({self.actor.principal, other.principal}), generation="2" * 32
+        )
+        self.source.configure_publisher_policy(self.store)
         self.source.publish(self.prepare("team/Math", 1, "a" * 40, self.body, "review"))
-        self.permission = "read"
-        self.assertEqual(self.read()[1], "revoked")
+        self.api.current_user.return_value = {"id": 9, "login": "second-reviewer"}
+        self.source.publish(
+            self.prepare("team/Math", 1, "a" * 40, self.body.replace("green", "blocking_request"), "review")
+        )
+        with patch.object(self.source, "_permission", side_effect=lambda a: "read" if a == other else "write"):
+            self.assertEqual(self.read()[1], "revoked")
         with patch.object(self.source, "_permission", side_effect=ForgeError("deleted account", status=404)):
             self.assertEqual(self.read()[1], "revoked")
         with patch.object(self.source, "_permission", side_effect=ForgeError("forbidden read", status=403)):
