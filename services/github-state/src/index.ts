@@ -91,6 +91,19 @@ export default {
           const pointer={key,delivery,event,repository:repo.name,received};
           await park(env,repo,pointer,'accepted');
           await env.EVENTS.send(pointer);
+          // Reviews depend on these updates before the next worker handoff.
+          // A busy FIFO queue can lag far behind durably accepted comments.
+          // Use the same idempotent handler now, after publishing recovery input;
+          // queue/cron remain the only retry owners if this bounded lifetime ends.
+          if (event==='issue_comment' || event==='pull_request_review_comment') ctx.waitUntil((async()=>{
+            try {
+              const response=await stub(env.REPOSITORIES,repo.id).fetch('https://internal/event',{method:'POST',body:JSON.stringify(pointer)});
+              if (!response.ok) {await response.body?.cancel();log('comment_application_deferred',{delivery,event_type:event,status:response.status});return;}
+              await response.body?.cancel();
+              await release(env,repo,pointer);
+              log('comment_application_complete',{delivery,event_type:event,elapsed_ms:Date.now()-received});
+            } catch(error) {log('comment_application_deferred',{delivery,event_type:event,reason:classify(error)});}
+          })());
         }
         return json({accepted:true},202);
       }

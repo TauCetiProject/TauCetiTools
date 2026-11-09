@@ -1,0 +1,328 @@
+{
+  "observed_at": "2026-11-09T00:25:00Z",
+  "production_before": {
+    "deployment": "01661238-3579-4e1e-ac9b-dac23401207e",
+    "latest_applied_input": {
+      "delivery": "092101a0-dbce-11f1-9f0c-48e13b8b363d",
+      "event": "pull_request",
+      "received": 1794181340121,
+      "applied_at": 1794183788155
+    },
+    "webhook_apply_ms": 2448034,
+    "ingestion": [
+      {
+        "event_type": "issue_comment",
+        "minute": 1794183780000,
+        "deliveries": 2,
+        "sql_round_trips": 32,
+        "sql_samples": 2,
+        "writer_wait_ms": 28998,
+        "writer_wait_max_ms": 14528,
+        "apply_through_cleanup_ms": 1251,
+        "apply_max_ms": 628
+      },
+      {
+        "event_type": "pull_request",
+        "minute": 1794183780000,
+        "deliveries": 6,
+        "sql_round_trips": 65,
+        "sql_samples": 6,
+        "writer_wait_ms": 82258,
+        "writer_wait_max_ms": 14668,
+        "apply_through_cleanup_ms": 2648,
+        "apply_max_ms": 520
+      },
+      {
+        "event_type": "status",
+        "minute": 1794183780000,
+        "deliveries": 1,
+        "sql_round_trips": 10,
+        "sql_samples": 1,
+        "writer_wait_ms": 14058,
+        "writer_wait_max_ms": 14058,
+        "apply_through_cleanup_ms": 396,
+        "apply_max_ms": 396
+      },
+      {
+        "event_type": "pull_request_review_comment",
+        "minute": 1794183780000,
+        "deliveries": 1,
+        "sql_round_trips": 15,
+        "sql_samples": 1,
+        "writer_wait_ms": 14157,
+        "writer_wait_max_ms": 14157,
+        "apply_through_cleanup_ms": 575,
+        "apply_max_ms": 575
+      },
+      {
+        "event_type": "pull_request_review",
+        "minute": 1794183720000,
+        "deliveries": 2,
+        "sql_round_trips": 12,
+        "sql_samples": 2,
+        "writer_wait_ms": 31958,
+        "writer_wait_max_ms": 19123,
+        "apply_through_cleanup_ms": 538,
+        "apply_max_ms": 289
+      },
+      {
+        "event_type": "push",
+        "minute": 1794183720000,
+        "deliveries": 1,
+        "sql_round_trips": 13,
+        "sql_samples": 1,
+        "writer_wait_ms": 12043,
+        "writer_wait_max_ms": 12043,
+        "apply_through_cleanup_ms": 656,
+        "apply_max_ms": 656
+      },
+      {
+        "event_type": "label",
+        "minute": 1794173280000,
+        "deliveries": 1,
+        "sql_round_trips": 6,
+        "sql_samples": 1,
+        "writer_wait_ms": 12779,
+        "writer_wait_max_ms": 12779,
+        "apply_through_cleanup_ms": 257,
+        "apply_max_ms": 257
+      },
+      {
+        "event_type": "create",
+        "minute": 1794180780000,
+        "deliveries": 1,
+        "sql_round_trips": 6,
+        "sql_samples": 1,
+        "writer_wait_ms": 14792,
+        "writer_wait_max_ms": 14792,
+        "apply_through_cleanup_ms": 290,
+        "apply_max_ms": 290
+      },
+      {
+        "event_type": "pull_request_review_thread",
+        "minute": 1794180360000,
+        "deliveries": 1,
+        "sql_round_trips": 6,
+        "sql_samples": 1,
+        "writer_wait_ms": 13353,
+        "writer_wait_max_ms": 13353,
+        "apply_through_cleanup_ms": 318,
+        "apply_max_ms": 318
+      }
+    ],
+    "ingress": {
+      "mode": "apply",
+      "prepared_at": 1794183800117,
+      "parked": {
+        "count": 492,
+        "truncated": true,
+        "oldest_received": 1794181343010
+      },
+      "held": {
+        "count": 0,
+        "truncated": false,
+        "oldest_received": null
+      },
+      "next_lane": "held",
+      "pointers_last_pass": {
+        "replayed": 10,
+        "failed": 0,
+        "superseded": 0,
+        "timing": {
+          "listing_ms": 424,
+          "preparing_ms": 3592,
+          "receipt_lookup_ms": 253,
+          "batch_ms": 0,
+          "cleanup_ms": 20272
+        },
+        "page_size": 50,
+        "ready_size": 50,
+        "batched": 0,
+        "batch_status": null,
+        "known_receipts": 0,
+        "receipt_lookup_status": 200,
+        "cursor": "parked/1256881326/pointers/001794181342789-0b449596-dbce-11f1-8404-3164d806590c.json",
+        "remaining": true,
+        "stopped": "deadline",
+        "page_limit": 50,
+        "budget_ms": 19530,
+        "duration_ms": 24746
+      },
+      "failures": 0,
+      "last_error": null,
+      "next_retry": 1794183804342,
+      "last_attempt": 1794183774342,
+      "lease_until": 0,
+      "held_last_pass": {
+        "replayed": 0,
+        "failed": 0,
+        "superseded": 0,
+        "timing": {
+          "listing_ms": 174,
+          "preparing_ms": 0,
+          "receipt_lookup_ms": 0,
+          "batch_ms": 0,
+          "cleanup_ms": 0
+        },
+        "page_size": 0,
+        "ready_size": 0,
+        "batched": 0,
+        "batch_status": null,
+        "known_receipts": 0,
+        "receipt_lookup_status": null,
+        "remaining": false,
+        "page_limit": 50,
+        "budget_ms": 10904,
+        "duration_ms": 422
+      },
+      "pointers_pass_completed_at": 1794177482579,
+      "held_pass_completed_at": 1794177483718,
+      "pointers_pass_started_at": 1794177534588,
+      "pointers_fast_passes": 0,
+      "held_pass_started_at": 1794177483296,
+      "held_fast_passes": 0,
+      "pointers_cursor": "parked/1256881326/pointers/001794181342789-0b449596-dbce-11f1-8404-3164d806590c.json",
+      "storage": null,
+      "raw": {
+        "last_error": null,
+        "next_retry": 1794183804018,
+        "gaps": {
+          "count": 0,
+          "truncated": false
+        },
+        "prepared_at": 1794183794297,
+        "last_attempt": 1794183774018,
+        "lease_until": 0,
+        "gap_last_pass": {
+          "at": 1794183774532,
+          "examined": 0,
+          "resolved": 0,
+          "errors": 0
+        },
+        "receipt_lookup": {
+          "at": 1794183794297,
+          "lookups": 0,
+          "requests": 0,
+          "requested_ids": 0,
+          "known_lookups": 0,
+          "failures": 0,
+          "largest_batch": 0,
+          "request_ms": 0,
+          "groups": 9,
+          "group_tasks": 145,
+          "rounds": 0,
+          "group_ms": 10937,
+          "barrier_wait_ms": 0
+        },
+        "last_completed": 1794181692406,
+        "after": "webhooks/2026-10-12/30f8fb90-c690-11f1-94e3-e93fd6633d31.json"
+      }
+    }
+  },
+  "retained_comment_traces": [
+    {
+      "delivery": "167cce60-dbce-11f1-8768-338a43d12206",
+      "event": "issue_comment",
+      "action": "created",
+      "number": 28625,
+      "id": "6728819436",
+      "received": 1794181362136,
+      "published_updated_at": "2026-11-08T23:42:40Z",
+      "body_matches": true,
+      "stored": [
+        {
+          "updated": "2026-11-08T23:42:40Z",
+          "observed": "1794183910820",
+          "tombstone": "0"
+        }
+      ],
+      "receipt": [
+        {
+          "id": "167cce60-dbce-11f1-8768-338a43d12206",
+          "received": "1794183911074"
+        }
+      ],
+      "original_key": "webhooks/2026-11-08/167cce60-dbce-11f1-8768-338a43d12206.json"
+    },
+    {
+      "delivery": "134f8340-dbce-11f1-9468-fb618f436507",
+      "event": "issue_comment",
+      "action": "created",
+      "number": 32134,
+      "id": "6728818318",
+      "received": 1794181359200,
+      "published_updated_at": "2026-11-08T23:42:34Z",
+      "body_matches": true,
+      "stored": [
+        {
+          "updated": "2026-11-08T23:42:34Z",
+          "observed": "1794183908297",
+          "tombstone": "0"
+        }
+      ],
+      "receipt": [
+        {
+          "id": "134f8340-dbce-11f1-9468-fb618f436507",
+          "received": "1794183908569"
+        }
+      ],
+      "original_key": "webhooks/2026-11-08/134f8340-dbce-11f1-9468-fb618f436507.json"
+    },
+    {
+      "delivery": "1b9c2580-dbce-11f1-92e8-0d0ca865cfd8",
+      "event": "issue_comment",
+      "action": "created",
+      "number": 32176,
+      "id": "6728820849",
+      "received": 1794181370778,
+      "published_updated_at": "2026-11-08T23:42:48Z",
+      "body_matches": false,
+      "stored": [],
+      "receipt": [],
+      "original_key": "webhooks/2026-11-08/1b9c2580-dbce-11f1-92e8-0d0ca865cfd8.json"
+    },
+    {
+      "delivery": "1cf28dc0-dbce-11f1-8355-5d66a937649e",
+      "event": "issue_comment",
+      "action": "created",
+      "number": 32199,
+      "id": "6728821357",
+      "received": 1794181372850,
+      "published_updated_at": "2026-11-08T23:42:51Z",
+      "body_matches": false,
+      "stored": [],
+      "receipt": [],
+      "original_key": "webhooks/2026-11-08/1cf28dc0-dbce-11f1-8355-5d66a937649e.json"
+    },
+    {
+      "delivery": "1eaa01c0-dbce-11f1-90bc-ee8871583946",
+      "event": "issue_comment",
+      "action": "created",
+      "number": 32161,
+      "id": "6728821728",
+      "received": 1794181375906,
+      "published_updated_at": "2026-11-08T23:42:53Z",
+      "body_matches": false,
+      "stored": [],
+      "receipt": [],
+      "original_key": "webhooks/2026-11-08/1eaa01c0-dbce-11f1-90bc-ee8871583946.json"
+    },
+    {
+      "delivery": "2051be50-dbce-11f1-9e01-9dc88064ec26",
+      "event": "issue_comment",
+      "action": "created",
+      "number": 32165,
+      "id": "6728822239",
+      "received": 1794181378803,
+      "published_updated_at": "2026-11-08T23:42:56Z",
+      "body_matches": false,
+      "stored": [],
+      "receipt": [],
+      "original_key": "webhooks/2026-11-08/2051be50-dbce-11f1-9e01-9dc88064ec26.json"
+    }
+  ],
+  "diagnosis": "Signed comment inputs were durably archived and parked, but queue application was over 40 minutes behind; missing SQL receipts and resources demonstrate pre-application delay. Existing complete collection coverage does not prove input caught up. No GitHub polling was used.",
+  "new_regression": "Same-millisecond refresh publication could remove a newly created comment from membership; equality must preserve comment resources and membership.",
+  "direct_read_exception": false,
+  "additional_github_requests": 0
+}
