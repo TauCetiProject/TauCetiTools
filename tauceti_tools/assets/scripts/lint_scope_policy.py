@@ -26,6 +26,32 @@ class FullLint(Exception):
     """The caller must lint the entire library."""
 
 
+def check_citations(repo, comparison):
+    """Never reinterpret a qualified or foreign source PR as a local GitHub number."""
+    if not isinstance(comparison, dict) or not isinstance(comparison.get("commits"), list):
+        raise FullLint("commit provenance is incomplete")
+    for commit in comparison["commits"]:
+        message = commit.get("commit", {}).get("message") if isinstance(commit, dict) else None
+        if not isinstance(message, str):
+            raise FullLint("commit provenance is malformed")
+        retained = commit.get("source_prs", [])
+        if not isinstance(retained,list) or any(not isinstance(value,str) for value in retained):
+            raise FullLint("retained commit provenance is malformed")
+        citations = set([*retained,*re.findall(r"^Source-PR:[ \t]*(.*)$", message, re.M)])
+        if not citations:
+            continue  # Preserve historical GitHub/Bors subject attribution.
+        if len(citations) != 1:
+            raise FullLint("commit has ambiguous Source-PR citations")
+        value = citations.pop()
+        prefix = "github:https://github.com/"
+        if value.startswith(prefix):
+            value = value[len(prefix):]
+        matched = re.fullmatch(re.escape(repo) + r"#([1-9][0-9]*)", value, re.I)
+        subject = re.search(r"\(#([0-9]+)\)$", message.split("\n", 1)[0])
+        if matched is None or subject is None or matched[1] != subject[1]:
+            raise FullLint("qualified, foreign, or conflicting Source-PR provenance requires full-library lint")
+
+
 def query_for(repo, numbers):
     owner, name = repo.split("/")
     fields = " ".join(
@@ -118,7 +144,10 @@ def check_policy(repo, raw_numbers):
 
 def main():
     try:
-        check_policy(sys.argv[1], sys.stdin.read(2048))
+        if len(sys.argv) == 3 and sys.argv[1] == "--check-citations":
+            check_citations(sys.argv[2], json.loads(sys.stdin.read(MAX_RESPONSE_BYTES)))
+        else:
+            check_policy(sys.argv[1], sys.stdin.read(2048))
     except (FullLint, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         print(f"PR lint policy requires full-library lint: {error}")
         return 1

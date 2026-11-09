@@ -7,6 +7,9 @@ inputs:
     required: true
   project-directory:
     default: .
+  source-mirror-enabled:
+    description: Use the protected qualified post-merge contract for a Forgejo source
+    default: "false"
 runs:
   using: composite
   steps:
@@ -19,6 +22,9 @@ runs:
     - shell: bash
       env:
         PROJECT_DIRECTORY: ${{ inputs.project-directory }}
+        SOURCE_MIRROR_ENABLED: ${{ inputs.source-mirror-enabled }}
+        TOOLS_REPOSITORY: ${{ inputs.tools-repository }}
+        TOOLS_REVISION: ${{ inputs.tools-ref }}
       run: |
         set -euo pipefail
         tools_directory="$GITHUB_WORKSPACE/.tauceti-tools"
@@ -28,7 +34,27 @@ runs:
           (cd "$project_directory"; printf '%s\n' '.tauceti-tools/' '.tauceti-project/' '.tauceti-rubrics/' >> "$(git rev-parse --git-path info/exclude)")
         fi
         export PYTHONPATH="$tools_directory${PYTHONPATH:+:$PYTHONPATH}"
-        python3 -m tauceti_tools config environment --conf "$project_directory/tauceti.toml" --github-env "$GITHUB_ENV"
-        python3 -m tauceti_tools materialize "$RUNNER_TEMP/tauceti-shared-scripts" --conf "$project_directory/tauceti.toml" --policy-dir "$project_directory/scripts"
+        if [ "$SOURCE_MIRROR_ENABLED" = true ]; then
+          test "$(git -C "$tools_directory" rev-parse HEAD)" = "$TOOLS_REVISION"
+          python3 -m tauceti_tools.ci_mirror_workflow bootstrap \
+            --configuration "$project_directory/tauceti.toml" \
+            --policy "$project_directory/.tauceti/ci-source.json" \
+            --scripts "$RUNNER_TEMP/tauceti-shared-scripts" --policy-dir "$project_directory/scripts" \
+            --github-env "$GITHUB_ENV" --provenance "$RUNNER_TEMP/source-mirror-context.json" \
+            --harness-repository "$TOOLS_REPOSITORY" --harness-sha "$TOOLS_REVISION"
+        elif [ "$SOURCE_MIRROR_ENABLED" = false ]; then
+          python3 -m tauceti_tools config environment --conf "$project_directory/tauceti.toml" --github-env "$GITHUB_ENV"
+          python3 -m tauceti_tools materialize "$RUNNER_TEMP/tauceti-shared-scripts" --conf "$project_directory/tauceti.toml" --policy-dir "$project_directory/scripts"
+        else
+          echo '::error::source-mirror-enabled must be an explicit true or false'
+          exit 1
+        fi
         cp -a "$RUNNER_TEMP/tauceti-shared-scripts/." "$project_directory/scripts/"
         echo "PYTHONPATH=$PYTHONPATH" >> "$GITHUB_ENV"
+    - if: ${{ inputs.source-mirror-enabled == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: source-mirror-context-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+        path: ${{ runner.temp }}/source-mirror-context.json
+        if-no-files-found: error
+        retention-days: 7

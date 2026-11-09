@@ -956,6 +956,7 @@ jobs:
     # `build-site` must have succeeded, so the published site is the one it produced rather than
     # a fallback restore, and its SOURCE_SHA is the one read from the tree that was deployed.
     if: ${{ !cancelled()
+        && '__SOURCE_MIRROR_ENABLED__' != 'true'
         && needs.build-site.result == 'success' && needs.deploy.result == 'success'
         && needs.build-site.outputs.docs-source-sha != '' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest

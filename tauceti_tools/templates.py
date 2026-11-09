@@ -169,6 +169,8 @@ def substitutions(project: Project, *, source_ci=False) -> list[tuple[str, str]]
     ]
     pairs = [
         *repository_pairs,
+        ("__SOURCE_MIRROR_ENABLED__", "true" if source_ci else "false"),
+        ("__CACHE_PUBLICATION_REQUIRED__", "true" if source_ci else "false"),
         ("https://bors.taucetiproject.org", project.service("bors").get("url", "")),
         ("/repositories/1/active-batches", "/repositories/" + str(project.service("bors").get("repository_id", 1 if project.legacy else "")) + "/active-batches"),
         # The repair worker's cache, read by staging CI (lake-cache-services.sh). Off renders an
@@ -438,7 +440,7 @@ def write_project(project: Project, checkout: Path, role: str = "content") -> li
     return written
 
 
-def add_setup_steps(text: str) -> str:
+def add_setup_steps(text: str, *, source_mirror=False) -> str:
     """Attach shared setup to trusted project checkout steps in small caller workflows."""
     import re
 
@@ -468,7 +470,9 @@ def add_setup_steps(text: str) -> str:
           tools-repository: __TOOLS_REPO__
           tools-ref: __TOOLS_REF__
           project-directory: .
+          source-mirror-enabled: __SOURCE_MIRROR_ENABLED__
 """
+        step = step.replace("__SOURCE_MIRROR_ENABLED__", "true" if source_mirror else "false")
         if "path: gate\n" in block:
             step = step.replace("project-directory: .", "project-directory: gate")
         step = "".join(

@@ -73,6 +73,7 @@ jobs:
           tools-repository: __TOOLS_REPO__
           tools-ref: __TOOLS_REF__
           project-directory: .
+          source-mirror-enabled: __SOURCE_MIRROR_ENABLED__
       - name: Import-boundary guard (TauCeti/ and TauCeti.lean ⊬ roadmap/review)
         run: |
           if grep -rIn -E '^[[:space:]]*import[[:space:]]+(TauCetiRoadmap|TauCetiReview)\b' TauCeti/ TauCeti.lean; then
@@ -431,6 +432,6 @@ jobs:
       revision: ${{ github.sha }}
       artifact-name: lake-cache-staging
       reported-toolchain: ${{ needs.build.outputs.reported-toolchain }}
-      publication-required: false
+      publication-required: __CACHE_PUBLICATION_REQUIRED__
     secrets:
       LAKE_CACHE_KEY: ${{ secrets.LAKE_CACHE_KEY }}

@@ -44,6 +44,12 @@ full() {
   exit 0
 }
 
+# Qualified post-merge setup has no GitHub PR authority, including when a native
+# merge subject has (#N) but no Source-PR trailer. Preserve every lint gate.
+if [ "${TAUCETI_SOURCE_MIRROR:-false}" = true ]; then
+  full "Forgejo main mirror has no GitHub PR lint-policy authority"
+fi
+
 # Human approval dispatches CI for one PR, not a staging batch. Ordinary PR commit
 # titles need not contain squash-style (#N) suffixes; requiring those here would
 # incorrectly fall back to whole-library lint and report unrelated inherited errors.
@@ -73,6 +79,12 @@ case "$EVENT" in
     [[ "${HEAD:-}" =~ ^[0-9a-f]{40}$ ]] || full "no head commit"
     if ! compare=$(metadata); then
       full "the immutable local commit metadata is unavailable"
+    fi
+    # Native/foreign Source-PR trailers take precedence over (#N) subjects.
+    # Keep all lint gates by selecting full-library lint without querying a
+    # coincidentally numbered PR on the GitHub execution mirror.
+    if ! reason=$(python3 "$tool_dir/lint_scope_policy.py" --check-citations "$REPO" <<<"$compare"); then
+      full "${reason:-commit provenance cannot be attributed to this GitHub repository}"
     fi
     # GitHub merge groups and bors staging both use one squash commit per PR,
     # titled `... (#N)`. The trusted workflow validates bors staging and its
