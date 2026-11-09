@@ -137,30 +137,52 @@ if [ -d "$OUTPUTS" ]; then
   cp -a "$OUTPUTS/." "$BEFORE/"
 fi
 
-# Relative paths of the output records that differ from the copy in $BEFORE, NUL-separated.
-changed_paths() {
-  [ -d "$OUTPUTS" ] || return 0
-  local rel
-  while IFS= read -r -d '' rel; do
-    rel="${rel#"$OUTPUTS"/}"
-    if ! cmp -s "$OUTPUTS/$rel" "$BEFORE/$rel"; then printf '%s\0' "$rel"; fi
-  done < <(find "$OUTPUTS" -type f -name '*.json' -print0)
+# Scan and copy records in one process. Staging caches have tens of thousands of
+# small files: spawning cmp, dirname, mkdir and cp per record dominates the fetch.
+record_changes() {
+  python3 - "$1" "$OUTPUTS" "$BEFORE" "$PLACED" <<'PYTHON'
+import os
+import shutil
+import sys
+from pathlib import Path
+
+mode, outputs, before, placed = sys.argv[1:]
+outputs, before, placed = Path(outputs), Path(before), Path(placed)
+count = 0
+for directory, _, names in os.walk(outputs):
+    for name in names:
+        source = Path(directory) / name
+        if not name.endswith(".json") or source.is_symlink() or not source.is_file():
+            continue
+        relative = source.relative_to(outputs)
+        if mode == "place" and (placed / relative).exists():
+            # keep_placed already restored this record. Earlier revisions retain
+            # priority; copying it back to PLACED again serves no purpose.
+            continue
+        try:
+            prior = (before / relative).read_bytes()
+        except OSError:
+            prior = None
+        if source.read_bytes() == prior:
+            continue
+        count += 1
+        if mode == "place":
+            target = placed / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+if mode == "count":
+    print(count)
+PYTHON
 }
 
 changed_records() {
-  local n=0 rel
-  while IFS= read -r -d '' rel; do n=$((n + 1)); done < <(changed_paths)
-  echo "$n"
+  record_changes count
 }
 
 # Put back the records placed by earlier revisions, then record what this one added.
 keep_placed() {
   cp -a "$PLACED/." "$OUTPUTS/"
-  local rel
-  while IFS= read -r -d '' rel; do
-    mkdir -p "$PLACED/$(dirname -- "$rel")"
-    cp -a "$OUTPUTS/$rel" "$PLACED/$rel"
-  done < <(changed_paths)
+  record_changes place
 }
 
 restore_records() {
