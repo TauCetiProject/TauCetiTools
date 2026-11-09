@@ -230,7 +230,10 @@ continues to support the deployed caller during rollout.
 Checkpoint version 1 contains a reporting `watermark`, ordered `pending` PR
 numbers, `checked` and `failed` identities (head SHA, updated time and base ref),
 and a mode and policy-source hash. Each batch enumerates the same complete
-bounded open-PR index needed by the detector. Every new or changed identity is
+open-PR index needed by the detector, following pages until the final short or
+empty page. The index has no PR-count ceiling; the existing API request, byte
+and time budgets still bound discovery. Checkpoint validation uses its byte
+bound rather than a PR-count ceiling. Every new or changed identity is
 selected, regardless of its timestamp, unless that exact identity is a retained
 unknown awaiting a new event or sweep. This avoids dropping a PR skipped during
 changing API pagination or delayed reads. Event targets are selected explicitly.

@@ -26,7 +26,6 @@ from urllib.error import HTTPError, URLError
 
 REPO = "TauCetiProject/TauCeti"
 BLOCK_LABEL = "stacked-pr"
-MAX_PRS = 2000
 MAX_COMMITS = 256
 MAX_EVIDENCE_COMMITS = 16
 MAX_FILES = 128
@@ -138,16 +137,19 @@ class API:
 
     def pages(self, path, limit):
         found = []
-        for page in range(1, limit // 100 + 2):
+        page = 1
+        # The open-PR index must be complete regardless of repository size.
+        # request() still bounds calls, bytes and time when limit is None.
+        while True:
             data = self.call(f"{path}{'&' if '?' in path else '?'}per_page=100&page={page}")
             if not isinstance(data, list):
                 raise Gap("expected an API array")
             found.extend(data)
-            if len(found) > limit:
+            if limit is not None and len(found) > limit:
                 raise Gap(f"pagination exceeds {limit} records: {path}")
             if len(data) < 100:
                 return found
-        raise Gap("incomplete pagination")
+            page += 1
 
     def pr(self, number):
         p = PR.parse(self.call(f"pulls/{number}"))
@@ -836,9 +838,9 @@ class BatchProgress:
                 state = json.loads(path.read_text())
                 if (state["version"] != 1 or state["mode"] != self.mode or state["policy"] != self.policy
                         or timestamp(state["watermark"]) > timestamp(self.started)
-                        or not isinstance(state["pending"], list) or len(state["pending"]) > MAX_PRS
+                        or not isinstance(state["pending"], list)
                         or not all(type(n) is int and n > 0 for n in state["pending"])
-                        or any(not isinstance(state[name], dict) or len(state[name]) > MAX_PRS
+                        or any(not isinstance(state[name], dict)
                                for name in ("checked", "failed"))):
                     raise ValueError("invalid checkpoint schema")
                 for n, identity in {**state["checked"], **state["failed"]}.items():
@@ -949,7 +951,7 @@ def audit(args):
     incomplete_index = False
     # Mutable pagination can return a PR twice; inspect its last observed identity once.
     raw_prs = list({raw["number"]: raw for raw in
-                    api.pages("pulls?state=open&sort=created&direction=asc", MAX_PRS)}.values())
+                    api.pages("pulls?state=open&sort=created&direction=asc", None)}.values())
     for raw in raw_prs:
         try:
             prs.append(PR.parse(raw))
