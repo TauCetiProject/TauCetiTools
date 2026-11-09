@@ -25,6 +25,8 @@ SCHEMA = "tauceti-ci.source-mirror/v1"
 
 
 def bootstrap(policy, configuration, context, scripts, *, policy_dir=None, client=None):
+    if policy.base_branch != policy.execution_branch:
+        raise ValueError("main mirroring requires the same source and execution branch name")
     if cc.ExecutionPolicy.parse(policy.record(with_config=False), configuration=configuration) != policy:
         raise ValueError("mirror build policy differs from its trusted configuration")
     if os.environ.get("TAUCETI_SOURCE_CANDIDATE") == "true":
@@ -86,8 +88,9 @@ def bootstrap(policy, configuration, context, scripts, *, policy_dir=None, clien
     ):
         raise ValueError("source main needs an exact protected branch identity")
     # Forgejo's Compare has no GitHub-style status field. In this direction,
-    # zero commits proves revision is reachable from the captured source tip.
-    # An older mirrored main is valid; an unmerged PR commit is not.
+    # Zero forward commits is necessary for ancestry. No-common-history also
+    # returns zero, so distinct revisions additionally need a nonempty reverse
+    # comparison. An older mirrored main is valid; unrelated histories are not.
     comparison = client.request(
         "GET",
         f"repos/{policy.source.repository.name}/compare/{source_main}...{revision}?files=false&verification=false",
@@ -99,6 +102,19 @@ def bootstrap(policy, configuration, context, scripts, *, policy_dir=None, clien
         or comparison.get("commits") != []
     ):
         raise ValueError("mirror revision is not proven to be on protected source main")
+    if source_main != revision:
+        reverse = client.request(
+            "GET",
+            f"repos/{policy.source.repository.name}/compare/{revision}...{source_main}?files=false&verification=false",
+        )
+        if (
+            not isinstance(reverse, dict)
+            or type(reverse.get("total_commits")) is not int
+            or reverse["total_commits"] <= 0
+            or not isinstance(reverse.get("commits"), list)
+            or not reverse["commits"]
+        ):
+            raise ValueError("mirror revision has no proven common history with protected source main")
     check_source_repository(policy, client)
     # Preserve explicit native-only sentinels for unported consumers. Cache
     # scope belongs to execution and is deliberately not a native repo alias.
@@ -135,10 +151,15 @@ def bootstrap(policy, configuration, context, scripts, *, policy_dir=None, clien
 
 
 def write_workflows(policy, configuration, destination):
-    """Render only the essential existing main/cache/docs workflows for review."""
+    """Render the flagship main/cache/docs workflows into an existing review checkout."""
     from .templates import ASSETS, add_setup_steps, pin_actions, render
 
     project = parse(configuration)
+    if policy.base_branch != policy.execution_branch:
+        raise ValueError("main mirroring requires the same source and execution branch name")
+    layout = ("web/lakefile.toml", "web/lean-toolchain", "docbuild/lakefile.toml", "docbuild/sync_manifest.py")
+    if not project.feature("docs") or any(not (Path(destination) / name).is_file() for name in layout):
+        raise ValueError("main/docs generation requires docs enabled and the existing web/docbuild project layout")
     if cc.ExecutionPolicy.parse(policy.record(with_config=False), configuration=configuration) != policy:
         raise ValueError("mirror workflow policy differs from configuration")
     if (project.repository_ref("content"), project.ci_repository_ref(), project.branch) != (

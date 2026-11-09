@@ -54,7 +54,10 @@ cache namespace is explicitly the GitHub execution repository. Shared state is
 disabled for this path.
 
 Render the existing canonical CI, API-docs, and Pages workflows into a local
-review checkout using a policy whose harness revision contains this support:
+review checkout using a policy whose harness revision contains this support.
+This command requires the flagship `web/` and `docbuild/` layout, `[features]
+docs = true`, and matching source/execution branch names. It refuses other project
+layouts rather than installing workflows for absent projects:
 
 ```sh
 python -m tauceti_tools.ci_mirror_workflow generate \
@@ -68,6 +71,8 @@ project-specific site settings before committing/deploying them. The generator
 uses the existing main build/audits/docs templates and secret-isolated reusable
 publisher; it requires cache publication on this native path. It does not
 install source-writing maintenance jobs or transfer live authority.
+Missing upload or public endpoint configuration fails the main build; it cannot
+turn required publication into a successful skipped job.
 The generated Pages workflow disables its legacy GitHub `docgen` branch writer;
 read the published `docs/SOURCE_SHA` for the documentation revision.
 

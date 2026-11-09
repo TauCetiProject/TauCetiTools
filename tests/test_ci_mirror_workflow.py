@@ -1,9 +1,11 @@
 """Post-merge source identity, control context, and canonical workflow generation."""
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,7 +14,9 @@ import yaml
 from tauceti_tools import ci_candidate as cc
 from tauceti_tools import ci_mirror_workflow as mirror
 from tests.test_ci_candidate import policy
-from tests.test_ci_candidate_workflow import CONFIG
+from tests.test_ci_candidate_workflow import CONFIG as CANDIDATE_CONFIG
+
+CONFIG = CANDIDATE_CONFIG.replace(b'branch="pilot"', b'branch="main"') + b"\n[features]\ndocs=true\n"
 
 
 class Client:
@@ -22,6 +26,7 @@ class Client:
         self.commit = {"sha": revision}
         self.branch = {"name": approved.base_branch, "protected": True, "commit": {"id": revision}}
         self.comparison = {"total_commits": 0, "commits": []}
+        self.reverse_comparison = {"total_commits": 1, "commits": [{"sha": "c" * 40}]}
         self.calls = []
 
     def request(self, method, path):
@@ -31,13 +36,17 @@ class Client:
         if "/branches/" in path:
             return self.branch
         if "/compare/" in path:
+            if self.branch["commit"]["id"] != self.commit["sha"] and f"/compare/{self.commit['sha']}..." in path:
+                return self.reverse_comparison
             return self.comparison
         return self.identity
 
 
 class MirrorWorkflow(unittest.TestCase):
     def setUp(self):
-        self.policy = cc.ExecutionPolicy.parse(policy().record(with_config=False), configuration=CONFIG)
+        self.policy = cc.ExecutionPolicy.parse(
+            replace(policy(), base_branch="main").record(with_config=False), configuration=CONFIG
+        )
         self.context = {
             "event_name": "push",
             "repository": "team/Execution",
@@ -78,7 +87,7 @@ class MirrorWorkflow(unittest.TestCase):
             [
                 ("GET", "repos/team/Math"),
                 ("GET", "repos/team/Math/git/commits/" + "b" * 40),
-                ("GET", "repos/team/Math/branches/pilot"),
+                ("GET", "repos/team/Math/branches/main"),
                 ("GET", "repos/team/Math/compare/" + "b" * 40 + "..." + "b" * 40 + "?files=false&verification=false"),
                 ("GET", "repos/team/Math"),
             ],
@@ -140,6 +149,65 @@ class MirrorWorkflow(unittest.TestCase):
             self.client.calls,
         )
 
+    def test_unrelated_history_cannot_use_the_empty_compare_result(self):
+        self.client.branch["commit"]["id"] = "c" * 40
+        self.client.reverse_comparison = {"total_commits": 0, "commits": []}
+        with self.assertRaisesRegex(ValueError, "no proven common history"):
+            self.bootstrap()
+
+    def test_mirror_branch_names_must_agree(self):
+        different = replace(self.policy, execution_branch="other")
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "same source and execution branch"):
+                mirror.bootstrap(different, CONFIG, self.context, Path(directory), client=self.client)
+            with self.assertRaisesRegex(ValueError, "same source and execution branch"):
+                mirror.write_workflows(different, CONFIG, Path(directory))
+        self.assertEqual(self.client.calls, [])
+
+    @staticmethod
+    def prepare_layout(directory):
+        for name in ("web/lakefile.toml", "web/lean-toolchain", "docbuild/lakefile.toml", "docbuild/sync_manifest.py"):
+            target = Path(directory) / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("fixture project file\n")
+
+    def test_generator_refuses_missing_flagship_projects(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "existing web/docbuild"):
+                mirror.write_workflows(self.policy, CONFIG, Path(directory))
+            self.assertFalse((Path(directory) / ".github").exists())
+
+    def test_required_main_cache_publication_cannot_skip_missing_endpoints(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.prepare_layout(directory)
+            mirror.write_workflows(self.policy, CONFIG, Path(directory))
+            workflow = yaml.safe_load((Path(directory) / ".github/workflows/ci.yml").read_text())
+            step = next(step for step in workflow["jobs"]["build"]["steps"] if step.get("id") == "cachecfg")
+            self.assertEqual(step["env"]["REQUIRE_PUBLICATION"], "true")
+            endpoints = {key: "https://cache.invalid/" for key in step["env"] if key.endswith("ENDPOINT")}
+            output = Path(directory) / "output"
+            for missing in endpoints:
+                with self.subTest(missing=missing):
+                    env = {
+                        "PATH": os.environ["PATH"],
+                        **endpoints,
+                        missing: "",
+                        "REQUIRE_PUBLICATION": "true",
+                        "GITHUB_OUTPUT": str(output),
+                    }
+                    result = subprocess.run(["bash", "-eu", "-c", step["run"]], env=env, capture_output=True)
+                    self.assertNotEqual(result.returncode, 0)
+            for required, configured in (("true", endpoints), ("false", {key: "" for key in endpoints})):
+                output.unlink(missing_ok=True)
+                env = {
+                    "PATH": os.environ["PATH"],
+                    **configured,
+                    "REQUIRE_PUBLICATION": required,
+                    "GITHUB_OUTPUT": str(output),
+                }
+                subprocess.run(["bash", "-eu", "-c", step["run"]], env=env, check=True, capture_output=True)
+                self.assertEqual(output.read_text(), "enabled=" + required + "\n")
+
     def test_composite_action_loads_and_supplies_explicit_mode_inputs(self):
         from tauceti_tools.templates import ASSETS
 
@@ -153,6 +221,7 @@ class MirrorWorkflow(unittest.TestCase):
 
     def test_generates_existing_main_and_docs_workflows_with_qualified_setup(self):
         with tempfile.TemporaryDirectory() as directory:
+            self.prepare_layout(directory)
             paths = mirror.write_workflows(self.policy, CONFIG, Path(directory))
             self.assertEqual({Path(path).name for path in paths}, {"ci.yml", "pages.yml", "api-docs.yml"})
             for path in paths:
@@ -169,6 +238,11 @@ class MirrorWorkflow(unittest.TestCase):
             self.assertNotIn("uses: ./.github/workflows/publish-lake-cache.yml", ci)
             pages = yaml.safe_load((Path(directory) / ".github/workflows/pages.yml").read_text())
             self.assertIn("'true' != 'true'", pages["jobs"]["advance-docgen-ref"]["if"])
+            self.assertIn(
+                "git clone --quiet https://source.example/team/Roadmap.git",
+                (Path(directory) / ".github/workflows/pages.yml").read_text(),
+            )
+            self.assertIn("branches: [main]", ci)
 
 
 if __name__ == "__main__":

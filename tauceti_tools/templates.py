@@ -165,6 +165,7 @@ def substitutions(project: Project, *, source_ci=False) -> list[tuple[str, str]]
         ("repositories: TauCeti\n", "repositories: " + project.content.split("/")[1] + "\n"),
         ("repositories: tauceti-claims\n", "repositories: " + project.repos.get("claims", "/").split("/")[1] + "\n"),
     ] if not source_ci else [
+        ("https://github.com/TauCetiProject/TauCetiRoadmap.git", project.repository_ref("roadmap").clone_url),
         ("https://github.com/" + CANONICAL, project.repository_ref("content").url),
     ]
     pairs = [
@@ -214,7 +215,7 @@ def render(text: str, project: Project, *, source_ci=False) -> str:
     pairs = dict(substitutions(project, source_ci=source_ci))
     pattern = re.compile("|".join(
         r"\bTauCeti\b" if key == "TauCeti" else
-        re.escape(key) + r"(?![A-Za-z0-9_-])" if key == CANONICAL else re.escape(key)
+        re.escape(key) + r"(?![A-Za-z0-9_-])" if key in {CANONICAL, "https://github.com/" + CANONICAL} else re.escape(key)
         for key in sorted(pairs, key=len, reverse=True)))
     return pattern.sub(lambda m: pairs[m.group()], text)
 
