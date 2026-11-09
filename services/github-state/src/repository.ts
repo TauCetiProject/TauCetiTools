@@ -659,7 +659,10 @@ export class RepositoryState extends DurableObject<Env> {
     if(fromEvent && received>started)return false;
     const updated = data?.updatedAt || data?.updated_at || data?.created_at || data?.startedAt || '';
     // A response begun before a webhook cannot overwrite that event, even if HTTP finishes later.
-    if (!fromEvent && old?.observed > started) return kind==='pr' && equivalentPR(await this.decode(old.data),data);
+    // Comment updates and refresh starts can share one millisecond. Treat that
+    // boundary conservatively: a later refresh can reconcile it safely.
+    const commentKind=kind==='issue_comments' || kind==='review_comments';
+    if (!fromEvent && old && (old.observed > started || commentKind && received>0 && old.observed===started)) return kind==='pr' && equivalentPR(await this.decode(old.data),data);
     if ((kind!=='pr' || fromEvent) && old?.updated && updated && old.updated > updated) return false;
     if (old?.updated && updated===old.updated && old.tombstone && !deleted) return false;
     if(kind==='pr' && old && data?.headRefOid) {
@@ -675,7 +678,7 @@ export class RepositoryState extends DurableObject<Env> {
     if(oldStored && typeof oldStored==='object')delete oldStored.__tauceti_received_at;
     // R2 encoding yields: repeat the guard against events received during that await.
     if(!this.store.transactional)old=(await this.store.exec<any>('SELECT * FROM resources WHERE kind=? AND id=?',kind,id)).toArray()[0];
-    if (!fromEvent && old?.observed>started || (kind!=='pr' || fromEvent) && old?.updated && updated && old.updated>updated || old?.updated && updated===old.updated && old.tombstone && !deleted) return false;
+    if (!fromEvent && old && (old.observed>started || commentKind && received>0 && old.observed===started) || (kind!=='pr' || fromEvent) && old?.updated && updated && old.updated>updated || old?.updated && updated===old.updated && old.tombstone && !deleted) return false;
     if (kind==='pr' && /^[1-9][0-9]*$/.test(id) && data?.headRefOid) await this.store.exec('INSERT OR IGNORE INTO head_prs VALUES(?,?)',data.headRefOid,id);
     if (old && JSON.stringify(oldStored)===plain && Boolean(old.tombstone)===deleted) {
       if(encoded===old.data)await this.store.exec('UPDATE resources SET observed=? WHERE kind=? AND id=?',Date.now(),kind,id);
@@ -1933,7 +1936,8 @@ export class RepositoryState extends DurableObject<Env> {
       // webhooks and delta surveys supply actual state changes instead.
       if(this.store instanceof ReadCacheStore)for(const row of prior)this.store.seed('SELECT id FROM members WHERE collection=? AND id=?',[job.key,row.id],[{id:row.id}]);
       const openInventory=['open_prs','open_issues'].includes(q.operation);
-      for (const row of prior) if (!(openInventory && result.api==='core') && !memberIDs.has(row.id) && row.observed<=started) await this.membership(job.key,row.id,false);
+      const commentHistory=q.operation==='issue_comments' || q.operation==='review_comments';
+      for (const row of prior) if (!(openInventory && result.api==='core') && !memberIDs.has(row.id) && (commentHistory?row.observed<started:row.observed<=started)) await this.membership(job.key,row.id,false);
       if(openInventory){
         const decided=new Set<string>();
         // Decide once per ID from the final stored resource, after every put.
@@ -2009,7 +2013,7 @@ export class RepositoryState extends DurableObject<Env> {
       }
       const prior=await this.scanRows('SELECT m.id,r.observed FROM members m LEFT JOIN resources r ON r.kind=? AND r.id=m.id WHERE m.collection=?','review_comments',flatKey);
       if(this.store instanceof ReadCacheStore)for(const row of prior)this.store.seed('SELECT id FROM members WHERE collection=? AND id=?',[flatKey,row.id],[{id:row.id}]);
-      for (const row of prior) if (!ids.has(row.id) && row.observed<=started) await this.membership(flatKey,row.id,false);
+      for (const row of prior) if (!ids.has(row.id) && row.observed<started) await this.membership(flatKey,row.id,false);
       if(this.store instanceof ReadCacheStore){const known=new Set(prior.map(row=>row.id));for(const id of ids)this.store.seed('SELECT id FROM members WHERE collection=? AND id=?',[flatKey,id],known.has(id)?[{id}]:[]);}
       for (const id of ids) await this.membership(flatKey,id,true);
       if (!(await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',flatKey)).toArray().length) await this.nextRevision('collection',flatKey);

@@ -98,6 +98,16 @@ SQLite; continuation reads individual pages rather than repeatedly decoding the
 entire inventory.
 Concurrent queries at the same revision share a snapshot.
 
+Comment webhooks also start the existing idempotent repository application immediately
+after durable archival, parking and queue submission. This keeps review handoffs from
+waiting behind a busy queue. The webhook response does not wait for application;
+failed or interrupted application retains the existing queue/cron recovery input.
+No extra GitHub read or retry owner is introduced. Comment resources and membership
+retain webhook updates even when an older refresh started in the same millisecond.
+Protected `comment_application_complete` / `comment_application_deferred` logs expose
+delivery IDs and elapsed time without comment bodies. See the retained-delivery
+[diagnosis](validation/review-comment-visibility.json).
+
 PR and issue headers and commit statuses update from webhook payloads. A
 changed PR does not start a full repository survey. Open PR headers reconcile every five minutes; other full inventories reconcile
 hourly, and overlapping deltas catch missed updates.
