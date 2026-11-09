@@ -675,6 +675,8 @@ class BorsMergesTest(unittest.TestCase):
             for kind, login, body in [
                 ("Bot", stats.BORS_LOGIN, stats.BORS_SUCCESS + "Build succeeded"),
                 ("User", stats.BORS_LOGIN, stats.BORS_SUCCESS),
+                ("User", stats.QUEUE_LOGIN, stats.BORS_SUCCESS),
+                ("Bot", stats.QUEUE_LOGIN, "Pull request rejected during staging repair.\n\n"),
                 ("Bot", "other[bot]", stats.BORS_SUCCESS),
                 ("Bot", stats.BORS_LOGIN, "Pull request successfully merged into staging.\n\n"),
                 ("Bot", stats.BORS_LOGIN, "Build succeeded"),
@@ -689,13 +691,36 @@ class BorsMergesTest(unittest.TestCase):
             merges, _ = stats.fetch_bors_merges("o/r")
         self.assertEqual(merges, {"42": timestamp(9)})
 
+    def test_queue_app_receipts_count_as_merges(self):
+        comments = [{"user": {"type": "Bot", "login": stats.QUEUE_LOGIN},
+                     "body": stats.BORS_SUCCESS + "Merged revision: `abc`.\n",
+                     "issue_url": "https://api.github.com/repos/o/r/issues/43",
+                     "created_at": timestamp(9)}]
+        def run(arguments):
+            return subprocess.run(["jq", "-c", arguments[-1]], input=json.dumps(comments),
+                                  text=True, check=True, capture_output=True).stdout
+        if shutil.which("jq") is None:
+            self.skipTest("jq unavailable")
+        with patch.object(stats, "run_gh", side_effect=run):
+            merges, _ = stats.fetch_bors_merges("o/r")
+        self.assertEqual(merges, {"43": timestamp(9)})
+
+    def test_snapshot_without_queue_receipts_rescans_full_history(self):
+        now = stats.parse_dt(timestamp(15))
+        bors_only = {"bors_merges_scanned_at": timestamp(14), "bors_merges": {"42": timestamp(9)}}
+        with patch.object(stats, "run_gh", return_value='') as run:
+            merges, _ = stats.fetch_bors_merges("o/r", bors_only, now)
+        self.assertNotIn("since=", run.call_args.args[0][2])
+        self.assertEqual(merges, {})
+
     def test_old_snapshot_forces_full_history_and_new_one_keeps_receipts(self):
         now = stats.parse_dt(timestamp(15))
         old = {"scoreboards_scanned_at": timestamp(14)}
         with patch.object(stats, "run_gh", return_value='') as run:
             merges, scanned = stats.fetch_bors_merges("o/r", old, now)
         self.assertNotIn("since=", run.call_args.args[0][2])
-        new = {"bors_merges_scanned_at": scanned, "bors_merges": {"42": timestamp(9)}}
+        new = {"bors_merges_scanned_at": scanned, "bors_merges": {"42": timestamp(9)},
+               "merge_receipt_logins": list(stats.MERGE_RECEIPT_LOGINS)}
         receipts = '\n'.join(json.dumps({"number": 42, "created_at": timestamp(day)})
                              for day in (10, 9))
         with patch.object(stats, "run_gh", return_value=receipts) as run:

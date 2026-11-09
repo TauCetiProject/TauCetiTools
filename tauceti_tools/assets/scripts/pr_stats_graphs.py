@@ -635,11 +635,25 @@ def load_previous(path: Path | None, repo: str) -> dict | None:
     return previous
 
 
-# Bors squash-merges land on main, but GitHub records their PRs as CLOSED with
-# mergedAt=null. Trust the installed app's success receipt, never the editable
-# "[Merged by Bors]" title, a queued approval, or a successful staging build.
+# Bors squash-merges and TauCeti queue landings reach main, but GitHub records their
+# PRs as CLOSED with mergedAt=null. Trust an installed merge app's success receipt,
+# never the editable "[Merged by Bors]" title, a queued approval, or a successful
+# staging build. Both apps post the same success line.
 BORS_LOGIN = "tau-ceti-bors[bot]"
+QUEUE_LOGIN = "tauceti-queue[bot]"
+MERGE_RECEIPT_LOGINS = (BORS_LOGIN, QUEUE_LOGIN)
 BORS_SUCCESS = "Pull request successfully merged into main.\n\n"
+
+
+def receipts_reusable(previous: dict | None) -> bool:
+    """Whether a snapshot's receipts were collected from exactly the current merge apps.
+
+    A snapshot scanned before an app was trusted has skipped that app's receipts, and an
+    incremental scan would never revisit them, so it must be rescanned in full.
+    """
+    previous = previous or {}
+    return (bool(previous.get("bors_merges_scanned_at"))
+            and previous.get("merge_receipt_logins") == list(MERGE_RECEIPT_LOGINS))
 
 
 def fetch_bors_merges(repo: str, previous: dict | None = None,
@@ -651,18 +665,20 @@ def fetch_bors_merges(repo: str, previous: dict | None = None,
     if the PR's updatedAt has not changed. No timeline-cache invalidation is needed.
     """
     now = now or datetime.now(timezone.utc)
-    scanned = parse_dt((previous or {}).get("bors_merges_scanned_at"))
+    scanned = (parse_dt((previous or {}).get("bors_merges_scanned_at"))
+               if receipts_reusable(previous) else None)
     since = scanned - SCOREBOARD_OVERLAP if scanned else None
     merges = dict((previous or {}).get("bors_merges") or {}) if since else {}
     query = "per_page=100&sort=created&direction=desc"
     if since:
         query += f"&since={iso_z(since)}"
-    print("scanning bors merge receipts" + (f" since {iso_z(since)}" if since
+    print("scanning bors and queue merge receipts" + (f" since {iso_z(since)}" if since
           else " across the full historical comment archive"), file=sys.stderr)
     raw = run_gh([
         "api", "--paginate", f"repos/{repo}/issues/comments?{query}", "--jq",
-        '.[] | select(.user.type == "Bot" and .user.login == '
-        + json.dumps(BORS_LOGIN) + ') | select((.body // "") | startswith('
+        '.[] | select(.user.type == "Bot" and (.user.login | IN('
+        + ", ".join(json.dumps(login) for login in MERGE_RECEIPT_LOGINS)
+        + '))) | select((.body // "") | startswith('
         + json.dumps(BORS_SUCCESS) + '))'
         + ' | {number: (.issue_url | split("/") | last), created_at}',
     ])
@@ -692,8 +708,8 @@ def fetch_snapshot(repo: str, previous: dict | None = None) -> dict:
     prs = fetch_prs(repo, previous)
     bors_merges, bors_scanned_at = fetch_bors_merges(repo, previous)
     apply_bors_merges(prs, bors_merges)
-    # Reconsider old rejected scoreboards now that bors-only contributors are trusted.
-    scoreboard_previous = previous if (previous or {}).get("bors_merges_scanned_at") else None
+    # Reconsider old rejected scoreboards whenever a merge app's contributors become trusted.
+    scoreboard_previous = previous if receipts_reusable(previous) else None
     trusted_logins = {
         pr["author"] for pr in prs
         if pr.get("merged_at") and pr.get("author") != "unknown"
@@ -712,6 +728,7 @@ def fetch_snapshot(repo: str, previous: dict | None = None) -> dict:
         "prs": prs,
         "bors_merges": bors_merges,
         "bors_merges_scanned_at": bors_scanned_at,
+        "merge_receipt_logins": list(MERGE_RECEIPT_LOGINS),
         "scoreboards": scoreboards,
         # Per comment, so that the next incremental scan can revise a single verdict. The
         # published counts below are derived from it and stay exact across incremental runs.
@@ -1629,7 +1646,7 @@ def generate(
             "review_cycle": cycles["definition"],
             "review": "one canonical <!--tauceti-scoreboard--> comment on a pull request of this repository, identified by the tauceti-meta:v1 block naming that PR, whose posting login also authors a merged PR in the fetched snapshot",
             "active_author": "distinct PR author opening a PR in the trailing seven-day window",
-            "merge": "GitHub mergedAt, or the installed bors app success receipt for a closed PR merged into main",
+            "merge": "GitHub mergedAt, or the installed bors or TauCeti queue app success receipt for a closed PR merged into main",
             "merge_latency": "PR creation timestamp to merge timestamp",
         },
         "queue": queue,
