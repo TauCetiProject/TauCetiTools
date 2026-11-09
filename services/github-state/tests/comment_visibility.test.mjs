@@ -82,3 +82,16 @@ test('failed immediate application leaves durable input for the existing queue',
   assert.equal(await archive.head('receipts/100/deferred-comment.json'),null);
  }finally{await mf.dispose();}
 });
+
+test('a delayed immediate application does not delay the webhook acknowledgement',async()=>{
+ let release,entered;const ready=new Promise(r=>entered=r),gate=new Promise(r=>release=r);
+ const mf=await runtime(async(req,url)=>{assert.equal(url.hostname,'comment.test');entered();await gate;return new Response('ready');},{},{repositoryAlarms:false,repositoryExtension:`async fetch(req){if(new URL(req.url).pathname==='/event')await fetch('https://comment.test/gate');return super.fetch(req);}`});
+ let timer;
+ try{
+  await Promise.race([webhook(mf,'issue_comment','slow-comment','created',comment('retained')),
+   new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('webhook acknowledgement waited for repository application')),5000);})]);
+  clearTimeout(timer);await ready;
+  const archive=await mf.getR2Bucket('ARCHIVE');assert.ok(await archive.head('parked/100/bodies/slow-comment.json'));
+  assert.equal(await archive.head('receipts/100/slow-comment.json'),null);
+ }finally{clearTimeout(timer);release();await mf.dispose();}
+});
