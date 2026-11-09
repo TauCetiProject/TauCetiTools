@@ -6,12 +6,36 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 SCRIPTS = Path(__file__).resolve().parents[1] / 'tauceti_tools/assets/scripts'
 sys.path.insert(0, str(SCRIPTS))
 import stack_policy as sp
 import test_stack_policy as fixtures
+
+
+class PaginationTests(unittest.TestCase):
+    def test_complete_open_index_beyond_2000_including_exact_page_boundary(self):
+        for size in (2100, 2101):
+            with self.subTest(size=size):
+                rows = list(range(size))
+                api = object.__new__(sp.API)
+                def page(path):
+                    number = int(path.rsplit('page=', 1)[1])
+                    return rows[(number - 1) * 100:number * 100]
+                api.call = MagicMock(side_effect=page)
+                self.assertEqual(api.pages('pulls?state=open', None), rows)
+                self.assertEqual(api.call.call_count, 22)
+
+    def test_open_index_still_obeys_request_budget_without_returning_partial_rows(self):
+        api = object.__new__(sp.API)
+        api.token, api.calls, api.bytes, api.deadline = 'fixture', 3999, 0, sp.time.monotonic() + 60
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps([None] * 100).encode()
+        with patch.object(sp, 'urlopen', return_value=response) as request:
+            with self.assertRaises(sp.BudgetGap):
+                api.pages('pulls?state=open', None)
+        self.assertEqual(request.call_count, 1)
 
 
 class ProgressTests(unittest.TestCase):
@@ -129,6 +153,21 @@ class ProgressTests(unittest.TestCase):
             b.save(self.path)
         self.assertEqual(self.batch().state['pending'], [])
 
+    def test_more_than_2000_pending_checked_or_failed_identities_resume(self):
+        self.rows = [dict(self.rows[0], number=n) for n in range(1, 2102)]
+        for kind in ('pending', 'checked', 'failed'):
+            with self.subTest(kind=kind):
+                self.path.unlink(missing_ok=True)
+                b = self.batch()
+                if kind != 'pending':
+                    for n in list(b.state['pending']):
+                        b.finish(n, kind == 'checked')
+                b.save(self.path)
+                resumed = self.batch()
+                self.assertIsNone(resumed.recovery)
+                self.assertEqual(resumed.state[kind], b.state[kind])
+                self.assertEqual(resumed.state['pending'], b.state['pending'])
+
 
 class BatchIntegration(fixtures.MainTests):
     # Re-run the legacy main-interface cases alongside new batch integration cases.
@@ -156,6 +195,28 @@ class BatchIntegration(fixtures.MainTests):
         self.last_source.fetch.assert_called_once()
         self.assertEqual({p.number for p in self.last_constructor.call_args.args[2]}, {1, 2})
         self.assertEqual(json.loads(self.state.read_text())['pending'], [])
+
+    def test_focused_pr_past_2000_uses_complete_parent_index(self):
+        self.raw = [dict(self.raw[0], number=n) for n in range(1, 2102)]
+        original_call = self.api.call
+        pages = []
+        def call(path, *args, **kwargs):
+            if path.startswith('pulls?state=open'):
+                page = int(path.rsplit('page=', 1)[1])
+                pages.append(page)
+                return self.raw[(page - 1) * 100:page * 100]
+            return original_call(path, *args, **kwargs)
+        self.api.call = call
+        paginate = sp.API.pages
+        self.api.pages = lambda path, limit: paginate(self.api, path, limit)
+        visited = []
+        self.detector.detect = lambda p: (visited.append(p.number) or None, [])
+        self.assertFalse(self.main('--pr', '2101'))
+        self.assertEqual(pages, list(range(1, 23)))
+        self.assertEqual(visited, [2101])
+        self.assertEqual(len(self.last_constructor.call_args.args[2]), 2101)
+        self.assertIn('"classification": "no-confirmed-stack"', self.last_output)
+        self.assertEqual(self.api.calls, [])
 
     def test_budget_saves_unvisited_then_failed_child_and_recovers(self):
         def fail(p):
