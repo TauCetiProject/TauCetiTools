@@ -20,6 +20,7 @@ from .forge import GITHUB, AmbiguousWrite, Forge, ForgeError, Forgejo, Repositor
 from .forge_command import CI_COMMANDS, parse_command
 from .forge_commands import execute, render
 from .project import ConfigError, load, resolve_repository
+from .system import ensure_ssl_cert_file
 
 
 def _checkout_repository(refs):
@@ -204,6 +205,8 @@ def run(argv, *, environment=None, native_exec=False):
             token = credential.read().strip()
         if not token:
             raise ForgeError("Forgejo token file is empty")
+    if native_exec:
+        ensure_ssl_cert_file()
     api = Forgejo(repository.forge, token=token)
     if api_plan is not None:
         rendered, diagnostic, status = forge_api.execute(api_plan, api)
