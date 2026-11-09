@@ -293,6 +293,40 @@ class LintScopeTest(unittest.TestCase):
 
     BATCH_EVENTS = ("merge_group", "repository_dispatch", "push")
 
+    def test_native_mirror_without_trailer_never_queries_a_github_pr(self):
+        compare = {"total_commits": 1, "commits": [{"commit": {
+            "message": "feat: native default squash title (#7)"}}],
+            "files": [f("modified", "TauCeti/X.lean")]}
+        for event in (*self.BATCH_EVENTS, "workflow_dispatch", "schedule"):
+            with self.subTest(event=event):
+                result = self.run_scope({"EVENT": event, "BASE": SHA_A, "HEAD": SHA_B,
+                                         "NUM": "7", "TAUCETI_SOURCE_MIRROR": "true"}, {
+                    f"repos/o/r/compare/{SHA_A}...{SHA_B}": compare, "repos/o/r/pulls/7": pr()})
+                self.assertIsNone(result)
+                self.assertEqual(self.last_calls, [])
+
+    def test_qualified_or_foreign_citations_cannot_select_a_github_number(self):
+        for citation in ("forgejo:https://source.example/o/r#7", "github:https://github.com/other/repo#7",
+                         "other/repo#7", "o/r#8", "malformed", ""):
+            compare = {"total_commits": 1, "commits": [{"commit": {
+                "message": "feat: native contribution (#7)\n\nSource-PR: " + citation}}],
+                "files": [f("modified", "TauCeti/X.lean")]}
+            for event in self.BATCH_EVENTS:
+                with self.subTest(citation=citation,event=event):
+                    result = self.run_scope({"EVENT":event,"BASE":SHA_A,"HEAD":SHA_B}, {
+                        f"repos/o/r/compare/{SHA_A}...{SHA_B}":compare,"repos/o/r/pulls/7":pr()})
+                    self.assertIsNone(result)
+                    self.assertEqual(self.last_calls, [], "foreign/native PR number was queried on GitHub")
+
+    def test_historical_local_source_citations_keep_their_existing_github_scope(self):
+        for citation in ("o/r#7", "github:https://github.com/o/r#7"):
+            compare = {"total_commits": 1, "commits": [{"commit": {
+                "message": "feat: old GitHub contribution (#7)\n\nSource-PR: " + citation}}],
+                "files": [f("modified", "TauCeti/X.lean")]}
+            result = self.run_scope({"EVENT":"push","BASE":SHA_A,"HEAD":SHA_B}, {
+                f"repos/o/r/compare/{SHA_A}...{SHA_B}":compare,"repos/o/r/pulls/7":pr()})
+            self.assertEqual(result,["TauCeti.X"])
+
     def test_batches_read_prs_from_squash_titles(self):
         compare = {"total_commits": 2, "commits": [{"commit": {"message": "feat: x (#7)\n\nbody"}},
                                {"commit": {"message": "fix: y (#8)"}}],

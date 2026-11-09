@@ -73,6 +73,7 @@ jobs:
           tools-repository: __TOOLS_REPO__
           tools-ref: __TOOLS_REF__
           project-directory: .
+          source-mirror-enabled: __SOURCE_MIRROR_ENABLED__
       - name: Import-boundary guard (TauCeti/ and TauCeti.lean ⊬ roadmap/review)
         run: |
           if grep -rIn -E '^[[:space:]]*import[[:space:]]+(TauCetiRoadmap|TauCetiReview)\b' TauCeti/ TauCeti.lean; then
@@ -314,7 +315,14 @@ jobs:
           # job skips with a notice if the key turns out to be missing.
           S3_ARTIFACT_ENDPOINT: ${{ vars.LAKE_CACHE_ARTIFACT_ENDPOINT }}
           S3_REVISION_ENDPOINT: ${{ vars.LAKE_CACHE_REVISION_ENDPOINT }}
+          PUBLIC_ARTIFACT_ENDPOINT: ${{ vars.LAKE_CACHE_ARTIFACT_ENDPOINT_PUBLIC }}
+          PUBLIC_REVISION_ENDPOINT: ${{ vars.LAKE_CACHE_REVISION_ENDPOINT_PUBLIC }}
+          REQUIRE_PUBLICATION: "__CACHE_PUBLICATION_REQUIRED__"
         run: |
+          if [ "$REQUIRE_PUBLICATION" = true ] && { [ -z "$S3_ARTIFACT_ENDPOINT" ] || [ -z "$S3_REVISION_ENDPOINT" ] || [ -z "$PUBLIC_ARTIFACT_ENDPOINT" ] || [ -z "$PUBLIC_REVISION_ENDPOINT" ]; }; then
+            echo "::error::Required Lake cache publication needs both upload and public endpoints"
+            exit 1
+          fi
           if [ -n "$S3_ARTIFACT_ENDPOINT" ] && [ -n "$S3_REVISION_ENDPOINT" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
             echo "::notice::Lake cache upload configured; staging TauCeti's oleans"
@@ -431,6 +439,6 @@ jobs:
       revision: ${{ github.sha }}
       artifact-name: lake-cache-staging
       reported-toolchain: ${{ needs.build.outputs.reported-toolchain }}
-      publication-required: false
+      publication-required: __CACHE_PUBLICATION_REQUIRED__
     secrets:
       LAKE_CACHE_KEY: ${{ secrets.LAKE_CACHE_KEY }}

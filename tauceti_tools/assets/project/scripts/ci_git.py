@@ -248,10 +248,18 @@ def lint_metadata(checkout, base, head):
         if messages[-1] or len(messages) - 1 != min(count, 129):
             raise ValueError("malformed local commit metadata")
         # %s folds a multiline first paragraph; policy uses the exact first line.
+        # Keep explicit source citations separately so a qualified native PR
+        # cannot disappear when this compact metadata drops the body.
+        commits = []
+        for message in messages[:-1]:
+            row = {"commit": {"message": message.split("\n", 1)[0]}}
+            citations = re.findall(r"^Source-PR:[ \t]*(.*)$", message, re.M)
+            if citations:
+                row["source_prs"] = citations
+            commits.append(row)
         return {"merge_base_commit": {"sha": git.commit(bases[0])},
                 "total_commits": count,
-                "commits": [{"commit": {"message": message.split("\n", 1)[0]}}
-                            for message in messages[:-1]]}
+                "commits": commits}
 
 
 def main():

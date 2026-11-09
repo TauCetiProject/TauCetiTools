@@ -40,3 +40,60 @@ The operator setup, review, promotion, and recovery commands are documented in
 `TauCetiWorker/docs/forgejo-stage1-operator.md`. Native branch protection, the main
 push mirror, post-merge cache/docs workflows, and tested backups/rollback remain
 required before production cutover; installing these callers alone is insufficient.
+
+## Post-merge builds, cache, and docs
+
+The shared setup action has an explicit `source-mirror-enabled: true` mode for
+trusted main jobs. It verifies the protected execution repository ID, branch,
+workflow and checkout commit, immutable harness pin, source repository ID, and
+that exact commit's ancestry on protected source main on the configured Forgejo
+server. An older mirrored main is accepted when source main has advanced; an
+unmerged source commit is refused. Source reads use
+the configured public origin. Unported source selectors remain invalid; the Lake
+cache namespace is explicitly the GitHub execution repository. Shared state is
+disabled for this path.
+
+Render the existing canonical CI, API-docs, and Pages workflows into a local
+review checkout using a policy whose harness revision contains this support.
+This command requires the flagship `web/` and `docbuild/` layout, `[features]
+docs = true`, and matching source/execution branch names. It refuses other project
+layouts rather than installing workflows for absent projects:
+
+```sh
+python -m tauceti_tools.ci_mirror_workflow generate \
+  --configuration /absolute/path/tauceti.toml \
+  --policy /absolute/path/ci-source.json \
+  --destination /absolute/path/review-checkout
+```
+
+This writes those three local workflow files. Inspect the generated diff and
+project-specific site settings before committing/deploying them. The generator
+uses the existing main build/audits/docs templates and secret-isolated reusable
+publisher; it requires cache publication on this native path. It does not
+install source-writing maintenance jobs or transfer live authority.
+Missing upload or public endpoint configuration fails the main build; it cannot
+turn required publication into a successful skipped job.
+The generated Pages workflow disables its legacy GitHub `docgen` branch writer;
+read the published `docs/SOURCE_SHA` for the documentation revision.
+
+Each qualified setup uploads a `source-mirror-context-RUN-ATTEMPT-JOB` artifact
+with source/execution identities, commit, configuration/policy digests, and harness
+pin and captured source-main tip. This is diagnostic build context with seven-day
+artifact retention, not durable publication attestation or a passing merge verdict.
+The cache's exact revision map and published docs' `SOURCE_SHA` identify their
+outputs. Save the context artifacts with the cutover evidence before they expire.
+Candidate execution continues to use the existing versioned request/result
+contract in `pr-build.yml`.
+
+Qualified mirror setup always selects full library lint without a GitHub PR
+lookup, including native default squash subjects without a trailer. Other callers
+retain qualified `Source-PR` citations from local Git metadata: native, foreign,
+ambiguous, or conflicting citations select full library lint before any GitHub PR
+lookup. Historical local GitHub/Bors subjects and matching local GitHub citations
+keep their existing scope policy. Native post-merge scope optimization is deferred.
+
+The site may retain GitHub history charts as explicitly historical data during
+Stage 1. Native analytics and remaining development automations belong to Stage
+2; classify their temporary replacements in the cutover package. A generated
+workflow is not proof of a working publication: the isolated rehearsal must
+verify real builds, cache upload/download, docs provenance and usable HTTP output.
