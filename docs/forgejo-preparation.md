@@ -75,6 +75,8 @@ list/create/edit, and account status/token commands. Read commands support JSON
 projection and `--jq`. Lists support state, limit, author (including `@me`),
 and repeated/comma-separated labels. PR lists also support base/head branches.
 It is not installed over the operator's `gh` and is not yet wired into workers.
+For a private opt-in `gh` setup and explicit source/CI routing, see the
+[Stage 1 contributor commands](forgejo-stage1-contributor.md).
 Forgejo/mixed-project use requires a leading `--conf PATH` or trusted `TAUCETI_CONF`;
 the wrapper never discovers configuration from the current checkout. Inherited
 worker snapshots are reused rather than fetching mutable online configuration.
@@ -127,6 +129,11 @@ still implement and verify that provenance before Forgejo activation.
 Forgejo authentication uses a private `TAUCETI_FORGEJO_TOKEN_FILE` and requires
 `TAUCETI_FORGEJO_ORIGIN` to match the normalized destination origin. Set both in
 trusted process configuration outside the checkout. Public reads can omit them.
+When `SSL_CERT_FILE` is unset, the standalone CLI's native Forgejo path selects an
+available system CA bundle (preferring `NIX_SSL_CERT_FILE`) through the shared
+helper. An explicit `SSL_CERT_FILE` is preserved, including private-CA
+configurations; TLS verification stays enabled. GitHub delegation returns before
+this native-client initialization.
 Ambient tokens for GitHub Enterprise destinations similarly require a matching
 `TAUCETI_GITHUB_ORIGIN`. Configured destinations cannot redirect a credential to
 another origin. Without `-R`/`GH_REPO`, all-GitHub projects retain native gh checkout
