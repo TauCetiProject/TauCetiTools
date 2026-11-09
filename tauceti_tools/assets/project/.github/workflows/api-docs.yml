@@ -15,8 +15,9 @@ name: API docs
 # The build is incremental. doc-gen4 keeps its analysis in docbuild/.lake/build (a SQLite
 # database plus one Lake marker per module), and that tree is cached between runs, so a run
 # re-analyzes only the modules whose oleans changed since the last one. The cache is keyed on the
-# pins, so a toolchain or Mathlib bump, which changes every olean anyway, starts from an empty
-# database. Modules deleted from TauCeti are removed from the database by doc-gen4 itself.
+# pins and analysis policy, so a toolchain or Mathlib bump, which changes every olean anyway,
+# starts from an empty database. Changing DISABLE_EQUATIONS also requires a new cache prefix.
+# Modules deleted from TauCeti are removed from the database by doc-gen4 itself.
 
 on:
   push:
@@ -46,8 +47,9 @@ env:
 jobs:
   build-docs:
     runs-on: ubuntu-latest
-    # A full rebuild (after a pin bump) analyzes all of TauCeti; everything else is far quicker.
-    timeout-minutes: 300
+    # A full rebuild (after a pin bump) analyzes all of TauCeti; allow cold-build headroom
+    # while staying below the hosted runner's six-hour limit.
+    timeout-minutes: 350
     permissions:
       contents: read
       # Only for pruning this workflow's superseded cache entries, at the end of the job.
@@ -117,13 +119,15 @@ jobs:
       # entry, so a prefix fallback across pins would restore nothing useful. The rendered tree has
       # to come along: some of its files (the bibliography) are written by steps whose markers
       # live outside it, so Lake would not recreate them if the tree alone were missing.
+      # Match the production policy that omits generated definition equations. Do not restore
+      # an analysis database generated under the earlier equation policy.
       - name: Restore the doc-gen4 build state
         uses: actions/cache/restore@v4
         with:
           path: docbuild/.lake/build
-          key: docs-build-v1-${{ hashFiles('lean-toolchain', 'lake-manifest.json', 'docbuild/lake-manifest.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: docs-build-v2-no-equations-${{ hashFiles('lean-toolchain', 'lake-manifest.json', 'docbuild/lake-manifest.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            docs-build-v1-${{ hashFiles('lean-toolchain', 'lake-manifest.json', 'docbuild/lake-manifest.json') }}-
+            docs-build-v2-no-equations-${{ hashFiles('lean-toolchain', 'lake-manifest.json', 'docbuild/lake-manifest.json') }}-
 
       # doc-gen4 needs TauCeti's oleans. ci.yml publishes them, and ci.yml and pr-build.yml
       # already restore them. Restore into the root project rather than docbuild: a path
@@ -182,6 +186,9 @@ jobs:
       # previous run's provenance marker goes too, since the step after this one writes it anew.
       - name: Build the API documentation (doc-gen4)
         env:
+          # Large definition bodies can exhaust memory during equation expansion; retain
+          # every declaration's signature and docstring, following the production docs policy.
+          DISABLE_EQUATIONS: "1"
           DOCGEN_LOCAL_MODULE_ROOTS: TauCeti
           DOCGEN_DEPS_DOCS_URL: https://leanprover-community.github.io/mathlib4_docs
           # The restore above placed what this needs, so do not reach for a remote cache.
@@ -249,13 +256,14 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: docbuild/.lake/build
-          key: docs-build-v1-${{ hashFiles('lean-toolchain', 'lake-manifest.json', 'docbuild/lake-manifest.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: docs-build-v2-no-equations-${{ hashFiles('lean-toolchain', 'lake-manifest.json', 'docbuild/lake-manifest.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       # Every run saves new entries, and the repository's cache is shared with the Mathlib olean
       # caches that pr-build.yml depends on, so left alone these would push those out under the
       # size limit. Only the newest few are ever restored; delete the rest. Best effort: a failure
       # here costs cache space, not the docs. Caches belong to the ref that saved them, and main's
       # are the ones Pages restores, so each ref prunes only its own.
+      # Unused docs-build-v1 entries are left for GitHub's normal cache eviction.
       - name: Prune superseded cache entries
         continue-on-error: true
         env:
@@ -263,7 +271,7 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          for prefix in docs-build-v1- docs-html-v2-; do
+          for prefix in docs-build-v2-no-equations- docs-html-v2-; do
             # Newest first; keep three so a Pages run that restored one just now still finds it.
             gh cache list -R "$REPO" --ref "$GITHUB_REF" --key "$prefix" --sort created_at --order desc --limit 100 --json id \
               --jq '.[3:][].id' |

@@ -219,6 +219,47 @@ class MirrorWorkflow(unittest.TestCase):
         self.assertEqual(action["inputs"]["source-mirror-enabled"]["default"], "false")
         subprocess.run(["bash", "-n"], input=step["run"], text=True, check=True)
 
+    def test_docs_analysis_policy_invalidates_old_build_state_but_keeps_pages_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.prepare_layout(directory)
+            mirror.write_workflows(self.policy, CONFIG, Path(directory))
+            text = (Path(directory) / ".github/workflows/api-docs.yml").read_text()
+            job = yaml.safe_load(text)["jobs"]["build-docs"]
+            self.assertEqual(job["runs-on"], "ubuntu-latest")
+            self.assertGreater(job["timeout-minutes"], 300)
+            self.assertLess(job["timeout-minutes"], 360)
+            steps = job["steps"]
+            by_name = {step.get("name"): step for step in steps}
+            build = by_name["Build the API documentation (doc-gen4)"]
+            self.assertEqual(build["env"]["DISABLE_EQUATIONS"], "1")
+            self.assertNotIn("LEAN_NUM_THREADS", build["env"])
+            self.assertIn("lake build TauCetiDocs:docs", build["run"])
+            restore = by_name["Restore the doc-gen4 build state"]["with"]
+            save = by_name["Save the doc-gen4 build state"]["with"]
+            self.assertEqual(restore["key"], save["key"])
+            self.assertTrue(restore["key"].startswith("docs-build-v2-no-equations-"))
+            self.assertEqual(restore["restore-keys"].strip(), restore["key"].split("${{ github.run_id }}")[0])
+            self.assertNotIn("docs-build-v1-", restore["restore-keys"])
+            self.assertIn("docs-build-v2-no-equations-", by_name["Prune superseded cache entries"]["run"])
+            html = by_name["Save the generated API docs"]["with"]
+            self.assertEqual(html["path"], "docbuild/.lake/build/doc")
+            self.assertTrue(html["key"].startswith("docs-html-v2-"))
+            pages = yaml.safe_load((Path(directory) / ".github/workflows/pages.yml").read_text())
+            restored_html = next(
+                step["with"] for step in pages["jobs"]["build-site"]["steps"]
+                if step.get("name") == "Restore the latest API docs"
+            )
+            self.assertEqual(restored_html["path"], html["path"])
+            self.assertTrue(html["key"].startswith(restored_html["restore-keys"].strip()))
+            # An unsuccessful analysis still cannot publish HTML or advance its provenance.
+            self.assertNotIn("continue-on-error", build)
+            for name in (
+                "Record the commit the API docs were generated from",
+                "Save the generated API docs",
+                "Save the doc-gen4 build state",
+            ):
+                self.assertNotRegex(by_name[name].get("if", ""), r"\b(?:always|failure|cancelled)\s*\(")
+
     def test_generates_existing_main_and_docs_workflows_with_qualified_setup(self):
         with tempfile.TemporaryDirectory() as directory:
             self.prepare_layout(directory)
