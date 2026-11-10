@@ -77,9 +77,11 @@ def isolated_runner(data, job, run_id):
             machines = required - base
             if not base <= required or len(machines) != 1 or not re.fullmatch(r"fleet-[a-f0-9]{32}", next(iter(machines))):
                 return False
-            extra = actual - required
-            isolated = (required <= actual and len(extra) == 1
-                        and bool(re.fullmatch(r"fleet-instance-[a-f0-9]{16}", next(iter(extra)))))
+            # Jobs expose requested labels, not every label registered on the runner.
+            # The Fleet name binds its fresh instance to the requested permanent machine.
+            machine = next(iter(machines)).removeprefix("fleet-")
+            isolated = (actual == required
+                        and bool(re.fullmatch("fleet-" + machine[:12] + r"-[a-f0-9]{16}", job.get("runner_name", ""))))
         except (ValueError, TypeError):
             return False
     sandbox = [item for item in data["jobs"] if item["name"] == "sandboxed-build"]

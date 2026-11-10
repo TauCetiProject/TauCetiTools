@@ -17,15 +17,13 @@ class QueueControlFinalizer(unittest.TestCase):
     def test_reserved_fresh_publisher_accepts_only_the_exact_machine_and_class(self):
         labels = ["self-hosted", "linux", "x64", "tauceti-fleet-queue-control", "fleet-" + "a" * 32]
         sandbox = dict(name="sandboxed-build", runner_name="build-guest")
-        job = dict(
-            name=finalizer.PUBLISHER, runner_name="fresh-publisher", labels=labels + ["fleet-instance-" + "b" * 16]
-        )
+        job = dict(name=finalizer.PUBLISHER, runner_name="fleet-" + "a" * 12 + "-" + "b" * 16, labels=labels)
         data = dict(jobs=[sandbox, job])
         with patch.dict(os.environ, CI_PUBLISHER_RUNNER_LABELS=json.dumps(labels)):
             self.assertTrue(finalizer.isolated_runner(data, job, 12))
             for bad in (
                 dict(job, runner_name="build-guest"),
-                dict(job, labels=labels),
+                dict(job, runner_name="fleet-" + "c" * 12 + "-" + "b" * 16),
                 dict(job, labels=job["labels"] + ["tauceti-fleet-pr"]),
                 dict(job, labels=[x.replace("a" * 32, "c" * 32) for x in job["labels"]]),
                 dict(job, labels=[finalizer.MACHINE_LABEL, "namespace-features:github.run-id=12"]),
