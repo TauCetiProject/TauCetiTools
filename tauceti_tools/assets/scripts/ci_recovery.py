@@ -47,8 +47,10 @@ def timestamp(value):
 
 def has_preflight(pull, commit):
     rows = (commit.get("status") or {}).get("contexts", [])
-    labels = {l["name"].lower() for l in (pull.get("labels") or {}).get("nodes", [])}
-    return any(row["context"] == "build" for row in rows) or (
+    labels = {label["name"].lower() for label in (pull.get("labels") or {}).get("nodes", [])}
+    return any(
+        row["context"] == "build" and row.get("state", "").lower() in {"success", "failure", "error"} for row in rows
+    ) or (
         "self-tested" in labels
         and not labels & {"full-lint", "lint-repair"}
         and any(
