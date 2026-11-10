@@ -6,8 +6,9 @@ import copy
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import bump_latest as bl
 
@@ -43,6 +44,59 @@ def pr(target=NEW, **kwargs):
         )
         | kwargs
     )
+
+
+def content(target):
+    return {
+        "content": base64.b64encode(
+            json.dumps({"packages": [{"name": "mathlib", "rev": target}]}).encode()
+        ).decode()
+    }
+
+
+OLD_HEAD, NEW_HEAD = (c * 40 for c in "ef")
+
+
+class FakeGitHub:
+    """Routes the GitHub reads a retarget makes. The old bump #7 targets NEW."""
+
+    def __init__(self, age_hours=bl.BUMP_RETARGET_HOURS + 1, labels=(), existing=(), carried="ahead"):
+        self.old = pr(
+            number=7,
+            state="open",
+            head={"sha": OLD_HEAD, "ref": f"bump-mathlib/{NEW}", "repo": {"full_name": bl.REPO}},
+            labels=[{"name": name} for name in labels],
+        )
+        self.new = pr(
+            number=8,
+            state="open",
+            head={"sha": NEW_HEAD, "ref": f"bump-mathlib/{TIP}", "repo": {"full_name": bl.REPO}},
+            body="Bump\n\n<!-- tauceti-retarget-from: #7 -->\n",
+        )
+        self.age_hours = age_hours
+        self.existing = list(existing)
+        self.carried = carried
+        self.calls = []
+
+    def api(self, path):
+        self.calls.append(path)
+        if path == f"repos/{bl.REPO}/pulls/7":
+            return self.old
+        if path.startswith(f"repos/{bl.REPO}/contents/lake-manifest.json?ref="):
+            ref = path.split("ref=")[1]
+            return content(NEW if ref == OLD_HEAD else TIP)
+        if path.startswith(f"repos/{bl.MATHLIB}/git/commits/"):
+            stamp = bl.time.time() - self.age_hours * 3600
+            return {"committer": {"date": datetime.fromtimestamp(stamp, timezone.utc).isoformat()}}
+        if path.startswith(f"repos/{bl.MATHLIB}/actions/runs/"):
+            return run(TIP)
+        if path.startswith(f"repos/{bl.REPO}/pulls?state=all&head="):
+            return self.existing
+        if path.startswith(f"repos/{bl.REPO}/pulls?state=open&head="):
+            return [self.new]
+        if path.startswith(f"repos/{bl.REPO}/compare/"):
+            return {"status": self.carried}
+        raise AssertionError(f"unexpected read {path}")
 
 
 class BumpTests(unittest.TestCase):
@@ -270,6 +324,7 @@ class BumpTests(unittest.TestCase):
                 self.assertEqual(probe.call_count, 1)
 
     def test_publication_preserves_active_repairs(self):
+        github = FakeGitHub(age_hours=bl.BUMP_RETARGET_HOURS - 1)
         with (
             patch.object(bl, "command", return_value=OLD) as cmd,
             patch.object(
@@ -277,12 +332,14 @@ class BumpTests(unittest.TestCase):
                 "read_text",
                 return_value=json.dumps({"packages": [{"name": "mathlib", "rev": OLD}]}),
             ),
-            patch.object(bl, "open_bumps", return_value=[pr()]),
-            patch.object(bl, "bump_state", return_value=([pr()], [])),
-            patch.object(bl, "api", side_effect=AssertionError("no candidate mutation")),
+            patch.object(bl, "open_bumps", return_value=[github.old]),
+            patch.object(bl, "bump_state", return_value=([github.old], [])),
+            patch.object(bl, "api", side_effect=github.api),
+            patch.object(bl, "queue_waiting", side_effect=AssertionError("fresh bump needs no queue")),
         ):
-            bl.publish(NEW, 42)
+            bl.publish(TIP, 42)
             self.assertEqual(cmd.call_count, 1)
+            self.assertFalse(any("runs/" in path for path in github.calls))
 
     def test_closed_pr_is_not_reopened(self):
         with (
@@ -356,6 +413,198 @@ class BumpTests(unittest.TestCase):
             self.assertEqual(len(created), 1)
             title = created[0][created[0].index("--title") + 1]
             self.assertEqual(title, f"chore: bump Mathlib to v4.36.0-rc2 ({NEW[:8]})")
+
+
+class RetargetTests(unittest.TestCase):
+    def publish(self, github, *, waiting=(), queue_error=None):
+        """Publish TIP with the stale (or fresh) active bump #7 open; return the commands."""
+        fixtures = Path(__file__).with_name("bump_manifest_fixtures")
+        base, upstream = (
+            json.loads((fixtures / name).read_text()) for name in ["base.json", "mathlib.json"]
+        )
+
+        def cmd(args, **kwargs):
+            if args[:3] == ["git", "rev-parse", "HEAD"]:
+                return OLD
+            if args[:3] == ["git", "rev-parse", "FETCH_HEAD"]:
+                return OLD_HEAD
+            return ""
+
+        relationships = {(OLD, NEW): "ahead", (OLD, TIP): "ahead", (NEW, TIP): "ahead"}
+        with (
+            patch.object(bl, "command", side_effect=cmd) as commands,
+            patch.object(bl.Path, "read_text", return_value=json.dumps(base)),
+            patch.object(bl.Path, "write_text", autospec=True) as self.writes,
+            patch.object(bl, "open_bumps", return_value=[github.old]),
+            patch.object(bl, "bump_state", return_value=([github.old], [])),
+            patch.object(bl, "relationship", side_effect=lambda a, b: relationships.get((a, b), "behind")),
+            patch.object(bl, "api", side_effect=github.api),
+            patch.object(
+                bl, "upstream_file", side_effect=[json.dumps(upstream), "leanprover/lean4:v4.35.0\n"]
+            ),
+            patch.object(bl, "release_tags", return_value={}),
+            patch.object(
+                bl, "queue_waiting", side_effect=queue_error, return_value=set(waiting)
+            ),
+        ):
+            bl.publish(TIP, 42)
+        return [c.args[0] for c in commands.call_args_list]
+
+    @staticmethod
+    def pushed(commands):
+        return [c for c in commands if c[:2] == ["git", "push"]]
+
+    @staticmethod
+    def closed(commands):
+        return [c for c in commands if c[:3] == ["gh", "pr", "close"]]
+
+    def test_a_stale_active_bump_is_retargeted_from_its_head(self):
+        commands = self.publish(github := FakeGitHub())
+        self.assertIn(["git", "fetch", "--no-tags", "origin", f"refs/heads/bump-mathlib/{NEW}"], commands)
+        worktrees = [c for c in commands if c[:3] == ["git", "worktree", "add"]]
+        self.assertTrue(worktrees and all(c[-1] == OLD_HEAD for c in worktrees))
+        self.assertEqual(len(worktrees), 2)
+        check = next(c for c in commands if c[0] == "bash")
+        self.assertEqual(check[2], check[3])
+        self.assertTrue(check[2].endswith("/base"))
+        self.assertEqual(
+            self.pushed(commands),
+            [["git", "push", f"--force-with-lease=refs/heads/bump-mathlib/{TIP}:", "origin",
+              f"HEAD:refs/heads/bump-mathlib/{TIP}"]],
+        )
+        created = [c for c in commands if c[:3] == ["gh", "pr", "create"]]
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0][created[0].index("--title") + 1], f"chore: bump Mathlib to {TIP[:8]}")
+        self.assertEqual(
+            self.closed(commands),
+            [["gh", "pr", "close", "7", "--repo", bl.REPO, "--comment",
+              "Retargeted to #8; the adaptation commits carry over."]],
+        )
+        self.assertTrue(any(f"compare/{OLD_HEAD}...{NEW_HEAD}" in p for p in github.calls))
+
+    def test_retarget_body_names_and_marks_its_predecessor(self):
+        self.publish(FakeGitHub())
+        bodies = [c.args[1] for c in self.writes.call_args_list if c.args[0].name == "body.md"]
+        self.assertEqual(len(bodies), 1)
+        self.assertIn("This bump continues #7", bodies[0])
+        self.assertIn("carries its source repairs", bodies[0])
+        self.assertEqual(bl.continuations([pr(number=7), pr(number=8, body=bodies[0])])[0][0], 7)
+
+    def test_a_fresh_active_bump_is_preserved(self):
+        commands = self.publish(FakeGitHub(age_hours=bl.BUMP_RETARGET_HOURS - 1))
+        self.assertEqual(self.pushed(commands), [])
+        self.assertEqual(self.closed(commands), [])
+
+    def test_a_bump_held_by_the_merge_queue_is_not_retargeted(self):
+        for name, github, kwargs in [
+            ("inserted", FakeGitHub(labels=["bors-staging"]), {}),
+            ("waiting", FakeGitHub(), {"waiting": [7]}),
+            ("unreadable", FakeGitHub(), {"queue_error": OSError("connection refused")}),
+            ("held", FakeGitHub(labels=["hold"]), {}),
+        ]:
+            with self.subTest(name):
+                commands = self.publish(github, **kwargs)
+                self.assertEqual(self.pushed(commands), [])
+                self.assertEqual(self.closed(commands), [])
+                self.assertFalse(any("runs/" in path for path in github.calls))
+
+    def test_a_target_not_ahead_of_the_old_one_is_not_retargeted(self):
+        github = FakeGitHub()
+        commands = []
+        with (
+            patch.object(bl, "command", side_effect=lambda args, **kw: commands.append(args) or ""),
+            patch.object(bl, "api", side_effect=github.api),
+            patch.object(bl, "queue_waiting", return_value=set()),
+            patch.object(bl, "relationship", return_value="behind"),
+        ):
+            bl.retarget(7, OLD, 42)
+        self.assertEqual(commands, [])
+        self.assertFalse(any("runs/" in path for path in github.calls))
+
+    def test_an_interrupted_retarget_only_closes_the_old_bump(self):
+        github = FakeGitHub()
+        commands = []
+        with (
+            patch.object(bl, "command", side_effect=lambda args, **kw: commands.append(args) or OLD),
+            patch.object(
+                bl.Path,
+                "read_text",
+                return_value=json.dumps({"packages": [{"name": "mathlib", "rev": OLD}]}),
+            ),
+            patch.object(bl, "open_bumps", return_value=[github.old, github.new]),
+            patch.object(bl, "bump_state", return_value=([github.old, github.new], [])),
+            patch.object(bl, "api", side_effect=github.api),
+            patch.object(bl, "queue_waiting", return_value=set()),
+        ):
+            bl.publish("", 0)
+        self.assertEqual(
+            commands[1:],
+            [["gh", "pr", "close", "7", "--repo", bl.REPO, "--comment",
+              "Retargeted to #8; the adaptation commits carry over."]],
+        )
+
+    def test_an_existing_successor_pr_is_reused(self):
+        github = FakeGitHub(existing=[{"number": 8, "state": "open", "head": {"sha": NEW_HEAD}}])
+        commands = self.publish(github)
+        self.assertEqual(self.pushed(commands), [])
+        self.assertFalse(any(c[:3] == ["gh", "pr", "create"] for c in commands))
+        self.assertEqual(len(self.closed(commands)), 1)
+        github = FakeGitHub(existing=[{"number": 8, "state": "closed", "head": {"sha": NEW_HEAD}}])
+        commands = self.publish(github)
+        self.assertEqual(self.pushed(commands) + self.closed(commands), [])
+
+    def test_old_commits_missing_from_the_successor_keep_it_open(self):
+        github = FakeGitHub(existing=[{"number": 8, "state": "open", "head": {"sha": NEW_HEAD}}],
+                            carried="diverged")
+        self.assertEqual(self.closed(self.publish(github)), [])
+
+    def test_selection_outputs_a_target_only_for_a_retargetable_bump(self):
+        for age, chosen, expected in [
+            (bl.BUMP_RETARGET_HOURS + 1, run(TIP), (run(TIP), True)),
+            (bl.BUMP_RETARGET_HOURS - 1, run(TIP), (None, False)),
+            (bl.BUMP_RETARGET_HOURS + 1, run(NEW), (None, False)),
+        ]:
+            github = FakeGitHub(age_hours=age)
+            with (
+                self.subTest(age=age, chosen=chosen["head_sha"]),
+                patch.object(bl, "api", side_effect=github.api),
+                patch.object(bl, "queue_waiting", return_value=set()),
+                patch.object(bl, "select_target", return_value=chosen),
+                patch.object(bl, "relationship", side_effect=lambda a, b: "ahead" if a != b else "identical"),
+            ):
+                self.assertEqual(bl.selection(OLD, [github.old], []), expected)
+        github = FakeGitHub()
+        with patch.object(bl, "select_target", side_effect=AssertionError("no selection")):
+            self.assertEqual(bl.selection(OLD, [github.old, github.new], []), (None, True))
+
+    def test_retarget_selection_counts_from_the_old_target(self):
+        # A bump stuck on a release commit must move past it, so selection starts at the old
+        # target (NEW), not main's pin (OLD), which would select the same release again.
+        github = FakeGitHub()
+        seen = []
+        with (
+            patch.object(bl, "api", side_effect=github.api),
+            patch.object(bl, "queue_waiting", return_value=set()),
+            patch.object(bl, "select_target", side_effect=lambda start: seen.append(start) or run(TIP)),
+            patch.object(bl, "relationship", side_effect=lambda a, b: "ahead" if a != b else "identical"),
+        ):
+            self.assertEqual(bl.selection(OLD, [github.old], []), (run(TIP), True))
+        self.assertEqual(seen, [NEW])
+
+    def test_unreadable_queue_status_fails_closed(self):
+        with patch.object(bl.urllib.request, "urlopen", side_effect=OSError("down")):
+            self.assertIn("unreadable", bl.hold_reason(pr(number=7)))
+        malformed = MagicMock()
+        malformed.__enter__.return_value.read.return_value = b'{"waiting": {}}'
+        with patch.object(bl.urllib.request, "urlopen", return_value=malformed):
+            self.assertIn("unreadable", bl.hold_reason(pr(number=7)))
+        listed = MagicMock()
+        listed.__enter__.return_value.read.return_value = json.dumps(
+            {"waiting": {"inputs": [{"number": 7, "head_sha": OLD}]}}
+        ).encode()
+        with patch.object(bl.urllib.request, "urlopen", return_value=listed):
+            self.assertIn("waiting", bl.hold_reason(pr(number=7)))
+            self.assertIsNone(bl.hold_reason(pr(number=9)))
 
 
 if __name__ == "__main__":

@@ -19,6 +19,19 @@ cache is incomplete), the bump waits for it rather than opening an extra bump to
 just before it. After `RELEASE_GRACE_SECONDS` it steps over that release, so a broken
 upstream release cannot stall freshness for longer than that. A release whose bump PR was
 closed without merging is stepped over at once.
+
+Only one bump is open at a time, and its target stays fixed while workers repair TauCeti
+against it. A fixed target still ages, so once the active bump's target Mathlib commit is
+older than `BUMP_RETARGET_HOURS` (by upstream committer date) the bump is retargeted: a new
+`bump-mathlib/<target>` branch starts from the old bump's head, so every source repair
+carries over, and adds one commit moving the manifest and toolchain to the newest target
+chosen as for a fresh bump but counted from the old target, so release commits already
+behind the old target are passed. The new PR is opened and the old one closed. A bump in
+the merge queue is never retargeted: an approved PR waiting for insertion would be
+cancelled, and an inserted one lands regardless. Drafts and held PRs are left alone too.
+
+`--select` runs without credentials and also selects a target for a stale, retargetable
+bump. `--publish` repeats every staleness and queue check with fresh reads before acting.
 """
 
 import argparse
@@ -30,6 +43,8 @@ import re
 import subprocess
 import tempfile
 import time
+import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 from bump_manifest import problems
@@ -42,6 +57,14 @@ TOOLCHAIN_PREFIX = "leanprover/lean4:"
 RELEASE_RE = re.compile(r"\Av\d+\.\d+\.\d+(?:-rc\d+)?\Z")
 # How long a release tag commit may stay unselectable before the bump steps over it.
 RELEASE_GRACE_SECONDS = 24 * 3600
+# Once the active bump's target is this old, retarget it rather than keep repairing a pin
+# that will already be stale when it lands.
+BUMP_RETARGET_HOURS = 48
+QUEUE_STATUS = "https://queue.taucetiproject.org/status"
+# Added when the merge queue inserts a PR into a batch; from then on it lands regardless.
+QUEUE_INSERTED_LABEL = "bors-staging"
+BOT_EMAIL = "290224625+tauceti-review-bot[bot]@users.noreply.github.com"
+RETARGET_MARKER = re.compile(r"<!-- tauceti-retarget-from: #(\d+) -->")
 
 
 def command(args, *, cwd=None, env=None, combined=False):
@@ -316,42 +339,130 @@ def derive_manifest(base, upstream, target):
     return result
 
 
-def publish(target, run_id):
-    base_sha = command(["git", "rev-parse", "HEAD"])
-    current = pin(json.loads(Path("lake-manifest.json").read_text()))
-    active, obsolete = bump_state(current, open_bumps())
-    if active:
-        print(f"Preserving active bump #{active[0]['number']} and its fixed target.")
+def head_target(pr):
+    data = api(f"repos/{REPO}/contents/lake-manifest.json?ref={sha(pr['head']['sha'])}")
+    return pin(json.loads(base64.b64decode(data["content"])))
+
+
+def target_age_hours(commit):
+    """Age of an upstream Mathlib commit by committer date, as `detect_stale_pin` measures."""
+    stamp = api(f"repos/{MATHLIB}/git/commits/{sha(commit)}")["committer"]["date"]
+    committed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    if committed.tzinfo is None:
+        raise ValueError("Mathlib commit timestamp has no timezone")
+    return (time.time() - committed.timestamp()) / 3600
+
+
+def queue_waiting():
+    """PR numbers approved and waiting for insertion in the merge queue."""
+    request = urllib.request.Request(
+        QUEUE_STATUS, headers={"Cache-Control": "no-cache", "User-Agent": "TauCetiBump/1.0"}
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        status = json.loads(response.read())
+    inputs = status["waiting"]["inputs"]
+    if not isinstance(inputs, list) or not all(
+        isinstance(i, dict) and type(i.get("number")) is int for i in inputs
+    ):
+        raise ValueError("unexpected waiting.inputs shape")
+    return {i["number"] for i in inputs}
+
+
+def hold_reason(pr, *, queue=True):
+    """Why this bump must not be retargeted or closed now, or None. Fails closed."""
+    labels = {label["name"].lower() for label in pr.get("labels", [])}
+    if pr.get("draft"):
+        return "it is a draft"
+    if labels & KEEP_LABELS:
+        return f"it carries {', '.join(sorted(labels & KEEP_LABELS))}"
+    if QUEUE_INSERTED_LABEL in labels:
+        return "the merge queue has inserted it into a batch"
+    if not queue:
+        return None
+    try:
+        waiting = queue_waiting()
+    except Exception as error:  # any unreadable or malformed status fails closed
+        return f"the merge queue status is unreadable ({error})"
+    if pr["number"] in waiting:
+        return "it is waiting in the merge queue"
+    return None
+
+
+def retargetable(number):
+    """(fresh PR, its target) when this open bump is stale and free to retarget, else None."""
+    pr = api(f"repos/{REPO}/pulls/{int(number)}")
+    if pr["state"] != "open" or not pr["head"]["ref"].startswith("bump-mathlib/"):
+        return None
+    reason = hold_reason(pr, queue=False)
+    if reason:
+        print(f"Preserving active bump #{number}: {reason}.")
+        return None
+    old = head_target(pr)
+    age = target_age_hours(old)
+    if age < BUMP_RETARGET_HOURS:
+        print(f"Preserving active bump #{number}: its target {old} is {age:.0f}h old.")
+        return None
+    reason = hold_reason(pr)
+    if reason:
+        print(f"Not retargeting stale bump #{number}: {reason}.")
+        return None
+    print(f"Active bump #{number} targets {old}, {age:.0f}h old; it may be retargeted.")
+    return pr, old
+
+
+def continuations(prs):
+    """[(old number, new PR)] for open retargeted bumps whose predecessor is still open."""
+    numbers = {pr["number"] for pr in prs}
+    pairs = []
+    for pr in prs:
+        found = RETARGET_MARKER.search(pr.get("body") or "")
+        if found and int(found.group(1)) in numbers - {pr["number"]}:
+            pairs.append((int(found.group(1)), pr))
+    return pairs
+
+
+def close_predecessor(number, new):
+    """Close a retargeted bump once its successor carries every one of its commits."""
+    old = api(f"repos/{REPO}/pulls/{int(number)}")
+    if old["state"] != "open":
         return
-    for pr in obsolete:
-        fresh = api(f"repos/{REPO}/pulls/{pr['number']}")
-        if fresh["state"] != "open":
-            continue
-        if bump_state(current, [fresh])[0]:
-            print(f"Preserving updated or held bump #{pr['number']}.")
-            return
-        command(
-            [
-                "gh",
-                "pr",
-                "close",
-                str(pr["number"]),
-                "--repo",
-                REPO,
-                "--comment",
-                "Closing this obsolete bump: main already pins the same or a newer Mathlib commit.",
-            ]
-        )
-    if not target or relationship(current, target) != "ahead":
+    reason = hold_reason(old)
+    if reason:
+        print(f"Leaving retargeted bump #{number} open: {reason}.")
         return
+    carried = api(
+        f"repos/{REPO}/compare/{sha(old['head']['sha'])}...{sha(new['head']['sha'])}?per_page=1"
+    )["status"]
+    if carried not in {"ahead", "identical"}:
+        print(f"Leaving #{number} open: #{new['number']} does not contain its head commit.")
+        return
+    command(
+        [
+            "gh",
+            "pr",
+            "close",
+            str(number),
+            "--repo",
+            REPO,
+            "--comment",
+            f"Retargeted to #{new['number']}; the adaptation commits carry over.",
+        ]
+    )
+
+
+def verified_run(target, run_id):
     run = api(f"repos/{MATHLIB}/actions/runs/{int(run_id)}")
     if ordered_runs([run], [sha(target)]) != [run]:
         raise ValueError("Target does not match a successful canonical master push run")
+    return run
+
+
+def open_bump(start, base, target, run, continues=None):
+    """Commit `target`'s manifest and toolchain on top of `start`, push, and open the PR.
+
+    `base` holds the trusted files the manifest is derived from and checked against:
+    the main checkout for a fresh bump, or the old bump's head when retargeting."""
     branch = f"bump-mathlib/{target}"
-    previous = api(f"repos/{REPO}/pulls?state=all&head=TauCetiProject:{branch}&per_page=100")
-    if previous:
-        print(f"Leaving existing PR #{previous[0]['number']} in its current state.")
-        return
     releases = release_tags().get(target, [])
     subject = f"chore: bump Mathlib to {' / '.join(releases)} ({target[:8]})" if releases else (
         f"chore: bump Mathlib to {target[:8]}"
@@ -362,12 +473,19 @@ def publish(target, run_id):
         if releases
         else ""
     )
+    continuation = (
+        f"This bump continues #{continues[0]} (Mathlib {continues[1][:8]}) and carries its "
+        "source repairs: its branch starts from that PR's head.\n\n"
+        f"<!-- tauceti-retarget-from: #{continues[0]} -->\n\n"
+        if continues
+        else ""
+    )
     upstream = json.loads(upstream_file(target, "lake-manifest.json"))
-    manifest = derive_manifest(json.loads(Path("lake-manifest.json").read_text()), upstream, target)
+    manifest = derive_manifest(json.loads((base / "lake-manifest.json").read_text()), upstream, target)
     toolchain = upstream_file(target, "lean-toolchain")
     with tempfile.TemporaryDirectory(prefix="tauceti-publish-") as tmp:
         candidate = Path(tmp) / "candidate"
-        command(["git", "worktree", "add", "--detach", str(candidate), base_sha])
+        command(["git", "worktree", "add", "--detach", str(candidate), start])
         try:
             (candidate / "lake-manifest.json").write_text(json.dumps(manifest, indent=1) + "\n")
             (candidate / "lean-toolchain").write_text(toolchain)
@@ -375,8 +493,8 @@ def publish(target, run_id):
                 [
                     "bash",
                     str(Path("scripts/check-bump.sh").resolve()),
-                    str(Path.cwd()),
-                    str(Path.cwd()),
+                    str(base),
+                    str(base),
                     str(candidate),
                 ]
             )
@@ -385,8 +503,8 @@ def publish(target, run_id):
                 os.environ,
                 GIT_AUTHOR_NAME=BOT,
                 GIT_COMMITTER_NAME=BOT,
-                GIT_AUTHOR_EMAIL="290224625+tauceti-review-bot[bot]@users.noreply.github.com",
-                GIT_COMMITTER_EMAIL="290224625+tauceti-review-bot[bot]@users.noreply.github.com",
+                GIT_AUTHOR_EMAIL=BOT_EMAIL,
+                GIT_COMMITTER_EMAIL=BOT_EMAIL,
             )
             command(
                 ["git", "commit", "-m", subject],
@@ -418,6 +536,7 @@ def publish(target, run_id):
                 f"The full canonical Mathlib cache was verified before selecting this target. "
                 f"Upstream build: {run['html_url']}.\n\n"
                 f"{release_note}"
+                f"{continuation}"
                 "Workers repair TauCeti against this fixed target and may checkpoint partial "
                 "source repairs. Full CI, audits, and current-head review are required to merge.\n\n"
                 "Roadmap: none\n"
@@ -441,6 +560,112 @@ def publish(target, run_id):
             )
         finally:
             command(["git", "worktree", "remove", "--force", str(candidate)])
+
+
+def retarget(number, target, run_id):
+    """Move a stale active bump to `target`, keeping its repairs. Every check is repeated
+    here with fresh reads, since the selection job's view may be an hour old."""
+    found = retargetable(number)
+    if not found:
+        return
+    pr, old = found
+    if relationship(old, target) != "ahead":
+        print(f"Not retargeting #{number}: {target} is not ahead of its target {old}.")
+        return
+    run = verified_run(target, run_id)
+    branch = f"bump-mathlib/{target}"
+    previous = api(f"repos/{REPO}/pulls?state=all&head=TauCetiProject:{branch}&per_page=100")
+    if previous:
+        live = [p for p in previous if p["state"] == "open"]
+        if live:
+            close_predecessor(number, live[0])
+        else:
+            print(f"Leaving existing PR #{previous[0]['number']} in its current state.")
+        return
+    start = sha(pr["head"]["sha"])
+    command(["git", "fetch", "--no-tags", "origin", f"refs/heads/{pr['head']['ref']}"])
+    if command(["git", "rev-parse", "FETCH_HEAD"]) != start:
+        print(f"Not retargeting #{number}: its head moved while this run read it.")
+        return
+    with tempfile.TemporaryDirectory(prefix="tauceti-retarget-") as tmp:
+        base = Path(tmp) / "base"
+        command(["git", "worktree", "add", "--detach", str(base), start])
+        try:
+            open_bump(start, base, target, run, continues=(number, old))
+        finally:
+            command(["git", "worktree", "remove", "--force", str(base)])
+    created = api(f"repos/{REPO}/pulls?state=open&head=TauCetiProject:{branch}&per_page=100")
+    if created:
+        close_predecessor(number, created[0])
+
+
+def publish(target, run_id):
+    base_sha = command(["git", "rev-parse", "HEAD"])
+    current = pin(json.loads(Path("lake-manifest.json").read_text()))
+    active, obsolete = bump_state(current, open_bumps())
+    pending = continuations(active)
+    if pending:
+        # A retarget opened its new PR but did not close the old one.
+        for number, new in pending:
+            close_predecessor(number, new)
+        return
+    if active:
+        if target and len(active) == 1:
+            retarget(active[0]["number"], target, run_id)
+        else:
+            print(f"Preserving active bump #{active[0]['number']} and its fixed target.")
+        return
+    for pr in obsolete:
+        fresh = api(f"repos/{REPO}/pulls/{pr['number']}")
+        if fresh["state"] != "open":
+            continue
+        if bump_state(current, [fresh])[0]:
+            print(f"Preserving updated or held bump #{pr['number']}.")
+            return
+        command(
+            [
+                "gh",
+                "pr",
+                "close",
+                str(pr["number"]),
+                "--repo",
+                REPO,
+                "--comment",
+                "Closing this obsolete bump: main already pins the same or a newer Mathlib commit.",
+            ]
+        )
+    if not target or relationship(current, target) != "ahead":
+        return
+    run = verified_run(target, run_id)
+    branch = f"bump-mathlib/{target}"
+    previous = api(f"repos/{REPO}/pulls?state=all&head=TauCetiProject:{branch}&per_page=100")
+    if previous:
+        print(f"Leaving existing PR #{previous[0]['number']} in its current state.")
+        return
+    open_bump(base_sha, Path.cwd(), target, run)
+
+
+def selection(current, active, obsolete):
+    """(selected run or None, reconcile) for the credential-free selection job."""
+    pending = continuations(active)
+    if pending:
+        print(f"Retargeted bumps still to close: {[number for number, _ in pending]}.")
+        return None, True
+    if not active:
+        selected = select_target(current)
+        return selected, bool(selected or obsolete)
+    stale = retargetable(active[0]["number"]) if len(active) == 1 else None
+    if not stale:
+        if len(active) > 1:
+            print(f"Preserving active bumps {[p['number'] for p in active]}.")
+        return None, False
+    # Select after the old target, not main's pin: a stale bump stuck on a release commit would
+    # otherwise select that same release again, and release stops behind it are already passed.
+    selected = select_target(stale[1])
+    if selected and relationship(stale[1], selected["head_sha"]) != "ahead":
+        print(f"Not retargeting: {selected['head_sha']} is not ahead of {stale[1]}.")
+        selected = None
+    return selected, bool(selected)
 
 
 def main():
@@ -468,7 +693,7 @@ def main():
         return
     current = pin(json.loads(Path("lake-manifest.json").read_text()))
     active, obsolete = bump_state(current, open_bumps())
-    selected = None if active else select_target(current)
+    selected, reconcile = selection(current, active, obsolete)
     target = selected["head_sha"] if selected else ""
     run_id = selected["id"] if selected else 0
     print(
@@ -477,9 +702,7 @@ def main():
     )
     if os.environ.get("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a") as out:
-            out.write(
-                f"target={target}\nrun_id={run_id}\nreconcile={str(not active and bool(target or obsolete)).lower()}\n"
-            )
+            out.write(f"target={target}\nrun_id={run_id}\nreconcile={str(reconcile).lower()}\n")
     if not args.dry_run and not args.select:
         publish(target, run_id)
 
