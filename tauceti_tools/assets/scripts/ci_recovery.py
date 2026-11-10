@@ -124,7 +124,7 @@ def quota_reserved(api, reserve):
     return False
 
 
-def recover(api, repo, *, apply=False, limit=20, min_age=5400, now=None, api_reserve=0):
+def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_reserve=0):
     now = dt.datetime.now(dt.timezone.utc).timestamp() if now is None else now
     branch, pulls = inventory(api, repo)
     if not pulls:
@@ -193,7 +193,7 @@ def recover(api, repo, *, apply=False, limit=20, min_age=5400, now=None, api_res
         entry = dict(pr=number, head=head, previous_run=latest["id"] if latest else None, dispatched=apply)
         selected.append(entry)
         print(json.dumps(entry), flush=True)
-        if len(selected) >= limit:
+        if limit and len(selected) >= limit:
             break
     return selected
 
@@ -206,14 +206,16 @@ def main():
     parser.add_argument(
         "--apply", action="store_true", help="dispatch trusted builds; otherwise only report candidates"
     )
-    parser.add_argument("--limit", type=int, default=20, help="maximum builds to recover in this sweep")
+    parser.add_argument(
+        "--limit", type=int, default=0, help="optional maximum builds in this sweep; 0 means no count cap"
+    )
     parser.add_argument(
         "--min-age-minutes", type=int, default=90, help="allow the existing status replay to finish first"
     )
     parser.add_argument("--api-reserve", type=int, default=0, help="leave this many shared GitHub API requests unused")
     args = parser.parse_args()
-    if args.limit < 1 or args.min_age_minutes < 0 or args.api_reserve < 0:
-        parser.error("limit must be positive and minimum age nonnegative")
+    if args.limit < 0 or args.min_age_minutes < 0 or args.api_reserve < 0:
+        parser.error("limit, minimum age and API reserve must be nonnegative")
     api = GitHub(max_wait=0)
     try:
         selected = recover(

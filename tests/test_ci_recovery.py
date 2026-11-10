@@ -216,6 +216,19 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.recover(api, apply=True), [])
         self.assertEqual(api.writes, [])
 
+    def test_default_sweep_has_no_count_cap_and_explicit_limit_is_optional(self):
+        pulls = [dict(number=number, headRefOid=HEAD, updatedAt=OLD) for number in range(1, 26)]
+        for options, expected in (({}, 25), ({"limit": 0}, 25), ({"limit": 2}, 2)):
+            with self.subTest(options=options):
+                api = GitHub()
+                with (
+                    patch.object(recovery, "inventory", return_value=("main", pulls)),
+                    patch.object(recovery, "still_missing", return_value=True),
+                ):
+                    selected = self.recover(api, apply=True, **options)
+                self.assertEqual(len(selected), expected)
+                self.assertEqual(len(api.writes), expected)
+
     def test_shared_api_reserve_stops_dispatch_and_next_pass_can_resume(self):
         api = GitHub()
         api.stats = {"read": {"buckets": {"core": {"remaining": "1499"}}}}
