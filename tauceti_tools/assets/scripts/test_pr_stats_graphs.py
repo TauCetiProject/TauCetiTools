@@ -796,6 +796,36 @@ class MergeAppLandingsTest(unittest.TestCase):
         self.assertEqual(run(3), (True, 3))
         self.assertEqual(run(None), (True, 3))
 
+    def test_the_cli_caps_receipt_checks_only_when_it_can_resume(self):
+        # 501 closed, unrenamed PRs, where only the oldest closure has a receipt.
+        def run(*extra):
+            prs = [closed(number, 5) for number in range(1, 501)] + [closed(501, 2)]
+            for record in prs:
+                record.pop("merge_rename")
+            landing = {"merged_at": timestamp(9, 3), "merge_source": "tauceti-queue"}
+            with tempfile.TemporaryDirectory() as temporary:
+                folder = Path(temporary)
+                argv = ["pr_stats_graphs.py", "--repo", "o/r", "--out-dir", str(folder), *extra]
+                if extra:
+                    argv[-1] = str(folder / argv[-1])
+                with (patch.object(stats, "fetch_prs", return_value=prs),
+                      patch.object(stats, "fetch_scoreboards", return_value=([], {}, timestamp(10))),
+                      patch.object(stats, "fetch_merge_receipt",
+                                   side_effect=lambda owner, name, number:
+                                   landing if number == 501 else None) as check,
+                      patch("sys.argv", argv)):
+                    self.assertEqual(stats.main(), 0)
+                totals = json.loads((folder / "pr-stats.json").read_text())
+                snapshot = json.loads((folder / "snapshot.json").read_text()) if extra else None
+            return check.call_count, totals["merge_totals_by_contributor"], snapshot
+
+        # Without --dump-data nothing resumes, so every candidate is checked now.
+        self.assertEqual(run()[:2], (501, {"alice": 1}))
+        # A run that saves its snapshot keeps the cap and leaves the oldest for the next run.
+        checks, totals, snapshot = run("--dump-data", "snapshot.json")
+        self.assertEqual((checks, totals), (500, {}))
+        self.assertFalse(snapshot["merge_evidence_complete"])
+
     def test_a_landing_before_creation_is_an_error(self):
         early = closed(3, 6, rename_event={**rename(6), "createdAt": "2025-12-31T00:00:00Z"})
         with self.assertRaisesRegex(ValueError, "predates creation of PR #3"):

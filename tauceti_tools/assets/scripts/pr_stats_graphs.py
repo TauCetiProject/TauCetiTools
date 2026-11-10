@@ -768,9 +768,10 @@ def apply_app_merges(repo: str, prs: list[dict], previous: dict | None = None,
     return len(pending) <= limit
 
 
-def fetch_snapshot(repo: str, previous: dict | None = None) -> dict:
+def fetch_snapshot(repo: str, previous: dict | None = None,
+                   receipt_checks: int | None = MERGE_RECEIPT_CHECKS_PER_RUN) -> dict:
     prs = fetch_prs(repo, previous)
-    complete = apply_app_merges(repo, prs, previous)
+    complete = apply_app_merges(repo, prs, previous, receipt_checks)
     settled = (previous or {}).get("merge_evidence") == MERGE_EVIDENCE and previous.get(
         "merge_evidence_complete")
     scoreboard_previous = previous if settled else None
@@ -1789,7 +1790,10 @@ def main() -> int:
     if args.data:
         data = json.loads(args.data.read_text(encoding="utf-8"))
     else:
-        data = fetch_snapshot(args.repo, load_previous(args.since_data, args.repo))
+        # Without --dump-data no later run can resume a capped receipt backlog, so this one
+        # checks every candidate.
+        receipt_checks = MERGE_RECEIPT_CHECKS_PER_RUN if args.dump_data else None
+        data = fetch_snapshot(args.repo, load_previous(args.since_data, args.repo), receipt_checks)
         if args.dump_data:
             atomic_write(args.dump_data, json.dumps(data, indent=2) + "\n")
     as_of = parse_dt(args.as_of) if args.as_of else None

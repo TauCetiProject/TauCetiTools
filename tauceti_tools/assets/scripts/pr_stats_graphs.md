@@ -60,8 +60,8 @@ It requires an authenticated `gh` CLI. In GitHub Actions, set `GH_TOKEN` to
   page query that misses the rename does not lose it. Receipt checks cost one request per PR,
   so a verdict of none is kept until the PR's `updatedAt` moves, and at most 500 PRs are
   checked a run, newest closures first; a first run works through the backlog over several
-  runs. The per-roadmap chart's live path, which keeps no snapshot, checks every candidate at
-  once. Until a run has checked every candidate under the current rule, the next run also
+  runs. A run that keeps no snapshot (no `--dump-data`), and the per-roadmap chart's live
+  path, check every candidate at once. Until a run has checked every candidate under the current rule, the next run also
   rescans scoreboards in full, so the run that finishes reconsiders every contributor whose
   merges only the receipts revealed.
 - Seven-day metrics use complete UTC calendar days. Merge latency is PR creation to
