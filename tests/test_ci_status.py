@@ -106,6 +106,17 @@ class StatusIntentTests(unittest.TestCase):
         self.assertFalse(second[0].exists())
         self.assertEqual(len(fake.calls), 5)
 
+    def test_transient_batch_scope_500_retries_with_fresh_identity(self):
+        path, record = ci_status.record_intent(self.sha, 'scope', 'success', 'pass')
+        error = ci_status.APIError('GET', 'compare/base...head', 500, {'message': 'temporary'})
+        with patch.object(ci_status, 'scope_approved', side_effect=[error, True]), patch.object(ci_status.time, 'sleep') as sleep:
+            result, fake = self.publish([(path, record)], [self.run, self.run, {}], max_wait=600)
+        self.assertTrue(result)
+        self.assertFalse(path.exists())
+        sleep.assert_called_once_with(2)
+        self.assertEqual(sum('/actions/runs/' in call[1] for call in fake.calls), 2)
+        self.assertEqual([call[0] for call in fake.calls].count('POST'), 1)
+
     def test_quota_without_wait_budget_retains_intent(self):
         record = self.record()
         result, fake = self.publish([record], [self.run, self.pull, ci_status.Deferred('write', ci_status.time.time() + 3600)], max_wait=0)

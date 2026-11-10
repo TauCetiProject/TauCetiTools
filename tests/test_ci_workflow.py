@@ -25,6 +25,33 @@ def shell_for(name, workflow=WORKFLOW):
 
 
 class WorkflowIdentityTests(unittest.TestCase):
+    def test_required_batch_status_failure_remains_visible_to_retry_workflow(self):
+        report = shell_for("Report build and bump-guard statuses to the PR head commit")
+        start = report.index('if [ "${SOURCE_CANDIDATE:-false}" != true ]; then\n  # Scope')
+        tail = report[start:].replace("${{ env.IS_BATCH }}", "true")
+        self.assertIn("CI_STATUS_MAX_WAIT=600", tail)
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "python3"
+            executable.write_text('#!/bin/sh\nexit "${STATUS_RC}"\n')
+            executable.chmod(0o755)
+            for rc in (0, 1):
+                env = dict(
+                    os.environ,
+                    PATH=directory + os.pathsep + os.environ["PATH"],
+                    STATUS_RC=str(rc),
+                    RUNNER_TEMP=directory,
+                    SOURCE_CANDIDATE="false",
+                )
+                run = subprocess.run(
+                    ["bash", "-eu", "-c", "post_fail=0; state=success\n" + tail],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(run.returncode, rc, run.stdout + run.stderr)
+        trigger = yaml.safe_load((ROOT / ".github/workflows/retry-ci-status.yml").read_text())["jobs"]["publish"]["if"]
+        self.assertIn('["success","failure"]', trigger)
+
     def resolve(self, event, *, git_fails=False, requested_pr="123"):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -128,10 +155,10 @@ else:
 
     def test_complete_source_fetch_is_separate_and_retains_known_identity_on_failure(self):
         shell = shell_for("Fetch complete immutable source histories")
-        self.assertIn('exec python3 gate/scripts/ci_checkout.py fetch', shell)
-        self.assertNotIn('$(python3', shell)
+        self.assertIn("exec python3 gate/scripts/ci_checkout.py fetch", shell)
+        self.assertNotIn("$(python3", shell)
         report = shell_for("Report build and bump-guard statuses to the PR head commit")
-        self.assertLess(report.index('steps.source_fetch.outcome'), report.index('elif [ "$identity_ok" != 1 ]'))
+        self.assertLess(report.index("steps.source_fetch.outcome"), report.index('elif [ "$identity_ok" != 1 ]'))
         for failed in (False, True):
             with self.subTest(failed=failed), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -285,8 +312,10 @@ class ParsingContextWorkflowTests(unittest.TestCase):
         self.assertLess(lint, build)
         self.assertIn("hashFiles('gate/scripts/lean_source.py')", text[restore:lint])
         self.assertIn("steps.pr.outputs.base_sha", text[restore:lint])
-        self.assertIn('--context-cache ".ci-dot-notation-context/context.json"',
-                      shell_for("Dot-notation namespace lint (Mathlib type namespaces stay at root)"))
+        self.assertIn(
+            '--context-cache ".ci-dot-notation-context/context.json"',
+            shell_for("Dot-notation namespace lint (Mathlib type namespaces stay at root)"),
+        )
         self.assertNotIn("Save main's dot-notation", text)
 
     def test_template_saves_context_only_from_the_default_branch(self):
@@ -308,16 +337,17 @@ class DotContextProducerTests(unittest.TestCase):
         text = workflow.read_text()
         self.assertNotIn("Restore dot-notation parsing context", text)
         self.assertIn("rm -rf .ci-dot-notation-context", text)
-        self.assertLess(text.index("Save main's dot-notation parsing context"),
-                        text.index("      - name: Build"))
+        self.assertLess(text.index("Save main's dot-notation parsing context"), text.index("      - name: Build"))
         self.assertNotIn("Save main's dot-notation parsing context", WORKFLOW.read_text())
 
 
 class PreflightScopeTests(unittest.TestCase):
     def test_pr_scope_and_full_gate_fallbacks(self):
         for batch, bump, scoped, unmatched in [
-            (False, False, True, ""), (True, False, True, ""),
-            (False, True, True, ""), (False, False, False, ""),
+            (False, False, True, ""),
+            (True, False, True, ""),
+            (False, True, True, ""),
+            (False, False, False, ""),
             (False, False, True, "web/Main.lean\n"),
             (False, False, True, None),
         ]:
@@ -330,12 +360,20 @@ class PreflightScopeTests(unittest.TestCase):
                         (root / "unmatched.txt").write_text(unmatched)
                     envfile = root / "env"
                     shell = shell_for("Decide the audit scope").replace(
-                        "${{ env.IS_BATCH }}", "true" if batch else "false")
-                    out = subprocess.run(["bash", "-euo", "pipefail", "-c", shell],
-                        text=True, capture_output=True, env={**os.environ,
-                        "GITHUB_ENV": str(envfile), "LINT_SCOPE_DIR": str(root),
-                        "LINT_ONLY_MODULES": str(modules) if scoped else "",
-                        "BUMP": "1" if bump else "0"})
+                        "${{ env.IS_BATCH }}", "true" if batch else "false"
+                    )
+                    out = subprocess.run(
+                        ["bash", "-euo", "pipefail", "-c", shell],
+                        text=True,
+                        capture_output=True,
+                        env={
+                            **os.environ,
+                            "GITHUB_ENV": str(envfile),
+                            "LINT_SCOPE_DIR": str(root),
+                            "LINT_ONLY_MODULES": str(modules) if scoped else "",
+                            "BUMP": "1" if bump else "0",
+                        },
+                    )
                     self.assertEqual(out.returncode, 0, out.stderr)
                     values = dict(line.split("=", 1) for line in envfile.read_text().splitlines())
                     fast = not batch and not bump and scoped and unmatched == ""
