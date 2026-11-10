@@ -59,6 +59,11 @@ phase() { printf '%s\t%s\n' "$1" "$(date +%s.%N)" >> "$TELEMETRY/phases.tsv" 2>/
 # another round: measured on 2026-11-03, about 3.3 failed rounds per landed large batch. The extra
 # runner minutes of a complete build buy the controller every attributable culprit at once.
 LAKE_BUILD_FLAGS=(--iofail)
+if [ "${STAGE_LAKE_CACHE:-}" = "1" ]; then
+  export LAKE_ARTIFACT_CACHE=true LAKE_RESTORE_ARTIFACTS=true
+  # Generate the native map in the final build, rather than walking the graph again.
+  LAKE_BUILD_FLAGS+=(--rehash -o .lake/outputs.jsonl)
+fi
 # Keep each changed module's restored main header for the declaration-names record below.
 # Advisory: a failure here only means no record.
 bash "$TRUSTED_SCRIPTS/declaration-names.sh" save || true
@@ -140,18 +145,9 @@ if [ "${STAGE_LAKE_CACHE:-}" = "1" ]; then
     exit 1
   fi
 
-  export LAKE_ARTIFACT_CACHE=true
-  export LAKE_RESTORE_ARTIFACTS=true
-  export LAKE_NO_CACHE=true
-  export LAKE_CACHE_DIR="$PWD/.lake/cache"
-  lake build >/dev/null
-  python3 "$TRUSTED_SCRIPTS/lake_cache_reuse.py" reconnect . "$TRUSTED_SCRIPTS/../lake-cache-reuse.json"
-  # Linked archives may have stale or candidate-written .ltar.hash sidecars.
-  # --rehash makes Lake hash the archive bytes instead of trusting those sidecars.
-  lake build --no-build --rehash -o .lake/outputs.jsonl
+  lake cache stage .lake/outputs.jsonl .lake/publication-stage
   echo "root-package mapping entries: $(wc -l < .lake/outputs.jsonl)"
-  # The host stages these data after all sandbox processes exit, using pinned tooling
-  # and anonymous availability checks. Candidate code never writes the staging tree.
+
 fi
 
 phase end
