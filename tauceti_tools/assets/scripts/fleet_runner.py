@@ -421,7 +421,7 @@ def route_main():
     order = config.get("staging_order" if kind == "staging" else "pr_order", ["github", "namespace"])
     excluded = set()
     attempt = int(environment["GITHUB_RUN_ATTEMPT"])
-    if attempt > 1:
+    if attempt > 1 and kind != "pr":
         try:
             if capacity_reader is None:
                 for credential, reserve in readers:
@@ -485,7 +485,13 @@ def route_main():
         target = [f"nscloud-ubuntu-24.04-amd64-{'16x32' if staging else '8x16'}-with-features" + (";job.priority=1" if staging else ""),
                   "namespace-features:container.privileged=true" + (f";github.run-id={environment['GITHUB_RUN_ID']}" if staging else "")]
     elif selected["pool"] != "github":
-        target = dict(group="TauCetiFleet", labels=selected["labels"])
+        labels = selected["labels"]
+        if kind == "pr":
+            # Availability chooses a pool, not a disposable runner. GitHub can
+            # assign a replacement guest if another job wins the observed slot.
+            labels = [label for label in labels if not label.startswith("fleet-instance-")
+                      and (selected["pool"] != "fleet" or not label.startswith("fleet-"))]
+        target = dict(group="TauCetiFleet", labels=labels)
     values = dict(runner=json.dumps(target, separators=(",", ":")), pool=selected["pool"],
                   fleet=str(selected["pool"] not in ("github", "namespace")).lower(),
                   github=str(selected["pool"] == "github").lower(), busy=observed["github_busy"],

@@ -352,7 +352,7 @@ class RoutingEntrypoint(unittest.TestCase):
             config += f'[services.fleet.machines.{machine["name"]}]\nmachine_id="{machine["machine_id"]}"\nmax_jobs={machine["max_jobs"]}\nkinds={json.dumps(machine["kinds"])}\n'
         return config, inventory[0]
 
-    def test_generic_pool_uses_only_the_selected_group_and_exact_workflow_target(self):
+    def test_generic_pr_pool_targets_the_group_and_class_across_runner_replacement(self):
         guest=LiveMembership().guest()
         endpoint='orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1'
         config='[services.fleet]\npr_order=["fleet","namespace","github"]\n'
@@ -362,10 +362,27 @@ class RoutingEntrypoint(unittest.TestCase):
         self.assertEqual(output['pool'],'fleet')
         target=json.loads(output['runner'])
         self.assertEqual(target['group'],'TauCetiFleet')
-        self.assertIn('fleet-'+'a'*32,target['labels'])
-        self.assertIn('fleet-instance-0000000000000001',target['labels'])
+        self.assertEqual(set(target['labels']), {'self-hosted', 'linux', 'x64', 'tauceti-fleet-pr'})
+        # The original guest can disappear: another eligible host still matches.
+        replacement = LiveMembership().guest('b'*32, 2)
+        self.assertLessEqual(set(target['labels']), {label['name'] for label in replacement['labels']})
+        staging = LiveMembership().guest('c'*32, 3, ('staging',))
+        self.assertFalse(set(target['labels']) <= {label['name'] for label in staging['labels']})
         self.assertEqual([p for token,p in calls if token=='fleet'],[endpoint])
         self.assertFalse(any(token in ('app','repository') for token,_ in calls))
+
+    def test_pr_pool_retry_needs_no_cancelled_placement_history(self):
+        guest = LiveMembership().guest()
+        endpoint = 'orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1'
+        output, calls = self.pick(dict(fleet={endpoint: dict(total_count=1, runners=[guest])},
+            state=dict(shared=self.shared())),
+            config='[services.fleet]\npr_order=["fleet","namespace","github"]\n',
+            FLEET_CI_ENABLED='true', FLEET_READ_TOKEN='fleet', FLEET_RUNNER_GROUP_ID='3',
+            GITHUB_STATE_TOKEN='state', GITHUB_RUN_ATTEMPT='2')
+        self.assertEqual(output['pool'], 'fleet')
+        self.assertEqual(set(json.loads(output['runner'])['labels']),
+                         {'self-hosted', 'linux', 'x64', 'tauceti-fleet-pr'})
+        self.assertFalse(any('attempts/' in path or path == 'rate_limit' for _, path in calls))
 
     def test_generic_pool_remains_disabled_without_explicit_fleet_routing(self):
         config='[services.fleet]\npr_order=["fleet","namespace","github"]\n'
@@ -408,6 +425,9 @@ class RoutingEntrypoint(unittest.TestCase):
         ), config=config, FLEET_CI_ENABLED="true", FLEET_READ_TOKEN="fleet", FLEET_RUNNER_GROUP_ID="3",
            GITHUB_STATE_TOKEN="state", PR_HEAD="")
         self.assertEqual(output["pool"], "chris")
+        labels = json.loads(output["runner"])["labels"]
+        self.assertIn("fleet-" + "b" * 32, labels)
+        self.assertFalse(any(label.startswith("fleet-instance-") for label in labels))
         self.assertEqual([token for token, _ in calls], ["state", "fleet"])
 
     def test_unknown_cloud_does_not_delay_an_available_machine_with_another_scan(self):
@@ -429,9 +449,9 @@ class RoutingEntrypoint(unittest.TestCase):
         self.assertEqual(output["pool"], "github")
         self.assertEqual(calls, [("state", "shared")])
 
-    def test_excluded_unknown_cloud_does_not_delay_next_machine(self):
+    def test_staging_excluded_unknown_cloud_does_not_delay_next_machine(self):
         config, inventory = self.staging_fixture()
-        config = config.replace('[services.fleet]\n', '[services.fleet]\npr_order=["namespace","chris","github"]\n')
+        config = config.replace('staging_order=["tauchonki","chris","namespace","github"]', 'staging_order=["namespace","chris","github"]')
         app = self.fixture(busy=19)
         app["repos/Test/code/actions/runs/5/attempts/1/jobs?per_page=100&page=1"] = dict(total_count=1, jobs=[
             dict(name="sandboxed-build", status="completed", conclusion="cancelled", runner_id=0,
@@ -439,7 +459,7 @@ class RoutingEntrypoint(unittest.TestCase):
         output, calls = self.pick(dict(app=app, state=dict(shared=self.shared(busy=19)),
             fleet={"orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1": inventory}),
             config=config, FLEET_CI_ENABLED="true", FLEET_READ_TOKEN="fleet", FLEET_RUNNER_GROUP_ID="3",
-            GITHUB_STATE_TOKEN="state", GITHUB_RUN_ATTEMPT="2")
+            GITHUB_STATE_TOKEN="state", GITHUB_RUN_ATTEMPT="2", FLEET_JOB_KIND="staging")
         self.assertEqual(output["pool"], "chris")
         self.assertFalse(any("orgs/Test/repos" in path for _, path in calls))
 
@@ -660,18 +680,14 @@ class Recovery(unittest.TestCase):
         self.assertTrue(any("/attempts/2/jobs?" in path for path, _ in self.calls))
         self.assertEqual([path for path, data in self.calls if data is not None], ["/actions/runs/42/force-cancel", "/actions/runs/42/rerun"])
 
-    def test_pr_recovery_requires_the_immutable_head_to_still_be_current(self):
-        for current, expected in [("a" * 40, "rerun-with-updated-placement-requested"),
-                                  ("b" * 40, "superseded-pr-cancelled")]:
+    def test_pr_pool_waiting_never_enters_startup_cancellation_or_rerun(self):
+        for event in ("pull_request_target", "repository_dispatch"):
             fetch = self.fixture()
-            self.run.update(event="pull_request_target", display_title="pr-build pr=7 head=" + "a" * 40)
-            self.job["labels"] = ["self-hosted", "tauceti-fleet-pr", "fleet-" + "b" * 32]
-            def operation(path, data=None, *, current=current, fetch=fetch):
-                if path == "/pulls/7":
-                    return dict(head=dict(sha=current))
-                return fetch(path, data)
-            self.assertEqual(recover(42, fetch=operation, clock=lambda: self.now, sleep=self.advance, policy=True), expected)
-            self.assertEqual(any(path.endswith("/rerun") for path, _ in self.calls), current == "a" * 40)
+            self.run.update(event=event, display_title="pr-build pr=7 head=" + "a" * 40)
+            self.job["labels"] = ["self-hosted", "tauceti-fleet-pr"]
+            self.assertEqual(recover(42, fetch=fetch, policy=True), "not-an-initial-bors-attempt")
+            self.assertEqual(self.calls, [("/actions/runs/42", None)])
+            self.assertFalse(self.canceled)
 
     def test_slow_picker_gets_full_acquisition_window_after_labels_appear(self):
         fetch = self.fixture()
