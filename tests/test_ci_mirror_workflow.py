@@ -114,6 +114,28 @@ class MirrorWorkflow(unittest.TestCase):
         with patch.dict("os.environ", {"TAUCETI_SOURCE_CANDIDATE": "true"}), self.assertRaises(ValueError):
             self.bootstrap()
 
+    def test_nightly_audit_requires_the_same_exact_main_identity(self):
+        nightly = {
+            **self.context,
+            "event_name": "schedule",
+            "workflow_ref": "team/Execution/.github/workflows/nightly-verify.yml@refs/heads/main",
+        }
+        env, record = self.bootstrap(nightly)
+        self.assertEqual(record["workflow_ref"], nightly["workflow_ref"])
+        self.assertEqual(record["source"], self.policy.source.record())
+        self.assertEqual(record["revision"], nightly["sha"])
+        self.assertEqual(env["TAUCETI_SOURCE_MIRROR"], "true")
+        for key, value in (
+            ("repository_id", "99"),
+            ("ref", "refs/heads/proposal"),
+            ("checkout_sha", "c" * 40),
+            ("workflow_sha", "c" * 40),
+            ("workflow_ref", "team/Other/.github/workflows/nightly-verify.yml@refs/heads/main"),
+            ("workflow_ref", "team/Execution/.github/workflows/lint-full.yml@refs/heads/main"),
+        ):
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                self.bootstrap({**nightly, key: value})
+
     def test_native_repository_name_reuse_and_wrong_revision_fail(self):
         self.client.identity["id"] = 999
         with self.assertRaisesRegex(ValueError, "identity changed"):
