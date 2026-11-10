@@ -262,7 +262,21 @@ else:
                 directory = Path(temp)
                 (directory / "scripts").mkdir()
                 data = json.dumps({"artifacts": rows, "total_count": count})
-                (directory / "scripts/github_api.py").write_text("print(" + repr(data) + ")\n")
+                run = dict(
+                    id=99,
+                    path=".github/workflows/pr-build.yml",
+                    event="repository_dispatch",
+                    status="completed",
+                    conclusion="success",
+                    head_repository={"full_name": "owner/Project"},
+                )
+                (directory / "scripts/github_api.py").write_text(
+                    "import sys\nprint("
+                    + repr(data)
+                    + ' if "/artifacts?" in sys.argv[1] else '
+                    + repr(json.dumps(run))
+                    + ")\n"
+                )
                 output = directory / "output"
                 result = subprocess.run(
                     ["bash", "-euo", "pipefail", "-c", shell],
@@ -274,6 +288,7 @@ else:
                         "CI_STATUS_SOURCE_RUN_ID": "99",
                         "CI_STATUS_SOURCE_ATTEMPT": "1",
                         "GITHUB_REPOSITORY": "owner/Project",
+                        "DEFAULT_BRANCH": "main",
                         "RUNNER_TEMP": temp,
                         "GITHUB_OUTPUT": str(output),
                     },
@@ -282,6 +297,57 @@ else:
                 if expected:
                     outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
                     self.assertEqual(outputs["ids"], "41" if rows[0]["name"] == "ci-status-intents-sandbox-1" else "")
+
+    def test_reporting_replay_rejects_untrusted_original_runs_before_credentials(self):
+        shell = shell_for(
+            "Discover retained intents from this exact original run", ROOT / ".github/workflows/retry-ci-status.yml"
+        )
+        trusted = dict(
+            id=99,
+            path=".github/workflows/pr-build.yml",
+            event="repository_dispatch",
+            status="completed",
+            conclusion="success",
+            head_repository={"full_name": "owner/Project"},
+        )
+        cases = (
+            {},
+            {"event": "pull_request"},
+            {"path": ".github/workflows/evil.yml"},
+            {"head_repository": {"full_name": "fork/Project"}},
+            {"status": "in_progress"},
+            {"id": 100},
+            {"event": "workflow_dispatch", "head_branch": "untrusted"},
+            {"event": "workflow_dispatch", "head_branch": "main"},
+        )
+        for changes in cases:
+            with self.subTest(changes=changes), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "scripts").mkdir()
+                run = dict(trusted, **changes)
+                artifacts = dict(
+                    total_count=1, artifacts=[dict(id=41, name="ci-status-intents-sandbox-1", size_in_bytes=100)]
+                )
+                (root / "scripts/github_api.py").write_text(
+                    "import json,sys\nprint(json.dumps("
+                    + repr(artifacts)
+                    + ' if "/artifacts?" in sys.argv[1] else '
+                    + repr(run)
+                    + "))\n"
+                )
+                env = dict(
+                    os.environ,
+                    CI_STATUS_SOURCE_RUN_ID="99",
+                    CI_STATUS_SOURCE_ATTEMPT="1",
+                    GITHUB_REPOSITORY="owner/Project",
+                    DEFAULT_BRANCH="main",
+                    RUNNER_TEMP=directory,
+                    GITHUB_OUTPUT=str(root / "out"),
+                )
+                result = subprocess.run(["bash", "-eu", "-c", shell], cwd=root, env=env, capture_output=True, text=True)
+                allowed = not changes or changes == {"event": "workflow_dispatch", "head_branch": "main"}
+                self.assertEqual(result.returncode == 0, allowed, result.stderr)
+                self.assertEqual((root / "out").exists(), allowed)
 
     def test_generated_wrapper_exposes_optional_credential_configuration(self):
         wrapper = (ROOT / "tauceti_tools/assets/project/.github/workflows/pr-build.yml").read_text()
