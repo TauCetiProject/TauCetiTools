@@ -56,11 +56,14 @@ It requires an authenticated `gh` CLI. In GitHub Actions, set `GH_TOKEN` to
   latency, contributor totals, the category grids, and pipeline health. Roadmap activity
   uses it when reading the shared snapshot. The per-roadmap
   line chart reads the same snapshot, including PR titles and diff sizes.
-  Receipt checks cost one request per PR, so each verdict is kept in the snapshot until the
-  PR's `updatedAt` moves, and at most 500 PRs are checked a run, newest closures first; a
-  run without a snapshot works through the backlog over several runs. A snapshot whose
-  merge evidence differs from the current rule also rescans scoreboards in full, to
-  reconsider contributors whose merges only the new rule recognises.
+  A landing, once recorded, is kept: neither a rename nor a receipt can be undone, so a later
+  page query that misses the rename does not lose it. Receipt checks cost one request per PR,
+  so a verdict of none is kept until the PR's `updatedAt` moves, and at most 500 PRs are
+  checked a run, newest closures first; a first run works through the backlog over several
+  runs. The per-roadmap chart's live path, which keeps no snapshot, checks every candidate at
+  once. Until a run has checked every candidate under the current rule, the next run also
+  rescans scoreboards in full, so the run that finishes reconsiders every contributor whose
+  merges only the receipts revealed.
 - Seven-day metrics use complete UTC calendar days. Merge latency is PR creation to
   merge time among PRs merged in that trailing window. Every chart is PLOTTED through the
   last complete UTC day: regenerated every three hours, a final point holding only part of

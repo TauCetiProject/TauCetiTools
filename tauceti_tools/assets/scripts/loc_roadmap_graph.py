@@ -58,9 +58,10 @@ MAINTENANCE_TITLE = re.compile(
 
 def fetch_gh(repo: str) -> list[dict]:
     # The cumulative series needs every pull request back to the first. The page walk follows its
-    # cursor to the last page, so there is no result-size ceiling to guard against.
+    # cursor to the last page, so there is no result-size ceiling to guard against, and with no
+    # snapshot to resume from every receipt candidate is checked now.
     prs = fetch_pr_pages(repo)
-    apply_app_merges(repo, prs)
+    apply_app_merges(repo, prs, max_checks=None)
     return snapshot_prs({"prs": prs})
 
 

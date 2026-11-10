@@ -3,6 +3,7 @@
 
 import datetime as dt
 import unittest
+from unittest.mock import patch
 
 import loc_roadmap_graph as graph
 
@@ -30,6 +31,14 @@ class BorsSnapshot(unittest.TestCase):
         ]})
         _, _, _, totals = graph.build_series(prs, today=dt.date(2026, 7, 2))
         self.assertEqual(totals, {"roadmap/PDE": 95})
+
+
+class LiveFetch(unittest.TestCase):
+    def test_without_a_snapshot_every_receipt_candidate_is_checked(self):
+        with (patch.object(graph, "fetch_pr_pages", return_value=[]),
+              patch.object(graph, "apply_app_merges") as apply):
+            graph.fetch_gh("o/r")
+        apply.assert_called_once_with("o/r", [], max_checks=None)
 
 
 class RoadmapSeries(unittest.TestCase):

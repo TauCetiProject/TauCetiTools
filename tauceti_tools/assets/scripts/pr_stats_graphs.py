@@ -666,12 +666,14 @@ def load_previous(path: Path | None, repo: str) -> dict | None:
 MERGE_APPS = ("tau-ceti-bors", "tauceti-queue")
 MERGED_TITLE_PREFIX = "[Merged by Bors] - "
 MERGE_RECEIPT = "Pull request successfully merged into main.\n\n"
-# Recorded in the snapshot. A run whose evidence differs from the previous run's may trust new
-# contributors, so it rescans scoreboards in full.
+# Recorded in the snapshot, whose landings and receipt verdicts a run reuses only under the same
+# rule. Until a run has checked every receipt candidate, the next run rescans scoreboards in full,
+# so the run that finishes reconsiders every contributor its landings made trusted.
 MERGE_EVIDENCE = {"rule": "merge app rename, else merge app receipt", "apps": list(MERGE_APPS)}
 # Every other closed PR is checked for the app's success receipt, one request each: a PR closed
-# while its batch was building still lands, unrenamed. Verdicts are reused while `updatedAt`,
-# which a new comment moves, is unchanged; the cap spreads a first backlog over several runs.
+# while its batch was building still lands, unrenamed. A landing, once found, is kept; a verdict
+# of none is reused while `updatedAt`, which a new comment moves, is unchanged. The cap spreads a
+# first backlog over several runs of a caller that keeps its snapshot.
 MERGE_RECEIPT_CHECKS_PER_RUN = 500
 
 
@@ -720,47 +722,58 @@ def record_landing(pr: dict, landing: dict) -> None:
     pr.update(landing, state="MERGED")
 
 
-def apply_app_merges(repo: str, prs: list[dict], previous: dict | None = None) -> None:
+def apply_app_merges(repo: str, prs: list[dict], previous: dict | None = None,
+                     max_checks: int | None = MERGE_RECEIPT_CHECKS_PER_RUN) -> bool:
     """Record merge-app landings as merges, before any chart or reviewer-trust calculation.
 
     The rename comes from the bulk page query, which can drop timeline events silently (see the
     note above `timeline_from_node`), so it is used only as positive evidence: a closed PR without
-    one goes to the receipt check, which reads the PR's own comments.
+    one keeps a landing the previous snapshot recorded, or else goes to the receipt check, which
+    reads the PR's own comments. A caller without a snapshot to resume from passes
+    `max_checks=None` to check every candidate now.
+
+    Returns whether every candidate has a verdict, rather than some being left for a later run.
     """
     owner, name = split_repo(repo)
-    checked = {entry["number"]: entry for entry in (previous or {}).get("prs") or []
-               if entry.get("receipt_checked")}
+    previous = previous or {}
+    earlier = ({entry["number"]: entry for entry in previous.get("prs") or []}
+               if previous.get("merge_evidence") == MERGE_EVIDENCE else {})
     pending = []
     for pr in prs:
         landing = pr.pop("merge_rename", None)
         if pr.get("merged_at") or pr.get("state") != "CLOSED":
             continue
-        if landing is None:
-            entry = checked.get(pr["number"])
-            if entry is None or entry["receipt_checked"] != pr["updated_at"]:
-                pending.append(pr)
-                continue
-            pr["receipt_checked"] = entry["receipt_checked"]
-            if not entry.get("merge_source"):
-                continue
+        entry = earlier.get(pr["number"], {})
+        if landing is None and entry.get("merge_source") in MERGE_APPS:
+            # Neither a rename nor a receipt can be undone, so a landing outlives `updatedAt`.
             landing = {"merged_at": entry["merged_at"], "merge_source": entry["merge_source"]}
+        if landing is None:
+            if entry.get("receipt_checked") == pr["updated_at"]:
+                pr["receipt_checked"] = entry["receipt_checked"]
+            else:
+                pending.append(pr)
+            continue
         record_landing(pr, landing)
     # Newest closures first, so a backlog never holds back the landings of the last few hours.
     pending.sort(key=lambda pr: pr["closed_at"], reverse=True)
-    for pr in pending[:MERGE_RECEIPT_CHECKS_PER_RUN]:
+    limit = len(pending) if max_checks is None else max_checks
+    for pr in pending[:limit]:
         landing = fetch_merge_receipt(owner, name, pr["number"])
         pr["receipt_checked"] = pr["updated_at"]
         if landing is not None:
             record_landing(pr, landing)
-    if len(pending) > MERGE_RECEIPT_CHECKS_PER_RUN:
-        print(f"checked {MERGE_RECEIPT_CHECKS_PER_RUN:,} closed PRs for merge receipts; "
-              f"{len(pending) - MERGE_RECEIPT_CHECKS_PER_RUN:,} left for later runs", file=sys.stderr)
+    if len(pending) > limit:
+        print(f"checked {limit:,} closed PRs for merge receipts; "
+              f"{len(pending) - limit:,} left for later runs", file=sys.stderr)
+    return len(pending) <= limit
 
 
 def fetch_snapshot(repo: str, previous: dict | None = None) -> dict:
     prs = fetch_prs(repo, previous)
-    apply_app_merges(repo, prs, previous)
-    scoreboard_previous = previous if (previous or {}).get("merge_evidence") == MERGE_EVIDENCE else None
+    complete = apply_app_merges(repo, prs, previous)
+    settled = (previous or {}).get("merge_evidence") == MERGE_EVIDENCE and previous.get(
+        "merge_evidence_complete")
+    scoreboard_previous = previous if settled else None
     trusted_logins = {
         pr["author"] for pr in prs
         if pr.get("merged_at") and pr.get("author") != "unknown"
@@ -778,6 +791,7 @@ def fetch_snapshot(repo: str, previous: dict | None = None) -> dict:
         "fetched_at": iso_z(datetime.now(timezone.utc)),
         "prs": prs,
         "merge_evidence": MERGE_EVIDENCE,
+        "merge_evidence_complete": complete,
         "scoreboards": scoreboards,
         # Per comment, so that the next incremental scan can revise a single verdict. The
         # published counts below are derived from it and stay exact across incremental runs.

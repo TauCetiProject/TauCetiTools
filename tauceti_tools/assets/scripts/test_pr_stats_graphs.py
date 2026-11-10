@@ -732,10 +732,9 @@ class MergeAppLandingsTest(unittest.TestCase):
         prs = [native, open_pr, closed(3, 6, rename_event=rename(6)),
                closed(4, 5), closed(5, 8), closed(6, 7)]
         receipts = {5: {"merged_at": timestamp(9, 3), "merge_source": "tauceti-queue"}, 6: None}
-        with (patch.object(stats, "MERGE_RECEIPT_CHECKS_PER_RUN", 2),
-              patch.object(stats, "fetch_merge_receipt",
-                           side_effect=lambda owner, name, number: receipts[number]) as check):
-            stats.apply_app_merges("o/r", prs)
+        with patch.object(stats, "fetch_merge_receipt",
+                          side_effect=lambda owner, name, number: receipts[number]) as check:
+            self.assertFalse(stats.apply_app_merges("o/r", prs, max_checks=2))
         self.assertEqual([call.args[2] for call in check.call_args_list], [5, 6])
         by_number = {record["number"]: record for record in prs}
         self.assertEqual(by_number[1]["merged_at"], timestamp(8, 12))
@@ -756,7 +755,7 @@ class MergeAppLandingsTest(unittest.TestCase):
                      receipt_checked=found["updated_at"])
         absent["receipt_checked"] = absent["updated_at"]
         stale["receipt_checked"] = timestamp(7, 4)
-        previous = {"prs": [found, absent, stale]}
+        previous = {"prs": [found, absent, stale], "merge_evidence": stats.MERGE_EVIDENCE}
         prs = [closed(5, 8), closed(6, 7), closed(7, 7, updated_day=9)]
         with patch.object(stats, "fetch_merge_receipt", return_value=None) as check:
             stats.apply_app_merges("o/r", prs, previous)
@@ -765,6 +764,37 @@ class MergeAppLandingsTest(unittest.TestCase):
                          ("MERGED", timestamp(9, 3), "tauceti-queue"))
         self.assertEqual((prs[1]["state"], prs[1]["receipt_checked"]), ("CLOSED", prs[1]["updated_at"]))
         self.assertEqual(prs[2]["receipt_checked"], timestamp(9, 4))
+
+    def test_a_recorded_landing_survives_a_missed_rename_and_a_full_batch(self):
+        # The page query drops #3's rename this run and #3 has moved since, while a newer
+        # closure takes the only receipt check: the landing the last run recorded must stand.
+        renamed = closed(3, 6, rename_event=rename(6))
+        stats.apply_app_merges("o/r", [renamed])
+        previous = {"prs": [renamed], "merge_evidence": stats.MERGE_EVIDENCE}
+        prs = [closed(3, 6, updated_day=9), closed(5, 8)]
+        with patch.object(stats, "fetch_merge_receipt", return_value=None) as check:
+            complete = stats.apply_app_merges("o/r", prs, previous, max_checks=1)
+        self.assertEqual([call.args[2] for call in check.call_args_list], [5])
+        self.assertTrue(complete)
+        self.assertEqual((prs[0]["state"], prs[0]["merged_at"], prs[0]["merge_source"]),
+                         ("MERGED", timestamp(6, 2), "tau-ceti-bors"))
+        # A snapshot written under another rule vouches for nothing.
+        prs = [closed(3, 6, updated_day=9)]
+        with patch.object(stats, "fetch_merge_receipt", return_value=None) as check:
+            stats.apply_app_merges("o/r", prs, {**previous, "merge_evidence": {"rule": "old"}})
+        self.assertEqual([call.args[2] for call in check.call_args_list], [3])
+        self.assertEqual(prs[0]["state"], "CLOSED")
+
+    def test_completeness_and_an_uncapped_check(self):
+        def run(max_checks):
+            prs = [closed(4, 5), closed(5, 8), closed(6, 7)]
+            with patch.object(stats, "fetch_merge_receipt", return_value=None) as check:
+                complete = stats.apply_app_merges("o/r", prs, max_checks=max_checks)
+            return complete, check.call_count
+
+        self.assertEqual(run(2), (False, 2))
+        self.assertEqual(run(3), (True, 3))
+        self.assertEqual(run(None), (True, 3))
 
     def test_a_landing_before_creation_is_an_error(self):
         early = closed(3, 6, rename_event={**rename(6), "createdAt": "2025-12-31T00:00:00Z"})
@@ -808,14 +838,19 @@ class MergeAppLandingsTest(unittest.TestCase):
             with (patch.object(stats, "fetch_prs", return_value=prs),
                   patch.object(stats, "fetch_scoreboards",
                                return_value=([], {}, timestamp(10))) as scan):
-                stats.fetch_snapshot("o/r", previous)
+                snapshot = stats.fetch_snapshot("o/r", previous)
             self.assertEqual(scan.call_args.args[2], {"app-only-author"})
+            self.assertTrue(snapshot["merge_evidence_complete"])
             return scan.call_args.args[3]
 
         old = {"repo": "o/r", "scoreboards_scanned_at": timestamp(10),
                "merge_receipt_logins": ["tau-ceti-bors[bot]", "tauceti-queue[bot]"]}
         self.assertIsNone(scoreboard_previous(old))
-        current = {**old, "merge_evidence": stats.MERGE_EVIDENCE}
+        # A run that left receipt candidates unchecked may not have found everyone it trusts yet,
+        # so the run after it rescans too, whatever the rule.
+        unfinished = {**old, "merge_evidence": stats.MERGE_EVIDENCE, "merge_evidence_complete": False}
+        self.assertIsNone(scoreboard_previous(unfinished))
+        current = {**unfinished, "merge_evidence_complete": True}
         self.assertIs(scoreboard_previous(current), current)
 
 
