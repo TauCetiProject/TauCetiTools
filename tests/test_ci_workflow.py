@@ -50,7 +50,9 @@ class WorkflowIdentityTests(unittest.TestCase):
                 )
                 self.assertEqual(run.returncode, rc, run.stdout + run.stderr)
         trigger = yaml.safe_load((ROOT / ".github/workflows/retry-ci-status.yml").read_text())["jobs"]["publish"]["if"]
-        self.assertIn('["success","failure"]', trigger)
+        self.assertIn("workflow_run.conclusion == 'failure'", trigger)
+        self.assertIn("workflow_run.conclusion == 'success'", trigger)
+        self.assertIn("startsWith(github.event.workflow_run.display_title, 'bors branch=')", trigger)
 
     def resolve(self, event, *, git_fails=False, requested_pr="123"):
         temp = tempfile.TemporaryDirectory()
