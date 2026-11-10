@@ -268,7 +268,8 @@ class MirrorWorkflow(unittest.TestCase):
             self.assertTrue(html["key"].startswith("docs-html-v2-"))
             pages = yaml.safe_load((Path(directory) / ".github/workflows/pages.yml").read_text())
             restored_html = next(
-                step["with"] for step in pages["jobs"]["build-site"]["steps"]
+                step["with"]
+                for step in pages["jobs"]["build-site"]["steps"]
                 if step.get("name") == "Restore the latest API docs"
             )
             self.assertEqual(restored_html["path"], html["path"])
