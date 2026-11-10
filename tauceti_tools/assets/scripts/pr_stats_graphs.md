@@ -53,11 +53,16 @@ It requires an authenticated `gh` CLI. In GitHub Actions, set `GH_TOKEN` to
   totals, the category grids, and pipeline health. Roadmap activity uses it when
   reading the shared snapshot. The per-roadmap
   line chart reads the same snapshot, including PR titles and diff sizes.
-  The first run with a cached snapshot whose recorded set of merge apps differs from the
-  current one scans the whole comment archive to backfill historical receipts and
-  reconsider scoreboards from contributors whose merges only those apps recorded.
-  Later runs carry the receipts forward and scan incrementally with an hour overlap;
-  unchanged cached label timelines do not prevent historical merge repair.
+  GitHub stops paginating the repository comment listing after about 400 pages, which
+  here is roughly the last week of comments, so receipts and scoreboards cannot be
+  refetched from the start of the project. They are always carried forward from the
+  cached snapshot; losing that cache loses the history beyond the pagination limit.
+  When the recorded set of merge apps differs from the current one, the run scans as
+  far back as GitHub allows, adding receipts and reconsidering scoreboards from
+  contributors whose merges only the new app recorded. Scoreboards are also rescanned
+  that far every seven days, revising the verdicts the scan reaches and keeping older
+  ones. Later runs scan incrementally with an hour overlap; unchanged cached label
+  timelines do not prevent historical merge repair.
 - Seven-day metrics use complete UTC calendar days. Merge latency is PR creation to
   merge time among PRs merged in that trailing window. Every chart is PLOTTED through the
   last complete UTC day: regenerated every three hours, a final point holding only part of

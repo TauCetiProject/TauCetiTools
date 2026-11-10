@@ -523,6 +523,7 @@ def fetch_scoreboards(
     trusted_logins: set[str],
     previous: dict | None = None,
     now: datetime | None = None,
+    rescan: bool = False,
 ) -> tuple[list[dict], dict[str, str], str]:
     """Canonical review scoreboards posted on this repository's pull requests.
 
@@ -534,12 +535,18 @@ def fetch_scoreboards(
     ``author_association`` values. Parsing runs at gh/jq, so only compact fields reach Python
     rather than memory growing with review prose. Rejections are published by reason.
 
+    GitHub stops paginating this endpoint after a few hundred pages (roughly the last week of
+    comments here), so a "full" scan cannot actually reach the whole history. Every scan
+    therefore revises the carried-over verdicts rather than replacing them: comments the scan
+    reaches get a fresh verdict, older ones keep theirs. ``rescan`` drops the watermark so the
+    scan reaches as far back as GitHub allows, e.g. after the trusted-author set grows.
+
     Returns the scoreboards, the rejected comments as {id: reason}, and the instant the scan
     covers up to. Rejections are kept per comment id rather than as bare counts so that a
     re-examined comment replaces its own earlier verdict instead of being counted twice.
     """
     now = now or datetime.now(timezone.utc)
-    since = scoreboard_watermark(previous, now)
+    since = None if rescan else scoreboard_watermark(previous, now)
     marker = json.dumps(SCOREBOARD_MARKER)
     # Descending, so a future run that does hit GitHub's pagination cap loses the oldest
     # comments rather than the newest. `--paginate` carries these parameters through the
@@ -566,13 +573,14 @@ def fetch_scoreboards(
                 '      and (($meta.pr | floor) == $meta.pr)'
                 '      and ($meta.pr == ($number | tonumber)))}',
     ])
-    # An incremental scan starts from what the previous one established and revises it; a full
-    # scan starts from nothing, which is what makes it able to drop deleted comments.
+    # Every scan starts from what the previous one established and revises it. Starting a
+    # "full" scan from nothing would silently discard everything beyond the pagination cap.
     kept: dict[str, dict] = {}
     rejected: dict[str, str] = {}
-    if since is not None:
-        kept = {entry["id"]: entry for entry in previous["scoreboards"]}
-        rejected = dict(previous.get("rejected_scoreboard_comments_by_id") or {})
+    carried = (previous or {}).get("scoreboards") or []
+    if all("id" in entry for entry in carried):
+        kept = {entry["id"]: entry for entry in carried}
+        rejected = dict((previous or {}).get("rejected_scoreboard_comments_by_id") or {})
 
     for line in raw.splitlines():
         comment = json.loads(line)
@@ -649,7 +657,8 @@ def receipts_reusable(previous: dict | None) -> bool:
     """Whether a snapshot's receipts were collected from exactly the current merge apps.
 
     A snapshot scanned before an app was trusted has skipped that app's receipts, and an
-    incremental scan would never revisit them, so it must be rescanned in full.
+    incremental scan would never revisit them, so it must be rescanned as far back as GitHub
+    paginates. Its existing receipts are still carried forward.
     """
     previous = previous or {}
     return (bool(previous.get("bors_merges_scanned_at"))
@@ -660,20 +669,21 @@ def fetch_bors_merges(repo: str, previous: dict | None = None,
                       now: datetime | None = None) -> tuple[dict[str, str], str]:
     """Success receipt times keyed by PR number, including the entire old history.
 
-    Old snapshots lack this watermark and force a full backfill. Subsequent scans
-    overlap by an hour, like scoreboards, while keeping historical receipts even
-    if the PR's updatedAt has not changed. No timeline-cache invalidation is needed.
+    Incremental scans overlap by an hour, like scoreboards, while keeping historical
+    receipts even if the PR's updatedAt has not changed. A snapshot without a usable
+    watermark scans as far back as GitHub paginates (roughly the last week of comments),
+    so receipts already in the snapshot are always carried forward rather than refetched.
     """
     now = now or datetime.now(timezone.utc)
     scanned = (parse_dt((previous or {}).get("bors_merges_scanned_at"))
                if receipts_reusable(previous) else None)
     since = scanned - SCOREBOARD_OVERLAP if scanned else None
-    merges = dict((previous or {}).get("bors_merges") or {}) if since else {}
+    merges = dict((previous or {}).get("bors_merges") or {})
     query = "per_page=100&sort=created&direction=desc"
     if since:
         query += f"&since={iso_z(since)}"
     print("scanning bors and queue merge receipts" + (f" since {iso_z(since)}" if since
-          else " across the full historical comment archive"), file=sys.stderr)
+          else " as far back as GitHub paginates"), file=sys.stderr)
     raw = run_gh([
         "api", "--paginate", f"repos/{repo}/issues/comments?{query}", "--jq",
         '.[] | select(.user.type == "Bot" and (.user.login | IN('
@@ -708,14 +718,14 @@ def fetch_snapshot(repo: str, previous: dict | None = None) -> dict:
     prs = fetch_prs(repo, previous)
     bors_merges, bors_scanned_at = fetch_bors_merges(repo, previous)
     apply_bors_merges(prs, bors_merges)
-    # Reconsider old rejected scoreboards whenever a merge app's contributors become trusted.
-    scoreboard_previous = previous if receipts_reusable(previous) else None
     trusted_logins = {
         pr["author"] for pr in prs
         if pr.get("merged_at") and pr.get("author") != "unknown"
     }
     scoreboards, rejected, scanned_at = fetch_scoreboards(
-        repo, {pr["number"] for pr in prs}, trusted_logins, scoreboard_previous,
+        repo, {pr["number"] for pr in prs}, trusted_logins, previous,
+        # Reconsider recently rejected scoreboards when a merge app's contributors become trusted.
+        rescan=not receipts_reusable(previous),
     )
     return {
         # 2: pull requests carry `updated_at` and scoreboards carry `id`, both so that the next
