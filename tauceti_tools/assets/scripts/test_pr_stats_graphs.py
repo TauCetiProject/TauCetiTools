@@ -539,12 +539,24 @@ class MetricsTest(unittest.TestCase):
         (_, _, _), path = self.scan("", previous=self.snapshot(scanned_day=9))
         self.assertIn("since=2026-01-08T23", path)
 
-    def test_a_stale_snapshot_forces_a_full_rescan(self):
-        # Deletions are invisible to an incremental scan, so one cannot be carried indefinitely.
+    def test_a_stale_snapshot_rescans_without_dropping_history(self):
+        # The rescan reaches only as far back as GitHub paginates, so verdicts for older
+        # comments must survive it rather than vanish from the charts.
         stale = self.snapshot(scanned_day=1)
-        (boards, _, _), path = self.scan("", previous=stale)
+        (boards, _, _), path = self.scan(self.row("2"), previous=stale)
         self.assertNotIn("since=", path)
-        self.assertEqual(boards, [])
+        self.assertEqual(sorted(item["id"] for item in boards), ["1", "2"])
+
+    def test_a_forced_rescan_keeps_history_and_revises_what_it_reaches(self):
+        previous = self.snapshot(entries=(("1", 7, "trusted"),),
+                                 rejected={"2": "untrusted_author"})
+        with patch.object(stats, "run_gh", return_value=self.row("2")) as run:
+            boards, rejected, _ = stats.fetch_scoreboards(
+                "example/project", {7}, {"trusted"}, previous,
+                datetime(2026, 1, 10, tzinfo=UTC), rescan=True)
+        self.assertNotIn("since=", run.call_args.args[0][2])
+        self.assertEqual(sorted(item["id"] for item in boards), ["1", "2"])
+        self.assertEqual(rejected, {})
 
     def test_a_snapshot_without_comment_ids_forces_a_full_rescan(self):
         # Without ids there is no way to revise one comment's verdict, so nothing may be kept.
@@ -631,7 +643,7 @@ class MetricsTest(unittest.TestCase):
         ):
             stats.fetch_snapshot("example/project")
         fetch.assert_called_once_with(
-            "example/project", {1, 2, 3}, {"merged-author"}, None,
+            "example/project", {1, 2, 3}, {"merged-author"}, None, rescan=True,
         )
 
     def test_thousands_of_contributors_are_bounded(self):
@@ -705,13 +717,14 @@ class BorsMergesTest(unittest.TestCase):
             merges, _ = stats.fetch_bors_merges("o/r")
         self.assertEqual(merges, {"43": timestamp(9)})
 
-    def test_snapshot_without_queue_receipts_rescans_full_history(self):
+    def test_snapshot_without_queue_receipts_rescans_but_keeps_bors_receipts(self):
         now = stats.parse_dt(timestamp(15))
         bors_only = {"bors_merges_scanned_at": timestamp(14), "bors_merges": {"42": timestamp(9)}}
-        with patch.object(stats, "run_gh", return_value='') as run:
+        queue = json.dumps({"number": 43, "created_at": timestamp(12)})
+        with patch.object(stats, "run_gh", return_value=queue) as run:
             merges, _ = stats.fetch_bors_merges("o/r", bors_only, now)
         self.assertNotIn("since=", run.call_args.args[0][2])
-        self.assertEqual(merges, {})
+        self.assertEqual(merges, {"42": timestamp(9), "43": timestamp(12)})
 
     def test_old_snapshot_forces_full_history_and_new_one_keeps_receipts(self):
         now = stats.parse_dt(timestamp(15))
@@ -771,7 +784,8 @@ class BorsMergesTest(unittest.TestCase):
                            return_value=({"42": timestamp(9)}, timestamp(10))),
               patch.object(stats, "fetch_scoreboards", return_value=([], {}, timestamp(10))) as scan):
             snapshot = stats.fetch_snapshot("o/r", old)
-        scan.assert_called_once_with("o/r", {42}, {"bors-only-author"}, None)
+        # The rescan revises the carried-over scoreboards rather than starting from nothing.
+        scan.assert_called_once_with("o/r", {42}, {"bors-only-author"}, old, rescan=True)
         self.assertEqual(snapshot["prs"][0]["merge_source"], "bors")
 
 
