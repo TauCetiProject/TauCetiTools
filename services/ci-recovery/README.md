@@ -4,7 +4,8 @@ The Actions sweep remains a fallback. Its nominal hourly schedule can be delayed
 or dropped for hours, and its twenty-dispatch limit cannot drain a large backlog.
 Run this systemd timer on the authoritative queue host to check every five minutes
 and recover up to forty missing builds per pass, across all authors. Systemd
-serializes passes. Ordinary workflow routing and runner capacity still apply.
+serializes passes. Ordinary workflow routing and runner capacity still apply. A pass stops before
+consuming the last 1,500 requests of the shared installation API budget.
 
 Install an immutable copy of this Tools checkout under
 `~/TauCetiCIRecovery/releases/<revision>` and point `~/TauCetiCIRecovery/current`

@@ -216,6 +216,15 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.recover(api, apply=True), [])
         self.assertEqual(api.writes, [])
 
+    def test_shared_api_reserve_stops_dispatch_and_next_pass_can_resume(self):
+        api = GitHub()
+        api.stats = {"read": {"buckets": {"core": {"remaining": "1499"}}}}
+        self.assertEqual(self.recover(api, apply=True, api_reserve=1500), [])
+        self.assertEqual(api.writes, [])
+        api.stats["read"]["buckets"]["core"]["remaining"] = "5000"
+        self.assertEqual(len(self.recover(api, apply=True, api_reserve=1500)), 1)
+        self.assertEqual(len(api.writes), 1)
+
     def test_ignored_label_events_do_not_block_recovery(self):
         ignored = run()
         ignored.update(display_title="Ignored label event 12", status="in_progress")
