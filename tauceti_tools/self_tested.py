@@ -1,4 +1,10 @@
-"""The manual self-tested PR route. Staging still builds and audits every candidate."""
+"""The manual self-tested PR route. Staging still builds and audits every candidate.
+
+Ordinary PRs qualify with mathematics-only diffs from a team member. Automatic
+Mathlib bumps (the review bot's `bump-mathlib/` branches in the base repository)
+qualify when a team member applied the label, the diff touches only the library
+and the Lake pins, and the packaged check-bump.sh accepts the pins.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +18,9 @@ CONTEXT = "self-tested"
 DESCRIPTION = "PR CI skipped: self-tested."
 DEFAULT_TEAM = "TauCetiProject/self-tested"
 EXCLUDED_LABELS = {"full-lint", "lint-repair"}
+BUMP_BRANCH = "bump-mathlib/"
+BUMP_AUTHOR = "tauceti-review-bot[bot]"  # bump_latest.BOT opens every automatic bump.
+PIN_FILES = ("lake-manifest.json", "lean-toolchain")
 
 
 def context(number):
@@ -28,8 +37,20 @@ def label_names(labels):
 
 
 def requested(labels, branch=""):
+    """A `bump-mathlib/` branch is requested here, but qualifies only as an `automatic_bump`."""
     names = label_names(labels)
-    return LABEL in names and not names & EXCLUDED_LABELS and not branch.startswith(("bump-mathlib/", "lint-repair/"))
+    return LABEL in names and not names & EXCLUDED_LABELS and not branch.startswith("lint-repair/")
+
+
+def automatic_bump(pr, repo):
+    """The review bot's own Mathlib bump PR, pushed to a branch of the base repository."""
+    head = pr.get("head") or {}
+    return bool(
+        str(head.get("ref") or "").startswith(BUMP_BRANCH)
+        and repo
+        and (head.get("repo") or {}).get("full_name") == repo
+        and (pr.get("user") or {}).get("login") == BUMP_AUTHOR
+    )
 
 
 def latest_status(rows, context=CONTEXT):
@@ -76,6 +97,7 @@ def observe(repo, number, head, read=gh_read):
             or pr.get("head", {}).get("sha") != head
             or pr.get("base", {}).get("ref") != os.environ.get("TAUCETI_BASE_BRANCH", "main")
             or not requested(pr.get("labels"), pr.get("head", {}).get("ref", ""))
+            or (pr.get("head", {}).get("ref", "").startswith(BUMP_BRANCH) and not automatic_bump(pr, repo))
         ):
             return False
         rows = read(f"repos/{repo}/commits/{head}/status?per_page=100").get("statuses", [])
@@ -92,6 +114,13 @@ def observe(repo, number, head, read=gh_read):
 
 def allowed_paths(paths, prefix="TauCeti/"):
     return bool(paths) and all(p.startswith(prefix) and "\n" not in p and "\r" not in p for p in paths)
+
+
+def allowed_bump_paths(paths, prefix="TauCeti/"):
+    """Library paths plus the Lake pins, changing at least one pin. Lakefiles never qualify."""
+    return bool(set(paths) & set(PIN_FILES)) and all(
+        (p.startswith(prefix) or p in PIN_FILES) and "\n" not in p and "\r" not in p for p in paths
+    )
 
 
 def in_staging(repo, number, head):

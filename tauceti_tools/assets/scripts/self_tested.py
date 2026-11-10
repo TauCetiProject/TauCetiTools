@@ -4,15 +4,22 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
+import subprocess
+import tempfile
 from pathlib import Path
 
 from github_api import APIError, Deferred, GitHub
 
 from tauceti_tools.self_tested import (
+    BUMP_BRANCH,
     DESCRIPTION,
+    PIN_FILES,
+    allowed_bump_paths,
     allowed_paths,
+    automatic_bump,
     in_staging,
     label_names,
     latest_status,
@@ -37,6 +44,80 @@ def recent_label(api, repo, number):
     latest = max(e.get("created_at", "") for e in labelled)
     at = datetime.fromisoformat(latest.replace("Z", "+00:00")).astimezone(timezone.utc).timestamp()
     return time.time() - at < 300
+
+
+def labeller(api, repo, number):
+    """The actor of the latest `self-tested` labeled event, or None when unreadable."""
+    try:
+        events = api.items(f"repos/{repo}/issues/{number}/events?per_page=100")
+        labelled = [
+            e for e in events if e.get("event") == "labeled" and (e.get("label") or {}).get("name") == "self-tested"
+        ]
+        if not labelled:
+            return None
+        latest = max(labelled, key=lambda e: (e.get("created_at") or "", e.get("id") or 0))
+        return (latest.get("actor") or {}).get("login") or None
+    except (APIError, Deferred, OSError, ValueError, TypeError, AttributeError, KeyError, RuntimeError):
+        return None  # Ordinary CI remains available when the label's author cannot be read.
+
+
+# Only these files feed check-bump.sh; candidate code is never fetched or run.
+GUARD_FILES = ("lakefile.toml", "lakefile.lean", *PIN_FILES)
+
+
+def fetch_guard_files(api, repo, sha, directory):
+    for name in GUARD_FILES:
+        try:
+            data = api.request("GET", f"repos/{repo}/contents/{name}?ref={sha}")
+        except APIError as error:
+            if error.status == 404:
+                continue  # A missing file stays absent, as check-bump.sh expects.
+            raise
+        if not isinstance(data, dict) or data.get("type") != "file" or data.get("encoding") != "base64":
+            raise RuntimeError(f"{name} at {sha} is not a readable file")
+        (directory / name).write_bytes(base64.b64decode(data.get("content") or ""))
+
+
+def check_bump(api, repo, head):
+    """Run the packaged check-bump.sh on main's tip, the merge base and the head.
+
+    Returns (verdict, output): True or False is check-bump.sh's verdict, None means
+    its inputs could not be read. Each directory holds only the four Lake files.
+    """
+    try:
+        base = api.request("GET", f"repos/{repo}/branches/main")["commit"]["sha"]
+        merge_base = api.request("GET", f"repos/{repo}/compare/{base}...{head}?per_page=1")["merge_base_commit"]["sha"]
+        # The upstream queries inside check-bump.sh use the same read credential.
+        env = api._credential(True)[1] if hasattr(api, "_credential") else dict(os.environ)
+        for name in ("TAUCETI_TEAM_TOKEN", "SELF_TESTED_TEAM_TOKEN", "SELF_TESTED_WRITE_TOKEN"):
+            env.pop(name, None)
+        with tempfile.TemporaryDirectory(prefix="tauceti-self-tested-bump-") as tmp:
+            dirs = []
+            for name, sha in (("base", base), ("mergebase", merge_base), ("pr", head)):
+                directory = Path(tmp) / name
+                directory.mkdir()
+                fetch_guard_files(api, repo, sha, directory)
+                dirs.append(str(directory))
+            result = subprocess.run(
+                ["bash", str(Path(__file__).resolve().with_name("check-bump.sh")), *dirs],
+                cwd=tmp,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+    except (
+        APIError,
+        Deferred,
+        OSError,
+        ValueError,
+        TypeError,
+        KeyError,
+        RuntimeError,
+        subprocess.SubprocessError,
+    ) as error:
+        return None, f"bump-guard inputs unavailable: {type(error).__name__}"
+    return result.returncode == 0, result.stdout + result.stderr
 
 
 def request_ordinary(api, repo, number):
@@ -114,7 +195,11 @@ def decide(api, repo, number, event=None, *, reconcile=False):
             raise RuntimeError("team membership unavailable")
         return json.loads(result.stdout)
 
-    if eligible:
+    bump = branch.startswith(BUMP_BRANCH)
+    if eligible and bump:
+        # The bot authors every bump; the trusted assertion is whoever applied the label.
+        eligible = automatic_bump(pr, repo) and membership(repo, labeller(api, repo, number), read_team)
+    elif eligible:
         eligible = membership(repo, pr.get("user", {}).get("login"), read_team)
     files = []
     if eligible:
@@ -125,7 +210,7 @@ def decide(api, repo, number, event=None, *, reconcile=False):
         eligible = (
             len(files) == pr.get("changed_files")
             and len(files) <= 2000
-            and allowed_paths(paths)
+            and (allowed_bump_paths(paths) if bump else allowed_paths(paths))
             and pr.get("additions", 2001) <= 2000
             and pr.get("deletions", 2001) <= 2000
             and all(
@@ -133,6 +218,11 @@ def decide(api, repo, number, event=None, *, reconcile=False):
                 for f in files
             )
         )
+    guard = None
+    if eligible and bump:
+        guard, output = check_bump(api, repo, head)
+        print(output)
+        eligible = guard is True
     after = api.request("GET", f"repos/{repo}/pulls/{number}")
     if (
         after["head"]["sha"] != head
@@ -141,13 +231,36 @@ def decide(api, repo, number, event=None, *, reconcile=False):
         != (names & {"self-tested", "full-lint", "lint-repair"})
     ):
         return False
+    target_url = f"https://github.com/{repo}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+    if guard is False:
+        api.request(
+            "POST",
+            f"repos/{repo}/statuses/{head}",
+            {
+                "state": "failure",
+                "context": "bump-guard",
+                "description": "self-tested: check-bump.sh rejected the Lake pins; ordinary PR CI required",
+                "target_url": target_url,
+            },
+            idempotent=True,
+        )
     if eligible:
         # These statuses describe actual policy results, not a fictional build.
-        for context, description in (
-            (assertion_context, DESCRIPTION),
-            ("scope", "self-tested: mathematics-only diff"),
-            ("bump-guard", "self-tested: dependency and toolchain pins unchanged"),
-        ):
+        # The bump-guard result is posted before the assertion that relies on it.
+        statuses = (
+            (
+                ("bump-guard", "self-tested: check-bump.sh validated the Lake pins"),
+                ("scope", "self-tested: mathematics plus Lake pins"),
+                (assertion_context, DESCRIPTION),
+            )
+            if bump
+            else (
+                (assertion_context, DESCRIPTION),
+                ("scope", "self-tested: mathematics-only diff"),
+                ("bump-guard", "self-tested: dependency and toolchain pins unchanged"),
+            )
+        )
+        for context, description in statuses:
             if latest_status(rows, context).get("state") == "success":
                 continue
             api.request(
@@ -157,7 +270,7 @@ def decide(api, repo, number, event=None, *, reconcile=False):
                     "state": "success",
                     "context": context,
                     "description": description,
-                    "target_url": f"https://github.com/{repo}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+                    "target_url": target_url,
                 },
                 idempotent=True,
             )
