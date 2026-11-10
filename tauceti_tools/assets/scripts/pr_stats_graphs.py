@@ -489,7 +489,7 @@ SCOREBOARD_FULL_RESCAN_DAYS = 7
 # cannot fall into the gap between the two.
 SCOREBOARD_OVERLAP = timedelta(hours=1)
 # Requests per run, shared by the walk that keeps up and a full walk in progress. A full walk
-# (about 1,300 pages in 2026-11) therefore takes several runs, within the Actions token's 1,000
+# (1,147 pages on 2026-11-10) therefore takes several runs, within the Actions token's 1,000
 # REST requests an hour; the scoreboards it replaces stay published until it finishes.
 SCOREBOARD_PAGES_PER_RUN = 300
 COMMENT_PAGE_SIZE = 100
