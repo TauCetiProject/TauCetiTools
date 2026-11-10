@@ -150,6 +150,7 @@ class StockLakePublication(unittest.TestCase):
             env = {
                 **os.environ,
                 "CURL_CA_BUNDLE": str(cert),
+                "ELAN_TOOLCHAIN": TOOLCHAIN,
                 "LAKE_ARTIFACT_CACHE": "true",
                 "LAKE_RESTORE_ARTIFACTS": "true",
             }
