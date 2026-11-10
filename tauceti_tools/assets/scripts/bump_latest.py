@@ -25,7 +25,8 @@ against it. A fixed target still ages, so once the active bump's target Mathlib 
 older than `BUMP_RETARGET_HOURS` (by upstream committer date) the bump is retargeted: a new
 `bump-mathlib/<target>` branch starts from the old bump's head, so every source repair
 carries over, and adds one commit moving the manifest and toolchain to the newest target
-chosen exactly as for a fresh bump. The new PR is opened and the old one closed. A bump in
+chosen as for a fresh bump but counted from the old target, so release commits already
+behind the old target are passed. The new PR is opened and the old one closed. A bump in
 the merge queue is never retargeted: an approved PR waiting for insertion would be
 cancelled, and an inserted one lands regardless. Drafts and held PRs are left alone too.
 
@@ -658,7 +659,9 @@ def selection(current, active, obsolete):
         if len(active) > 1:
             print(f"Preserving active bumps {[p['number'] for p in active]}.")
         return None, False
-    selected = select_target(current)
+    # Select after the old target, not main's pin: a stale bump stuck on a release commit would
+    # otherwise select that same release again, and release stops behind it are already passed.
+    selected = select_target(stale[1])
     if selected and relationship(stale[1], selected["head_sha"]) != "ahead":
         print(f"Not retargeting: {selected['head_sha']} is not ahead of {stale[1]}.")
         selected = None

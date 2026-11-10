@@ -577,6 +577,20 @@ class RetargetTests(unittest.TestCase):
         with patch.object(bl, "select_target", side_effect=AssertionError("no selection")):
             self.assertEqual(bl.selection(OLD, [github.old, github.new], []), (None, True))
 
+    def test_retarget_selection_counts_from_the_old_target(self):
+        # A bump stuck on a release commit must move past it, so selection starts at the old
+        # target (NEW), not main's pin (OLD), which would select the same release again.
+        github = FakeGitHub()
+        seen = []
+        with (
+            patch.object(bl, "api", side_effect=github.api),
+            patch.object(bl, "queue_waiting", return_value=set()),
+            patch.object(bl, "select_target", side_effect=lambda start: seen.append(start) or run(TIP)),
+            patch.object(bl, "relationship", side_effect=lambda a, b: "ahead" if a != b else "identical"),
+        ):
+            self.assertEqual(bl.selection(OLD, [github.old], []), (run(TIP), True))
+        self.assertEqual(seen, [NEW])
+
     def test_unreadable_queue_status_fails_closed(self):
         with patch.object(bl.urllib.request, "urlopen", side_effect=OSError("down")):
             self.assertIn("unreadable", bl.hold_reason(pr(number=7)))
