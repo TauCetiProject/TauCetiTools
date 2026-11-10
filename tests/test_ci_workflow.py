@@ -25,6 +25,35 @@ def shell_for(name, workflow=WORKFLOW):
 
 
 class WorkflowIdentityTests(unittest.TestCase):
+    def test_required_batch_status_failure_remains_visible_to_retry_workflow(self):
+        report = shell_for("Report build and bump-guard statuses to the PR head commit")
+        start = report.index('if [ "${SOURCE_CANDIDATE:-false}" != true ]; then\n  # Scope')
+        tail = report[start:].replace("${{ env.IS_BATCH }}", "true")
+        self.assertIn("CI_STATUS_MAX_WAIT=600", tail)
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "python3"
+            executable.write_text('#!/bin/sh\nexit "${STATUS_RC}"\n')
+            executable.chmod(0o755)
+            for rc in (0, 1):
+                env = dict(
+                    os.environ,
+                    PATH=directory + os.pathsep + os.environ["PATH"],
+                    STATUS_RC=str(rc),
+                    RUNNER_TEMP=directory,
+                    SOURCE_CANDIDATE="false",
+                )
+                run = subprocess.run(
+                    ["bash", "-eu", "-c", "post_fail=0; state=success\n" + tail],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(run.returncode, rc, run.stdout + run.stderr)
+        trigger = yaml.safe_load((ROOT / ".github/workflows/retry-ci-status.yml").read_text())["jobs"]["publish"]["if"]
+        self.assertIn("workflow_run.conclusion == 'failure'", trigger)
+        self.assertIn("workflow_run.conclusion == 'success'", trigger)
+        self.assertIn("startsWith(github.event.workflow_run.display_title, 'bors branch=')", trigger)
+
     def resolve(self, event, *, git_fails=False, requested_pr="123"):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -128,10 +157,10 @@ else:
 
     def test_complete_source_fetch_is_separate_and_retains_known_identity_on_failure(self):
         shell = shell_for("Fetch complete immutable source histories")
-        self.assertIn('exec python3 gate/scripts/ci_checkout.py fetch', shell)
-        self.assertNotIn('$(python3', shell)
+        self.assertIn("exec python3 gate/scripts/ci_checkout.py fetch", shell)
+        self.assertNotIn("$(python3", shell)
         report = shell_for("Report build and bump-guard statuses to the PR head commit")
-        self.assertLess(report.index('steps.source_fetch.outcome'), report.index('elif [ "$identity_ok" != 1 ]'))
+        self.assertLess(report.index("steps.source_fetch.outcome"), report.index('elif [ "$identity_ok" != 1 ]'))
         for failed in (False, True):
             with self.subTest(failed=failed), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -235,7 +264,22 @@ else:
                 directory = Path(temp)
                 (directory / "scripts").mkdir()
                 data = json.dumps({"artifacts": rows, "total_count": count})
-                (directory / "scripts/github_api.py").write_text("print(" + repr(data) + ")\n")
+                run = dict(
+                    id=99,
+                    path=".github/workflows/pr-build.yml",
+                    event="repository_dispatch",
+                    status="completed",
+                    conclusion="success",
+                    repository={"full_name": "owner/Project"},
+                    head_repository={"full_name": "owner/Project"},
+                )
+                (directory / "scripts/github_api.py").write_text(
+                    "import sys\nprint("
+                    + repr(data)
+                    + ' if "/artifacts?" in sys.argv[1] else '
+                    + repr(json.dumps(run))
+                    + ")\n"
+                )
                 output = directory / "output"
                 result = subprocess.run(
                     ["bash", "-euo", "pipefail", "-c", shell],
@@ -247,6 +291,7 @@ else:
                         "CI_STATUS_SOURCE_RUN_ID": "99",
                         "CI_STATUS_SOURCE_ATTEMPT": "1",
                         "GITHUB_REPOSITORY": "owner/Project",
+                        "DEFAULT_BRANCH": "main",
                         "RUNNER_TEMP": temp,
                         "GITHUB_OUTPUT": str(output),
                     },
@@ -255,6 +300,62 @@ else:
                 if expected:
                     outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
                     self.assertEqual(outputs["ids"], "41" if rows[0]["name"] == "ci-status-intents-sandbox-1" else "")
+
+    def test_reporting_replay_rejects_untrusted_original_runs_before_credentials(self):
+        shell = shell_for(
+            "Discover retained intents from this exact original run", ROOT / ".github/workflows/retry-ci-status.yml"
+        )
+        trusted = dict(
+            id=99,
+            path=".github/workflows/pr-build.yml",
+            event="repository_dispatch",
+            status="completed",
+            conclusion="success",
+            repository={"full_name": "owner/Project"},
+            head_repository={"full_name": "owner/Project"},
+        )
+        fork_pr = {"event": "pull_request_target", "head_repository": {"full_name": "fork/Project"}}
+        cases = (
+            ("workflow_dispatch", {}, True),
+            ("workflow_dispatch", {"event": "pull_request"}, False),
+            ("workflow_dispatch", {"path": ".github/workflows/other.yml"}, False),
+            ("workflow_dispatch", {"head_repository": {"full_name": "fork/Project"}}, False),
+            ("workflow_dispatch", {"status": "in_progress"}, False),
+            ("workflow_dispatch", {"id": 100}, False),
+            ("workflow_dispatch", {"event": "workflow_dispatch", "head_branch": "untrusted"}, False),
+            ("workflow_dispatch", {"event": "workflow_dispatch", "head_branch": "main"}, True),
+            ("workflow_dispatch", fork_pr, False),
+            ("workflow_run", fork_pr, True),
+            ("workflow_run", dict(fork_pr, repository={"full_name": "fork/Project"}), False),
+        )
+        for event, changes, allowed in cases:
+            with self.subTest(event=event, changes=changes), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "scripts").mkdir()
+                run = dict(trusted, **changes)
+                artifacts = dict(
+                    total_count=1, artifacts=[dict(id=41, name="ci-status-intents-sandbox-1", size_in_bytes=100)]
+                )
+                (root / "scripts/github_api.py").write_text(
+                    "import json,sys\nprint(json.dumps("
+                    + repr(artifacts)
+                    + ' if "/artifacts?" in sys.argv[1] else '
+                    + repr(run)
+                    + "))\n"
+                )
+                env = dict(
+                    os.environ,
+                    CI_STATUS_SOURCE_RUN_ID="99",
+                    CI_STATUS_SOURCE_ATTEMPT="1",
+                    GITHUB_REPOSITORY="owner/Project",
+                    GITHUB_EVENT_NAME=event,
+                    DEFAULT_BRANCH="main",
+                    RUNNER_TEMP=directory,
+                    GITHUB_OUTPUT=str(root / "out"),
+                )
+                result = subprocess.run(["bash", "-eu", "-c", shell], cwd=root, env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, allowed, result.stderr)
+                self.assertEqual((root / "out").exists(), allowed)
 
     def test_generated_wrapper_exposes_optional_credential_configuration(self):
         wrapper = (ROOT / "tauceti_tools/assets/project/.github/workflows/pr-build.yml").read_text()
@@ -285,8 +386,10 @@ class ParsingContextWorkflowTests(unittest.TestCase):
         self.assertLess(lint, build)
         self.assertIn("hashFiles('gate/scripts/lean_source.py')", text[restore:lint])
         self.assertIn("steps.pr.outputs.base_sha", text[restore:lint])
-        self.assertIn('--context-cache ".ci-dot-notation-context/context.json"',
-                      shell_for("Dot-notation namespace lint (Mathlib type namespaces stay at root)"))
+        self.assertIn(
+            '--context-cache ".ci-dot-notation-context/context.json"',
+            shell_for("Dot-notation namespace lint (Mathlib type namespaces stay at root)"),
+        )
         self.assertNotIn("Save main's dot-notation", text)
 
     def test_template_saves_context_only_from_the_default_branch(self):
@@ -308,16 +411,17 @@ class DotContextProducerTests(unittest.TestCase):
         text = workflow.read_text()
         self.assertNotIn("Restore dot-notation parsing context", text)
         self.assertIn("rm -rf .ci-dot-notation-context", text)
-        self.assertLess(text.index("Save main's dot-notation parsing context"),
-                        text.index("      - name: Build"))
+        self.assertLess(text.index("Save main's dot-notation parsing context"), text.index("      - name: Build"))
         self.assertNotIn("Save main's dot-notation parsing context", WORKFLOW.read_text())
 
 
 class PreflightScopeTests(unittest.TestCase):
     def test_pr_scope_and_full_gate_fallbacks(self):
         for batch, bump, scoped, unmatched in [
-            (False, False, True, ""), (True, False, True, ""),
-            (False, True, True, ""), (False, False, False, ""),
+            (False, False, True, ""),
+            (True, False, True, ""),
+            (False, True, True, ""),
+            (False, False, False, ""),
             (False, False, True, "web/Main.lean\n"),
             (False, False, True, None),
         ]:
@@ -330,12 +434,20 @@ class PreflightScopeTests(unittest.TestCase):
                         (root / "unmatched.txt").write_text(unmatched)
                     envfile = root / "env"
                     shell = shell_for("Decide the audit scope").replace(
-                        "${{ env.IS_BATCH }}", "true" if batch else "false")
-                    out = subprocess.run(["bash", "-euo", "pipefail", "-c", shell],
-                        text=True, capture_output=True, env={**os.environ,
-                        "GITHUB_ENV": str(envfile), "LINT_SCOPE_DIR": str(root),
-                        "LINT_ONLY_MODULES": str(modules) if scoped else "",
-                        "BUMP": "1" if bump else "0"})
+                        "${{ env.IS_BATCH }}", "true" if batch else "false"
+                    )
+                    out = subprocess.run(
+                        ["bash", "-euo", "pipefail", "-c", shell],
+                        text=True,
+                        capture_output=True,
+                        env={
+                            **os.environ,
+                            "GITHUB_ENV": str(envfile),
+                            "LINT_SCOPE_DIR": str(root),
+                            "LINT_ONLY_MODULES": str(modules) if scoped else "",
+                            "BUMP": "1" if bump else "0",
+                        },
+                    )
                     self.assertEqual(out.returncode, 0, out.stderr)
                     values = dict(line.split("=", 1) for line in envfile.read_text().splitlines())
                     fast = not batch and not bump and scoped and unmatched == ""
