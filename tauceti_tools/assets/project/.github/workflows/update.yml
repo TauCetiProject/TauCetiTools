@@ -1,7 +1,8 @@
 name: Update Dependencies
 
 # Pick a recent fully cached master commit, then keep it fixed while workers repair
-# TauCeti. downstream-reports remains external reporting, never a target selector.
+# TauCeti. Once that target is two days old, retarget the bump from its repaired head.
+# downstream-reports remains external reporting, never a target selector.
 on:
   schedule:
     - cron: "17 * * * *"

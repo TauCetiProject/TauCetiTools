@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Bound queued fleet startup using another attempt of the SAME workflow run.
+"""Bound queued staging startup using another attempt of the SAME workflow run.
 
 Using rerun instead of repository_dispatch preserves bors's unique staging-run
 identity. The picker skips machines whose earlier attempt never acquired a runner.
 Force-cancel bypasses always() finalizers; failed recovery publishes a fenced
-infrastructure verdict. PR retries require the original head to remain current.
+infrastructure verdict. PR jobs wait in their shared pool without this watcher.
 """
 
 import os
@@ -19,8 +19,6 @@ from github_api import APIError, Deferred, GitHub
 TITLE = re.compile(
     r"^bors branch=[^ ]+ batch=[1-9][0-9]* head=(?P<head>[0-9a-f]{40}) base=[0-9a-f]{40}$"
 )
-
-PR_TITLE = re.compile(r"^pr-build pr=(?P<pr>[1-9][0-9]*) head=(?P<head>[0-9a-f]{40})$")
 
 _client = None
 
@@ -39,9 +37,8 @@ def api(path, data=None):
 def eligible(run, *, policy=False):
     """Accept immutable build identities from the trusted repository and workflow."""
     staging = run.get("event") == "repository_dispatch" and bool(TITLE.fullmatch(run.get("display_title", "")))
-    pr = policy and run.get("event") in ("pull_request_target", "repository_dispatch") and bool(PR_TITLE.fullmatch(run.get("display_title", "")))
     attempt = run.get("run_attempt")
-    return ((staging or pr) and type(attempt) is int and attempt >= 1
+    return (staging and type(attempt) is int and attempt >= 1
             and (policy or attempt == 1) and run.get("path") == ".github/workflows/pr-build.yml"
             and run.get("repository", {}).get("full_name") == "TauCetiProject/TauCeti")
 
@@ -143,9 +140,6 @@ def handoff(run_id, run, *, fetch, clock, sleep, policy=False):
     latest = fetch(f"/actions/runs/{run_id}")
     if latest.get("run_attempt") != attempt or latest.get("status") == "completed":
         return "already-terminal-or-retried"
-    # Confirm PR metadata is readable before cancelling; repeat the head guard
-    # immediately before rerun to detect pushes during cancellation.
-    current_pr_head(run, fetch)
     # Mutations are not automatically retried after an ambiguous HTTP failure.
     try:
         fetch(f"/actions/runs/{run_id}/force-cancel", {})
@@ -173,8 +167,6 @@ def handoff(run_id, run, *, fetch, clock, sleep, policy=False):
                 # A real build raced acquisition; normal bors recovery owns it.
                 failure_status(run_id, run, fetch=fetch, policy=policy)
                 return "runner-acquired-during-cancellation"
-            if PR_TITLE.fullmatch(run.get("display_title", "")) and not current_pr_head(run, fetch):
-                return "superseded-pr-cancelled"
             try:
                 fetch(f"/actions/runs/{run_id}/rerun", {})
                 return "rerun-with-updated-placement-requested" if policy else "rerun-on-namespace-requested"
@@ -191,11 +183,6 @@ def handoff(run_id, run, *, fetch, clock, sleep, policy=False):
     raise TimeoutError("Force cancellation not confirmed; bors infrastructure recovery requested")
 
 
-def current_pr_head(run, fetch):
-    match = PR_TITLE.fullmatch(run.get("display_title", ""))
-    return not match or fetch(f"/pulls/{match.group('pr')}")["head"]["sha"] == match.group("head")
-
-
 def failure_status(run_id, original, *, fetch=api, policy=False):
     """Report failed handoff only for the verified original attempt.
 
@@ -206,12 +193,7 @@ def failure_status(run_id, original, *, fetch=api, policy=False):
     if (not eligible(latest, policy=policy) or latest.get("run_attempt") != original.get("run_attempt")
             or latest["display_title"] != original["display_title"]):
         return
-    match = TITLE.fullmatch(original["display_title"]) or PR_TITLE.fullmatch(original["display_title"])
-    try:
-        if not current_pr_head(original, fetch):
-            return
-    except (OSError, HTTPException, ValueError, KeyError, TypeError, RuntimeError):
-        return  # Unknown current head cannot authorize status publication.
+    match = TITLE.fullmatch(original["display_title"])
     head = match.group("head")
     fetch(f"/statuses/{head}", dict(
         context="build", state="failure", description="fleet startup recovery failed; retry this build",

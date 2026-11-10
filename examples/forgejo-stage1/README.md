@@ -97,3 +97,13 @@ Stage 1. Native analytics and remaining development automations belong to Stage
 2; classify their temporary replacements in the cutover package. A generated
 workflow is not proof of a working publication: the isolated rehearsal must
 verify real builds, cache upload/download, docs provenance and usable HTTP output.
+
+Keep the clean-build cache audit when retaining main's cache restore. The qualified
+setup also accepts `nightly-verify.yml` on protected execution main, subject to the
+same source, execution, harness and exact checkout checks. Adapt the existing
+nightly workflow with `source-mirror-enabled: true`, pin its tooling coherently,
+and check out the triggering commit by SHA rather than a moving `main`. Its clean
+and cache-reference builds must use that same commit. Retire or replace any legacy
+runner selector separately; qualifying setup does not make old source-writing
+helpers portable. The generator still writes only the main, API-docs and Pages
+templates, so project-specific nightly audit and sandbox steps must be preserved.

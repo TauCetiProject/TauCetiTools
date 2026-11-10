@@ -61,9 +61,16 @@ It requires an authenticated `gh` CLI. In GitHub Actions, set `GH_TOKEN` to
   so a verdict of none is kept until the PR's `updatedAt` moves, and at most 500 PRs are
   checked a run, newest closures first; a first run works through the backlog over several
   runs. A run that keeps no snapshot (no `--dump-data`), and the per-roadmap chart's live
-  path, check every candidate at once. Until a run has checked every candidate under the current rule, the next run also
-  rescans scoreboards in full, so the run that finishes reconsiders every contributor whose
-  merges only the receipts revealed.
+  path, check every candidate at once.
+  Scoreboards come from the repository comment listing, which GitHub stops paginating after
+  300 pages (30,000 comments, here roughly the last week), so they cannot be refetched from
+  the start of the project. They are always carried forward from the cached snapshot;
+  losing that cache loses the history beyond the pagination limit. Until a run has checked
+  every receipt candidate under the current rule, the next run rescans scoreboards as far
+  back as GitHub allows, so the run that finishes reconsiders every contributor whose merges
+  only the receipts revealed. Scoreboards are also rescanned that far every seven days,
+  revising the verdicts the scan reaches and keeping older ones. Later runs scan
+  incrementally with an hour overlap.
 - Seven-day metrics use complete UTC calendar days. Merge latency is PR creation to
   merge time among PRs merged in that trailing window. Every chart is PLOTTED through the
   last complete UTC day: regenerated every three hours, a final point holding only part of

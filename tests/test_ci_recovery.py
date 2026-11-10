@@ -59,7 +59,7 @@ class GitHub:
                         isDraft=self.current["draft"],
                         headRefOid=self.current["head"]["sha"],
                     ),
-                    object=dict(status=dict(contexts=[dict(context="build")] if self.build else [])),
+                    object=dict(status=dict(contexts=[dict(context="build", state="SUCCESS")] if self.build else [])),
                 )
             )
         pull = dict(
@@ -83,7 +83,9 @@ class GitHub:
         if "/pulls/" in path:
             return self.current
         if "/commits/" in path:
-            return dict(total_count=int(self.build), statuses=[dict(context="build")] if self.build else [])
+            return dict(
+                total_count=int(self.build), statuses=[dict(context="build", state="SUCCESS")] if self.build else []
+            )
         if "status=" in path:
             self.active_reads += 1
             live = self.fresh_live if self.active_reads > 5 else self.live
@@ -154,7 +156,9 @@ class RecoveryTests(unittest.TestCase):
             number=2,
             headRefOid=HEAD,
             isDraft=False,
-            commits=dict(nodes=[dict(commit=dict(oid=HEAD, status=dict(contexts=[dict(context="build")])))]),
+            commits=dict(
+                nodes=[dict(commit=dict(oid=HEAD, status=dict(contexts=[dict(context="build", state="SUCCESS")])))]
+            ),
         )
         api = GitHub()
         pages = [
@@ -170,18 +174,73 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(query.call_args.args[1]["after"], "next")
 
     def test_only_current_pr_success_with_label_counts_as_preflight(self):
-        pull = dict(number=7, labels=dict(nodes=[dict(name='self-tested')]))
-        commit = dict(status=dict(contexts=[dict(context='self-tested/7', state='SUCCESS')]))
+        pull = dict(number=7, labels=dict(nodes=[dict(name="self-tested")]))
+        commit = dict(status=dict(contexts=[dict(context="self-tested/7", state="SUCCESS")]))
         self.assertTrue(recovery.has_preflight(pull, commit))
-        for other in (dict(pull, number=8), dict(pull, labels=dict(nodes=[])),
-                      dict(pull, labels=dict(nodes=[dict(name='self-tested'), dict(name='full-lint')]))):
+        for other in (
+            dict(pull, number=8),
+            dict(pull, labels=dict(nodes=[])),
+            dict(pull, labels=dict(nodes=[dict(name="self-tested"), dict(name="full-lint")])),
+        ):
             self.assertFalse(recovery.has_preflight(other, commit))
-        commit['status']['contexts'][0]['state'] = 'FAILURE'
+        commit["status"]["contexts"][0]["state"] = "FAILURE"
         self.assertFalse(recovery.has_preflight(pull, commit))
+
+    def test_dead_pending_status_does_not_count_as_a_finished_build(self):
+        pull = dict(number=1)
+        for state in ("PENDING", "pending", ""):
+            with self.subTest(state=state):
+                self.assertFalse(
+                    recovery.has_preflight(pull, dict(status=dict(contexts=[dict(context="build", state=state)])))
+                )
+        for state in ("SUCCESS", "FAILURE", "ERROR"):
+            with self.subTest(state=state):
+                self.assertTrue(
+                    recovery.has_preflight(pull, dict(status=dict(contexts=[dict(context="build", state=state)])))
+                )
+
+    def test_abandoned_pending_status_is_recovered_but_a_live_run_is_not(self):
+        class Pending(GitHub):
+            def graphql(self, query, variables):
+                value = super().graphql(query, variables)
+                if query == recovery.CURRENT:
+                    value["repository"]["object"] = dict(status=dict(contexts=[dict(context="build", state="PENDING")]))
+                return value
+
+        api = Pending()
+        self.assertEqual(len(self.recover(api, apply=True)), 1)
+        self.assertEqual(len(api.writes), 1)
+        active = run()
+        active.update(status="in_progress")
+        api = Pending(live=active)
+        self.assertEqual(self.recover(api, apply=True), [])
+        self.assertEqual(api.writes, [])
+
+    def test_default_sweep_has_no_count_cap_and_explicit_limit_is_optional(self):
+        pulls = [dict(number=number, headRefOid=HEAD, updatedAt=OLD) for number in range(1, 26)]
+        for options, expected in (({}, 25), ({"limit": 0}, 25), ({"limit": 2}, 2)):
+            with self.subTest(options=options):
+                api = GitHub()
+                with (
+                    patch.object(recovery, "inventory", return_value=("main", pulls)),
+                    patch.object(recovery, "still_missing", return_value=True),
+                ):
+                    selected = self.recover(api, apply=True, **options)
+                self.assertEqual(len(selected), expected)
+                self.assertEqual(len(api.writes), expected)
+
+    def test_shared_api_reserve_stops_dispatch_and_next_pass_can_resume(self):
+        api = GitHub()
+        api.stats = {"read": {"buckets": {"core": {"remaining": "1499"}}}}
+        self.assertEqual(self.recover(api, apply=True, api_reserve=1500), [])
+        self.assertEqual(api.writes, [])
+        api.stats["read"]["buckets"]["core"]["remaining"] = "5000"
+        self.assertEqual(len(self.recover(api, apply=True, api_reserve=1500)), 1)
+        self.assertEqual(len(api.writes), 1)
 
     def test_ignored_label_events_do_not_block_recovery(self):
         ignored = run()
-        ignored.update(display_title='Ignored label event 12', status='in_progress')
+        ignored.update(display_title="Ignored label event 12", status="in_progress")
         api = GitHub(live=ignored, history=[ignored])
         self.assertEqual(len(self.recover(api, apply=True)), 1)
         self.assertEqual(len(api.writes), 1)

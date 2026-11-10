@@ -1,0 +1,19 @@
+[Unit]
+Description=Recover missing PR CI across all authors
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/TauCetiCIRecovery/current
+Environment=PATH=%h/.local/bin:/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin
+Environment=SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/TauCetiQueue/.venv/bin/python services/ci-recovery/run.py --repo TauCetiProject/TauCeti --apply --api-reserve 1500
+TimeoutStartSec=45min
+Nice=10
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

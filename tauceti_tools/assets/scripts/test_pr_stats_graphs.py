@@ -541,12 +541,24 @@ class MetricsTest(unittest.TestCase):
         (_, _, _), path = self.scan("", previous=self.snapshot(scanned_day=9))
         self.assertIn("since=2026-01-08T23", path)
 
-    def test_a_stale_snapshot_forces_a_full_rescan(self):
-        # Deletions are invisible to an incremental scan, so one cannot be carried indefinitely.
+    def test_a_stale_snapshot_rescans_without_dropping_history(self):
+        # The rescan reaches only as far back as GitHub paginates, so verdicts for older
+        # comments must survive it rather than vanish from the charts.
         stale = self.snapshot(scanned_day=1)
-        (boards, _, _), path = self.scan("", previous=stale)
+        (boards, _, _), path = self.scan(self.row("2"), previous=stale)
         self.assertNotIn("since=", path)
-        self.assertEqual(boards, [])
+        self.assertEqual(sorted(item["id"] for item in boards), ["1", "2"])
+
+    def test_a_forced_rescan_keeps_history_and_revises_what_it_reaches(self):
+        previous = self.snapshot(entries=(("1", 7, "trusted"),),
+                                 rejected={"2": "untrusted_author"})
+        with patch.object(stats, "run_gh", return_value=self.row("2")) as run:
+            boards, rejected, _ = stats.fetch_scoreboards(
+                "example/project", {7}, {"trusted"}, previous,
+                datetime(2026, 1, 10, tzinfo=UTC), rescan=True)
+        self.assertNotIn("since=", run.call_args.args[0][2])
+        self.assertEqual(sorted(item["id"] for item in boards), ["1", "2"])
+        self.assertEqual(rejected, {})
 
     def test_a_snapshot_without_comment_ids_forces_a_full_rescan(self):
         # Without ids there is no way to revise one comment's verdict, so nothing may be kept.
@@ -632,7 +644,7 @@ class MetricsTest(unittest.TestCase):
         ):
             stats.fetch_snapshot("example/project")
         fetch.assert_called_once_with(
-            "example/project", {1, 2, 3}, {"merged-author"}, None,
+            "example/project", {1, 2, 3}, {"merged-author"}, None, rescan=True,
         )
 
     def test_thousands_of_contributors_are_bounded(self):
@@ -862,8 +874,8 @@ class MergeAppLandingsTest(unittest.TestCase):
         self.assertEqual(snapshot["prs"][0]["merged_at"], timestamp(9, 2))
         self.assertEqual(snapshot["merge_evidence"], stats.MERGE_EVIDENCE)
 
-    def test_new_merge_evidence_rescans_scoreboards_in_full(self):
-        def scoreboard_previous(previous):
+    def test_unsettled_merge_evidence_rescans_scoreboards(self):
+        def rescan(previous):
             prs = [closed(42, 9, rename_event=rename(9), author="app-only-author")]
             with (patch.object(stats, "fetch_prs", return_value=prs),
                   patch.object(stats, "fetch_scoreboards",
@@ -871,17 +883,18 @@ class MergeAppLandingsTest(unittest.TestCase):
                 snapshot = stats.fetch_snapshot("o/r", previous)
             self.assertEqual(scan.call_args.args[2], {"app-only-author"})
             self.assertTrue(snapshot["merge_evidence_complete"])
-            return scan.call_args.args[3]
+            # Scoreboards are always carried forward; a rescan only revises what it reaches.
+            self.assertIs(scan.call_args.args[3], previous)
+            return scan.call_args.kwargs["rescan"]
 
         old = {"repo": "o/r", "scoreboards_scanned_at": timestamp(10),
                "merge_receipt_logins": ["tau-ceti-bors[bot]", "tauceti-queue[bot]"]}
-        self.assertIsNone(scoreboard_previous(old))
+        self.assertTrue(rescan(old))
         # A run that left receipt candidates unchecked may not have found everyone it trusts yet,
         # so the run after it rescans too, whatever the rule.
         unfinished = {**old, "merge_evidence": stats.MERGE_EVIDENCE, "merge_evidence_complete": False}
-        self.assertIsNone(scoreboard_previous(unfinished))
-        current = {**unfinished, "merge_evidence_complete": True}
-        self.assertIs(scoreboard_previous(current), current)
+        self.assertTrue(rescan(unfinished))
+        self.assertFalse(rescan({**unfinished, "merge_evidence_complete": True}))
 
 
 class RoadmapMatrixTest(unittest.TestCase):

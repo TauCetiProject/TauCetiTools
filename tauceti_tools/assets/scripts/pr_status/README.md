@@ -222,7 +222,8 @@ while it persists.
 This is an **emergency channel, not a help queue.** Every alert means a piece of
 infrastructure needs fixing so the wedge cannot recur, not that a human should
 hand-hold one PR. It fires on: a pinned Mathlib commit that is more than three days
-old, regardless of when the manifest changed, linking the active `bump-mathlib/` repair PR;
+old, regardless of when the manifest changed, linking the active `bump-mathlib/` repair PR
+(`bump_latest.py` retargets that PR, keeping its repairs, once its own target is two days old);
 an in-scope, fully-green PR the merge path never
 merged; an open `Review stuck: PR #…` issue; a scheduled workflow that is disabled
 or overdue; and `main` gone red. It
