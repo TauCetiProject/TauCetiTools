@@ -114,6 +114,20 @@ def linterOrigins (modules : Array Name)
     ("truncated", toJson (decide (total > records.size))), ("records", toJson records),
     ("elapsed_ms", toJson ((← IO.monoMsNow) - started))]
 
+/-- Optional profiling keeps the ordinary batched checker unchanged. Times are
+informational only; every requested linter still contributes to the same report. -/
+def measuredLint (decls : Array Name) (linters : Array NamedLinter) :
+    CoreM (Array (NamedLinter × Std.HashMap Name MessageData)) := do
+  if (← IO.getEnv "TAUCETI_LINT_PROFILE") != some "1" then
+    return ← lintCore decls linters (inIO := true)
+  let mut results := #[]
+  for linter in linters do
+    let started ← IO.monoMsNow
+    let result ← lintCore decls #[linter] (inIO := true)
+    IO.println s!"LINT-TIMING linter={linter.name} milliseconds={(← IO.monoMsNow) - started}"
+    results := results ++ result
+  return results
+
 unsafe def main (args : List String) : IO UInt32 := do
   let (onlyListed, args) := match args with
     | "--only-listed" :: rest => (true, rest)
@@ -142,8 +156,11 @@ unsafe def main (args : List String) : IO UInt32 := do
   -- The legacy `#lint` driver ran imported initializers too (`lean` always does).
   enableInitializersExecution
   let lintImports := #[`Mathlib.Init, `Mathlib.Tactic.SetNotationForOrder] ++ importModulesList
+  let importStarted ← IO.monoMsNow
   let env ← importModules (lintImports.map ({ module := · })) {} (trustLevel := 1024)
     (loadExts := true)
+  IO.println s!"LINT-TIMING phase=import milliseconds={(← IO.monoMsNow) - importStarted}"
+  let lintStarted ← IO.monoMsNow
   let opts : Options := ({} : Options).setBool `trace.Batteries.Lint true
   let ctx : Core.Context := { fileName := tag, fileMap := default, options := opts }
   let (failed, report, origins) ← Prod.fst <$> (CoreM.toIO · ctx { env }) do
@@ -162,7 +179,7 @@ unsafe def main (args : List String) : IO UInt32 := do
     for n in linterNames do
       unless linters.any (·.name == n.toName) do
         throwError "not a linter: {n}"
-    let mut results ← lintCore decls linters (inIO := true)
+    let mut results ← measuredLint decls linters
     let mut reportDecls := decls
     if downstreamFile.isSome then
       unless linters.any (·.name == `unusedArguments) do
@@ -180,12 +197,15 @@ unsafe def main (args : List String) : IO UInt32 := do
           else (original, messages)
       IO.println s!"lint-env: unusedArguments additionally checked {extraDecls.size} declarations \
         in transitive downstream modules"
+    IO.println s!"LINT-TIMING phase=linters milliseconds={(← IO.monoMsNow) - lintStarted}"
+    let renderStarted ← IO.monoMsNow
     let failed := results.any (!·.2.isEmpty)
     let fmt ← formatLinterResults results reportDecls (groupByFilename := true)
       s!"in {lintedPackage}" (runSlowLinters := true) .medium linters.size
     let report ← (← addMessageContext fmt).toString
     let origins ← try linterOrigins importModulesList results catch _ =>
       pure <| Json.mkObj [("unknown", toJson "collection_failed")]
+    IO.println s!"LINT-TIMING phase=report milliseconds={(← IO.monoMsNow) - renderStarted}"
     return (failed, report, origins)
   -- Before the report region: existing report/nonce parsing is unchanged.
   IO.println s!"LINT-ENV-ORIGINS {origins.compress}"

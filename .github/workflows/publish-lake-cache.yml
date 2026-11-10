@@ -176,7 +176,7 @@ jobs:
           "$HOME/.elan/bin/elan" toolchain install "$TOOLCHAIN"
           printf 'name=%s\n' "$TOOLCHAIN" >> "$GITHUB_OUTPUT"
 
-      - name: Validate staged data and verify inherited objects without credentials
+      - name: Copy native staging data into the credential boundary
         if: ${{ vars.LAKE_CACHE_ARTIFACT_ENDPOINT != '' && vars.LAKE_CACHE_REVISION_ENDPOINT != '' && vars.LAKE_CACHE_ARTIFACT_ENDPOINT_PUBLIC != '' }}
         env:
           STAGING: ${{ runner.temp }}/lake-cache-staging
@@ -187,8 +187,7 @@ jobs:
           TOOLCHAIN: ${{ steps.toolchain.outputs.name }}
         run: |
           python3 publisher-tools/tauceti_tools/assets/scripts/lake_cache_publish.py prepare \
-            "$STAGING" "$RUNNER_TEMP/lake-publication-plan" \
-            --toolchain "$TOOLCHAIN" --revision "$REVISION"
+            "$STAGING" "$RUNNER_TEMP/lake-publication-plan"
 
       - name: Publish the staged Lake cache
         id: upload
@@ -230,22 +229,15 @@ jobs:
           [ -n "$KEY" ] || skip_or_fail 'the LAKE_CACHE_KEY secret is empty after trimming'
           echo "::add-mask::$KEY"
 
-          # The workflow-pinned, key-free planner supplied only validated flat files
-          # and URLs. No repository helper, Lake workspace, or candidate code executes
-          # in this step. Artifacts complete before the FULL map becomes visible.
+          # Native put-staged does not load candidate workspace code.
           PLAN="$RUNNER_TEMP/lake-publication-plan"
           started=$SECONDS
-          if [ -s "$PLAN/artifacts.curl" ]; then
-            curl --parallel --parallel-max 50 --fail-early --fail --silent --show-error \
-              --retry 2 --retry-all-errors --max-time 120 \
-              --aws-sigv4 aws:amz:auto:s3 --user "$KEY" --request PUT \
-              --header 'Content-Type: application/vnd.reservoir.artifact' \
-              --config "$PLAN/artifacts.curl"
-          fi
-          curl --fail --silent --show-error --retry 2 --retry-all-errors --max-time 120 \
-            --aws-sigv4 aws:amz:auto:s3 --user "$KEY" --request PUT \
-            --header 'Content-Type: application/vnd.reservoir.outputs+json-lines' \
-            --upload-file "$PLAN/outputs.jsonl" "$(cat "$PLAN/map-url")"
+          cd "$PLAN"
+          LAKE_CACHE_KEY="$KEY" \
+          LAKE_CACHE_ARTIFACT_ENDPOINT="$S3_ARTIFACT_ENDPOINT" \
+          LAKE_CACHE_REVISION_ENDPOINT="$S3_REVISION_ENDPOINT" \
+            lake cache put-staged "$PLAN" --repo "$GITHUB_REPOSITORY" \
+              --rev="$REVISION" --toolchain="$ELAN_TOOLCHAIN"
           echo "Lake publication upload seconds: $((SECONDS - started))"
 
           echo 'uploaded=true' >> "$GITHUB_OUTPUT"
