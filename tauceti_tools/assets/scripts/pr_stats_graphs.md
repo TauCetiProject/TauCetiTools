@@ -60,8 +60,9 @@ It requires an authenticated `gh` CLI. In GitHub Actions, set `GH_TOKEN` to
   page query that misses the rename does not lose it. Receipt checks cost one request per PR,
   so a verdict of none is kept until the PR's `updatedAt` moves, and at most 500 PRs are
   checked a run, newest closures first; a first run works through the backlog over several
-  runs. A run that keeps no snapshot (no `--dump-data`), and the per-roadmap chart's live
-  path, check every candidate at once.
+  runs. Only a run that keeps its snapshot (`--dump-data`) is capped; every other fetch,
+  including `pipeline_health.py` and the per-roadmap chart's live path, checks every
+  candidate at once.
   Scoreboards come from the repository comment listing, which GitHub stops paginating after
   300 pages (30,000 comments, here roughly the last week), so they cannot be refetched from
   the start of the project. They are always carried forward from the cached snapshot;

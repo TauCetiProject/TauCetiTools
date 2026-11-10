@@ -731,14 +731,14 @@ def record_landing(pr: dict, landing: dict) -> None:
 
 
 def apply_app_merges(repo: str, prs: list[dict], previous: dict | None = None,
-                     max_checks: int | None = MERGE_RECEIPT_CHECKS_PER_RUN) -> bool:
+                     max_checks: int | None = None) -> bool:
     """Record merge-app landings as merges, before any chart or reviewer-trust calculation.
 
     The rename comes from the bulk page query, which can drop timeline events silently (see the
     note above `timeline_from_node`), so it is used only as positive evidence: a closed PR without
     one keeps a landing the previous snapshot recorded, or else goes to the receipt check, which
-    reads the PR's own comments. A caller without a snapshot to resume from passes
-    `max_checks=None` to check every candidate now.
+    reads the PR's own comments. Every candidate is checked now unless the caller, which must
+    keep its snapshot for a later run to resume from, passes `max_checks`.
 
     Returns whether every candidate has a verdict, rather than some being left for a later run.
     """
@@ -777,7 +777,7 @@ def apply_app_merges(repo: str, prs: list[dict], previous: dict | None = None,
 
 
 def fetch_snapshot(repo: str, previous: dict | None = None,
-                   receipt_checks: int | None = MERGE_RECEIPT_CHECKS_PER_RUN) -> dict:
+                   receipt_checks: int | None = None) -> dict:
     prs = fetch_prs(repo, previous)
     complete = apply_app_merges(repo, prs, previous, receipt_checks)
     settled = (previous or {}).get("merge_evidence") == MERGE_EVIDENCE and previous.get(

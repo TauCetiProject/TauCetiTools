@@ -3,11 +3,20 @@
 
 from __future__ import annotations
 
+import io
+import json
+import sys
+import tempfile
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pipeline_health as health
 import pr_lifecycle as health_lc
+import pr_stats_graphs as stats
 
 UTC = timezone.utc
 NOW = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
@@ -844,6 +853,33 @@ class VerifiedReadiness(unittest.TestCase):
         result = health.analyse(data, 24, 336, NOW)
         self.assertEqual(result["merge_readiness"]["labelled_ready"], 0)
         self.assertEqual(result["merge_readiness"]["verified_eligible"], 1)
+
+
+class LiveFetch(unittest.TestCase):
+    def test_a_live_report_checks_every_merge_receipt(self):
+        # 501 closed, unrenamed PRs in the recent window; only the oldest closure has a receipt.
+        # A live report keeps no snapshot to resume from, so it must not stop at the per-run cap.
+        now = datetime.now(UTC)
+        prs = []
+        for number in range(1, 502):
+            record = pr(number, [], state="CLOSED", created=now - timedelta(days=2))
+            closed = iso(now - timedelta(hours=2 if number == 501 else 1))
+            record.update(closed_at=closed, updated_at=closed)
+            prs.append(record)
+        landing = {"merged_at": prs[-1]["closed_at"], "merge_source": "tauceti-queue"}
+        with (tempfile.TemporaryDirectory() as folder,
+              patch.object(stats, "fetch_prs", return_value=prs),
+              patch.object(stats, "fetch_scoreboards", return_value=([], {}, iso(now))),
+              patch.object(stats, "fetch_merge_receipt",
+                           side_effect=lambda owner, name, number:
+                           landing if number == 501 else None) as check,
+              patch.dict(sys.modules, {"readiness": SimpleNamespace(audit=lambda snapshot: {})}),
+              redirect_stdout(io.StringIO())):
+            out = Path(folder) / "health.json"
+            self.assertEqual(health.main(["--repo", "o/r", "--out", str(out)]), 0)
+            result = json.loads(out.read_text())
+        self.assertEqual(check.call_count, 501)
+        self.assertEqual(result["merged_count"], 1)
 
 
 if __name__ == "__main__":
