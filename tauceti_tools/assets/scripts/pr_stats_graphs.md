@@ -103,7 +103,14 @@ for its state clock. PRs closed before the lifecycle-label workflow landed on
 about 1,000 of GitHub's 5,000-point hourly GraphQL budget per run. Excessive missing
 state transitions stop generation rather than publishing a mislabelled clock. Issue
 comments and their v1 metadata are filtered and parsed by `gh` before reaching Python,
-so full scoreboard bodies do not accumulate in memory.
+so full scoreboard bodies do not accumulate in memory. The comment listing serves at most
+300 pages from any starting point, so it is read as a cursor walk in `updated_at` order,
+each request starting `since` the last comment of the one before. A run resumes an hour
+before the previous one's end, and the snapshot keeps every marker comment it has
+observed, so verdicts are derived again each run as trust and the set of PRs change. A
+full walk from the beginning, which is what drops deleted comments, starts weekly and is
+built beside the published set over several runs, sharing 300 requests a run with the
+walk that keeps up, before it replaces that set.
 
 All eight outputs are rendered in a staging directory and promoted only after every
 chart and the JSON payload succeeds. A failed scheduled fetch therefore keeps the

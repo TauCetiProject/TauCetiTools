@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections import Counter
 import shutil
 import subprocess
 import tempfile
@@ -450,122 +449,143 @@ class MetricsTest(unittest.TestCase):
                 stats.generate(data, Path(temporary))
 
     def test_scoreboards_need_trust_pull_request_and_matching_meta(self):
-        counter = iter(range(1000, 2000))
+        def comment(identifier, number, user, canonical=True):
+            return {"id": identifier, "number": str(number), "created_at": timestamp(2),
+                    "updated_at": timestamp(2), "user": user, "canonical": canonical}
 
-        def comment(number, user, canonical=True, association="MEMBER"):
-            return json.dumps({
-                "id": next(counter),
-                "number": str(number), "created_at": timestamp(2),
-                "updated_at": timestamp(2), "user": user, "canonical": canonical,
-                "author_association": association,
-            })
+        store = {item["id"]: item for item in [
+            comment("1", 7, "reviewer-a"),
+            comment("2", 8, "issue-commenter"),       # an ordinary issue, not a PR
+            comment("3", 9, "marker-quoter", False),  # the public marker without engine meta
+            comment("4", 7, "forger"),
+            comment("5", 7, "reviewer-b"),
+            comment("6", None, "reviewer-a"),
+        ]}
+        scoreboards, rejected = stats.scoreboard_verdicts(
+            store, {7, 9}, {"reviewer-a", "reviewer-b", "marker-quoter"})
+        self.assertEqual([(item["pr"], item["user"]) for item in scoreboards],
+                         [(7, "reviewer-a"), (7, "reviewer-b")])
+        self.assertEqual(rejected, {"2": "not_a_pull_request", "3": "no_canonical_scoreboard_meta",
+                                    "4": "untrusted_author", "6": "unparsable_issue_number"})
+        # Verdicts are derived each run: trusting the forger needs no comment to be read again.
+        scoreboards, _ = stats.scoreboard_verdicts(store, {7, 9}, {"reviewer-a", "forger"})
+        self.assertEqual([item["user"] for item in scoreboards], ["reviewer-a", "forger"])
 
-        raw = "\n".join([
-            # GitHub Actions may project a real collaborator as CONTRIBUTOR here.
-            comment(7, "reviewer-a", association="CONTRIBUTOR"),
-            comment(8, "issue-commenter"),       # an ordinary issue, not a PR
-            comment(9, "marker-quoter", False),  # the public marker without engine meta
-            comment(7, "forger", association="NONE"),
-            comment(7, "reviewer-b"),
-        ])
-        with patch.object(stats, "run_gh", return_value=raw):
-            scoreboards, rejected, scanned_at = stats.fetch_scoreboards(
-                "example/project", {7, 9},
-                {"reviewer-a", "reviewer-b", "marker-quoter"},
-            )
-        self.assertTrue(scanned_at)
-        self.assertEqual(
-            [(item["pr"], item["user"]) for item in scoreboards],
-            [(7, "reviewer-a"), (7, "reviewer-b")],
-        )
-        # Rejections are kept per comment id; the published counts are derived from them.
-        self.assertEqual(
-            dict(Counter(rejected.values())),
-            {"not_a_pull_request": 1, "no_canonical_scoreboard_meta": 1,
-             "untrusted_author": 1},
-        )
-
-    # --- incremental scoreboard scanning -----------------------------------------------------
+    # --- the comment walk ---------------------------------------------------------------------
     #
-    # The comment scan reads the whole repository history: ~136 pages every three hours, and on
-    # a course to break outright. GitHub caps this endpoint at 400 pages and the scan was
-    # ASCENDING, so once the repository passes 40,000 comments the pages that stop arriving are
-    # the newest -- the scoreboards that decide whether a pull request may merge. Descending plus
-    # `since` fixes both the cost and the direction of that eventual loss.
+    # GitHub serves at most 300 pages of the repository comment listing from any starting point,
+    # and `gh api --paginate` stops there silently. A descending scan of the whole history so
+    # reached back only about a week, and its weekly full rescan dropped everything older.
+
+    class Listing:
+        """The comment listing: `sort=updated&direction=asc`, an inclusive `since`, pages of two."""
+
+        def __init__(self, rows):
+            self.rows, self.requests = rows, []
+
+        def __call__(self, repo, since, page):
+            self.requests.append((since, page))
+            matching = sorted((row for row in self.rows
+                               if since is None or stats.parse_dt(row["updated_at"]) >= since),
+                              key=lambda row: row["updated_at"])
+            return matching[(page - 1) * 2:page * 2]
 
     @staticmethod
-    def scan(raw, previous=None, now=None):
-        with patch.object(stats, "run_gh", return_value=raw) as run:
-            result = stats.fetch_scoreboards(
-                "example/project", {7}, {"trusted"}, previous,
-                now or datetime(2026, 1, 10, tzinfo=UTC))
-        return result, run.call_args.args[0][2]
+    def row(identifier, day, hour=0, number=7, user="trusted", marker=True):
+        return {"id": identifier, "updated_at": timestamp(day, hour), "marker": marker,
+                "number": str(number), "created_at": timestamp(day, hour), "user": user,
+                "canonical": True}
 
-    @staticmethod
-    def row(identifier, number=7, user="trusted", canonical=True, day=2):
-        return json.dumps({
-            "id": identifier, "number": str(number), "created_at": timestamp(day),
-            "updated_at": timestamp(day), "user": user, "canonical": canonical,
-        })
+    def walk(self, rows, since=None, pages=10, store=None):
+        listing = self.Listing(rows)
+        store = {} if store is None else store
+        with (patch.object(stats, "COMMENT_PAGE_SIZE", 2),
+              patch.object(stats, "fetch_comment_page", side_effect=listing)):
+            result = stats.walk_comments("o/r", since, pages, store)
+        return result, store, listing.requests
 
-    @staticmethod
-    def snapshot(scanned_day=9, entries=(("1", 7, "trusted"),), rejected=None, ids=True):
-        return {
-            "scoreboards_scanned_at": timestamp(scanned_day),
-            "scoreboards": [
-                ({"id": i} if ids else {}) | {
-                    "pr": pr_number, "created_at": timestamp(2),
-                    "updated_at": timestamp(2), "user": user}
-                for i, pr_number, user in entries],
-            "rejected_scoreboard_comments_by_id": dict(rejected or {}),
-        }
+    def test_the_walk_follows_its_cursor_past_any_page_cap(self):
+        rows = [self.row(i, 2, i) for i in range(1, 8)]
+        (cursor, spent, complete), store, requests = self.walk(rows)
+        self.assertEqual(sorted(store, key=int), [str(i) for i in range(1, 8)])
+        self.assertTrue(complete)
+        self.assertEqual(cursor, stats.parse_dt(timestamp(2, 7)))
+        # Every request is a first page; the cursor, not the page number, moves the walk.
+        self.assertEqual({page for _, page in requests}, {1})
+        self.assertEqual(spent, len(requests))
 
-    def test_the_scan_is_descending_so_a_future_cap_loses_the_oldest(self):
-        (_, _, _), path = self.scan("")
-        self.assertIn("direction=desc", path)
+    def test_comments_sharing_a_timestamp_are_stepped_through_by_page(self):
+        rows = [self.row(i, 2, 1) for i in range(1, 6)] + [self.row(6, 2, 2)]
+        (_, _, complete), store, requests = self.walk(rows)
+        self.assertTrue(complete)
+        self.assertEqual(len(store), 6)
+        self.assertIn((stats.parse_dt(timestamp(2, 1)), 2), requests)
 
-    def test_no_previous_snapshot_scans_everything(self):
-        (_, _, _), path = self.scan("")
-        self.assertNotIn("since=", path)
+    def test_a_walk_out_of_budget_says_where_to_resume(self):
+        rows = [self.row(i, 2, i) for i in range(1, 8)]
+        (cursor, spent, complete), store, _ = self.walk(rows, pages=2)
+        self.assertEqual((spent, complete), (2, False))
+        (_, _, complete), store, _ = self.walk(rows, since=cursor, store=store)
+        self.assertTrue(complete)
+        self.assertEqual(len(store), 7)
 
-    def test_a_recent_snapshot_scans_only_since_it(self):
-        (boards, _, _), path = self.scan(self.row(2), previous=self.snapshot())
-        self.assertIn("since=", path)
-        # The carried-over entry survives alongside the newly seen one.
-        self.assertEqual(sorted(item["id"] for item in boards), ["1", "2"])
+    def test_an_edit_that_drops_the_marker_leaves_the_store(self):
+        store = {"1": {"id": "1"}, "2": {"id": "2"}}
+        _, store, _ = self.walk([self.row(1, 3, marker=False), self.row(2, 3, user="editor")],
+                                store=store)
+        self.assertEqual(list(store), ["2"])
+        self.assertEqual(store["2"]["user"], "editor")
 
-    def test_the_since_is_pulled_back_before_the_last_scan(self):
-        # A comment written while the previous scan was running must not fall in the gap.
-        (_, _, _), path = self.scan("", previous=self.snapshot(scanned_day=9))
-        self.assertIn("since=2026-01-08T23", path)
+    def scan(self, rows, previous=None, now_day=10, pages=stats.SCOREBOARD_PAGES_PER_RUN):
+        listing = self.Listing(rows)
+        with (patch.object(stats, "COMMENT_PAGE_SIZE", 2),
+              patch.object(stats, "SCOREBOARD_PAGES_PER_RUN", pages),
+              patch.object(stats, "fetch_comment_page", side_effect=listing)):
+            boards, rejected, state = stats.fetch_scoreboards(
+                "o/r", {7}, {"trusted"}, previous, datetime(2026, 1, now_day, tzinfo=UTC))
+        return [item["id"] for item in boards], state, listing.requests
 
-    def test_a_stale_snapshot_forces_a_full_rescan(self):
-        # Deletions are invisible to an incremental scan, so one cannot be carried indefinitely.
-        stale = self.snapshot(scanned_day=1)
-        (boards, _, _), path = self.scan("", previous=stale)
-        self.assertNotIn("since=", path)
+    def test_a_cold_start_publishes_only_a_finished_full_walk(self):
+        rows = [self.row(str(i), 2, i) for i in range(1, 8)]
+        boards, state, requests = self.scan(rows, pages=2)
         self.assertEqual(boards, [])
+        self.assertIsNotNone(state["scoreboard_rescan"])
+        self.assertEqual(requests[0], (None, 1))
+        boards, state, _ = self.scan(rows, previous=state)
+        self.assertEqual(sorted(boards, key=int), [str(i) for i in range(1, 8)])
+        self.assertIsNone(state["scoreboard_rescan"])
+        self.assertEqual(state["scoreboards_rescanned_at"], timestamp(10))
+        self.assertEqual(state["scoreboards_scanned_at"], timestamp(2, 7))
 
-    def test_a_snapshot_without_comment_ids_forces_a_full_rescan(self):
-        # Without ids there is no way to revise one comment's verdict, so nothing may be kept.
-        (boards, _, _), path = self.scan("", previous=self.snapshot(ids=False))
-        self.assertNotIn("since=", path)
-        self.assertEqual(boards, [])
+    def test_a_recent_full_walk_is_kept_up_from_an_hour_before_its_end(self):
+        _, state, _ = self.scan([self.row("1", 2)])
+        boards, state, requests = self.scan([self.row("1", 2), self.row("2", 9)], previous=state)
+        self.assertEqual(requests[0], (stats.parse_dt(timestamp(1, 23)), 1))
+        self.assertEqual(boards, ["1", "2"])
+        self.assertIsNone(state["scoreboard_rescan"])
 
-    def test_an_edited_comment_replaces_its_own_earlier_verdict(self):
-        # Edited from a valid scoreboard into something untrusted: it must leave the kept set
-        # and be counted once as rejected, not counted twice or left in both.
-        previous = self.snapshot(entries=(("1", 7, "trusted"),))
-        (boards, rejected, _), _ = self.scan(
-            self.row("1", user="stranger"), previous=previous)
-        self.assertEqual(boards, [])
-        self.assertEqual(rejected, {"1": "untrusted_author"})
+    def test_the_weekly_full_walk_replaces_the_published_set_only_when_done(self):
+        _, state, _ = self.scan([self.row("1", 2), self.row("2", 2, 1)], now_day=1)
+        live = [self.row("2", 2, 1), self.row("3", 9), self.row("4", 9, 1), self.row("5", 9, 2)]
+        boards, state, _ = self.scan(live, previous=state, pages=2)
+        # Deleted comment 1 is still published while the full walk is unfinished.
+        self.assertEqual(boards, ["1", "2", "3", "4"])
+        self.assertIsNotNone(state["scoreboard_rescan"])
+        boards, state, _ = self.scan(live, previous=state)
+        self.assertEqual(boards, ["2", "3", "4", "5"])
+        self.assertIsNone(state["scoreboard_rescan"])
 
-    def test_a_rejection_that_becomes_valid_stops_being_counted(self):
-        previous = self.snapshot(entries=(), rejected={"1": "untrusted_author"})
-        (boards, rejected, _), _ = self.scan(self.row("1"), previous=previous)
-        self.assertEqual(rejected, {})
-        self.assertEqual([item["id"] for item in boards], ["1"])
+    def test_a_capped_scan_snapshot_keeps_its_scoreboards_while_a_full_walk_runs(self):
+        old = {"scoreboards_scanned_at": timestamp(9), "scoreboards": [
+            {"id": "1", "pr": 7, "created_at": timestamp(2), "updated_at": timestamp(2),
+             "user": "trusted"},
+            {"pr": 7, "created_at": timestamp(2), "updated_at": timestamp(2), "user": "trusted"},
+        ], "rejected_scoreboard_comments_by_id": {"9": "untrusted_author"}}
+        rows = [self.row(str(i), 1, i) for i in range(1, 8)]
+        boards, state, requests = self.scan(rows + [self.row("8", 9, 12)], previous=old, pages=3)
+        self.assertEqual(requests[0], (stats.parse_dt(timestamp(8, 23)), 1))
+        self.assertEqual(boards, ["1", "8"])
+        self.assertIsNotNone(state["scoreboard_rescan"])
 
     def test_scoreboard_meta_pr_number_is_matched_exactly(self):
         # #185's scoreboard pasted onto #18 shares the prefix `"pr":18`, and a string "18"
@@ -604,18 +624,19 @@ class MetricsTest(unittest.TestCase):
                 "body": "<!--tauceti-scoreboard-->",
             },
         ]
-        with patch.object(stats, "run_gh", return_value="") as run:
-            stats.fetch_scoreboards("example/project", {7}, {"trusted"})
-        query = run.call_args.args[0][-1]
+        comments.append({"id": 5100, "updated_at": timestamp(4), "body": "LGTM",
+                         "issue_url": "https://api.github.com/repos/example/project/issues/7",
+                         "created_at": timestamp(4), "user": {"login": "commenter"}})
         result = subprocess.run(
-            ["jq", "-c", query], input=json.dumps(comments), text=True,
+            ["jq", "-c", stats.SCOREBOARD_JQ], input=json.dumps(comments), text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
         )
         rows = [json.loads(line) for line in result.stdout.splitlines()]
         self.assertEqual(
-            [row["canonical"] for row in rows], [True, False, False, False, False],
+            [row.get("canonical") for row in rows], [True, False, False, False, False, None],
         )
         self.assertEqual(rows[0]["user"], "trusted")
+        self.assertEqual(rows[-1], {"id": 5100, "updated_at": timestamp(4), "marker": False})
 
     def test_snapshot_trusts_only_merged_pr_authors(self):
         prs = [
@@ -627,7 +648,7 @@ class MetricsTest(unittest.TestCase):
             patch.object(stats, "fetch_prs", return_value=prs),
             patch.object(stats, "fetch_bors_merges", return_value=({}, timestamp(3))),
             patch.object(stats, "fetch_scoreboards",
-                         return_value=([], {}, timestamp(3))) as fetch,
+                         return_value=([], {}, {})) as fetch,
         ):
             stats.fetch_snapshot("example/project")
         fetch.assert_called_once_with(
@@ -758,7 +779,7 @@ class BorsMergesTest(unittest.TestCase):
         with (patch.object(stats, "graphql", return_value=page) as query,
               patch.object(stats, "fetch_bors_merges",
                            return_value=({"42": timestamp(9)}, timestamp(10))),
-              patch.object(stats, "fetch_scoreboards", return_value=([], {}, timestamp(10)))):
+              patch.object(stats, "fetch_scoreboards", return_value=([], {}, {}))):
             snapshot = stats.fetch_snapshot("o/r", previous)
         self.assertEqual(query.call_count, 1)  # Only metadata; reused label history.
         self.assertEqual(snapshot["prs"][0]["merged_at"], timestamp(9))
@@ -769,9 +790,10 @@ class BorsMergesTest(unittest.TestCase):
         with (patch.object(stats, "fetch_prs", return_value=prs),
               patch.object(stats, "fetch_bors_merges",
                            return_value=({"42": timestamp(9)}, timestamp(10))),
-              patch.object(stats, "fetch_scoreboards", return_value=([], {}, timestamp(10))) as scan):
+              patch.object(stats, "fetch_scoreboards", return_value=([], {}, {})) as scan):
             snapshot = stats.fetch_snapshot("o/r", old)
-        scan.assert_called_once_with("o/r", {42}, {"bors-only-author"}, None)
+        # The walk state carries over: verdicts are derived each run, so new trust needs no rescan.
+        scan.assert_called_once_with("o/r", {42}, {"bors-only-author"}, old)
         self.assertEqual(snapshot["prs"][0]["merge_source"], "bors")
 
 
