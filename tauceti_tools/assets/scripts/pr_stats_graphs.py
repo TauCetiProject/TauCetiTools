@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import html
+import itertools
 import json
 import math
 import os
@@ -535,14 +536,15 @@ def observe_comment(store: dict[str, dict], row: dict) -> None:
 
 
 def walk_comments(
-    repo: str, since: datetime | None, pages: int, store: dict[str, dict],
+    repo: str, since: datetime | None, pages: int | None, store: dict[str, dict],
 ) -> tuple[datetime | None, int, bool]:
     """Fold the comments updated at or after `since` into `store`, oldest update first.
 
-    Returns where to resume, how many requests it spent, and whether it reached the end.
+    Spends at most `pages` requests, or as many as it takes when `pages` is None. Returns where
+    to resume, how many requests it spent, and whether it reached the end.
     """
     page = 1
-    for spent in range(1, pages + 1):
+    for spent in itertools.count(1) if pages is None else range(1, pages + 1):
         rows = fetch_comment_page(repo, since, page)
         for row in rows:
             observe_comment(store, row)
@@ -617,6 +619,7 @@ def fetch_scoreboards(
     trusted_logins: set[str],
     previous: dict | None = None,
     now: datetime | None = None,
+    pages: int | None = SCOREBOARD_PAGES_PER_RUN,
 ) -> tuple[list[dict], dict[str, str], dict]:
     """Canonical review scoreboards posted on this repository's pull requests.
 
@@ -629,20 +632,22 @@ def fetch_scoreboards(
 
     Returns the scoreboards, the rejected comments as {id: reason}, and the walk state for the
     snapshot: the observed marker comments, the cursor of the walk that keeps up, and any full
-    walk in progress.
+    walk in progress. Until a first full walk finishes there is no cursor, and the scoreboards
+    are not a history; see `scoreboard_history_unfinished`. `pages` caps the requests, shared
+    by both walks; None walks to the end.
     """
     now = now or datetime.now(timezone.utc)
     state = scoreboard_scan_state(previous)
     store, cursor, rescan = state["comments"], state["cursor"], state["rescan"]
-    rescanned_at, budget = state["rescanned_at"], SCOREBOARD_PAGES_PER_RUN
+    rescanned_at, budget = state["rescanned_at"], pages
     # With nothing observed there is nothing to keep up: the full walk below covers it all.
     if cursor is not None:
         cursor, spent, _ = walk_comments(repo, cursor - SCOREBOARD_OVERLAP, budget, store)
-        budget -= spent
+        budget = None if budget is None else budget - spent
     if rescan is None and (
             rescanned_at is None or now - rescanned_at > timedelta(days=SCOREBOARD_FULL_RESCAN_DAYS)):
         rescan = {"started_at": now, "cursor": None, "comments": {}}
-    if rescan is not None and budget > 0:
+    if rescan is not None and (budget is None or budget > 0):
         rescan["cursor"], _, complete = walk_comments(
             repo, rescan["cursor"], budget, rescan["comments"])
         if complete:
@@ -663,6 +668,15 @@ def fetch_scoreboards(
             "comments": rescan["comments"],
         },
     }
+
+
+def scoreboard_history_unfinished(data: dict) -> bool:
+    """Whether a snapshot is mid-way through its first full scoreboard walk.
+
+    Its scoreboards are then only what that walk has reached, and rendering them would publish
+    a review history that has lost everything the walk has yet to read.
+    """
+    return bool(data.get("scoreboard_rescan")) and not data.get("scoreboards_scanned_at")
 
 
 def load_previous(path: Path | None, repo: str) -> dict | None:
@@ -763,7 +777,8 @@ def apply_bors_merges(prs: list[dict], merges: dict[str, str]) -> None:
             pr.update(merged_at=stamp, state="MERGED", merge_source="bors")
 
 
-def fetch_snapshot(repo: str, previous: dict | None = None) -> dict:
+def fetch_snapshot(repo: str, previous: dict | None = None,
+                   scoreboard_pages: int | None = SCOREBOARD_PAGES_PER_RUN) -> dict:
     prs = fetch_prs(repo, previous)
     bors_merges, bors_scanned_at = fetch_bors_merges(repo, previous)
     apply_bors_merges(prs, bors_merges)
@@ -772,7 +787,7 @@ def fetch_snapshot(repo: str, previous: dict | None = None) -> dict:
         if pr.get("merged_at") and pr.get("author") != "unknown"
     }
     scoreboards, rejected, scan_state = fetch_scoreboards(
-        repo, {pr["number"] for pr in prs}, trusted_logins, previous,
+        repo, {pr["number"] for pr in prs}, trusted_logins, previous, pages=scoreboard_pages,
     )
     return {
         # 2: pull requests carry `updated_at` and scoreboards carry `id`, both so that the next
@@ -1780,9 +1795,15 @@ def main() -> int:
     if args.data:
         data = json.loads(args.data.read_text(encoding="utf-8"))
     else:
-        data = fetch_snapshot(args.repo, load_previous(args.since_data, args.repo))
+        # Without --dump-data no later run can resume a capped walk, so this one walks to the end.
+        pages = SCOREBOARD_PAGES_PER_RUN if args.dump_data else None
+        data = fetch_snapshot(args.repo, load_previous(args.since_data, args.repo), pages)
         if args.dump_data:
             atomic_write(args.dump_data, json.dumps(data, indent=2) + "\n")
+    if scoreboard_history_unfinished(data):
+        print("the first full walk of scoreboard comments is unfinished, so no assets were "
+              "written; the snapshot carries it on to the next run", file=sys.stderr)
+        return 3
     as_of = parse_dt(args.as_of) if args.as_of else None
     metrics = generate(
         data, args.out_dir, args.contributor_limit, args.history_days,

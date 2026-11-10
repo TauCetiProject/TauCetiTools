@@ -529,6 +529,12 @@ class MetricsTest(unittest.TestCase):
         self.assertTrue(complete)
         self.assertEqual(len(store), 7)
 
+    def test_an_unbounded_walk_runs_to_the_end(self):
+        rows = [self.row(i, 2, i) for i in range(1, 8)]
+        (_, spent, complete), store, _ = self.walk(rows, pages=None)
+        self.assertTrue(complete)
+        self.assertEqual((len(store), spent), (7, 7))
+
     def test_an_edit_that_drops_the_marker_leaves_the_store(self):
         store = {"1": {"id": "1"}, "2": {"id": "2"}}
         _, store, _ = self.walk([self.row(1, 3, marker=False), self.row(2, 3, user="editor")],
@@ -539,10 +545,9 @@ class MetricsTest(unittest.TestCase):
     def scan(self, rows, previous=None, now_day=10, pages=stats.SCOREBOARD_PAGES_PER_RUN):
         listing = self.Listing(rows)
         with (patch.object(stats, "COMMENT_PAGE_SIZE", 2),
-              patch.object(stats, "SCOREBOARD_PAGES_PER_RUN", pages),
               patch.object(stats, "fetch_comment_page", side_effect=listing)):
             boards, rejected, state = stats.fetch_scoreboards(
-                "o/r", {7}, {"trusted"}, previous, datetime(2026, 1, now_day, tzinfo=UTC))
+                "o/r", {7}, {"trusted"}, previous, datetime(2026, 1, now_day, tzinfo=UTC), pages)
         return [item["id"] for item in boards], state, listing.requests
 
     def test_a_cold_start_publishes_only_a_finished_full_walk(self):
@@ -556,6 +561,46 @@ class MetricsTest(unittest.TestCase):
         self.assertIsNone(state["scoreboard_rescan"])
         self.assertEqual(state["scoreboards_rescanned_at"], timestamp(10))
         self.assertEqual(state["scoreboards_scanned_at"], timestamp(2, 7))
+
+    def run_main(self, folder, rows, *extra):
+        """`main()` against a listing of `rows`, two comments a page and three requests a run."""
+        prs = [pr(7, 1, merged_day=2, author="trusted")]
+        argv = ["pr_stats_graphs.py", "--repo", "o/r", "--out-dir", str(folder / "out"), *extra]
+        with (patch.object(stats, "COMMENT_PAGE_SIZE", 2),
+              patch.object(stats, "SCOREBOARD_PAGES_PER_RUN", 3),
+              patch.object(stats, "fetch_comment_page", side_effect=self.Listing(rows)),
+              patch.object(stats, "fetch_prs", side_effect=lambda repo, previous: [dict(p) for p in prs]),
+              patch.object(stats, "fetch_bors_merges", return_value=({}, timestamp(3))),
+              patch("sys.argv", argv)):
+            return stats.main()
+
+    def test_an_unfinished_first_walk_keeps_the_published_assets(self):
+        rows = [self.row(str(i), 2, i) for i in range(1, 8)]
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            (folder / "out").mkdir()
+            published = folder / "out" / "pr-stats.json"
+            published.write_text('{"review_totals_by_contributor": {"trusted": 1}}')
+            snapshot = folder / "snapshot.json"
+            resumable = ("--dump-data", str(snapshot), "--since-data", str(snapshot))
+            self.assertEqual(self.run_main(folder, rows, *resumable), 3)
+            self.assertEqual(published.read_text(), '{"review_totals_by_contributor": {"trusted": 1}}')
+            checkpoint = json.loads(snapshot.read_text())["scoreboard_rescan"]
+            self.assertEqual(checkpoint["cursor"], timestamp(2, 4))
+            # Replaying the unfinished checkpoint is refused the same way.
+            self.assertEqual(self.run_main(folder, rows, "--data", str(snapshot)), 3)
+            self.assertEqual(self.run_main(folder, rows, *resumable), 3)
+            self.assertEqual(self.run_main(folder, rows, *resumable), 0)
+            totals = json.loads(published.read_text())["review_totals_by_contributor"]
+            self.assertEqual(totals, {"trusted": 7})
+
+    def test_a_run_that_cannot_resume_walks_to_the_end(self):
+        rows = [self.row(str(i), 2, i) for i in range(1, 8)]
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            self.assertEqual(self.run_main(folder, rows), 0)
+            totals = json.loads((folder / "out" / "pr-stats.json").read_text())
+            self.assertEqual(totals["review_totals_by_contributor"], {"trusted": 7})
 
     def test_a_recent_full_walk_is_kept_up_from_an_hour_before_its_end(self):
         _, state, _ = self.scan([self.row("1", 2)])
@@ -653,6 +698,7 @@ class MetricsTest(unittest.TestCase):
             stats.fetch_snapshot("example/project")
         fetch.assert_called_once_with(
             "example/project", {1, 2, 3}, {"merged-author"}, None,
+            pages=stats.SCOREBOARD_PAGES_PER_RUN,
         )
 
     def test_thousands_of_contributors_are_bounded(self):
@@ -793,7 +839,8 @@ class BorsMergesTest(unittest.TestCase):
               patch.object(stats, "fetch_scoreboards", return_value=([], {}, {})) as scan):
             snapshot = stats.fetch_snapshot("o/r", old)
         # The walk state carries over: verdicts are derived each run, so new trust needs no rescan.
-        scan.assert_called_once_with("o/r", {42}, {"bors-only-author"}, old)
+        scan.assert_called_once_with("o/r", {42}, {"bors-only-author"}, old,
+                                     pages=stats.SCOREBOARD_PAGES_PER_RUN)
         self.assertEqual(snapshot["prs"][0]["merge_source"], "bors")
 
 

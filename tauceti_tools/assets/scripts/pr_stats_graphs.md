@@ -110,7 +110,11 @@ before the previous one's end, and the snapshot keeps every marker comment it ha
 observed, so verdicts are derived again each run as trust and the set of PRs change. A
 full walk from the beginning, which is what drops deleted comments, starts weekly and is
 built beside the published set over several runs, sharing 300 requests a run with the
-walk that keeps up, before it replaces that set.
+walk that keeps up, before it replaces that set. Until a first full walk has finished there is no
+history to publish: with `--dump-data` the script saves the snapshot to resume from and
+exits 3 without writing assets, so the previous ones stay, and replaying such a snapshot
+with `--data` exits 3 too. Without `--dump-data` no later run could resume, so the walk
+runs to the end.
 
 All eight outputs are rendered in a staging directory and promoted only after every
 chart and the JSON payload succeeds. A failed scheduled fetch therefore keeps the
