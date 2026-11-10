@@ -749,17 +749,23 @@ through their registered runners; no repository machine-ID list is required.
 Each runner must be online, idle, unreserved, and advertise exactly one permanent
 `fleet-<machine-id>` and ephemeral `fleet-instance-<instance-id>` identity, plus
 the appropriate `tauceti-fleet-pr` or `tauceti-fleet-staging` class. PR-only hosts
-remain ineligible for staging. Retries exclude previously failed machine IDs.
+remain ineligible for staging. Staging retries exclude previously failed machine IDs.
 
 Enable fleet routing explicitly with the existing `FLEET_CI_ENABLED`,
 `FLEET_READ_TOKEN`, and `FLEET_RUNNER_GROUP_ID` settings. Inventory is read only
 from that group; labels on runners outside the group grant no eligibility.
 Partial or ambiguous inventories retain the existing cloud fallback. The picker
-continues to bind each placement to an exact host and runner instance.
+uses this inventory to choose a destination; it does not reserve a runner.
 
 Named machine entries remain available as optional priority tiers. A generic
-`fleet` tier spreads jobs across the eligible registered slots in that tier;
-staging-only slots are preferred for staging. Repository configuration selects
+`fleet` tier dispatches PR jobs to the `TauCetiFleet` group with the
+`self-hosted`, `linux`, `x64`, and `tauceti-fleet-pr` labels. GitHub assigns the
+next matching runner, including a replacement on another enrolled host. A
+simultaneous picker can cause a brief pool queue rather than pinning a job to a
+retired instance. Named PR tiers keep their permanent machine label, but omit
+the disposable instance label. PR jobs wait normally; the startup cancellation
+and rerun watcher is restricted to staging.
+Staging retains exact guest placement, preferring staging-only slots. Repository configuration selects
 pool priority and job classes, while host controls govern live fleet membership
 and concurrency. No new registry service is introduced.
 
