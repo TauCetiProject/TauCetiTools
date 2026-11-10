@@ -29,10 +29,9 @@ import html
 import json
 import math
 import re
-import subprocess
 import sys
 
-from pr_stats_graphs import apply_bors_merges, fetch_bors_merges
+from pr_stats_graphs import apply_app_merges, fetch_pr_pages
 
 from chart_style import MUTED, PALETTE, TEXT, base_css, card_rect, css_px, hover_metadata
 
@@ -57,26 +56,12 @@ MAINTENANCE_TITLE = re.compile(
 )
 
 
-# `gh pr list` returns at most `--limit` pull requests, newest first, and says nothing when it
-# stops. The limit here was 2000 against 5072 merged pull requests, so the chart was built from
-# the newest 2000 and silently lost every band before them -- a cumulative series whose early
-# history simply was not there. This ceiling exists only so a runaway query cannot page forever;
-# reaching it means the chart would be wrong, so reaching it raises instead.
-MERGED_PR_CEILING = 100_000
-
-
 def fetch_gh(repo: str) -> list[dict]:
-    out = subprocess.run(
-        ["gh", "pr", "list", "--repo", repo, "--state", "all",
-         "--limit", str(MERGED_PR_CEILING),
-         "--json", "number,title,state,createdAt,labels,mergedAt,additions,deletions"],
-        check=True, text=True, stdout=subprocess.PIPE).stdout
-    prs = json.loads(out)
-    check_complete(prs)
-    normalized = [{**pr, "created_at": pr["createdAt"], "merged_at": pr["mergedAt"]}
-                  for pr in prs]
-    apply_bors_merges(normalized, fetch_bors_merges(repo)[0])
-    return snapshot_prs({"prs": normalized})
+    # The cumulative series needs every pull request back to the first. The page walk follows its
+    # cursor to the last page, so there is no result-size ceiling to guard against.
+    prs = fetch_pr_pages(repo)
+    apply_app_merges(repo, prs)
+    return snapshot_prs({"prs": prs})
 
 
 def snapshot_prs(data: dict | list) -> list[dict]:
@@ -87,20 +72,6 @@ def snapshot_prs(data: dict | list) -> list[dict]:
              "labels": [{"name": label} if isinstance(label, str) else label
                         for label in pr.get("labels", [])]}
             for pr in data["prs"]]
-
-
-def check_complete(prs: list[dict]) -> None:
-    """Refuse a truncated result rather than drawing a chart that is quietly missing its start.
-
-    A cumulative chart cannot survive losing its oldest rows: every band is shifted by whatever
-    was dropped, and it looks entirely plausible while being wrong. There is no partial answer
-    worth publishing here, so this raises and the caller keeps the previous SVG.
-    """
-    if len(prs) >= MERGED_PR_CEILING:
-        raise RuntimeError(
-            f"gh returned {len(prs)} pull requests, at or above the {MERGED_PR_CEILING} "
-            "ceiling, so the oldest ones were probably dropped and the cumulative series would "
-            "start in the wrong place. Raise MERGED_PR_CEILING.")
 
 
 def utc_day(stamp: str) -> dt.date:

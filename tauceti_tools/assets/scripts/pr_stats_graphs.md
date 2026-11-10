@@ -44,20 +44,23 @@ It requires an authenticated `gh` CLI. In GitHub Actions, set `GH_TOKEN` to
   commenters without requiring the read-only Actions token to enumerate collaborators; a
   contributor who has authored a merged PR is inside this statistics trust boundary.
 - **Merge time** is GitHub's `mergedAt` for ordinary merges. Bors squash merges and
-  TauCeti queue landings leave a closed PR with no `mergedAt`; these use the creation
-  time of the installed `tau-ceti-bors[bot]` or `tauceti-queue[bot]` app's “Pull request
-  successfully merged into main.” receipt.
-  An editable title prefix, queued approval, staging success, or another account's
-  comment is not evidence of a merge. Native merge timestamps take precedence and
-  each PR counts once. This normalization feeds throughput, latency, contributor
-  totals, the category grids, and pipeline health. Roadmap activity uses it when
-  reading the shared snapshot. The per-roadmap
+  TauCeti queue landings leave a closed PR with no `mergedAt`. When the installed
+  `tau-ceti-bors` or `tauceti-queue` app renamed the PR to `[Merged by Bors] - …`, which it
+  does as it closes a PR it landed, the merge time is that rename, read with the PR page
+  query. Any other closed PR is checked for that app's “Pull request successfully merged
+  into main.” receipt among its own comments, and uses the receipt's time: a PR someone
+  closed while its batch was building still lands, without the rename.
+  The title itself, a close by the app (it also closes PRs it rejects), a queued approval,
+  staging success, or another account's comment is not evidence of a merge. Native merge
+  timestamps take precedence and each PR counts once. This normalization feeds throughput,
+  latency, contributor totals, the category grids, and pipeline health. Roadmap activity
+  uses it when reading the shared snapshot. The per-roadmap
   line chart reads the same snapshot, including PR titles and diff sizes.
-  The first run with a cached snapshot whose recorded set of merge apps differs from the
-  current one scans the whole comment archive to backfill historical receipts and
-  reconsider scoreboards from contributors whose merges only those apps recorded.
-  Later runs carry the receipts forward and scan incrementally with an hour overlap;
-  unchanged cached label timelines do not prevent historical merge repair.
+  Receipt checks cost one request per PR, so each verdict is kept in the snapshot until the
+  PR's `updatedAt` moves, and at most 500 PRs are checked a run, newest closures first; a
+  run without a snapshot works through the backlog over several runs. A snapshot whose
+  merge evidence differs from the current rule also rescans scoreboards in full, to
+  reconsider contributors whose merges only the new rule recognises.
 - Seven-day metrics use complete UTC calendar days. Merge latency is PR creation to
   merge time among PRs merged in that trailing window. Every chart is PLOTTED through the
   last complete UTC day: regenerated every three hours, a final point holding only part of

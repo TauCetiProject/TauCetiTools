@@ -229,6 +229,7 @@ def split_repo(repo: str) -> tuple[str, str]:
     return match.group(1), match.group(2)
 
 
+# `mergeRenames` is the one timeline read in bulk; `apply_app_merges` says why that is safe.
 PR_PAGE_QUERY = r"""
 query($owner:String!, $name:String!, $cursor:String) {
   repository(owner:$owner, name:$name) {
@@ -239,6 +240,22 @@ query($owner:String!, $name:String!, $cursor:String) {
         number title additions deletions createdAt updatedAt mergedAt closedAt state isDraft
         author { login }
         labels(first:100) { nodes { name } pageInfo { hasNextPage } }
+        mergeRenames: timelineItems(last:5, itemTypes:[RENAMED_TITLE_EVENT]) {
+          nodes { ... on RenamedTitleEvent { createdAt currentTitle actor { __typename login } } }
+        }
+      }
+    }
+  }
+}
+"""
+
+MERGE_RECEIPT_QUERY = r"""
+query($owner:String!, $name:String!, $number:Int!, $cursor:String) {
+  repository(owner:$owner, name:$name) {
+    pullRequest(number:$number) {
+      comments(last:100, before:$cursor) {
+        pageInfo { hasPreviousPage startCursor }
+        nodes { createdAt body author { __typename login } }
       }
     }
   }
@@ -400,12 +417,8 @@ def reusable_timelines(previous: dict | None, prs: list[dict]) -> dict[int, dict
     return reusable
 
 
-def fetch_prs(repo: str, previous: dict | None = None) -> list[dict]:
-    """Fetch every PR and its authoritative, directly queried label timeline.
-
-    `previous` is an earlier snapshot from this same repository, used only to skip refetching
-    the timeline of a pull request that has not been touched since. See `reusable_timelines`.
-    """
+def fetch_pr_pages(repo: str) -> list[dict]:
+    """Every PR as the page query reads it: no label timeline, merge-app landings not yet applied."""
     owner, name = split_repo(repo)
     cursor = None
     prs = []
@@ -428,10 +441,21 @@ def fetch_prs(repo: str, previous: dict | None = None) -> list[dict]:
                 "author": (raw.get("author") or {}).get("login") or "unknown",
                 "labels": labels,
                 "labeled_events": [],
+                "merge_rename": merge_app_rename(raw),
             })
         if not connection["pageInfo"]["hasNextPage"]:
-            break
+            return prs
         cursor = connection["pageInfo"]["endCursor"]
+
+
+def fetch_prs(repo: str, previous: dict | None = None) -> list[dict]:
+    """Fetch every PR and its authoritative, directly queried label timeline.
+
+    `previous` is an earlier snapshot from this same repository, used only to skip refetching
+    the timeline of a pull request that has not been touched since. See `reusable_timelines`.
+    """
+    owner, name = split_repo(repo)
+    prs = fetch_pr_pages(repo)
     timeline_numbers = [
         pr["number"] for pr in prs
         if pr["closed_at"] is None or parse_dt(pr["closed_at"]) >= LIFECYCLE_EPOCH
@@ -635,81 +659,108 @@ def load_previous(path: Path | None, repo: str) -> dict | None:
     return previous
 
 
-# Bors squash-merges and TauCeti queue landings reach main, but GitHub records their
-# PRs as CLOSED with mergedAt=null. Trust an installed merge app's success receipt,
-# never the editable "[Merged by Bors]" title, a queued approval, or a successful
-# staging build. Both apps post the same success line.
-BORS_LOGIN = "tau-ceti-bors[bot]"
-QUEUE_LOGIN = "tauceti-queue[bot]"
-MERGE_RECEIPT_LOGINS = (BORS_LOGIN, QUEUE_LOGIN)
-BORS_SUCCESS = "Pull request successfully merged into main.\n\n"
+# Bors squash merges and TauCeti queue landings reach main, but GitHub records their PRs as
+# CLOSED with mergedAt=null. The landing app renames the PR "[Merged by Bors] - ..." as it closes
+# it. Only the app can be that rename's actor, whereas anyone with write access can edit a title,
+# and both apps also close PRs they rejected or found superseded, without renaming them.
+MERGE_APPS = ("tau-ceti-bors", "tauceti-queue")
+MERGED_TITLE_PREFIX = "[Merged by Bors] - "
+MERGE_RECEIPT = "Pull request successfully merged into main.\n\n"
+# Recorded in the snapshot. A run whose evidence differs from the previous run's may trust new
+# contributors, so it rescans scoreboards in full.
+MERGE_EVIDENCE = {"rule": "merge app rename, else merge app receipt", "apps": list(MERGE_APPS)}
+# Every other closed PR is checked for the app's success receipt, one request each: a PR closed
+# while its batch was building still lands, unrenamed. Verdicts are reused while `updatedAt`,
+# which a new comment moves, is unchanged; the cap spreads a first backlog over several runs.
+MERGE_RECEIPT_CHECKS_PER_RUN = 500
 
 
-def receipts_reusable(previous: dict | None) -> bool:
-    """Whether a snapshot's receipts were collected from exactly the current merge apps.
+def is_merge_app(actor: dict | None) -> bool:
+    return bool(actor) and actor.get("__typename") == "Bot" and actor.get("login") in MERGE_APPS
 
-    A snapshot scanned before an app was trusted has skipped that app's receipts, and an
-    incremental scan would never revisit them, so it must be rescanned in full.
+
+def first_landing(landings: Iterable[dict]) -> dict | None:
+    # Repeated notifications still describe one merge, at its first success.
+    return min(landings, key=lambda landing: parse_dt(landing["merged_at"]), default=None)
+
+
+def merge_app_rename(raw: dict) -> dict | None:
+    """The landing a merge app recorded by renaming this PR_PAGE_QUERY node, if it did."""
+    return first_landing(
+        {"merged_at": event["createdAt"], "merge_source": event["actor"]["login"]}
+        for event in (raw.get("mergeRenames") or {}).get("nodes") or []
+        if is_merge_app(event.get("actor"))
+        and (event.get("currentTitle") or "").startswith(MERGED_TITLE_PREFIX))
+
+
+def fetch_merge_receipt(owner: str, name: str, number: int) -> dict | None:
+    """The landing recorded by a merge app's success receipt among all of one PR's comments."""
+    cursor = None
+    landings = []
+    while True:
+        pull = graphql(MERGE_RECEIPT_QUERY, owner=owner, name=name, number=number,
+                       cursor=cursor)["repository"]["pullRequest"]
+        if pull is None:
+            raise RuntimeError(f"GitHub returned no comments for PR #{number}")
+        comments = pull["comments"]
+        landings.extend(
+            {"merged_at": comment["createdAt"], "merge_source": comment["author"]["login"]}
+            for comment in comments["nodes"]
+            if is_merge_app(comment.get("author"))
+            and (comment.get("body") or "").startswith(MERGE_RECEIPT))
+        if not comments["pageInfo"]["hasPreviousPage"]:
+            return first_landing(landings)
+        cursor = comments["pageInfo"]["startCursor"]
+
+
+def record_landing(pr: dict, landing: dict) -> None:
+    created = parse_dt(pr.get("created_at"))
+    if created and parse_dt(landing["merged_at"]) < created:
+        raise ValueError(f"merge app landing predates creation of PR #{pr['number']}")
+    pr.update(landing, state="MERGED")
+
+
+def apply_app_merges(repo: str, prs: list[dict], previous: dict | None = None) -> None:
+    """Record merge-app landings as merges, before any chart or reviewer-trust calculation.
+
+    The rename comes from the bulk page query, which can drop timeline events silently (see the
+    note above `timeline_from_node`), so it is used only as positive evidence: a closed PR without
+    one goes to the receipt check, which reads the PR's own comments.
     """
-    previous = previous or {}
-    return (bool(previous.get("bors_merges_scanned_at"))
-            and previous.get("merge_receipt_logins") == list(MERGE_RECEIPT_LOGINS))
-
-
-def fetch_bors_merges(repo: str, previous: dict | None = None,
-                      now: datetime | None = None) -> tuple[dict[str, str], str]:
-    """Success receipt times keyed by PR number, including the entire old history.
-
-    Old snapshots lack this watermark and force a full backfill. Subsequent scans
-    overlap by an hour, like scoreboards, while keeping historical receipts even
-    if the PR's updatedAt has not changed. No timeline-cache invalidation is needed.
-    """
-    now = now or datetime.now(timezone.utc)
-    scanned = (parse_dt((previous or {}).get("bors_merges_scanned_at"))
-               if receipts_reusable(previous) else None)
-    since = scanned - SCOREBOARD_OVERLAP if scanned else None
-    merges = dict((previous or {}).get("bors_merges") or {}) if since else {}
-    query = "per_page=100&sort=created&direction=desc"
-    if since:
-        query += f"&since={iso_z(since)}"
-    print("scanning bors and queue merge receipts" + (f" since {iso_z(since)}" if since
-          else " across the full historical comment archive"), file=sys.stderr)
-    raw = run_gh([
-        "api", "--paginate", f"repos/{repo}/issues/comments?{query}", "--jq",
-        '.[] | select(.user.type == "Bot" and (.user.login | IN('
-        + ", ".join(json.dumps(login) for login in MERGE_RECEIPT_LOGINS)
-        + '))) | select((.body // "") | startswith('
-        + json.dumps(BORS_SUCCESS) + '))'
-        + ' | {number: (.issue_url | split("/") | last), created_at}',
-    ])
-    for line in raw.splitlines():
-        receipt = json.loads(line)
-        number, stamp = str(int(receipt["number"])), receipt["created_at"]
-        if parse_dt(stamp) is None:
-            raise ValueError(f"invalid bors merge time for #{number}")
-        # Repeated notifications still describe one merge, at its first success.
-        if number not in merges or parse_dt(stamp) < parse_dt(merges[number]):
-            merges[number] = stamp
-    return merges, iso_z(now)
-
-
-def apply_bors_merges(prs: list[dict], merges: dict[str, str]) -> None:
-    """Normalize bors closures before any chart or reviewer-trust calculation."""
+    owner, name = split_repo(repo)
+    checked = {entry["number"]: entry for entry in (previous or {}).get("prs") or []
+               if entry.get("receipt_checked")}
+    pending = []
     for pr in prs:
-        stamp = merges.get(str(pr["number"]))
-        if not pr.get("merged_at") and pr.get("state") == "CLOSED" and stamp:
-            created = parse_dt(pr.get("created_at"))
-            if created and parse_dt(stamp) < created:
-                raise ValueError(f"bors merge predates creation of PR #{pr['number']}")
-            pr.update(merged_at=stamp, state="MERGED", merge_source="bors")
+        landing = pr.pop("merge_rename", None)
+        if pr.get("merged_at") or pr.get("state") != "CLOSED":
+            continue
+        if landing is None:
+            entry = checked.get(pr["number"])
+            if entry is None or entry["receipt_checked"] != pr["updated_at"]:
+                pending.append(pr)
+                continue
+            pr["receipt_checked"] = entry["receipt_checked"]
+            if not entry.get("merge_source"):
+                continue
+            landing = {"merged_at": entry["merged_at"], "merge_source": entry["merge_source"]}
+        record_landing(pr, landing)
+    # Newest closures first, so a backlog never holds back the landings of the last few hours.
+    pending.sort(key=lambda pr: pr["closed_at"], reverse=True)
+    for pr in pending[:MERGE_RECEIPT_CHECKS_PER_RUN]:
+        landing = fetch_merge_receipt(owner, name, pr["number"])
+        pr["receipt_checked"] = pr["updated_at"]
+        if landing is not None:
+            record_landing(pr, landing)
+    if len(pending) > MERGE_RECEIPT_CHECKS_PER_RUN:
+        print(f"checked {MERGE_RECEIPT_CHECKS_PER_RUN:,} closed PRs for merge receipts; "
+              f"{len(pending) - MERGE_RECEIPT_CHECKS_PER_RUN:,} left for later runs", file=sys.stderr)
 
 
 def fetch_snapshot(repo: str, previous: dict | None = None) -> dict:
     prs = fetch_prs(repo, previous)
-    bors_merges, bors_scanned_at = fetch_bors_merges(repo, previous)
-    apply_bors_merges(prs, bors_merges)
-    # Reconsider old rejected scoreboards whenever a merge app's contributors become trusted.
-    scoreboard_previous = previous if receipts_reusable(previous) else None
+    apply_app_merges(repo, prs, previous)
+    scoreboard_previous = previous if (previous or {}).get("merge_evidence") == MERGE_EVIDENCE else None
     trusted_logins = {
         pr["author"] for pr in prs
         if pr.get("merged_at") and pr.get("author") != "unknown"
@@ -726,9 +777,7 @@ def fetch_snapshot(repo: str, previous: dict | None = None) -> dict:
         "repo": repo,
         "fetched_at": iso_z(datetime.now(timezone.utc)),
         "prs": prs,
-        "bors_merges": bors_merges,
-        "bors_merges_scanned_at": bors_scanned_at,
-        "merge_receipt_logins": list(MERGE_RECEIPT_LOGINS),
+        "merge_evidence": MERGE_EVIDENCE,
         "scoreboards": scoreboards,
         # Per comment, so that the next incremental scan can revise a single verdict. The
         # published counts below are derived from it and stay exact across incremental runs.
@@ -1646,7 +1695,7 @@ def generate(
             "review_cycle": cycles["definition"],
             "review": "one canonical <!--tauceti-scoreboard--> comment on a pull request of this repository, identified by the tauceti-meta:v1 block naming that PR, whose posting login also authors a merged PR in the fetched snapshot",
             "active_author": "distinct PR author opening a PR in the trailing seven-day window",
-            "merge": "GitHub mergedAt, or the installed bors or TauCeti queue app success receipt for a closed PR merged into main",
+            "merge": "GitHub mergedAt; for a closed PR, the installed bors or TauCeti queue app renaming it to a [Merged by Bors] title, or else that app's success receipt on it",
             "merge_latency": "PR creation timestamp to merge timestamp",
         },
         "queue": queue,

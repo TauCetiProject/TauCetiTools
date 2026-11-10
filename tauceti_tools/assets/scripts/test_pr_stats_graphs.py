@@ -77,9 +77,11 @@ def pr(number, created_day, *, state="CLOSED", merged_day=None, author="alice",
 
 
 class MetricsTest(unittest.TestCase):
-    def test_outer_pr_page_contains_no_nested_timeline(self):
+    def test_outer_pr_page_reads_no_label_timeline(self):
         self.assertIn("pullRequests(first:100", stats.PR_PAGE_QUERY)
-        self.assertNotIn("timelineItems", stats.PR_PAGE_QUERY)
+        self.assertEqual(stats.PR_PAGE_QUERY.count("timelineItems"), 1)
+        self.assertIn("itemTypes:[RENAMED_TITLE_EVENT]", stats.PR_PAGE_QUERY)
+        self.assertNotIn("LABELED_EVENT", stats.PR_PAGE_QUERY)
 
     def test_direct_label_timeline_pagination_is_not_truncated(self):
         first_page = {
@@ -625,7 +627,6 @@ class MetricsTest(unittest.TestCase):
         ]
         with (
             patch.object(stats, "fetch_prs", return_value=prs),
-            patch.object(stats, "fetch_bors_merges", return_value=({}, timestamp(3))),
             patch.object(stats, "fetch_scoreboards",
                          return_value=([], {}, timestamp(3))) as fetch,
         ):
@@ -666,76 +667,115 @@ class MetricsTest(unittest.TestCase):
         self.assertEqual(dict(totals), {"before": 1})
 
 
-class BorsMergesTest(unittest.TestCase):
-    def test_receipts_filter_bot_identity_branch_and_success(self):
-        comments = [
-            {"user": {"type": kind, "login": login}, "body": body,
-             "issue_url": "https://api.github.com/repos/o/r/issues/42",
-             "created_at": timestamp(9)}
-            for kind, login, body in [
-                ("Bot", stats.BORS_LOGIN, stats.BORS_SUCCESS + "Build succeeded"),
-                ("User", stats.BORS_LOGIN, stats.BORS_SUCCESS),
-                ("User", stats.QUEUE_LOGIN, stats.BORS_SUCCESS),
-                ("Bot", stats.QUEUE_LOGIN, "Pull request rejected during staging repair.\n\n"),
-                ("Bot", "other[bot]", stats.BORS_SUCCESS),
-                ("Bot", stats.BORS_LOGIN, "Pull request successfully merged into staging.\n\n"),
-                ("Bot", stats.BORS_LOGIN, "Build succeeded"),
-            ]
+def rename(day, actor="tau-ceti-bors", kind="Bot", title="[Merged by Bors] - feat: x"):
+    return {"createdAt": timestamp(day, 2), "currentTitle": title,
+            "actor": {"__typename": kind, "login": actor}}
+
+
+def comment(day, body, author="tauceti-queue", kind="Bot"):
+    return {"createdAt": timestamp(day, 3), "body": body,
+            "author": {"__typename": kind, "login": author}}
+
+
+def comments_page(nodes, previous_cursor=None):
+    return {"repository": {"pullRequest": {"comments": {
+        "pageInfo": {"hasPreviousPage": previous_cursor is not None,
+                     "startCursor": previous_cursor},
+        "nodes": nodes,
+    }}}}
+
+
+def closed(number, closed_day, *, updated_day=None, rename_event=None, author="alice"):
+    record = pr(number, 1, author=author)
+    record.update(closed_at=timestamp(closed_day, 1),
+                  updated_at=timestamp(updated_day or closed_day, 4),
+                  merge_rename=stats.merge_app_rename(
+                      {"mergeRenames": {"nodes": [rename_event] if rename_event else []}}))
+    return record
+
+
+class MergeAppLandingsTest(unittest.TestCase):
+    def test_only_a_merge_apps_rename_to_a_merged_title_is_a_landing(self):
+        def landing(*events):
+            return stats.merge_app_rename({"mergeRenames": {"nodes": list(events)}})
+
+        self.assertEqual(landing({}, rename(10), rename(9, "tauceti-queue")),
+                         {"merged_at": timestamp(9, 2), "merge_source": "tauceti-queue"})
+        for rejected in (rename(9, kind="User"), rename(9, "other-app"),
+                         rename(9, title="feat: x"), {}):
+            self.assertIsNone(landing(rejected))
+        self.assertIsNone(stats.merge_app_rename({}))
+
+    def test_receipt_check_reads_every_page_and_keeps_the_first_receipt(self):
+        receipt = stats.MERGE_RECEIPT + "Build succeeded"
+        pages = [
+            comments_page([comment(10, receipt, "tau-ceti-bors"),
+                           comment(10, receipt, kind="User"),
+                           comment(10, receipt, "other-app"),
+                           comment(10, "Pull request rejected during staging repair.\n\n"),
+                           comment(10, "Pull request successfully merged into staging.\n\n")],
+                          previous_cursor="older"),
+            comments_page([comment(9, receipt)]),
         ]
-        def run(arguments):
-            return subprocess.run(["jq", "-c", arguments[-1]], input=json.dumps(comments),
-                                  text=True, check=True, capture_output=True).stdout
-        if shutil.which("jq") is None:
-            self.skipTest("jq unavailable")
-        with patch.object(stats, "run_gh", side_effect=run):
-            merges, _ = stats.fetch_bors_merges("o/r")
-        self.assertEqual(merges, {"42": timestamp(9)})
+        with patch.object(stats, "graphql", side_effect=pages) as query:
+            landing = stats.fetch_merge_receipt("o", "r", 42)
+        self.assertEqual(landing, {"merged_at": timestamp(9, 3), "merge_source": "tauceti-queue"})
+        self.assertEqual(query.call_args_list[1].kwargs["cursor"], "older")
+        with patch.object(stats, "graphql", return_value=comments_page([comment(9, "Build failed")])):
+            self.assertIsNone(stats.fetch_merge_receipt("o", "r", 42))
 
-    def test_queue_app_receipts_count_as_merges(self):
-        comments = [{"user": {"type": "Bot", "login": stats.QUEUE_LOGIN},
-                     "body": stats.BORS_SUCCESS + "Merged revision: `abc`.\n",
-                     "issue_url": "https://api.github.com/repos/o/r/issues/43",
-                     "created_at": timestamp(9)}]
-        def run(arguments):
-            return subprocess.run(["jq", "-c", arguments[-1]], input=json.dumps(comments),
-                                  text=True, check=True, capture_output=True).stdout
-        if shutil.which("jq") is None:
-            self.skipTest("jq unavailable")
-        with patch.object(stats, "run_gh", side_effect=run):
-            merges, _ = stats.fetch_bors_merges("o/r")
-        self.assertEqual(merges, {"43": timestamp(9)})
+    def test_renames_count_without_requests_and_receipts_are_checked_newest_first(self):
+        native = pr(1, 1, merged_day=8)
+        native["merge_rename"] = None
+        open_pr = pr(2, 1, state="OPEN")
+        open_pr["merge_rename"] = None
+        prs = [native, open_pr, closed(3, 6, rename_event=rename(6)),
+               closed(4, 5), closed(5, 8), closed(6, 7)]
+        receipts = {5: {"merged_at": timestamp(9, 3), "merge_source": "tauceti-queue"}, 6: None}
+        with (patch.object(stats, "MERGE_RECEIPT_CHECKS_PER_RUN", 2),
+              patch.object(stats, "fetch_merge_receipt",
+                           side_effect=lambda owner, name, number: receipts[number]) as check):
+            stats.apply_app_merges("o/r", prs)
+        self.assertEqual([call.args[2] for call in check.call_args_list], [5, 6])
+        by_number = {record["number"]: record for record in prs}
+        self.assertEqual(by_number[1]["merged_at"], timestamp(8, 12))
+        self.assertNotIn("merge_source", by_number[1])
+        self.assertIsNone(by_number[2]["merged_at"])
+        self.assertEqual((by_number[3]["state"], by_number[3]["merged_at"], by_number[3]["merge_source"]),
+                         ("MERGED", timestamp(6, 2), "tau-ceti-bors"))
+        self.assertEqual((by_number[5]["state"], by_number[5]["merged_at"]), ("MERGED", timestamp(9, 3)))
+        self.assertEqual((by_number[6]["state"], by_number[6]["merged_at"]), ("CLOSED", None))
+        self.assertEqual({number for number, record in by_number.items() if "receipt_checked" in record},
+                         {5, 6})
+        self.assertNotIn("receipt_checked", by_number[4])  # Left for the next run.
+        self.assertFalse(any("merge_rename" in record for record in prs))
 
-    def test_snapshot_without_queue_receipts_rescans_full_history(self):
-        now = stats.parse_dt(timestamp(15))
-        bors_only = {"bors_merges_scanned_at": timestamp(14), "bors_merges": {"42": timestamp(9)}}
-        with patch.object(stats, "run_gh", return_value='') as run:
-            merges, _ = stats.fetch_bors_merges("o/r", bors_only, now)
-        self.assertNotIn("since=", run.call_args.args[0][2])
-        self.assertEqual(merges, {})
+    def test_receipt_verdicts_are_reused_until_updated_at_moves(self):
+        found, absent, stale = closed(5, 8), closed(6, 7), closed(7, 7, updated_day=9)
+        found.update(state="MERGED", merged_at=timestamp(9, 3), merge_source="tauceti-queue",
+                     receipt_checked=found["updated_at"])
+        absent["receipt_checked"] = absent["updated_at"]
+        stale["receipt_checked"] = timestamp(7, 4)
+        previous = {"prs": [found, absent, stale]}
+        prs = [closed(5, 8), closed(6, 7), closed(7, 7, updated_day=9)]
+        with patch.object(stats, "fetch_merge_receipt", return_value=None) as check:
+            stats.apply_app_merges("o/r", prs, previous)
+        self.assertEqual([call.args[2] for call in check.call_args_list], [7])
+        self.assertEqual((prs[0]["state"], prs[0]["merged_at"], prs[0]["merge_source"]),
+                         ("MERGED", timestamp(9, 3), "tauceti-queue"))
+        self.assertEqual((prs[1]["state"], prs[1]["receipt_checked"]), ("CLOSED", prs[1]["updated_at"]))
+        self.assertEqual(prs[2]["receipt_checked"], timestamp(9, 4))
 
-    def test_old_snapshot_forces_full_history_and_new_one_keeps_receipts(self):
-        now = stats.parse_dt(timestamp(15))
-        old = {"scoreboards_scanned_at": timestamp(14)}
-        with patch.object(stats, "run_gh", return_value='') as run:
-            merges, scanned = stats.fetch_bors_merges("o/r", old, now)
-        self.assertNotIn("since=", run.call_args.args[0][2])
-        new = {"bors_merges_scanned_at": scanned, "bors_merges": {"42": timestamp(9)},
-               "merge_receipt_logins": list(stats.MERGE_RECEIPT_LOGINS)}
-        receipts = '\n'.join(json.dumps({"number": 42, "created_at": timestamp(day)})
-                             for day in (10, 9))
-        with patch.object(stats, "run_gh", return_value=receipts) as run:
-            merges, _ = stats.fetch_bors_merges("o/r", new, now)
-        self.assertIn("since=2026-01-14T23:00:00Z", run.call_args.args[0][2])
-        self.assertEqual(merges, {"42": timestamp(9)})
+    def test_a_landing_before_creation_is_an_error(self):
+        early = closed(3, 6, rename_event={**rename(6), "createdAt": "2025-12-31T00:00:00Z"})
+        with self.assertRaisesRegex(ValueError, "predates creation of PR #3"):
+            stats.apply_app_merges("o/r", [early])
 
-    def test_bors_and_native_merges_count_once_in_all_histories(self):
-        prs = [pr(1, 1), pr(2, 1, merged_day=8), pr(3, 1), pr(4, 1, state="OPEN")]
-        stats.apply_bors_merges(prs, {"1": timestamp(9), "2": timestamp(9),
-                                      "4": timestamp(9), "999": timestamp(9)})
-        self.assertEqual(prs[0]["state"], "MERGED")
-        self.assertEqual(prs[1]["merged_at"], timestamp(8, 12))
-        self.assertIsNone(prs[2]["merged_at"])
-        self.assertIsNone(prs[3]["merged_at"])
+    def test_app_and_native_merges_count_once_in_all_histories(self):
+        prs = [closed(1, 9, rename_event=rename(9)), pr(2, 1, merged_day=8),
+               closed(3, 9), pr(4, 1, state="OPEN")]
+        with patch.object(stats, "fetch_merge_receipt", return_value=None):
+            stats.apply_app_merges("o/r", prs)
         with tempfile.TemporaryDirectory() as folder:
             metrics = stats.generate({"prs": prs, "fetched_at": timestamp(10),
                                       "scoreboards": []}, Path(folder))
@@ -743,36 +783,40 @@ class BorsMergesTest(unittest.TestCase):
         self.assertEqual(metrics["merge_totals_by_contributor"], {"alice": 2})
         self.assertEqual(metrics["cumulative_merges_plotted"]["alice"][-1], 2)
 
-    def test_unchanged_cached_timeline_still_gets_historical_merge_backfill(self):
-        old_pr = pr(42, 1, author="bors-only-author")
+    def test_unchanged_cached_timeline_still_gets_its_landing_from_the_page(self):
+        old_pr = pr(42, 1, author="app-only-author")
         old_pr.update(closed_at=timestamp(9), updated_at=timestamp(9), labeled_events=[])
         previous = {"repo": "o/r", "prs": [old_pr]}
         page = {"repository": {"pullRequests": {
             "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": [{
                 "number": 42, "createdAt": timestamp(1), "updatedAt": timestamp(9),
                 "mergedAt": None, "closedAt": timestamp(9), "state": "CLOSED",
-                "isDraft": False, "author": {"login": "bors-only-author"},
-                "labels": {"nodes": []},
+                "isDraft": False, "author": {"login": "app-only-author"},
+                "labels": {"nodes": []}, "mergeRenames": {"nodes": [rename(9)]},
             }],
         }}}
         with (patch.object(stats, "graphql", return_value=page) as query,
-              patch.object(stats, "fetch_bors_merges",
-                           return_value=({"42": timestamp(9)}, timestamp(10))),
               patch.object(stats, "fetch_scoreboards", return_value=([], {}, timestamp(10)))):
             snapshot = stats.fetch_snapshot("o/r", previous)
-        self.assertEqual(query.call_count, 1)  # Only metadata; reused label history.
-        self.assertEqual(snapshot["prs"][0]["merged_at"], timestamp(9))
+        self.assertEqual(query.call_count, 1)  # Only the page: label history reused, no receipt check.
+        self.assertEqual(snapshot["prs"][0]["merged_at"], timestamp(9, 2))
+        self.assertEqual(snapshot["merge_evidence"], stats.MERGE_EVIDENCE)
 
-    def test_backfill_restores_bors_contributor_review_trust(self):
-        prs = [pr(42, 1, author="bors-only-author")]
-        old = {"repo": "o/r", "scoreboards_scanned_at": timestamp(10)}
-        with (patch.object(stats, "fetch_prs", return_value=prs),
-              patch.object(stats, "fetch_bors_merges",
-                           return_value=({"42": timestamp(9)}, timestamp(10))),
-              patch.object(stats, "fetch_scoreboards", return_value=([], {}, timestamp(10))) as scan):
-            snapshot = stats.fetch_snapshot("o/r", old)
-        scan.assert_called_once_with("o/r", {42}, {"bors-only-author"}, None)
-        self.assertEqual(snapshot["prs"][0]["merge_source"], "bors")
+    def test_new_merge_evidence_rescans_scoreboards_in_full(self):
+        def scoreboard_previous(previous):
+            prs = [closed(42, 9, rename_event=rename(9), author="app-only-author")]
+            with (patch.object(stats, "fetch_prs", return_value=prs),
+                  patch.object(stats, "fetch_scoreboards",
+                               return_value=([], {}, timestamp(10))) as scan):
+                stats.fetch_snapshot("o/r", previous)
+            self.assertEqual(scan.call_args.args[2], {"app-only-author"})
+            return scan.call_args.args[3]
+
+        old = {"repo": "o/r", "scoreboards_scanned_at": timestamp(10),
+               "merge_receipt_logins": ["tau-ceti-bors[bot]", "tauceti-queue[bot]"]}
+        self.assertIsNone(scoreboard_previous(old))
+        current = {**old, "merge_evidence": stats.MERGE_EVIDENCE}
+        self.assertIs(scoreboard_previous(current), current)
 
 
 class RoadmapMatrixTest(unittest.TestCase):
