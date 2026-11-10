@@ -270,6 +270,7 @@ else:
                     event="repository_dispatch",
                     status="completed",
                     conclusion="success",
+                    repository={"full_name": "owner/Project"},
                     head_repository={"full_name": "owner/Project"},
                 )
                 (directory / "scripts/github_api.py").write_text(
@@ -310,20 +311,25 @@ else:
             event="repository_dispatch",
             status="completed",
             conclusion="success",
+            repository={"full_name": "owner/Project"},
             head_repository={"full_name": "owner/Project"},
         )
+        fork_pr = {"event": "pull_request_target", "head_repository": {"full_name": "fork/Project"}}
         cases = (
-            {},
-            {"event": "pull_request"},
-            {"path": ".github/workflows/evil.yml"},
-            {"head_repository": {"full_name": "fork/Project"}},
-            {"status": "in_progress"},
-            {"id": 100},
-            {"event": "workflow_dispatch", "head_branch": "untrusted"},
-            {"event": "workflow_dispatch", "head_branch": "main"},
+            ("workflow_dispatch", {}, True),
+            ("workflow_dispatch", {"event": "pull_request"}, False),
+            ("workflow_dispatch", {"path": ".github/workflows/other.yml"}, False),
+            ("workflow_dispatch", {"head_repository": {"full_name": "fork/Project"}}, False),
+            ("workflow_dispatch", {"status": "in_progress"}, False),
+            ("workflow_dispatch", {"id": 100}, False),
+            ("workflow_dispatch", {"event": "workflow_dispatch", "head_branch": "untrusted"}, False),
+            ("workflow_dispatch", {"event": "workflow_dispatch", "head_branch": "main"}, True),
+            ("workflow_dispatch", fork_pr, False),
+            ("workflow_run", fork_pr, True),
+            ("workflow_run", dict(fork_pr, repository={"full_name": "fork/Project"}), False),
         )
-        for changes in cases:
-            with self.subTest(changes=changes), tempfile.TemporaryDirectory() as directory:
+        for event, changes, allowed in cases:
+            with self.subTest(event=event, changes=changes), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 (root / "scripts").mkdir()
                 run = dict(trusted, **changes)
@@ -342,12 +348,12 @@ else:
                     CI_STATUS_SOURCE_RUN_ID="99",
                     CI_STATUS_SOURCE_ATTEMPT="1",
                     GITHUB_REPOSITORY="owner/Project",
+                    GITHUB_EVENT_NAME=event,
                     DEFAULT_BRANCH="main",
                     RUNNER_TEMP=directory,
                     GITHUB_OUTPUT=str(root / "out"),
                 )
                 result = subprocess.run(["bash", "-eu", "-c", shell], cwd=root, env=env, capture_output=True, text=True)
-                allowed = not changes or changes == {"event": "workflow_dispatch", "head_branch": "main"}
                 self.assertEqual(result.returncode == 0, allowed, result.stderr)
                 self.assertEqual((root / "out").exists(), allowed)
 
