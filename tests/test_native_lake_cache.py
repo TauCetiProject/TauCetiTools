@@ -2,7 +2,10 @@
 
 import importlib.util
 import sys
+import unittest
 from pathlib import Path
+
+import yaml
 
 SCRIPTS = Path(__file__).parents[1] / "tauceti_tools/assets/scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -10,11 +13,6 @@ spec = importlib.util.spec_from_file_location("native_lake_cache_tests", SCRIPTS
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 PublicationTests = module.PublicationTests
-
-
-import unittest
-
-import yaml
 
 
 class WorkflowStructure(unittest.TestCase):
