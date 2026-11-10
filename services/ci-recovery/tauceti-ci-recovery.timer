@@ -1,10 +1,10 @@
 [Unit]
-Description=Check for abandoned PR CI every five minutes
+Description=Check for abandoned PR CI hourly
 
 [Timer]
 OnBootSec=2min
-OnCalendar=*:0/5
-RandomizedDelaySec=10
+OnCalendar=hourly
+RandomizedDelaySec=2min
 Persistent=true
 Unit=tauceti-ci-recovery.service
 
