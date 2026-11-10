@@ -20,7 +20,12 @@ from .project import parse
 from .system import ensure_ssl_cert_file
 from .templates import materialize
 
-WORKFLOWS = {".github/workflows/ci.yml", ".github/workflows/api-docs.yml", ".github/workflows/pages.yml"}
+WORKFLOWS = {
+    ".github/workflows/ci.yml",
+    ".github/workflows/api-docs.yml",
+    ".github/workflows/pages.yml",
+    ".github/workflows/nightly-verify.yml",
+}
 SCHEMA = "tauceti-ci.source-mirror/v1"
 
 

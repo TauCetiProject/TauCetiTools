@@ -772,13 +772,14 @@ class BorsMergesTest(unittest.TestCase):
             merges, _ = stats.fetch_bors_merges("o/r")
         self.assertEqual(merges, {"43": timestamp(9)})
 
-    def test_snapshot_without_queue_receipts_rescans_full_history(self):
+    def test_snapshot_without_queue_receipts_rescans_but_keeps_bors_receipts(self):
         now = stats.parse_dt(timestamp(15))
         bors_only = {"bors_merges_scanned_at": timestamp(14), "bors_merges": {"42": timestamp(9)}}
-        with patch.object(stats, "run_gh", return_value='') as run:
+        queue = json.dumps({"number": 43, "created_at": timestamp(12)})
+        with patch.object(stats, "run_gh", return_value=queue) as run:
             merges, _ = stats.fetch_bors_merges("o/r", bors_only, now)
         self.assertNotIn("since=", run.call_args.args[0][2])
-        self.assertEqual(merges, {})
+        self.assertEqual(merges, {"42": timestamp(9), "43": timestamp(12)})
 
     def test_old_snapshot_forces_full_history_and_new_one_keeps_receipts(self):
         now = stats.parse_dt(timestamp(15))

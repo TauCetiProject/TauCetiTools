@@ -722,7 +722,8 @@ def receipts_reusable(previous: dict | None) -> bool:
     """Whether a snapshot's receipts were collected from exactly the current merge apps.
 
     A snapshot scanned before an app was trusted has skipped that app's receipts, and an
-    incremental scan would never revisit them, so it must be rescanned in full.
+    incremental scan would never revisit them, so it must be rescanned as far back as GitHub
+    paginates. Its existing receipts are still carried forward.
     """
     previous = previous or {}
     return (bool(previous.get("bors_merges_scanned_at"))
@@ -733,20 +734,21 @@ def fetch_bors_merges(repo: str, previous: dict | None = None,
                       now: datetime | None = None) -> tuple[dict[str, str], str]:
     """Success receipt times keyed by PR number, including the entire old history.
 
-    Old snapshots lack this watermark and force a full backfill. Subsequent scans
-    overlap by an hour, like scoreboards, while keeping historical receipts even
-    if the PR's updatedAt has not changed. No timeline-cache invalidation is needed.
+    Incremental scans overlap by an hour, like scoreboards, while keeping historical
+    receipts even if the PR's updatedAt has not changed. A snapshot without a usable
+    watermark scans as far back as GitHub paginates (roughly the last week of comments),
+    so receipts already in the snapshot are always carried forward rather than refetched.
     """
     now = now or datetime.now(timezone.utc)
     scanned = (parse_dt((previous or {}).get("bors_merges_scanned_at"))
                if receipts_reusable(previous) else None)
     since = scanned - SCOREBOARD_OVERLAP if scanned else None
-    merges = dict((previous or {}).get("bors_merges") or {}) if since else {}
+    merges = dict((previous or {}).get("bors_merges") or {})
     query = "per_page=100&sort=created&direction=desc"
     if since:
         query += f"&since={iso_z(since)}"
     print("scanning bors and queue merge receipts" + (f" since {iso_z(since)}" if since
-          else " across the full historical comment archive"), file=sys.stderr)
+          else " as far back as GitHub paginates"), file=sys.stderr)
     raw = run_gh([
         "api", "--paginate", f"repos/{repo}/issues/comments?{query}", "--jq",
         '.[] | select(.user.type == "Bot" and (.user.login | IN('
