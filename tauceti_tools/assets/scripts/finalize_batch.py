@@ -64,8 +64,26 @@ def publication_job(data):
 def isolated_runner(data, job, run_id):
     """Require the selected nonprivileged labels and a different sandbox runner."""
     labels = {MACHINE_LABEL, f"namespace-features:github.run-id={run_id}"}
+    actual = set(job.get("labels", []))
+    isolated = actual == labels
+    configured = os.environ.get("CI_PUBLISHER_RUNNER_LABELS")
+    if configured:
+        try:
+            required = json.loads(configured)
+            if not isinstance(required, list) or not all(isinstance(label, str) for label in required):
+                return False
+            required = set(required)
+            base = {"self-hosted", "linux", "x64", "tauceti-fleet-queue-control"}
+            machines = required - base
+            if not base <= required or len(machines) != 1 or not re.fullmatch(r"fleet-[a-f0-9]{32}", next(iter(machines))):
+                return False
+            extra = actual - required
+            isolated = (required <= actual and len(extra) == 1
+                        and bool(re.fullmatch(r"fleet-instance-[a-f0-9]{16}", next(iter(extra)))))
+        except (ValueError, TypeError):
+            return False
     sandbox = [item for item in data["jobs"] if item["name"] == "sandboxed-build"]
-    return (set(job.get("labels", [])) == labels and bool(job.get("runner_name"))
+    return (isolated and bool(job.get("runner_name"))
             and len(sandbox) == 1 and bool(sandbox[0].get("runner_name"))
             and job["runner_name"] != sandbox[0]["runner_name"])
 
@@ -94,10 +112,10 @@ def wait_publication(run_id, attempt, *, fetch=api, clock=time.monotonic, sleep=
                     "completed_at", "runner_name", "labels")}), flush=True)
                 previous = current
             if job["status"] == "completed" and not job.get("runner_name"):
-                return "failure", "publisher completed without acquiring a runner; inspect run jobs and Namespace routing"
+                return "failure", "publisher completed without acquiring a runner; inspect run jobs and publisher routing"
             if job.get("runner_name") and job["status"] in {"in_progress", "completed"}:
                 if not isolated_runner(data, job, run_id):
-                    return "failure", "publisher runner/labels are not isolated; inspect Namespace routing"
+                    return "failure", "publisher runner/labels are not isolated; inspect publisher routing"
             if job["status"] == "completed":
                 confirmed = any(step.get("name") == CONFIRM and step.get("conclusion") == "success"
                                 for step in job.get("steps", []))
@@ -107,9 +125,9 @@ def wait_publication(run_id, attempt, *, fetch=api, clock=time.monotonic, sleep=
         if job is not None and job["status"] == "in_progress" and job.get("runner_name"):
             acquired = True
         if not acquired and elapsed >= ACQUISITION_SECONDS:
-            return "failure", "publisher not acquired/observable in 5m; inspect run jobs and Namespace routing"
+            return "failure", "publisher not acquired/observable in 5m; inspect run jobs and publisher routing"
         if elapsed >= PUBLICATION_SECONDS:
-            return "failure", "isolated publication exceeded 20m; inspect run jobs and Namespace capacity"
+            return "failure", "isolated publication exceeded 20m; inspect run jobs and publisher capacity"
         sleep(30)
 
 
