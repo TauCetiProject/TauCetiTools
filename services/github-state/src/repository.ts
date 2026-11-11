@@ -21,6 +21,10 @@ import { Checkpoint, DEFAULT_POLICY, Policy, RetentionClass, R2_CLASSES, RULES, 
 import { CapacitySample, RepairMetrics, RequestMetrics, SQLITE_ALLOWANCE, capacity, postgresCapacity, emitAlarm, timedBucket, within } from './monitoring';
 import { Failure, FULL_MESSAGE, AdminError, CLEANUP, PARKABLE, classify, deleteClass, faultySql, log, missingSchema, requestId, scan, summary, userTables as summaryTables } from './storage';
 
+type GroupedIngest={pointer:EventPointer,body:any,encodings:Map<string,string>,queuedAt:number,resolve:(committed:boolean)=>void,reject:(error:unknown)=>void};
+// At most this many deliveries share one writer transaction, and at most this
+// many such groups wait for the writer at once.
+const INGEST_GROUP_LIMIT=16,INGEST_GROUP_FLIGHTS=4;
 type IngestRepair={q:Query,priority:number,dirty?:boolean,dirtyIfMissing?:boolean,missingOnly?:boolean};
 const INGEST_EVENT_TYPES=new Set(['pull_request','issues','issue_comment','pull_request_review_comment','pull_request_review','pull_request_review_thread','status','push','create','delete','repository','label','milestone','merge_group']);
 interface RepairWait {job:any;due:number;attempts:number;reason:string;event:string;installationCapacity?:boolean;memberFailure?:boolean;failure?:{category:string,request_id?:string}}
@@ -109,6 +113,7 @@ export class RepositoryState extends DurableObject<Env> {
   private renewedLeases=0;
   private optionalWork={active:0};
   private demandMemo=new Map<string,number>();
+  private ingestGroup:{pending:GroupedIngest[],flights:number}={pending:[],flights:0};
   private ingestStats=new Map<string,{minute:number,deliveries:number,sql_round_trips:number,sql_samples:number,writer_wait_ms:number,writer_wait_max_ms:number,apply_through_cleanup_ms:number,apply_max_ms:number}>();
   private groupedPublication={scope:'repository_instance_since_restart',since:Date.now(),admissions:0,members:0,queued_work_yields:0,max_members:0};
   private readDemands={pending:new Map<string,Query>(),active:new Map<string,{complete?:boolean}>(),flight:undefined as Promise<void>|undefined};
@@ -1019,6 +1024,67 @@ export class RepositoryState extends DurableObject<Env> {
     row.deliveries++;row.apply_through_cleanup_ms+=elapsed;row.apply_max_ms=Math.max(row.apply_max_ms,elapsed);
     if(queries!==undefined){row.sql_round_trips+=queries;row.sql_samples++;}
   }
+  // Group commit for webhook application. Each writer transaction costs a new
+  // database connection, ownership check and commit, and the serialized writer
+  // gives every waiting caller one turn. Applying deliveries one per turn let
+  // arrivals outpace application. A group takes the deliveries waiting when it
+  // reaches the writer and applies them in arrival order in one transaction.
+  // A failed group is retried one delivery per transaction, so one bad input
+  // cannot hold back or fail its neighbours.
+  groupIngest(item:{pointer:EventPointer,body:any,encodings:Map<string,string>,queuedAt:number}):Promise<boolean> {
+    const group=this.ingestGroup;
+    return new Promise<boolean>((resolve,reject)=>{
+      group.pending.push({...item,resolve,reject});
+      this.startIngestGroups();
+    });
+  }
+  private startIngestGroups():void {
+    const group=this.ingestGroup;
+    while(group.pending.length>group.flights*INGEST_GROUP_LIMIT && group.flights<INGEST_GROUP_FLIGHTS) {
+      group.flights++;
+      const flight=this.applyIngestGroup().finally(()=>{group.flights--;if(group.pending.length)this.startIngestGroups();});
+      this.ctx.waitUntil?.(flight);
+    }
+  }
+  private async applyIngestGroup():Promise<void> {
+    const group=this.ingestGroup;let batch:GroupedIngest[]=[];
+    const applyOne=async(state:RepositoryState,item:GroupedIngest)=>{
+      const store=state.store,queries=store.queryCount ?? 0,applyStarted=Date.now();
+      state.preparedEncodings=item.encodings;
+      if(store.backend==='postgres')state.store=new ReadCacheStore(store);
+      try {
+        const committed=await RepositoryState.prototype.ingest.call(state,item.pointer,item.body);
+        return {item,committed,applyStarted,queries:store.queryCount===undefined?undefined:store.queryCount-queries};
+      } finally {state.store=store;}
+    };
+    const record=(results:{item:GroupedIngest,committed:boolean,applyStarted:number,queries?:number}[])=>{
+      const finished=Date.now();
+      for(const {item,committed,applyStarted,queries} of results) {
+        if(committed)try{this.recordIngest(item.pointer.event,queries,finished-applyStarted,Math.max(0,applyStarted-item.queuedAt));}catch{}
+        item.resolve(committed);
+      }
+    };
+    try {
+      record(await this.atomic(async state=>{
+        // Take the deliveries waiting now that the writer is ours.
+        batch=group.pending.splice(0,INGEST_GROUP_LIMIT);
+        const results=[];for(const item of batch)results.push(await applyOne(state,item));
+        return results;
+      },'ingest'));
+    } catch(error) {
+      if(!batch.length) {
+        // The writer was unavailable before any delivery was taken: fail the
+        // waiting deliveries as their individual transactions would have.
+        for(const item of group.pending.splice(0))item.reject(error);
+        return;
+      }
+      if(batch.length===1){batch[0].reject(error);return;}
+      for(const item of batch) {
+        try {record([await this.atomic(state=>applyOne(state,item),'ingest')]);}
+        catch(cause){item.reject(cause);}
+      }
+    }
+  }
   async ingest(pointer:EventPointer,preparedBody?:any): Promise<boolean> {
     const configured=repository(this.env,pointer.repository);if(!configured)throw Error('repository not allowed');
     if(!this.store.transactional){
@@ -1034,14 +1100,7 @@ export class RepositoryState extends DurableObject<Env> {
         const object=await this.env.ARCHIVE.get(pointer.key);if(!object)throw Error('event body unavailable');body=parseGitHub(await object.text());
         if(body.comment){const value=comment(body.comment),text=JSON.stringify(value);if(new TextEncoder().encode(text).length>=1500000)encodings.set('resource:'+text,await this.encode(value,undefined,configured.id));}
       }
-      let measured:RepositoryStore|undefined,applyStarted=0,committed=false;const queuedAt=Date.now();
-      await this.atomic(async state=>{
-        measured=state.store;applyStarted=Date.now();state.preparedEncodings=encodings;
-        if(state.store.backend==='postgres')state.store=new ReadCacheStore(state.store);
-        committed=await RepositoryState.prototype.ingest.call(state,pointer,body);
-      },'ingest');
-      if(committed)try{this.owner.recordIngest(pointer.event,measured?.queryCount,Date.now()-applyStarted,Math.max(0,applyStarted-queuedAt));}catch{}
-      return committed;
+      return this.owner.groupIngest({pointer,body,encodings,queuedAt:Date.now()});
     }
     // Another ingest can commit while we preload the body. Its fresh SQL
     // receipt remains retained; no external I/O is needed under the writer.
