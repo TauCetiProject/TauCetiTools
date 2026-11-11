@@ -18,7 +18,7 @@ from functools import partial
 from . import forge_api
 from .forge import GITHUB, AmbiguousWrite, Forge, ForgeError, Forgejo, RepositoryRef, Unsupported
 from .forge_command import CI_COMMANDS, parse_command
-from .forge_commands import execute, render
+from .forge_commands import execute, exit_status, render
 from .project import ConfigError, load, resolve_repository
 from .system import ensure_ssl_cert_file
 
@@ -221,9 +221,9 @@ def run(argv, *, environment=None, native_exec=False):
         result = subprocess.run(["jq", "-r", opts["jq"]], input=rendered, text=True, capture_output=True)
         sys.stdout.write(result.stdout)
         sys.stderr.write(result.stderr)
-        return result.returncode
+        return result.returncode or exit_status(command, value)
     sys.stdout.write(rendered)
-    return 0
+    return exit_status(command, value)
 
 
 def _delegate(argv, env, *, replace_process=False):

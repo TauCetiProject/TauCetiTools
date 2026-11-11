@@ -76,7 +76,9 @@ CI_COMMANDS = {
 # a credential or an implicit native-GitHub fallback.
 COMMANDS = {
     **CI_COMMANDS,
-    ("pr", "view"): READ,
+    ("pr", "view"): (*READ, option("comments", "-c", kind="bool")),
+    ("pr", "diff"): (REPO, option("name_only", kind="bool")),
+    ("pr", "checks"): READ,
     ("pr", "list"): (*READ, STATE, LIMIT, AUTHOR, LABEL, BASE, HEAD),
     ("pr", "create"): (*WRITE, *CONTENT, BASE, HEAD, LABEL, option("draft", "-d", kind="bool")),
     ("pr", "edit"): (*WRITE, *CONTENT, BASE, option("add_label", kind="repeat"), option("remove_label", kind="repeat")),

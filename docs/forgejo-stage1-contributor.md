@@ -93,6 +93,16 @@ fail explicitly. In particular, `gh pr merge` is not the Stage 1 merge path:
 human acceptance, candidate dispatch, verified results, and exact-candidate
 promotion use the Worker Stage 1 operator commands.
 
+The routed read commands include `gh pr diff` (also `--name-only`),
+`gh pr view --comments`, and `gh pr checks` (including `--json` and `--jq`).
+Diff reads reject a comparison that moves during the read; filename listing
+uses the exact Git comparison. Comments include both conversation and review
+bodies. Checks report observed native statuses and keep missing verified
+execution evidence pending: exit 8 means pending, and exit 1 means a failed
+check. A native status named `build` does not establish execution authority.
+Additional diff formats, checks watching/filtering, and options outside the
+parsed command contract remain explicitly unsupported.
+
 GitHub run `headSha` identifies the execution workflow context, not necessarily
 the Forgejo candidate. The operator verifies candidate, request, run, and attempt
 identities through the retained CI contract. A green run viewed with `gh` alone
