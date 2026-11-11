@@ -132,8 +132,12 @@ class ProjectTests(unittest.TestCase):
         source = "      repair_bot_login: tauceti-review-bot[bot]\n"
         project = parse(initial_configuration("kim-em/Arcturus", "human").encode())
         self.assertEqual(render(source, project), "      repair_bot_login: arcturus-automation[bot]\n")
-        project.raw.setdefault("services", {})["automation"] = {"app_slug": "arcturus-bot"}
-        self.assertEqual(render(source, project), "      repair_bot_login: arcturus-bot[bot]\n")
+        # The documented section, through parsing: it needs no `mode`.
+        custom = initial_configuration("kim-em/Arcturus", "human") + '\n[services.automation]\napp_slug = "arcturus-bot"\n'
+        self.assertEqual(render(source, parse(custom.encode())), "      repair_bot_login: arcturus-bot[bot]\n")
+        for section in ('app_slug = "Arcturus Bot"', 'app_slug = ""', 'mode = "custom"\napp_slug = "arcturus-bot"', "app_slug = 1"):
+            with self.subTest(section=section), self.assertRaises(ConfigError):
+                parse((initial_configuration("kim-em/Arcturus", "human") + "\n[services.automation]\n" + section + "\n").encode())
         tauceti = parse(initial_configuration("TauCetiProject/TauCeti", "human").encode())
         self.assertEqual(render(source, tauceti), source)
 

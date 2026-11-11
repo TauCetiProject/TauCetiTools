@@ -463,8 +463,13 @@ being installed on the content repository.
 For each App enter:
 
 - **GitHub App name:** a unique name such as `ExampleCeti-automation`. The PR build recognizes
-  the automation App's lint repair PRs by its login, `REPOSITORY-automation[bot]` in lower case;
-  if you register another name, set `services.automation.app_slug` to the App's actual slug.
+  the automation App's lint repair PRs by its login, `REPOSITORY-automation[bot]` in lower case.
+  If you register another name, give its actual slug in `tauceti.toml` (the table takes no `mode`):
+
+  ```toml
+  [services.automation]
+  app_slug = "examplecetis-bot"
+  ```
 - **Homepage URL:** the content repository, or the service URL for Bors/state.
 - **Where can this GitHub App be installed?** **Any account**.
 - For non-webhook roles, clear **Active** in Webhook.

@@ -718,6 +718,22 @@ class PrBuildWiringTest(unittest.TestCase):
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertEqual(github_env.read_text(), "LINT_CHANGED_ONLY=0\nAXIOMS_ONLY_MODULES=\nDOT_ONLY_MODULES=\n")
 
+    def test_only_the_full_lint_label_rebuilds(self):
+        # pr-build does not run on label changes; a separate workflow dispatches it for full-lint.
+        pr_build = yaml.safe_load((ROOT / ".github" / "workflows" / "pr-build.yml").read_text())
+        self.assertNotIn("labeled", pr_build[True]["pull_request_target"]["types"])
+        self.assertIn("workflow_dispatch", pr_build[True])
+        wf = yaml.safe_load((ROOT / ".github" / "workflows" / "full-lint-label.yml").read_text())
+        self.assertEqual(wf[True]["pull_request_target"]["types"], ["labeled"])
+        (job,) = wf["jobs"].values()
+        self.assertEqual(job["if"], "${{ github.event.label.name == 'full-lint' }}")
+        self.assertIn("gh workflow run pr-build.yml", job["steps"][0]["run"])
+
+
+class RepairExemptionTest(unittest.TestCase):
+    """pr-build's exemption of an empty lint repair PR from human routing. It reads only the shared
+    pr-build.yml, so the package's own CI runs it too (tests/test_lint_metadata.py)."""
+
     def repair_exemption(self, event, files, env=None, api=None):
         """Run pr-build's empty-repair-PR exemption, extracted from the Scope guard step, with a fake
         metadata helper that prints `api` (or fails when it is None).
@@ -794,16 +810,6 @@ class PrBuildWiringTest(unittest.TestCase):
             "workflow_dispatch", "TauCeti/A.lean", api=f"lint-repair/main\to/r\t{self.BOT}"),
             (False, False))
 
-    def test_only_the_full_lint_label_rebuilds(self):
-        # pr-build does not run on label changes; a separate workflow dispatches it for full-lint.
-        pr_build = yaml.safe_load((ROOT / ".github" / "workflows" / "pr-build.yml").read_text())
-        self.assertNotIn("labeled", pr_build[True]["pull_request_target"]["types"])
-        self.assertIn("workflow_dispatch", pr_build[True])
-        wf = yaml.safe_load((ROOT / ".github" / "workflows" / "full-lint-label.yml").read_text())
-        self.assertEqual(wf[True]["pull_request_target"]["types"], ["labeled"])
-        (job,) = wf["jobs"].values()
-        self.assertEqual(job["if"], "${{ github.event.label.name == 'full-lint' }}")
-        self.assertIn("gh workflow run pr-build.yml", job["steps"][0]["run"])
 
 if __name__ == "__main__":
     unittest.main()

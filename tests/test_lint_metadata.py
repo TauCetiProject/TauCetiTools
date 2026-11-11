@@ -26,4 +26,5 @@ def load_tests(loader, tests, pattern):
     return unittest.TestSuite([
         loader.loadTestsFromTestCase(scope_tests.LintScopeTest),
         loader.loadTestsFromTestCase(scope_tests.PolicyLookupTest),
+        loader.loadTestsFromTestCase(scope_tests.RepairExemptionTest),
     ])
