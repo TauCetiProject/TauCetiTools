@@ -58,6 +58,7 @@ def scoped_git_environment(origin, token=None, *, token_file=None, parent=None, 
         command = shlex.join(
             [
                 sys.executable,
+                "-I",
                 "-m",
                 "tauceti_tools.git_credentials",
                 "--origin",

@@ -24,6 +24,9 @@ class CredentialFile(unittest.TestCase):
             self.assertNotIn("fixture-secret", values)
             self.assertNotIn(base64.b64encode(b"x-access-token:fixture-secret").decode(), values)
             self.assertNotIn(".extraheader", values)
+            shadow = root / "tauceti_tools"
+            shadow.mkdir()
+            (shadow / "__init__.py").write_text("raise RuntimeError('untrusted checkout package executed')")
             for host, success in [
                 ("git.example.org", True),
                 ("other.example.org", False),
@@ -34,6 +37,7 @@ class CredentialFile(unittest.TestCase):
                     ["git", "credential", "fill"],
                     input=f"protocol=https\nhost={host}\npath=team/project.git\n\n",
                     env=env,
+                    cwd=root,
                     capture_output=True,
                     text=True,
                 )
