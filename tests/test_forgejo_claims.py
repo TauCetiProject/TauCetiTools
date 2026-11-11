@@ -272,8 +272,9 @@ class NativeClaims(unittest.TestCase):
             settings["http.https://source.example/.extraheader"],
             "AUTHORIZATION: basic " + base64.b64encode(b"x-access-token:native-token").decode(),
         )
-        for value in ["old-secret", "github-secret", "other-proxy"]:
+        for value in ["old-secret", "github-secret"]:
             self.assertNotIn(value, str(env))
+        self.assertEqual(env["HTTPS_PROXY"], "other-proxy")
         self.assertNotIn("GIT_TRACE_CURL", env)
         self.assertNotIn("GIT_SSL_NO_VERIFY", env)
 
