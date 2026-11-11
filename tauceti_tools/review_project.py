@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import os
 
+from . import project as project_state
 from .forge import GITHUB
 from .project import QUALIFIED_CONTEXT_VARIABLES, ConfigError, Project, bootstrap_qualified
 
@@ -32,7 +33,7 @@ def environment(project):
     return {
         **settings.environment(),
         **dict.fromkeys(QUALIFIED_CONTEXT_VARIABLES, ""),
-        "TAUCETI_REPO": reference.name if reference.forge == GITHUB else reference.key,
+        "TAUCETI_REPO": reference.key,
         "TAUCETI_PROJECT_STATE": str(project.state_root),
         "TAUCETI_PROJECT_KEY": project.key,
     }
@@ -40,7 +41,15 @@ def environment(project):
 
 def bootstrap(argv=None):
     """Reuse the trusted snapshot and select shared tools without rehoming content."""
-    project = bootstrap_qualified(argv)
-    if project is not None:
-        os.environ.update(environment(project))
+    previous_environment, previous_project = dict(os.environ), project_state.active()
+    try:
+        project = bootstrap_qualified(argv)
+        if project is not None:
+            os.environ.update(environment(project))
+    except Exception:
+        # A rejected shared-tool capability must not poison an embedding caller.
+        os.environ.clear()
+        os.environ.update(previous_environment)
+        project_state._active = previous_project
+        raise
     return project

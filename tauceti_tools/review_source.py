@@ -276,7 +276,7 @@ def source_for(repository, environment=None):
     project = active() if environment is None else None
     configured = project.repository_ref("content") if project else None
     if configured is not None and configured.forge != GITHUB:
-        if repository not in {configured.key, configured.name, configured.url}:
+        if repository not in {configured.key, configured.url} and repository.casefold() != configured.name.casefold():
             raise ValueError("review repository differs from its configured content source")
         if not binding:
             native_id = env.get("TAUCETI_FORGEJO_REPOSITORY_ID", "")
@@ -288,9 +288,10 @@ def source_for(repository, environment=None):
     if not binding:
         return GitHubReviewSource(RepositoryRef(GITHUB, repository))
     identity = RepositoryIdentity.parse(json.loads(binding))
-    if configured is not None and configured.forge != GITHUB and configured != identity.repository:
+    if configured is not None and configured.forge != GITHUB and configured.key != identity.repository.key:
         raise ValueError("review source binding differs from its configured content source")
-    if repository not in {identity.repository.key, identity.repository.name, identity.repository.url}:
+    if (repository not in {identity.repository.key, identity.repository.url}
+            and repository.casefold() != identity.repository.name.casefold()):
         raise ValueError("review repository differs from its source binding")
     if env.get("TAUCETI_FORGEJO_ORIGIN") != identity.repository.forge.url:
         raise ValueError("review credential origin differs from its source")

@@ -51,7 +51,7 @@ class ReviewProject(unittest.TestCase):
                         configured,
                         qualified=True,
                     )
-                    self.assertIn(ref.url + "/pull/7", rendered)
+                    self.assertIn(ref.pull_url(7), rendered)
                     self.assertIn("Owner/Roadmap Project/", rendered)
                     self.assertIn("https://github.com/Owner/Review", rendered)
                     if kind == "forgejo":
@@ -78,6 +78,7 @@ class ReviewProject(unittest.TestCase):
                     patch("tauceti_tools.review_source.Forgejo", return_value=api),
                 ):
                     self.assertEqual(source_for("Owner/Project").repository, configured.repository_ref("content"))
+                    self.assertEqual(source_for("owner/project").repository, configured.repository_ref("content"))
                     with patch.dict(os.environ, TAUCETI_FORGEJO_ORIGIN="https://other.example.org"):
                         with self.assertRaisesRegex(ValueError, "credential origin"):
                             source_for("Owner/Project")
@@ -93,6 +94,25 @@ class ReviewProject(unittest.TestCase):
         raw["repositories"]["roadmap"] = {"forge": "native", "name": "Owner/Roadmap"}
         with self.assertRaisesRegex(project.ConfigError, "Shared roadmap"):
             review_project.environment(project.Project(raw, ""))
+
+    def test_rejected_bootstrap_restores_the_embedding_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "project.toml"
+            path.write_text(
+                configuration("forgejo").replace(
+                    'roadmap="Owner/Roadmap"', 'roadmap={forge="native",name="Owner/Roadmap"}'
+                )
+            )
+            previous = project.parse(configuration("github").encode())
+            with (
+                patch.object(project, "_active", previous),
+                patch.dict(os.environ, {"TAUCETI_CONF": str(path)}, clear=True),
+            ):
+                original = dict(os.environ)
+                with self.assertRaisesRegex(project.ConfigError, "Shared roadmap"):
+                    review_project.bootstrap([])
+                self.assertEqual(dict(os.environ), original)
+                self.assertIs(project.active(), previous)
 
     def test_legacy_github_configuration_can_still_opt_into_a_native_source(self):
         configured = project.parse(configuration("github").encode())

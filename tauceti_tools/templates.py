@@ -198,7 +198,11 @@ def substitutions(project: Project, *, source_ci=False, qualified=False) -> list
             ("claims", "TauCetiProject/tauceti-claims"),
         ):
             if role in project.raw["repositories"]:
-                repository_pairs.append(("https://github.com/" + original, project.repository_ref(role).url))
+                reference = project.repository_ref(role)
+                repository_pairs.append(("https://github.com/" + original, reference.url))
+                if role == 'content':
+                    # Render a URL prefix using the forge's own pull URL route.
+                    repository_pairs.append(('https://github.com/' + original + '/pull/', reference.pull_url(1)[:-1]))
         for name, original in (
             ("review", "TauCetiProject/TauCetiReview"),
             ("progress", "TauCetiProject/TauCetiProgress"),
