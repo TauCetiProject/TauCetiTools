@@ -64,6 +64,11 @@ if [ "${STAGE_LAKE_CACHE:-}" = "1" ]; then
   # Generate the native map in the final build, rather than walking the graph again.
   LAKE_BUILD_FLAGS+=(--rehash -o .lake/outputs.jsonl)
 fi
+if [ "${STAGE_LAKE_CACHE:-}" = "1" ]; then
+  # Stock Lake forks once per cached module. Prepare fresh private caches in one
+  # leantar call, retaining archives for native publication; Lake verifies inputs.
+  python3 "$TRUSTED_SCRIPTS/bulk-unpack-cache.py" .
+fi
 # Keep each changed module's restored main header for the declaration-names record below.
 # Advisory: a failure here only means no record.
 bash "$TRUSTED_SCRIPTS/declaration-names.sh" save || true

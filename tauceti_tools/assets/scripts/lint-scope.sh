@@ -92,7 +92,7 @@ case "$EVENT" in
     prs=$(jq -r '.commits[].commit.message | split("\n")[0]' <<<"$compare" \
       | sed -nE 's/.*\(#([0-9]+)\)$/\1/p' | sort -u)
     ncommits=$(jq '.commits | length' <<<"$compare")
-    [ "$(jq '.total_commits' <<<"$compare")" = "$ncommits" ] || full "the local batch history exceeds the policy limit"
+    [ "$(jq '.total_commits' <<<"$compare")" = "$ncommits" ] || full "the local batch history is incomplete"
     nprs=$(grep -c . <<<"$prs" || true)
     [ "$nprs" -eq "$ncommits" ] || full "$ncommits commit(s) but $nprs PR number(s) in their titles"
     ;;

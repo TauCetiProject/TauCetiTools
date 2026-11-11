@@ -14,7 +14,6 @@ import sys
 import tempfile
 import time
 
-MAX_PRS = 128
 CHUNK_SIZE = 32
 MAX_LABELS = 100
 MAX_RESPONSE_BYTES = 1024 * 1024
@@ -124,9 +123,9 @@ def check_policy(repo, raw_numbers):
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
             raise FullLint("invalid policy repository")
         tokens = raw_numbers.split()
-        if not 1 <= len(tokens) <= MAX_PRS or any(
+        if not tokens or any(
                 not re.fullmatch(r"[1-9][0-9]{0,9}", n) or int(n) > 2147483647 for n in tokens):
-            raise FullLint("invalid or excessive attributed PR numbers")
+            raise FullLint("invalid attributed PR numbers")
         numbers = [int(n) for n in tokens]
         if len(set(numbers)) != len(numbers):
             raise FullLint("duplicate attributed PR numbers")
@@ -147,7 +146,10 @@ def main():
         if len(sys.argv) == 3 and sys.argv[1] == "--check-citations":
             check_citations(sys.argv[2], json.loads(sys.stdin.read(MAX_RESPONSE_BYTES)))
         else:
-            check_policy(sys.argv[1], sys.stdin.read(2048))
+            numbers = sys.stdin.read(MAX_RESPONSE_BYTES + 1)
+            if len(numbers) > MAX_RESPONSE_BYTES:
+                raise FullLint("PR lint policy input reached its size limit")
+            check_policy(sys.argv[1], numbers)
     except (FullLint, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         print(f"PR lint policy requires full-library lint: {error}")
         return 1
