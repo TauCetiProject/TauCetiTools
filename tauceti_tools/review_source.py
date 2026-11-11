@@ -11,19 +11,21 @@ import hashlib
 import json
 import os
 import re
-import stat
 import subprocess
 
 from .ci_candidate import RepositoryIdentity
 from .forge import GITHUB, Forgejo, Incomplete, RepositoryRef
 from .forge_read import ForgejoReader
-from .git_credentials import scoped_git_environment
+from .git_credentials import read_private_token, scoped_git_environment
 
 
 def validate_comments(rows):
     if not isinstance(rows, list) or not all(
-        isinstance(row, dict) and type(row.get("id")) is int and row["id"] > 0
-        and "body" in row and (row["body"] is None or isinstance(row["body"], str))
+        isinstance(row, dict)
+        and type(row.get("id")) is int
+        and row["id"] > 0
+        and "body" in row
+        and (row["body"] is None or isinstance(row["body"], str))
         and (row.get("in_reply_to_id") is None or type(row["in_reply_to_id"]) is int)
         and (row.get("user") is None or isinstance(row["user"], dict))
         for row in rows
@@ -118,7 +120,12 @@ class GitHubReviewSource:
         return os.environ.get("GITHUB_ACTOR") or self.request("user")["login"]
 
     def request(self, endpoint, *, collection=False):
-        result = subprocess.run(["gh", "api", *(["--paginate"] if collection else []), endpoint], capture_output=True, text=True, timeout=300)
+        result = subprocess.run(
+            ["gh", "api", *(["--paginate"] if collection else []), endpoint],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
         if result.returncode:
             raise Incomplete("GitHub review source unavailable")
         pages = []
@@ -150,7 +157,9 @@ class GitHubReviewSource:
         return self.request(f"repos/{self.repository.name}/pulls/{number}")
 
     def comments(self, number):
-        return validate_comments(self.request(f"repos/{self.repository.name}/issues/{number}/comments", collection=True))
+        return validate_comments(
+            self.request(f"repos/{self.repository.name}/issues/{number}/comments", collection=True)
+        )
 
     def findings(self, number):
         return validate_comments(self.request(f"repos/{self.repository.name}/pulls/{number}/comments", collection=True))
@@ -260,12 +269,7 @@ def source_for(repository, environment=None):
         raise ValueError("review repository differs from its source binding")
     if env.get("TAUCETI_FORGEJO_ORIGIN") != identity.repository.forge.url:
         raise ValueError("review credential origin differs from its source")
-    fd = os.open(env["TAUCETI_FORGEJO_TOKEN_FILE"], os.O_RDONLY | os.O_NOFOLLOW)
-    with os.fdopen(fd) as stream:
-        info = os.fstat(stream.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
-            raise ValueError("review credential file must be private and owned")
-        token = stream.read().strip()
+    token = read_private_token(env["TAUCETI_FORGEJO_TOKEN_FILE"])
     return ForgejoReviewSource(
         identity, Forgejo(identity.repository.forge, token=token), expected_actor=env.get("TAUCETI_FORGEJO_USER_ID")
     )
