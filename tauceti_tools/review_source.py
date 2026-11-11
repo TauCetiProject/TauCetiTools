@@ -117,7 +117,16 @@ class GitHubReviewSource:
         return GitClaim(repository, f"review/{self.repository.name.lower()}/{number}/{head}", owner, ttl)
 
     def publisher_key(self):
-        return os.environ.get("GITHUB_ACTOR") or self.request("user")["login"]
+        if actor := os.environ.get("GITHUB_ACTOR"):
+            return actor
+        try:
+            login = self.request("user").get("login")
+            return login if isinstance(login, str) else ""
+        except (Incomplete, OSError, subprocess.TimeoutExpired):
+            # Archive attribution is best effort, as in the original CLI.
+            # Installation tokens cannot read /user. Publication ownership is
+            # established separately by the trusted poster.
+            return ""
 
     def request(self, endpoint, *, collection=False):
         result = subprocess.run(

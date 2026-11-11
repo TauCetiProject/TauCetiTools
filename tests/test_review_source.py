@@ -90,6 +90,13 @@ class ReviewSources(unittest.TestCase):
         with patch.dict(os.environ, {"GITHUB_ACTOR": "ci-author"}):
             self.assertEqual(source.publisher_key(), "ci-author")
 
+    def test_github_optional_archive_attribution_preserves_installation_token_behavior(self):
+        source = GitHubReviewSource(RepositoryRef(Forge("github", "https://github.com"), "team/project"))
+        with patch.dict(os.environ, {"GITHUB_ACTOR": ""}), patch.object(
+            source, "request", side_effect=Incomplete("installation token cannot read /user")
+        ):
+            self.assertEqual(source.publisher_key(), "")
+
 
 if __name__ == "__main__":
     unittest.main()
