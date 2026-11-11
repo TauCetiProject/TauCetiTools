@@ -25,6 +25,31 @@ def shell_for(name, workflow=WORKFLOW):
 
 
 class WorkflowIdentityTests(unittest.TestCase):
+    def test_failed_batch_reports_without_waiting_for_a_finalizer(self):
+        report = shell_for("Report build and bump-guard statuses to the PR head commit")
+        start = report.index("# Failed batches and PR heads are reported immediately.")
+        block = report[start : report.index("# scope:", start)]
+        for batch in ("true", "false"):
+            for state in ("failure", "success"):
+                with self.subTest(batch=batch, state=state):
+                    shell = block.replace("${{ env.IS_BATCH }}", batch)
+                    result = subprocess.run(
+                        [
+                            "bash",
+                            "-euo",
+                            "pipefail",
+                            "-c",
+                            'post_status() { echo "$1=$2"; }; state="$1"; desc=verdict\n' + shell,
+                            "test",
+                            state,
+                        ],
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    expected = "" if batch == "true" and state == "success" else f"build={state}\n"
+                    self.assertEqual(result.stdout, expected)
+
     def test_required_batch_status_failure_remains_visible_to_retry_workflow(self):
         report = shell_for("Report build and bump-guard statuses to the PR head commit")
         start = report.index('if [ "${SOURCE_CANDIDATE:-false}" != true ]; then\n  # Scope')

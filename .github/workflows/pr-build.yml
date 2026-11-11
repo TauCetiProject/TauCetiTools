@@ -1596,9 +1596,9 @@ jobs:
               echo 'publication-required=false'
             fi
           } >> "$GITHUB_OUTPUT"
-          # PR heads are reported immediately. A merge-group head is reported by the finalizer
-          # job below, after its exact revision map has reached the public cache endpoint.
-          if [ "${{ env.IS_BATCH }}" != "true" ]; then
+          # Failed batches and PR heads are reported immediately. Only a successful
+          # batch waits for the finalizer to confirm exact-revision cache publication.
+          if [ "${{ env.IS_BATCH }}" != "true" ] || [ "$state" = failure ]; then
             post_status build "$state" "$desc"
           fi
 
