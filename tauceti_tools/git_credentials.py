@@ -10,6 +10,7 @@ import sys
 from urllib.parse import urlsplit
 
 from .forge import Forge
+from .git_inputs import ENV_ALLOW
 
 
 def read_private_token(path):
@@ -36,7 +37,7 @@ def scoped_git_environment(origin, token=None, *, token_file=None, parent=None, 
     elif not isinstance(token, str) or not 0 < len(token) <= 4096 or not all(33 <= ord(c) <= 126 for c in token):
         raise ValueError("Git credentials require an explicit bearer token")
     parent = os.environ if parent is None else parent
-    env = {key: parent[key] for key in ("PATH", "HOME", "TMPDIR", "SSL_CERT_FILE", "GIT_SSL_CAINFO") if key in parent}
+    env = {key: parent[key] for key in (*ENV_ALLOW, "GIT_SSL_CAINFO") if key in parent}
     env.update(
         LC_ALL="C",
         GIT_CONFIG_NOSYSTEM="1",

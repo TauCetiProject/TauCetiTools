@@ -1,8 +1,11 @@
 """Workspace Git authenticates lazily to its origin without exporting bearer data."""
 
 import base64
+import http.server
+import os
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -11,6 +14,49 @@ from tauceti_tools.git_credentials import scoped_git_environment
 
 
 class CredentialFile(unittest.TestCase):
+    def test_authenticated_git_uses_the_same_proxy_settings_as_anonymous_git(self):
+        requests = []
+
+        class Proxy(http.server.BaseHTTPRequestHandler):
+            def do_CONNECT(self):
+                requests.append(self.path)
+                self.send_error(502, "fixture upstream unavailable")
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            for purpose in ("source", "workspace"):
+                env = scoped_git_environment(
+                    Forge("forgejo", "https://git.example.invalid"),
+                    "fixture-secret",
+                    purpose=purpose,
+                    parent={
+                        **os.environ,
+                        "HTTPS_PROXY": f"http://127.0.0.1:{server.server_port}",
+                        "https_proxy": f"http://127.0.0.1:{server.server_port}",
+                        "NO_PROXY": "",
+                        "no_proxy": "",
+                    },
+                )
+                result = subprocess.run(
+                    ["git", "ls-remote", "https://git.example.invalid/team/project.git"],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("fixture-secret", result.stderr)
+            self.assertEqual(requests, ["git.example.invalid:443"] * 2)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
     def test_real_git_credential_protocol_selects_exact_origin_and_keeps_environment_secret_free(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
