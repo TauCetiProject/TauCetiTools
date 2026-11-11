@@ -50,13 +50,17 @@ def layout(project):
 def selected_records(project):
     """Read native archive-only selections and retain original mapping bytes.
 
-    Reject unsupported schemas, unsafe archive names and duplicate archives.
+    Reject unsupported schemas and unsafe archive names. Prepare the first
+    selection for each archive; every alternative mapping stays available to Lake.
     This reads existing native selections; it does not select another ancestor.
     """
     outputs = project / ".lake/cache/outputs/TauCeti"
     artifacts = project / ".lake/cache/artifacts"
     records, archives = [], set()
-    for path in sorted(outputs.glob("*.json")):
+    # Base-cache records arrive before repair history. Prefer them for unchanged
+    # modules; this affects speed only, since Lake still selects the current input.
+    paths = sorted(outputs.glob("*.json"), key=lambda path: (path.stat().st_mtime_ns, path.name))
+    for path in paths:
         if not HASH.fullmatch(path.stem):
             raise ValueError("unexpected cache record")
         original = regular(path).read_bytes()
@@ -67,7 +71,7 @@ def selected_records(project):
         if not isinstance(archive, str) or not ARCHIVE.fullmatch(archive):
             raise ValueError("cache is not an archive-only revision")
         if archive in archives:
-            raise ValueError("overlapping historical cache entries")
+            continue
         archives.add(archive)
         records.append(dict(file=str(regular(artifacts / archive)), hash=path.stem,
                             archive=archive, path=path, original=original))
@@ -143,8 +147,11 @@ def assemble(project, records, staging):
     archives = []
     plans = []
     for record, module, files in extracted:
+        # Prepare one version, retaining every alternative mapping. A different
+        # current input still hits its original record and Lake restores that
+        # version normally; no extra compilation or guessed validity is required.
         if module in modules:
-            raise ValueError("overlapping module identity")
+            continue
         modules.add(module)
         if not source_present(project, module):
             continue
@@ -163,7 +170,8 @@ def assemble(project, records, staging):
     for source, target in archives:
         target.parent.mkdir(parents=True, exist_ok=True)
         os.link(source, target)
-    return combined, satisfied, dict(bulk_archives=len(records), satisfied_records=len(satisfied))
+    return combined, satisfied, dict(bulk_archives=len(records), satisfied_records=len(satisfied),
+                                    historical_archives=len(extracted) - len(modules))
 
 
 def publish(project, combined, satisfied):
@@ -199,6 +207,9 @@ def unpack(project: Path) -> int:
             return 0
         with tempfile.TemporaryDirectory(prefix="bulk-unpack-", dir=project / ".lake") as temporary:
             combined, satisfied, result = assemble(project, records, Path(temporary))
+            if not satisfied:
+                print("bulk-unpack-cache: no unambiguous current sources; using stock Lake restoration")
+                return 0
             publish(project, combined, satisfied)
         result["seconds"] = time.monotonic() - started
         print("bulk-unpack-cache: " + json.dumps(result, sort_keys=True), flush=True)

@@ -67,6 +67,7 @@ fi
 if [ "${STAGE_LAKE_CACHE:-}" = "1" ]; then
   # Stock Lake forks once per cached module. Prepare fresh private caches in one
   # leantar call, retaining archives for native publication; Lake verifies inputs.
+  phase cache-unpack
   python3 "$TRUSTED_SCRIPTS/bulk-unpack-cache.py" .
 fi
 # Keep each changed module's restored main header for the declaration-names record below.

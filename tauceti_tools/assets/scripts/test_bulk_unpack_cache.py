@@ -137,9 +137,37 @@ class BulkUnpackTests(unittest.TestCase):
         self.archive.unlink()
         self.assert_stock_fallback()
 
-    def test_historical_duplicate_archive_uses_stock_lake(self):
-        (self.records / "1111111111111111.json").write_bytes(self.record.read_bytes())
-        self.assert_stock_fallback()
+    def test_historical_duplicate_keeps_alternative_for_native_selection(self):
+        duplicate = self.records / "1111111111111111.json"
+        duplicate.write_bytes(self.record.read_bytes())
+        with patch.object(bulk, "extract_records", side_effect=self.extracted_fixture):
+            self.assertEqual(bulk.unpack(self.root), 1)
+        self.assertFalse(self.record.exists())
+        self.assertTrue(duplicate.exists())
+
+    def test_historical_records_do_not_disable_other_modules(self):
+        duplicate = self.records / "1111111111111111.json"
+        duplicate.write_bytes(self.record.read_bytes())
+        unique = self.records / "2222222222222222.json"
+        unique.write_text(json.dumps({"schemaVersion": bulk.SCHEMA, "data": "3333333333333333.ltar"}))
+        (self.artifacts / "3333333333333333.ltar").write_bytes(b"another archive")
+        def extracted(records, staging):
+            result = []
+            for index, record in enumerate(records):
+                module = f"TauCeti.Fixture{index}"
+                source = self.root.joinpath(*module.split(".")).with_suffix(".lean")
+                source.parent.mkdir(exist_ok=True)
+                source.write_text("module\n")
+                output = staging / f"output{index}"
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(b"native output fixture")
+                result.append((record, module, [(output, f"lib/lean/TauCeti/Fixture{index}.olean")]))
+            return result
+        with patch.object(bulk, "extract_records", side_effect=extracted):
+            self.assertEqual(bulk.unpack(self.root), 2)
+        self.assertFalse(self.record.exists())
+        self.assertTrue(duplicate.exists())
+        self.assertFalse(unique.exists())
 
     def test_symlinked_record_or_archive_uses_stock_lake(self):
         self.archive.unlink()
@@ -267,6 +295,26 @@ class StockLakeTests(unittest.TestCase):
                 if mode == "bulk":
                     self.assertEqual(bulk.unpack(path), 3)
                 run(path, "build", "--iofail", expected=1)
+
+            # Real repair caches retain historical versions. Prepare the older
+            # version first and prove native selection still restores the current
+            # cached version without compilation and with the identical final map.
+            (producer / "TauCeti/A.lean").write_text("module\npublic def a : Int := 43\n")
+            run(producer, "build", "--iofail", "--rehash", "-o", ".lake/map.jsonl")
+            run(producer, "cache", "stage", ".lake/map.jsonl", str(root / "new-staging"))
+            maps = []
+            for mode in ("stock", "bulk"):
+                path = project(f"history-{mode}")
+                (path / "TauCeti/A.lean").write_text("module\npublic def a : Int := 43\n")
+                run(path, "cache", "unstage", str(root / "staging"))
+                run(path, "cache", "unstage", str(root / "new-staging"))
+                if mode == "bulk":
+                    self.assertEqual(bulk.unpack(path), 4)
+                log = run(path, "build", "--iofail", "--rehash", "-o", ".lake/map.jsonl")
+                self.assertNotIn("Built TauCeti", log)
+                lines = (path / ".lake/map.jsonl").read_text().splitlines()
+                maps.append((json.loads(lines[0]), dict(map(json.loads, lines[1:]))))
+            self.assertEqual(maps[0], maps[1])
 
 
 if __name__ == "__main__":
