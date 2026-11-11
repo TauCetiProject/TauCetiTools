@@ -46,7 +46,8 @@ test('published public mirror queries need no token and never unlock private or 
 });
 
 test('webhook rejects bad signatures and conflicting duplicate bodies',async()=>{
-  const text=JSON.stringify(body()); const base={'x-github-delivery':'delivery-one','x-github-event':'pull_request'};
+  // A queue-only event type: pull_request and status deliveries are also applied at acceptance.
+  const text=JSON.stringify(body()); const base={'x-github-delivery':'delivery-one','x-github-event':'issues'};
   assert.equal((await request('/webhook/github',{method:'POST',headers:base,body:text})).status,401);
   const signature='sha256='+createHmac('sha256',secret).update(text).digest('hex'); const good={...base,'x-hub-signature-256':signature};
   assert.equal((await request('/webhook/github',{method:'POST',headers:good,body:text})).status,202);
