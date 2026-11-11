@@ -231,9 +231,8 @@ def tree_entry(checkout, commit, path):
 def lint_metadata(checkout, base, head):
     """Read the exact merge base and batch commit titles without a REST compare.
 
-    Lint policy accepts at most 128 attributed PRs. Read one extra title so an
-    oversized history retains the existing full-lint fallback instead of silently
-    considering a partial batch. PR scope only needs the merge base.
+    Read the complete immutable batch, including every source citation. Batch
+    size alone must not select full-library lint. PR scope only needs the merge base.
     """
     with object_reader(checkout) as git:
         git.commit(base)
@@ -244,8 +243,8 @@ def lint_metadata(checkout, base, head):
         history = f"{base}..{head}"
         count = int(git.run("rev-list", "--count", history).stdout)
         messages = git.run("log", "--no-show-signature", "--format=%B", "-z",
-                           "--max-count=129", history).stdout.decode(errors="replace").split("\0")
-        if messages[-1] or len(messages) - 1 != min(count, 129):
+                           history).stdout.decode(errors="replace").split("\0")
+        if messages[-1] or len(messages) - 1 != count:
             raise ValueError("malformed local commit metadata")
         # %s folds a multiline first paragraph; policy uses the exact first line.
         # Keep explicit source citations separately so a qualified native PR
