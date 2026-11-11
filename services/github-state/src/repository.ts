@@ -10,6 +10,7 @@ import { RepairCoordinator, RepairGroup, RepairIdentity, RepairQuantum, RepairEf
 import { repairHop, RepairTransportTimeout, REPAIR_HOP_MS } from './repair_io';
 import { SURVEY_CONTRACT, SURVEY_INDEX_VERSION, compactPR, issueFragment, reviewFragment, summarizeFragments, inScope, roadmapFocuses } from './survey';
 import { readPromotionReceipts } from './activity_landings';
+import { scoreboardRounds } from './activity_reviews';
 import { queueMetrics } from './queue_monitoring';
 import { ageProvider, providerObservation, providerAlarms } from './provider_monitoring';
 import { targetConfig, targetOwner } from './migration_target';
@@ -60,6 +61,7 @@ const activityFingerprint=(p:any,revision:number|undefined)=>JSON.stringify([2,p
 // Git comparisons are immutable for a head/base pair, independent of mirror files.
 const activityGitFingerprint=(p:any)=>JSON.stringify([2,p.headRefOid,p.baseRefOid]);
 const ACTIVITY_LOC_CACHE_QUERY='SELECT data FROM activity_loc_cache WHERE number=? AND fingerprint IN (?,?)';
+const ACTIVITY_REVIEW_QUERY="SELECT f.data FROM survey_fragments f JOIN members m ON m.id=f.id AND m.collection=? WHERE f.kind='issue_comments' AND f.parent=?";
 const cursorKey=(repo:string,id:string,offset:number)=>`cursors/${repo}/${id}/${offset}.json`;
 function coordinationWindows(history:any,now:number):any {
   if(!history)return null;
@@ -2940,11 +2942,14 @@ export class RepositoryState extends DurableObject<Env> {
     if(this.store.backend!=='postgres')return this;
     const state=Object.create(this) as RepositoryState,cache=new ReadCacheStore(this.store);state.store=cache;state.readScope=true;
     for(let offset=0;offset<numbers.length;offset+=128) {
-      const ns=numbers.slice(offset,offset+128),ids=ns.map(String),keys=ns.map(number=>queryKey({operation:'files',args:{number}}));
-      const [resources,collections,loc]=await cache.batch([
+      const ns=numbers.slice(offset,offset+128),ids=ns.map(String),keys=ns.map(number=>queryKey({operation:'files',args:{number}})),commentKeys=ns.map(number=>queryKey({operation:'issue_comments',args:{number}}));
+      const allKeys=[...keys,...commentKeys];
+      const [resources,collections,loc,hydrated,fragments]=await cache.batch([
         {sql:"SELECT id,data,observed FROM resources WHERE kind='pr' AND tombstone=0 AND id IN ("+ids.map(()=>'?').join(',')+')',bindings:ids},
-        {sql:'SELECT key,complete,revision FROM collections WHERE key IN ('+keys.map(()=>'?').join(',')+')',bindings:keys},
-        {sql:'SELECT number,fingerprint,data FROM activity_loc_cache WHERE number IN ('+ids.map(()=>'?').join(',')+')',bindings:ids}
+        {sql:'SELECT key,complete,revision,verified FROM collections WHERE key IN ('+allKeys.map(()=>'?').join(',')+')',bindings:allKeys},
+        {sql:'SELECT number,fingerprint,data FROM activity_loc_cache WHERE number IN ('+ids.map(()=>'?').join(',')+')',bindings:ids},
+        {sql:'SELECT number,contract FROM survey_hydrated WHERE number IN ('+ids.map(()=>'?').join(',')+')',bindings:ids},
+        {sql:"SELECT f.parent,f.data,m.collection FROM survey_fragments f JOIN members m ON m.id=f.id WHERE f.kind='issue_comments' AND f.parent IN ("+ids.map(()=>'?').join(',')+') AND m.collection IN ('+commentKeys.map(()=>'?').join(',')+')',bindings:[...ids,...commentKeys]}
       ]);
       const decoded=new Map<string,any>();
       for(const row of resources.toArray())decoded.set(row.id,await this.decode(row.data));
@@ -2954,6 +2959,10 @@ export class RepositoryState extends DurableObject<Env> {
         const id=String(number),found=resources.toArray().filter(r=>r.id===id),key=queryKey({operation:'files',args:{number}}),collection=collections.toArray().filter(r=>r.key===key),p=decoded.get(id);
         cache.seed("SELECT data,observed FROM resources WHERE kind='pr' AND id=? AND tombstone=0",[id],found);
         cache.seed('SELECT complete,revision FROM collections WHERE key=?',[key],collection);
+        const comments=queryKey({operation:'issue_comments',args:{number}});
+        cache.seed('SELECT complete,verified FROM collections WHERE key=?',[comments],collections.toArray().filter(r=>r.key===comments));
+        cache.seed('SELECT contract FROM survey_hydrated WHERE number=?',[id],hydrated.toArray().filter(r=>r.number===id));
+        cache.seed(ACTIVITY_REVIEW_QUERY,[comments,id],fragments.toArray().filter(r=>r.parent===id && r.collection===comments));
         if(p){
           cache.seed('SELECT at,source FROM activity_landings WHERE number=? AND head=?',[number,p.headRefOid || ''],landings.filter(r=>r.number===id && r.head===p.headRefOid));
           const fingerprint=activityFingerprint(p,collection[0]?.revision);
@@ -2966,6 +2975,17 @@ export class RepositoryState extends DurableObject<Env> {
       state.decode=async text=>byText.has(text)?byText.get(text):decode(text);
     }
     return state;
+  }
+  async activityReviews(number:number,p:any):Promise<any> {
+    const id=String(number),key=queryKey({operation:'issue_comments',args:{number}});
+    const collection=(await this.store.exec<any>('SELECT complete,verified FROM collections WHERE key=?',key)).toArray()[0];
+    const hydrated=(await this.store.exec<any>('SELECT contract FROM survey_hydrated WHERE number=?',id)).toArray()[0];
+    if(!collection?.complete || !Number.isFinite(collection.verified) || hydrated?.contract!==SURVEY_INDEX_VERSION)return null;
+    const rows=(await this.store.exec<any>(ACTIVITY_REVIEW_QUERY,key,id)).toArray();
+    try {
+      const counts=scoreboardRounds(rows.map(row=>JSON.parse(row.data)),p.headRefOid || '');
+      return counts?{...counts,observed_at:collection.verified}:null;
+    }catch{return null;} // Optional accounting metadata must not hide PR facts.
   }
   async activityLOC(number:number,p:any,budget?:{remaining:number},source?:string): Promise<any> {
     const key=queryKey({operation:'files',args:{number}});
@@ -3669,7 +3689,7 @@ export class RepositoryState extends DurableObject<Env> {
           prs.push({number,state:p.state,created_at:p.createdAt || null,landed_at:p.mergedAt || (landing?new Date(landing.at/1000).toISOString():null),
             head_sha:p.headRefOid || null,base_sha:p.baseRefOid || null,
             diff_totals:{files:p.changedFiles,added:p.additions,deleted:p.deletions},observed_at:row.observed,
-            landing_source:p.mergedAt?'github-merged':landing?.source || null,lean_loc:await state.activityLOC(number,p,locBudget,row.data)});
+            landing_source:p.mergedAt?'github-merged':landing?.source || null,lean_loc:await state.activityLOC(number,p,locBudget,row.data),review_passes:await state.activityReviews(number,p)});
         }
         // Normal responses retain their completion-time clock. A migration
         // shadow supplies the same private clock to both local read scopes.
