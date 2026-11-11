@@ -207,12 +207,15 @@ def decide(api, repo, number, event=None, *, reconcile=False):
         paths = [f["filename"] for f in files]
         renamed = [f for f in files if f.get("status") == "renamed"]
         paths.extend(f.get("previous_filename", "") for f in renamed)
+        # A Mathlib bump rewrites many lines mechanically across the library, so it gets a
+        # wider line budget; it already passes review and check-bump.sh before staging builds it.
+        lines = 20000 if bump else 2000
         eligible = (
             len(files) == pr.get("changed_files")
             and len(files) <= 2000
             and (allowed_bump_paths(paths) if bump else allowed_paths(paths))
-            and pr.get("additions", 2001) <= 2000
-            and pr.get("deletions", 2001) <= 2000
+            and pr.get("additions", lines + 1) <= lines
+            and pr.get("deletions", lines + 1) <= lines
             and all(
                 f.get("status") != "added" or not f["filename"].endswith(".lean") or f.get("additions", 1001) <= 1000
                 for f in files

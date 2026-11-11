@@ -377,8 +377,18 @@ class AutomaticBump(unittest.TestCase):
                 self.assertEqual([w[0] for w in self.api.writes], ["DELETE"])
         self.guard.assert_not_called()
 
-    def test_bump_keeps_size_limits(self):
-        self.api.pr["additions"] = 2001
+    def test_bump_has_a_wider_line_budget(self):
+        self.api.pr["additions"] = 4585
+        self.api.pr["deletions"] = 4276
+        self.assertTrue(self.decide())
+        self.guard.reset_mock()
+        self.api.pr["additions"] = 20001
+        self.assertFalse(self.decide())
+        self.guard.assert_not_called()
+
+    def test_bump_keeps_the_file_limit(self):
+        self.api.files = [{"filename": f"TauCeti/A{i}.lean", "status": "modified"} for i in range(2001)]
+        self.api.pr["changed_files"] = 2001
         self.assertFalse(self.decide())
         self.guard.assert_not_called()
 
