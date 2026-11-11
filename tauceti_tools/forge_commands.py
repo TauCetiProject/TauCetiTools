@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
 from .forge import Incomplete, RepositoryRef, Unsupported
 from .forge_read import ForgejoReader, project, validate_fields
 from .forge_write import ForgejoWriter
+
+
+class CheckResults(list):
+    """Keep the command status when --json selects fields without bucket/state."""
+
+    def __init__(self, rows, status):
+        super().__init__(rows)
+        self.status = status
 
 
 def names(groups):
@@ -28,11 +37,58 @@ def execute(command, repository, api, *, token=None, expected_user_id=None):
     reader = ForgejoReader(api)
     fields = opts["json"].split(",") if "json" in opts else None
     limit = int(opts.get("limit", "30"))
+    if command.key == ("pr", "diff"):
+        number = int(command.args[0])
+        before = reader.pull(repository, number, ["headRefOid", "baseRefOid"])
+        if opts.get("name_only"):
+            # Historical PR stats/files on stock Forgejo are not always bound
+            # to the retained comparison. Exact Git endpoints also handle file
+            # limits, renames, and quoted filenames consistently with reviews.
+            from .git_credentials import scoped_git_environment
+            from .git_inputs import changed_paths
+
+            row = api.pull(repository, number)
+            base = row.get("merge_base")
+            if not isinstance(base, str) or not re.fullmatch(r"[0-9a-f]{40}", base):
+                raise Incomplete("PR merge base unavailable for exact file listing")
+            environment = scoped_git_environment(repository.forge, token) if token else None
+            paths = changed_paths(repository.clone_url, base, before["headRefOid"], environment=environment)
+            output = "".join(path + "\n" for path in paths)
+        else:
+            output = api.pull_diff(repository, number)
+        if reader.pull(repository, number, ["headRefOid", "baseRefOid"]) != before:
+            raise Incomplete("PR comparison changed while reading its diff")
+        return output, False
+    if command.key == ("pr", "checks"):
+        supported = {"name", "state", "bucket", "description", "link", "startedAt", "completedAt", "workflow", "event"}
+        validate_fields(fields, supported)
+        statuses = reader.pull(repository, int(command.args[0]), ["statusCheckRollup"])["statusCheckRollup"]
+        values = [dict(name=row["context"], state=row["state"],
+                       bucket={"SUCCESS": "pass", "FAILURE": "fail", "ERROR": "fail"}.get(row["state"], "pending"),
+                       description=row.get("description", ""), link=row.get("targetUrl", ""),
+                       startedAt=row.get("startedAt", ""), completedAt="", workflow="", event="native-status")
+                  for row in statuses]
+        # Native status names alone cannot attest to the configured execution
+        # backend's exact-input build. Keep that missing evidence visible even
+        # when an ordinary contributor posted a status named "build".
+        values.append(dict(name="execution evidence", state="PENDING", bucket="pending",
+                           description="Verified execution evidence unavailable", link="", startedAt="",
+                           completedAt="", workflow="", event="execution"))
+        status = 1 if any(row["bucket"] == "fail" for row in values) else 8
+        return CheckResults([project(row, fields) for row in values], status), True
     if action == "view":
         if group == "repo":
             value = reader.repository(repository, fields)
         else:
-            value = getattr(reader, "pull" if group == "pr" else "issue")(repository, int(command.args[0]), fields)
+            selected = fields
+            if opts.get("comments"):
+                selected = list(dict.fromkeys([*(fields or ["number", "title", "body", "url"]), "comments", "reviews"]))
+            value = getattr(reader, "pull" if group == "pr" else "issue")(repository, int(command.args[0]), selected)
+            if opts.get("comments") and fields is None:
+                sections = [f"{value['title']}\n{value['url']}\n\n{value['body'] or ''}"]
+                for row in [*value["comments"], *value["reviews"]]:
+                    sections.append(f"{(row.get('author') or {}).get('login', 'unknown')}:\n{row.get('body') or ''}")
+                return "\n\n".join(sections) + "\n", False
         return value, True
     if action == "list" and group in {"pr", "issue"}:
         author = opts.get("author")
@@ -171,3 +227,9 @@ def execute(command, repository, api, *, token=None, expected_user_id=None):
 
 def render(value, json_output):
     return json.dumps(value, ensure_ascii=False) + "\n" if json_output else value
+
+
+def exit_status(command, value):
+    if command.key == ("pr", "checks"):
+        return value.status
+    return 0

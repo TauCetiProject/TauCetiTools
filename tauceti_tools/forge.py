@@ -169,7 +169,9 @@ class Forgejo:
         else:
             self._opener = urllib.request.build_opener(_NoRedirect)
 
-    def request(self, method, path, data=None, *, response_headers=None, response_meta=None):
+    def request(self, method, path, data=None, *, response_headers=None, response_meta=None, response_format="json"):
+        if response_format not in {"json", "text"}:
+            raise ValueError("response format must be json or text")
         parsed = urllib.parse.urlsplit(path)
         if (
             parsed.scheme
@@ -182,7 +184,7 @@ class Forgejo:
         method = method.upper()
         if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
             raise Unsupported(f"unsupported HTTP method {method}")
-        headers = {"Accept": "application/json", "User-Agent": "tauceti-tools"}
+        headers = {"Accept": "text/plain" if response_format == "text" else "application/json", "User-Agent": "tauceti-tools"}
         if self._token:
             headers["Authorization"] = "token " + self._token
         body = None if data is None else json.dumps(data).encode()
@@ -201,6 +203,11 @@ class Forgejo:
                 if len(raw) > self.max_bytes:
                     error = Incomplete if method == "GET" else AmbiguousWrite
                     raise error("Forgejo response exceeded the configured byte limit")
+                if response_format == "text":
+                    try:
+                        return raw.decode("utf-8")
+                    except UnicodeError:
+                        raise Incomplete("Forgejo returned invalid UTF-8 text") from None
                 if not raw:
                     if method == "GET":
                         raise Incomplete("Forgejo returned an empty read response")
@@ -326,6 +333,10 @@ class Forgejo:
         if not isinstance(row, dict) or row.get("number") != number:
             raise Incomplete("Forgejo pull response did not identify the requested PR")
         return row
+
+    def pull_diff(self, repository, number):
+        repository.pull_url(number)
+        return self.request("GET", f"{self._repo(repository)}/pulls/{number}.diff", response_format="text")
 
     def pull_ref(self, repository, number):
         repository.pull_url(number)
