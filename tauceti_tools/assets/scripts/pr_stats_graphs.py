@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import html
+import itertools
 import json
 import math
 import os
@@ -478,43 +479,138 @@ def names_scoreboard_for(metas: Iterable[str], pr_number: int) -> bool:
     return False
 
 
-# The comment scan below reads the repository's whole comment history. That is affordable only
-# because it does not have to happen every run, and it will not stay possible at all: GitHub caps
-# this endpoint at 400 pages, and the scan is ASCENDING, so once the repository passes 40,000
-# comments the pages that stop arriving are the newest ones -- precisely the scoreboards that
-# decide whether a pull request may merge. At ~13,600 comments growing by ~150 a day, that is a
-# few months out, and it would arrive as quietly as everything else in this file did.
-#
-# So: scan descending, and normally only since the last scan. Descending means that if the cap is
-# ever reached anyway the oldest comments are lost rather than the newest, which is the survivable
-# direction. `since` filters on updated_at, so an edited comment is re-examined.
-#
-# What an incremental scan cannot see is a comment that was DELETED, or edited to drop its marker;
-# either lingers in the carried-over set. A full rescan every week bounds how long that can last,
-# and costs one run in fifty-six rather than every run.
+# The repository comment listing serves at most 300 pages (30,000 comments, about a week of
+# TauCeti in 2026-11) from any one starting point, and `gh api --paginate` stops there without an
+# error. So comments are read as a cursor walk in `updated_at` order, each request starting
+# `since` the last comment the one before it returned. An edit moves a comment to the end of that
+# order, so a walk that reaches the end has seen every live comment as it now reads. A deletion
+# is invisible to it, which is what the weekly full walk from the beginning is for.
 SCOREBOARD_FULL_RESCAN_DAYS = 7
-# Re-read a little before the last scan, so a comment written while that scan was running cannot
-# fall into the gap between the two.
+# Re-read a little before the last walk's end, so a comment written while that walk was running
+# cannot fall into the gap between the two.
 SCOREBOARD_OVERLAP = timedelta(hours=1)
+# Requests per run, shared by the walk that keeps up and a full walk in progress. A full walk
+# (1,147 pages on 2026-11-10) therefore takes several runs, within the Actions token's 1,000
+# REST requests an hour; the scoreboards it replaces stay published until it finishes.
+SCOREBOARD_PAGES_PER_RUN = 300
+COMMENT_PAGE_SIZE = 100
+# One compact line per comment, parsed by jq so that review prose never reaches Python. Every
+# comment carries its id and `updated_at`: the cursor needs the time, and a comment edited to
+# drop the marker must leave the store. Marker comments also carry what their verdict needs.
+SCOREBOARD_JQ = (
+    '.[] | . as $comment | {id: $comment.id, updated_at: $comment.updated_at}'
+    f' + if (($comment.body // "") | contains({json.dumps(SCOREBOARD_MARKER)})) | not'
+    ' then {marker: false} else'
+    ' ($comment.issue_url | split("/") | last) as $number'
+    ' | ([try ($comment.body | capture("<!--tauceti-meta:v1\\\\s+'
+    '(?<json>\\\\{[\\\\s\\\\S]*\\\\})\\\\s*-->").json'
+    ' | fromjson) catch null][0] // null) as $meta'
+    ' | {marker: true, number: $number, created_at: $comment.created_at,'
+    '    user: $comment.user.login,'
+    '    canonical: (($meta | type == "object")'
+    '      and $meta.kind == "scoreboard"'
+    '      and (($meta.pr | type) == "number")'
+    '      and (($meta.pr | floor) == $meta.pr)'
+    '      and ($meta.pr == ($number | tonumber)))} end'
+)
 
 
-def scoreboard_watermark(previous: dict | None, now: datetime) -> datetime | None:
-    """The instant to scan comments from, or None to scan the whole history.
+def fetch_comment_page(repo: str, since: datetime | None, page: int) -> list[dict]:
+    query = f"per_page={COMMENT_PAGE_SIZE}&sort=updated&direction=asc&page={page}"
+    if since is not None:
+        query += f"&since={iso_z(since)}"
+    raw = run_gh(["api", f"repos/{repo}/issues/comments?{query}", "--jq", SCOREBOARD_JQ])
+    return [json.loads(line) for line in raw.splitlines()]
 
-    Returns None whenever the carried-over set cannot be trusted to be merged into: no previous
-    snapshot, one written before this bookkeeping existed, one whose records predate comment ids,
-    or one old enough that deletions may have accumulated behind it.
+
+def observe_comment(store: dict[str, dict], row: dict) -> None:
+    identifier = str(row["id"])
+    if not row.get("marker"):
+        store.pop(identifier, None)
+        return
+    store[identifier] = {
+        "id": identifier, "number": row.get("number"), "created_at": row["created_at"],
+        "updated_at": row["updated_at"], "user": row.get("user"),
+        "canonical": bool(row.get("canonical")),
+    }
+
+
+def walk_comments(
+    repo: str, since: datetime | None, pages: int | None, store: dict[str, dict],
+) -> tuple[datetime | None, int, bool]:
+    """Fold the comments updated at or after `since` into `store`, oldest update first.
+
+    Spends at most `pages` requests, or as many as it takes when `pages` is None. Returns where
+    to resume, how many requests it spent, and whether it reached the end.
     """
-    if not previous:
-        return None
-    scanned = parse_dt(previous.get("scoreboards_scanned_at") or "")
-    if scanned is None:
-        return None
-    if now - scanned > timedelta(days=SCOREBOARD_FULL_RESCAN_DAYS):
-        return None
-    if any("id" not in entry for entry in previous.get("scoreboards") or []):
-        return None
-    return scanned - SCOREBOARD_OVERLAP
+    page = 1
+    for spent in itertools.count(1) if pages is None else range(1, pages + 1):
+        rows = fetch_comment_page(repo, since, page)
+        for row in rows:
+            observe_comment(store, row)
+        if len(rows) < COMMENT_PAGE_SIZE:
+            return (parse_dt(rows[-1]["updated_at"]) if rows else since), spent, True
+        last = parse_dt(rows[-1]["updated_at"])
+        # `since` is inclusive, so a full page ending where it began holds comments sharing one
+        # timestamp; step through them by page number until the timestamp moves on.
+        page = page + 1 if last == since else 1
+        since = last
+    return since, pages, False
+
+
+def scoreboard_verdicts(
+    store: dict[str, dict], pr_numbers: set[int], trusted_logins: set[str],
+) -> tuple[list[dict], dict[str, str]]:
+    """The accepted scoreboards and {comment id: rejection reason}, from the observed comments.
+
+    Derived afresh every run, so a contributor who becomes trusted, or a pull request that joins
+    the snapshot, changes the verdict on comments already observed without reading them again.
+    """
+    scoreboards, rejected = [], {}
+    for identifier, comment in store.items():
+        try:
+            pr_number = int(comment["number"])
+        except (KeyError, TypeError, ValueError):
+            rejected[identifier] = "unparsable_issue_number"
+            continue
+        if pr_number not in pr_numbers:
+            rejected[identifier] = "not_a_pull_request"
+        elif comment.get("user") not in trusted_logins:
+            rejected[identifier] = "untrusted_author"
+        elif not comment.get("canonical"):
+            rejected[identifier] = "no_canonical_scoreboard_meta"
+        else:
+            scoreboards.append({
+                "id": identifier, "pr": pr_number, "created_at": comment["created_at"],
+                "updated_at": comment["updated_at"], "user": comment.get("user") or "unknown",
+            })
+    scoreboards.sort(key=lambda entry: (entry["created_at"], entry["id"]))
+    return scoreboards, rejected
+
+
+def scoreboard_scan_state(previous: dict | None) -> dict:
+    """The observed comments and walk positions an earlier snapshot recorded."""
+    previous = previous or {}
+    if "scoreboard_comments" not in previous:
+        # A snapshot from the capped scan. Its accepted scoreboards stay published, kept up to
+        # date from its watermark, while a full walk rebuilds the history that scan lost.
+        comments = {
+            entry["id"]: {"id": entry["id"], "number": entry["pr"],
+                          "created_at": entry["created_at"], "updated_at": entry["updated_at"],
+                          "user": entry["user"], "canonical": True}
+            for entry in previous.get("scoreboards") or [] if "id" in entry
+        }
+        cursor = parse_dt(previous.get("scoreboards_scanned_at")) if comments else None
+        return {"comments": comments, "cursor": cursor, "rescanned_at": None, "rescan": None}
+    rescan = previous.get("scoreboard_rescan")
+    return {
+        "comments": dict(previous["scoreboard_comments"]),
+        "cursor": parse_dt(previous.get("scoreboards_scanned_at")),
+        "rescanned_at": parse_dt(previous.get("scoreboards_rescanned_at")),
+        "rescan": rescan and {"started_at": parse_dt(rescan["started_at"]),
+                              "cursor": parse_dt(rescan.get("cursor")),
+                              "comments": dict(rescan["comments"])},
+    }
 
 
 def fetch_scoreboards(
@@ -523,8 +619,8 @@ def fetch_scoreboards(
     trusted_logins: set[str],
     previous: dict | None = None,
     now: datetime | None = None,
-    rescan: bool = False,
-) -> tuple[list[dict], dict[str, str], str]:
+    pages: int | None = SCOREBOARD_PAGES_PER_RUN,
+) -> tuple[list[dict], dict[str, str], dict]:
     """Canonical review scoreboards posted on this repository's pull requests.
 
     The repository issue-comments endpoint also serves ordinary issues and accepts comments
@@ -532,86 +628,55 @@ def fetch_scoreboards(
     requests, its author has contributed a merged PR, and its parsed engine metadata declares a
     scoreboard for that same PR. The merged-author set comes from the same PR snapshot, so this
     works with the read-only Actions token and does not trust requester-dependent
-    ``author_association`` values. Parsing runs at gh/jq, so only compact fields reach Python
-    rather than memory growing with review prose. Rejections are published by reason.
+    ``author_association`` values. Rejections are published by reason.
 
-    GitHub stops paginating this endpoint after a few hundred pages (roughly the last week of
-    comments here), so a "full" scan cannot actually reach the whole history. Every scan
-    therefore revises the carried-over verdicts rather than replacing them: comments the scan
-    reaches get a fresh verdict, older ones keep theirs. ``rescan`` drops the watermark so the
-    scan reaches as far back as GitHub allows, e.g. after the trusted-author set grows.
-
-    Returns the scoreboards, the rejected comments as {id: reason}, and the instant the scan
-    covers up to. Rejections are kept per comment id rather than as bare counts so that a
-    re-examined comment replaces its own earlier verdict instead of being counted twice.
+    Returns the scoreboards, the rejected comments as {id: reason}, and the walk state for the
+    snapshot: the observed marker comments, the cursor of the walk that keeps up, and any full
+    walk in progress. Until a first full walk finishes there is no cursor, and the scoreboards
+    are not a history; see `scoreboard_history_unfinished`. `pages` caps the requests, shared
+    by both walks; None walks to the end.
     """
     now = now or datetime.now(timezone.utc)
-    since = None if rescan else scoreboard_watermark(previous, now)
-    marker = json.dumps(SCOREBOARD_MARKER)
-    # Descending, so a future run that does hit GitHub's pagination cap loses the oldest
-    # comments rather than the newest. `--paginate` carries these parameters through the
-    # Link headers it follows.
-    query = "per_page=100&sort=created&direction=desc"
-    if since is not None:
-        query += f"&since={iso_z(since)}"
-        print(f"scanning scoreboard comments updated since {iso_z(since)}", file=sys.stderr)
-    else:
-        print("scanning the full scoreboard comment history", file=sys.stderr)
-    raw = run_gh([
-        "api", "--paginate",
-        f"repos/{repo}/issues/comments?{query}",
-        "--jq", f'.[] | select((.body // "") | contains({marker}))'
-                ' | . as $comment | ($comment.issue_url | split("/") | last) as $number'
-                ' | ([try ($comment.body | capture("<!--tauceti-meta:v1\\\\s+'
-                '(?<json>\\\\{[\\\\s\\\\S]*\\\\})\\\\s*-->").json'
-                ' | fromjson) catch null][0] // null) as $meta'
-                ' | {id: $comment.id, number: $number, created_at: $comment.created_at,'
-                '    updated_at: $comment.updated_at, user: $comment.user.login,'
-                '    canonical: (($meta | type == "object")'
-                '      and $meta.kind == "scoreboard"'
-                '      and (($meta.pr | type) == "number")'
-                '      and (($meta.pr | floor) == $meta.pr)'
-                '      and ($meta.pr == ($number | tonumber)))}',
-    ])
-    # Every scan starts from what the previous one established and revises it. Starting a
-    # "full" scan from nothing would silently discard everything beyond the pagination cap.
-    kept: dict[str, dict] = {}
-    rejected: dict[str, str] = {}
-    carried = (previous or {}).get("scoreboards") or []
-    if all("id" in entry for entry in carried):
-        kept = {entry["id"]: entry for entry in carried}
-        rejected = dict((previous or {}).get("rejected_scoreboard_comments_by_id") or {})
+    state = scoreboard_scan_state(previous)
+    store, cursor, rescan = state["comments"], state["cursor"], state["rescan"]
+    rescanned_at, budget = state["rescanned_at"], pages
+    # With nothing observed there is nothing to keep up: the full walk below covers it all.
+    if cursor is not None:
+        cursor, spent, _ = walk_comments(repo, cursor - SCOREBOARD_OVERLAP, budget, store)
+        budget = None if budget is None else budget - spent
+    if rescan is None and (
+            rescanned_at is None or now - rescanned_at > timedelta(days=SCOREBOARD_FULL_RESCAN_DAYS)):
+        rescan = {"started_at": now, "cursor": None, "comments": {}}
+    if rescan is not None and (budget is None or budget > 0):
+        rescan["cursor"], _, complete = walk_comments(
+            repo, rescan["cursor"], budget, rescan["comments"])
+        if complete:
+            store, rescanned_at = rescan["comments"], rescan["started_at"]
+            cursor = rescan["cursor"] or rescan["started_at"]
+            rescan = None
+    print("scoreboard comments: " + ("full walk complete" if rescan is None else
+          f"full walk at {iso_z(rescan['cursor']) if rescan['cursor'] else 'its start'}"),
+          file=sys.stderr)
+    scoreboards, rejected = scoreboard_verdicts(store, pr_numbers, trusted_logins)
+    return scoreboards, rejected, {
+        "scoreboard_comments": store,
+        "scoreboards_scanned_at": cursor and iso_z(cursor),
+        "scoreboards_rescanned_at": rescanned_at and iso_z(rescanned_at),
+        "scoreboard_rescan": rescan and {
+            "started_at": iso_z(rescan["started_at"]),
+            "cursor": rescan["cursor"] and iso_z(rescan["cursor"]),
+            "comments": rescan["comments"],
+        },
+    }
 
-    for line in raw.splitlines():
-        comment = json.loads(line)
-        identifier = str(comment.get("id"))
-        # A comment can cross the line in either direction when edited, so a fresh verdict
-        # always displaces the old one rather than being added alongside it.
-        kept.pop(identifier, None)
-        rejected.pop(identifier, None)
-        try:
-            pr_number = int(comment["number"])
-        except (KeyError, TypeError, ValueError):
-            rejected[identifier] = "unparsable_issue_number"
-            continue
-        if pr_number not in pr_numbers:
-            rejected[identifier] = "not_a_pull_request"
-            continue
-        if comment.get("user") not in trusted_logins:
-            rejected[identifier] = "untrusted_author"
-            continue
-        if not comment.get("canonical"):
-            rejected[identifier] = "no_canonical_scoreboard_meta"
-            continue
-        kept[identifier] = {
-            "id": identifier,
-            "pr": pr_number,
-            "created_at": comment["created_at"],
-            "updated_at": comment["updated_at"],
-            "user": comment.get("user") or "unknown",
-        }
-    scoreboards = sorted(kept.values(), key=lambda entry: (entry["created_at"], entry["id"]))
-    return scoreboards, rejected, iso_z(now)
+
+def scoreboard_history_unfinished(data: dict) -> bool:
+    """Whether a snapshot is mid-way through its first full scoreboard walk.
+
+    Its scoreboards are then only what that walk has reached, and rendering them would publish
+    a review history that has lost everything the walk has yet to read.
+    """
+    return bool(data.get("scoreboard_rescan")) and not data.get("scoreboards_scanned_at")
 
 
 def load_previous(path: Path | None, repo: str) -> dict | None:
@@ -714,7 +779,8 @@ def apply_bors_merges(prs: list[dict], merges: dict[str, str]) -> None:
             pr.update(merged_at=stamp, state="MERGED", merge_source="bors")
 
 
-def fetch_snapshot(repo: str, previous: dict | None = None) -> dict:
+def fetch_snapshot(repo: str, previous: dict | None = None,
+                   scoreboard_pages: int | None = SCOREBOARD_PAGES_PER_RUN) -> dict:
     prs = fetch_prs(repo, previous)
     bors_merges, bors_scanned_at = fetch_bors_merges(repo, previous)
     apply_bors_merges(prs, bors_merges)
@@ -722,10 +788,8 @@ def fetch_snapshot(repo: str, previous: dict | None = None) -> dict:
         pr["author"] for pr in prs
         if pr.get("merged_at") and pr.get("author") != "unknown"
     }
-    scoreboards, rejected, scanned_at = fetch_scoreboards(
-        repo, {pr["number"] for pr in prs}, trusted_logins, previous,
-        # Reconsider recently rejected scoreboards when a merge app's contributors become trusted.
-        rescan=not receipts_reusable(previous),
+    scoreboards, rejected, scan_state = fetch_scoreboards(
+        repo, {pr["number"] for pr in prs}, trusted_logins, previous, pages=scoreboard_pages,
     )
     return {
         # 2: pull requests carry `updated_at` and scoreboards carry `id`, both so that the next
@@ -740,11 +804,8 @@ def fetch_snapshot(repo: str, previous: dict | None = None) -> dict:
         "bors_merges_scanned_at": bors_scanned_at,
         "merge_receipt_logins": list(MERGE_RECEIPT_LOGINS),
         "scoreboards": scoreboards,
-        # Per comment, so that the next incremental scan can revise a single verdict. The
-        # published counts below are derived from it and stay exact across incremental runs.
-        "scoreboards_scanned_at": scanned_at,
-        "rejected_scoreboard_comments_by_id": dict(sorted(rejected.items())),
         "rejected_scoreboard_comments": dict(sorted(Counter(rejected.values()).items())),
+        **scan_state,
     }
 
 
@@ -1736,9 +1797,15 @@ def main() -> int:
     if args.data:
         data = json.loads(args.data.read_text(encoding="utf-8"))
     else:
-        data = fetch_snapshot(args.repo, load_previous(args.since_data, args.repo))
+        # Without --dump-data no later run can resume a capped walk, so this one walks to the end.
+        pages = SCOREBOARD_PAGES_PER_RUN if args.dump_data else None
+        data = fetch_snapshot(args.repo, load_previous(args.since_data, args.repo), pages)
         if args.dump_data:
             atomic_write(args.dump_data, json.dumps(data, indent=2) + "\n")
+    if scoreboard_history_unfinished(data):
+        print("the first full walk of scoreboard comments is unfinished, so no assets were "
+              "written; the snapshot carries it on to the next run", file=sys.stderr)
+        return 3
     as_of = parse_dt(args.as_of) if args.as_of else None
     metrics = generate(
         data, args.out_dir, args.contributor_limit, args.history_days,
