@@ -10,12 +10,10 @@ import sys
 import tempfile
 import unittest
 
-import yaml
 from unittest.mock import patch
 
 
 SCRIPTS = Path(__file__).resolve().parent
-ROOT = SCRIPTS.parents[2]
 spec = importlib.util.spec_from_file_location("bulk_unpack", SCRIPTS / "bulk-unpack-cache.py")
 bulk = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bulk)

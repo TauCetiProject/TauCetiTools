@@ -8,4 +8,3 @@ spec = importlib.util.spec_from_file_location("bulk_cache_tests", SCRIPT)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 BulkUnpackTests = module.BulkUnpackTests
-
