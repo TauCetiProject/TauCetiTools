@@ -43,13 +43,11 @@ jobs:
         run: |
           set -euo pipefail
           deb="bubblewrap_${BWRAP_VER}_amd64.deb"
-          if ! curl -sSL --fail "https://archive.ubuntu.com/ubuntu/pool/main/b/bubblewrap/${deb}" -o bwrap.deb \
-             && ! curl -sSL --fail "https://security.ubuntu.com/ubuntu/pool/main/b/bubblewrap/${deb}" -o bwrap.deb; then
-            echo "::error::bubblewrap ${BWRAP_VER} is gone from the Ubuntu pool. The sandbox cannot be installed, so no PR can build until the pin is moved."
-            exit 1
-          fi
+          # Use the exact Ubuntu release package bundled with the pinned tools.
+          # Sandbox bootstrap must not depend on Ubuntu DNS or archive availability.
+          cp "$RUNNER_TEMP/tauceti-shared-scripts/vendor/$deb" bwrap.deb
           if ! echo "${BWRAP_DEB_SHA256}  bwrap.deb" | sha256sum -c -; then
-            echo "::error::bubblewrap ${BWRAP_VER} downloaded but does not match BWRAP_DEB_SHA256. Ubuntu does not rewrite published packages, so either the pin is wrong or the download was tampered with. Re-derive the hashes rather than relaxing this check."
+            echo "::error::Bundled bubblewrap ${BWRAP_VER} does not match BWRAP_DEB_SHA256; refusing to install it. Update the bundled package and both pins together."
             exit 1
           fi
           sudo dpkg -i bwrap.deb >/dev/null
