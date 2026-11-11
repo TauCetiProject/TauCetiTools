@@ -78,6 +78,19 @@ class Workflow(unittest.TestCase):
             "job_result": "success",
         }
 
+    def test_dedicated_trusted_source_configuration_keeps_default_project_separate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            gate = Path(directory)
+            default = gate / "tauceti.toml"
+            default.write_bytes(b"ordinary GitHub project configuration")
+            self.assertEqual(cw.source_configuration_path(default), default)
+            dedicated = gate / ".tauceti" / "ci-source.toml"
+            dedicated.parent.mkdir()
+            dedicated.write_bytes(CONFIG)
+            self.assertEqual(cw.source_configuration_path(default), dedicated)
+            explicit = gate / "operator-config.toml"
+            self.assertEqual(cw.source_configuration_path(explicit), explicit)
+
     def advance(self, seconds):
         self.elapsed += seconds
 
