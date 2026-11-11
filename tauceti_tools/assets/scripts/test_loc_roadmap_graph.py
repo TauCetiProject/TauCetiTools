@@ -3,6 +3,7 @@
 
 import datetime as dt
 import unittest
+from unittest.mock import patch
 
 import loc_roadmap_graph as graph
 
@@ -32,6 +33,14 @@ class BorsSnapshot(unittest.TestCase):
         self.assertEqual(totals, {"roadmap/PDE": 95})
 
 
+class LiveFetch(unittest.TestCase):
+    def test_without_a_snapshot_every_receipt_candidate_is_checked(self):
+        with (patch.object(graph, "fetch_pr_pages", return_value=[]),
+              patch.object(graph, "apply_app_merges") as apply):
+            graph.fetch_gh("o/r")
+        apply.assert_called_once_with("o/r", [], max_checks=None)
+
+
 class RoadmapSeries(unittest.TestCase):
     def test_excludes_maintenance_even_with_area_label(self):
         prs = [
@@ -58,30 +67,6 @@ class RoadmapSeries(unittest.TestCase):
         ]
         with self.assertRaisesRegex(ValueError, "negative cumulative"):
             graph.build_series(prs)
-
-
-class TruncationTest(unittest.TestCase):
-    """A cumulative chart cannot survive losing its oldest rows.
-
-    `gh pr list` returns at most --limit results, newest first, and reports nothing when it
-    stops there. The limit was 2000 while the repository had 5072 merged pull requests, so every
-    band silently began 3000 pull requests too late and the chart looked entirely plausible.
-    """
-
-    def test_a_full_result_is_refused_rather_than_drawn(self):
-        prs = [pr(n, "feat: add theorem", "roadmap/PDE", 1, 0)
-               for n in range(graph.MERGED_PR_CEILING)]
-        with self.assertRaisesRegex(RuntimeError, "ceiling"):
-            graph.check_complete(prs)
-
-    def test_a_short_result_is_accepted(self):
-        self.assertIsNone(graph.check_complete([pr(1, "feat: x", "roadmap/PDE", 1, 0)]))
-
-    def test_the_ceiling_is_well_clear_of_the_project(self):
-        # The point of the ceiling is to stop a runaway query, not to bound the project. If it
-        # ever sits near the real number of merged pull requests, the guard above starts firing
-        # on healthy runs instead of on a bug.
-        self.assertGreaterEqual(graph.MERGED_PR_CEILING, 50_000)
 
 
 class CollapseTail(unittest.TestCase):

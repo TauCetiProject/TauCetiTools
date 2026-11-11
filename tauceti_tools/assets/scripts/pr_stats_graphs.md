@@ -44,25 +44,28 @@ It requires an authenticated `gh` CLI. In GitHub Actions, set `GH_TOKEN` to
   commenters without requiring the read-only Actions token to enumerate collaborators; a
   contributor who has authored a merged PR is inside this statistics trust boundary.
 - **Merge time** is GitHub's `mergedAt` for ordinary merges. Bors squash merges and
-  TauCeti queue landings leave a closed PR with no `mergedAt`; these use the creation
-  time of the installed `tau-ceti-bors[bot]` or `tauceti-queue[bot]` app's “Pull request
-  successfully merged into main.” receipt.
-  An editable title prefix, queued approval, staging success, or another account's
-  comment is not evidence of a merge. Native merge timestamps take precedence and
-  each PR counts once. This normalization feeds throughput, latency, contributor
-  totals, the category grids, and pipeline health. Roadmap activity uses it when
-  reading the shared snapshot. The per-roadmap
+  TauCeti queue landings leave a closed PR with no `mergedAt`. When the installed
+  `tau-ceti-bors` or `tauceti-queue` app renamed the PR to `[Merged by Bors] - …`, which it
+  does as it closes a PR it landed, the merge time is that rename, read with the PR page
+  query. Any other closed PR is checked for that app's “Pull request successfully merged
+  into main.” receipt among its own comments, and uses the receipt's time: a PR someone
+  closed while its batch was building still lands, without the rename.
+  The title itself, a close by the app (it also closes PRs it rejects), a queued approval,
+  staging success, or another account's comment is not evidence of a merge. Native merge
+  timestamps take precedence and each PR counts once. This normalization feeds throughput,
+  latency, contributor totals, the category grids, and pipeline health. Roadmap activity
+  uses it when reading the shared snapshot. The per-roadmap
   line chart reads the same snapshot, including PR titles and diff sizes.
-  GitHub stops paginating the repository comment listing after 300 pages (30,000
-  comments, here roughly the last week), so receipts cannot be refetched from the start
-  of the project. They are always carried forward from the cached snapshot; losing that
-  cache loses the history beyond the pagination limit. When the recorded set of merge
-  apps differs from the current one, the run scans as far back as GitHub allows, adding
-  receipts. Later runs scan incrementally with an hour overlap; unchanged cached label
-  timelines do not prevent historical merge repair. Scoreboards are read by the cursor
-  walk described under Scaling below, which reaches the whole history, and their
-  verdicts are derived every run, so a contributor whose merge a receipt reveals is
-  trusted without a rescan.
+  A landing, once recorded, is kept: neither a rename nor a receipt can be undone, so a later
+  page query that misses the rename does not lose it. Receipt checks cost one request per PR,
+  so a verdict of none is kept until the PR's `updatedAt` moves, and at most 500 PRs are
+  checked a run, newest closures first; a first run works through the backlog over several
+  runs. Only a run that keeps its snapshot (`--dump-data`) is capped; every other fetch,
+  including `pipeline_health.py` and the per-roadmap chart's live path, checks every
+  candidate at once.
+  Scoreboards are read by the cursor walk described under Scaling below, which reaches the
+  whole history, and their verdicts are derived every run, so a contributor whose merge a
+  receipt reveals is trusted without a rescan.
 - Seven-day metrics use complete UTC calendar days. Merge latency is PR creation to
   merge time among PRs merged in that trailing window. Every chart is PLOTTED through the
   last complete UTC day: regenerated every three hours, a final point holding only part of
