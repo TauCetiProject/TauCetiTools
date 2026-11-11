@@ -245,7 +245,8 @@ class ForgejoReviewSource:
 
     @property
     def cache_key(self):
-        return hashlib.sha256((self.repository.key + "\0" + self.api._token).encode()).hexdigest()
+        identity = json.dumps(self.identity.record(), sort_keys=True)
+        return hashlib.sha256((identity + "\0" + self.api._token).encode()).hexdigest()
 
 
 def source_for(repository, environment=None):

@@ -35,6 +35,9 @@ class ReviewSources(unittest.TestCase):
         other = RepositoryIdentity(RepositoryRef(Forge("forgejo", "https://other.example.org"), self.repo.name), 7)
         second = ForgejoReviewSource(other, self.api)
         self.assertNotEqual(first.cache_key, second.cache_key)
+        self.api.repository.return_value["id"] = 8
+        replaced = ForgejoReviewSource(RepositoryIdentity(self.repo, 8), self.api)
+        self.assertNotEqual(first.cache_key, replaced.cache_key)
         old = first.cache_key
         self.api._token = "two-token"
         self.assertNotEqual(first.cache_key, old)
