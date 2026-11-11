@@ -375,7 +375,10 @@ run_meta do
   -- imported canary before subsequent PRs depend on it.
   unless (← findDocString? env \`Monoid).isSome do
     throwError "docstring visibility calibration failed for imported Monoid"
-  let inScope := fun m => if changedOnly then selectedModules.contains m
+  -- Membership is queried for every imported declaration, not just selected ones.
+  -- Index the requested modules once so large scoped scans stay within the normal budget.
+  let selectedModuleSet : NameHashSet := selectedModules.foldl (fun s m => s.insert m) {}
+  let inScope := fun m => if changedOnly then selectedModuleSet.contains m
     else m == \`TauCeti || (\`TauCeti).isPrefixOf m
   let candidates : Array Name := env.constants.fold (init := #[]) fun acc declName _ =>
     match env.getModuleIdxFor? declName with
