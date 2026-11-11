@@ -375,7 +375,10 @@ run_meta do
   -- imported canary before subsequent PRs depend on it.
   unless (← findDocString? env \`Monoid).isSome do
     throwError "docstring visibility calibration failed for imported Monoid"
-  let inScope := fun m => if changedOnly then selectedModules.contains m
+  -- Membership is queried for every imported declaration, not just selected ones.
+  -- Index the requested modules once so large scoped scans stay within the normal budget.
+  let selectedModuleSet : NameHashSet := selectedModules.foldl (fun s m => s.insert m) {}
+  let inScope := fun m => if changedOnly then selectedModuleSet.contains m
     else m == \`TauCeti || (\`TauCeti).isPrefixOf m
   let candidates : Array Name := env.constants.fold (init := #[]) fun acc declName _ =>
     match env.getModuleIdxFor? declName with
@@ -427,10 +430,12 @@ run_meta do
 EOF
 } > "$DOCDRIVER"
 
+docscan_started=$SECONDS
 if ! run_lean "$DOCDRIVER" > "$TMP/docscan.txt" 2>&1; then
   cat "$TMP/docscan.txt"
   fail "driver failure: the docstring-scan driver did not elaborate cleanly — see output above"
 fi
+echo "lint-env: timing docscan_seconds=$((SECONDS - docscan_started))"
 nsets=$(grep -cE "^LINTERSET (base|tacticAlt) $LINTERSETMARKER\$" "$TMP/docscan.txt" || true)
 if [ "${nsets:-0}" -ne 1 ]; then
   cat "$TMP/docscan.txt"
@@ -584,6 +589,7 @@ else
     status=$?
   fi
 fi
+grep -E '^LINT-TIMING ' "$TMP/out.txt" || true
 # Echo each linter's completion trace line into the log. Informational only: nothing below reads
 # these lines, and PR code could print look-alikes. Once Batteries reports per-linter cost on them,
 # this is how the CI logs record what each linter costs.

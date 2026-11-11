@@ -41,6 +41,42 @@ test('stale cached closed/merged PRs remain readable without reactivating pollin
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM jobs').get()).n,0);
  }finally{await db.close();}
 });
+test('reporting sums cumulative counters from complete cached scoreboard fragments without collection',async()=>{
+ const {db,state}=await fixture();try{
+  const head='a'.repeat(40),key='issue_comments:{"number":7}';
+  await db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?,0)').run('pr','7','',JSON.stringify({number:7,state:'CLOSED',headRefOid:head}),'',123,1);
+  await db.prepare('INSERT INTO collections VALUES (?,?,?,?,?,?,?)').run(key,'issue_comments','{"number":7}',1,120,1,null);
+  await db.prepare('INSERT INTO survey_hydrated VALUES (?,?)').run('7','tauceti-survey-facts/v1:completed-scoreboards');
+  for(const [id,round,sha] of [['101',3,head],['102',2,'old-head']]) {
+   await db.prepare('INSERT INTO survey_fragments VALUES (?,?,?,?)').run('issue_comments',id,'7',JSON.stringify({meta:{round,head_sha:sha}}));
+   await db.prepare('INSERT INTO members VALUES (?,?)').run(key,id);
+  }
+  const counts=(await (await query(state,[7])).json()).prs[0].review_passes;
+  assert.deepEqual(counts,{count:5,boards:2,basis:'scoreboard-round-counters',observed_at:120});
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM demand').get()).n,0);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM jobs').get()).n,0);
+  await db.prepare('UPDATE collections SET complete=0 WHERE key=?').run(key);
+  assert.equal((await (await query(state,[7])).json()).prs[0].review_passes,null);
+  await db.prepare('UPDATE collections SET complete=1 WHERE key=?').run(key);
+  await db.prepare('DELETE FROM survey_hydrated WHERE number=?').run('7');
+  assert.equal((await (await query(state,[7])).json()).prs[0].review_passes,null);
+ }finally{await db.close();}
+});
+test('cached review counters require a current-head board and valid counters',async()=>{
+ const {db,state}=await fixture();try{
+  const key='issue_comments:{"number":7}';
+  await db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?,0)').run('pr','7','',JSON.stringify({number:7,state:'OPEN',headRefOid:'new-head'}),'',123,1);
+  await db.prepare('INSERT INTO collections VALUES (?,?,?,?,?,?,?)').run(key,'issue_comments','{"number":7}',1,120,1,null);
+  await db.prepare('INSERT INTO survey_hydrated VALUES (?,?)').run('7','tauceti-survey-facts/v1:completed-scoreboards');
+  await db.prepare('INSERT INTO survey_fragments VALUES (?,?,?,?)').run('issue_comments','101','7',JSON.stringify({meta:{round:3,head_sha:'old-head'}}));
+  await db.prepare('INSERT INTO members VALUES (?,?)').run(key,'101');
+  assert.equal((await (await query(state,[7])).json()).prs[0].review_passes,null);
+  for(const round of [null,-1,1.5,'3',Number.MAX_SAFE_INTEGER+1]) {
+   await db.prepare('UPDATE survey_fragments SET data=? WHERE id=?').run(JSON.stringify({meta:{round,head_sha:'new-head'}}),'101');
+   assert.equal((await (await query(state,[7])).json()).prs[0].review_passes,null);
+  }
+ }finally{await db.close();}
+});
 test('unavailable stored resource fails without falling back to upstream repair',async()=>{
  const {db,state}=(await fixture());try{
   await db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?,0)').run('pr','7','',JSON.stringify({$r2:'missing'}),'',Date.now(),1);

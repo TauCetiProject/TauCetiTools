@@ -7,7 +7,10 @@ on:
     types: [completed]
   schedule:
     - cron: '17 * * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      source_run_id: {description: "Completed original build run", type: string, default: ""}
+      source_attempt: {description: "Original run attempt", type: string, default: "1"}
 
 permissions:
   contents: read
@@ -19,6 +22,8 @@ jobs:
   publish:
     uses: __TOOLS_REPO__/.github/workflows/retry-ci-status.yml@__TOOLS_REF__
     with:
+      source_run_id: ${{ inputs.source_run_id || '' }}
+      source_attempt: ${{ inputs.source_attempt || '1' }}
       tools_repository: __TOOLS_REPO__
       tools_ref: __TOOLS_REF__
       project_ref: ${{ github.workflow_sha }}

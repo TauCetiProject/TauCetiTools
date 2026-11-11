@@ -63,15 +63,9 @@ It requires an authenticated `gh` CLI. In GitHub Actions, set `GH_TOKEN` to
   runs. Only a run that keeps its snapshot (`--dump-data`) is capped; every other fetch,
   including `pipeline_health.py` and the per-roadmap chart's live path, checks every
   candidate at once.
-  Scoreboards come from the repository comment listing, which GitHub stops paginating after
-  300 pages (30,000 comments, here roughly the last week), so they cannot be refetched from
-  the start of the project. They are always carried forward from the cached snapshot;
-  losing that cache loses the history beyond the pagination limit. Until a run has checked
-  every receipt candidate under the current rule, the next run rescans scoreboards as far
-  back as GitHub allows, so the run that finishes reconsiders every contributor whose merges
-  only the receipts revealed. Scoreboards are also rescanned that far every seven days,
-  revising the verdicts the scan reaches and keeping older ones. Later runs scan
-  incrementally with an hour overlap.
+  Scoreboards are read by the cursor walk described under Scaling below, which reaches the
+  whole history, and their verdicts are derived every run, so a contributor whose merge a
+  receipt reveals is trusted without a rescan.
 - Seven-day metrics use complete UTC calendar days. Merge latency is PR creation to
   merge time among PRs merged in that trailing window. Every chart is PLOTTED through the
   last complete UTC day: regenerated every three hours, a final point holding only part of
@@ -117,7 +111,18 @@ for its state clock. PRs closed before the lifecycle-label workflow landed on
 about 1,000 of GitHub's 5,000-point hourly GraphQL budget per run. Excessive missing
 state transitions stop generation rather than publishing a mislabelled clock. Issue
 comments and their v1 metadata are filtered and parsed by `gh` before reaching Python,
-so full scoreboard bodies do not accumulate in memory.
+so full scoreboard bodies do not accumulate in memory. The comment listing serves at most
+300 pages from any starting point, so it is read as a cursor walk in `updated_at` order,
+each request starting `since` the last comment of the one before. A run resumes an hour
+before the previous one's end, and the snapshot keeps every marker comment it has
+observed, so verdicts are derived again each run as trust and the set of PRs change. A
+full walk from the beginning, which is what drops deleted comments, starts weekly and is
+built beside the published set over several runs, sharing 300 requests a run with the
+walk that keeps up, before it replaces that set. Until a first full walk has finished there is no
+history to publish: with `--dump-data` the script saves the snapshot to resume from and
+exits 3 without writing assets, so the previous ones stay, and replaying such a snapshot
+with `--data` exits 3 too. Without `--dump-data` no later run could resume, so the walk
+runs to the end.
 
 All eight outputs are rendered in a staging directory and promoted only after every
 chart and the JSON payload succeeds. A failed scheduled fetch therefore keeps the

@@ -32,6 +32,14 @@ parameter and starting discovery.
 Reporting clients can use authenticated `POST /v1/activity` with
 `{"repository":"TauCetiProject/TauCeti","numbers":[1,2]}` (maximum 500 numbers).
 It returns stored PR headers, original observation timestamps and missing IDs.
+`review_passes` estimates participation by summing the cumulative `round`
+counter on each cached scoreboard comment. It requires a complete cached issue
+comment collection, current compact fragments, and at least one scoreboard at
+the reported PR head. Invalid/missing counters return `null`. Its basis is
+`scoreboard-round-counters`; it includes runner control/reply rounds reflected
+in those published counters and is not an exact model-call count. These are
+already-stored compact fields, batched with the other PostgreSQL activity reads;
+reporting does not scan comment prose, hydrate histories, or request GitHub data.
 This route is observation-only: no repository configuration, demand renewal,
 repair jobs, upstream validation or installation-scheduler access. Closed PRs
 without cached merge evidence have no landing timestamp. See

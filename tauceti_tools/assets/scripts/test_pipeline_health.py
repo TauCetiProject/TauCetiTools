@@ -869,7 +869,7 @@ class LiveFetch(unittest.TestCase):
         landing = {"merged_at": prs[-1]["closed_at"], "merge_source": "tauceti-queue"}
         with (tempfile.TemporaryDirectory() as folder,
               patch.object(stats, "fetch_prs", return_value=prs),
-              patch.object(stats, "fetch_scoreboards", return_value=([], {}, iso(now))),
+              patch.object(stats, "fetch_scoreboards", return_value=([], {}, {})),
               patch.object(stats, "fetch_merge_receipt",
                            side_effect=lambda owner, name, number:
                            landing if number == 501 else None) as check,
