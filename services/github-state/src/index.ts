@@ -136,12 +136,22 @@ export default {
         return stub(env.REPOSITORIES,repo.id).fetch('https://internal/activity',{method:'POST',body:JSON.stringify({repository:repo.name,numbers:[...new Set(input.numbers)]})});
       }
       if(url.pathname==='/v1/refresh-pr' && req.method==='POST'){
-        if(!await authorize(req,env))return json({error:'unauthorized'},401);
         const text=await req.text();if(text.length>4096)return json({error:'payload_too_large'},413);
         let input:any;try{input=parseGitHub(text);}catch{return json({error:'invalid_json'},400);}
         const repo=repository(env,input?.repository);
-        if(!repo || !await authorize(req,env,repo.name))return json({error:'repository_unavailable'},403);
+        // Public repositories accept anonymous refreshes, like their reads. A refresh reads only the
+        // named PR, reuses a recent verification, coalesces concurrent requests and obeys the
+        // installation's quota admission; the per-client public limit bounds the rest.
+        const authenticated=Boolean(repo) && await authorize(req,env,repo!.name);
+        if(!repo || !authenticated && !publicQuery(env,repo))return json({error:'repository_unavailable'},403);
         if(!Number.isSafeInteger(input.number) || input.number<=0 || !/^[a-f0-9]{40}$/.test(input.expected_head || '') || input.observed_head!==undefined && !/^[a-f0-9]{40}$/.test(input.observed_head))return json({error:'invalid_request'},400);
+        if(!authenticated){
+          if(!env.PUBLIC_QUERY_LIMIT)return json({error:'public_refresh_unavailable'},503);
+          try{
+            const allowed=await env.PUBLIC_QUERY_LIMIT.limit({key:'refresh:'+repo.id+':'+(req.headers.get('CF-Connecting-IP') || 'unknown')});
+            if(!allowed.success)return json({error:'public_rate_limited'},429);
+          }catch{return json({error:'public_refresh_unavailable'},503);}
+        }
         // This optional capability never sets a host-wide Retry-After header.
         return stub(env.REPOSITORIES,repo.id).fetch('https://internal/refresh-pr',{method:'POST',body:JSON.stringify({...input,repository:repo.name})});
       }
