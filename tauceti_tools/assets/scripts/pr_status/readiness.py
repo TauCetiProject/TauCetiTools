@@ -48,19 +48,29 @@ def meta_merge_base(scoreboard):
     return scoreboard[1].get("merge_base_sha") or ""
 
 
-def classify(pr, comments, statuses, paths, merge_base_sha, now=None, self_tested=False):
+def required_rubrics(gate, repo, number):
+    """The rubrics PR `number` of `repo` is judged against.
+
+    An engine that is phasing a rubric in asks it only of PRs above a cutoff, and says so through
+    `rubrics_for`. An earlier pin asks its one list of every PR."""
+    rubrics_for = getattr(gate, "rubrics_for", None)
+    return list(rubrics_for(repo, number) if rubrics_for else gate.DEFAULT_RUBRICS)
+
+
+def classify(pr, comments, statuses, paths, merge_base_sha, now=None, self_tested=False, repo=None):
     """Pure evaluation of a fetched PR. Reservations and queue capacity are separate.
 
     `paths` are the PR's changed paths and `merge_base_sha` the merge base its diff is taken
     from; the gate accepts a scoreboard only for the merge base it reviewed."""
     gate = engine()
+    rubrics = required_rubrics(gate, repo or core.REPO, pr["number"])
     head = pr["head"]["sha"]
     result = {"head": head, "number": pr["number"], "eligible": False,
               "category": None, "reason": "PR is closed", "gate": None}
     if pr["state"] != "open":
         return result
     verdict = gate.decide_from_comments(
-        comments, head, set(gate.DEFAULT_RUBRICS), paths,
+        comments, head, set(rubrics), paths,
         statuses.get("build", ""), statuses.get("bump-guard", ""),
         scope=statuses.get("scope", ""), now=now, merge_base_sha=merge_base_sha,
         **({"self_tested": True} if self_tested else {}))
@@ -92,7 +102,7 @@ def classify(pr, comments, statuses, paths, merge_base_sha, now=None, self_teste
             if not isinstance(states, dict) or not states:
                 states = gate.states_from_table(board.get("body"))
             blocking = any(states.get(r) in {"blocking_request", "blocking_block"}
-                           for r in gate.DEFAULT_RUBRICS)
+                           for r in rubrics)
             result["category"] = ("awaiting-author" if blocking else "awaiting-review")
         else:
             paths = set(paths)
@@ -198,13 +208,15 @@ def assess(pr, repo=None, now=None):
     from tauceti_tools.self_tested import observe, requested
     local = (observe(repo, number, head, lambda path: json.loads(core.gh_api(path)))
              if requested(current.get("labels")) else False)
-    result = classify(current, comments, statuses, [], merge_base, now=now, self_tested=local)
+    result = classify(current, comments, statuses, [], merge_base, now=now, self_tested=local,
+                      repo=repo)
     # The gate rejects missing/build/review evidence before inspecting paths.
     # Only otherwise approved PRs need the expensive path read, which the engine takes from git
     # without any API call (`gh pr diff` fails for PRs touching more than 300 files).
     if result["category"] in {"needs-human-review", "merge-check-failed"}:
         paths = diff_engine().git_diff(f"https://github.com/{repo}", merge_base, head)
-        result = classify(current, comments, statuses, paths, merge_base, now=now, self_tested=local)
+        result = classify(current, comments, statuses, paths, merge_base, now=now,
+                          self_tested=local, repo=repo)
     after, _, _ = evidence(number, repo, comments=False)
     if routing_state(after) != routing_state(current):
         result.update(eligible=False, category="awaiting-CI" if after["state"] == "open" else None,
