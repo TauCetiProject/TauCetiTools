@@ -14,6 +14,9 @@ function targets(env:Env,payload:any,event:string): Repository[] {
   const target=payload?.repository ? configured.filter(r=>r.id===String(payload.repository.id)) : ['installation','installation_repositories','ping'].includes(event)?configured:[];
   return target.filter(repo=>!payload?.installation?.id || String(payload.installation.id)===repo.installation);
 }
+// Webhooks applied at acceptance as well as through the queue. A queue
+// redelivery of an applied delivery stops at its committed receipt.
+const IMMEDIATE_EVENTS=new Set(['issue_comment','pull_request_review_comment','pull_request','status']);
 const STORAGE_OPERATIONS=new Set(['ownership','scan','cleanup','probe','fault','retention']);
 async function query(req:Request,env:Env,q:Query,request_id:string): Promise<Response> {
   try { validateQuery(q); } catch { return json({error:'invalid_query'},400); }
@@ -91,18 +94,20 @@ export default {
           const pointer={key,delivery,event,repository:repo.name,received};
           await park(env,repo,pointer,'accepted');
           await env.EVENTS.send(pointer);
-          // Reviews depend on these updates before the next worker handoff.
-          // A busy FIFO queue can lag far behind durably accepted comments.
+          // Review selection depends on these updates before the next worker handoff:
+          // comments, PR heads (which also schedule new heads' histories and
+          // statuses) and the commit statuses behind statusCheckRollup.
+          // A busy FIFO queue can lag hours behind durably accepted input.
           // Use the same idempotent handler now, after publishing recovery input;
           // queue/cron remain the only retry owners if this bounded lifetime ends.
-          if (event==='issue_comment' || event==='pull_request_review_comment') ctx.waitUntil((async()=>{
+          if (IMMEDIATE_EVENTS.has(event)) ctx.waitUntil((async()=>{
             try {
               const response=await stub(env.REPOSITORIES,repo.id).fetch('https://internal/event',{method:'POST',body:JSON.stringify(pointer)});
-              if (!response.ok) {await response.body?.cancel();log('comment_application_deferred',{delivery,event_type:event,status:response.status});return;}
+              if (!response.ok) {await response.body?.cancel();log('immediate_application_deferred',{delivery,event_type:event,status:response.status});return;}
               await response.body?.cancel();
               await release(env,repo,pointer);
-              log('comment_application_complete',{delivery,event_type:event,elapsed_ms:Date.now()-received});
-            } catch(error) {log('comment_application_deferred',{delivery,event_type:event,reason:classify(error)});}
+              log('immediate_application_complete',{delivery,event_type:event,elapsed_ms:Date.now()-received});
+            } catch(error) {log('immediate_application_deferred',{delivery,event_type:event,reason:classify(error)});}
           })());
         }
         return json({accepted:true},202);
