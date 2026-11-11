@@ -271,13 +271,32 @@ def source_for(repository, environment=None):
     """Select the transport once at the source boundary, never by PR number alone."""
     env = os.environ if environment is None else environment
     binding = env.get("TAUCETI_SOURCE_BINDING")
+    from .project import active
+
+    project = active() if environment is None else None
+    configured = project.repository_ref("content") if project else None
+    if configured is not None and configured.forge != GITHUB:
+        if repository not in {configured.key, configured.url} and repository.casefold() != configured.name.casefold():
+            raise ValueError("review repository differs from its configured content source")
+        if not binding:
+            native_id = env.get("TAUCETI_FORGEJO_REPOSITORY_ID", "")
+            if not native_id.isascii() or not native_id.isdigit() or int(native_id) < 1:
+                raise ValueError("native review requires TAUCETI_FORGEJO_REPOSITORY_ID and a private token file")
+            identity = RepositoryIdentity(configured, int(native_id))
+            binding = json.dumps(identity.record())
+            env = {**env, "TAUCETI_FORGEJO_ORIGIN": env.get("TAUCETI_FORGEJO_ORIGIN", configured.forge.url)}
     if not binding:
         return GitHubReviewSource(RepositoryRef(GITHUB, repository))
     identity = RepositoryIdentity.parse(json.loads(binding))
-    if repository not in {identity.repository.key, identity.repository.name, identity.repository.url}:
+    if configured is not None and configured.forge != GITHUB and configured.key != identity.repository.key:
+        raise ValueError("review source binding differs from its configured content source")
+    if (repository not in {identity.repository.key, identity.repository.url}
+            and repository.casefold() != identity.repository.name.casefold()):
         raise ValueError("review repository differs from its source binding")
     if env.get("TAUCETI_FORGEJO_ORIGIN") != identity.repository.forge.url:
         raise ValueError("review credential origin differs from its source")
+    if not env.get("TAUCETI_FORGEJO_TOKEN_FILE"):
+        raise ValueError("native review requires a private TAUCETI_FORGEJO_TOKEN_FILE")
     token = read_private_token(env["TAUCETI_FORGEJO_TOKEN_FILE"])
     return ForgejoReviewSource(
         identity, Forgejo(identity.repository.forge, token=token), expected_actor=env.get("TAUCETI_FORGEJO_USER_ID")

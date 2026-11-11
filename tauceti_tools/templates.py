@@ -145,40 +145,88 @@ def repair_cache_url(project: Project) -> str:
     return str(service.get("url", "")).rstrip("/")
 
 
-def substitutions(project: Project, *, source_ci=False) -> list[tuple[str, str]]:
+def substitutions(project: Project, *, source_ci=False, qualified=False) -> list[tuple[str, str]]:
     """Render only trusted tool templates, never contributor/agent content."""
     root = project.roots[0]
     if len(project.roots) != 1:
         raise ValueError(
             "This release's build harness supports one Lean library root; split the library or keep its existing custom build workflow"
         )
-    repository_pairs = [
-        ("__MAINTENANCE_RUNNER__", MAINTENANCE_CONTROL_RUNNER if project.legacy else "ubuntu-latest"),
-        ("TauCetiProject/TauCetiRoadmap", project.repos["roadmap"]),
-        ("TauCetiProject/TauCetiReview", project.tool("review").get("repo", "TauCetiProject/TauCetiReview")),
-        ("TauCetiProject/TauCetiProgress", project.tool("progress").get("repo", "TauCetiProject/TauCetiProgress")),
-        ("TauCetiProject/TauCetiData", project.repos.get("data", "")),
-        ("TauCetiProject/TauCetiCI", project.repos.get("ci", "")),
-        ("TauCetiProject/tauceti-claims", project.repos.get("claims", "")),
-        (CANONICAL, project.content),
-        ("owner: TauCetiProject\n", "owner: " + project.content.split("/")[0] + "\n"),
-        ("repositories: TauCeti\n", "repositories: " + project.content.split("/")[1] + "\n"),
-        ("repositories: tauceti-claims\n", "repositories: " + project.repos.get("claims", "/").split("/")[1] + "\n"),
-    ] if not source_ci else [
-        ("https://github.com/TauCetiProject/TauCetiRoadmap.git", project.repository_ref("roadmap").clone_url),
-        ("https://github.com/" + CANONICAL, project.repository_ref("content").url),
-    ]
+    repos = (
+        (
+            {role: project.repository_ref(role).name for role in project.raw["repositories"]}
+            if qualified
+            else project.repos
+        )
+        if not source_ci
+        else {}
+    )
+    content = project.repository_ref("content").name if qualified else (project.content if not source_ci else "")
+
+    def tool(name):
+        pin = project.tool_pin(name) if qualified else None
+        return {"repo": pin[0].name} if pin else ({} if qualified else project.tool(name))
+
+    repository_pairs = (
+        [
+            ("__MAINTENANCE_RUNNER__", MAINTENANCE_CONTROL_RUNNER if project.legacy else "ubuntu-latest"),
+            ("TauCetiProject/TauCetiRoadmap", repos["roadmap"]),
+            ("TauCetiProject/TauCetiReview", tool("review").get("repo", "TauCetiProject/TauCetiReview")),
+            ("TauCetiProject/TauCetiProgress", tool("progress").get("repo", "TauCetiProject/TauCetiProgress")),
+            ("TauCetiProject/TauCetiData", repos.get("data", "")),
+            ("TauCetiProject/TauCetiCI", repos.get("ci", "")),
+            ("TauCetiProject/tauceti-claims", repos.get("claims", "")),
+            (CANONICAL, content),
+            ("owner: TauCetiProject\n", "owner: " + content.split("/")[0] + "\n"),
+            ("repositories: TauCeti\n", "repositories: " + content.split("/")[1] + "\n"),
+            ("repositories: tauceti-claims\n", "repositories: " + repos.get("claims", "/").split("/")[1] + "\n"),
+        ]
+        if not source_ci
+        else [
+            ("https://github.com/TauCetiProject/TauCetiRoadmap.git", project.repository_ref("roadmap").clone_url),
+            ("https://github.com/" + CANONICAL, project.repository_ref("content").url),
+        ]
+    )
+    if qualified:
+        # Whole URLs take precedence over name substitutions. A native content
+        # binding must never produce a GitHub URL with the native name appended.
+        for role, original in (
+            ("content", CANONICAL),
+            ("roadmap", "TauCetiProject/TauCetiRoadmap"),
+            ("data", "TauCetiProject/TauCetiData"),
+            ("ci", "TauCetiProject/TauCetiCI"),
+            ("claims", "TauCetiProject/tauceti-claims"),
+        ):
+            if role in project.raw["repositories"]:
+                reference = project.repository_ref(role)
+                repository_pairs.append(("https://github.com/" + original, reference.url))
+                if role == 'content':
+                    # Render a URL prefix using the forge's own pull URL route.
+                    repository_pairs.append(('https://github.com/' + original + '/pull/', reference.pull_url(1)[:-1]))
+        for name, original in (
+            ("review", "TauCetiProject/TauCetiReview"),
+            ("progress", "TauCetiProject/TauCetiProgress"),
+        ):
+            if pin := project.tool_pin(name):
+                repository_pairs.append(("https://github.com/" + original, pin[0].url))
     pairs = [
         *repository_pairs,
         ("__SOURCE_MIRROR_ENABLED__", "true" if source_ci else "false"),
         ("__CACHE_PUBLICATION_REQUIRED__", "true" if source_ci else "false"),
         ("https://bors.taucetiproject.org", project.service("bors").get("url", "")),
-        ("/repositories/1/active-batches", "/repositories/" + str(project.service("bors").get("repository_id", 1 if project.legacy else "")) + "/active-batches"),
+        (
+            "/repositories/1/active-batches",
+            "/repositories/"
+            + str(project.service("bors").get("repository_id", 1 if project.legacy else ""))
+            + "/active-batches",
+        ),
         # The repair worker's cache, read by staging CI (lake-cache-services.sh). Off renders an
         # empty URL, which leaves the service undefined and the fetch a logged no-op.
         ("https://repair-cache.taucetiproject.org", repair_cache_url(project)),
-        ('REPAIR_CACHE_SERVICE="tauceti-repair"',
-         'REPAIR_CACHE_SERVICE=' + json.dumps(project.service("repair_cache").get("name", "tauceti-repair"))),
+        (
+            'REPAIR_CACHE_SERVICE="tauceti-repair"',
+            "REPAIR_CACHE_SERVICE=" + json.dumps(project.service("repair_cache").get("name", "tauceti-repair")),
+        ),
         ("https://taucetiproject.github.io/TauCeti/docs", project.raw.get("publication", {}).get("docs_url", "")),
         ("roadmap_dir: TauCetiRoadmap", "roadmap_dir: " + project.roadmap_dir),
         ("lean_root: TauCeti", "lean_root: " + project.roots[0]),
@@ -209,14 +257,20 @@ def substitutions(project: Project, *, source_ci=False) -> list[tuple[str, str]]
     return pairs
 
 
-def render(text: str, project: Project, *, source_ci=False) -> str:
+def render(text: str, project: Project, *, source_ci=False, qualified=False) -> str:
     import re
 
-    pairs = dict(substitutions(project, source_ci=source_ci))
-    pattern = re.compile("|".join(
-        r"\bTauCeti\b" if key == "TauCeti" else
-        re.escape(key) + r"(?![A-Za-z0-9_-])" if key in {CANONICAL, "https://github.com/" + CANONICAL} else re.escape(key)
-        for key in sorted(pairs, key=len, reverse=True)))
+    pairs = dict(substitutions(project, source_ci=source_ci, qualified=qualified))
+    pattern = re.compile(
+        "|".join(
+            r"\bTauCeti\b"
+            if key == "TauCeti"
+            else re.escape(key) + r"(?![A-Za-z0-9_-])"
+            if key in {CANONICAL, "https://github.com/" + CANONICAL}
+            else re.escape(key)
+            for key in sorted(pairs, key=len, reverse=True)
+        )
+    )
     return pattern.sub(lambda m: pairs[m.group()], text)
 
 
