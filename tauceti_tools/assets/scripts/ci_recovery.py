@@ -209,6 +209,24 @@ def cancel_unacquired(api, repo, run, jobs):
     return "uncancellable-terminal-shell"
 
 
+def cancelled_before_build(api, repo, run):
+    """GitHub retains restart evidence, without a separate recovery ledger.
+
+    A cancelled attempt that never acquired the sandbox has no build verdict
+    left to replay. Do not add another grace period after a recovery process
+    stops between cancellation and replacement dispatch.
+    """
+    if not ordinary(run, repo) or run.get("conclusion") != "cancelled":
+        return False
+    jobs = unacquired(api, repo, run)
+    return jobs is not None and all(
+        job.get("status") == "completed"
+        and (job.get("name", "").startswith("pick-runner /")
+             or job.get("name") == "sandboxed-build" and not job.get("runner_id") and not job.get("runner_name"))
+        for job in jobs
+    )
+
+
 def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_reserve=0):
     now = dt.datetime.now(dt.timezone.utc).timestamp() if now is None else now
     branch, pulls = inventory(api, repo)
@@ -292,7 +310,8 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
             if (now - timestamp(latest["updated_at"] if latest else pull["updatedAt"]) < min_age
                     and (not latest or latest["id"] not in abandoned
                          or abandoned[latest["id"]] != latest.get("run_attempt"))):
-                continue
+                if not latest or not cancelled_before_build(api, repo, latest):
+                    continue
             # Recheck immediately before dispatch. Closed PRs, moved heads and
             # results arriving during the inventory must never trigger a retry.
             if not still_missing(api, repo, number, head):

@@ -366,6 +366,15 @@ class AcquisitionTests(unittest.TestCase):
                 api = AcquisitionGitHub(after_cancel=current)
                 self.assertEqual(len(self.recover(api, apply=True)), count)
 
+    def test_next_pass_recovers_a_cancelled_unstarted_build_without_waiting_another_grace(self):
+        completed = queued(status="completed", conclusion="cancelled", updated_at="2026-10-28T17:59:30Z")
+        for acquired, count in [(0, 1), (7, 0)]:
+            with self.subTest(acquired=acquired):
+                jobs = [dict(name="pick-runner / pick", status="completed", runner_id=7),
+                        dict(name="sandboxed-build", status="completed", runner_id=acquired)]
+                api = AcquisitionGitHub(live=completed, jobs=dict(total_count=2, jobs=jobs))
+                self.assertEqual(len(self.recover(api, apply=True)), count)
+
     def test_unknown_cancellation_conflict_or_ambiguous_post_does_not_dispatch_or_retry(self):
         for status, message in [(409, "another conflict"), (503, "lost response"), (0, "network failure")]:
             with self.subTest(status=status):
