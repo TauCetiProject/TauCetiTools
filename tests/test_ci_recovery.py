@@ -433,6 +433,25 @@ class AcquisitionTests(unittest.TestCase):
             self.assertEqual(self.recover(api, apply=True), [])
         self.assertEqual(api.cancelled, list(range(1000, 1101)))
 
+    def test_needed_build_dispatches_before_obsolete_cleanup_consumes_the_budget(self):
+        class Priority(AcquisitionGitHub):
+            other = queued(id=20, head_sha="b" * 40, display_title="pr-build pr=2 head=" + "b" * 40)
+
+            def request(self, method, path, data=None):
+                if method == "GET" and "status=" in path:
+                    return dict(workflow_runs=[self.other, self.live] if "status=queued&" in path else [])
+                if method == "GET" and path == "repos/owner/project/actions/runs/20":
+                    return self.other
+                value = super().request(method, path, data)
+                if method == "POST" and path.endswith("/20/cancel"):
+                    self.stats = {"read": {"buckets": {"core": {"remaining": "1499"}}}}
+                return value
+
+        api = Priority()
+        self.assertEqual(len(self.recover(api, apply=True, api_reserve=1500)), 1)
+        self.assertEqual([p.rsplit("/", 2)[-2:] for p, _ in api.writes],
+                         [["10", "cancel"], ["pr-build.yml", "dispatches"], ["20", "cancel"]])
+
 
 if __name__ == "__main__":
     unittest.main()

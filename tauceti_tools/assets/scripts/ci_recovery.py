@@ -267,17 +267,15 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
             print(f"ci-recovery: run {run['id']}: {error}", file=sys.stderr)
             return True
 
-    active, recent = [], {}
+    active, all_active, recent = [], [], {}
     # One repository-wide inventory, independent of worker count. Older live
     # dispatches must also be seen even though their SHA belongs to main.
     for state in ("queued", "in_progress", "waiting", "pending", "requested"):
         # Cancellation changes the paginated live collection. Finish reading
         # its pages first so removing page one cannot skip page two's runs.
         for run in list(runs(api, repo, f"status={state}", include_ignored=True)):
-            if quota_reserved(api, api_reserve):
-                print("ci-recovery: shared API reserve reached; next pass will resume", file=sys.stderr)
-                return []
-            if not blocking(run) or run.get("display_title", "").startswith("Ignored label event "):
+            all_active.append(run)
+            if run.get("display_title", "").startswith("Ignored label event "):
                 continue
             active.append(run)
     since = dt.datetime.fromtimestamp(now - max(86400, min_age), dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -296,7 +294,7 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
             print("ci-recovery: shared API reserve reached; next pass will resume", file=sys.stderr)
             break
         number, head = pull["number"], pull["headRefOid"]
-        if any(matches(run, number, head) for run in active):
+        if any(matches(run, number, head) and blocking(run) for run in active):
             continue
         try:
             history = list(runs(api, repo, f"head_sha={head}"))
@@ -343,6 +341,16 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
         print(json.dumps(entry), flush=True)
         if limit and len(selected) >= limit:
             break
+    # Useful current-head recovery comes first. Ancient uncancellable shells
+    # must not consume the pass's API budget before missing builds can dispatch.
+    for run in all_active:
+        if quota_reserved(api, api_reserve):
+            print("ci-recovery: cleanup reached the shared API reserve; next pass will resume", file=sys.stderr)
+            break
+        if (not run.get("display_title", "").startswith("Ignored label event ")
+                and any(matches(run, pull["number"], pull["headRefOid"]) for pull in pulls)):
+            continue
+        blocking(run)
     return selected
 
 

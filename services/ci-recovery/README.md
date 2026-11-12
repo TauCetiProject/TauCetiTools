@@ -29,6 +29,8 @@ staging workflows remain protected. Acquisition is checked again before dispatch
 Explicitly head-bound old runs do not reserve a PR's newer head.
 If a pass stops after cancelling an unstarted build, the next pass uses its
 terminal job evidence to resume without imposing another acquisition grace.
+Current-head replacements run before obsolete-shell cleanup, so old GitHub
+metadata cannot consume the pass's API budget ahead of useful recovery.
 
 Recovery dispatches the ordinary trusted default-branch build. It never approves
 or merges a PR, and it never fabricates a successful status.
