@@ -161,7 +161,7 @@ def old(run, now, min_age):
 
 
 def unacquired(api, repo, run):
-    """Require complete attempt-bound job evidence; never stop an acquired job."""
+    """Require complete terminal-job evidence; real pending jobs keep their place."""
     attempt = run.get("run_attempt")
     if type(attempt) is not int or attempt < 1:
         return None
@@ -179,9 +179,7 @@ def unacquired(api, repo, run):
         or type(job.get("id")) is not int or job["id"] < 1
         or job.get("run_id", run["id"]) != run["id"]
         or job.get("run_attempt", attempt) != attempt
-        or job.get("status") not in ACTIVE | {"completed"}
-        or job.get("status") == "in_progress"
-        or job.get("status") != "completed" and (job.get("runner_id") or job.get("runner_name"))
+        or job.get("status") != "completed"
         for job in jobs
     ):
         return None
@@ -239,7 +237,8 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
         # require live attempt and job evidence, including immediately before
         # dispatch so acquisition racing an earlier inventory remains protected.
         proven = run["id"] in abandoned and abandoned[run["id"]] == run.get("run_attempt")
-        if not ordinary(run, repo) or not proven and not old(run, now, min_age):
+        if (run.get("status") in {"pending", "waiting"} or not ordinary(run, repo)
+                or not proven and not old(run, now, min_age)):
             return True
         if proven and not fresh:
             return False
@@ -248,6 +247,7 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
             if current.get("status") == "completed":
                 return False
             if (current.get("id") != run["id"] or not ordinary(current, repo)
+                    or current.get("status") in {"pending", "waiting"}
                     or current.get("run_attempt") != run.get("run_attempt")
                     or not proven and not old(current, now, min_age)
                     or current.get("status") not in ACTIVE):
