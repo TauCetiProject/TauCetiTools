@@ -465,7 +465,14 @@ set `source_candidate_enabled`; generated callers obtain it from
 selects the legacy GitHub PR path, including when the opt-in check fails.
 
 The execution repository's immutable workflow checkout contains `tauceti.toml`
-and `.tauceti/ci-source.json`. The latter uses this policy shape:
+and `.tauceti/ci-source.json`. To keep ordinary GitHub CI and worker defaults
+unchanged during mixed operation, put the source candidate's trusted project
+configuration in `.tauceti/ci-source.toml`. Only source-candidate workflow commands
+select that fixed file, from the immutable workflow checkout; otherwise they fall
+back to `tauceti.toml` for existing deployments. The policy digest binds the exact
+selected bytes. Candidate data never selects this path. Both the build and cache
+publisher retain it in their trusted sparse checkout.
+The policy file uses this shape:
 
 ```json
 {
@@ -481,6 +488,14 @@ and `.tauceti/ci-source.json`. The latter uses this policy shape:
   "require_publication": true
 }
 ```
+
+Mixed queues explicitly add a nonempty `member_sources` array of complete
+repository identity records to the trusted policy. It includes `source` (the
+Forgejo retention repository) and each allowed originating repository, for
+example the GitHub content repository. Execution, retention, and member-source
+roles are independent; a source may also be the execution repository. Duplicate
+server/repository IDs or case-folded names are rejected. Omitting the field
+preserves the legacy policy bytes and digest; an empty array is invalid.
 
 The example IDs and revision must be replaced with independently verified
 deployment values. The policy digest includes the SHA-256 of the exact trusted
@@ -499,11 +514,18 @@ repository IDs, batch version, exact base, candidate commit/tree and accepted
 member heads. Inline transport bounds the request to 60 KiB and 128 members.
 Larger batches use a retained member manifest, leaving the request and result
 small without truncating or splitting membership. The manifest bounds are 8,192
-members and 1 MiB of canonical JSON. These are transport limits; they do not
+members and 1 MiB of canonical JSON, whichever limit is reached first. Qualified
+members repeat their source record and can reach the byte bound before 8,192
+members; producers must validate the canonical manifest before any publication.
+These are transport limits; they do not
 establish queue or fleet capacity.
 Retained branch names are derived from the epoch and request ID:
 `refs/heads/tauceti-ci/EPOCH/REQUEST/candidate` and, for inline requests,
-`member-PR`. The queue must protect these refs from subsequent mutation. CI
+`member-PR` for implicit legacy members. A qualified member carries
+`{"pr":NUMBER,"head":SHA,"source":REPOSITORY_IDENTITY}` and uses
+`member-<sha256(canonical([source.record(), pr]))>`. Keep this formula in the shared
+contract helper; do not derive retained refs from the PR number alone. Every
+member in a qualified candidate must have an enrolled source. The queue must protect these refs from subsequent mutation. CI
 fetches retained sources, verifies each SHA and candidate tree, and checks that the base is
 the candidate's merge base. It rechecks the native repository ID before and after
 source transfers. Complete histories and sandbox materialization use the existing
@@ -513,13 +535,29 @@ variable or merge credential. Native branch/label policy is saved with the
 request digest in runner temporary storage. The later lint step reads that
 observation and local Git objects without native credentials or network access.
 
+CI attests retained bytes and enrolled member identities. It grants no review or
+merge authority on any originating forge. Immediately before landing, the queue
+must independently recheck each original repository ID, PR head, target and
+current review authority, then perform the expected-old main update.
+Mixed requests force full lint if any member originates outside the native
+retention repository; those members never cause cross-origin API requests using
+the native read credential.
+
+Deploy the pinned harness and execution policy before enabling a mixed producer.
+Do not rewrite frozen in-flight requests into the new policy: retain their original
+policy, configuration, caller and attestation identity through recovery. Legacy
+GitHub queue attempts keep their existing execution path.
+
 For retained membership, the request's `members` value is
 `{"manifest":{"commit":"…","sha256":"…","count":1197,"size":123456}}`.
 The commit must be retained at the derived `members` branch under the same
 epoch/request namespace. Its tree contains exactly one ordinary `100644` file,
 `accepted-members.json`. The canonical data binds its schema
 `tauceti-ci.accepted-members/v1`, epoch, request ID and exact ordered list of
-`{"pr":NUMBER,"head":SHA}` members. Its parents must be exactly the accepted
+`{"pr":NUMBER,"head":SHA}` legacy members or fully qualified members as above.
+Implicit and qualified members cannot be mixed. Binding a qualified manifest
+requires the independently trusted policy. Index downstream data by server,
+native repository ID and PR number, never by PR number alone. Its parents must be exactly the accepted
 heads, deduplicated in first-occurrence order. Those parent links retain all
 source histories through one manifest branch, avoiding a push and a fetch
 argument for every member. The queue must durably record and protect the

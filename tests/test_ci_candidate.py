@@ -4,6 +4,7 @@ import io
 import tempfile
 import unittest
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -285,6 +286,96 @@ class CandidateContracts(unittest.TestCase):
                 self.assertRaises(ValueError),
             ):
                 cw.load_request(root / "policy.json", root / "project.toml", root / "event.json", self.context)
+
+
+class MixedMemberContracts(unittest.TestCase):
+    def setUp(self):
+        self.github = cc.RepositoryIdentity(RepositoryRef(GITHUB, "team/Math"), 99)
+        self.policy = replace(policy(), member_sources=(policy().source, self.github))
+        self.request = replace(
+            request(self.policy),
+            members=(cc.Member(17, "f" * 40, self.policy.source), cc.Member(17, "e" * 40, self.github)),
+        )
+
+    def test_same_native_number_is_distinct_across_enrolled_sources(self):
+        value = cc.CandidateRequest.parse(self.request.record(), policy=self.policy)
+        self.assertEqual(value.members, self.request.members)
+        self.assertNotEqual(value.member_ref(value.members[0]), value.member_ref(value.members[1]))
+        self.assertNotEqual(value.members[0].key, value.members[1].key)
+
+    def test_source_enrollment_is_independent_of_execution_repository(self):
+        self.assertNotEqual(self.github, self.policy.execution)
+        self.request.check_policy(self.policy)
+        with self.assertRaises(ValueError):
+            replace(self.request, members=(cc.Member(1, "f" * 40, self.policy.execution),)).check_policy(self.policy)
+
+    def test_unknown_sources_and_recreated_native_ids_are_refused(self):
+        for identity in (
+            replace(self.github, native_id=100),
+            cc.RepositoryIdentity(RepositoryRef(Forge("forgejo", "https://other.example"), "team/Math"), 41),
+        ):
+            with self.subTest(identity=identity), self.assertRaises(ValueError):
+                replace(self.request, members=(cc.Member(17, "f" * 40, identity),)).check_policy(self.policy)
+
+    def test_legacy_policy_and_implicit_members_do_not_enable_mixed_authority(self):
+        legacy = policy()
+        with self.assertRaises(ValueError):
+            replace(self.request, policy_digest=legacy.digest).check_policy(legacy)
+        with self.assertRaises(ValueError):
+            replace(self.request, members=(cc.Member(17, "f" * 40),)).check_policy(self.policy)
+        with self.assertRaises(ValueError):
+            replace(self.request, members=(cc.Member(17, "f" * 40), self.request.members[1]))
+
+    def test_mixed_candidates_always_require_full_lint_without_cross_origin_reads(self):
+        client = unittest.mock.Mock()
+        self.assertFalse(
+            cw.native_lint_policy(self.request, self.policy, context(self.request, self.policy), client=client)
+        )
+        client.request.assert_not_called()
+
+    def test_qualified_membership_and_policy_change_request_digest(self):
+        one = replace(self.request, members=(self.request.members[0],))
+        other = replace(self.request, members=(cc.Member(17, "f" * 40, self.github),))
+        self.assertNotEqual(one.digest, other.digest)
+        self.assertNotEqual(self.policy.digest, policy().digest)
+        raw = cc.member_manifest_bytes(self.request.epoch, self.request.request_id, self.request.members)
+        self.assertIn(b'"source"', raw)
+
+    def test_policy_round_trip_rejects_duplicate_native_ids_and_empty_enrollment(self):
+        self.assertEqual(
+            cc.ExecutionPolicy.parse(self.policy.record(with_config=False), configuration=b"trusted configuration"),
+            self.policy,
+        )
+        native = self.policy.source
+        alias = replace(native, repository=RepositoryRef(native.repository.forge, "Team/math"))
+        with self.assertRaises(ValueError):
+            replace(self.policy, member_sources=(native, self.github, alias))
+        with self.assertRaises(ValueError):
+            replace(self.request, members=(cc.Member(17, "f" * 40, native), cc.Member(17, "e" * 40, alias)))
+        row = policy().record(with_config=False)
+        row["member_sources"] = []
+        with self.assertRaises(ValueError):
+            cc.ExecutionPolicy.parse(row, configuration=b"trusted configuration")
+
+    def test_qualified_manifest_requires_enrollment_and_preserves_same_number_sources(self):
+        members = self.request.members
+        raw = cc.member_manifest_bytes(self.request.epoch, self.request.request_id, members)
+        manifest = cc.MemberManifest("9" * 40, hashlib.sha256(raw).hexdigest(), len(members), len(raw))
+        original = replace(self.request, member_manifest=manifest)
+        incoming = cc.CandidateRequest.parse(original.record(), policy=self.policy)
+        self.assertEqual(incoming.bind_members(raw, policy=self.policy).accepted_members, members)
+        with self.assertRaises(ValueError):
+            incoming.bind_members(raw)
+        with self.assertRaises(ValueError):
+            incoming.bind_members(raw, policy=replace(self.policy, member_sources=(self.policy.source,)))
+        with self.assertRaises(ValueError):
+            cc.member_manifest_bytes(self.request.epoch, self.request.request_id, (members[0], cc.Member(18, "e" * 40)))
+        legacy_members = (cc.Member(17, "f" * 40),)
+        legacy_raw = cc.member_manifest_bytes(self.request.epoch, self.request.request_id, legacy_members)
+        legacy_manifest = cc.MemberManifest("9" * 40, hashlib.sha256(legacy_raw).hexdigest(), 1, len(legacy_raw))
+        unbound = replace(incoming, member_manifest=legacy_manifest)
+        with self.assertRaises(ValueError):
+            unbound.bind_members(legacy_raw, policy=self.policy)
 
 
 if __name__ == "__main__":

@@ -91,6 +91,7 @@ jobs:
           sparse-checkout: |
             tauceti.toml
             .tauceti/ci-source.json
+            .tauceti/ci-source.toml
           sparse-checkout-cone-mode: false
           persist-credentials: false
 

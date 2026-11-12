@@ -1841,6 +1841,7 @@ jobs:
           sparse-checkout: |
             tauceti.toml
             .tauceti/ci-source.json
+            .tauceti/ci-source.toml
             scripts/finalize_batch.py
             scripts/bors_observation.py
             scripts/bors_train_identity.py
