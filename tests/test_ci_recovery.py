@@ -369,6 +369,10 @@ class AcquisitionTests(unittest.TestCase):
                 self.assertEqual(self.recover(api, apply=True), [])
                 self.assertEqual(api.writes, [])
                 self.assertEqual(api.job_reads, 0)
+                api = AcquisitionGitHub(current_run=queued(status=status))
+                self.assertEqual(self.recover(api, apply=True), [])
+                self.assertEqual(api.writes, [])
+                self.assertEqual(api.job_reads, 0)
 
     def test_acquisition_racing_inventory_prevents_dispatch(self):
         api = AcquisitionGitHub(fresh_jobs=dict(total_count=1, jobs=[dict(status="in_progress", runner_id=7)]))

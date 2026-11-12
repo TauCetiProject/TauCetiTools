@@ -247,6 +247,7 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
             if current.get("status") == "completed":
                 return False
             if (current.get("id") != run["id"] or not ordinary(current, repo)
+                    or current.get("status") in {"pending", "waiting"}
                     or current.get("run_attempt") != run.get("run_attempt")
                     or not proven and not old(current, now, min_age)
                     or current.get("status") not in ACTIVE):
