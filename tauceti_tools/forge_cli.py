@@ -26,17 +26,7 @@ from .system import ensure_ssl_cert_file
 def _checkout_repository(refs):
     result = subprocess.run(["git", "config", "--get", "remote.origin.url"], capture_output=True, text=True)
     remote = result.stdout.strip() if result.returncode == 0 else ""
-    if remote.startswith("git@") and ":" in remote:
-        host, path = remote[4:].split(":", 1)
-    else:
-        parsed = urllib.parse.urlsplit(remote)
-        host, path = parsed.netloc.rsplit("@", 1)[-1], parsed.path.lstrip("/")
-    path = path.removesuffix(".git").rstrip("/")
-    matches = {
-        ref
-        for ref in refs
-        if host.lower() == urllib.parse.urlsplit(ref.forge.url).netloc and path.lower() == ref.name.lower()
-    }
+    matches = {ref for ref in refs if ref.matches_remote(remote)}
     if len(matches) != 1:
         raise Unsupported("checkout origin is not uniquely configured; specify -R HOST/OWNER/REPO")
     return matches.pop()

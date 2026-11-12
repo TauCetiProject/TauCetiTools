@@ -7,6 +7,9 @@ import re
 import subprocess
 from pathlib import Path
 
+from .forge import GITHUB, RepositoryRef
+from .project import load
+
 BASE_BRANCH = os.environ.get("TAUCETI_BASE_BRANCH", "main")
 LEAN_ROOT = os.environ.get("TAUCETI_LEAN_ROOT", "TauCeti")
 TAUCETI = os.environ.get("TAUCETI_REPO", "TauCetiProject/TauCeti")
@@ -29,18 +32,29 @@ def git(root: Path, *args: str) -> bytes:
 
 
 def local_main(root: Path) -> str:
-    """Resolve only a locally available canonical remote. Never fetch or call GitHub."""
+    """Resolve the configured repository's local base ref without network access."""
+    source = os.environ.get("TAUCETI_CONF")
+    if not source and (root / "tauceti.toml").is_file():
+        source = str(root / "tauceti.toml")
+    if source:
+        snapshot = os.environ.get("TAUCETI_CONF_SNAPSHOT") if os.environ.get("TAUCETI_CONF_SOURCE") == source else None
+        if not snapshot and source.startswith(("http://", "https://")):
+            raise ValueError("local verification needs a saved project snapshot; bootstrap the configured consumer first")
+        project = load(snapshot or source)
+        repository, branch = project.repository_ref("content"), project.branch
+    else:
+        repository, branch = RepositoryRef(GITHUB, TAUCETI), BASE_BRANCH
     for remote in git(root, "remote").decode().splitlines():
-        if CANONICAL.fullmatch(git(root, "config", "--get", f"remote.{remote}.url").decode().strip()):
+        if repository.matches_remote(git(root, "config", "--get", f"remote.{remote}.url").decode().strip()):
             try:
                 return (
-                    git(root, "rev-parse", "--verify", f"refs/remotes/{remote}/{BASE_BRANCH}^{{commit}}")
+                    git(root, "rev-parse", "--verify", f"refs/remotes/{remote}/{branch}^{{commit}}")
                     .decode()
                     .strip()
                 )
             except subprocess.CalledProcessError:
                 continue
-    raise ValueError("no local canonical TauCetiProject/TauCeti main ref")
+    raise ValueError(f"no local canonical {repository.key} {branch} ref")
 
 
 def untracked(root: Path) -> set[str]:
