@@ -204,7 +204,8 @@ def cancel_unacquired(api, repo, run, jobs):
         except APIError as error:
             message = str(error.data.get("message", "")).lower() if isinstance(error.data, dict) else ""
             terminal = all(job["status"] == "completed" for job in jobs)
-            if error.status != 409 or not terminal or "not yet queued" not in message:
+            orphan = "not yet queued" in message or "not been queued yet" in message
+            if error.status != 409 or not terminal or not orphan:
                 raise
     return "uncancellable-terminal-shell"
 

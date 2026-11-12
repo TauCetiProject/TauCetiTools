@@ -322,13 +322,15 @@ class AcquisitionTests(unittest.TestCase):
     def test_completed_attempt_shell_and_uncancellable_empty_shell_do_not_reserve_forever(self):
         terminal = [dict(status="completed", runner_id=7, runner_name="old-picker"),
                     dict(status="completed", conclusion="cancelled", runner_id=0)]
-        error = recovery.APIError("POST", "cancel", 409, dict(message="Cannot cancel a workflow run that has not yet queued."))
-        for jobs in [[], terminal]:
-            with self.subTest(jobs=jobs):
-                api = AcquisitionGitHub(jobs=dict(total_count=len(jobs), jobs=jobs), cancellation=error)
-                self.assertEqual(len(self.recover(api, apply=True)), 1)
-                self.assertEqual([p.rsplit("/", 1)[-1] for p, _ in api.writes],
-                                 ["cancel", "force-cancel", "dispatches"])
+        for message in ["Cannot cancel a workflow run that has not yet queued.",
+                        "Cannot cancel a workflow run that has not been queued yet."]:
+            error = recovery.APIError("POST", "cancel", 409, dict(message=message))
+            for jobs in [[], terminal]:
+                with self.subTest(jobs=jobs, message=message):
+                    api = AcquisitionGitHub(jobs=dict(total_count=len(jobs), jobs=jobs), cancellation=error)
+                    self.assertEqual(len(self.recover(api, apply=True)), 1)
+                    self.assertEqual([p.rsplit("/", 1)[-1] for p, _ in api.writes],
+                                     ["cancel", "force-cancel", "dispatches"])
 
     def test_fresh_queued_attempt_and_changed_attempt_are_protected(self):
         for run in [queued(updated_at="2026-10-28T17:30:00Z"), queued(run_attempt=2)]:
