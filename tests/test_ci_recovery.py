@@ -460,6 +460,8 @@ class AcquisitionTests(unittest.TestCase):
             head_reads = 0
 
             def request(self, method, path, data=None):
+                if path == "repos/owner/project/actions/runs/10" and self.head_reads > 1:
+                    return queued(status="in_progress")
                 if "head_sha=" in path:
                     self.head_reads += 1
                     if self.head_reads > 1:
