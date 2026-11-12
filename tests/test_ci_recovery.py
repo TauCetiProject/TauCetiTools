@@ -343,6 +343,8 @@ class AcquisitionTests(unittest.TestCase):
         cases = [
             dict(total_count=1, jobs=[dict(status="in_progress", runner_id=7)]),
             dict(total_count=1, jobs=[dict(status="queued", runner_name="acquired")]),
+            dict(total_count=1, jobs=[dict(status="pending", runner_id=0)]),
+            dict(total_count=1, jobs=[dict(status="queued", runner_id=0)]),
             dict(total_count=2, jobs=[dict(status="queued", runner_id=0)]),
             dict(total_count=1, jobs=[dict(status="unknown")]),
             dict(total_count=2, jobs=[dict(id=1, status="queued"), dict(id=1, status="queued")]),
@@ -354,10 +356,19 @@ class AcquisitionTests(unittest.TestCase):
                 self.assertEqual(self.recover(api, apply=True), [])
                 self.assertEqual(api.writes, [])
 
-    def test_completed_picker_does_not_reserve_an_unacquired_sandbox(self):
+    def test_completed_picker_and_waiting_sandbox_keep_their_queue_position(self):
         jobs = [dict(status="completed", runner_id=7), dict(status="queued", runner_id=0)]
         api = AcquisitionGitHub(jobs=dict(total_count=2, jobs=jobs))
-        self.assertEqual(len(self.recover(api, apply=True)), 1)
+        self.assertEqual(self.recover(api, apply=True), [])
+        self.assertEqual(api.writes, [])
+
+    def test_old_native_concurrency_wait_is_not_an_abandoned_attempt(self):
+        for status in ["pending", "waiting"]:
+            with self.subTest(status=status):
+                api = AcquisitionGitHub(live=queued(status=status))
+                self.assertEqual(self.recover(api, apply=True), [])
+                self.assertEqual(api.writes, [])
+                self.assertEqual(api.job_reads, 0)
 
     def test_acquisition_racing_inventory_prevents_dispatch(self):
         api = AcquisitionGitHub(fresh_jobs=dict(total_count=1, jobs=[dict(status="in_progress", runner_id=7)]))

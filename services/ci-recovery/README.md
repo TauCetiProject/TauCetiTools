@@ -20,8 +20,10 @@ mutation. A missing event or a dead pending status may be recovered; a running
 build, a completed build result, moved head, closed PR or draft is left alone.
 An old queued workflow is not proof of a live build. After the acquisition
 grace, the sweeper reads the fresh run and its complete attempt-bound job list.
-It cancels ordinary PR attempts with no acquired job still running, including
-workflow shells whose attempt jobs are already terminal. Closed PRs, obsolete
+It cancels empty ordinary PR workflows and workflow shells whose attempt jobs
+are already terminal. A real queued or pending job retains its queue position
+regardless of age; age alone does not prove that it is stranded. Native pending
+and waiting workflows are left to GitHub's scheduler. Closed PRs, obsolete
 heads and already-tested PRs get cleanup without a replacement. GitHub's explicit
 "not yet queued" rejection for an empty/terminal shell is recorded and does not
 block recovery. New attempts, acquired jobs, incomplete observations and all
