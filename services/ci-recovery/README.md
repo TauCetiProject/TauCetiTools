@@ -31,6 +31,8 @@ If a pass stops after cancelling an unstarted build, the next pass uses its
 terminal job evidence to resume without imposing another acquisition grace.
 Current-head replacements run before obsolete-shell cleanup, so old GitHub
 metadata cannot consume the pass's API budget ahead of useful recovery.
+The final check refreshes the specific head, known attempts and new dispatches;
+it does not repeat the entire historical live-run scan for every missing PR.
 
 Recovery dispatches the ordinary trusted default-branch build. It never approves
 or merges a PR, and it never fabricates a successful status.

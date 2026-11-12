@@ -91,7 +91,10 @@ class GitHub:
             live = self.fresh_live if self.active_reads > 5 else self.live
             return dict(workflow_runs=[live] if live and "status=in_progress" in path else [])
         if "event=" in path:
-            return dict(workflow_runs=[self.manual] if self.manual and f"event={self.manual_event}&" in path else [])
+            live = self.fresh_live or self.manual
+            return dict(workflow_runs=[live] if live and f"event={self.manual_event}&" in path else [])
+        if path == "repos/owner/project/actions/runs/10":
+            return self.history[0] if self.history else run()
         return dict(workflow_runs=self.history)
 
 
@@ -451,6 +454,23 @@ class AcquisitionTests(unittest.TestCase):
         self.assertEqual(len(self.recover(api, apply=True, api_reserve=1500)), 1)
         self.assertEqual([p.rsplit("/", 2)[-2:] for p, _ in api.writes],
                          [["10", "cancel"], ["pr-build.yml", "dispatches"], ["20", "cancel"]])
+
+    def test_fresh_head_run_blocks_dispatch_without_rescanning_global_status_lists(self):
+        class Race(GitHub):
+            head_reads = 0
+
+            def request(self, method, path, data=None):
+                if "head_sha=" in path:
+                    self.head_reads += 1
+                    if self.head_reads > 1:
+                        return dict(workflow_runs=[queued(status="in_progress")])
+                return super().request(method, path, data)
+
+        api = Race()
+        with patch.object(api, "request", wraps=api.request) as calls:
+            self.assertEqual(self.recover(api, apply=True), [])
+        self.assertEqual(sum("status=" in c.args[1] for c in calls.call_args_list), 5)
+        self.assertEqual(api.writes, [])
 
 
 if __name__ == "__main__":

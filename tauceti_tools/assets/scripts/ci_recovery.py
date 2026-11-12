@@ -279,6 +279,7 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
                 continue
             active.append(run)
     since = dt.datetime.fromtimestamp(now - max(86400, min_age), dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    pass_started = dt.datetime.fromtimestamp(now, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     for event in ("workflow_dispatch", "repository_dispatch"):
         for run in runs(api, repo, f"event={event}&created=%3E%3D{since}"):
             for number in pr_numbers(run):
@@ -314,14 +315,20 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
             # results arriving during the inventory must never trigger a retry.
             if not still_missing(api, repo, number, head):
                 continue
-            # Refresh active runs after the slower inventory/history reads. A
-            # manual replacement can be on main's SHA, so a head-only query is insufficient.
-            if apply and any(
-                matches(run, number, head) and blocking(run, fresh=True)
-                for state in ("queued", "in_progress", "waiting", "pending", "requested")
-                for run in list(runs(api, repo, f"status={state}"))
-            ):
-                continue
+            if apply:
+                # Refresh this immutable head, and known manual attempts that
+                # could have been rerun. Then look for new dispatches on main's
+                # SHA since this pass began. This preserves the final live
+                # fence without rescanning every old queued PR for every PR.
+                fresh = list(runs(api, repo, f"head_sha={head}"))
+                known = {r["id"]: r for r in [*history, *active] if matches(r, number, head)}
+                for run in known.values():
+                    fresh.append(api.request("GET", f"repos/{repo}/actions/runs/{run['id']}"))
+                for event in ("workflow_dispatch", "repository_dispatch"):
+                    fresh.extend(runs(api, repo, f"event={event}&created=%3E%3D{pass_started}"))
+                if any(run.get("status") in ACTIVE and matches(run, number, head) and blocking(run, fresh=True)
+                       for run in fresh):
+                    continue
             if apply and not still_missing(api, repo, number, head):
                 continue
         except APIError as error:
