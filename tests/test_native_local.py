@@ -1,6 +1,7 @@
 """Configured local verification uses the same checks on either source forge."""
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -89,19 +90,32 @@ class NativeLocal(unittest.TestCase):
         # immutable snapshot is selected.
         self.conf.write_text('schema_version="invalid live file"')
         self.env.update(TAUCETI_CONF_SOURCE=str(self.conf), TAUCETI_CONF_SNAPSHOT=str(snapshot))
-        result = self.run_cli("script", "local_checks.py", "sources")
+        code = '''from unittest.mock import patch
+from tauceti_tools.cli import main
+from tauceti_tools.templates import render
+def execute(name, args, project):
+    assert render("TauCeti/", project, qualified=True) == "Probe/"
+    assert project.repository_ref("content").forge.kind == "forgejo"
+    return 0
+with patch("tauceti_tools.templates.run_script", execute):
+    raise SystemExit(main(["script", "local_checks.py", "sources"]))
+'''
+        result = subprocess.run([sys.executable, "-c", code], cwd=self.root, env=self.env,
+                                capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("local-sources: PASS", result.stdout)
 
     def test_local_scope_never_fetches_an_unbootstrapped_url(self):
         with patch.dict(os.environ, {**self.env, "TAUCETI_CONF": "https://config.example.org/project.toml"}, clear=True):
             with patch("urllib.request.urlopen", side_effect=AssertionError("network")), self.assertRaisesRegex(ValueError, "saved project snapshot"):
                 local_main(self.root)
 
-    def test_real_native_sources_entrypoint_and_all_local_wrapper_bootstraps(self):
+    @unittest.skipUnless(shutil.which("lean"), "real source import validation needs Lean")
+    def test_real_native_sources_entrypoint(self):
         result = self.run_cli("script", "local_checks.py", "sources")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("local-sources: PASS", result.stdout)
+
+    def test_all_local_wrapper_bootstraps(self):
         for script in ("local_checks.py", "local_axioms.py", "local_lint.py", "check-expired-mathlib-shims.py"):
             with self.subTest(script=script):
                 result = self.run_cli("script", script, "--help")
