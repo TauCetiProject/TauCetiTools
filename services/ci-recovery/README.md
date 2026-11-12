@@ -18,6 +18,16 @@ The shared sweeper checks immutable current PR heads, existing commit statuses,
 all live build runs, recent dispatches and a final live observation before each
 mutation. A missing event or a dead pending status may be recovered; a running
 build, a completed build result, moved head, closed PR or draft is left alone.
+An old queued workflow is not proof of a live build. After the acquisition
+grace, the sweeper reads the fresh run and its complete attempt-bound job list.
+It cancels ordinary PR attempts with no acquired job still running, including
+workflow shells whose attempt jobs are already terminal. Closed PRs, obsolete
+heads and already-tested PRs get cleanup without a replacement. GitHub's explicit
+"not yet queued" rejection for an empty/terminal shell is recorded and does not
+block recovery. New attempts, acquired jobs, incomplete observations and all
+staging workflows remain protected. Acquisition is checked again before dispatch.
+Explicitly head-bound old runs do not reserve a PR's newer head.
+
 Recovery dispatches the ordinary trusted default-branch build. It never approves
 or merges a PR, and it never fabricates a successful status.
 

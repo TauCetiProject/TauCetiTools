@@ -259,5 +259,146 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(sum(call.args[0] == "POST" for call in calls.call_args_list), 1)
 
 
+def queued(**changes):
+    value = run()
+    value.update(
+        status="queued", conclusion=None, run_attempt=1, event="pull_request_target",
+        path=".github/workflows/pr-build.yml", repository=dict(full_name="owner/project"),
+    )
+    value.update(changes)
+    return value
+
+
+class AcquisitionGitHub(GitHub):
+    def __init__(self, *, jobs=None, current_run=None, cancellation=None, fresh_jobs=None, after_cancel=None, **kwargs):
+        live = kwargs.pop("live", queued())
+        super().__init__(live=live, history=[live], **kwargs)
+        self.current_run = live if current_run is None else current_run
+        self.jobs = dict(total_count=0, jobs=[]) if jobs is None else jobs
+        self.fresh_jobs, self.job_reads = fresh_jobs, 0
+        self.cancellation = cancellation
+        self.after_cancel = after_cancel
+        for response in [self.jobs, self.fresh_jobs]:
+            if response:
+                for index, job in enumerate(response.get("jobs", []), 1):
+                    job.setdefault("id", index)
+
+    def request(self, method, path, data=None):
+        if method == "GET" and "/attempts/" in path and "/jobs?" in path:
+            self.job_reads += 1
+            return self.fresh_jobs if self.job_reads > 1 and self.fresh_jobs is not None else self.jobs
+        if method == "GET" and path == "repos/owner/project/actions/runs/10":
+            return self.current_run
+        if method == "GET" and "status=" in path:
+            return dict(workflow_runs=[self.live] if f"status={self.live['status']}&" in path else [])
+        if method == "POST" and path.endswith(("/cancel", "/force-cancel")):
+            self.writes.append((path, data))
+            if self.cancellation:
+                raise self.cancellation
+            if self.after_cancel:
+                self.current_run = self.live = self.after_cancel
+            return None
+        return super().request(method, path, data)
+
+
+class AcquisitionTests(unittest.TestCase):
+    def recover(self, api, **kwargs):
+        return recovery.recover(api, "owner/project", now=NOW, **kwargs)
+
+    def test_stale_empty_run_is_cancelled_and_replaced_and_dry_run_is_read_only(self):
+        for apply in [False, True]:
+            api = AcquisitionGitHub()
+            selected = self.recover(api, apply=apply)
+            self.assertEqual(len(selected), 1)
+            self.assertEqual(selected[0]["dispatched"], apply)
+            self.assertEqual(len(api.writes), 2 if apply else 0)
+            if apply:
+                self.assertTrue(api.writes[0][0].endswith("/cancel"))
+                self.assertTrue(api.writes[1][0].endswith("/dispatches"))
+
+    def test_completed_attempt_shell_and_uncancellable_empty_shell_do_not_reserve_forever(self):
+        terminal = [dict(status="completed", runner_id=7, runner_name="old-picker"),
+                    dict(status="completed", conclusion="cancelled", runner_id=0)]
+        error = recovery.APIError("POST", "cancel", 409, dict(message="Cannot cancel a workflow run that has not yet queued."))
+        for jobs in [[], terminal]:
+            with self.subTest(jobs=jobs):
+                api = AcquisitionGitHub(jobs=dict(total_count=len(jobs), jobs=jobs), cancellation=error)
+                self.assertEqual(len(self.recover(api, apply=True)), 1)
+                self.assertEqual([p.rsplit("/", 1)[-1] for p, _ in api.writes],
+                                 ["cancel", "force-cancel", "dispatches"])
+
+    def test_fresh_queued_attempt_and_changed_attempt_are_protected(self):
+        for run in [queued(updated_at="2026-10-28T17:30:00Z"), queued(run_attempt=2)]:
+            with self.subTest(run=run):
+                api = AcquisitionGitHub(current_run=run)
+                self.assertEqual(self.recover(api, apply=True), [])
+                self.assertEqual(api.writes, [])
+
+    def test_acquired_jobs_and_incomplete_or_unknown_job_observations_are_protected(self):
+        cases = [
+            dict(total_count=1, jobs=[dict(status="in_progress", runner_id=7)]),
+            dict(total_count=1, jobs=[dict(status="queued", runner_name="acquired")]),
+            dict(total_count=2, jobs=[dict(status="queued", runner_id=0)]),
+            dict(total_count=1, jobs=[dict(status="unknown")]),
+            dict(total_count=2, jobs=[dict(id=1, status="queued"), dict(id=1, status="queued")]),
+            dict(total_count=1, jobs=[dict(status="queued", run_attempt=2)]),
+        ]
+        for jobs in cases:
+            with self.subTest(jobs=jobs):
+                api = AcquisitionGitHub(jobs=jobs)
+                self.assertEqual(self.recover(api, apply=True), [])
+                self.assertEqual(api.writes, [])
+
+    def test_completed_picker_does_not_reserve_an_unacquired_sandbox(self):
+        jobs = [dict(status="completed", runner_id=7), dict(status="queued", runner_id=0)]
+        api = AcquisitionGitHub(jobs=dict(total_count=2, jobs=jobs))
+        self.assertEqual(len(self.recover(api, apply=True)), 1)
+
+    def test_acquisition_racing_inventory_prevents_dispatch(self):
+        api = AcquisitionGitHub(fresh_jobs=dict(total_count=1, jobs=[dict(status="in_progress", runner_id=7)]))
+        self.assertEqual(self.recover(api, apply=True), [])
+        self.assertEqual([p.rsplit("/", 1)[-1] for p, _ in api.writes], ["cancel"])
+
+    def test_cancel_transition_does_not_restart_grace_but_a_new_attempt_does(self):
+        for attempt, count in [(1, 1), (2, 0)]:
+            with self.subTest(attempt=attempt):
+                current = queued(run_attempt=attempt, updated_at="2026-10-28T17:59:30Z")
+                api = AcquisitionGitHub(after_cancel=current)
+                self.assertEqual(len(self.recover(api, apply=True)), count)
+
+    def test_unknown_cancellation_conflict_or_ambiguous_post_does_not_dispatch_or_retry(self):
+        for status, message in [(409, "another conflict"), (503, "lost response"), (0, "network failure")]:
+            with self.subTest(status=status):
+                api = AcquisitionGitHub(cancellation=recovery.APIError("POST", "cancel", status, dict(message=message)))
+                self.assertEqual(self.recover(api, apply=True), [])
+                self.assertEqual([p.rsplit("/", 1)[-1] for p, _ in api.writes], ["cancel"])
+
+    def test_staging_is_owned_by_its_controller(self):
+        staging = queued(event="repository_dispatch", display_title="bors branch=main batch=415 head=" + HEAD)
+        api = AcquisitionGitHub(live=staging)
+        self.assertEqual(self.recover(api, apply=True), [])
+        self.assertEqual(api.job_reads, 0)
+        self.assertEqual(api.writes, [])
+
+    def test_obsolete_queue_cleanup_also_runs_when_no_pr_needs_another_build(self):
+        api = AcquisitionGitHub()
+        with patch.object(recovery, "inventory", return_value=("main", [])):
+            self.assertEqual(self.recover(api, apply=True), [])
+        self.assertEqual([p.rsplit("/", 1)[-1] for p, _ in api.writes], ["cancel"])
+
+    def test_late_status_after_active_recheck_does_not_dispatch(self):
+        api = AcquisitionGitHub()
+        with patch.object(recovery, "still_missing", side_effect=[True, False]):
+            self.assertEqual(self.recover(api, apply=True), [])
+        self.assertEqual([p.rsplit("/", 1)[-1] for p, _ in api.writes], ["cancel"])
+
+    def test_acquired_old_head_does_not_block_a_new_head(self):
+        live = queued(status="in_progress", head_sha="b" * 40, display_title="pr-build pr=1 head=" + "b" * 40)
+        api = AcquisitionGitHub(live=live, jobs=dict(total_count=1, jobs=[dict(status="in_progress", runner_id=7)]))
+        api.history = []
+        self.assertEqual(len(self.recover(api, apply=True)), 1)
+        self.assertEqual([p.rsplit("/", 1)[-1] for p, _ in api.writes], ["dispatches"])
+
+
 if __name__ == "__main__":
     unittest.main()

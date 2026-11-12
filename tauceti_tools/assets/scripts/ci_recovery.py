@@ -75,14 +75,17 @@ def inventory(api, repo):
         after = page["pageInfo"]["endCursor"]
 
 
-def runs(api, repo, query):
+def runs(api, repo, query, *, include_ignored=False):
     page = 1
     while True:
         result = api.request(
             "GET", f"repos/{repo}/actions/workflows/pr-build.yml/runs?{query}&per_page=100&page={page}"
         )
         rows = result["workflow_runs"]
-        yield from (row for row in rows if not row.get("display_title", "").startswith("Ignored label event "))
+        yield from (
+            row for row in rows
+            if include_ignored or not row.get("display_title", "").startswith("Ignored label event ")
+        )
         if len(rows) < 100:
             return
         page += 1
@@ -96,6 +99,16 @@ def pr_numbers(run):
     if match:
         numbers.add(int(match[1]))
     return numbers
+
+
+def matches(run, number, head):
+    """An obsolete, explicitly bound PR head cannot reserve a newer head."""
+    bound = re.fullmatch(r"pr-build pr=([1-9][0-9]*) head=([0-9a-f]{40})", run.get("display_title", ""))
+    if bound:
+        return int(bound[1]) == number and bound[2] == head
+    if run.get("event") == "pull_request_target":
+        return run["head_sha"] == head
+    return number in pr_numbers(run) or run["head_sha"] == head
 
 
 def still_missing(api, repo, number, head):
@@ -124,19 +137,131 @@ def quota_reserved(api, reserve):
     return False
 
 
+ACTIVE = {"queued", "in_progress", "waiting", "pending", "requested"}
+
+
+def ordinary(run, repo):
+    """Staging belongs to its controller; only ordinary trusted PR workflows qualify."""
+    return (
+        run.get("path") == ".github/workflows/pr-build.yml"
+        and run.get("repository", {}).get("full_name") == repo
+        and (run.get("event") in {"pull_request_target", "workflow_dispatch"}
+             or run.get("event") == "repository_dispatch" and bool(pr_numbers(run)))
+        and not run.get("display_title", "").startswith("bors ")
+    )
+
+
+def old(run, now, min_age):
+    """A new attempt or a recent transition receives the full acquisition grace."""
+    try:
+        times = [timestamp(run[k]) for k in ("created_at", "updated_at", "run_started_at") if run.get(k)]
+        return bool(times) and now - max(times) >= min_age
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
+def unacquired(api, repo, run):
+    """Require complete attempt-bound job evidence; never stop an acquired job."""
+    attempt = run.get("run_attempt")
+    if type(attempt) is not int or attempt < 1:
+        return None
+    data = api.request(
+        "GET", f"repos/{repo}/actions/runs/{run['id']}/attempts/{attempt}/jobs?per_page=100"
+    )
+    if not isinstance(data, dict):
+        return None
+    jobs = data.get("jobs")
+    if (not isinstance(jobs, list) or type(data.get("total_count")) is not int
+            or data["total_count"] != len(jobs) or len(jobs) > 100):
+        return None
+    if any(
+        not isinstance(job, dict)
+        or type(job.get("id")) is not int or job["id"] < 1
+        or job.get("run_id", run["id"]) != run["id"]
+        or job.get("run_attempt", attempt) != attempt
+        or job.get("status") not in ACTIVE | {"completed"}
+        or job.get("status") == "in_progress"
+        or job.get("status") != "completed" and (job.get("runner_id") or job.get("runner_name"))
+        for job in jobs
+    ):
+        return None
+    if len({job["id"] for job in jobs}) != len(jobs):
+        return None
+    return jobs
+
+
+def cancel_unacquired(api, repo, run, jobs):
+    """Cancel stale queued work; tolerate GitHub's explicit orphan-shell error.
+
+    An ambiguous POST is never repeated. A subsequent sweep observes its result.
+    GitHub can reject both endpoints for a workflow with zero or entirely
+    terminal jobs. That shell must not permanently suppress a replacement.
+    """
+    for operation in ("cancel", "force-cancel"):
+        try:
+            api.request("POST", f"repos/{repo}/actions/runs/{run['id']}/{operation}", {})
+            return "cancel-requested"
+        except APIError as error:
+            message = str(error.data.get("message", "")).lower() if isinstance(error.data, dict) else ""
+            terminal = all(job["status"] == "completed" for job in jobs)
+            if error.status != 409 or not terminal or "not yet queued" not in message:
+                raise
+    return "uncancellable-terminal-shell"
+
+
 def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_reserve=0):
     now = dt.datetime.now(dt.timezone.utc).timestamp() if now is None else now
     branch, pulls = inventory(api, repo)
-    if not pulls:
-        return []
 
-    active_prs, active_heads, recent = set(), set(), {}
+    abandoned, attempted = {}, set()
+
+    def blocking(run, *, fresh=False):
+        # New/unqualified runs protect work without extra API calls. Old runs
+        # require live attempt and job evidence, including immediately before
+        # dispatch so acquisition racing an earlier inventory remains protected.
+        proven = run["id"] in abandoned and abandoned[run["id"]] == run.get("run_attempt")
+        if not ordinary(run, repo) or not proven and not old(run, now, min_age):
+            return True
+        if proven and not fresh:
+            return False
+        try:
+            current = api.request("GET", f"repos/{repo}/actions/runs/{run['id']}")
+            if current.get("status") == "completed":
+                return False
+            if (current.get("id") != run["id"] or not ordinary(current, repo)
+                    or current.get("run_attempt") != run.get("run_attempt")
+                    or not proven and not old(current, now, min_age)
+                    or current.get("status") not in ACTIVE):
+                return True
+            jobs = unacquired(api, repo, current)
+            if jobs is None:
+                return True
+            key = (current["id"], current["run_attempt"])
+            if apply and key not in attempted:
+                attempted.add(key)
+                result = cancel_unacquired(api, repo, current, jobs)
+                print(json.dumps(dict(stale_run=current["id"], recovery=result)), flush=True)
+            elif apply and not proven:
+                return True  # An earlier cancellation had an ambiguous or rejected response.
+            abandoned[current["id"]] = current["run_attempt"]
+            return False
+        except APIError as error:
+            print(f"ci-recovery: run {run['id']}: {error}", file=sys.stderr)
+            return True
+
+    active, recent = [], {}
     # One repository-wide inventory, independent of worker count. Older live
     # dispatches must also be seen even though their SHA belongs to main.
     for state in ("queued", "in_progress", "waiting", "pending", "requested"):
-        for run in runs(api, repo, f"status={state}"):
-            active_prs.update(pr_numbers(run))
-            active_heads.add(run["head_sha"])
+        # Cancellation changes the paginated live collection. Finish reading
+        # its pages first so removing page one cannot skip page two's runs.
+        for run in list(runs(api, repo, f"status={state}", include_ignored=True)):
+            if quota_reserved(api, api_reserve):
+                print("ci-recovery: shared API reserve reached; next pass will resume", file=sys.stderr)
+                return []
+            if not blocking(run) or run.get("display_title", "").startswith("Ignored label event "):
+                continue
+            active.append(run)
     since = dt.datetime.fromtimestamp(now - max(86400, min_age), dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     for event in ("workflow_dispatch", "repository_dispatch"):
         for run in runs(api, repo, f"event={event}&created=%3E%3D{since}"):
@@ -153,18 +278,20 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
             print("ci-recovery: shared API reserve reached; next pass will resume", file=sys.stderr)
             break
         number, head = pull["number"], pull["headRefOid"]
-        if number in active_prs or head in active_heads:
+        if any(matches(run, number, head) for run in active):
             continue
         try:
             history = list(runs(api, repo, f"head_sha={head}"))
-            if number in recent:
+            if number in recent and matches(recent[number], number, head):
                 history.append(recent[number])
             latest = max(history, key=lambda r: timestamp(r.get("run_started_at") or r["created_at"]), default=None)
-            if latest and latest["status"] != "completed":
+            if latest and latest["status"] != "completed" and blocking(latest):
                 continue
             # Lost events can leave no run at all. Allow startup grace from the
             # PR update in that case instead of stranding it permanently.
-            if now - timestamp(latest["updated_at"] if latest else pull["updatedAt"]) < min_age:
+            if (now - timestamp(latest["updated_at"] if latest else pull["updatedAt"]) < min_age
+                    and (not latest or latest["id"] not in abandoned
+                         or abandoned[latest["id"]] != latest.get("run_attempt"))):
                 continue
             # Recheck immediately before dispatch. Closed PRs, moved heads and
             # results arriving during the inventory must never trigger a retry.
@@ -173,10 +300,12 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
             # Refresh active runs after the slower inventory/history reads. A
             # manual replacement can be on main's SHA, so a head-only query is insufficient.
             if apply and any(
-                number in pr_numbers(run) or run["head_sha"] == head
+                matches(run, number, head) and blocking(run, fresh=True)
                 for state in ("queued", "in_progress", "waiting", "pending", "requested")
-                for run in runs(api, repo, f"status={state}")
+                for run in list(runs(api, repo, f"status={state}"))
             ):
+                continue
+            if apply and not still_missing(api, repo, number, head):
                 continue
         except APIError as error:
             # One inaccessible/deleted PR must not strand the other candidates.
