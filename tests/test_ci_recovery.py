@@ -399,6 +399,31 @@ class AcquisitionTests(unittest.TestCase):
         self.assertEqual(len(self.recover(api, apply=True)), 1)
         self.assertEqual([p.rsplit("/", 1)[-1] for p, _ in api.writes], ["dispatches"])
 
+    def test_cancelling_a_paginated_inventory_does_not_skip_the_next_page(self):
+        class Paginated:
+            def __init__(self):
+                self.live = {number: queued(id=number) for number in range(1000, 1101)}
+                self.cancelled = []
+
+            def request(self, method, path, data=None):
+                if "status=" in path or "event=" in path:
+                    page = int(path.rsplit("page=", 1)[-1])
+                    rows = list(self.live.values()) if "status=queued&" in path else []
+                    return dict(workflow_runs=rows[(page - 1) * 100:page * 100])
+                number = int(path.split("/runs/", 1)[1].split("/", 1)[0])
+                if method == "POST":
+                    self.cancelled.append(number)
+                    del self.live[number]
+                    return None
+                if "/jobs?" in path:
+                    return dict(total_count=0, jobs=[])
+                return self.live[number]
+
+        api = Paginated()
+        with patch.object(recovery, "inventory", return_value=("main", [])):
+            self.assertEqual(self.recover(api, apply=True), [])
+        self.assertEqual(api.cancelled, list(range(1000, 1101)))
+
 
 if __name__ == "__main__":
     unittest.main()
