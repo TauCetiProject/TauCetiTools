@@ -129,6 +129,10 @@ def main(argv=None):
             raise ConfigError(configuration_problem("", "No tauceti.toml was found in this directory or its Git checkout root.", fresh=True))
         if args.command == "config" and args.action == "environment":
             project = (bootstrap_qualified if args.qualified else bootstrap)(["--conf", source])
+        elif args.command == "script":
+            from .templates import LOCAL_SCRIPTS
+
+            project = (bootstrap_qualified if args.name in LOCAL_SCRIPTS else bootstrap)(["--conf", source])
         else:
             if args.command == "config" and args.qualified:
                 raise ConfigError("--qualified requires config environment")
@@ -183,7 +187,6 @@ def main(argv=None):
         if args.command == "script":
             from .templates import run_script
 
-            bootstrap(["--conf", source])
             return run_script(args.name, args.args, project)
         if args.command == "doctor":
             from .doctor import diagnose, render, repair

@@ -14,10 +14,13 @@ import tempfile
 from functools import lru_cache
 from pathlib import Path
 
-from .project import CANONICAL, ConfigError, Project, bootstrap, checkout_root
+from .project import CANONICAL, ConfigError, Project, bootstrap, bootstrap_qualified, checkout_root
 
 HERE = Path(__file__).resolve().parent
 ASSETS = HERE / "assets"
+# These consumers use local Git/Lean inputs only. Unported source-control and
+# deployment scripts must still reject qualified configuration.
+LOCAL_SCRIPTS = frozenset({"local_checks.py", "local_axioms.py", "local_lint.py", "check-expired-mathlib-shims.py"})
 MAINTENANCE_CONTROL_RUNNER = '${{ fromJSON(format(\'["nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=0","namespace-features:github.run-id={0}"]\', github.run_id)) }}'
 
 # Resolve tags when updating Tools, never when generating a downstream setup PR.
@@ -38,8 +41,9 @@ ACTION_PINS = {
 
 def pin_actions(text: str) -> str:
     for action, commit in ACTION_PINS.items():
+        replacement = action.split("@")[0] + "@" + commit
         text = re.sub(r"(\buses:\s*)" + re.escape(action) + r"(?=\s|$)",
-                      lambda m, ref=action.split("@")[0] + "@" + commit: m[1] + ref, text)
+                      lambda m, ref=replacement: m[1] + ref, text)
     return text
 
 
@@ -274,7 +278,7 @@ def render(text: str, project: Project, *, source_ci=False, qualified=False) -> 
     return pattern.sub(lambda m: pairs[m.group()], text)
 
 
-def materialize(project: Project, destination: Path, *, policy_dir: Path | None = None, source_ci=False):
+def materialize(project: Project, destination: Path, *, policy_dir: Path | None = None, source_ci=False, qualified=False):
     # Read policy first: local callers may materialize directly over scripts/.
     policies = (
         [
@@ -292,7 +296,7 @@ def materialize(project: Project, destination: Path, *, policy_dir: Path | None 
         target = destination / source.relative_to(ASSETS / "scripts")
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
-            content = render(source.read_text(), project, source_ci=source_ci)
+            content = render(source.read_text(), project, source_ci=source_ci, qualified=qualified)
         except UnicodeError:
             shutil.copyfile(source, target)
         else:
@@ -309,14 +313,14 @@ def run_script(name: str, args: list[str], project: Project | None = None) -> in
     if not source.is_file():
         raise ValueError(f"No shared script named {name}")
     if project is None:
-        project = bootstrap([])
+        project = (bootstrap_qualified if name in LOCAL_SCRIPTS else bootstrap)([])
     if project is None:
         # Legacy Tau Ceti operation needs no new configuration.
         executable = source
     else:
         root = checkout_root()
         destination = Path(tempfile.mkdtemp(prefix="tauceti-scripts-"))
-        materialize(project, destination, policy_dir=root / "scripts")
+        materialize(project, destination, policy_dir=root / "scripts", qualified=name in LOCAL_SCRIPTS)
         executable = destination / name
     command = [sys.executable, str(executable)] if executable.suffix == ".py" else ["bash", str(executable)]
     try:
@@ -329,18 +333,18 @@ def run_script(name: str, args: list[str], project: Project | None = None) -> in
             shutil.rmtree(destination, ignore_errors=True)
 
 
-@lru_cache(maxsize=1)
-def shared_import_directory() -> Path:
-    project = bootstrap([])
+@lru_cache(maxsize=2)
+def shared_import_directory(*, qualified=False) -> Path:
+    project = (bootstrap_qualified if qualified else bootstrap)([])
     if project is None:
         return ASSETS / "scripts"
     directory = Path(tempfile.mkdtemp(prefix="tauceti-imports-"))
-    materialize(project, directory, policy_dir=checkout_root() / "scripts")
+    materialize(project, directory, policy_dir=checkout_root() / "scripts", qualified=qualified)
     return directory
 
 
 def import_shared(name: str, module_name: str):
-    directory = shared_import_directory()
+    directory = shared_import_directory(qualified=name in LOCAL_SCRIPTS)
     sys.path.insert(0, str(directory))
     spec = importlib.util.spec_from_file_location(module_name, directory / name)
     if spec is None or spec.loader is None:

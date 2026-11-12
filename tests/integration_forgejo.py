@@ -54,6 +54,7 @@ HTTP_PORT = {port}
 ROOT_URL = {url}/
 DISABLE_SSH = true
 APP_DATA_PATH = {root}/data
+STATIC_ROOT_PATH = {os.environ.get("FORGEJO_STATIC_ROOT", "")}
 [database]
 DB_TYPE = sqlite3
 PATH = {root}/db.sqlite
@@ -161,7 +162,7 @@ ROOT_PATH = {root}/log
             reviewer_token_file = root / "reviewer-token"
             reviewer_token_file.write_text(reviewer_tokens[0])
             reviewer_token_file.chmod(0o600)
-            api = Forgejo(Forge("forgejo", url), token=token, timeout=3)
+            api = Forgejo(Forge("forgejo", url), token=token, timeout=15)
             with (root / "server.log").open("w") as logs:
                 process = subprocess.Popen([*base, "web"], stdout=logs, stderr=logs)
                 try:

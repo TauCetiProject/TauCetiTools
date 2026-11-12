@@ -94,6 +94,30 @@ class RepositoryRef:
     forge: Forge
     name: str
 
+    def matches_remote(self, remote: str) -> bool:
+        """Match a local Git remote to this repository without fetching or credentials."""
+        origin = urllib.parse.urlsplit(self.forge.url)
+        if remote.startswith("git@") and ":" in remote:
+            host, path = remote[4:].split(":", 1)
+            matches = host.casefold() == origin.hostname.casefold() and origin.port is None
+        else:
+            try:
+                parsed = urllib.parse.urlsplit(remote)
+                port = parsed.port
+            except ValueError:
+                return False
+            if parsed.query or parsed.fragment:
+                return False
+            path = parsed.path.lstrip("/")
+            if parsed.scheme == "ssh":
+                matches = (parsed.hostname == origin.hostname and parsed.username == "git"
+                           and port in {None, 22} and origin.port is None)
+            else:
+                matches = (parsed.scheme == origin.scheme and parsed.hostname == origin.hostname
+                           and (port or (443 if parsed.scheme == "https" else 80))
+                           == (origin.port or (443 if origin.scheme == "https" else 80)))
+        return matches and path.rstrip("/").removesuffix(".git").casefold() == self.name.casefold()
+
     def __post_init__(self):
         if (
             not isinstance(self.name, str)
