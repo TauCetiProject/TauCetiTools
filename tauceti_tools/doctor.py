@@ -1133,7 +1133,7 @@ def extra_findings(project, gh, again):
         "claims": ("content", ["claims-access.yml"]),
         "docs": ("content", ["api-docs.yml", "pages.yml"] if project.legacy else ["api-docs.yml"]),
         "progress": ("roadmap", ["ci.yml", "progress-merge.yml"]),
-        "zulip": ("content", ["zulip-healthcheck.yml"]),
+        "zulip": ("content", ["stuck-alerts.yml"]),
         "fleet": ("content", ["pick-runner.yml"]),
         "security_audit": ("content", ["nightly-verify.yml"]),
     }
@@ -1174,7 +1174,7 @@ def extra_findings(project, gh, again):
         if name == "zulip":
             steps += [
                 "Set publication.zulip_site, zulip_channel and zulip_topic to the intended destination. At the site's /#settings/your-bots create a Generic bot, subscribe it to that channel, and store its email and API key as ZULIP_EMAIL and ZULIP_API_KEY in the content and roadmap repositories that publish announcements.",
-                "Run the existing zulip-healthcheck.yml workflow from Actions → Run workflow. Inspect its credential-consuming step; it must succeed without skipping.",
+                "Inspect a recent stuck-alerts.yml run. Its credential check must succeed without skipping.",
             ]
         if name == "fleet":
             steps += [

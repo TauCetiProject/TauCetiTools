@@ -428,7 +428,6 @@ def write_project(project: Project, checkout: Path, role: str = "content") -> li
             "pages.yml": "docs",
             "prepare_docs.py": "docs",
             "stuck-alerts.yml": "zulip",
-            "zulip-healthcheck.yml": "zulip",
             "toolchain-tags.yml": "security_audit",
             "nightly-verify.yml": "security_audit",
             "roadmap-label.yml": "progress",
@@ -453,9 +452,6 @@ def write_project(project: Project, checkout: Path, role: str = "content") -> li
             text = render((ASSETS / "downstream/api-docs.yml").read_text(), project)
         else:
             text = render(source.read_text(), project)
-        if relative.name == "pr-status.yml" and not project.feature("zulip"):
-            text = text.replace('args=(--since', 'args=(--labels-only --since')
-            text = text.replace("Reconcile labels and Zulip posts", "Reconcile PR status labels")
         if relative.name == "claims-access.yml" and project.repos.get("claims"):
             text = text.replace(
                 "owner: " + project.content.split("/")[0], "owner: " + project.repos["claims"].split("/")[0]

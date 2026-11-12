@@ -1,4 +1,4 @@
-"""Reconcile the status label and the Zulip post of every PR with activity since a point in time.
+"""Reconcile the status label of every PR with activity since a point in time.
 
 Usage: batch.py --since <ISO time> [--pr <number>]... [--state-in FILE] [--state-out FILE] [--dry-run]
 
@@ -16,16 +16,9 @@ A PR has had activity since T if any of these holds:
     does not move the PR's updated_at, so build results are found through the runs);
   - it was named with --pr (the event that started this run).
 
-For each such PR it applies exactly the per-PR reconciliation the per-event workflows used:
-labels.reconcile, then zulip.reconcile. Two things the events used to supply are derived from
-current state instead:
+For each such PR it reconciles the GitHub lifecycle label from current state.
 
-  - a PR whose pr-build run for its head is still queued or running shows CI as running (what
-    zulip-pr-status.yml painted on pr-build's `requested` event);
-  - the Zulip post is created if missing only while the PR is open (`create_if_open`), which is
-    what the opened/reopened events did, without letting later churn on a closed PR resurrect it.
-
-A rate limit or a configuration error (missing Zulip credentials, a listing past GitHub's cap) fails
+A rate limit or a listing past GitHub's cap fails
 the run. The next run resumes its pending work; only finishing the scan advances its watermark. A single
 PR's failure does not: that PR is handed to the next run through --state-out/--state-in and retried
 up to MAX_RETRIES times, so one broken PR cannot hold every later run back.
@@ -35,7 +28,6 @@ deadline; no PR bodies or credentials. A forced runner loss before artifact uplo
 repeat work from the last uploaded checkpoint. Missing state uses the workflow fallback.
 
 Requires authenticated gh and TAUCETI_REVIEW_RUNNER (for labels).
-ZULIP_EMAIL/ZULIP_API_KEY are needed unless --labels-only is selected.
 """
 
 from __future__ import annotations
@@ -43,7 +35,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
-import os
 import re
 import math
 from pathlib import Path
@@ -55,15 +46,14 @@ from urllib.parse import parse_qsl, urlencode
 
 import core
 import labels
-import zulip
 
 REPO = core.REPO
 # Runs finish within GitHub's six-hour job limit, so a run that completed after `since` was created
 # no earlier than this before it.
 RUN_LOOKBACK = dt.timedelta(hours=7)
-# PRs reconciled at once. Each takes a few seconds, nearly all of it waiting on GitHub and Zulip; at
+# PRs reconciled at once. Each takes a few seconds, nearly all of it waiting on GitHub; at
 # busy times some fifty PRs are touched in ten minutes, which one at a time would barely keep up with.
-# A PR's own label and Zulip steps stay in order; only different PRs overlap.
+# Only different PRs overlap; each label update is checkpointed before proceeding.
 PARALLEL = 4
 MAX_RETRIES = 5
 
@@ -80,20 +70,20 @@ def lines(path: str, jq: str, paginate: bool = False) -> list[str]:
     return [l for l in core.gh_api(path, jq=jq, paginate=paginate).splitlines() if l]
 
 
-def updated_prs(since: str, completed=None) -> tuple[list[int], set[int]]:
-    """PRs whose updated_at is at or after `since`, newest first, and those of them created at or
-    after `since`. Paging stops after reaching older activity. ``completed`` maps
+def updated_prs(since: str, completed=None) -> list[int]:
+    """PRs whose updated_at is at or after `since`, newest first.
+    Paging stops after reaching older activity. ``completed`` maps
     PR numbers to the start times of finished checks; older updates are skipped.
     Same-second updates remain eligible to avoid losing concurrent changes.
     """
-    out, opened = [], set()
+    out = []
     page = 1
     while True:
         rows = lines(f"/repos/{REPO}/pulls?state=all&sort=updated&direction=desc&per_page=100&page={page}",
-                     jq='.[] | "\\(.number) \\(.updated_at) \\(.created_at)"')
+                     jq='.[] | "\\(.number) \\(.updated_at)"')
         done = False
         for row in rows:
-            number, updated, created = row.split()
+            number, updated = row.split()
             if updated < since:
                 done = True
                 break
@@ -103,10 +93,8 @@ def updated_prs(since: str, completed=None) -> tuple[list[int], set[int]]:
             if completed and updated < completed.get(number, ''):
                 continue
             out.append(int(number))
-            if created >= since:
-                opened.add(int(number))
         if done or len(rows) < 100:
-            return out, opened
+            return out
         page += 1
 
 
@@ -166,14 +154,12 @@ def workflow_runs(workflow: str, query: str) -> list[dict]:
 ACTIVE = ("requested", "queued", "pending", "waiting", "in_progress")
 
 
-def touched_by_runs(since: str, heads: dict[str, list[int]], completed=None) -> tuple[set[int], set[str]]:
-    """PRs whose pr-build or Review runs moved since `since`, and the heads with a pr-build run
-    still queued or in progress (whose CI therefore reads as running).
+def touched_by_runs(since: str, heads: dict[str, list[int]], completed=None) -> set[int]:
+    """PRs whose pr-build or Review runs moved since `since`.
 
-    ``completed`` filters activity older than the start of a finished PR check;
-    running flags remain current even when no new reconciliation is needed.
+    ``completed`` filters activity older than the start of a finished PR check.
     """
-    prs, running = set(), set()
+    prs = set()
     installed = set(lines(f"/repos/{REPO}/actions/workflows?per_page=100",
                           jq=".workflows[].path", paginate=True))
     lookback = iso(dt.datetime.fromisoformat(since.replace("Z", "+00:00")) - RUN_LOOKBACK)
@@ -193,7 +179,6 @@ def touched_by_runs(since: str, heads: dict[str, list[int]], completed=None) -> 
                     continue
                 sha = r["head_sha"]
                 numbers = heads.get(sha, [])
-                exact_head = bool(numbers)
                 if workflow == "pr-build.yml":
                     event = r.get("event", "pull_request_target")
                     if event not in {"pull_request_target", "workflow_dispatch", "repository_dispatch"}:
@@ -203,26 +188,18 @@ def touched_by_runs(since: str, heads: dict[str, list[int]], completed=None) -> 
                     if identity:
                         number, sha = int(identity[1]), identity[2]
                         numbers = [number] if number in heads.get(sha, []) else []
-                        exact_head = bool(numbers)
                     elif event == "workflow_dispatch":
                         # Legacy manual titles omit H. Recheck the open PR without claiming
                         # that its current head is the one the queued/running job is testing.
                         identity = re.fullmatch(r"pr-build ([1-9][0-9]*)", title)
                         number = int(identity[1]) if identity else None
                         numbers = [number] if number in open_prs else []
-                        exact_head = False
                     elif event == "repository_dispatch":
                         # Staging batches and malformed dispatch identities are not PR runs.
-                        numbers, exact_head = [], False
+                        numbers = []
                 prs.update(n for n in numbers
                            if not completed or r['updated_at'] >= completed.get(str(n), ''))
-                if workflow == "pr-build.yml" and status != "completed" and exact_head:
-                    running.add(sha)
-    return prs, running
-
-
-def running_prs(heads: dict[str, list[int]], running: set[str], number: int) -> bool:
-    return any(number in ns and s in running for s, ns in heads.items())
+    return prs
 
 
 def load_progress(path, since):
@@ -267,12 +244,10 @@ def load_progress(path, since):
             if not number.isdigit() or int(number) <= 0:
                 raise ValueError('Invalid completed PR')
             timestamp(finished)
-        for field in ('pending', 'opened'):
+        for field in ('pending',):
             numbers = active[field]
             if not isinstance(numbers, list) or any(type(n) is not int or n <= 0 for n in numbers) or len(set(numbers)) != len(numbers):
                 raise ValueError('Invalid pending PRs')
-        if not set(active['opened']) <= set(active['pending']):
-            raise ValueError('Opened PRs must still be pending')
     return state
 
 
@@ -296,7 +271,6 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--since", required=True, help="fallback window start, ISO-8601 UTC")
     ap.add_argument("--pr", type=int, action="append", default=[], help="a PR to reconcile regardless")
-    ap.add_argument("--labels-only", action="store_true", help="Update GitHub labels without contacting Zulip")
     ap.add_argument("--dry-run", action="store_true", help="list work; write nothing")
     ap.add_argument("--state-in", help="previous progress/retries JSON checkpoint")
     ap.add_argument("--state-out", help="where to checkpoint progress, including on failure")
@@ -318,11 +292,11 @@ def main(argv=None):
             started = iso(dt.datetime.now(dt.timezone.utc))
             since = iso(dt.datetime.fromisoformat(state['watermark'].replace('Z', '+00:00')) - dt.timedelta(minutes=2))
             heads = open_heads()
-            by_update, opened = updated_prs(since)
-            by_runs, running = touched_by_runs(since, heads)
+            by_update = updated_prs(since)
+            by_runs = touched_by_runs(since, heads)
             ordered = list(dict.fromkeys(args.pr + by_update + sorted(by_runs) + sorted(int(n) for n in state['retry'])))
             state['active'] = {"started_at": started, "pending": ordered,
-                               "opened": sorted(set(ordered) & opened), "completed": {}}
+                               "completed": {}}
         else:
             active = state['active']
             discovered = iso(dt.datetime.now(dt.timezone.utc))
@@ -330,30 +304,19 @@ def main(argv=None):
             # Include collapsed events since discovery, but omit activity known
             # to precede the start of an already completed reconciliation.
             since = iso(dt.datetime.fromisoformat(active['started_at'].replace('Z', '+00:00')) - dt.timedelta(minutes=2))
-            by_update, newly_opened = updated_prs(since, active['completed'])
-            by_runs, running = touched_by_runs(since, heads, active['completed'])
+            by_update = updated_prs(since, active['completed'])
+            by_runs = touched_by_runs(since, heads, active['completed'])
             active['pending'] = list(dict.fromkeys(args.pr + active['pending'] + by_update + sorted(by_runs)))
-            active['opened'] = sorted(set(active['opened']) | (newly_opened & set(active['pending'])))
             # Only advance after both discovery streams were read completely.
             active['started_at'] = discovered
         active = state['active']
-        ordered, opened = list(active['pending']), set(active['opened'])
+        ordered = list(active['pending'])
         log(f"scan {active['started_at']}: {len(ordered)} pending PRs; {len(state['retry'])} queued retries")
         if args.dry_run:
             for number in ordered:
                 log(f"would reconcile #{number}")
             return 0
         save_progress(output, state)
-        z, bot_id = None, None
-        if not args.labels_only:
-            email, api_key = (os.environ.get('ZULIP_EMAIL') or '').strip(), (os.environ.get('ZULIP_API_KEY') or '').strip()
-            if not (email and api_key):
-                return zulip.fail_config('ZULIP_EMAIL / ZULIP_API_KEY not set (no bot configured)')
-            z = zulip.Zulip(email, api_key, (os.environ.get('ZULIP_SITE') or 'https://leanprover.zulipchat.com').strip())
-            try:
-                bot_id = z.my_user_id()
-            except zulip.ConfigError as exc:
-                return zulip.fail_config(str(exc))
         stop, failures = [], []
 
         def one(number):
@@ -369,19 +332,6 @@ def main(argv=None):
             except Exception as exc:
                 failed = True
                 log(f"PR #{number}: label reconciliation failed: {exc}")
-            if z is not None:
-                try:
-                    ci = 'running' if running_prs(heads, running, number) else None
-                    zulip.reconcile(z, str(number), number in opened, ci, bot_id=bot_id, create_if_open=True)
-                except zulip.ConfigError as exc:
-                    stop.append(('config', str(exc)))
-                    return
-                except core.RateLimited as exc:
-                    stop.append(('quota', str(exc)))
-                    return
-                except Exception as exc:
-                    failed = True
-                    log(f"PR #{number}: Zulip reconciliation failed: {exc}")
             with lock:
                 key = str(number)
                 if failed:
@@ -396,16 +346,13 @@ def main(argv=None):
                     state['retry'].pop(key, None)
                 active['completed'][key] = checked_from
                 active['pending'].remove(number)
-                if number in active['opened']:
-                    active['opened'].remove(number)
                 save_progress(output, state)
 
         with ThreadPoolExecutor(max_workers=PARALLEL) as pool:
             list(pool.map(one, ordered))
         if stop:
             log(f"stopping: {stop[0][1]}; {len(active['pending'])} PRs retained")
-            config = next((reason for kind, reason in stop if kind == 'config'), None)
-            return zulip.fail_config(config) if config is not None else 1
+            return 1
         # Advance to a completely read discovery boundary, never merely to
         # this workflow run's creation time.
         state['watermark'] = active['started_at']

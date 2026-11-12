@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 import batch
@@ -79,16 +79,12 @@ class ResumeTests(unittest.TestCase):
         root = stack.enter_context(tempfile.TemporaryDirectory())
         self.path = Path(root) / 'state.json'
         self.args = ['--since', '2026-10-19T08:00:00Z', '--state-in', str(self.path), '--state-out', str(self.path)]
-        stack.enter_context(patch.dict(os.environ, {'ZULIP_EMAIL': 'bot', 'ZULIP_API_KEY': 'test'}, clear=True))
+        stack.enter_context(patch.dict(os.environ, {}, clear=True))
         stack.enter_context(patch.object(batch, 'PARALLEL', 1))
         self.heads = stack.enter_context(patch.object(batch, 'open_heads', return_value={'h': [1, 2, 3]}))
-        self.updated = stack.enter_context(patch.object(batch, 'updated_prs', return_value=([1, 2, 3], {1})))
-        stack.enter_context(patch.object(batch, 'touched_by_runs', return_value=(set(), set())))
+        self.updated = stack.enter_context(patch.object(batch, 'updated_prs', return_value=[1, 2, 3]))
+        stack.enter_context(patch.object(batch, 'touched_by_runs', return_value=set()))
         self.labels = stack.enter_context(patch.object(batch.labels, 'reconcile'))
-        self.zulip = stack.enter_context(patch.object(batch.zulip, 'reconcile'))
-        client = Mock()
-        client.my_user_id.return_value = 7
-        stack.enter_context(patch.object(batch.zulip, 'Zulip', return_value=client))
         core._BLOCKED_UNTIL = 0
         self.addCleanup(setattr, core, '_BLOCKED_UNTIL', 0)
 
@@ -98,7 +94,7 @@ class ResumeTests(unittest.TestCase):
     def test_run_discovery_queries_only_installed_workflows(self):
         with patch.object(batch, 'lines', return_value=['.github/workflows/pr-build.yml']), \
                 patch.object(batch, 'workflow_runs', return_value=[]) as runs:
-            self.assertEqual(REAL_TOUCHED('2026-10-19T08:00:00Z', {}), (set(), set()))
+            self.assertEqual(REAL_TOUCHED('2026-10-19T08:00:00Z', {}), set())
         self.assertTrue(runs.called)
         self.assertEqual({call.args[0] for call in runs.call_args_list}, {'pr-build.yml'})
 
@@ -111,34 +107,20 @@ class ResumeTests(unittest.TestCase):
                     patch.object(batch, 'workflow_runs', side_effect=lambda w, q:
                                  [row] if q.startswith('status=completed') else []):
                 return REAL_TOUCHED('2026-10-19T08:00:00Z', {head: [7]}, completed)
-        self.assertEqual(discover({}), ({7}, set()))
-        self.assertEqual(discover({}, completed={'7': '2026-10-19T09:01:00Z'}), (set(), set()))
-        self.assertEqual(discover({'display_title': 'pr-build 8'}), (set(), set()))
-        self.assertEqual(discover({'event': 'push'}), (set(), set()))
+        self.assertEqual(discover({}), {7})
+        self.assertEqual(discover({}, completed={'7': '2026-10-19T09:01:00Z'}), set())
+        self.assertEqual(discover({'display_title': 'pr-build 8'}), set())
+        self.assertEqual(discover({'event': 'push'}), set())
         self.assertEqual(discover({'event': 'repository_dispatch',
-                                  'display_title': f'pr-build pr=7 head={head}'}), ({7}, set()))
+                                  'display_title': f'pr-build pr=7 head={head}'}), {7})
         self.assertEqual(discover({'event': 'repository_dispatch',
-                                  'display_title': 'pr-build pr=7 head=' + 'c' * 40}), (set(), set()))
+                                  'display_title': 'pr-build pr=7 head=' + 'c' * 40}), set())
 
-    def test_only_an_exact_dispatched_head_can_be_painted_running(self):
-        head = "a" * 40
-        def discover(title):
-            row = dict(head_sha="b" * 40, event="workflow_dispatch", display_title=title,
-                       updated_at="2026-10-19T09:00:00Z")
-            with patch.object(batch, 'lines', return_value=['.github/workflows/pr-build.yml']), \
-                    patch.object(batch, 'workflow_runs', side_effect=lambda w, q:
-                                 [row] if q == 'status=in_progress' else []):
-                return REAL_TOUCHED('2026-10-19T08:00:00Z', {head: [7]})
-        self.assertEqual(discover('pr-build 7'), ({7}, set()))
-        self.assertEqual(discover(f'pr-build pr=7 head={head}'), ({7}, {head}))
-        self.assertEqual(discover('pr-build pr=7 head=' + 'c' * 40), (set(), set()))
-
-    def test_labels_only_needs_no_zulip_credentials_or_client(self):
+    def test_labels_need_no_zulip_credentials_or_network(self):
         with patch.dict(os.environ, {}, clear=True), \
-                patch.object(batch.zulip, 'Zulip', side_effect=AssertionError('Zulip is off')):
-            self.assertEqual(batch.main(self.args + ['--labels-only']), 0)
+                patch('urllib.request.urlopen', side_effect=AssertionError('unexpected network')):
+            self.assertEqual(batch.main(self.args), 0)
         self.assertEqual([c.args[0] for c in self.labels.call_args_list], ['1', '2', '3'])
-        self.zulip.assert_not_called()
         self.assertIsNone(self.read()['active'])
 
     def test_quota_failure_resumes_without_repeating_successful_prefix(self):
@@ -161,7 +143,7 @@ class ResumeTests(unittest.TestCase):
         self.path.write_text(json.dumps(failed))
         core._BLOCKED_UNTIL = 0
         self.labels.side_effect = None
-        self.updated.return_value = ([], set())
+        self.updated.return_value = []
         self.assertEqual(batch.main(self.args), 0)
         self.assertEqual([c.args[0] for c in self.labels.call_args_list], ['2', '3'])
         done = self.read()
@@ -170,15 +152,15 @@ class ResumeTests(unittest.TestCase):
 
     def test_a_mid_scan_change_is_covered_by_the_next_window(self):
         state = batch.load_progress(None, '2026-10-19T08:00:00Z')
-        state['active'] = {'started_at': '2026-10-19T09:00:00Z', 'pending': [2], 'opened': [], 'completed': {}}
+        state['active'] = {'started_at': '2026-10-19T09:00:00Z', 'pending': [2], 'completed': {}}
         self.path.write_text(json.dumps(state))
-        self.updated.return_value = ([3], set())
+        self.updated.return_value = [3]
         self.assertEqual(batch.main(self.args), 0)
         # PR 3 was the last event and has no future trigger: catch it now.
         self.assertEqual([c.args[0] for c in self.labels.call_args_list], ['2', '3'])
         self.assertEqual(self.updated.call_args.args[0], '2026-10-19T08:58:00Z')
         watermark = self.read()['watermark']
-        self.updated.return_value = ([], set())
+        self.updated.return_value = []
         self.assertEqual(batch.main(self.args), 0)
         expected = batch.iso(batch.dt.datetime.fromisoformat(watermark.replace('Z', '+00:00')) - batch.dt.timedelta(minutes=2))
         self.updated.assert_called_with(expected)
@@ -187,7 +169,7 @@ class ResumeTests(unittest.TestCase):
         self.labels.side_effect = lambda n: (_ for _ in ()).throw(RuntimeError('bad input')) if n == '2' else None
         self.assertEqual(batch.main(self.args), 0)
         self.assertEqual(self.read()['retry'], {'2': 1})
-        self.updated.return_value = ([], set())
+        self.updated.return_value = []
         self.labels.reset_mock()
         self.labels.side_effect = None
         self.assertEqual(batch.main(self.args), 0)
@@ -204,7 +186,6 @@ class ResumeTests(unittest.TestCase):
         self.assertEqual(batch.main(self.args + ['--dry-run']), 0)
         self.assertFalse(self.path.exists())
         self.labels.assert_not_called()
-        self.zulip.assert_not_called()
 
     def test_bad_cooldown_and_duplicate_pending_records_fail_closed(self):
         for value in (True, '600', -1, float('nan'), float('inf')):
@@ -214,7 +195,7 @@ class ResumeTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 batch.load_progress(self.path, 'ignored')
         state['blocked_until'] = 0
-        state['active'] = {'started_at': state['watermark'], 'pending': [1, 1], 'opened': [], 'completed': {}}
+        state['active'] = {'started_at': state['watermark'], 'pending': [1, 1], 'completed': {}}
         self.path.write_text(json.dumps(state))
         with self.assertRaises(ValueError):
             batch.load_progress(self.path, 'ignored')
@@ -236,19 +217,11 @@ class ResumeTests(unittest.TestCase):
 
 
     def test_discovery_ignores_activity_older_than_saved_completion(self):
-        rows = ['1 2026-10-19T09:00:00Z 2026-10-19T08:00:00Z',
-                '2 2026-10-19T09:02:00Z 2026-10-19T09:02:00Z']
+        rows = ['1 2026-10-19T09:00:00Z',
+                '2 2026-10-19T09:02:00Z']
         with patch.object(batch, 'lines', return_value=rows):
-            prs, opened = REAL_UPDATED('2026-10-19T08:00:00Z', {'1': '2026-10-19T09:01:00Z'})
-        self.assertEqual((prs, opened), ([2], {2}))
-
-    def test_mid_batch_config_failure_keeps_error_annotation_and_pending_work(self):
-        self.zulip.side_effect = batch.zulip.ConfigError('invalid credentials')
-        with patch.object(batch.zulip, 'fail_config', return_value=1) as fail:
-            self.assertEqual(batch.main(self.args), 1)
-        fail.assert_called_once_with('invalid credentials')
-        self.assertEqual(self.read()['active']['pending'], [1, 2, 3])
-
+            prs = REAL_UPDATED('2026-10-19T08:00:00Z', {'1': '2026-10-19T09:01:00Z'})
+        self.assertEqual(prs, [2])
 
     def test_changes_during_a_completed_check_are_not_skipped_on_resume(self):
         real_datetime = batch.dt.datetime
