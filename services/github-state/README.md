@@ -85,13 +85,23 @@ jobs with pagination state, a seven-day change journal, and stable query
 snapshots. Initial inventories and histories publish complete coverage after
 all pages finish. A failed page preserves the previous complete collection.
 
-The main webhook queue admits up to sixteen concurrent single-message consumers
-in production and test. This overlaps delivery I/O while the existing repository
-writer serializes mutations. Each message retains its own acknowledgement,
-retry and durable replay behavior; the dead-letter consumer remains at one.
+The main webhook queue admits up to sixteen concurrent consumers of up to four
+messages each in production and test, handled concurrently. This overlaps delivery
+I/O while the existing repository writer serializes mutations. Each message retains
+its own acknowledgement, retry and durable replay behavior; the dead-letter consumer
+remains at one message.
 Ingestion health separates writer wait (total and maximum milliseconds per
 event type/minute) from application-through-cleanup time. A growing writer wait
 means that increasing delivery concurrency alone will not resolve the delay.
+
+Deliveries that wait for the writer at the same time share its transactions.
+Each writer transaction opens its own database connection and commits once, and
+the serialized writer gives every waiting caller one turn, so one delivery per
+transaction let arrivals outpace application. A group takes up to 16 deliveries
+that are waiting when it reaches the writer and applies them in arrival order in
+one transaction; at most four groups wait at once. A failed group is retried one
+delivery per transaction, so a bad delivery fails only itself. Receipts, ordering
+guards and the queue's retry and parking behavior are unchanged.
 
 PostgreSQL housekeeping runs in the background from the existing cron and
 maintenance hooks. Survey rebuilding coalesces independently of storage maintenance

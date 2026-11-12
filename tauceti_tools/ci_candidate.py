@@ -130,10 +130,22 @@ class ExecutionPolicy:
     execution_branch: str
     require_publication: bool
     config_digest: str
+    member_sources: tuple[RepositoryIdentity, ...] = ()
 
     def __post_init__(self):
         if not all(isinstance(ref, RepositoryIdentity) for ref in (self.source, self.execution, self.harness)):
             raise ValueError("invalid policy repositories")
+        if (
+            not isinstance(self.member_sources, tuple)
+            or len(self.member_sources) > 16
+            or any(not isinstance(source, RepositoryIdentity) for source in self.member_sources)
+            or len({(source.repository.forge.key, source.native_id) for source in self.member_sources})
+            != len(self.member_sources)
+            or len({source.repository.key for source in self.member_sources}) != len(self.member_sources)
+        ):
+            raise ValueError("invalid enrolled member sources")
+        if self.member_sources and self.source not in self.member_sources:
+            raise ValueError("retention source must be among the enrolled member sources")
         if self.source.repository.forge.kind != "forgejo":
             raise ValueError("source-candidate execution requires a Forgejo source")
         if self.execution.repository.forge != GITHUB or self.harness.repository.forge != GITHUB:
@@ -164,7 +176,8 @@ class ExecutionPolicy:
                 "base_branch",
                 "execution_branch",
                 "require_publication",
-            },
+            }
+            | ({"member_sources"} if isinstance(value, dict) and "member_sources" in value else set()),
             "execution policy",
         )
         if value["schema"] != SCHEMA or not isinstance(configuration, bytes):
@@ -172,6 +185,8 @@ class ExecutionPolicy:
         origin = _object(value["credential_origin"], {"kind", "url"}, "credential origin")
         if not all(isinstance(origin[key], str) for key in origin):
             raise ValueError("invalid credential origin")
+        if "member_sources" in value and (not isinstance(value["member_sources"], list) or not value["member_sources"]):
+            raise ValueError("enrolled member sources must be a nonempty list")
         return cls(
             RepositoryIdentity.parse(value["source"]),
             RepositoryIdentity.parse(value["execution"]),
@@ -183,6 +198,7 @@ class ExecutionPolicy:
             value["execution_branch"],
             value["require_publication"],
             hashlib.sha256(configuration).hexdigest(),
+            tuple(RepositoryIdentity.parse(source) for source in value.get("member_sources", [])),
         )
 
     def record(self, *, with_config=True):
@@ -198,6 +214,8 @@ class ExecutionPolicy:
             "execution_branch": self.execution_branch,
             "require_publication": self.require_publication,
         }
+        if self.member_sources:
+            value["member_sources"] = [source.record() for source in self.member_sources]
         if with_config:
             value["config_digest"] = self.config_digest
         return value
@@ -209,20 +227,38 @@ class ExecutionPolicy:
 
 @dataclass(frozen=True)
 class Member:
+    """An accepted source revision; qualified members require explicit policy enrollment."""
+
     pr: int
     head: str
+    source: RepositoryIdentity | None = None
 
     def __post_init__(self):
         _positive(self.pr, "source PR number")
         _hex(self.head, 40, "accepted member head")
+        if self.source is not None and not isinstance(self.source, RepositoryIdentity):
+            raise ValueError("qualified member requires a native repository identity")
+
+    @property
+    def key(self):
+        source = None if self.source is None else (self.source.repository.forge.key, self.source.native_id)
+        return (source, self.pr)
+
+    @property
+    def ref_key(self):
+        return str(self.pr) if self.source is None else digest([self.source.record(), self.pr])
 
     @classmethod
     def parse(cls, value):
-        _object(value, {"pr", "head"}, "accepted member")
-        return cls(value["pr"], value["head"])
+        qualified = isinstance(value, dict) and "source" in value
+        _object(value, {"pr", "head"} | ({"source"} if qualified else set()), "accepted member")
+        return cls(value["pr"], value["head"], RepositoryIdentity.parse(value["source"]) if qualified else None)
 
     def record(self):
-        return {"pr": self.pr, "head": self.head}
+        value = {"pr": self.pr, "head": self.head}
+        if self.source is not None:
+            value["source"] = self.source.record()
+        return value
 
 
 def member_manifest_bytes(epoch, request_id, members):
@@ -233,7 +269,8 @@ def member_manifest_bytes(epoch, request_id, members):
         not isinstance(members, tuple)
         or not 1 <= len(members) <= MAX_RETAINED_MEMBERS
         or not all(isinstance(member, Member) for member in members)
-        or len({member.pr for member in members}) != len(members)
+        or len({member.key for member in members}) != len(members)
+        or len({member.source is None for member in members}) != 1
     ):
         raise ValueError("invalid retained members")
     raw = canonical(
@@ -346,7 +383,9 @@ class CandidateRequest:
                 epoch=self.epoch,
                 request_id=self.request_id,
             )
-        if len({m.pr for m in self.members}) != len(self.members):
+        if any(m.source is not None for m in self.members) and any(m.source is None for m in self.members):
+            raise ValueError("qualified membership cannot mix implicit and explicit source identities")
+        if len({m.key for m in self.members}) != len(self.members):
             raise ValueError("duplicate source PR in candidate")
 
     @property
@@ -369,10 +408,15 @@ class CandidateRequest:
             raise ValueError("inline candidate has no retained member manifest")
         return f"refs/heads/tauceti-ci/{self.epoch}/{self.request_id}/members"
 
-    def bind_members(self, raw):
+    def bind_members(self, raw, *, policy=None):
         if self.member_manifest is None:
             raise ValueError("inline candidate cannot bind external membership")
-        return replace(self, members=self.member_manifest.read(raw, epoch=self.epoch, request_id=self.request_id))
+        bound = replace(self, members=self.member_manifest.read(raw, epoch=self.epoch, request_id=self.request_id))
+        if policy is not None:
+            bound.check_policy(policy)
+        elif any(member.source is not None for member in bound.members):
+            raise ValueError("qualified retained membership requires its independently trusted policy")
+        return bound
 
     @property
     def retained_ref(self):
@@ -383,7 +427,7 @@ class CandidateRequest:
             raise ValueError("retained membership uses manifest parents rather than per-member branches")
         if member not in self._member_set:
             raise ValueError("member does not belong to candidate")
-        return f"refs/heads/tauceti-ci/{self.epoch}/{self.request_id}/member-{member.pr}"
+        return f"refs/heads/tauceti-ci/{self.epoch}/{self.request_id}/member-{member.ref_key}"
 
     @classmethod
     def parse(cls, value, *, policy):
@@ -451,6 +495,13 @@ class CandidateRequest:
             or self.config_digest != policy.config_digest
         ):
             raise ValueError("candidate request differs from trusted policy")
+        qualified = any(member.source is not None for member in self.members)
+        if qualified and (
+            not policy.member_sources or any(member.source not in policy.member_sources for member in self.members)
+        ):
+            raise ValueError("candidate member source is not enrolled in the trusted policy")
+        if policy.member_sources and self.members and not qualified:
+            raise ValueError("mixed-source policy requires explicit identities on every member")
 
     def record(self):
         return {

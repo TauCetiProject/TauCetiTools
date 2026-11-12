@@ -36,6 +36,17 @@ from .project import ConfigError, load
 from .templates import materialize
 
 
+def source_configuration_path(path):
+    """Select a fixed trusted source-CI config while ordinary GitHub CI keeps its config.
+
+    The caller provides its immutable workflow checkout, never a candidate checkout.
+    This selector accepts no request field or candidate-chosen filename.
+    """
+    path = Path(path)
+    dedicated = path.parent / ".tauceti" / "ci-source.toml"
+    return dedicated if path.name == "tauceti.toml" and dedicated.is_file() else path
+
+
 def load_request(
     policy_path, configuration_path, event_path, context, *, harness_file=".github/workflows/pr-build.yml"
 ):
@@ -118,7 +129,7 @@ def retained_members(request, policy, context, *, token=None, client=None):
     raw = base64.b64decode(blob["content"], validate=True)
     if len(raw) != manifest.size or hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest() != blob_id:
         raise ValueError("retained membership differs from its Git blob")
-    bound = request.bind_members(raw)
+    bound = request.bind_members(raw, policy=policy)
     check_member_parents(bound, commit_header)
     check_source_repository(policy, client)
     return bound, raw
@@ -200,7 +211,7 @@ def resolve(request, policy, context, store, *, token=None, client=None):
         if request.member_manifest is not None:
             refs.append((request.manifest_ref, "refs/ci/members"))
         else:
-            refs.extend((request.member_ref(m), f"refs/ci/member-{m.pr}") for m in request.accepted_members)
+            refs.extend((request.member_ref(m), f"refs/ci/member-{m.ref_key}") for m in request.accepted_members)
         git.fetch(policy.source.repository.clone_url, refs)
         for ref, expected in [
             ("refs/ci/head", request.head),
@@ -208,7 +219,7 @@ def resolve(request, policy, context, store, *, token=None, client=None):
             *(
                 ([("refs/ci/members", request.member_manifest.commit)])
                 if request.member_manifest is not None
-                else [(f"refs/ci/member-{m.pr}", m.head) for m in request.accepted_members]
+                else [(f"refs/ci/member-{m.ref_key}", m.head) for m in request.accepted_members]
             ),
         ]:
             actual = git.run("rev-parse", ref).stdout.decode().strip()
@@ -277,10 +288,10 @@ def fetch(request, policy, context, workspace, *, token=None, client=None):
         else:
             git.fetch_sources(
                 policy.source.repository.clone_url,
-                [(request.member_ref(m), f"refs/ci/member-{m.pr}") for m in request.accepted_members],
+                [(request.member_ref(m), f"refs/ci/member-{m.ref_key}") for m in request.accepted_members],
             )
             for member in request.accepted_members:
-                if git.run("rev-parse", f"refs/ci/member-{member.pr}").stdout.decode().strip() != member.head:
+                if git.run("rev-parse", f"refs/ci/member-{member.ref_key}").stdout.decode().strip() != member.head:
                     raise ValueError("fetched member differs from the accepted head")
     check_source_repository(policy, client)
     return value
@@ -420,7 +431,11 @@ def toolchain_pin(request, policy, context, store, *, token=None, client=None):
 def native_lint_policy(request, policy, context, *, client):
     """Collect native metadata before any dependency executable runs on the job."""
     check_workflow_context(request, policy, context)
-    if len(request.accepted_members) > MAX_MEMBERS:
+    if len(request.accepted_members) > MAX_MEMBERS or any(
+        member.source is not None and member.source != policy.source for member in request.accepted_members
+    ):
+        # Full lint is the safe default when a batch includes another source.
+        # Never ask Forgejo for the same-numbered GitHub PR or share credentials.
         return False
     started = time.monotonic()
     try:
@@ -757,6 +772,7 @@ def main(argv=None):
     parser.add_argument("--members-output")
     parser.add_argument("--receipt-output")
     args = parser.parse_args(argv)
+    args.configuration = str(source_configuration_path(args.configuration))
     context = context_from_environment(os.environ)
     request, policy = load_request(
         args.policy,
@@ -781,7 +797,7 @@ def main(argv=None):
                 parser.error("this operation requires verified --members-file")
             with open(args.members_file, "rb") as source:
                 raw = source.read(MAX_MEMBER_MANIFEST_BYTES + 1)
-            request = request.bind_members(raw)
+            request = request.bind_members(raw, policy=policy)
     if args.command == "bootstrap":
         if not args.scripts:
             parser.error("bootstrap requires --scripts")
