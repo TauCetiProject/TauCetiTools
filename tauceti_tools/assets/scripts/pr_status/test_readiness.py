@@ -1,6 +1,7 @@
 """Contract tests using the actual pinned Auto-merge engine, without network calls."""
 
 import copy
+import importlib
 import json
 import unittest
 from types import SimpleNamespace
@@ -103,6 +104,42 @@ class GateContract(unittest.TestCase):
             f"| ✅ | [{r}](url) | approved | judge | summary |"
             for r in readiness.engine().DEFAULT_RUBRICS)
         self.check("ready-to-merge", comments=[old])
+
+    def test_a_rubric_being_phased_in_is_asked_only_of_prs_above_its_cutoff(self):
+        ten = list(readiness.engine().DEFAULT_RUBRICS)
+        phased = ten + ["quality-pass"]
+
+        def rubrics_for(repo, number):
+            return list(phased if repo == "Owner/Repo" and int(number) > 1 else ten)
+
+        later = dict(PR, number=2)
+        with patch.object(readiness.engine(), "rubrics_for", rubrics_for, create=True), \
+                patch.object(readiness.core, "REPO", "Owner/Repo"):
+            self.check("ready-to-merge")
+            self.check("awaiting-review", pr=later)
+            states = {r: "green" for r in phased}
+            self.check("ready-to-merge", pr=later, comments=[board(states=states)])
+            states["quality-pass"] = "blocking_request"
+            self.check("awaiting-author", pr=later, comments=[board(states=states)])
+            elsewhere = readiness.classify(later, [board()], STATUSES, PATHS, MERGE_BASE, NOW,
+                                           repo="Other/Repo")
+            self.assertEqual(elsewhere["category"], "ready-to-merge")
+
+    def test_an_engine_without_phased_rubrics_asks_its_one_list_of_every_pr(self):
+        with patch.object(readiness.engine(), "rubrics_for", None, create=True):
+            self.check("ready-to-merge", pr=dict(PR, number=10 ** 9))
+
+    def test_the_pinned_engines_own_table_is_followed_once_it_has_one(self):
+        gate = readiness.engine()
+        table = getattr(importlib.import_module("admission_policy"), "PHASED_RUBRICS", None)
+        if table is None or not hasattr(gate, "rubrics_for"):
+            self.skipTest("the pinned review engine predates phased rubrics")
+        later = dict(PR, number=101)
+        with patch.dict(table, {"quality-pass": {readiness.core.REPO: 100}}):
+            self.check("ready-to-merge", pr=dict(PR, number=100))
+            self.check("awaiting-review", pr=later)
+            states = {r: "green" for r in gate.rubrics_for(readiness.core.REPO, 101)}
+            self.check("ready-to-merge", pr=later, comments=[board(states=states)])
 
     def test_ci_failure_and_missing_build_are_never_ready(self):
         self.check("ci-failed", statuses=dict(STATUSES, build="failure"))
