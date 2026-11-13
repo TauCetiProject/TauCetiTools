@@ -132,6 +132,9 @@ class ProjectTests(unittest.TestCase):
         source = "      repair_bot_login: tauceti-review-bot[bot]\n"
         project = parse(initial_configuration("kim-em/Arcturus", "human").encode())
         self.assertEqual(render(source, project), "      repair_bot_login: arcturus-automation[bot]\n")
+        # GitHub's slug of the App name `Example.Ceti-automation`, as for `deepsource.io`.
+        dotted = parse(initial_configuration("o/Example.Ceti", "human").encode())
+        self.assertEqual(render(source, dotted), "      repair_bot_login: example-ceti-automation[bot]\n")
         # The documented section, through parsing: it needs no `mode`.
         custom = initial_configuration("kim-em/Arcturus", "human") + '\n[services.automation]\napp_slug = "arcturus-bot"\n'
         self.assertEqual(render(source, parse(custom.encode())), "      repair_bot_login: arcturus-bot[bot]\n")

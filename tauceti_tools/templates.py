@@ -152,14 +152,17 @@ def repair_cache_url(project: Project) -> str:
 def automation_login(project: Project) -> str:
     """The login of the project's automation App, which opens its lint repair PRs.
 
-    Tau Ceti's is its review bot. Other projects register `REPOSITORY-automation`; set
-    `services.automation.app_slug` when the App has another slug.
+    Tau Ceti's is its review bot. Other projects register the App as `REPOSITORY-automation`, and
+    GitHub derives its slug from that name: lower case, with each run of characters other than
+    letters and digits replaced by `-` (`Example.Ceti-automation` has slug `example-ceti-automation`).
+    Set `services.automation.app_slug` when the App has another slug.
     """
     if project.legacy:
         return "tauceti-review-bot[bot]"
     # The repository name through the qualified reference, which a project on any forge has
     # (`project.content` is GitHub-only).
-    default = project.repository_ref("content").name.split("/")[1].lower() + "-automation"
+    name = project.repository_ref("content").name.split("/")[1] + "-automation"
+    default = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
     return project.service("automation").get("app_slug", default) + "[bot]"
 
 
