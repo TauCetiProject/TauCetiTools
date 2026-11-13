@@ -23,7 +23,7 @@ CONFIRM = "Confirm the exact revision map on the public endpoint"
 ACQUISITION_SECONDS = 300
 PUBLICATION_SECONDS = 1200
 POST_RETRY_SECONDS = 600
-MACHINE_LABEL = "nscloud-ubuntu-24.04-amd64-4x8-with-features;job.priority=0"
+MACHINE_LABEL = "ubuntu-24.04"
 API_ROOT = "https://api.github.com/repos/" + REPO
 
 
@@ -63,7 +63,7 @@ def publication_job(data):
 
 def isolated_runner(data, job, run_id):
     """Require the selected nonprivileged labels and a different sandbox runner."""
-    labels = {MACHINE_LABEL, f"namespace-features:github.run-id={run_id}"}
+    labels = {MACHINE_LABEL}
     actual = set(job.get("labels", []))
     isolated = actual == labels
     configured = os.environ.get("CI_PUBLISHER_RUNNER_LABELS")

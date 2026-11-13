@@ -21,12 +21,9 @@ jobs:
     with:
       caller_repository: ${{ github.repository }}
       caller_revision: ${{ github.workflow_sha }}
-  # Reuse small Namespace runners rather than queue release fixes behind GitHub builds.
-  # Leave priority unspecified so Bors control (0) and staging builds (1) go first.
+  # Package and audit checks use GitHub-hosted capacity.
   package:
-    runs-on:
-      - nscloud-ubuntu-24.04-amd64-2x4-with-features
-      - namespace-features:github.run-id=${{ github.run_id }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -36,9 +33,7 @@ jobs:
       - run: python -m unittest discover -s tests -p 'test_*.py'
       - run: PYTHONPATH=tauceti_tools/assets/scripts python tauceti_tools/assets/scripts/test_lint_dot_notation.py
   axiom-audit:
-    runs-on:
-      - nscloud-ubuntu-24.04-amd64-2x4-with-features
-      - namespace-features:github.run-id=${{ github.run_id }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       ELAN_TOOLCHAIN: leanprover/lean4:v4.36.0-rc2
@@ -79,9 +74,7 @@ jobs:
       - name: Verify bulk restoration and native publication with stock Lake
         run: python tauceti_tools/assets/scripts/test_bulk_unpack_cache.py --integration
   github-state:
-    runs-on:
-      - nscloud-ubuntu-24.04-amd64-2x4-with-features
-      - namespace-features:github.run-id=${{ github.run_id }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -92,9 +85,7 @@ jobs:
 
   github-state-postgres:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on:
-      - nscloud-ubuntu-24.04-amd64-2x4-with-features
-      - namespace-features:github.run-id=${{ github.run_id }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       # Isolated test-branch credentials only; no Neon API key or production URL.

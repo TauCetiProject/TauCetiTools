@@ -22,6 +22,11 @@ class MaintenanceControlRunnersTests(unittest.TestCase):
                 text += '[tools.review]\nrepo="TauCetiProject/TauCetiReview"\nref="' + "b" * 40 + '"\n'
                 config.write_text(text)
                 write_project(load(str(config)), root)
+                for workflow in (root / ".github/workflows").glob("*.yml"):
+                    for job in yaml.safe_load(workflow.read_text()).get("jobs", {}).values():
+                        target = str(job.get("runs-on", ""))
+                        self.assertNotIn("nscloud-", target, workflow.name)
+                        self.assertNotIn("namespace-features:", target, workflow.name)
                 alerts = (root / ".github/workflows/stuck-alerts.yml").read_text()
                 self.assertNotIn("__MAINTENANCE_RUNNER__", alerts)
                 alert_runner = yaml.safe_load(alerts)["jobs"]["stuck-alerts"]["runs-on"]
@@ -41,8 +46,7 @@ class MaintenanceControlRunnersTests(unittest.TestCase):
                     update = yaml.safe_load((root / ".github/workflows/update.yml").read_text())
                     runners = [alert_runner] + status_runners + [job["runs-on"] for job in update["jobs"].values()]
                     for runner in runners:
-                        self.assertIn("2x4-with-features;job.priority=0", runner)
-                        self.assertIn("github.run_id", runner)
+                        self.assertEqual(runner, "ubuntu-24.04")
                 else:
                     self.assertEqual(alert_runner, "ubuntu-latest")
                     self.assertTrue(all(runner == "ubuntu-latest" for runner in status_runners))
