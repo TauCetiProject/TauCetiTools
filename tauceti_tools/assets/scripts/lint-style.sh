@@ -45,7 +45,9 @@ fi
 status=0
 if ((${#files[@]} == 0)); then
   echo "lint-style: no remaining changed source files; skipping header audit."
-elif ! lake env lean --run "$TRUSTED_SCRIPTS/HeaderStyle.lean" "${files[@]}"; then
+# Pass the NUL-separated list in batches: the whole-library path list exceeds ARG_MAX (E2BIG).
+# xargs exits non-zero if any batch fails, so a single header failure still fails the audit.
+elif ! xargs -0 -n 2000 lake env lean --run "$TRUSTED_SCRIPTS/HeaderStyle.lean" < "$lint_src/files"; then
   status=1
 fi
 
