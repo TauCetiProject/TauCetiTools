@@ -93,6 +93,19 @@ class SetupTemplateTests(SetupFixture):
         self.assertTrue((self.root / "content/.github/workflows/claims-access.yml").is_file())
         self.assertTrue((self.root / "content/.github/workflows/pick-runner.yml").is_file())
 
+    def test_pr_status_has_no_zulip_sink_with_announcements_enabled_or_disabled(self):
+        for enabled in (False, True):
+            with self.subTest(zulip=enabled):
+                self.project.raw["features"]["zulip"] = enabled
+                checkout = self.root / f"posting-{enabled}"
+                checkout.mkdir()
+                write_project(self.project, checkout)
+                workflow = (checkout / ".github/workflows/pr-status.yml").read_text()
+                self.assertNotIn("ZULIP_", workflow)
+                self.assertNotIn("--labels-only", workflow)
+                self.assertIn("scripts/pr_status/batch.py", workflow)
+                self.assertFalse((checkout / ".github/workflows/zulip-healthcheck.yml").exists())
+
     def test_app_permission_prerequisite_precedes_registration(self):
         _, steps = app_setup(self.project, "automation", organization=True)
         self.assertIn("organization owner or an authorized GitHub App manager", steps[0])

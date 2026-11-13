@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """GitHub-reading helpers and build/review signals for PR status consumers.
 
-Zulip renders derive() as build and review reactions. Merge eligibility is stricter:
+Merge eligibility is assessed separately:
 labels and pipeline health call readiness.py, which uses the pinned Auto-merge gate.
 These summary helpers must not be used to infer that a PR can enter the queue.
 
@@ -86,7 +86,7 @@ class RateLimited(RuntimeError):
 
 # Once a limit is established, every later read is refused until it resets. Without
 # this a caller that catches per-item failures — stuck_alerts runs ten detectors,
-# housekeeping and the Zulip backfill loop per PR — would start the full wait again
+# housekeeping and label reconciliation loop per PR — would start the full wait again
 # for each one and blow the job's timeout long before doing any work.
 _BLOCKED_UNTIL = 0.0
 _BLOCK_LOCK = threading.Lock()  # batch.py calls gh_api from several threads
@@ -258,52 +258,6 @@ def gh_api(path, jq=None, paginate=False):
         waited += delay
 
 
-def _roadmap_labels(labels):
-    """Sorted `roadmap/...` names from REST label objects or plain label names."""
-    names = [label.get("name", "") if isinstance(label, dict) else str(label)
-             for label in labels]
-    return sorted(name for name in names if name.startswith("roadmap/"))
-
-
-def pr_state(pr):
-    """{'state','merged','head','title','author','roadmaps'} for the PR.
-
-    Prefer the triggering event's payload, passed in via PR_STATE/PR_HEAD/
-    PR_MERGED/PR_TITLE/PR_AUTHOR/PR_LABELS_JSON (a workflow that has the
-    pull_request object can set these from github.event.pull_request, so a
-    close/merge needs no GitHub API call at all). Fall back to the REST API when
-    PR state/head aren't set (the workflow_run and issue_comment triggers, and
-    the backfill), where the payload is absent or isn't the PR we're
-    reconciling.
-    """
-    env_state = os.environ.get("PR_STATE")
-    env_head = os.environ.get("PR_HEAD")
-    if env_state and env_head:
-        try:
-            labels = json.loads(os.environ.get("PR_LABELS_JSON") or "[]")
-        except json.JSONDecodeError:
-            labels = []
-        if not isinstance(labels, list):
-            labels = []
-        return {
-            "state": env_state,
-            "merged": os.environ.get("PR_MERGED") == "true",
-            "head": env_head,
-            "title": os.environ.get("PR_TITLE") or f"PR #{pr}",
-            "author": os.environ.get("PR_AUTHOR") or "",
-            "roadmaps": _roadmap_labels(labels),
-        }
-    d = json.loads(gh_api(f"/repos/{REPO}/pulls/{pr}"))
-    return {
-        "state": d["state"],                 # "open" | "closed"
-        "merged": bool(d.get("merged")),
-        "head": d["head"]["sha"],
-        "title": d.get("title") or f"PR #{pr}",
-        "author": (d.get("user") or {}).get("login") or "",
-        "roadmaps": _roadmap_labels(d.get("labels") or []),
-    }
-
-
 def issue_comments(pr):
     """All issue comments as `[{'body','updated','author_association'}]`.
 
@@ -381,18 +335,6 @@ def newest_status(head, context):
     return row["state"], row.get("updated_at") or None
 
 
-def ci_status(head):
-    """'running' | 'success' | 'failure' | None from the `build` commit status."""
-    state, _ = newest_status(head, "build")
-    if state == "pending":
-        return "running"
-    if state == "success":
-        return "success"
-    if state in ("failure", "error"):
-        return "failure"
-    return None
-
-
 def review_state(meta, head):
     """Map the scoreboard meta at the current head to a sink-agnostic review state.
 
@@ -404,10 +346,10 @@ def review_state(meta, head):
     map. State not at the current head (a fix landed since the last
     review) reads as "running, green so far".
 
-        "none"     nothing posted yet          (no Zulip review emoji / label awaiting-review)
-        "running"  behind HEAD, or undecided    (no Zulip review emoji / label awaiting-review)
-        "changes"  at HEAD, a blocking rubric   (Zulip ✍️ / label awaiting-author)
-        "approved" at HEAD, supplied review signals green (Zulip ✔️; not merge readiness)
+        "none"     nothing posted yet          (label awaiting-review)
+        "running"  behind HEAD, or undecided    (label awaiting-review)
+        "changes"  at HEAD, a blocking rubric   (label awaiting-author)
+        "approved" at HEAD, supplied review signals green (not merge readiness)
     """
     if not meta:
         return "none"
@@ -430,47 +372,3 @@ def review_state(meta, head):
     if all(r.get("verdict") == "approve" for r in runs):
         return "approved"
     return "running"
-
-
-def derive(pr, ci_override=None, state=None, now=None):
-    """The canonical status of a PR, as a dict:
-
-        {"lifecycle": "open"|"merged"|"closed",
-         "ci":        "running"|"success"|"failure"|None,   # None => not reported
-         "review":    "none"|"running"|"changes"|"approved"|None,
-         "head":      "<sha>", "title": "<title>"}
-
-    `ci` and `review` are only meaningful while the PR is open; on a
-    merged/closed PR they are None/False (a sink shows a terminal state and clears the rest).
-
-    `ci_override` (running|success|failure|none|None) forces the CI state instead of reading the
-    `build` commit status. `state` lets a caller pass a pre-fetched pr_state() so the PR is read
-    once (a Zulip sink creates its message from the title BEFORE these fallible reads). `now`
-    (epoch seconds) is the clock for the in-progress TTL; defaults to the wall clock.
-    """
-    st = state if state is not None else pr_state(pr)
-    if st["merged"]:
-        lifecycle = "merged"
-    elif st["state"] == "closed":
-        lifecycle = "closed"
-    else:
-        lifecycle = "open"
-
-    if lifecycle != "open":
-        ci = None
-        review = None
-    else:
-        if ci_override is not None:
-            ci = None if ci_override == "none" else ci_override
-        else:
-            ci = ci_status(st["head"])
-        comments = issue_comments(pr)
-        review = review_state(scoreboard_meta_from(comments), st["head"])
-
-    return {
-        "lifecycle": lifecycle,
-        "ci": ci,
-        "review": review,
-        "head": st["head"],
-        "title": st["title"],
-    }

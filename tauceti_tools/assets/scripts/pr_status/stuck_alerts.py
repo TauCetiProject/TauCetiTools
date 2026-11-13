@@ -63,7 +63,7 @@ these would cheapen the topic and train people to ignore it):
     these after STALE_DAYS;
   * open roadmap / help-wanted issues -- that IS the ask-the-humans queue.
 
-Idempotent, like zulip.py: exactly one bot-owned message per active
+Idempotent: exactly one bot-owned message per active
 alert key, tagged with a hidden `<!--stuck:v1 <key>-->` marker on its LAST line.
 Each run reconciles the topic against live GitHub state:
   * a NEW alert posts a message (the only event that notifies watchers);
@@ -164,7 +164,6 @@ SCHEDULERS = {
     # concurrency group for hours, so allow for one of those.
     "api-docs.yml":          ("API docs (doc-gen4)",       8),
     "housekeeping.yml":      ("queue housekeeping",        7),
-    "zulip-healthcheck.yml": ("zulip healthcheck",        15),
     "merge-sweep.yml":       ("merge sweep",               4),
     # Every 15 minutes; the threshold is deliberately loose because GitHub
     # routinely delays a scheduled run well past its cadence.
@@ -418,8 +417,8 @@ def detect_missing_required_status():
     """An open PR whose head never received a `build` status although pr-build finished.
 
     A MISSING required status is worse than a red one and cannot self-heal. GitHub holds the PR
-    at BLOCKED because the required check never arrives; core.derive sees no `build` status, so
-    labels.py takes its ci=None branch and pins the PR at `awaiting-CI` instead of moving it to
+    at BLOCKED because the required check never arrives; the readiness gate keeps its
+    label at `awaiting-CI` instead of moving it to
     `ci-failed`; and nothing re-runs pr-build without a push, so no event ever corrects
     it. PR #1358 sat wedged this way for seven days, invisible to the author and review paths
     alike, after a transient API error killed the status-reporting step mid-way.

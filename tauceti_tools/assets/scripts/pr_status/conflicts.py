@@ -15,8 +15,7 @@ The `merge-conflict` label is deliberately NOT part of the mutually-exclusive se
 `labels.py` maintains, and nothing else reads or writes it. Conflict is orthogonal
 to where a PR sits in the pipeline: a PR can be awaiting review AND conflicting,
 and saying both is more useful than having one hide the other. Keeping them apart
-also means conflict state never enters `core.derive` and can never lose a
-precedence argument against CI or review state.
+preserves a visible conflict signal alongside the lifecycle label.
 
 THE LABEL IS THE STATE. Whether an episode is open is just "is the label on the
 PR", so there is no marker to parse and no way to fail to recognise our own
