@@ -40,6 +40,15 @@ class API:
         self.reads = 0
         self.runs = []
 
+    def graphql(self, query, variables):
+        return {"repository": {"pullRequest": {
+            "headRefOid": self.pr["head"]["sha"],
+            "timelineItems": {"nodes": [
+                {"__typename": "PullRequestCommit", "commit": {"oid": self.pr["head"]["sha"]}},
+                {"__typename": "LabeledEvent", "label": {"name": "self-tested"}, "actor": {"login": "worker"}},
+            ], "pageInfo": {"hasPreviousPage": False, "startCursor": None}},
+        }}}
+
     def request(self, method, path, data=None, **kwargs):
         if method != "GET":
             self.writes.append((method, path, data))
@@ -62,162 +71,128 @@ class API:
 
 class SelfTested(unittest.TestCase):
     def setUp(self):
-        staging = patch.object(route, "in_staging", return_value=False)
-        self.staging = staging.start()
-        self.addCleanup(staging.stop)
         self.api = API()
-        self.event = {"action": "labeled", "label": {"name": "self-tested"}, "pull_request": self.api.pr}
-        self.env = patch.dict(
-            os.environ,
-            TAUCETI_SELF_TESTED_TEAM="org/trusted",
-            GITHUB_RUN_ID="42",
-            SELF_TESTED_MERGE_BACKEND="bors",
-            TAUCETI_TEAM_TOKEN="",
-            SELF_TESTED_TEAM_TOKEN="",
-        )
-        self.env.start()
-        self.addCleanup(self.env.stop)
+        env = patch.dict(os.environ, TAUCETI_SELF_TESTED_TEAM="org/trusted", GITHUB_RUN_ID="42",
+                         SELF_TESTED_MERGE_BACKEND="bors")
+        env.start()
+        self.addCleanup(env.stop)
 
     def decide(self, **kwargs):
-        return route.decide(self.api, "org/repo", 7, self.event, **kwargs)
+        return route.decide(self.api, "org/repo", 7, **kwargs)
 
-    def test_allowed_author_gets_explicit_skip_without_a_build_success(self):
+    def test_existing_assessment_accepts_label_without_a_picker_receipt(self):
         self.assertTrue(self.decide())
-        contexts = {data["context"] for _, _, data in self.api.writes}
-        self.assertEqual(contexts, {"self-tested/7", "scope", "bump-guard"})
-        self.assertEqual(self.api.writes[0][2]["description"], policy.DESCRIPTION)
+        contexts = [data["context"] for method, path, data in self.api.writes if method == "POST"]
+        self.assertEqual(contexts, ["scope", "bump-guard", "self-tested/7"])
+        self.assertFalse(any("/dispatches" in path for _, path, _ in self.api.writes))
 
-    def test_accepted_staging_membership_survives_label_removal(self):
-        self.api.statuses = [{"context": "self-tested/7", "state": "success", "id": 10}]
-        self.api.pr["labels"] = []
-        self.event = {"action": "unlabeled", "label": {"name": "self-tested"}}
-        self.staging.return_value = True
+    def test_assessment_reuses_its_existing_pr_status_and_diff_evidence(self):
+        def no_files(path):
+            self.fail("assessment must reuse its existing diff")
+        self.api.items = no_files
+        self.assertTrue(self.decide(pr=self.api.pr, rows=[], paths=["TauCeti/A.lean"]))
+        self.assertEqual(self.api.reads, 1)  # one final head/label fence only
+
+    def test_no_artificial_line_or_file_size_cap(self):
+        self.api.pr.update(additions=100000, deletions=50000)
+        self.api.files[0].update(status="added", additions=50000)
         self.assertTrue(self.decide())
-        self.assertEqual(self.api.writes, [])
 
-    def test_nonmember_infrastructure_and_full_lint_use_ordinary_ci(self):
-        self.api.member = False
-        self.assertFalse(self.decide())
-        self.assertEqual([w[0] for w in self.api.writes], ["DELETE"])
-        self.api.member = True
-        self.api.files[0]["filename"] = "lakefile.toml"
-        self.assertFalse(self.decide())
-        self.api.files[0]["filename"] = "TauCeti/A.lean"
+    def test_nonmember_or_human_owned_files_return_to_normal_ci_by_label_event(self):
+        for member, name in [(False, "TauCeti/A.lean"), (True, "scripts/tool.py")]:
+            with self.subTest(member=member, path=name):
+                self.api = API()
+                self.api.member = member
+                self.api.files[0]["filename"] = name
+                self.assertFalse(self.decide())
+                self.assertEqual(self.api.writes, [("DELETE", "repos/org/repo/issues/7/labels/self-tested", None)])
+
+    def test_full_lint_requires_ci_without_removing_the_routing_label(self):
         self.api.pr["labels"].append({"name": "full-lint"})
         self.assertFalse(self.decide())
+        self.assertEqual(self.api.writes, [])
 
-    def test_push_without_relabel_clears_assertion_and_reconciliation_requests_ci(self):
-        self.event = {"action": "synchronize", "pull_request": self.api.pr}
-        self.assertFalse(self.decide(reconcile=True))
-        self.assertIn("/dispatches", self.api.writes[0][1])
-        self.assertEqual(self.api.writes[1][0], "DELETE")
-
-    def test_late_push_event_keeps_a_new_head_assertion_and_main_advance_is_irrelevant(self):
-        self.api.statuses = [{"context": "self-tested/7", "state": "success", "id": 10}]
-        self.event = {"action": "synchronize", "pull_request": self.api.pr}
-        self.assertTrue(self.decide())
-        self.assertEqual({w[2]["context"] for w in self.api.writes}, {"scope", "bump-guard"})
-
-    def test_label_for_an_old_head_cannot_assert_the_new_head(self):
-        self.event = copy.deepcopy(self.event)
-        self.event["pull_request"]["head"]["sha"] = "b" * 40
+    def test_unlabelled_pr_does_no_assessment_work(self):
+        self.api.pr["labels"] = []
         self.assertFalse(self.decide())
-        self.assertEqual(self.api.writes[0][0], "DELETE")
+        self.assertEqual(self.api.writes, [])
 
-    def test_membership_revocation_returns_to_ordinary_ci(self):
-        self.api.statuses = [{"context": "self-tested/7", "state": "success", "id": 10}]
-        self.api.member = False
-        self.assertFalse(self.decide(reconcile=True))
-        self.assertIn("/dispatches", self.api.writes[0][1])
-        self.assertEqual(self.api.writes[1][2]["state"], "failure")
-
-    def test_unavailable_membership_returns_to_ordinary_ci(self):
-        self.api.statuses = [{"context": "self-tested/7", "state": "success", "id": 10}]
+    def test_membership_failure_retries_assessment_without_mutating_or_dispatching(self):
         original = self.api.request
-
         def unavailable(method, path, *args, **kwargs):
             if "/memberships/" in path:
                 raise RuntimeError("membership unavailable")
             return original(method, path, *args, **kwargs)
-
         self.api.request = unavailable
-        self.assertFalse(self.decide(reconcile=True))
-        self.assertIn("/dispatches", self.api.writes[0][1])
-
-    def test_head_change_during_read_does_not_publish(self):
-        self.api.move = True
-        self.assertFalse(self.decide())
+        with self.assertRaisesRegex(RuntimeError, "membership unavailable"):
+            self.decide()
         self.assertEqual(self.api.writes, [])
 
-    def test_renaming_human_owned_files_into_library_remains_ineligible(self):
+    def test_head_change_during_assessment_retries_without_publishing(self):
+        self.api.move = True
+        with self.assertRaisesRegex(RuntimeError, "PR changed"):
+            self.decide()
+        self.assertEqual(self.api.writes, [])
+
+    def test_partial_diff_is_unknown_not_an_excuse_to_build(self):
+        self.api.pr["changed_files"] = 2
+        with self.assertRaisesRegex(RuntimeError, "Incomplete"):
+            self.decide()
+        self.assertEqual(self.api.writes, [])
+
+    def test_rename_from_human_owned_paths_still_needs_normal_ci(self):
         self.api.files[0].update(status="renamed", previous_filename="scripts/tool.lean")
         self.assertFalse(self.decide())
-        self.assertEqual([w[0] for w in self.api.writes], ["DELETE"])
 
-    def test_partial_diff_and_size_guards_still_use_ordinary_ci(self):
-        self.api.pr["changed_files"] = 2
-        self.assertFalse(self.decide())
-        self.api.pr["changed_files"] = 1
-        self.api.pr["additions"] = 2001
-        self.assertFalse(self.decide())
-
-    def test_fresh_label_reconciliation_waits_for_picker_and_dispatch_failure_keeps_retry_evidence(self):
-        self.event = {}
-        with patch.object(route, "recent_label", return_value=True):
-            self.assertFalse(self.decide(reconcile=True))
-        self.assertEqual(self.api.writes, [])
-        original = self.api.request
-
-        def rejected(method, path, *args, **kwargs):
-            if "/dispatches" in path:
-                raise RuntimeError("dispatch unavailable")
-            return original(method, path, *args, **kwargs)
-
-        self.api.request = rejected
-        with patch.object(route, "recent_label", return_value=False), self.assertRaises(RuntimeError):
-            self.decide(reconcile=True)
-        self.assertEqual(self.api.writes, [])
-
-    def test_queued_picker_is_not_limited_by_the_five_minute_grace(self):
-        self.event = {}
-        self.api.runs = [{"pull_requests": [{"number": 7}]}]
-        with patch.object(route, "recent_label", return_value=False):
-            self.assertFalse(self.decide(reconcile=True))
-        self.assertEqual(self.api.writes, [])
-
-    def test_stale_label_with_existing_build_does_not_dispatch_again(self):
-        self.event = {}
-        self.api.statuses = [{"context": "build", "state": "failure", "id": 10}]
-        self.assertFalse(self.decide(reconcile=True))
-        self.assertEqual([w[0] for w in self.api.writes], ["DELETE"])
-
-    def test_unrelated_label_change_during_read_does_not_lose_the_assertion(self):
-        original = self.api.request
-
-        def relabel(method, path, *args, **kwargs):
-            result = original(method, path, *args, **kwargs)
-            if method == "GET" and "/pulls/" in path and self.api.reads > 1:
-                result["labels"].append({"name": "awaiting-review"})
-            return result
-
-        self.api.request = relabel
-        self.assertTrue(self.decide())
-
-    def test_observer_needs_current_head_label_and_the_pr_bound_policy_status(self):
+    def test_revoked_membership_withdraws_current_assertion_and_removes_label(self):
         self.api.statuses = [{"context": "self-tested/7", "state": "success", "id": 10}]
+        self.api.member = False
+        self.assertFalse(self.decide())
+        self.assertEqual(self.api.writes[0][2]["state"], "failure")
+        self.assertEqual(self.api.writes[1][0], "DELETE")
 
-        def read(path):
-            return self.api.request("GET", path)
+    def test_push_after_label_requires_relabel_without_a_separate_picker(self):
+        original = self.api.graphql
+        def old_label(*args):
+            value = original(*args)
+            value["repository"]["pullRequest"]["timelineItems"]["nodes"].reverse()
+            return value
+        self.api.graphql = old_label
+        self.assertFalse(self.decide())
+        self.assertEqual(self.api.writes, [("DELETE", "repos/org/repo/issues/7/labels/self-tested", None)])
 
-        self.assertTrue(policy.observe("org/repo", 7, "a" * 40, read))
-        self.api.statuses[0]["context"] = "self-tested/8"
-        self.assertFalse(policy.observe("org/repo", 7, "a" * 40, read))
-        self.api.statuses[0]["context"] = "self-tested/7"
-        self.assertFalse(policy.observe("org/repo", 7, "b" * 40, read))
+    def test_force_push_after_label_does_not_reuse_old_assertion(self):
+        original = self.api.graphql
+        def force_push(*args):
+            value = original(*args)
+            value['repository']['pullRequest']['timelineItems']['nodes'].append(
+                {'__typename': 'HeadRefForcePushedEvent', 'afterCommit': {'oid': self.api.pr['head']['sha']}})
+            return value
+        self.api.graphql = force_push
+        self.assertFalse(self.decide())
+
+    def test_timeline_paginates_past_unrelated_lifecycle_label_churn(self):
+        page = self.api.graphql('', {})
+        older = page['repository']['pullRequest']['timelineItems']['nodes'][:1]
+        page['repository']['pullRequest']['timelineItems']['nodes'] = page['repository']['pullRequest']['timelineItems']['nodes'][1:]
+        page['repository']['pullRequest']['timelineItems']['pageInfo'] = {'hasPreviousPage': True, 'startCursor': 'older'}
+        from copy import deepcopy
+        second = deepcopy(page)
+        second['repository']['pullRequest']['timelineItems']['nodes'] = older
+        second['repository']['pullRequest']['timelineItems']['pageInfo'] = {'hasPreviousPage': False, 'startCursor': None}
+        with patch.object(self.api, 'graphql', side_effect=[page, second]) as query:
+            self.assertTrue(self.decide())
+        self.assertEqual(query.call_args.args[1]['before'], 'older')
+
+    def test_current_head_result_is_idempotent(self):
+        self.api.statuses = [{"context": c, "state": "success", "id": i}
+                             for i, c in enumerate(["scope", "bump-guard", "self-tested/7"])]
+        self.assertTrue(self.decide())
+        self.assertEqual(self.api.writes, [])
 
 
-BOT = "tauceti-review-bot[bot]"
 REPO = "TauCetiProject/TauCeti"
+BOT = "tauceti-review-bot[bot]"
 
 
 class BumpAPI(API):
@@ -275,9 +250,6 @@ class BumpAPI(API):
 
 class AutomaticBump(unittest.TestCase):
     def setUp(self):
-        staging = patch.object(route, "in_staging", return_value=False)
-        self.staging = staging.start()
-        self.addCleanup(staging.stop)
         self.guard_patch = patch.object(route, "check_bump", return_value=(True, "BUMP-GUARD: PASS"))
         self.guard = self.guard_patch.start()
         self.addCleanup(self.guard_patch.stop)
@@ -295,7 +267,7 @@ class AutomaticBump(unittest.TestCase):
         self.addCleanup(env.stop)
 
     def decide(self, **kwargs):
-        return route.decide(self.api, REPO, 7, self.event, **kwargs)
+        return route.decide(self.api, REPO, 7, **kwargs)
 
     def posted(self):
         return {w[2]["context"]: w[2] for w in self.api.writes if "/statuses/" in w[1]}
@@ -325,18 +297,15 @@ class AutomaticBump(unittest.TestCase):
         self.assertEqual([w[0] for w in self.api.writes], ["DELETE"])
         self.guard.assert_not_called()
 
-    def test_unreadable_label_events_use_ordinary_ci(self):
-        def unavailable(path):
-            raise route.APIError("GET", path, 502, {"message": "unavailable"})
+    def test_unreadable_label_timeline_retries_without_changing_the_label(self):
+        def unavailable(*args):
+            raise RuntimeError("timeline unavailable")
+        self.api.graphql = unavailable
+        with self.assertRaisesRegex(RuntimeError, "timeline unavailable"):
+            self.decide()
+        self.assertEqual(self.api.writes, [])
 
-        self.api.items = lambda path: unavailable(path) if "/events?" in path else self.api.files
-        self.assertFalse(self.decide())
-        self.assertEqual(self.api.membership_queries, [])
-        self.assertEqual([w[0] for w in self.api.writes], ["DELETE"])
-        self.api.items = lambda path: [] if "/events?" in path else self.api.files
-        self.assertFalse(self.decide())
-
-    def test_unreadable_membership_uses_ordinary_ci(self):
+    def test_unreadable_membership_retries_assessment(self):
         original = self.api.request
 
         def unavailable(method, path, *args, **kwargs):
@@ -345,8 +314,9 @@ class AutomaticBump(unittest.TestCase):
             return original(method, path, *args, **kwargs)
 
         self.api.request = unavailable
-        self.assertFalse(self.decide())
-        self.assertEqual([w[0] for w in self.api.writes], ["DELETE"])
+        with self.assertRaisesRegex(RuntimeError, "membership unavailable"):
+            self.decide()
+        self.assertEqual(self.api.writes, [])
 
     def test_bump_paths_exclude_lakefiles_other_roots_and_pinless_diffs(self):
         for files in (
@@ -377,21 +347,6 @@ class AutomaticBump(unittest.TestCase):
                 self.assertEqual([w[0] for w in self.api.writes], ["DELETE"])
         self.guard.assert_not_called()
 
-    def test_bump_has_a_wider_line_budget(self):
-        self.api.pr["additions"] = 4585
-        self.api.pr["deletions"] = 4276
-        self.assertTrue(self.decide())
-        self.guard.reset_mock()
-        self.api.pr["additions"] = 20001
-        self.assertFalse(self.decide())
-        self.guard.assert_not_called()
-
-    def test_bump_keeps_the_file_limit(self):
-        self.api.files = [{"filename": f"TauCeti/A{i}.lean", "status": "modified"} for i in range(2001)]
-        self.api.pr["changed_files"] = 2001
-        self.assertFalse(self.decide())
-        self.guard.assert_not_called()
-
     def test_check_bump_failure_posts_no_assertion(self):
         self.guard.return_value = (False, "BUMP-GUARD: FAIL")
         self.assertFalse(self.decide())
@@ -403,18 +358,20 @@ class AutomaticBump(unittest.TestCase):
 
     def test_unreadable_check_bump_inputs_post_no_verdict(self):
         self.guard.return_value = (None, "bump-guard inputs unavailable")
-        self.assertFalse(self.decide())
-        self.assertEqual([w[0] for w in self.api.writes], ["DELETE"])
+        with self.assertRaisesRegex(RuntimeError, "Bump-guard evidence"):
+            self.decide()
+        self.assertEqual(self.api.writes, [])
 
     def test_check_bump_failure_withdraws_an_earlier_assertion(self):
         self.api.statuses = [{"context": "self-tested/7", "state": "success", "id": 10}]
         self.guard.return_value = (False, "BUMP-GUARD: FAIL")
-        self.assertFalse(self.decide(reconcile=True))
+        self.assertFalse(self.decide())
         self.assertEqual(self.posted()["self-tested/7"]["state"], "failure")
 
     def test_head_change_during_check_bump_does_not_publish(self):
         self.api.move = True
-        self.assertFalse(self.decide())
+        with self.assertRaisesRegex(RuntimeError, "PR changed"):
+            self.decide()
         self.assertEqual(self.api.writes, [])
 
     def test_bump_branch_needs_the_bot_author_and_the_base_repository(self):

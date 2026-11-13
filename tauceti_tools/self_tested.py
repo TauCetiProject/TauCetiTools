@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import urllib.request
 
 LABEL = "self-tested"
 CONTEXT = "self-tested"
@@ -70,7 +69,7 @@ def gh_read(path):
     return json.loads(result.stdout)
 
 
-def membership(repo, author, read=gh_read):
+def membership(repo, author, read=gh_read, *, strict=False):
     configured = team(repo)
     if not configured or not author:
         return False
@@ -78,15 +77,17 @@ def membership(repo, author, read=gh_read):
         org, slug = configured.split("/", 1)
         return read(f"orgs/{org}/teams/{slug}/memberships/{author}").get("state") == "active"
     except (OSError, ValueError, TypeError, AttributeError, KeyError, RuntimeError, subprocess.SubprocessError):
-        return False  # Ordinary CI remains available when org membership cannot be read.
+        if strict:
+            raise
+        return False  # Read-only consumers remain conservative when membership is unknown.
 
 
 def observe(repo, number, head, read=gh_read):
-    """Consume the trusted picker's PR/head-bound policy result and current label.
+    """Consume the existing assessment's PR/head-bound result and current label.
 
-    The picker and existing label reconciliation resolve team membership. Consumers
-    use that result just as they use trusted scope/build statuses; no second App
-    permission or independently cached team roster is needed.
+    The existing PR assessment resolves team membership and records its decision.
+    Consumers reuse that result like scope/build statuses; no picker handshake,
+    second App permission or independently cached team roster is needed.
     """
     if not team(repo):
         return False
@@ -122,33 +123,3 @@ def allowed_bump_paths(paths, prefix="TauCeti/"):
         (p.startswith(prefix) or p in PIN_FILES) and "\n" not in p and "\r" not in p for p in paths
     )
 
-
-def in_staging(repo, number, head):
-    """Use the queue's existing immutable member snapshot; unknown means ordinary CI."""
-    url = os.environ.get(
-        "TAUCETI_BORS_URL", "https://bors.taucetiproject.org" if repo == "TauCetiProject/TauCeti" else ""
-    )
-    repository_id = os.environ.get("TAUCETI_BORS_REPOSITORY_ID", "1" if repo == "TauCetiProject/TauCeti" else "")
-    if not url or not repository_id:
-        return False
-    try:
-        request = urllib.request.Request(
-            f"{url.rstrip('/')}/repositories/{repository_id}/active-batches?base=main",
-            headers={"Cache-Control": "no-cache", "Accept": "application/json"},
-        )
-        with urllib.request.urlopen(request, timeout=10) as response:
-            data = json.load(response)
-        if (
-            data.get("schema") != "tauceti-bors.observation/v1"
-            or data.get("repo") != repo
-            or data.get("base") != "main"
-        ):
-            return False
-        return any(
-            m.get("pr") == number and m.get("head_sha") == head
-            for batch in data.get("batches", [])
-            if batch.get("state") in {"waiting", "running"}
-            for m in batch.get("members", [])
-        )
-    except (OSError, ValueError, TypeError, AttributeError):
-        return False

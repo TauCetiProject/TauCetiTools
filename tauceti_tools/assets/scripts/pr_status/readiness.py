@@ -122,7 +122,8 @@ def classify(pr, comments, statuses, paths, merge_base_sha, now=None, self_teste
 # Use GraphQL for evidence so the all-open audit does not spend one REST request
 # per metadata/comments/status read. Status.contexts contains the latest value of
 # each commit-status context; check runs are intentionally not interchangeable.
-_FIELDS = """number state isDraft baseRefName baseRefOid headRefOid mergeable
+_FIELDS = """number state isDraft baseRefName baseRefOid headRefOid headRefName mergeable
+  author { login } headRepository { nameWithOwner }
   labels(first:100) { nodes { name } pageInfo { hasNextPage } }
   commits(last:1) { nodes { commit { oid status { contexts { context state } } } } }
 """
@@ -180,7 +181,9 @@ def evidence(number, repo, comments=True):
     if commit["oid"] != first["headRefOid"]:
         raise RuntimeError("Commit statuses do not belong to the current PR head")
     pr = {"number": number, "state": first["state"].lower(), "draft": first["isDraft"],
-          "head": {"sha": first["headRefOid"]},
+          "head": {"sha": first["headRefOid"], "ref": first.get("headRefName", ""),
+                   "repo": {"full_name": (first.get("headRepository") or {}).get("nameWithOwner", "")}},
+          "user": {"login": (first.get("author") or {}).get("login", "")},
           "base": {"ref": first["baseRefName"], "sha": first["baseRefOid"]},
           "labels": first["labels"]["nodes"],
           "mergeable": {"MERGEABLE": True, "CONFLICTING": False}.get(first["mergeable"])}
@@ -195,9 +198,6 @@ def assess(pr, repo=None, now=None):
     number = int(pr)
     current, comments, statuses = evidence(number, repo)
     head = current["head"]["sha"]
-    if any(label.get("name") == "self-tested" for label in current.get("labels", [])):
-        from self_tested import reconcile as reconcile_local_route
-        reconcile_local_route(number, repo)
     # The same compare the merge job asks, so the merge base is the one it will require;
     # core.gh_api keeps the rate-limit circuit breaker. A bare head SHA also resolves for fork
     # PRs, whose heads GitHub keeps in this repository as refs/pull/<n>/head.
@@ -205,18 +205,25 @@ def assess(pr, repo=None, now=None):
                              jq=".merge_base_commit.sha").strip()
     if not merge_base:
         raise RuntimeError(f"No merge base for #{number} from the compare API")
-    from tauceti_tools.self_tested import observe, requested
-    local = (observe(repo, number, head, lambda path: json.loads(core.gh_api(path)))
-             if requested(current.get("labels")) else False)
-    result = classify(current, comments, statuses, [], merge_base, now=now, self_tested=local,
-                      repo=repo)
-    # The gate rejects missing/build/review evidence before inspecting paths.
-    # Only otherwise approved PRs need the expensive path read, which the engine takes from git
-    # without any API call (`gh pr diff` fails for PRs touching more than 300 files).
-    if result["category"] in {"needs-human-review", "merge-check-failed"}:
+    from tauceti_tools.self_tested import context, requested
+    from self_tested import reconcile as reconcile_local_route
+    paths = None
+    local = False
+    if requested(current.get("labels"), current["head"].get("ref", "")):
+        # Reuse this head's existing assessment; metadata-only updates do not
+        # repeat membership, path or bump checks.
+        local = all(statuses.get(c) == "success" for c in (context(number), "scope", "bump-guard"))
+        if not local:
+            paths = diff_engine().git_diff(f"https://github.com/{repo}", merge_base, head)
+            local = reconcile_local_route(number, repo, pr=current, statuses=statuses, paths=paths)
+        if local and os.environ.get("SELF_TESTED_WRITE_TOKEN"):
+            statuses.update({context(number): "success", "scope": "success", "bump-guard": "success"})
+    elif any(label.get("name") == "self-tested" for label in current.get("labels", [])):
+        reconcile_local_route(number, repo, pr=current, statuses=statuses)
+    result = classify(current, comments, statuses, paths or [], merge_base, now=now, self_tested=local)
+    if paths is None and result["category"] in {"needs-human-review", "merge-check-failed"}:
         paths = diff_engine().git_diff(f"https://github.com/{repo}", merge_base, head)
-        result = classify(current, comments, statuses, paths, merge_base, now=now,
-                          self_tested=local, repo=repo)
+        result = classify(current, comments, statuses, paths, merge_base, now=now, self_tested=local)
     after, _, _ = evidence(number, repo, comments=False)
     if routing_state(after) != routing_state(current):
         result.update(eligible=False, category="awaiting-CI" if after["state"] == "open" else None,

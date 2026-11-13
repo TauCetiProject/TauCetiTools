@@ -176,6 +176,17 @@ class ResumeTests(unittest.TestCase):
         self.labels.assert_called_once_with('2')
         self.assertEqual(self.read()['retry'], {})
 
+    def test_persistent_failure_remains_retryable_after_many_passes(self):
+        self.labels.side_effect = lambda n: (_ for _ in ()).throw(RuntimeError('temporary API failure')) if n == '2' else None
+        self.assertEqual(batch.main(self.args), 0)
+        self.updated.return_value = []
+        for _ in range(8):
+            self.assertEqual(batch.main(self.args), 0)
+        self.assertEqual(self.read()['retry'], {'2': 9})
+        self.labels.side_effect = None
+        self.assertEqual(batch.main(self.args), 0)
+        self.assertEqual(self.read()['retry'], {})
+
     def test_parallel_completions_leave_no_pending_or_partially_written_state(self):
         with patch.object(batch, 'PARALLEL', 4):
             self.assertEqual(batch.main(self.args), 0)

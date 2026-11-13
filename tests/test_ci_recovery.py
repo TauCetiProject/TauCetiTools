@@ -176,18 +176,13 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(recovery.inventory(api, "owner/project"), ("main", [missing]))
         self.assertEqual(query.call_args.args[1]["after"], "next")
 
-    def test_only_current_pr_success_with_label_counts_as_preflight(self):
+    def test_self_tested_label_is_owned_by_existing_assessment_not_recovery(self):
         pull = dict(number=7, labels=dict(nodes=[dict(name="self-tested")]))
-        commit = dict(status=dict(contexts=[dict(context="self-tested/7", state="SUCCESS")]))
-        self.assertTrue(recovery.has_preflight(pull, commit))
-        for other in (
-            dict(pull, number=8),
-            dict(pull, labels=dict(nodes=[])),
-            dict(pull, labels=dict(nodes=[dict(name="self-tested"), dict(name="full-lint")])),
-        ):
-            self.assertFalse(recovery.has_preflight(other, commit))
-        commit["status"]["contexts"][0]["state"] = "FAILURE"
-        self.assertFalse(recovery.has_preflight(pull, commit))
+        self.assertTrue(recovery.has_preflight(pull, dict(status=None)))
+        self.assertFalse(recovery.has_preflight(dict(pull, labels=dict(nodes=[])), dict(status=None)))
+        for label in ("full-lint", "lint-repair"):
+            other = dict(pull, labels=dict(nodes=[dict(name="self-tested"), dict(name=label)]))
+            self.assertFalse(recovery.has_preflight(other, dict(status=None)))
 
     def test_dead_pending_status_does_not_count_as_a_finished_build(self):
         pull = dict(number=1)
