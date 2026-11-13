@@ -36,6 +36,11 @@ metadata cannot consume the pass's API budget ahead of useful recovery.
 The final check refreshes the specific head, known attempts and new dispatches;
 it does not repeat the entire historical live-run scan for every missing PR.
 
+PRs carrying `self-tested` are left to the existing PR assessment. It validates
+the current assertion and either records local testing or removes an ineligible
+label, whose event resumes ordinary CI. Recovery does not compete with that
+assessment by dispatching replacements. Full-lint requests still use ordinary CI.
+
 Recovery dispatches the ordinary trusted default-branch build. It never approves
 or merges a PR, and it never fabricates a successful status.
 

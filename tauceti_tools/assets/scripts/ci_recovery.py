@@ -51,12 +51,9 @@ def has_preflight(pull, commit):
     return any(
         row["context"] == "build" and row.get("state", "").lower() in {"success", "failure", "error"} for row in rows
     ) or (
-        "self-tested" in labels
-        and not labels & {"full-lint", "lint-repair"}
-        and any(
-            row["context"] == f"self-tested/{pull['number']}" and row.get("state", "").lower() == "success"
-            for row in rows
-        )
+        # The existing PR assessment owns the routing label. Do not cancel a
+        # label-event run or dispatch a build while it makes that decision.
+        "self-tested" in labels and not labels & {"full-lint", "lint-repair"}
     )
 
 

@@ -70,7 +70,7 @@ def gh_read(path):
     return json.loads(result.stdout)
 
 
-def membership(repo, author, read=gh_read):
+def membership(repo, author, read=gh_read, *, strict=False):
     configured = team(repo)
     if not configured or not author:
         return False
@@ -78,15 +78,17 @@ def membership(repo, author, read=gh_read):
         org, slug = configured.split("/", 1)
         return read(f"orgs/{org}/teams/{slug}/memberships/{author}").get("state") == "active"
     except (OSError, ValueError, TypeError, AttributeError, KeyError, RuntimeError, subprocess.SubprocessError):
-        return False  # Ordinary CI remains available when org membership cannot be read.
+        if strict:
+            raise
+        return False  # Read-only consumers remain conservative when membership is unknown.
 
 
 def observe(repo, number, head, read=gh_read):
     """Consume the trusted picker's PR/head-bound policy result and current label.
 
-    The picker and existing label reconciliation resolve team membership. Consumers
-    use that result just as they use trusted scope/build statuses; no second App
-    permission or independently cached team roster is needed.
+    The existing PR assessment resolves team membership and records its decision.
+    Consumers reuse that result like scope/build statuses; no picker handshake,
+    second App permission or independently cached team roster is needed.
     """
     if not team(repo):
         return False

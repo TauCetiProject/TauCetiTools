@@ -21,7 +21,7 @@ For each such PR it reconciles the GitHub lifecycle label from current state.
 A rate limit or a listing past GitHub's cap fails
 the run. The next run resumes its pending work; only finishing the scan advances its watermark. A single
 PR's failure does not: that PR is handed to the next run through --state-out/--state-in and retried
-up to MAX_RETRIES times, so one broken PR cannot hold every later run back.
+on later passes, so a temporary failure cannot strand a PR or hold healthy PRs back.
 
 Checkpoints contain PR numbers, retry counts, UTC window boundaries and a finite quota
 deadline; no PR bodies or credentials. A forced runner loss before artifact upload can
@@ -55,7 +55,6 @@ RUN_LOOKBACK = dt.timedelta(hours=7)
 # busy times some fifty PRs are touched in ten minutes, which one at a time would barely keep up with.
 # Only different PRs overlap; each label update is checkpointed before proceeding.
 PARALLEL = 4
-MAX_RETRIES = 5
 
 
 def log(msg):
@@ -232,7 +231,7 @@ def load_progress(path, since):
         raise ValueError('Invalid quota deadline')
     retry = state['retry']
     if not isinstance(retry, dict) or any(not k.isdigit() or int(k) <= 0 or
-            type(v) is not int or not 1 <= v <= MAX_RETRIES for k, v in retry.items()):
+            type(v) is not int or v < 1 for k, v in retry.items()):
         raise ValueError('Invalid retry queue')
     active = state['active']
     if active is not None:
@@ -337,11 +336,7 @@ def main(argv=None):
                 if failed:
                     failures.append(number)
                     attempt = state['retry'].get(key, 0) + 1
-                    if attempt <= MAX_RETRIES:
-                        state['retry'][key] = attempt
-                    else:
-                        state['retry'].pop(key, None)
-                        log(f"::warning::giving up on PR #{number} after {MAX_RETRIES} retries")
+                    state['retry'][key] = attempt
                 else:
                     state['retry'].pop(key, None)
                 active['completed'][key] = checked_from

@@ -208,6 +208,40 @@ class ReadEvidence(unittest.TestCase):
         self.assertFalse(result["eligible"])
         self.assertEqual(result["head"], "moved")
 
+    def test_local_testing_is_decided_inside_existing_assessment(self):
+        current = copy.deepcopy(PR)
+        current['labels'] = [{'name': 'self-tested'}]
+        current['head']['ref'] = 'math'
+        missing = {}
+        fake = MagicMock()
+        fake.git_diff.return_value = PATHS
+        import self_tested
+        with patch.object(readiness, 'evidence', return_value=(current, [board()], missing)), \
+             patch.object(readiness.core, 'gh_api', return_value=MERGE_BASE), \
+             patch.object(readiness, 'diff_engine', return_value=fake), \
+             patch.dict('os.environ', SELF_TESTED_WRITE_TOKEN='workflow-token'), \
+             patch.object(self_tested, 'reconcile', return_value=True) as assess:
+            result = readiness.assess(1, repo='owner/repo', now=NOW)
+        self.assertTrue(result['eligible'], result)
+        assess.assert_called_once_with(1, 'owner/repo', pr=current, statuses=missing, paths=PATHS)
+        fake.git_diff.assert_called_once()
+
+    def test_current_head_assessment_is_reused_without_rechecking_eligibility(self):
+        current = copy.deepcopy(PR)
+        current['labels'] = [{'name': 'self-tested'}]
+        statuses = {'self-tested/1': 'success', 'scope': 'success', 'bump-guard': 'success'}
+        fake = MagicMock()
+        fake.git_diff.return_value = PATHS
+        import self_tested
+        with patch.object(readiness, 'evidence', return_value=(current, [board()], statuses)), \
+             patch.object(readiness.core, 'gh_api', return_value=MERGE_BASE), \
+             patch.object(readiness, 'diff_engine', return_value=fake), \
+             patch.object(self_tested, 'reconcile') as assess:
+            result = readiness.assess(1, repo='owner/repo', now=NOW)
+        self.assertTrue(result['eligible'], result)
+        assess.assert_not_called()
+        fake.git_diff.assert_called_once()
+
     def test_only_approved_active_prs_fetch_diff(self):
         for current, comments, statuses, expected in (
                 (PR, [board()], STATUSES, True), (PR, [], STATUSES, False),
