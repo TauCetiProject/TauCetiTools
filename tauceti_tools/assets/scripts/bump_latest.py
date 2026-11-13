@@ -117,16 +117,29 @@ def open_bumps():
     raise RuntimeError("Open pull request listing was truncated")
 
 
+def repo_pin(commit):
+    data = api(f"repos/{REPO}/contents/lake-manifest.json?ref={sha(commit)}")
+    return pin(json.loads(base64.b64decode(data["content"])))
+
+
 def bump_state(current, prs):
-    """A held PR is left alone; otherwise only an obsolete target may be closed."""
+    """A held PR is left alone; otherwise only an obsolete target may be closed.
+
+    A bump is obsolete when main already pins its target or a newer one, or when main's pin
+    has changed since the branch was based on it (another bump landed first). The second
+    kind cannot merge until someone reconciles its manifest, and while it stays open no
+    fresh bump is opened, so it is replaced by a bump from current main."""
     active, obsolete = [], []
     for pr in prs:
         if pr.get("draft") or {p["name"].lower() for p in pr.get("labels", [])} & KEEP_LABELS:
             active.append(pr)
             continue
-        data = api(f"repos/{REPO}/contents/lake-manifest.json?ref={sha(pr['head']['sha'])}")
-        target = pin(json.loads(base64.b64decode(data["content"])))
-        (active if relationship(current, target) == "ahead" else obsolete).append(pr)
+        head = sha(pr["head"]["sha"])
+        if relationship(current, repo_pin(head)) != "ahead":
+            obsolete.append(pr)
+            continue
+        base = api(f"repos/{REPO}/compare/main...{head}?per_page=1")["merge_base_commit"]["sha"]
+        (active if repo_pin(base) == current else obsolete).append(pr)
     return active, obsolete
 
 
@@ -631,7 +644,7 @@ def publish(target, run_id):
                 "--repo",
                 REPO,
                 "--comment",
-                "Closing this obsolete bump: main already pins the same or a newer Mathlib commit.",
+                "Closing this obsolete bump: main's Mathlib pin has changed since this branch was based on it.",
             ]
         )
     if not target or relationship(current, target) != "ahead":

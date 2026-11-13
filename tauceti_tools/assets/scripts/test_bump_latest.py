@@ -126,24 +126,51 @@ class BumpTests(unittest.TestCase):
         self.assertTrue(all(p["inherited"] for p in proposed["packages"] if p["name"] != "mathlib"))
 
     def test_fixed_target_holds_and_obsolete_closure(self):
-        data = {
-            "content": base64.b64encode(
-                json.dumps({"packages": [{"name": "mathlib", "rev": NEW}]}).encode()
-            ).decode()
-        }
+        def api(base_pin):
+            def read(path):
+                if "/compare/" in path:
+                    return {"merge_base_commit": {"sha": MID}}
+                rev = base_pin if MID in path else NEW
+                return {
+                    "content": base64.b64encode(
+                        json.dumps({"packages": [{"name": "mathlib", "rev": rev}]}).encode()
+                    ).decode()
+                }
+
+            return read
+
         with (
-            patch.object(bl, "api", return_value=data),
+            patch.object(bl, "api", side_effect=api(OLD)),
             patch.object(bl, "relationship", return_value="ahead"),
         ):
             self.assertEqual(bl.bump_state(OLD, [pr()]), ([pr()], []))
         with (
-            patch.object(bl, "api", return_value=data),
+            patch.object(bl, "api", side_effect=api(OLD)),
             patch.object(bl, "relationship", return_value="behind"),
         ):
             self.assertEqual(bl.bump_state(TIP, [pr()]), ([], [pr()]))
         held = pr(labels=[{"name": "hold"}])
         with patch.object(bl, "api", side_effect=AssertionError("held target must not be changed")):
             self.assertEqual(bl.bump_state(TIP, [held]), ([held], []))
+
+    def test_bump_based_on_a_superseded_pin_is_replaced(self):
+        # Main moved from OLD to TAG1 under the open bump to NEW: its target is still ahead,
+        # but its branch is based on OLD, so it is closed and a fresh bump opens.
+        def read(path):
+            if "/compare/" in path:
+                return {"merge_base_commit": {"sha": MID}}
+            rev = OLD if MID in path else NEW
+            return {
+                "content": base64.b64encode(
+                    json.dumps({"packages": [{"name": "mathlib", "rev": rev}]}).encode()
+                ).decode()
+            }
+
+        with (
+            patch.object(bl, "api", side_effect=read),
+            patch.object(bl, "relationship", return_value="ahead"),
+        ):
+            self.assertEqual(bl.bump_state(TAG1, [pr()]), ([], [pr()]))
 
     def test_divergence_does_not_authorize_obsolete_closure(self):
         with patch.object(bl, "api", return_value={"status": "diverged"}):
