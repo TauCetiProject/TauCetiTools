@@ -30,6 +30,9 @@ on:
       lean_root: {type: string, required: true}
       roadmap_dir: {type: string, required: true}
       source_candidate_enabled: {type: boolean, default: false}
+      # The login of the GitHub App that opens the project's lint repair PRs (lint-full.yml): the
+      # automation App of the project's `APP_ID`. Project templates render it from the configuration.
+      repair_bot_login: {type: string, default: "tauceti-review-bot[bot]"}
     secrets:
       CI_SOURCE_READ_TOKEN: {required: false}
       APP_ID: {required: false}
@@ -402,6 +405,7 @@ jobs:
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           PR_USER: ${{ github.event.pull_request.user.login }}
+          REPAIR_BOT_LOGIN: ${{ inputs.repair_bot_login }}
           SCOPE_BASE: ${{ env.IS_BATCH == 'true' && steps.pr.outputs.base_ref || steps.pr.outputs.mergebase }}
           SCOPE_HEAD: ${{ steps.pr.outputs.sha }}
         run: |
@@ -444,9 +448,10 @@ jobs:
           # not tell that apart from a PR with no pin change at all — so it posted the required
           # bump-guard status green, asserting a validation that had not happened, to the human
           # being asked to merge exactly that kind of PR by hand.
-          # A lint repair PR starts as an empty commit on `lint-repair/...` opened by the review
-          # bot (lint-full.yml); its first build is the full lint that shows what to repair. Only
-          # that exact shape is exempt from routing an empty diff to a human.
+          # A lint repair PR starts as an empty commit on `lint-repair/...` opened by the
+          # project's app (lint-full.yml, login `repair_bot_login`); its first build is the full
+          # lint that shows what to repair. Only that exact shape is exempt from routing an empty
+          # diff to a human.
           repair_pr=0
           if [ -z "$files" ] && { [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event.action }}" = "tauceti-bors-pr-approved" ]; }; then
             # A dispatched rebuild (e.g. `gh workflow run pr-build.yml -f pr=N`) carries no PR payload.
@@ -460,9 +465,9 @@ jobs:
                    || [ "${{ github.event.action }}" = "tauceti-bors-pr-approved" ]; } \
               && [ "$PR_HEAD_REPO" = "${{ github.repository }}" ] \
               && [[ "$PR_HEAD_REF" == lint-repair/* ]] \
-              && [ "$PR_USER" = "tauceti-review-bot[bot]" ]; then
+              && [ -n "${REPAIR_BOT_LOGIN:-}" ] && [ "$PR_USER" = "${REPAIR_BOT_LOGIN:-}" ]; then
             repair_pr=1
-            echo "empty lint repair PR from the review bot: building it for its full lint"
+            echo "empty lint repair PR from $REPAIR_BOT_LOGIN: building it for its full lint"
           fi
           if [ -z "$files" ] && [ "$repair_pr" = 0 ]; then
             if [ "${SOURCE_CANDIDATE:-false}" = true ] && [ "$scope_diff_available" = 1 ]; then

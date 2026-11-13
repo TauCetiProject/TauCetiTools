@@ -127,6 +127,23 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(render(source, project),
                          "find Arcturus -name '*.lean'\nTauCetiProject/TauCetiTools\nTauCetiProject/TauCetiReview\n")
 
+    def test_repair_bot_login_is_the_project_automation_app(self):
+        from tauceti_tools.templates import render
+        source = "      repair_bot_login: tauceti-review-bot[bot]\n"
+        project = parse(initial_configuration("kim-em/Arcturus", "human").encode())
+        self.assertEqual(render(source, project), "      repair_bot_login: arcturus-automation[bot]\n")
+        # GitHub's slug of the App name `Example.Ceti-automation`, as for `deepsource.io`.
+        dotted = parse(initial_configuration("o/Example.Ceti", "human").encode())
+        self.assertEqual(render(source, dotted), "      repair_bot_login: example-ceti-automation[bot]\n")
+        # The documented section, through parsing: it needs no `mode`.
+        custom = initial_configuration("kim-em/Arcturus", "human") + '\n[services.automation]\napp_slug = "arcturus-bot"\n'
+        self.assertEqual(render(source, parse(custom.encode())), "      repair_bot_login: arcturus-bot[bot]\n")
+        for section in ('app_slug = "Arcturus Bot"', 'app_slug = ""', 'mode = "custom"\napp_slug = "arcturus-bot"', "app_slug = 1"):
+            with self.subTest(section=section), self.assertRaises(ConfigError):
+                parse((initial_configuration("kim-em/Arcturus", "human") + "\n[services.automation]\n" + section + "\n").encode())
+        tauceti = parse(initial_configuration("TauCetiProject/TauCeti", "human").encode())
+        self.assertEqual(render(source, tauceti), source)
+
     def test_configuration_snapshot_does_not_follow_file_edits(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"XDG_STATE_HOME": tmp}, clear=True):
             config = Path(tmp) / "project.toml"
