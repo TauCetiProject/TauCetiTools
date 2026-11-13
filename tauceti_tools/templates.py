@@ -21,7 +21,7 @@ ASSETS = HERE / "assets"
 # These consumers use local Git/Lean inputs only. Unported source-control and
 # deployment scripts must still reject qualified configuration.
 LOCAL_SCRIPTS = frozenset({"local_checks.py", "local_axioms.py", "local_lint.py", "check-expired-mathlib-shims.py"})
-MAINTENANCE_CONTROL_RUNNER = '${{ fromJSON(format(\'["nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=0","namespace-features:github.run-id={0}"]\', github.run_id)) }}'
+MAINTENANCE_CONTROL_RUNNER = "ubuntu-24.04"
 
 # Resolve tags when updating Tools, never when generating a downstream setup PR.
 # Verified against each action's GitHub commits API on 2026-10-21.

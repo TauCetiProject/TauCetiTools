@@ -76,7 +76,7 @@ def choose(pages, *, enabled, attempt):
 
     Pages must form a complete, consistently sized runner-group inventory.
     Disabled routing, retries, or incomplete observations return False so the
-    caller retains Namespace. This function reserves no runner capacity.
+    caller retains GitHub-hosted capacity. This function reserves no runner capacity.
     """
     if not enabled or attempt != 1:
         return False
@@ -121,10 +121,10 @@ def legacy_main():
                     break
             selected = choose(pages, enabled=enabled, attempt=attempt)
     except (OSError, ValueError, KeyError, TypeError):
-        print("::notice::Fleet inventory unavailable/incomplete; retaining Namespace")
+        print("::notice::Fleet inventory unavailable/incomplete; retaining GitHub-hosted capacity")
     with open(os.environ["GITHUB_OUTPUT"], "a") as out:
         out.write("fleet=" + ("true" if selected else "false") + "\n")
-    print("Dedicated fleet selected" if selected else "Namespace selected")
+    print("Dedicated fleet selected" if selected else "GitHub selected")
 
 
 class ObservationError(ValueError):
@@ -342,14 +342,14 @@ def route(*, kind, order, machines, runner_pages, observed, github_budget, names
     except (ValueError, KeyError, TypeError):
         print("::warning::Fleet configuration or inventory invalid; retaining cloud choices")
         resolved, ranked, discovered = {}, [], []
-    namespace_busy = observed.get("namespace_busy")
     for name in order:
+        # Ignore retired pool names even in older configuration and retries.
+        if name == "namespace":
+            continue
         if name in excluded or name in resolved and resolved[name]["machine_id"] in excluded:
             continue
         if name == "github" and observed.get("github_busy") is not None and observed["github_busy"] <= github_budget:
             return dict(pool="github")
-        if name == "namespace" and namespace_busy is not None and namespace_busy < namespace_cap:
-            return dict(pool="namespace")
         candidates = discovered if name == "fleet" else [r for r in ranked if r["machine"] == name]
         candidates = [r for r in candidates if r["machine_id"] not in excluded]
         if candidates:
@@ -418,7 +418,8 @@ def route_main():
         observed = shared_capacity(repository, environment.get("GITHUB_STATE_TOKEN", ""), namespace_cap) or observed
     except (OSError, ValueError, KeyError, TypeError):
         print("::warning::Shared capacity unavailable; retaining native runner fallback")
-    order = config.get("staging_order" if kind == "staging" else "pr_order", ["github", "namespace"])
+    order = config.get("staging_order" if kind == "staging" else "pr_order", ["github", "fleet"])
+    order = [name for name in order if name != "namespace"]
     excluded = set()
     attempt = int(environment["GITHUB_RUN_ATTEMPT"])
     if attempt > 1 and kind != "pr":
@@ -480,11 +481,7 @@ def route_main():
                      observed=observed, github_budget=budget, namespace_cap=namespace_cap, excluded=excluded or (),
                      selection_key=environment["GITHUB_RUN_ID"])
     target = "ubuntu-24.04"
-    if selected["pool"] == "namespace":
-        staging = kind == "staging"
-        target = [f"nscloud-ubuntu-24.04-amd64-{'16x32' if staging else '8x16'}-with-features" + (";job.priority=1" if staging else ""),
-                  "namespace-features:container.privileged=true" + (f";github.run-id={environment['GITHUB_RUN_ID']}" if staging else "")]
-    elif selected["pool"] != "github":
+    if selected["pool"] != "github":
         labels = selected["labels"]
         if kind == "pr":
             # Availability chooses a pool, not a disposable runner. GitHub can
@@ -493,7 +490,7 @@ def route_main():
                       and (selected["pool"] != "fleet" or not label.startswith("fleet-"))]
         target = dict(group="TauCetiFleet", labels=labels)
     values = dict(runner=json.dumps(target, separators=(",", ":")), pool=selected["pool"],
-                  fleet=str(selected["pool"] not in ("github", "namespace")).lower(),
+                  fleet=str(selected["pool"] != "github").lower(),
                   github=str(selected["pool"] == "github").lower(), busy=observed["github_busy"],
                   namespace_busy=observed["namespace_busy"], namespace_busy_lower_bound=observed.get("namespace_busy_lower_bound"),
                   placement_unavailable=observed.get("placement_unavailable"), budget=budget, namespace_cap=namespace_cap,

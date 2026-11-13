@@ -25,7 +25,7 @@ ENV = dict(STATUS_SHA="a" * 40, BUILD_JOB_RESULT="success", BUILD_STATE="success
 def job(status="completed", conclusion="success", confirmed=True):
     return dict(id=7, name=finalizer.PUBLISHER, status=status, conclusion=conclusion,
                 runner_name="nsc-publisher" if status != "queued" else "",
-                labels=[finalizer.MACHINE_LABEL, "namespace-features:github.run-id=12"],
+                labels=[finalizer.MACHINE_LABEL],
                 steps=[dict(name=finalizer.CONFIRM, conclusion="success" if confirmed else "skipped")])
 
 

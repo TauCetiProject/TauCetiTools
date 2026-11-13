@@ -62,7 +62,7 @@ def build_job(data):
 def recover(
     run_id, *, fetch=api, clock=time.monotonic, sleep=time.sleep, policy=False
 ):
-    """Bound first-attempt fleet acquisition and request a same-run Namespace retry.
+    """Bound first-attempt fleet acquisition and request a same-run GitHub retry.
 
     Read observations until a fleet job acquires a runner or waits two minutes.
     Only a never-acquired job is force-canceled. Once terminal, request exactly
@@ -118,7 +118,7 @@ def wait_for_fleet(run_id, *, fetch, clock, sleep, run, policy=False):
         if job:
             labels = job.get("labels", [])
             if labels and not {"tauceti-fleet", "tauceti-fleet-pr", "tauceti-fleet-staging"}.intersection(labels):
-                return "cloud-selected" if policy else "namespace-selected"
+                return "cloud-selected" if policy else "github-selected"
             if job.get("runner_name") or job.get("runner_id") or job["status"] in ("in_progress", "completed"):
                 return "runner-acquired"
             if labels and not placed:
@@ -169,16 +169,16 @@ def handoff(run_id, run, *, fetch, clock, sleep, policy=False):
                 return "runner-acquired-during-cancellation"
             try:
                 fetch(f"/actions/runs/{run_id}/rerun", {})
-                return "rerun-with-updated-placement-requested" if policy else "rerun-on-namespace-requested"
+                return "rerun-with-updated-placement-requested" if policy else "rerun-on-github-requested"
             except (OSError, HTTPException, APIError):
                 # POST may have succeeded despite a lost response. Observe the
                 # successor before deciding to hand recovery back to bors.
                 deadline = clock() + 60
                 while clock() < deadline:
                     if fetch(f"/actions/runs/{run_id}").get("run_attempt", 0) > attempt:
-                        return "rerun-with-updated-placement-observed" if policy else "rerun-on-namespace-observed"
+                        return "rerun-with-updated-placement-observed" if policy else "rerun-on-github-observed"
                     sleep(5)
-                raise RuntimeError("Namespace retry not confirmed; bors infrastructure recovery requested") from None
+                raise RuntimeError("GitHub retry not confirmed; bors infrastructure recovery requested") from None
         sleep(5)
     raise TimeoutError("Force cancellation not confirmed; bors infrastructure recovery requested")
 

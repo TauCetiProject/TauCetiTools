@@ -116,9 +116,9 @@ class Selection(unittest.TestCase):
         self.assertEqual(select("staging", 0, 0)["pool"], "chris")
         for r in pages[0]["runners"]:
             r["busy"] = True
-        self.assertEqual(select("staging", 0, 19)["pool"], "namespace")
+        self.assertEqual(select("staging", 0, 19)["pool"], "github")
         self.assertEqual(select("staging", 0, 20)["pool"], "github")
-        self.assertEqual(select("pr", 19, 19)["pool"], "namespace")
+        self.assertEqual(select("pr", 19, 19)["pool"], "github")
         self.assertEqual(select("pr", 19, 20), dict(pool="github", waiting=True))
 
     def test_expanded_brett_capacity_keeps_other_ready_machines_available(self):
@@ -157,7 +157,7 @@ class Selection(unittest.TestCase):
         selected = route(kind="pr", order=["github", "chris", "namespace"], machines={m["name"]: m for m in machines},
                          runner_pages=pages, observed=dict(github_busy=19, namespace_busy=0, queued_fleet=queued),
                          github_budget=18, namespace_cap=20)
-        self.assertEqual(selected["pool"], "namespace")
+        self.assertEqual(selected["pool"], "github")
 
     def test_enrollment_label_resolves_one_permanent_machine_and_ambiguity_disables_it(self):
         _, pages = self.ranked_fixture()
@@ -233,32 +233,32 @@ class LiveMembership(unittest.TestCase):
         replacement=self.select([self.guest('b'*32,2)])
         self.assertEqual(replacement['machine_id'],'b'*32)
         self.assertIn('fleet-instance-0000000000000002',replacement['labels'])
-        self.assertEqual(self.select([])['pool'],'namespace')
+        self.assertEqual(self.select([])['pool'],"github")
 
     def test_busy_offline_and_queued_slots_do_not_advertise_capacity(self):
         for field,value in [('busy',True),('status','offline')]:
             guest=self.guest();guest[field]=value
-            self.assertEqual(self.select([guest])['pool'],'namespace')
+            self.assertEqual(self.select([guest])['pool'],"github")
         guest=self.guest()
         labels={v['name'] for v in guest['labels']}
-        self.assertEqual(self.select([guest],queued=[labels])['pool'],'namespace')
+        self.assertEqual(self.select([guest],queued=[labels])['pool'],"github")
 
     def test_class_labels_and_staging_reservation_priority_are_preserved(self):
         pr=self.guest();mixed=self.guest('b'*32,2,('pr','staging'));staging=self.guest('c'*32,3,('staging',))
-        self.assertEqual(self.select([pr],kind='staging')['pool'],'namespace')
-        self.assertEqual(self.select([staging],kind='pr')['pool'],'namespace')
+        self.assertEqual(self.select([pr],kind='staging')['pool'],"github")
+        self.assertEqual(self.select([staging],kind='pr')['pool'],"github")
         self.assertEqual(self.select([mixed,staging],kind='staging')['runner_id'],3)
-        self.assertEqual(self.select([pr],kind='other')['pool'],'namespace')
+        self.assertEqual(self.select([pr],kind='other')['pool'],"github")
 
     def test_retry_exclusions_apply_to_individual_discovered_hosts(self):
         guests=[self.guest(),self.guest('b'*32,2)]
         self.assertEqual(self.select(guests,excluded={'a'*32})['machine_id'],'b'*32)
-        self.assertEqual(self.select(guests,excluded={'a'*32,'b'*32})['pool'],'namespace')
-        self.assertEqual(self.select(guests,excluded={'fleet'})['pool'],'namespace')
+        self.assertEqual(self.select(guests,excluded={'a'*32,'b'*32})['pool'],"github")
+        self.assertEqual(self.select(guests,excluded={'fleet'})['pool'],"github")
 
     def test_incomplete_or_ambiguous_inventory_cannot_select_a_runner(self):
-        self.assertEqual(self.select([self.guest()],total=2)['pool'],'namespace')
-        self.assertEqual(self.select([self.guest(),self.guest()])['pool'],'namespace')
+        self.assertEqual(self.select([self.guest()],total=2)['pool'],"github")
+        self.assertEqual(self.select([self.guest(),self.guest()])['pool'],"github")
         for label in ['fleet-'+'b'*32,'fleet-instance-0000000000000002']:
             ambiguous=self.guest();ambiguous['labels'].append(dict(name=label))
             # Include a valid peer on the same machine so discovery alone cannot mask ambiguity.
@@ -266,7 +266,7 @@ class LiveMembership(unittest.TestCase):
             self.assertEqual(selected['runner_id'],3)
 
     def test_generic_membership_is_opt_in(self):
-        self.assertEqual(self.select([self.guest()],order=['github','namespace'])['pool'],'namespace')
+        self.assertEqual(self.select([self.guest()],order=['github','namespace'])['pool'],"github")
 
 
 class CapacityScan(unittest.TestCase):
@@ -388,7 +388,7 @@ class RoutingEntrypoint(unittest.TestCase):
         config='[services.fleet]\npr_order=["fleet","namespace","github"]\n'
         output,calls=self.pick(dict(state=dict(shared=self.shared(routing_version=2,namespace_busy=0,queued_fleet=[]))),
             config=config,GITHUB_STATE_TOKEN='state')
-        self.assertEqual(output['pool'],'namespace')
+        self.assertEqual(output['pool'],"github")
         self.assertFalse(any('runner-groups' in path for _,path in calls))
 
     def test_staging_v1_and_missing_shared_state_choose_fleet_without_cloud_scans(self):
@@ -514,7 +514,7 @@ class RoutingEntrypoint(unittest.TestCase):
                 self.assertIn(("fleet", "orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1"), calls)
                 self.assertFalse(any("orgs/Test/repos" in path for _, path in calls))
 
-    def test_staging_busy_offline_mislabeled_or_unavailable_inventory_retains_cloud_fallback(self):
+    def test_staging_busy_offline_mislabeled_or_unavailable_inventory_retains_github_fallback(self):
         config, inventory = self.staging_fixture()
         for failure in ("busy", "offline", "labels", "unavailable"):
             current = json.loads(json.dumps(inventory))
@@ -524,7 +524,7 @@ class RoutingEntrypoint(unittest.TestCase):
                 if failure == "labels": guest["labels"] = []
             if failure == "unavailable": current = OSError("inventory offline")
             output, calls = self.pick(dict(fleet={"orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1": current}, state=dict(shared=self.shared(routing_version=2, namespace_busy=0, queued_fleet=[]))), config=config, FLEET_JOB_KIND="staging", FLEET_CI_ENABLED="true", FLEET_READ_TOKEN="fleet", FLEET_RUNNER_GROUP_ID="3", GITHUB_STATE_TOKEN="state")
-            self.assertEqual(output["pool"], "namespace", failure)
+            self.assertEqual(output["pool"], "github", failure)
 
     def shared(self, **changes):
         now = time.time() * 1000
@@ -574,7 +574,7 @@ class RoutingEntrypoint(unittest.TestCase):
         for count in (0, 16, 19):
             snapshot = self.shared(busy=20, routing_version=2, namespace_busy=count, queued_fleet=[])
             output, calls = self.pick(dict(state=dict(shared=snapshot)), GITHUB_STATE_TOKEN="state", BUDGET="12")
-            self.assertEqual(output["pool"], "namespace")
+            self.assertEqual(output["pool"], "github")
             self.assertIn(f"{count}/20; inventory=complete; capacity available", self.last_log)
             self.assertEqual(calls, [("state", "shared")])
 
@@ -591,8 +591,8 @@ class RoutingEntrypoint(unittest.TestCase):
         self.assertIn(">=22/20; inventory=partial; cap reached; reason=capacity_namespace_target", self.last_log)
         self.assertFalse(any(token in ("app", "repository") for token, _ in calls))
 
-    def test_requested_cap_is_used_for_discovery_and_admission(self):
-        for cap, count, expected in [(8, 7, "namespace"), (8, 8, "github"), (30, 20, "namespace"), (30, 30, "github")]:
+    def test_historical_namespace_counts_never_authorize_namespace_dispatch(self):
+        for cap, count, expected in [(8, 7, "github"), (8, 8, "github"), (30, 20, "github"), (30, 30, "github")]:
             snapshot = self.shared(busy=20, routing_version=2, namespace_busy=count, queued_fleet=[])
             output, _ = self.pick(dict(state=dict(shared=snapshot)), GITHUB_STATE_TOKEN="state", BUDGET="12", NAMESPACE_BUILD_CAP=str(cap))
             self.assertEqual(output["pool"], expected)
@@ -644,7 +644,7 @@ class RoutingEntrypoint(unittest.TestCase):
         app = self.fixture(busy=0)
         app["repos/Test/code/actions/runs/3/jobs?per_page=100&page=1"] = OSError("unavailable")
         output, calls = self.pick(dict(app=app, repository=self.fixture(busy=19)))
-        self.assertEqual(output["pool"], "namespace")
+        self.assertEqual(output["pool"], "github")
         self.assertEqual(output["busy"], "19")
         self.assertEqual(output["namespace_cap"], "20")
         self.assertIn(("repository", "orgs/Test/repos?per_page=100&page=1"), calls)
@@ -660,11 +660,11 @@ class RoutingEntrypoint(unittest.TestCase):
         self.assertEqual(output["pool"], "github")
         self.assertFalse(any("actions/runs" in path for token, path in calls))
 
-    def test_namespace_staging_shape_priority_assignment_and_attempt_are_preserved(self):
+    def test_legacy_namespace_preference_cannot_emit_namespace_labels(self):
         output, _ = self.pick(dict(app=self.fixture()), FLEET_JOB_KIND="staging")
-        self.assertEqual(output["pool"], "namespace")
+        self.assertEqual(output["pool"], "github")
         self.assertEqual(output["attempt"], "1")
-        self.assertEqual(json.loads(output["runner"]), ["nscloud-ubuntu-24.04-amd64-16x32-with-features;job.priority=1", "namespace-features:container.privileged=true;github.run-id=5"])
+        self.assertEqual(json.loads(output["runner"]), "ubuntu-24.04")
 
 
 class Recovery(unittest.TestCase):
@@ -700,7 +700,7 @@ class Recovery(unittest.TestCase):
                 result["jobs"] = [dict(self.job, labels=[])]
             return result
         self.assertEqual(recover(42, fetch=delayed, clock=lambda: self.now, sleep=self.advance),
-                         "rerun-on-namespace-requested")
+                         "rerun-on-github-requested")
         self.assertEqual(when, [1520])
 
     def test_transient_read_failure_is_retried_without_abandoning_recovery(self):
@@ -713,7 +713,7 @@ class Recovery(unittest.TestCase):
                 raise OSError("temporary 502")
             return fetch(path, data)
         self.assertEqual(recover(42, fetch=transient, clock=lambda: self.now, sleep=self.advance),
-                         "rerun-on-namespace-requested")
+                         "rerun-on-github-requested")
         self.assertTrue(failed)
 
     def test_definite_force_cancel_rejection_uses_ordinary_cancellation(self):
@@ -727,7 +727,7 @@ class Recovery(unittest.TestCase):
                 return {}
             return fetch(path, data)
         self.assertEqual(recover(42, fetch=rejected, clock=lambda: self.now, sleep=self.advance),
-                         "rerun-on-namespace-requested")
+                         "rerun-on-github-requested")
         self.assertTrue(any(p.endswith("/cancel") for p, d in self.calls))
 
     def fixture(self, *, acquired=False):
@@ -782,7 +782,7 @@ class Recovery(unittest.TestCase):
             clock=lambda: self.now,
             sleep=self.advance,
         )
-        self.assertEqual(result, "rerun-on-namespace-requested")
+        self.assertEqual(result, "rerun-on-github-requested")
         self.assertEqual(
             [p for p, d in self.calls if d is not None],
             ["/actions/runs/42/force-cancel", "/actions/runs/42/rerun"],
@@ -821,7 +821,7 @@ class Recovery(unittest.TestCase):
                 self.run["run_attempt"] = 2
                 raise OSError("lost response")
             return fetch(path, data)
-        self.assertEqual(recover(42, fetch=lost, clock=lambda: self.now, sleep=self.advance), "rerun-on-namespace-observed")
+        self.assertEqual(recover(42, fetch=lost, clock=lambda: self.now, sleep=self.advance), "rerun-on-github-observed")
         self.assertFalse(any("/statuses/" in p for p, d in self.calls))
 
     def test_cancellation_timeout_posts_failure_and_does_not_start_overlapping_retry(self):

@@ -26,7 +26,7 @@ class QueueControlFinalizer(unittest.TestCase):
                 dict(job, runner_name="fleet-" + "c" * 12 + "-" + "b" * 16),
                 dict(job, labels=job["labels"] + ["tauceti-fleet-pr"]),
                 dict(job, labels=[x.replace("a" * 32, "c" * 32) for x in job["labels"]]),
-                dict(job, labels=[finalizer.MACHINE_LABEL, "namespace-features:github.run-id=12"]),
+                dict(job, labels=[finalizer.MACHINE_LABEL]),
             ):
                 self.assertFalse(finalizer.isolated_runner(data, bad, 12))
 
@@ -34,7 +34,7 @@ class QueueControlFinalizer(unittest.TestCase):
         job = dict(
             name=finalizer.PUBLISHER,
             runner_name="publisher",
-            labels=[finalizer.MACHINE_LABEL, "namespace-features:github.run-id=12"],
+            labels=[finalizer.MACHINE_LABEL],
         )
         data = dict(jobs=[dict(name="sandboxed-build", runner_name="build"), job])
         with patch.dict(os.environ, {}, clear=True):
