@@ -744,6 +744,19 @@ class ShippedWorkflow(unittest.TestCase):
     def step(self, name, *, job="sandboxed-build"):
         return next(step for step in self.value["jobs"][job]["steps"] if step.get("name") == name)
 
+    def test_source_candidate_preserves_trusted_routing_and_repair_cache_restore(self):
+        job = self.value["jobs"]["sandboxed-build"]
+        self.assertIn("inputs.source_candidate_runner", job["runs-on"])
+        self.assertNotIn("client_payload", job["runs-on"])
+        step = self.step("Restore source candidate repair outputs")
+        self.assertIn("env.SOURCE_CANDIDATE == 'true'", step["if"])
+        self.assertEqual(step["env"]["REPAIR_HEAD"], "${{ steps.pr.outputs.sha }}")
+        self.assertEqual(step["env"]["REPAIR_BASE"], "${{ steps.pr.outputs.base_sha }}")
+        self.assertNotIn("TOKEN", str(step["env"]))
+        steps = job["steps"]
+        self.assertLess(steps.index(step), next(i for i,s in enumerate(steps) if s.get("id") == "build"))
+        self.assertIn('repair-cache-get.sh pr "$REPAIR_HEAD" "$REPAIR_BASE"', step["run"])
+
     def test_source_identity_shell_executes_ingress_and_never_the_legacy_helpers(self):
         shell = self.step("Resolve PR head")["run"]
         # Non-source expressions are irrelevant in the selected branch. If the

@@ -30,6 +30,10 @@ on:
       lean_root: {type: string, required: true}
       roadmap_dir: {type: string, required: true}
       source_candidate_enabled: {type: boolean, default: false}
+      source_candidate_runner:
+        type: string
+        default: '"ubuntu-24.04"'
+        description: 'Trusted caller-selected runner labels as JSON; never taken from candidate dispatch data.'
     secrets:
       CI_SOURCE_READ_TOKEN: {required: false}
       APP_ID: {required: false}
@@ -101,8 +105,9 @@ jobs:
       id-token: write  # telemetry-only grant, kept outside the candidate sandbox
     needs: pick-runner
     if: ${{ !cancelled() }}
-    # Keep candidate execution in the existing offline sandbox on a fresh runner.
-    runs-on: ubuntu-24.04
+    # The immutable caller owns routing. Candidate execution retains the same
+    # offline sandbox on the selected ephemeral runner.
+    runs-on: ${{ fromJSON(inputs.source_candidate_enabled && inputs.source_candidate_runner || '"ubuntu-24.04"') }}
     outputs:
       status-sha: ${{ steps.pr.outputs.status_sha }}
       build-state: ${{ steps.report.outputs.build-state }}
@@ -1226,6 +1231,17 @@ jobs:
           # so unknown falls through to the walk rather than to the single lookup.
           LAKE_CACHE_MAX_REVS: ${{ env.TOOLCHAIN_CHANGED == '1' && '1' || '1000' }}
         run: bash gate/scripts/lake-cache-get.sh pr
+
+      # Restore the repair worker's output records as well as main's. Both SHAs
+      # come from verified immutable ingress; Lake verifies traces and artifacts.
+      - name: Restore source candidate repair outputs
+        if: ${{ env.SOURCE_CANDIDATE == 'true' && env.INFRA != '1' && env.TAUCETI_CACHE_ENABLED == '1' }}
+        env:
+          REPAIR_HEAD: ${{ steps.pr.outputs.sha }}
+          REPAIR_BASE: ${{ steps.pr.outputs.base_sha }}
+          PUBLIC_ARTIFACT_ENDPOINT: ${{ vars.LAKE_CACHE_ARTIFACT_ENDPOINT_PUBLIC }}
+          PUBLIC_REVISION_ENDPOINT: ${{ vars.LAKE_CACHE_REVISION_ENDPOINT_PUBLIC }}
+        run: bash gate/scripts/repair-cache-get.sh pr "$REPAIR_HEAD" "$REPAIR_BASE"
 
       - name: Prepare trusted read-only Lean watchdog toolchain
         if: ${{ env.INFRA != '1' }}
