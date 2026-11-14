@@ -37,7 +37,7 @@ def inventory(pages):
     return found
 
 
-def ranked_runners(pages, *, kind, machines, reserved=()):
+def ranked_runners(pages, *, kind, machines, reserved=(), allow_busy=False):
     """Extend the existing picker with ordered, class-safe machine candidates.
 
     Hosts advertise capacity through registered runners and their class labels.
@@ -62,7 +62,7 @@ def ranked_runners(pages, *, kind, machines, reserved=()):
             instances = [label for label in labels if re.fullmatch(r"fleet-instance-[a-f0-9]{16}", label)]
             identities = [label for label in labels if re.fullmatch(r"fleet-[a-f0-9]{32}", label)]
             required = {"self-hosted", "linux", "x64", "fleet-" + identity, "tauceti-fleet-" + kind}
-            if (runner.get("status") == "online" and runner.get("busy") is False
+            if (runner.get("status") == "online" and (runner.get("busy") is False or allow_busy and runner.get("busy") is True)
                     and runner["id"] not in reserved and required <= labels and len(instances) == 1 and len(identities) == 1):
                 ready.append(dict(machine=machine["name"], machine_id=identity, runner_id=runner["id"],
                                   staging_only=kind == "staging" and "tauceti-fleet-pr" not in labels,
@@ -169,6 +169,9 @@ def shared_capacity(repository, token, namespace_cap=20):
     if reason is not None and (not isinstance(reason, str) or not re.fullmatch(r"capacity_[a-z_]{1,64}", reason)):
         reason = None
     result = dict(github_busy=value["busy"], namespace_busy=None, queued_fleet=None, placement_unavailable=reason)
+    # Running counts can be complete while queued placement discovery is only
+    # partial. Such a snapshot cannot authorize intentionally waiting PR work.
+    result["fleet_queue_complete"] = value.get("routing_version") == 2 and value.get("placement_unavailable") is None
     lower = value.get("namespace_busy_lower_bound")
     if type(lower) is int and 0 <= lower <= 10000:
         result["namespace_busy_lower_bound"] = lower
@@ -279,9 +282,9 @@ def scan_capacity(read, *, repository):
                 github += 1
             if status in ("queued", "in_progress") and namespace_labels(labels) and build_job(job):
                 namespace += 1
-            if status == "queued" and "self-hosted" in labels:
+            if status in ("queued", "pending", "waiting", "requested") and "self-hosted" in labels:
                 queued.append(set(labels))
-    return dict(github_busy=github, namespace_busy=namespace, queued_fleet=queued)
+    return dict(github_busy=github, namespace_busy=namespace, queued_fleet=queued, fleet_queue_complete=True)
 
 
 def resolve_machines(config, runners):
@@ -321,7 +324,7 @@ def discover_machines(runners):
     return [dict(name="fleet", machine_id=identity) for identity in sorted(identities)]
 
 
-def route(*, kind, order, machines, runner_pages, observed, github_budget, namespace_cap, excluded=(), selection_key=""):
+def route(*, kind, order, machines, runner_pages, observed, github_budget, namespace_cap, excluded=(), selection_key="", pr_queue_limit=0):
     """Choose in the configured preference order using one bounded observation.
 
     Limits are approximate: simultaneous pickers can observe the same spare slot.
@@ -330,6 +333,9 @@ def route(*, kind, order, machines, runner_pages, observed, github_budget, names
     """
     if type(github_budget) is not int or github_budget < 1 or type(namespace_cap) is not int or namespace_cap < 1:
         raise ObservationError("invalid capacity budgets")
+    if type(pr_queue_limit) is not int or not 0 <= pr_queue_limit <= 10:
+        raise ObservationError("invalid fleet PR queue limit")
+    queued_pr = None
     try:
         resolved = resolve_machines(machines, inventory(runner_pages)) if runner_pages else {}
         reserved = set()
@@ -339,9 +345,23 @@ def route(*, kind, order, machines, runner_pages, observed, github_budget, names
                 reserved.add(runner["id"])
         ranked = ranked_runners(runner_pages, kind=kind, machines=[resolved[n] for n in order if n in resolved and n != "fleet"], reserved=reserved) if kind in ("pr", "staging") and runner_pages else []
         discovered = ranked_runners(runner_pages, kind=kind, machines=discover_machines(inventory(runner_pages)), reserved=reserved) if "fleet" in order and kind in ("pr", "staging") and runner_pages else []
+        # A small shared PR backlog feeds the next available host. Only complete
+        # queue coverage and currently online PR registrations justify waiting;
+        # staging/control-only runners cannot keep this queue open.
+        backlog = []
+        if (kind == "pr" and "fleet" in order and pr_queue_limit and runner_pages
+                and observed.get("fleet_queue_complete") is True
+                and isinstance(observed.get("queued_fleet"), list) and not observed.get("placement_unavailable")):
+            online = ranked_runners(runner_pages, kind="pr", machines=discover_machines(inventory(runner_pages)), allow_busy=True)
+            online = [r for r in online if r["machine_id"] not in excluded]
+            labels = [set(r["labels"]) for r in online]
+            queued_pr = sum("tauceti-fleet-pr" in queued or any(queued <= target for target in labels)
+                            for queued in observed["queued_fleet"])
+            if queued_pr < pr_queue_limit:
+                backlog = online
     except (ValueError, KeyError, TypeError):
         print("::warning::Fleet configuration or inventory invalid; retaining cloud choices")
-        resolved, ranked, discovered = {}, [], []
+        resolved, ranked, discovered, backlog = {}, [], [], []
     for name in order:
         # Ignore retired pool names even in older configuration and retries.
         if name == "namespace":
@@ -361,6 +381,9 @@ def route(*, kind, order, machines, runner_pages, observed, github_budget, names
                 candidates = staging_only
             offset = int(hashlib.sha256(selection_key.encode()).hexdigest(), 16) if selection_key else 0
             return dict(candidates[offset % len(candidates)], pool=name)
+        if name == "fleet" and backlog:
+            return dict(pool="fleet", labels=["self-hosted", "linux", "x64", "tauceti-fleet-pr"],
+                        queued_pr=queued_pr, pr_queue_limit=pr_queue_limit)
     return dict(pool="github", waiting=True)
 
 
@@ -407,6 +430,7 @@ def route_main():
     kind = environment.get("FLEET_JOB_KIND", "other")
     budget = int(environment.get("BUDGET") or "18")
     namespace_cap = int(environment.get("NAMESPACE_BUILD_CAP") or config.get("namespace_build_cap", 20))
+    pr_queue_limit = config.get("pr_queue_limit", 0)
     observed = dict(github_busy=None, namespace_busy=None, queued_fleet=None)
     token = environment.get("GH_TOKEN", "")
     fallback = environment.get("FALLBACK_TOKEN", "")
@@ -457,7 +481,7 @@ def route_main():
     runner_pages = fleet_inventory(environment, repository) if inventory_read else []
     candidate = route(kind=kind, order=ready_order, machines=config.get("machines", {}), runner_pages=runner_pages,
                       observed=observed, github_budget=budget, namespace_cap=namespace_cap, excluded=excluded,
-                      selection_key=environment["GITHUB_RUN_ID"])
+                      selection_key=environment["GITHUB_RUN_ID"], pr_queue_limit=pr_queue_limit)
     selected = None if candidate.get("waiting") else candidate
     scanned = False
     # A configured shared service owns the bounded organization scan. A partial
@@ -479,7 +503,7 @@ def route_main():
         runner_pages = fleet_inventory(environment, repository)
     selected = selected or route(kind=kind, order=order, machines=config.get("machines", {}), runner_pages=runner_pages,
                      observed=observed, github_budget=budget, namespace_cap=namespace_cap, excluded=excluded or (),
-                     selection_key=environment["GITHUB_RUN_ID"])
+                     selection_key=environment["GITHUB_RUN_ID"], pr_queue_limit=pr_queue_limit)
     target = "ubuntu-24.04"
     if selected["pool"] != "github":
         labels = selected["labels"]
@@ -490,6 +514,7 @@ def route_main():
                       and (selected["pool"] != "fleet" or not label.startswith("fleet-"))]
         target = dict(group="TauCetiFleet", labels=labels)
     values = dict(runner=json.dumps(target, separators=(",", ":")), pool=selected["pool"],
+                  queued_pr=selected.get("queued_pr"), pr_queue_limit=pr_queue_limit,
                   fleet=str(selected["pool"] != "github").lower(),
                   github=str(selected["pool"] == "github").lower(), busy=observed["github_busy"],
                   namespace_busy=observed["namespace_busy"], namespace_busy_lower_bound=observed.get("namespace_busy_lower_bound"),
@@ -511,6 +536,8 @@ def route_main():
                f"inventory={namespace_inventory}; {namespace_state}")
     if observed.get("placement_unavailable"):
         message += f"; reason={observed['placement_unavailable']}"
+    if selected.get("queued_pr") is not None:
+        message += f"; waiting for shared fleet PR capacity ({selected['queued_pr']}/{pr_queue_limit} observed waiting)"
     message += " (approximate cap)."
     print(message)
     if environment.get("GITHUB_STEP_SUMMARY"):
