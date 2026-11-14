@@ -235,6 +235,60 @@ class LiveMembership(unittest.TestCase):
         self.assertIn('fleet-instance-0000000000000002',replacement['labels'])
         self.assertEqual(self.select([])['pool'],"github")
 
+    def test_small_pr_backlog_uses_busy_online_pool_until_observed_limit(self):
+        guest = self.guest()
+        guest['busy'] = True
+        target = {'self-hosted', 'linux', 'x64', 'tauceti-fleet-pr'}
+
+        def pick(queued, *, guests=None, kind='pr', limit=3, excluded=(), **observed):
+            guests = [guest] if guests is None else guests
+            return route(kind=kind, order=['github', 'fleet'], machines={},
+                         runner_pages=[dict(total_count=len(guests), runners=guests)],
+                         observed=dict(github_busy=19, queued_fleet=queued, **({'fleet_queue_complete': True} | observed)),
+                         github_budget=18, namespace_cap=20, pr_queue_limit=limit, excluded=excluded)
+
+        for count in range(3):
+            selected = pick([target] * count)
+            self.assertEqual(selected['pool'], 'fleet')
+            self.assertEqual(set(selected['labels']), target)
+            self.assertEqual(selected['queued_pr'], count)
+        self.assertEqual(pick([target] * 3), dict(pool='github', waiting=True))
+        self.assertEqual(pick([], limit=0)['pool'], 'github')
+        self.assertEqual(pick(None)['pool'], 'github')
+        self.assertEqual(pick([], fleet_queue_complete=False)['pool'], 'github')
+        self.assertEqual(pick([], placement_unavailable='capacity_queue_pagination')['pool'], 'github')
+        self.assertEqual(pick([], guests=[])['pool'], 'github')
+        offline = dict(guest, status='offline')
+        self.assertEqual(pick([], guests=[offline])['pool'], 'github')
+        self.assertEqual(pick([], guests=[self.guest(kinds=('staging',))])['pool'], 'github')
+        self.assertEqual(pick([], guests=[self.guest(kinds=('queue-control',))])['pool'], 'github')
+        self.assertEqual(pick([], kind='staging')['pool'], 'github')
+        self.assertEqual(pick([], excluded=('a' * 32,))['pool'], 'github')
+        for invalid in (-1, True, '3', 11):
+            with self.assertRaises(ValueError):
+                pick([], limit=invalid)
+
+    def test_backlog_counts_legacy_and_machine_specific_pr_targets_without_staging(self):
+        guest = self.guest()
+        guest['busy'] = True
+        labels = {v['name'] for v in guest['labels']}
+        staging = {'self-hosted', 'tauceti-fleet-staging'}
+        for queued, expected in (([staging] * 4, 'fleet'),
+                                 ([{'self-hosted', 'linux', 'x64'}] * 3, 'github'),
+                                 ([labels] * 3, 'github'),
+                                 ([{'self-hosted', 'tauceti-fleet-pr', 'fleet-' + 'b' * 32}] * 3, 'github')):
+            selected = route(kind='pr', order=['fleet', 'github'], machines={},
+                             runner_pages=[dict(total_count=1, runners=[guest])],
+                             observed=dict(github_busy=19, queued_fleet=queued, fleet_queue_complete=True),
+                             github_budget=18, namespace_cap=20, pr_queue_limit=3)
+            self.assertEqual(selected['pool'], expected)
+        # A partial inventory never justifies creating waiting work.
+        selected = route(kind='pr', order=['fleet'], machines={},
+                         runner_pages=[dict(total_count=2, runners=[guest])],
+                         observed=dict(github_busy=19, queued_fleet=[], fleet_queue_complete=True),
+                         github_budget=18, namespace_cap=20, pr_queue_limit=3)
+        self.assertEqual(selected['pool'], 'github')
+
     def test_busy_offline_and_queued_slots_do_not_advertise_capacity(self):
         for field,value in [('busy',True),('status','offline')]:
             guest=self.guest();guest[field]=value
@@ -286,7 +340,7 @@ class CapacityScan(unittest.TestCase):
                 dict(name="sandboxed-build", status="queued", labels=ns)]),
         }
         result = scan_capacity(fixtures.__getitem__, repository="Test/code")
-        self.assertEqual(result, dict(github_busy=1, namespace_busy=2, queued_fleet=[]))
+        self.assertEqual(result, dict(github_busy=1, namespace_busy=2, queued_fleet=[], fleet_queue_complete=True))
         fixtures["repos/Test/code/actions/runs/2/jobs?per_page=100&page=1"]["total_count"] = 2
         fixtures["repos/Test/code/actions/runs/2/jobs?per_page=100&page=2"] = dict(total_count=2, jobs=[])
         with self.assertRaises(ValueError):
@@ -370,6 +424,24 @@ class RoutingEntrypoint(unittest.TestCase):
         self.assertFalse(set(target['labels']) <= {label['name'] for label in staging['labels']})
         self.assertEqual([p for token,p in calls if token=='fleet'],[endpoint])
         self.assertFalse(any(token in ('app','repository') for token,_ in calls))
+
+    def test_busy_pr_pool_waits_without_cloud_scan_and_stops_at_queue_limit(self):
+        guest = LiveMembership().guest()
+        guest['busy'] = True
+        endpoint = 'orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1'
+        target = ['self-hosted', 'linux', 'x64', 'tauceti-fleet-pr']
+        config = '[services.fleet]\npr_order=["github","fleet"]\npr_queue_limit=3\n'
+        for count, expected in ((0, 'fleet'), (2, 'fleet'), (3, 'github')):
+            output, calls = self.pick(dict(fleet={endpoint: dict(total_count=1, runners=[guest])},
+                state=dict(shared=self.shared(busy=20, routing_version=2, namespace_busy=0,
+                                              queued_fleet=[target] * count))), config=config,
+                FLEET_CI_ENABLED='true', FLEET_READ_TOKEN='fleet', FLEET_RUNNER_GROUP_ID='3',
+                GITHUB_STATE_TOKEN='state')
+            self.assertEqual(output['pool'], expected)
+            if expected == 'fleet':
+                self.assertEqual(json.loads(output['runner']), dict(group='TauCetiFleet', labels=target))
+                self.assertIn('waiting for shared fleet PR capacity', self.last_log)
+            self.assertFalse(any(token in ('app', 'repository') for token, _ in calls))
 
     def test_pr_pool_retry_needs_no_cancelled_placement_history(self):
         guest = LiveMembership().guest()

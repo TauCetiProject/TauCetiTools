@@ -769,6 +769,18 @@ Staging retains exact guest placement, preferring staging-only slots. Repository
 pool priority and job classes, while host controls govern live fleet membership
 and concurrency. No new registry service is introduced.
 
+Set `[services.fleet].pr_queue_limit = 3` to keep a small waiting queue at the
+generic `fleet` tier when its PR runners are busy (default zero, maximum ten).
+Earlier preference tiers still win when available. With GitHub first, its
+running capacity stays in use while the fleet can retain a few waiting builds.
+The backlog requires complete, fresh queue observations and at least one online
+PR runner in the trusted group. Offline, staging-only and control-only runners
+cannot justify waiting PR work. At the observed limit, later tiers or the usual
+GitHub fallback receive new work. Setting zero restores idle-only selection.
+This is an observational limit, like the existing runner capacity budgets:
+cached observations and simultaneous pickers can briefly exceed it. No new
+service, credential, cancellation loop or runner-consuming wait is introduced.
+
 ## Cache
 
 `services.cache.mode = "off"` leaves ordinary local builds available. Hosted or custom cache

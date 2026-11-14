@@ -205,7 +205,7 @@ export async function scanHostedCapacity(
             namespaceByRepo.set(run.prefix,(namespaceByRepo.get(run.prefix) || 0)+1);
             if(run.path)namespaceWorkflows.add(run.prefix+'/'+run.path);
           }
-          if(job.status==='queued' && job.labels.includes('self-hosted'))queued_fleet.push(job.labels);
+          if(['queued','pending','waiting','requested'].includes(job.status) && job.labels.includes('self-hosted'))queued_fleet.push(job.labels);
           if(job.status==='in_progress' && !job.labels.some((l:string)=>l==='self-hosted' || l.startsWith('nscloud-') || l.startsWith('namespace-profile-')))busy++;
           observed.push({id:job.id,name:job.name,status:job.status,labels:job.labels,
             runner_id:job.runner_id,runner_name:job.runner_name});
