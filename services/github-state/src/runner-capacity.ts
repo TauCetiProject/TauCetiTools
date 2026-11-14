@@ -11,7 +11,7 @@ export async function scanHostedCapacity(
   read:(path:string,body?:unknown,context?:{phase:'running'|'queued';reusableFill:boolean})=>Promise<{status:number;body:any;link?:string;deferred?:boolean}>,
   namespaceTarget=20,
   cache?:JobLabelCache,
-):Promise<{routing_version:number;busy:number;running_jobs:Record<string,number>;namespace_busy?:number;namespace_busy_lower_bound?:number;queued_fleet?:string[][];placement_unavailable?:string;requests:number;repositories:number;runs:number;observed_at:number;job_cache_hits:number;job_cache_writes:number;job_cache_reusable_writes:number;elapsed_ms:number;running_requests:number;request_types:Record<string,number>;cache_fallbacks:Record<string,{count:number;run:string}>}> {
+):Promise<{routing_version:number;fleet_queue_version?:number;busy:number;running_jobs:Record<string,number>;namespace_busy?:number;namespace_busy_lower_bound?:number;queued_fleet?:string[][];placement_unavailable?:string;requests:number;repositories:number;runs:number;observed_at:number;job_cache_hits:number;job_cache_writes:number;job_cache_reusable_writes:number;elapsed_ms:number;running_requests:number;request_types:Record<string,number>;cache_fallbacks:Record<string,{count:number;run:string}>}> {
   // Provider request/concurrency/hourly budgets bound discovery. Valid cold
   // scans may outlive the caller; the owner retains their background lifetime.
   let requests=0;const started=Date.now();
@@ -317,5 +317,5 @@ export async function scanHostedCapacity(
     // Retain distinct jobs from every completed page, including a partial scan.
     return {routing_version:1,busy:running,running_jobs,namespace_busy_lower_bound:namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:observedAt,job_cache_hits,job_cache_writes,job_cache_reusable_writes,elapsed_ms:Date.now()-started,running_requests,request_types,cache_fallbacks,placement_unavailable:error instanceof Error && error.message.startsWith('capacity_')?error.message:'capacity_inventory_unavailable'};
   }
-  return {routing_version:2,busy:running,running_jobs,namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:observedAt,job_cache_hits,job_cache_writes,job_cache_reusable_writes,elapsed_ms:Date.now()-started,running_requests,request_types,cache_fallbacks};
+  return {routing_version:2,fleet_queue_version:1,busy:running,running_jobs,namespace_busy,queued_fleet,requests,repositories:all.length,runs:activeRuns.length,observed_at:observedAt,job_cache_hits,job_cache_writes,job_cache_reusable_writes,elapsed_ms:Date.now()-started,running_requests,request_types,cache_fallbacks};
 }

@@ -169,9 +169,13 @@ def shared_capacity(repository, token, namespace_cap=20):
     if reason is not None and (not isinstance(reason, str) or not re.fullmatch(r"capacity_[a-z_]{1,64}", reason)):
         reason = None
     result = dict(github_busy=value["busy"], namespace_busy=None, queued_fleet=None, placement_unavailable=reason)
+    result["snapshot_age_seconds"] = max(0, int((now - value["observed_at"]) / 1000))
     # Running counts can be complete while queued placement discovery is only
     # partial. Such a snapshot cannot authorize intentionally waiting PR work.
-    result["fleet_queue_complete"] = value.get("routing_version") == 2 and value.get("placement_unavailable") is None
+    result["fleet_queue_complete"] = (value.get("routing_version") == 2
+                                      and type(value.get("fleet_queue_version")) is int
+                                      and value["fleet_queue_version"] == 1
+                                      and value.get("placement_unavailable") is None)
     lower = value.get("namespace_busy_lower_bound")
     if type(lower) is int and 0 <= lower <= 10000:
         result["namespace_busy_lower_bound"] = lower
@@ -333,6 +337,8 @@ def route(*, kind, order, machines, runner_pages, observed, github_budget, names
     """
     if type(github_budget) is not int or github_budget < 1 or type(namespace_cap) is not int or namespace_cap < 1:
         raise ObservationError("invalid capacity budgets")
+    if kind != "pr":
+        pr_queue_limit = 0
     if type(pr_queue_limit) is not int or not 0 <= pr_queue_limit <= 10:
         raise ObservationError("invalid fleet PR queue limit")
     queued_pr = None
@@ -354,8 +360,12 @@ def route(*, kind, order, machines, runner_pages, observed, github_budget, names
                 and isinstance(observed.get("queued_fleet"), list) and not observed.get("placement_unavailable")):
             online = ranked_runners(runner_pages, kind="pr", machines=discover_machines(inventory(runner_pages)), allow_busy=True)
             online = [r for r in online if r["machine_id"] not in excluded]
-            labels = [set(r["labels"]) for r in online]
-            queued_pr = sum("tauceti-fleet-pr" in queued or any(queued <= target for target in labels)
+            actual_labels = {runner["id"]: {label["name"].lower() for label in runner["labels"]}
+                             for runner in inventory(runner_pages)}
+            labels = [actual_labels[r["runner_id"]] for r in online]
+            queued_pr = sum("tauceti-fleet-pr" in queued or (
+                               not queued & {"tauceti-fleet-staging", "tauceti-fleet-queue-control"}
+                               and any(queued <= target for target in labels))
                             for queued in observed["queued_fleet"])
             if queued_pr < pr_queue_limit:
                 backlog = online
@@ -538,6 +548,8 @@ def route_main():
         message += f"; reason={observed['placement_unavailable']}"
     if selected.get("queued_pr") is not None:
         message += f"; waiting for shared fleet PR capacity ({selected['queued_pr']}/{pr_queue_limit} observed waiting)"
+        if observed.get("snapshot_age_seconds") is not None:
+            message += f"; queue observation age={observed['snapshot_age_seconds']}s"
     message += " (approximate cap)."
     print(message)
     if environment.get("GITHUB_STEP_SUMMARY"):

@@ -75,7 +75,7 @@ test('routing snapshot counts queued/running Namespace builds and fleet targets,
    ...['pending','waiting','requested'].map(status=>({name:'sandboxed-build',status,labels:['self-hosted','tauceti-fleet-pr']})),
   ]);
  });
- assert.equal(snapshot.routing_version,2);assert.equal(snapshot.namespace_busy,3);
+ assert.equal(snapshot.routing_version,2);assert.equal(snapshot.fleet_queue_version,1);assert.equal(snapshot.namespace_busy,3);
  assert.equal(snapshot.busy,0);assert.equal(snapshot.queued_fleet.length,4);
 });
 test('pagination is complete and a missing later page is unavailable, never an undercount',async()=>{

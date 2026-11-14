@@ -271,9 +271,13 @@ class LiveMembership(unittest.TestCase):
     def test_backlog_counts_legacy_and_machine_specific_pr_targets_without_staging(self):
         guest = self.guest()
         guest['busy'] = True
+        guest['labels'] += [dict(name='tauceti-fleet'), dict(name='tauceti-fleet-staging'),
+                            dict(name='tauceti-fleet-queue-control')]
         labels = {v['name'] for v in guest['labels']}
         staging = {'self-hosted', 'tauceti-fleet-staging'}
         for queued, expected in (([staging] * 4, 'fleet'),
+                                 ([{'self-hosted', 'tauceti-fleet-queue-control'}] * 4, 'fleet'),
+                                 ([{'self-hosted', 'linux', 'x64', 'tauceti-fleet'}] * 3, 'github'),
                                  ([{'self-hosted', 'linux', 'x64'}] * 3, 'github'),
                                  ([labels] * 3, 'github'),
                                  ([{'self-hosted', 'tauceti-fleet-pr', 'fleet-' + 'b' * 32}] * 3, 'github')):
@@ -288,6 +292,17 @@ class LiveMembership(unittest.TestCase):
                          observed=dict(github_busy=19, queued_fleet=[], fleet_queue_complete=True),
                          github_budget=18, namespace_cap=20, pr_queue_limit=3)
         self.assertEqual(selected['pool'], 'github')
+
+    def test_pr_queue_settings_and_backlog_do_not_change_staging_reservations(self):
+        mixed = self.guest(kinds=('pr', 'staging'))
+        staging = self.guest('b' * 32, 2, ('staging',))
+        queued = [{'self-hosted', 'linux', 'x64', 'tauceti-fleet-pr'}] * 3
+        for limit in (3, True, 'invalid', -1):
+            selected = route(kind='staging', order=['fleet'], machines={},
+                             runner_pages=[dict(total_count=2, runners=[mixed, staging])],
+                             observed=dict(github_busy=19, queued_fleet=queued, fleet_queue_complete=True),
+                             github_budget=18, namespace_cap=20, pr_queue_limit=limit)
+            self.assertEqual(selected['runner_id'], 2)
 
     def test_busy_offline_and_queued_slots_do_not_advertise_capacity(self):
         for field,value in [('busy',True),('status','offline')]:
@@ -434,14 +449,25 @@ class RoutingEntrypoint(unittest.TestCase):
         for count, expected in ((0, 'fleet'), (2, 'fleet'), (3, 'github')):
             output, calls = self.pick(dict(fleet={endpoint: dict(total_count=1, runners=[guest])},
                 state=dict(shared=self.shared(busy=20, routing_version=2, namespace_busy=0,
-                                              queued_fleet=[target] * count))), config=config,
+                                              fleet_queue_version=1, queued_fleet=[target] * count))), config=config,
                 FLEET_CI_ENABLED='true', FLEET_READ_TOKEN='fleet', FLEET_RUNNER_GROUP_ID='3',
                 GITHUB_STATE_TOKEN='state')
             self.assertEqual(output['pool'], expected)
             if expected == 'fleet':
                 self.assertEqual(json.loads(output['runner']), dict(group='TauCetiFleet', labels=target))
                 self.assertIn('waiting for shared fleet PR capacity', self.last_log)
+                self.assertIn('queue observation age=', self.last_log)
             self.assertFalse(any(token in ('app', 'repository') for token, _ in calls))
+
+        # Old complete snapshots omit non-queued waiting states. They remain
+        # useful for running capacity, but cannot authorize a new backlog.
+        for capability in (None, True, 0, 2, '1'):
+            output, _ = self.pick(dict(fleet={endpoint: dict(total_count=1, runners=[guest])},
+                state=dict(shared=self.shared(busy=20, routing_version=2, namespace_busy=0,
+                                              fleet_queue_version=capability, queued_fleet=[]))), config=config,
+                FLEET_CI_ENABLED='true', FLEET_READ_TOKEN='fleet', FLEET_RUNNER_GROUP_ID='3',
+                GITHUB_STATE_TOKEN='state')
+            self.assertEqual(output['pool'], 'github')
 
     def test_pr_pool_retry_needs_no_cancelled_placement_history(self):
         guest = LiveMembership().guest()
