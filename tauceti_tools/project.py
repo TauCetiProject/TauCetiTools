@@ -448,6 +448,20 @@ def _validate(raw: dict, source: str) -> Project:
     if raw.get("features", {}).get("progress") and not raw.get("tools", {}).get("progress"):
         raise ConfigError("features.progress = true requires [tools.progress] repo and a full immutable ref")
     for name, value in _table(raw, "services").items():
+        if name == "automation":
+            # Not a service with a mode: the project's own automation App, named by its slug. The PR
+            # build recognizes the App's lint repair PRs by `<app_slug>[bot]` (templates.automation_login).
+            if (
+                not isinstance(value, dict)
+                or set(value) != {"app_slug"}
+                or not isinstance(value["app_slug"], str)
+                or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", value["app_slug"])
+            ):
+                raise ConfigError(
+                    "services.automation takes only app_slug, the automation App's slug "
+                    "(lower-case letters, digits and -)"
+                )
+            continue
         if not isinstance(value, dict) or value.get("mode") not in ("off", "hosted", "custom"):
             raise ConfigError(f"services.{name}.mode must be off, hosted or custom")
         for key in ("url", "artifact_url", "revision_url", "artifact_write_url", "revision_write_url"):

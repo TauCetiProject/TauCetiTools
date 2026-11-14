@@ -38,6 +38,7 @@ jobs:
       lean_root: TauCeti
       roadmap_dir: TauCetiRoadmap
       source_candidate_enabled: ${{ vars.FORGEJO_SOURCE_CI_ENABLED == 'true' }}
+      repair_bot_login: tauceti-review-bot[bot]
     secrets:
       CI_SOURCE_READ_TOKEN: ${{ secrets.CI_SOURCE_READ_TOKEN }}
       APP_ID: ${{ secrets.APP_ID }}
