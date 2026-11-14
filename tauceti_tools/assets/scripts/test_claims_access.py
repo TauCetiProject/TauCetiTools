@@ -86,5 +86,95 @@ class Sweepable(unittest.TestCase):
                 self.assertFalse(ca.is_sweepable(self.lease(expires), 1000))
 
 
+class QueueLanded(unittest.TestCase):
+    """The merge queue closes the PRs it lands, so GitHub reports them as closed, not merged."""
+
+    def test_a_pr_titled_as_landed_counts_for_its_author(self):
+        prs = [
+            {"number": 3, "author": {"login": "alice"}, "title": ca.LANDED_TITLE + "feat: a lemma"},
+            {"number": 2, "author": {"login": "alice"}, "title": ca.LANDED_TITLE + "feat: another"},
+            {"number": 1, "author": {"login": "bob"}, "title": "feat: closed without landing"},
+            {"number": 0, "author": {"login": "tauceti-review-bot[bot]"}, "title": ca.LANDED_TITLE + "chore: bump"},
+        ]
+        answer = SimpleNamespace(returncode=0, stdout=json.dumps(prs), stderr="")
+        with mock.patch.object(ca, "gh", lambda args, token, check=True: answer):
+            self.assertEqual(ca.queue_landed_prs(), {"alice": [3, 2]})
+
+    def closers(self, *logins, returncode=0):
+        out = "".join(login + "\n" for login in logins)
+        return lambda args, token, check=True: SimpleNamespace(returncode=returncode, stdout=out, stderr="")
+
+    def test_the_queue_closed_it(self):
+        with mock.patch.object(ca, "gh", self.closers("tauceti-queue[bot]")):
+            self.assertTrue(ca.closed_by_lander(7))
+
+    def test_the_title_alone_is_not_enough(self):
+        # An author can retitle and close their own PR. Only the queue's closing counts, and the last.
+        for closers in (("alice",), ("tauceti-queue[bot]", "alice"), ()):
+            with self.subTest(closers=closers), mock.patch.object(ca, "gh", self.closers(*closers)):
+                self.assertFalse(ca.closed_by_lander(7))
+
+    def test_an_unreadable_answer_is_no(self):
+        with mock.patch.object(ca, "gh", self.closers("tauceti-queue[bot]", returncode=1)):
+            self.assertFalse(ca.closed_by_lander(7))
+
+
+class Grant(unittest.TestCase):
+    """What `grant` sends, from what GitHub reports. Every login here can only read the claims repo."""
+
+    def grant(self, merged=(), closed=(), invitations=(), closers=None):
+        calls = []
+
+        def gh(args, token, check=True):
+            calls.append(args)
+            path = " ".join(args)
+            out = ""
+            if args[:2] == ["pr", "list"]:
+                out = json.dumps(list(merged if "merged" in args else closed))
+            elif "/invitations?" in path:
+                out = "".join(f"{login} {number} {str(expired).lower()}\n" for login, number, expired in invitations)
+            elif path.endswith("/permission --jq .permission"):
+                out = "read\n"
+            elif "/events?" in path:
+                number = int(path.split("/issues/")[1].split("/")[0])
+                out = "".join(login + "\n" for login in (closers or {}).get(number, ()))
+            elif args[:3] == ["api", "-X", "PUT"]:
+                out = "{}"
+            return SimpleNamespace(returncode=0, stdout=out, stderr="")
+
+        with mock.patch.object(ca, "gh", gh), mock.patch.object(ca, "DRY_RUN", False):
+            failures = ca.grant()
+        writes = [(args[2], args[3].rsplit("/", 1)[1]) for args in calls if args[:2] == ["api", "-X"]]
+        return failures, writes, calls
+
+    def landed(self, number, login):
+        return {"number": number, "author": {"login": login}, "title": ca.LANDED_TITLE + "feat: x"}
+
+    def test_the_author_of_a_pr_the_queue_landed_is_invited(self):
+        _, writes, _ = self.grant(closed=[self.landed(5, "alice")], closers={5: ["tauceti-queue[bot]"]})
+        self.assertEqual(writes, [("PUT", "alice")])
+
+    def test_a_retitled_pr_the_author_closed_invites_nobody(self):
+        _, writes, _ = self.grant(closed=[self.landed(5, "alice")], closers={5: ["alice"]})
+        self.assertEqual(writes, [])
+
+    def test_a_pr_merged_by_github_needs_no_further_check(self):
+        _, writes, calls = self.grant(merged=[{"author": {"login": "bob"}}])
+        self.assertEqual(writes, [("PUT", "bob")])
+        self.assertFalse([args for args in calls if "/events?" in " ".join(args)])
+
+    def test_an_expired_invitation_is_cancelled_and_sent_again(self):
+        _, writes, _ = self.grant(merged=[{"author": {"login": "bob"}}], invitations=[("bob", "42", True)])
+        self.assertEqual(writes, [("DELETE", "42"), ("PUT", "bob")])
+
+    def test_a_live_invitation_is_left_alone(self):
+        _, writes, _ = self.grant(merged=[{"author": {"login": "bob"}}], invitations=[("bob", "42", False)])
+        self.assertEqual(writes, [])
+
+    def test_an_invitation_sent_by_email_is_ignored(self):
+        with mock.patch.object(ca, "gh_lines", lambda args, token: ["null 7 false", "bob 8 true"]):
+            self.assertEqual(ca.invitations(), {"bob": ("8", True)})
+
+
 if __name__ == "__main__":
     unittest.main()
