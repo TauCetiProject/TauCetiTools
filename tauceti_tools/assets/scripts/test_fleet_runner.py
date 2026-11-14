@@ -434,7 +434,7 @@ class RoutingEntrypoint(unittest.TestCase):
         for count, expected in ((0, 'fleet'), (2, 'fleet'), (3, 'github')):
             output, calls = self.pick(dict(fleet={endpoint: dict(total_count=1, runners=[guest])},
                 state=dict(shared=self.shared(busy=20, routing_version=2, namespace_busy=0,
-                                              queued_fleet=[target] * count))), config=config,
+                                              fleet_queue_version=1, queued_fleet=[target] * count))), config=config,
                 FLEET_CI_ENABLED='true', FLEET_READ_TOKEN='fleet', FLEET_RUNNER_GROUP_ID='3',
                 GITHUB_STATE_TOKEN='state')
             self.assertEqual(output['pool'], expected)
@@ -442,6 +442,16 @@ class RoutingEntrypoint(unittest.TestCase):
                 self.assertEqual(json.loads(output['runner']), dict(group='TauCetiFleet', labels=target))
                 self.assertIn('waiting for shared fleet PR capacity', self.last_log)
             self.assertFalse(any(token in ('app', 'repository') for token, _ in calls))
+
+        # Old complete snapshots omit non-queued waiting states. They remain
+        # useful for running capacity, but cannot authorize a new backlog.
+        for capability in (None, True, 0, 2, '1'):
+            output, _ = self.pick(dict(fleet={endpoint: dict(total_count=1, runners=[guest])},
+                state=dict(shared=self.shared(busy=20, routing_version=2, namespace_busy=0,
+                                              fleet_queue_version=capability, queued_fleet=[]))), config=config,
+                FLEET_CI_ENABLED='true', FLEET_READ_TOKEN='fleet', FLEET_RUNNER_GROUP_ID='3',
+                GITHUB_STATE_TOKEN='state')
+            self.assertEqual(output['pool'], 'github')
 
     def test_pr_pool_retry_needs_no_cancelled_placement_history(self):
         guest = LiveMembership().guest()

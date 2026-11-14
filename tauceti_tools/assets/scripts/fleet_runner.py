@@ -171,7 +171,10 @@ def shared_capacity(repository, token, namespace_cap=20):
     result = dict(github_busy=value["busy"], namespace_busy=None, queued_fleet=None, placement_unavailable=reason)
     # Running counts can be complete while queued placement discovery is only
     # partial. Such a snapshot cannot authorize intentionally waiting PR work.
-    result["fleet_queue_complete"] = value.get("routing_version") == 2 and value.get("placement_unavailable") is None
+    result["fleet_queue_complete"] = (value.get("routing_version") == 2
+                                      and type(value.get("fleet_queue_version")) is int
+                                      and value["fleet_queue_version"] == 1
+                                      and value.get("placement_unavailable") is None)
     lower = value.get("namespace_busy_lower_bound")
     if type(lower) is int and 0 <= lower <= 10000:
         result["namespace_busy_lower_bound"] = lower

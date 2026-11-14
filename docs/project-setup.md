@@ -780,6 +780,10 @@ GitHub fallback receive new work. Setting zero restores idle-only selection.
 This is an observational limit, like the existing runner capacity budgets:
 cached observations and simultaneous pickers can briefly exceed it. No new
 service, credential, cancellation loop or runner-consuming wait is introduced.
+Deploy the capacity service first and verify fresh snapshots advertise
+`fleet_queue_version: 1`. This capability certifies queued, pending, waiting and
+requested fleet jobs are included. Older cached snapshots remain useful for
+running capacity but cannot authorize intentionally waiting PR work.
 
 ## Cache
 
