@@ -7,13 +7,15 @@ every worker can push to. That repository is TauCetiProject/tauceti-claims, and 
 no code, no Actions, no relationship to this one. Coordinating workers must never need write access to
 the library itself, which is the whole reason the leases do not live here.
 
-So somebody has to be let in, and this decides who: the author of any merged pull request in this
+So somebody has to be let in, and this decides who: the author of any pull request that landed in this
 repository. A maintainer looked at their work and took it, which is a better statement than org
-membership and is already recorded on GitHub, so there is no list to keep. A worker whose operator has
-not landed anything yet is not stuck waiting — it claims in its own fork until then, and so still
-coordinates with the rest of its own fleet.
+membership and is already recorded on GitHub, so there is no list to keep. Landed means merged by
+GitHub, or landed by the merge queue, which pushes the commit and closes the PR under LANDED_TITLE:
+GitHub records that PR as closed, not merged. A worker whose operator has not landed anything yet is
+not stuck waiting — it claims in its own fork until then, and so still coordinates with the rest of
+its own fleet.
 
-  grant  Invite every merged-PR author who is not already a collaborator or already invited. Grants
+  grant  Invite every landed-PR author who is not already a collaborator or already invited. Grants
          are monotone: nothing is revoked automatically, because a quiet operator silently losing
          coordination is a confusing thing to debug from the worker side. Remove abuse by hand.
   sweep  Delete leases that expired more than SWEEP_GRACE_MINUTES ago. Releasing a lease deletes it,
@@ -24,8 +26,8 @@ Reconciling (rather than reacting to a merge event) is what makes this self-heal
 a failed API call, or an invitation that expired unaccepted after seven days is simply picked up on the
 next run.
 
-Env: GH_TOKEN (reads merged PRs here), CLAIMS_TOKEN (administers the claims repo: `Administration:
-write` to invite, `Contents: write` to sweep), REPO (owner/name), optional CLAIMS_REPO, DRY_RUN=1,
+Env: GH_TOKEN (reads PRs here), CLAIMS_TOKEN (administers the claims repo: `Administration: write` to
+invite, `Contents: write` to sweep), REPO (owner/name), optional CLAIMS_REPO, LANDERS, DRY_RUN=1,
 SWEEP_GRACE_MINUTES.
 """
 
@@ -45,6 +47,12 @@ DRY_RUN = os.environ.get("DRY_RUN") == "1"
 # sweep cannot race that and delete a lease somebody is actively holding.
 SWEEP_GRACE_MINUTES = int(os.environ.get("SWEEP_GRACE_MINUTES", "60"))
 NS = "tauceti-claims"
+# The merge queue lands a PR by pushing its commit to the default branch, then renames the PR with this
+# prefix and closes it, as bors-ng did.
+LANDED_TITLE = "[Merged by Bors] - "
+# The accounts that land PRs that way. A title is the author's to edit, so it counts only on a PR one of
+# these closed.
+LANDERS = {name.strip().lower() for name in os.environ.get("LANDERS", "tauceti-queue[bot]").split(",") if name.strip()}
 
 
 def gh(args, token, check=True):
@@ -92,10 +100,67 @@ def merged_pr_authors():
     return human_authors(json.loads(out.stdout or "[]"))
 
 
-def already_admitted():
+def queue_landed_prs():
+    """{author: [PR numbers, newest first]} for the newest closed PRs titled as the merge queue titles a
+    PR it landed. Whether the queue really closed one is checked only for an author not yet admitted
+    (`closed_by_lander`), because that costs a request per PR."""
+    out = gh(
+        ["pr", "list", "--repo", REPO, "--state", "closed", "--limit", "5000", "--json", "number,author,title"],
+        GH_TOKEN,
+    )
+    landed = {}
+    for pr in json.loads(out.stdout or "[]"):
+        if (pr.get("title") or "").startswith(LANDED_TITLE):
+            for login in human_authors([pr]):
+                landed.setdefault(login, []).append(pr["number"])
+    return landed
+
+
+def closed_by_lander(number):
+    """Did one of LANDERS close this PR? Its last `closed` event says who did. An unreadable answer is
+    no: a missed grant is picked up on a later run, a wrong one is not undone."""
+    p = gh(
+        [
+            "api",
+            "--paginate",
+            f"/repos/{REPO}/issues/{number}/events?per_page=100",
+            "--jq",
+            '.[] | select(.event == "closed") | .actor.login',
+        ],
+        GH_TOKEN,
+        check=False,
+    )
+    closers = [line.strip().lower() for line in p.stdout.splitlines() if line.strip()] if p.returncode == 0 else []
+    return bool(closers) and closers[-1] in LANDERS
+
+
+def invitations():
+    """{login: (invitation id, expired)} for the claims repository. GitHub keeps an invitation that
+    expired unaccepted, and inviting the same login again only returns it, still expired, so `grant`
+    cancels it first. An invitation sent to an email address has no login and is skipped."""
+    rows = gh_lines(
+        [
+            "api",
+            "--paginate",
+            f"/repos/{CLAIMS_REPO}/invitations?per_page=100",
+            "--jq",
+            r'.[] | "\(.invitee.login) \(.id) \(.expired)"',
+        ],
+        CLAIMS_TOKEN,
+    )
+    found = {}
+    for row in rows:
+        login, number, expired = (row.split() + ["", "", ""])[:3]
+        if login and login != "null":
+            found[login] = (number, expired == "true")
+    return found
+
+
+def already_admitted(pending):
     """Logins that already have access, or have been asked: direct collaborators plus people who have
     not clicked yet (workers accept their own invitation, but an operator who has not started one
-    since the grant still has it pending).
+    since the grant still has it pending). `pending` is `invitations()`; one that expired does not
+    count, so its login is invited again.
 
     This does NOT see people whose access comes from the organization. The collaborators endpoint
     resolves those only for a caller that can read org membership, and this App is installed on one
@@ -104,11 +169,7 @@ def already_admitted():
         ["api", "--paginate", f"/repos/{CLAIMS_REPO}/collaborators?per_page=100", "--jq", ".[].login"],
         CLAIMS_TOKEN,
     )
-    invitations = gh_lines(
-        ["api", "--paginate", f"/repos/{CLAIMS_REPO}/invitations?per_page=100", "--jq", ".[].invitee.login"],
-        CLAIMS_TOKEN,
-    )
-    return set(collaborators) | set(invitations)
+    return set(collaborators) | {login for login, (_, expired) in pending.items() if not expired}
 
 
 def has_access(login):
@@ -127,16 +188,30 @@ def grant():
     """Invite every author who is not in yet. A failure on one login does not stop the others, but
     the job still ends red so somebody looks (an org that forbids outside collaborators, or requires
     2FA of them, fails exactly here)."""
-    candidates = sorted(merged_pr_authors() - already_admitted())
+    pending = invitations()
+    merged = merged_pr_authors()
+    landed = queue_landed_prs()
+    candidates = sorted((merged | set(landed)) - already_admitted(pending))
     invited = 0
     failures = 0
     for login in candidates:
         if has_access(login):
             continue  # an organization member; nothing to grant and nothing to report
+        if login not in merged and not any(closed_by_lander(number) for number in landed[login][:3]):
+            print(f"grant: skipped {login}: could not confirm that the merge queue landed one of their PRs")
+            continue
+        number, expired = pending.get(login, (None, False))
         if DRY_RUN:
-            print(f"grant: would invite {login}")
+            print(f"grant: would invite {login}" + (" (cancelling their expired invitation)" if expired else ""))
             invited += 1
             continue
+        if expired:
+            p = gh(["api", "-X", "DELETE", f"/repos/{CLAIMS_REPO}/invitations/{number}"], CLAIMS_TOKEN, check=False)
+            if p.returncode != 0:
+                failures += 1
+                reason = (p.stderr or p.stdout).strip()
+                print(f"grant: FAILED to cancel the expired invitation of {login}: {reason}", file=sys.stderr)
+                continue
         p = gh(
             ["api", "-X", "PUT", f"/repos/{CLAIMS_REPO}/collaborators/{login}", "-f", "permission=push"],
             CLAIMS_TOKEN,
@@ -151,7 +226,7 @@ def grant():
         print(f"grant: invited {login} to {CLAIMS_REPO}" if p.stdout.strip() else f"grant: {login} already had access")
         invited += 1
     if not invited:
-        print("grant: every merged-PR author already has the claim namespace")
+        print("grant: every landed-PR author already has the claim namespace")
     return failures
 
 
