@@ -100,7 +100,7 @@ class GitHub:
 
 class RecoveryTests(unittest.TestCase):
     def recover(self, api, **kwargs):
-        return recovery.recover(api, "owner/project", now=NOW, **kwargs)
+        return recovery.recover(api, "owner/project", now=NOW, cleanup=False, **kwargs)
 
     def test_old_missing_result_dispatches_default_branch_and_dry_run_does_not_write(self):
         for history in ([run()], []):
@@ -301,7 +301,7 @@ class AcquisitionGitHub(GitHub):
 
 class AcquisitionTests(unittest.TestCase):
     def recover(self, api, **kwargs):
-        return recovery.recover(api, "owner/project", now=NOW, **kwargs)
+        return recovery.recover(api, "owner/project", now=NOW, cleanup=False, **kwargs)
 
     def test_stale_empty_run_is_cancelled_and_replaced_and_dry_run_is_read_only(self):
         for apply in [False, True]:

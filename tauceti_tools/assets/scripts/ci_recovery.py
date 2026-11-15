@@ -11,6 +11,7 @@ import re
 import sys
 
 from github_api import APIError, Deferred, GitHub
+from pr_ci_lifecycle import ACTIVE, ordinary, pr_numbers, reconcile, runs
 
 INVENTORY = """
 query($owner: String!, $name: String!, $after: String) {
@@ -72,31 +73,6 @@ def inventory(api, repo):
         after = page["pageInfo"]["endCursor"]
 
 
-def runs(api, repo, query, *, include_ignored=False):
-    page = 1
-    while True:
-        result = api.request(
-            "GET", f"repos/{repo}/actions/workflows/pr-build.yml/runs?{query}&per_page=100&page={page}"
-        )
-        rows = result["workflow_runs"]
-        yield from (
-            row for row in rows
-            if include_ignored or not row.get("display_title", "").startswith("Ignored label event ")
-        )
-        if len(rows) < 100:
-            return
-        page += 1
-
-
-def pr_numbers(run):
-    numbers = {p["number"] for p in run.get("pull_requests", [])}
-    # Dispatches have no pull_requests association, and use the default branch's
-    # SHA rather than the tested PR head. Include both current and legacy titles.
-    match = re.fullmatch(r"pr-build (?:pr=)?([1-9][0-9]*)(?: head=[0-9a-f]{40})?", run.get("display_title", ""))
-    if match:
-        numbers.add(int(match[1]))
-    return numbers
-
 
 def matches(run, number, head):
     """An obsolete, explicitly bound PR head cannot reserve a newer head."""
@@ -133,19 +109,6 @@ def quota_reserved(api, reserve):
                 return True
     return False
 
-
-ACTIVE = {"queued", "in_progress", "waiting", "pending", "requested"}
-
-
-def ordinary(run, repo):
-    """Staging belongs to its controller; only ordinary trusted PR workflows qualify."""
-    return (
-        run.get("path") == ".github/workflows/pr-build.yml"
-        and run.get("repository", {}).get("full_name") == repo
-        and (run.get("event") in {"pull_request_target", "workflow_dispatch"}
-             or run.get("event") == "repository_dispatch" and bool(pr_numbers(run)))
-        and not run.get("display_title", "").startswith("bors ")
-    )
 
 
 def old(run, now, min_age):
@@ -223,7 +186,7 @@ def cancelled_before_build(api, repo, run):
     )
 
 
-def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_reserve=0):
+def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_reserve=0, cleanup=True):
     now = dt.datetime.now(dt.timezone.utc).timestamp() if now is None else now
     branch, pulls = inventory(api, repo)
 
@@ -276,6 +239,8 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
             if run.get("display_title", "").startswith("Ignored label event "):
                 continue
             active.append(run)
+    if cleanup:
+        reconcile(api, repo, active=all_active, apply=apply, api_reserve=api_reserve)
     since = dt.datetime.fromtimestamp(now - max(86400, min_age), dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     pass_started = dt.datetime.fromtimestamp(now, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     for event in ("workflow_dispatch", "repository_dispatch"):
@@ -374,11 +339,16 @@ def main():
         "--min-age-minutes", type=int, default=90, help="allow the existing status replay to finish first"
     )
     parser.add_argument("--api-reserve", type=int, default=0, help="leave this many shared GitHub API requests unused")
+    parser.add_argument("--cleanup-only", action="store_true", help="cancel obsolete PR CI without dispatching builds")
+    parser.add_argument("--pr", type=int, help="restrict cleanup to a PR; implies --cleanup-only")
     args = parser.parse_args()
-    if args.limit < 0 or args.min_age_minutes < 0 or args.api_reserve < 0:
-        parser.error("limit, minimum age and API reserve must be nonnegative")
+    if args.limit < 0 or args.min_age_minutes < 0 or args.api_reserve < 0 or (args.pr is not None and args.pr < 1):
+        parser.error("limit, minimum age and API reserve must be nonnegative; PR number must be positive")
     api = GitHub(max_wait=0)
     try:
+        if args.cleanup_only or args.pr is not None:
+            reconcile(api, args.repo, apply=args.apply, number=args.pr, api_reserve=args.api_reserve, strict=True)
+            return 0
         selected = recover(
             api,
             args.repo,
@@ -390,7 +360,7 @@ def main():
         print(
             f"ci-recovery: {'dispatched' if args.apply else 'would dispatch'} {len(selected)} build(s)", file=sys.stderr
         )
-    except (APIError, Deferred) as error:
+    except (APIError, Deferred, RuntimeError) as error:
         print(f"ci-recovery: {error}; the next scheduled sweep will retry", file=sys.stderr)
         return 1
     finally:

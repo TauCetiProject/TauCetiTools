@@ -81,6 +81,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_READ_TOKEN: ${{ github.token }}
+          PYTHONPATH: ${{ github.workspace }}
           TAUCETI_GITHUB_READ_ROLE: workflow-read
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
@@ -197,12 +198,13 @@ jobs:
         with:
           repository: ${{ inputs.tools_repository }}
           ref: ${{ inputs.tools_ref }}
-          sparse-checkout: tauceti_tools/assets/scripts
+          sparse-checkout: tauceti_tools
           persist-credentials: false
       - name: Recover abandoned PR builds
         env:
           GH_TOKEN: ${{ github.token }}
           GH_READ_TOKEN: ${{ github.token }}
+          PYTHONPATH: ${{ github.workspace }}
           TAUCETI_GITHUB_READ_ROLE: workflow-read
           TAUCETI_GITHUB_WRITE_ROLE: workflow-dispatch
         run: python3 tauceti_tools/assets/scripts/ci_recovery.py --apply
