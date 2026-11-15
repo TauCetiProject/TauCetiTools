@@ -1919,6 +1919,7 @@ jobs:
         env:
           GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
           SOURCE_JOB_RESULT: ${{ needs.sandboxed-build.result }}
+          CI_SOURCE_PUBLISHER_RUNNER: ${{ inputs.source_candidate_control_runner }}
           SOURCE_BUILD_STATE: ${{ needs.sandboxed-build.outputs.build-state }}
           SOURCE_SCOPE_STATE: ${{ needs.sandboxed-build.outputs.source-scope }}
           SOURCE_BUMP_STATE: ${{ needs.sandboxed-build.outputs.source-bump-guard }}

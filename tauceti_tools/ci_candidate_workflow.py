@@ -618,15 +618,44 @@ def publication_verdict(request, policy, context, reader, *, clock=time.monotoni
             if type(runner) is int and runner > 0:
                 acquired = True
                 build_runner = builders[0].get("runner_id")
+                expected = context.get("publisher_runner", "ubuntu-24.04")
+                if expected == "ubuntu-24.04":
+                    runner_matches = (
+                        job.get("runner_group_id") == 0
+                        and job.get("runner_group_name") == "GitHub Actions"
+                        and job.get("labels") == ["ubuntu-24.04"]
+                    )
+                else:
+                    # This selector comes only from the protected caller input,
+                    # outside the candidate sandbox. Require explicit group
+                    # membership as well as every requested label; plain custom
+                    # labels cannot establish publisher isolation.
+                    runner_matches = (
+                        isinstance(expected, dict)
+                        and set(expected) == {"group", "labels"}
+                        and isinstance(expected["group"], str)
+                        and bool(expected["group"])
+                        and isinstance(expected["labels"], list)
+                        and bool(expected["labels"])
+                        and all(isinstance(label, str) and label for label in expected["labels"])
+                        and "self-hosted" in expected["labels"]
+                        and type(job.get("runner_group_id")) is int
+                        and job["runner_group_id"] > 0
+                        # Jobs API lowercases custom group names even though
+                        # the group configuration preserves their case.
+                        and isinstance(job.get("runner_group_name"), str)
+                        and job["runner_group_name"].casefold() == expected["group"].casefold()
+                        and isinstance(job.get("labels"), list)
+                        and all(isinstance(label, str) for label in job["labels"])
+                        and sorted(job["labels"]) == sorted(expected["labels"])
+                    )
                 if (
-                    job.get("runner_group_id") != 0
-                    or job.get("runner_group_name") != "GitHub Actions"
-                    or job.get("labels") != ["ubuntu-24.04"]
+                    not runner_matches
                     or type(build_runner) is not int
                     or build_runner <= 0
                     or build_runner == runner
                 ):
-                    raise EvidenceUnavailable("publisher did not acquire an isolated hosted runner")
+                    raise EvidenceUnavailable("publisher did not acquire the caller's isolated runner")
                 isolated = True
             if job.get("status") == "completed":
                 if isolated and job.get("conclusion") == "success":
@@ -718,6 +747,8 @@ def context_from_environment(env):
         "harness_file": "CI_SOURCE_HARNESS_FILE",
     }
     context = {key: env.get(name) for key, name in names.items()}
+    if "CI_SOURCE_PUBLISHER_RUNNER" in env:
+        context["publisher_runner"] = json.loads(env["CI_SOURCE_PUBLISHER_RUNNER"])
     for key, name in (("run_id", "GITHUB_RUN_ID"), ("attempt", "GITHUB_RUN_ATTEMPT")):
         value = env.get(name)
         if (

@@ -221,6 +221,32 @@ class Workflow(unittest.TestCase):
                 )
                 self.assertEqual(result["verdicts"]["publication"], "infrastructure")
 
+    def test_finalizer_verifies_explicit_trusted_publisher_group_and_labels(self):
+        selector = dict(group="TauCetiQueueControl", labels=["self-hosted", "linux", "x64",
+                        "tauceti-fleet-queue-control", "fleet-" + "a" * 32])
+        context = dict(self.context, publisher_runner=selector)
+        changes = dict(runner_group_id=6, runner_group_name=selector["group"].lower(), labels=selector["labels"])
+        result = cw.finalize(self.request, self.policy, context, self.evidence,
+                             reader=self.publisher_reader(publisher_changes=changes))
+        self.assertEqual(result["verdicts"]["publication"], "success")
+        for invalid in (
+            dict(changes, runner_group_name="TauCetiFleet"),
+            dict(changes, runner_group_id=0),
+            dict(changes, runner_id=9001),
+            dict(changes, labels=["self-hosted", "tauceti-fleet-pr"]),
+            dict(changes, labels=selector["labels"][:-1] + ["fleet-" + "b" * 32]),
+            dict(changes, labels=[None]),
+            dict(changes, steps=[]),
+        ):
+            with self.subTest(invalid=invalid):
+                result = cw.finalize(self.request, self.policy, context, self.evidence,
+                                     reader=self.publisher_reader(publisher_changes=invalid))
+                self.assertEqual(result["verdicts"]["publication"], "infrastructure")
+        # Self-hosted publication is never an implicit fallback for the hosted default.
+        result = cw.finalize(self.request, self.policy, self.context, self.evidence,
+                             reader=self.publisher_reader(publisher_changes=changes))
+        self.assertEqual(result["verdicts"]["publication"], "infrastructure")
+
     def test_publication_cannot_reuse_an_older_attempt_or_partial_jobs_response(self):
         for reader in (
             self.publisher_reader(run_changes={"run_attempt": 3}),
@@ -770,6 +796,9 @@ class ShippedWorkflow(unittest.TestCase):
         # The control jobs may run concurrently; neither is routed back onto the
         # one compiler slot, which would let the finalizer wait on its own queue.
         self.assertNotIn("inputs.source_candidate_runner", control)
+        finalizer = self.step("Produce the source execution result", job="finalize-merge-group-build")
+        self.assertEqual(finalizer["env"]["CI_SOURCE_PUBLISHER_RUNNER"],
+                         "${{ inputs.source_candidate_control_runner }}")
 
     def test_source_identity_shell_executes_ingress_and_never_the_legacy_helpers(self):
         shell = self.step("Resolve PR head")["run"]
