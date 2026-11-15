@@ -93,13 +93,14 @@ jobs:
       # Isolated test-branch credentials only; no Neon API key or production URL.
       TEST_POSTGRES_URL: ${{ secrets.STATE_TEST_POSTGRES_URL }}
       TEST_POSTGRES_MIGRATION_URL: ${{ secrets.STATE_TEST_POSTGRES_MIGRATION_URL }}
-      POSTGRES_TEST_REPORT: ${{ runner.temp }}/postgres-test-results.xml
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
       - run: npm ci && npm run test:postgres
+        env:
+          POSTGRES_TEST_REPORT: ${{ runner.temp }}/postgres-test-results.xml
         working-directory: services/github-state
       - name: Upload PostgreSQL test timings
         if: ${{ always() }}
