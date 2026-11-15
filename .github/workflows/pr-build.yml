@@ -34,6 +34,10 @@ on:
         type: string
         default: '"ubuntu-24.04"'
         description: 'Trusted caller-selected runner labels as JSON; never taken from candidate dispatch data.'
+      source_candidate_control_runner:
+        type: string
+        default: '"ubuntu-24.04"'
+        description: 'Trusted caller-selected JSON labels for isolated publisher and finalizer capacity.'
     secrets:
       CI_SOURCE_READ_TOKEN: {required: false}
       APP_ID: {required: false}
@@ -1786,6 +1790,7 @@ jobs:
       publication-required: true
       project_ref: ${{ inputs.project_ref }}
       source_candidate_enabled: ${{ github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-source-candidate-v2' && inputs.source_candidate_enabled }}
+      source_candidate_control_runner: ${{ inputs.source_candidate_control_runner }}
     secrets:
       LAKE_CACHE_KEY: ${{ secrets.LAKE_CACHE_KEY }}
       CI_SOURCE_READ_TOKEN: ${{ secrets.CI_SOURCE_READ_TOKEN }}
@@ -1801,7 +1806,7 @@ jobs:
     # Finalizer (2x4) + publisher (4x8) fit within the freed compiler allocation (8x16).
     needs: sandboxed-build
     if: ${{ always() && (github.event_name == 'merge_group' || (github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-source-candidate-v2'))) }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(inputs.source_candidate_enabled && inputs.source_candidate_control_runner || '"ubuntu-24.04"') }}
     timeout-minutes: 30
     permissions:
       contents: read  # sparse immutable finalization tools only

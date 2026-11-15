@@ -13,6 +13,10 @@ on:
       tools_ref: {type: string, required: true}
       project_ref: {type: string, default: ""}
       source_candidate_enabled: {type: boolean, default: false}
+      source_candidate_control_runner:
+        type: string
+        default: '"ubuntu-24.04"'
+        description: 'Trusted caller-selected JSON runner labels; never read from candidate data.'
       revision:
         description: Immutable TauCeti revision whose output map is being published
         required: true
@@ -46,7 +50,7 @@ jobs:
   publish:
     # A NEW ephemeral runner for this job, separate from the candidate sandbox.
     # Direct labels request no privileged container, cache volume, git mirror or tool cache.
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(inputs.source_candidate_enabled && inputs.source_candidate_control_runner || '"ubuntu-24.04"') }}
     timeout-minutes: 15
     outputs:
       published: ${{ steps.result.outputs.published }}
