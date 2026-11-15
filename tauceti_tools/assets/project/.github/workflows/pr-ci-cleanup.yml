@@ -10,6 +10,7 @@ permissions:
   contents: read
   actions: write
   pull-requests: read
+  statuses: read
 jobs:
   cleanup:
     if: >-
@@ -37,19 +38,9 @@ jobs:
           tools-repository: __TOOLS_REPO__
           tools-ref: __TOOLS_REF__
           project-directory: .
-      - name: Select existing CI read credentials
-        id: ci-api
-        uses: __TOOLS_REPO__/.github/actions/ci-credentials@__TOOLS_REF__
-        with:
-          owner: ${{ github.repository_owner }}
-          repository: ${{ github.event.repository.name }}
-          workflow-token: ${{ github.token }}
-          read-app-id: ${{ secrets.CI_READ_APP_ID }}
-          read-app-private-key: ${{ secrets.CI_READ_APP_PRIVATE_KEY }}
       - name: Cancel only builds whose live PR state makes them obsolete
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token }}
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr }}
           STATUS_CONTEXT: ${{ github.event.context }}
         run: |
