@@ -465,6 +465,22 @@ PR writes invalidate saved targeted ETags; an automatic one-time validator reset
 older poisoned records. Head corrections invalidate affected cached PR queries and aggregate
 survey grace entries without decoding unrelated histories.
 
+## PostgreSQL CI budget and timings
+
+`npm run test:postgres` runs the contract suite against isolated test credentials,
+with two test files running concurrently. Each fixture creates and removes its
+own database schema, and the tests exercise real database connections and SQL
+requests. End-to-end time therefore depends strongly on runner-to-database latency.
+The GitHub-hosted CI job has a 60-minute limit; its earlier 20-minute budget was
+insufficient after moving from Namespace runners.
+
+CI keeps the normal console reporter and also uploads per-test durations in the
+`postgres-test-results-<run>-<attempt>` JUnit artifact, retained for seven days.
+To produce the same report locally, set `POSTGRES_TEST_REPORT` to an output path.
+The report does not change test concurrency or failure handling. An interrupted
+run may leave an incomplete report; console transaction telemetry still records
+connection and SQL-phase times up to cancellation.
+
 ## Client behavior
 
 Clients request the newest available service data, including conditional reads.
