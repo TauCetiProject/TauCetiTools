@@ -13,7 +13,7 @@ SCRIPT = ROOT / 'tauceti_tools/assets/scripts/sandbox-build.sh'
 
 
 class CIAxiomPreflightTests(unittest.TestCase):
-    def sandbox(self, *, scoped=True, empty=False, duplicate_status=0, local_status=0, full_status=0):
+    def sandbox(self, *, scoped=True, empty=False, duplicate_status=0, local_status=0, full_status=0, cache=False):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             for name in ('bin', 'trusted', 'drivers', 'watchdog/bin', '.lake/tmp'):
@@ -23,6 +23,9 @@ class CIAxiomPreflightTests(unittest.TestCase):
             for name in ('declaration-names.sh', 'lint-env.sh', 'lint-style.sh'):
                 (root / 'trusted' / name).write_text('exit 0\n')
             (root / 'trusted/ci_log_filter.py').write_text('import sys\nsys.stdout.write(sys.stdin.read())\n')
+            (root / 'trusted/bulk-unpack-cache.py').write_text(
+                'import json, os\nwith open(os.environ["CALLS"], "a") as f: '
+                'f.write(json.dumps(["bulk-unpack-cache"]) + "\\n")\n')
             stub = '''#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
@@ -45,6 +48,9 @@ if name == 'local-axioms': sys.exit(int(os.environ['LOCAL_STATUS']))
                        CALLS=str(root / 'calls.jsonl'), TAUCETI_TRUSTED_SCRIPTS=str(root / 'trusted'),
                        WATCHDOG_TOOLCHAIN=str(root / 'watchdog'), LINT_DRIVER_EXE=str(root / 'drivers/lint-env-driver'),
                        AXIOMS_ONLY_MODULES=str(scope) if scoped else '', STAGE_LAKE_CACHE='',
+                       LAKE_ARTIFACT_CACHE='true' if cache else '',
+                       LAKE_RESTORE_ARTIFACTS='true' if cache else '',
+                       LAKE_CACHE_DIR=str(root / '.lake/cache') if cache else '',
                        DUPLICATE_STATUS=str(duplicate_status), LOCAL_STATUS=str(local_status), FULL_STATUS=str(full_status))
             result = subprocess.run(['bash', str(SCRIPT)], cwd=root, env=env, text=True, capture_output=True)
             calls = [json.loads(line) for line in (root / 'calls.jsonl').read_text().splitlines()]
@@ -59,6 +65,19 @@ if name == 'local-axioms': sys.exit(int(os.environ['LOCAL_STATUS']))
                          [['local-axioms', scope, 'TauCeti', artifacts]])
         self.assertLess(next(i for i, c in enumerate(calls) if c[0] == 'audit-driver'),
                         next(i for i, c in enumerate(calls) if c[0] == 'local-axioms'))
+
+    def test_ordinary_cached_pr_bulk_restores_before_build_without_staging_flags(self):
+        result, calls, _, _ = self.sandbox(cache=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(sum(c[0] == 'bulk-unpack-cache' for c in calls), 1)
+        self.assertLess(next(i for i, c in enumerate(calls) if c[0] == 'bulk-unpack-cache'),
+                        next(i for i, c in enumerate(calls) if c[:2] == ['lake', 'build']))
+        self.assertIn(['lake', 'build', '--iofail'], calls)
+
+    def test_pr_without_artifact_cache_keeps_the_normal_build_path(self):
+        result, calls, _, _ = self.sandbox()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(any(c[0] == 'bulk-unpack-cache' for c in calls))
 
     def test_empty_scope_stays_scoped(self):
         result, calls, _, _ = self.sandbox(empty=True)

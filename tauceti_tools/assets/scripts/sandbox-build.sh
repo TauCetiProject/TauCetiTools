@@ -64,9 +64,10 @@ if [ "${STAGE_LAKE_CACHE:-}" = "1" ]; then
   # Generate the native map in the final build, rather than walking the graph again.
   LAKE_BUILD_FLAGS+=(--rehash -o .lake/outputs.jsonl)
 fi
-if [ "${STAGE_LAKE_CACHE:-}" = "1" ]; then
+if [ "${LAKE_ARTIFACT_CACHE:-}" = "true" ] && [ "${LAKE_RESTORE_ARTIFACTS:-}" = "true" ]; then
   # Stock Lake forks once per cached module. Prepare fresh private caches in one
-  # leantar call, retaining archives for native publication; Lake verifies inputs.
+  # leantar call for ordinary PRs as well as staging. Retain archives for native
+  # publication; Lake still verifies inputs before using the restored outputs.
   phase cache-unpack
   python3 "$TRUSTED_SCRIPTS/bulk-unpack-cache.py" .
 fi
