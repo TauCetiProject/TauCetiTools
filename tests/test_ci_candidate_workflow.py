@@ -221,6 +221,59 @@ class Workflow(unittest.TestCase):
                 )
                 self.assertEqual(result["verdicts"]["publication"], "infrastructure")
 
+    def test_finalizer_publishes_bound_candidate_verdicts_and_not_execution_main(self):
+        from unittest.mock import Mock
+
+        result = cw.finalize(self.request, self.policy, self.context, self.evidence, reader=self.publisher_reader())
+        writer = Mock()
+        cw.publish_statuses(self.request, self.policy, self.context, result, writer=writer)
+        calls = writer.request.call_args_list
+        self.assertEqual(len(calls), 2)
+        for call, name in zip(calls, ("build", "bump-guard"), strict=True):
+            self.assertEqual(call.args[:2], ("POST", f"repos/team/Execution/statuses/{self.request.head}"))
+            self.assertEqual(call.args[2]["context"], name)
+            self.assertEqual(call.args[2]["state"], "success")
+            self.assertEqual(call.args[2]["target_url"], f"https://github.com/team/Execution/actions/runs/{self.context['run_id']}")
+        altered = copy.deepcopy(result)
+        altered["producer"]["attempt"] += 1
+        with self.assertRaises(ValueError):
+            cw.publish_statuses(self.request, self.policy, self.context, altered, writer=writer)
+        self.assertEqual(writer.request.call_count, 2)
+
+    def test_missing_publication_cannot_post_a_passing_build(self):
+        from unittest.mock import Mock
+
+        result = cw.finalize(self.request, self.policy, self.context, dict(self.evidence, publication_staged="false"))
+        writer = Mock()
+        cw.publish_statuses(self.request, self.policy, self.context, result, writer=writer)
+        self.assertEqual(writer.request.call_args_list[0].args[2]["state"], "error")
+
+    def test_status_api_failure_retains_a_verified_retryable_result(self):
+        from unittest.mock import Mock
+
+        writer = Mock()
+        writer.request.side_effect = github_api.APIError("POST", "statuses", 503, {})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence, output = root / "evidence.json", root / "result.json"
+            evidence.write_text(json.dumps(self.evidence))
+            with (
+                patch.dict(os.environ, {"TAUCETI_GITHUB_WRITE_ROLE": "ci-status-app"}),
+                patch.object(cw, "context_from_environment", return_value=self.context),
+                patch.object(cw, "load_request", return_value=(self.request, self.policy)),
+                patch.object(cw, "GitHubEvidence", return_value=self.publisher_reader()),
+                patch.object(cw, "GitHub", return_value=writer),
+            ):
+                code = cw.main(["finalize", "--policy", "trusted.json", "--configuration", "trusted.toml",
+                                "--evidence", str(evidence), "--output", str(output), "--publish-statuses"])
+            self.assertEqual(code, 1)
+            result = json.loads(output.read_text())
+            self.assertEqual(result["verdicts"]["publication"], "infrastructure")
+            metadata = dict(run(self.request, self.policy), conclusion="failure")
+            verified = cc.verify_result(self.request, self.policy, result, metadata,
+                                        run_id=self.context["run_id"], attempt=self.context["attempt"])
+            self.assertEqual(cc.classify_verdicts(verified), "infrastructure")
+
     def test_finalizer_verifies_explicit_trusted_publisher_group_and_labels(self):
         selector = dict(group="TauCetiQueueControl", labels=["self-hosted", "linux", "x64",
                         "tauceti-fleet-queue-control", "fleet-" + "a" * 32])
@@ -727,6 +780,25 @@ class PinGuard(unittest.TestCase):
 
 
 class NativeGuard(unittest.TestCase):
+    def test_finalizer_write_fence_allows_only_the_selected_execution_commit(self):
+        env = {"TAUCETI_SOURCE_CANDIDATE": "true",
+               "TAUCETI_CI_EXECUTION_REPOSITORY": json.dumps(policy().execution.record())}
+        sha = "a" * 40
+        client = github_api.GitHub(source_status_target=("team/Execution", sha))
+        response = subprocess.CompletedProcess([], 0, 'HTTP/2.0 201 Created\r\n\r\n{}', '')
+        with patch.dict(os.environ, env), patch.object(github_api.subprocess, "run", return_value=response) as child:
+            client.request("POST", "repos/team/Execution/statuses/" + sha, {"context": "build", "state": "success"})
+            self.assertEqual(child.call_args.kwargs["env"]["GH_HOST"], "github.com")
+            for path, body in (
+                ("repos/team/Execution/statuses/" + "b" * 40, {"context": "build"}),
+                ("repos/team/Math/statuses/" + sha, {"context": "build"}),
+                ("repos/team/Execution/statuses/" + sha, {"context": "scope"}),
+                ("repos/team/Execution/issues/17/comments", {"body": "unexpected"}),
+            ):
+                with self.subTest(path=path), self.assertRaises(ValueError):
+                    client.request("POST", path, body)
+            self.assertEqual(child.call_count, 1)
+
     def test_github_source_metadata_and_status_requests_are_refused_before_credentials(self):
         env = {
             "TAUCETI_SOURCE_CANDIDATE": "true",
@@ -799,6 +871,13 @@ class ShippedWorkflow(unittest.TestCase):
         finalizer = self.step("Produce the source execution result", job="finalize-merge-group-build")
         self.assertEqual(finalizer["env"]["CI_SOURCE_PUBLISHER_RUNNER"],
                          "${{ inputs.source_candidate_control_runner }}")
+        credentials = self.step("Select CI API credentials", job="finalize-merge-group-build")
+        self.assertEqual(credentials["with"]["status-app-id"], "${{ secrets.CI_STATUS_APP_ID }}")
+        self.assertEqual(credentials["if"], "${{ env.SOURCE_CANDIDATE != 'true' || inputs.source_candidate_github_statuses }}")
+        self.assertIn("--publish-statuses", finalizer["run"])
+        self.assertFalse(self.value[True]["workflow_call"]["inputs"]["source_candidate_github_statuses"]["default"])
+        builder_credentials = self.step("Select CI API credentials")
+        self.assertIn("env.SOURCE_CANDIDATE != 'true'", builder_credentials["with"]["status-app-id"])
 
     def test_source_identity_shell_executes_ingress_and_never_the_legacy_helpers(self):
         shell = self.step("Resolve PR head")["run"]

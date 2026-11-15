@@ -30,6 +30,10 @@ on:
       lean_root: {type: string, required: true}
       roadmap_dir: {type: string, required: true}
       source_candidate_enabled: {type: boolean, default: false}
+      source_candidate_github_statuses:
+        type: boolean
+        default: false
+        description: "Publish verified verdicts on the execution repository candidate SHA when it is also a protected mirror."
       source_candidate_runner:
         type: string
         default: '"ubuntu-24.04"'
@@ -1882,7 +1886,7 @@ jobs:
           cp -a "$RUNNER_TEMP/tauceti-shared-scripts/." ./scripts/
           echo "PYTHONPATH=$PYTHONPATH" >> "$GITHUB_ENV"
       - name: Select CI API credentials
-        if: ${{ env.SOURCE_CANDIDATE != 'true' }}
+        if: ${{ env.SOURCE_CANDIDATE != 'true' || inputs.source_candidate_github_statuses }}
         id: ci-api
         uses: ./.tauceti-tools/.github/actions/ci-credentials
         with:
@@ -1891,8 +1895,8 @@ jobs:
           workflow-token: ${{ github.token }}
           read-app-id: ${{ secrets.CI_READ_APP_ID }}
           read-app-private-key: ${{ secrets.CI_READ_APP_PRIVATE_KEY }}
-          status-app-id: ${{ env.SOURCE_CANDIDATE != 'true' && secrets.CI_STATUS_APP_ID || '' }}
-          status-app-private-key: ${{ env.SOURCE_CANDIDATE != 'true' && secrets.CI_STATUS_APP_PRIVATE_KEY || '' }}
+          status-app-id: ${{ secrets.CI_STATUS_APP_ID }}
+          status-app-private-key: ${{ secrets.CI_STATUS_APP_PRIVATE_KEY }}
 
       - name: Post the terminal merge-group build status
         if: ${{ env.SOURCE_CANDIDATE != 'true' }}
@@ -1918,6 +1922,9 @@ jobs:
         if: ${{ always() && env.SOURCE_CANDIDATE == 'true' }}
         env:
           GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
+          GH_TOKEN: ${{ steps.ci-api.outputs.status-token }}
+          TAUCETI_GITHUB_WRITE_ROLE: ${{ steps.ci-api.outputs.status-role }}
+          CI_SOURCE_GITHUB_STATUSES: ${{ inputs.source_candidate_github_statuses }}
           SOURCE_JOB_RESULT: ${{ needs.sandboxed-build.result }}
           CI_SOURCE_PUBLISHER_RUNNER: ${{ inputs.source_candidate_control_runner }}
           SOURCE_BUILD_STATE: ${{ needs.sandboxed-build.outputs.build-state }}
@@ -1953,10 +1960,13 @@ jobs:
           value = {key: os.environ.get(name) for key, name in fields.items()}
           (Path(os.environ["RUNNER_TEMP"]) / "source-build-evidence.json").write_text(json.dumps(value))
           PYTHON
+          status_args=()
+          if [ "$CI_SOURCE_GITHUB_STATUSES" = true ]; then status_args+=(--publish-statuses); fi
           python3 -m tauceti_tools.ci_candidate_workflow finalize \
             --policy .tauceti/ci-source.json --configuration tauceti.toml \
             --evidence "$RUNNER_TEMP/source-build-evidence.json" \
-            --output "$RUNNER_TEMP/source-candidate-result.json" --github-output "$GITHUB_OUTPUT"
+            --output "$RUNNER_TEMP/source-candidate-result.json" --github-output "$GITHUB_OUTPUT" \
+            "${status_args[@]}"
 
       - name: Retain the source execution result
         if: ${{ always() && env.SOURCE_CANDIDATE == 'true' && steps.source_result.outputs.artifact-name != '' }}
