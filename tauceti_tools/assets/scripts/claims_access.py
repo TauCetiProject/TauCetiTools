@@ -52,12 +52,18 @@ NS = "tauceti-claims"
 # prefix and closes it, as bors-ng did. It also closes the PRs it rejects, under their own titles, which
 # their authors can then edit, so the title only picks out the PRs worth checking for LANDED_RECORD.
 LANDED_TITLE = "[Merged by Bors] - "
-# The marker in the comment the queue posts on a PR it landed: the PR (`owner/name#number`), the batch and
-# the commit that landed it (TauCetiWorker `tauceti_queue/controller.py`, `_enqueue_landing_effects`). On
-# a PR it rejected, the marker says `rejected:` instead.
-LANDED_RECORD = re.compile(r"<!-- tauceti-queue landed:(?P<pr>[^\s:]+#\d+):\d+:(?P<sha>[0-9a-f]{40}) -->")
-# The accounts whose comments can carry that record. Anyone can paste the marker into a comment of their
-# own; only the queue's App posts as its bot.
+# How the comment the queue posts on a PR it landed ends: a marker naming the PR (`owner/name#number`), the
+# batch and the commit that landed it, then that marker again inside the wrapper the queue's comment adapter
+# appends to everything it posts (TauCetiWorker `tauceti_queue`: `_enqueue_landing_effects` in
+# controller.py, `post_comment` in github_adapter.py). Only that ending counts. The queue quotes what people
+# type in its replies to commands, so a marker can appear anywhere in its comments, but a reply ends with
+# its own wrapper (`reply …`), and a PR it rejected with `rejected:`.
+LANDED_RECORD = re.compile(
+    r"(?P<record><!-- tauceti-queue landed:(?P<pr>[^\s:]+#\d+):\d+:(?P<sha>[0-9a-f]{40}) -->)"
+    r"\r?\n\r?\n<!-- tauceti-queue (?P=record) -->\s*\Z"
+)
+# The accounts whose comments can carry that record. Anyone can paste it into a comment of their own; only
+# the queue's App posts as its bot.
 LANDERS = {name.strip().lower() for name in os.environ.get("LANDERS", "tauceti-queue[bot]").split(",") if name.strip()}
 
 
@@ -124,9 +130,9 @@ def queue_landed_prs():
 
 def landing_record(number):
     """The commit named by this PR's landing record, or None. The record is a comment by one of LANDERS
-    whose LANDED_RECORD names this repository and PR. Neither who closed the PR nor its title will do:
-    the queue closes the PRs it rejects too, and a title is the author's to edit. An unreadable answer
-    is None: a missed grant is picked up on a later run, a wrong one is not undone."""
+    that ends with LANDED_RECORD naming this repository and PR. Neither who closed the PR nor its title
+    will do: the queue closes the PRs it rejects too, and a title is the author's to edit. An unreadable
+    answer is None: a missed grant is picked up on a later run, a wrong one is not undone."""
     p = gh(
         [
             "api",
@@ -148,9 +154,9 @@ def landing_record(number):
             continue
         if str(login or "").lower() not in LANDERS:
             continue
-        for record in LANDED_RECORD.finditer(str(body or "")):
-            if record["pr"].lower() == this_pr:
-                return record["sha"]
+        record = LANDED_RECORD.search(str(body or ""))
+        if record and record["pr"].lower() == this_pr:
+            return record["sha"]
     return None
 
 

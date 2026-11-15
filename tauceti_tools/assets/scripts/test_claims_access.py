@@ -14,12 +14,31 @@ REPO = "TauCetiProject/TauCeti"
 SHA = "7ac17318810667a200f543cc646d98451c5327f3"
 
 
-def queue_comment(kind, pr, sha=SHA, batch=434):
-    """A comment as the merge queue posts it on a PR it `landed` or `rejected`: text, then the marker,
-    then the marker again inside the queue's own comment marker."""
+def marker(kind, pr, sha=SHA, batch=434):
+    """The marker the merge queue writes on a PR it `landed` or `rejected`."""
     pr = pr if isinstance(pr, str) else f"{REPO}#{pr}"
-    marker = f"<!-- tauceti-queue {kind}:{pr}:{batch}:{sha} -->"
-    return f"Pull request {kind} in batch {batch}.\n\n{marker}\n\n<!-- tauceti-queue {marker} -->"
+    return f"<!-- tauceti-queue {kind}:{pr}:{batch}:{sha} -->"
+
+
+def posted(body, key):
+    """`body` as the queue's comment adapter posts it, under the wrapper for `key` (its `post_comment`)."""
+    return f"{body.rstrip()}\n\n<!-- tauceti-queue {key} -->\n"
+
+
+def queue_comment(kind, pr, sha=SHA, batch=434):
+    """The comment the merge queue posts on a PR it `landed` or `rejected`: text, the marker, and the
+    marker again as the key of the adapter's wrapper."""
+    record = marker(kind, pr, sha, batch)
+    return posted(f"Pull request {kind} in batch {batch}.\n\n{record}", record)
+
+
+def queue_refusal(typed):
+    """The queue's reply to `bors ping <typed>`, which quotes `typed` (TauCetiWorker `commands._leftover`)."""
+    reply = (
+        f":-1: bors did not run `bors ping {typed}`: `bors ping` takes nothing after it, but `{typed}` followed. "
+        "Reply with just `bors ping`, and put any other command on a line of its own."
+    )
+    return posted(reply, "reply issue_comment:6756654198:0")
 
 
 def comment_lines(rows):
@@ -153,6 +172,29 @@ class QueueLanded(unittest.TestCase):
             with self.subTest(login=login, pr=pr), mock.patch.object(ca, "gh", self.github(comment)):
                 self.assertFalse(ca.landed_by_queue(7, "main"))
 
+    def test_a_landing_marker_the_queue_quotes_is_not_a_record(self):
+        # Anyone may type `bors ping` with text after it, and the queue's refusal quotes the text under the
+        # queue's own name. The author types this PR's landing marker, naming a commit already on main.
+        record = marker("landed", 7)
+        for typed in (record, f"{record}  <!-- tauceti-queue {record} -->"):
+            with (
+                self.subTest(typed=typed),
+                mock.patch.object(ca, "gh", self.github(("tauceti-queue[bot]", queue_refusal(typed)))),
+            ):
+                self.assertIsNone(ca.landing_record(7))
+                self.assertFalse(ca.landed_by_queue(7, "main"))
+
+    def test_only_the_end_of_the_landing_comment_counts(self):
+        record = marker("landed", 7)
+        for body in (
+            queue_comment("landed", 7) + "\nmore text",  # the record is not where the comment ends
+            posted(f"Landed.\n\n{record}", marker("landed", 8)),  # the wrapper is another PR's record
+            posted("Landed.", record),  # the wrapper, without the record before it
+            f"Landed.\n\n{record}\n",  # the record, without the wrapper
+        ):
+            with self.subTest(body=body), mock.patch.object(ca, "gh", self.github(("tauceti-queue[bot]", body))):
+                self.assertIsNone(ca.landing_record(7))
+
     def test_the_landed_commit_must_be_on_the_default_branch(self):
         landed = ("tauceti-queue[bot]", queue_comment("landed", 7))
         for compare, compare_rc in (("diverged", 0), ("ahead", 0), ("behind", 1)):
@@ -230,6 +272,14 @@ class Grant(unittest.TestCase):
         _, writes, _ = self.grant(
             closed=[self.landed(5, "alice")], comments=rejected, closers={5: ["tauceti-queue[bot]"]}
         )
+        self.assertEqual(writes, [])
+
+    def test_a_landing_marker_the_queue_quoted_invites_nobody(self):
+        # Nothing landed. The author typed `bors ping` and this PR's landing marker, naming a commit on main,
+        # the queue's refusal quoted it, and the author closed and retitled the PR.
+        typed = f"bors ping {marker('landed', 5)}"
+        quoted = {5: [("alice", typed), ("tauceti-queue[bot]", queue_refusal(marker("landed", 5)))]}
+        _, writes, _ = self.grant(closed=[self.landed(5, "alice")], comments=quoted, closers={5: ["alice"]})
         self.assertEqual(writes, [])
 
     def test_a_pr_merged_by_github_needs_no_further_check(self):
