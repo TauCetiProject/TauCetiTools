@@ -21,8 +21,8 @@ def fetch_guard_files(api, repo, sha, directory):
     for name in GUARD_FILES:
         try:
             data = api.request("GET", f"repos/{repo}/contents/{name}?ref={sha}")
-        except APIError as error:
-            if error.status == 404:
+        except RuntimeError as error:
+            if getattr(error, "status", None) == 404:
                 continue  # A missing file stays absent, as check-bump.sh expects.
             raise
         if not isinstance(data, dict) or data.get("type") != "file" or data.get("encoding") != "base64":
