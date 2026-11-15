@@ -10,10 +10,10 @@ the library itself, which is the whole reason the leases do not live here.
 So somebody has to be let in, and this decides who: the author of any pull request that landed in this
 repository. A maintainer looked at their work and took it, which is a better statement than org
 membership and is already recorded on GitHub, so there is no list to keep. Landed means merged by
-GitHub, or landed by the merge queue, which pushes the commit and closes the PR under LANDED_TITLE:
-GitHub records that PR as closed, not merged. A worker whose operator has not landed anything yet is
-not stuck waiting — it claims in its own fork until then, and so still coordinates with the rest of
-its own fleet.
+GitHub, or landed by the merge queue, which pushes the commit, records the landing in a comment on the
+PR (LANDED_RECORD) and closes it under LANDED_TITLE: GitHub records that PR as closed, not merged. A
+worker whose operator has not landed anything yet is not stuck waiting — it claims in its own fork
+until then, and so still coordinates with the rest of its own fleet.
 
   grant  Invite every landed-PR author who is not already a collaborator or already invited. Grants
          are monotone: nothing is revoked automatically, because a quiet operator silently losing
@@ -33,6 +33,7 @@ SWEEP_GRACE_MINUTES.
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -48,10 +49,15 @@ DRY_RUN = os.environ.get("DRY_RUN") == "1"
 SWEEP_GRACE_MINUTES = int(os.environ.get("SWEEP_GRACE_MINUTES", "60"))
 NS = "tauceti-claims"
 # The merge queue lands a PR by pushing its commit to the default branch, then renames the PR with this
-# prefix and closes it, as bors-ng did.
+# prefix and closes it, as bors-ng did. It also closes the PRs it rejects, under their own titles, which
+# their authors can then edit, so the title only picks out the PRs worth checking for LANDED_RECORD.
 LANDED_TITLE = "[Merged by Bors] - "
-# The accounts that land PRs that way. A title is the author's to edit, so it counts only on a PR one of
-# these closed.
+# The marker in the comment the queue posts on a PR it landed: the PR (`owner/name#number`), the batch and
+# the commit that landed it (TauCetiWorker `tauceti_queue/controller.py`, `_enqueue_landing_effects`). On
+# a PR it rejected, the marker says `rejected:` instead.
+LANDED_RECORD = re.compile(r"<!-- tauceti-queue landed:(?P<pr>[^\s:]+#\d+):\d+:(?P<sha>[0-9a-f]{40}) -->")
+# The accounts whose comments can carry that record. Anyone can paste the marker into a comment of their
+# own; only the queue's App posts as its bot.
 LANDERS = {name.strip().lower() for name in os.environ.get("LANDERS", "tauceti-queue[bot]").split(",") if name.strip()}
 
 
@@ -102,8 +108,8 @@ def merged_pr_authors():
 
 def queue_landed_prs():
     """{author: [PR numbers, newest first]} for the newest closed PRs titled as the merge queue titles a
-    PR it landed. Whether the queue really closed one is checked only for an author not yet admitted
-    (`closed_by_lander`), because that costs a request per PR."""
+    PR it landed. Whether the queue really landed one is checked only for an author not yet admitted
+    (`landed_by_queue`), because that costs requests per PR."""
     out = gh(
         ["pr", "list", "--repo", REPO, "--state", "closed", "--limit", "5000", "--json", "number,author,title"],
         GH_TOKEN,
@@ -116,22 +122,53 @@ def queue_landed_prs():
     return landed
 
 
-def closed_by_lander(number):
-    """Did one of LANDERS close this PR? Its last `closed` event says who did. An unreadable answer is
-    no: a missed grant is picked up on a later run, a wrong one is not undone."""
+def landing_record(number):
+    """The commit named by this PR's landing record, or None. The record is a comment by one of LANDERS
+    whose LANDED_RECORD names this repository and PR. Neither who closed the PR nor its title will do:
+    the queue closes the PRs it rejects too, and a title is the author's to edit. An unreadable answer
+    is None: a missed grant is picked up on a later run, a wrong one is not undone."""
     p = gh(
         [
             "api",
             "--paginate",
-            f"/repos/{REPO}/issues/{number}/events?per_page=100",
+            f"/repos/{REPO}/issues/{number}/comments?per_page=100",
             "--jq",
-            '.[] | select(.event == "closed") | .actor.login',
+            ".[] | [.user.login, .body] | @json",
         ],
         GH_TOKEN,
         check=False,
     )
-    closers = [line.strip().lower() for line in p.stdout.splitlines() if line.strip()] if p.returncode == 0 else []
-    return bool(closers) and closers[-1] in LANDERS
+    if p.returncode != 0:
+        return None
+    this_pr = f"{REPO}#{number}".lower()
+    for line in p.stdout.splitlines():
+        try:
+            login, body = json.loads(line)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if str(login or "").lower() not in LANDERS:
+            continue
+        for record in LANDED_RECORD.finditer(str(body or "")):
+            if record["pr"].lower() == this_pr:
+                return record["sha"]
+    return None
+
+
+def default_branch():
+    """The repository's default branch, or "" if GitHub does not say, which confirms no queue landing."""
+    p = gh(["api", f"/repos/{REPO}", "--jq", ".default_branch"], GH_TOKEN, check=False)
+    return p.stdout.strip() if p.returncode == 0 else ""
+
+
+def landed_by_queue(number, branch):
+    """Did the merge queue land this PR? It did if the PR has a landing record and the commit the record
+    names is on `branch`, the default branch: `compare/<branch>...<commit>` is `behind` or `identical`
+    exactly when the branch contains the commit. An unreadable answer is no, as in `landing_record`."""
+    sha = landing_record(number)
+    if not sha or not branch:
+        return False
+    p = gh(["api", f"/repos/{REPO}/compare/{branch}...{sha}", "--jq", ".status"], GH_TOKEN, check=False)
+    return p.returncode == 0 and p.stdout.strip() in ("behind", "identical")
 
 
 def invitations():
@@ -194,12 +231,15 @@ def grant():
     candidates = sorted((merged | set(landed)) - already_admitted(pending))
     invited = 0
     failures = 0
+    branch = None  # read once, and only if a queue landing needs confirming
     for login in candidates:
         if has_access(login):
             continue  # an organization member; nothing to grant and nothing to report
-        if login not in merged and not any(closed_by_lander(number) for number in landed[login][:3]):
-            print(f"grant: skipped {login}: could not confirm that the merge queue landed one of their PRs")
-            continue
+        if login not in merged:
+            branch = default_branch() if branch is None else branch
+            if not any(landed_by_queue(number, branch) for number in landed[login][:3]):
+                print(f"grant: skipped {login}: could not confirm that the merge queue landed one of their PRs")
+                continue
         number, expired = pending.get(login, (None, False))
         if DRY_RUN:
             print(f"grant: would invite {login}" + (" (cancelling their expired invitation)" if expired else ""))

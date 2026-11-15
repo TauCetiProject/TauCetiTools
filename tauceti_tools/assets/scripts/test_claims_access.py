@@ -10,6 +10,22 @@ from unittest import mock
 
 import claims_access as ca
 
+REPO = "TauCetiProject/TauCeti"
+SHA = "7ac17318810667a200f543cc646d98451c5327f3"
+
+
+def queue_comment(kind, pr, sha=SHA, batch=434):
+    """A comment as the merge queue posts it on a PR it `landed` or `rejected`: text, then the marker,
+    then the marker again inside the queue's own comment marker."""
+    pr = pr if isinstance(pr, str) else f"{REPO}#{pr}"
+    marker = f"<!-- tauceti-queue {kind}:{pr}:{batch}:{sha} -->"
+    return f"Pull request {kind} in batch {batch}.\n\n{marker}\n\n<!-- tauceti-queue {marker} -->"
+
+
+def comment_lines(rows):
+    """`gh api` output for these (login, body) comments, one JSON array per line as the filter emits."""
+    return "".join(json.dumps([login, body]) + "\n" for login, body in rows)
+
 
 class HumanAuthors(unittest.TestCase):
     def test_bots_never_get_the_claim_namespace(self):
@@ -87,7 +103,13 @@ class Sweepable(unittest.TestCase):
 
 
 class QueueLanded(unittest.TestCase):
-    """The merge queue closes the PRs it lands, so GitHub reports them as closed, not merged."""
+    """The merge queue closes the PRs it lands, so GitHub reports them as closed, not merged. It closes
+    the PRs it rejects too, so only its landing record counts."""
+
+    def setUp(self):
+        patcher = mock.patch.object(ca, "REPO", REPO)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_a_pr_titled_as_landed_counts_for_its_author(self):
         prs = [
@@ -100,29 +122,58 @@ class QueueLanded(unittest.TestCase):
         with mock.patch.object(ca, "gh", lambda args, token, check=True: answer):
             self.assertEqual(ca.queue_landed_prs(), {"alice": [3, 2]})
 
-    def closers(self, *logins, returncode=0):
-        out = "".join(login + "\n" for login in logins)
-        return lambda args, token, check=True: SimpleNamespace(returncode=returncode, stdout=out, stderr="")
+    def github(self, *comments, comments_rc=0, compare="behind", compare_rc=0):
+        """GitHub answering with these (login, body) comments, and with `compare` for the landed commit."""
 
-    def test_the_queue_closed_it(self):
-        with mock.patch.object(ca, "gh", self.closers("tauceti-queue[bot]")):
-            self.assertTrue(ca.closed_by_lander(7))
+        def gh(args, token, check=True):
+            if "/compare/" in " ".join(args):
+                return SimpleNamespace(returncode=compare_rc, stdout=compare + "\n", stderr="")
+            return SimpleNamespace(returncode=comments_rc, stdout=comment_lines(comments), stderr="")
 
-    def test_the_title_alone_is_not_enough(self):
-        # An author can retitle and close their own PR. Only the queue's closing counts, and the last.
-        for closers in (("alice",), ("tauceti-queue[bot]", "alice"), ()):
-            with self.subTest(closers=closers), mock.patch.object(ca, "gh", self.closers(*closers)):
-                self.assertFalse(ca.closed_by_lander(7))
+        return gh
+
+    def test_the_queue_landing_record_counts(self):
+        with mock.patch.object(ca, "gh", self.github(("tauceti-queue[bot]", queue_comment("landed", 7)))):
+            self.assertEqual(ca.landing_record(7), SHA)
+            self.assertTrue(ca.landed_by_queue(7, "main"))
+
+    def test_a_pr_the_queue_rejected_is_not_landed(self):
+        # The queue closes a PR it rejected under its own title, which the author can then retitle.
+        with mock.patch.object(ca, "gh", self.github(("tauceti-queue[bot]", queue_comment("rejected", 7)))):
+            self.assertIsNone(ca.landing_record(7))
+            self.assertFalse(ca.landed_by_queue(7, "main"))
+
+    def test_a_record_counts_only_from_the_queue_and_only_for_this_pr(self):
+        for login, pr in (
+            ("alice", 7),  # the marker pasted into a comment of the author's own
+            ("tauceti-queue[bot]", 8),  # the queue's record of another PR, quoted here
+            ("tauceti-queue[bot]", "someone/else#7"),
+        ):
+            comment = (login, queue_comment("landed", pr))
+            with self.subTest(login=login, pr=pr), mock.patch.object(ca, "gh", self.github(comment)):
+                self.assertFalse(ca.landed_by_queue(7, "main"))
+
+    def test_the_landed_commit_must_be_on_the_default_branch(self):
+        landed = ("tauceti-queue[bot]", queue_comment("landed", 7))
+        for compare, compare_rc in (("diverged", 0), ("ahead", 0), ("behind", 1)):
+            with (
+                self.subTest(compare=compare, compare_rc=compare_rc),
+                mock.patch.object(ca, "gh", self.github(landed, compare=compare, compare_rc=compare_rc)),
+            ):
+                self.assertFalse(ca.landed_by_queue(7, "main"))
+        with mock.patch.object(ca, "gh", self.github(landed)):
+            self.assertFalse(ca.landed_by_queue(7, ""))  # the default branch was unreadable
 
     def test_an_unreadable_answer_is_no(self):
-        with mock.patch.object(ca, "gh", self.closers("tauceti-queue[bot]", returncode=1)):
-            self.assertFalse(ca.closed_by_lander(7))
+        landed = ("tauceti-queue[bot]", queue_comment("landed", 7))
+        with mock.patch.object(ca, "gh", self.github(landed, comments_rc=1)):
+            self.assertFalse(ca.landed_by_queue(7, "main"))
 
 
 class Grant(unittest.TestCase):
     """What `grant` sends, from what GitHub reports. Every login here can only read the claims repo."""
 
-    def grant(self, merged=(), closed=(), invitations=(), closers=None):
+    def grant(self, merged=(), closed=(), invitations=(), comments=None, closers=None):
         calls = []
 
         def gh(args, token, check=True):
@@ -135,14 +186,25 @@ class Grant(unittest.TestCase):
                 out = "".join(f"{login} {number} {str(expired).lower()}\n" for login, number, expired in invitations)
             elif path.endswith("/permission --jq .permission"):
                 out = "read\n"
-            elif "/events?" in path:
+            elif "/comments?" in path:
+                number = int(path.split("/issues/")[1].split("/")[0])
+                out = comment_lines((comments or {}).get(number, ()))
+            elif "/events?" in path:  # who closed it, which `grant` must not rely on
                 number = int(path.split("/issues/")[1].split("/")[0])
                 out = "".join(login + "\n" for login in (closers or {}).get(number, ()))
+            elif path.endswith("--jq .default_branch"):
+                out = "main\n"
+            elif "/compare/main..." in path:
+                out = "behind\n"
             elif args[:3] == ["api", "-X", "PUT"]:
                 out = "{}"
             return SimpleNamespace(returncode=0, stdout=out, stderr="")
 
-        with mock.patch.object(ca, "gh", gh), mock.patch.object(ca, "DRY_RUN", False):
+        with (
+            mock.patch.object(ca, "gh", gh),
+            mock.patch.object(ca, "DRY_RUN", False),
+            mock.patch.object(ca, "REPO", REPO),
+        ):
             failures = ca.grant()
         writes = [(args[2], args[3].rsplit("/", 1)[1]) for args in calls if args[:2] == ["api", "-X"]]
         return failures, writes, calls
@@ -151,17 +213,29 @@ class Grant(unittest.TestCase):
         return {"number": number, "author": {"login": login}, "title": ca.LANDED_TITLE + "feat: x"}
 
     def test_the_author_of_a_pr_the_queue_landed_is_invited(self):
-        _, writes, _ = self.grant(closed=[self.landed(5, "alice")], closers={5: ["tauceti-queue[bot]"]})
+        landed = {5: [("tauceti-queue[bot]", queue_comment("landed", 5))]}
+        _, writes, _ = self.grant(
+            closed=[self.landed(5, "alice")], comments=landed, closers={5: ["tauceti-queue[bot]"]}
+        )
         self.assertEqual(writes, [("PUT", "alice")])
 
     def test_a_retitled_pr_the_author_closed_invites_nobody(self):
-        _, writes, _ = self.grant(closed=[self.landed(5, "alice")], closers={5: ["alice"]})
+        _, writes, _ = self.grant(closed=[self.landed(5, "alice")], comments={5: []}, closers={5: ["alice"]})
+        self.assertEqual(writes, [])
+
+    def test_a_pr_the_queue_rejected_and_its_author_retitled_invites_nobody(self):
+        # The queue closed it, as it closes the PRs it lands, but its comment records a rejection. The
+        # author retitled the PR and pasted a landing marker into a comment of their own.
+        rejected = {5: [("tauceti-queue[bot]", queue_comment("rejected", 5)), ("alice", queue_comment("landed", 5))]}
+        _, writes, _ = self.grant(
+            closed=[self.landed(5, "alice")], comments=rejected, closers={5: ["tauceti-queue[bot]"]}
+        )
         self.assertEqual(writes, [])
 
     def test_a_pr_merged_by_github_needs_no_further_check(self):
         _, writes, calls = self.grant(merged=[{"author": {"login": "bob"}}])
         self.assertEqual(writes, [("PUT", "bob")])
-        self.assertFalse([args for args in calls if "/events?" in " ".join(args)])
+        self.assertFalse([args for args in calls if "/comments?" in " ".join(args)])
 
     def test_an_expired_invitation_is_cancelled_and_sent_again(self):
         _, writes, _ = self.grant(merged=[{"author": {"login": "bob"}}], invitations=[("bob", "42", True)])
