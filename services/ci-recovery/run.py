@@ -12,7 +12,10 @@ from pathlib import Path
 
 def main():
     checkout = Path(os.environ.get("TAUCETI_QUEUE_CHECKOUT", Path.home() / "TauCetiQueue"))
-    sys.path.insert(0, str(checkout))
+    root = Path(__file__).resolve().parents[2]
+    # Queue imports can themselves import shared Tools. Select this immutable
+    # release before importing the queue, not after an older installed copy loads.
+    sys.path[:0] = [str(root), str(checkout)]
     from tauceti_queue.github_app import GitHubApp
 
     # The queue App is repository-scoped; its installation cannot read the org
@@ -28,8 +31,6 @@ def main():
         TAUCETI_GITHUB_READ_ROLE="ci-recovery-read",
         TAUCETI_GITHUB_WRITE_ROLE="ci-recovery-dispatch",
     )
-    root = Path(__file__).resolve().parents[2]
-    sys.path.insert(0, str(root))
     script = root / "tauceti_tools/assets/scripts/ci_recovery.py"
     sys.path.insert(0, str(script.parent))
     sys.argv[0] = str(script)
