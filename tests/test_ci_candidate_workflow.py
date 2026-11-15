@@ -757,6 +757,20 @@ class ShippedWorkflow(unittest.TestCase):
         self.assertLess(steps.index(step), next(i for i,s in enumerate(steps) if s.get("id") == "build"))
         self.assertIn('repair-cache-get.sh pr "$REPAIR_HEAD" "$REPAIR_BASE"', step["run"])
 
+    def test_source_publication_and_finalizer_use_separate_trusted_control_capacity(self):
+        control = "${{ fromJSON(inputs.source_candidate_enabled && inputs.source_candidate_control_runner || '\"ubuntu-24.04\"') }}"
+        jobs = self.value["jobs"]
+        self.assertEqual(jobs["finalize-merge-group-build"]["runs-on"], control)
+        publisher = jobs["publish-merge-group-cache"]
+        self.assertEqual(publisher["with"]["source_candidate_control_runner"],
+                         "${{ inputs.source_candidate_control_runner }}")
+        workflow = yaml.safe_load((self.root / ".github/workflows/publish-lake-cache.yml").read_text())
+        self.assertEqual(workflow["jobs"]["publish"]["runs-on"], control)
+        self.assertNotIn("client_payload", control)
+        # The control jobs may run concurrently; neither is routed back onto the
+        # one compiler slot, which would let the finalizer wait on its own queue.
+        self.assertNotIn("inputs.source_candidate_runner", control)
+
     def test_source_identity_shell_executes_ingress_and_never_the_legacy_helpers(self):
         shell = self.step("Resolve PR head")["run"]
         # Non-source expressions are irrelevant in the selected branch. If the
