@@ -231,6 +231,26 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(ci_recovery.recover(api, REPO, apply=True), [])
         cleanup.assert_called_once_with(api, REPO, active=[], apply=True, api_reserve=0)
 
+    def test_standalone_recovery_checkout_contains_its_policy_and_exports_package_root(self):
+        root = Path(__file__).parents[1]
+        workflow = (root / ".github/workflows/retry-ci-status.yml").read_text()
+        self.assertIn("sparse-checkout: tauceti_tools\n", workflow)
+        self.assertIn("PYTHONPATH: ${{ github.workspace }}", workflow)
+        import os
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as cwd:
+            result = subprocess.run(
+                [sys.executable, str(root / "tauceti_tools/assets/scripts/ci_recovery.py"), "--help"],
+                cwd=cwd,
+                env={**os.environ, "PYTHONPATH": str(root)},
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--cleanup-only", result.stdout)
+
     def test_all_pages_are_read_before_any_cancellation(self):
         api = GitHub()
         visited = []
