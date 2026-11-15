@@ -1,0 +1,11 @@
+[Unit]
+Description=Cancel obsolete PR builds every three minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=3min
+RandomizedDelaySec=15s
+Unit=tauceti-ci-cleanup.service
+
+[Install]
+WantedBy=timers.target

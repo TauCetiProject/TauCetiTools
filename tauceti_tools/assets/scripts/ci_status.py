@@ -6,14 +6,16 @@ import argparse
 import datetime as dt
 import json
 import os
-from pathlib import Path
 import re
 import sys
 import tempfile
 import time
+from pathlib import Path
 
-from github_api import APIError, Deferred, GitHub
 import bors_scope_approval
+from github_api import APIError, Deferred, GitHub
+
+from tauceti_tools.self_tested import accepted, context, latest_status
 
 SCHEMA = "tauceti-ci.pr-status-intent/v1"
 CONTEXTS = {"build", "bump-guard", "scope"}
@@ -148,9 +150,16 @@ def fence(api, record):
         return False
     if record["pr"] is not None:
         pull = api.request("GET", f"repos/{repo}/pulls/{record['pr']}")
-        if (not isinstance(pull, dict) or (pull.get("head") or {}).get("sha") != record["sha"]
+        if (not isinstance(pull, dict) or pull.get("state") != "open"
+                or (pull.get("head") or {}).get("sha") != record["sha"]
                 or (pull.get("base") or {}).get("ref") != record["base_ref"]):
             return False
+        if any(label.get("name") == "self-tested" for label in pull.get("labels", [])):
+            rows = api.request("GET", f"repos/{repo}/commits/{record['sha']}/status?per_page=100").get("statuses", [])
+            assertion = latest_status(rows, context(record["pr"]))
+            if accepted(pull["labels"], assertion.get("state"), member=True,
+                        branch=(pull.get("head") or {}).get("ref", "")):
+                return False  # Accepted local testing owns this head, even during cancellation finalizers.
     return current
 
 

@@ -46,7 +46,7 @@ class StatusIntentTests(unittest.TestCase):
         self.addCleanup(self.env.stop)
         self.sha = 'a' * 40
         self.run = {'id': 123, 'run_attempt': 2, 'conclusion': None, 'run_started_at': '2026-10-21T02:00:00Z'}
-        self.pull = {'head': {'sha': self.sha}, 'base': {'ref': 'main'}}
+        self.pull = {'state': 'open', 'head': {'sha': self.sha}, 'base': {'ref': 'main'}}
 
     def record(self, context='build', **kwargs):
         return ci_status.record_intent(self.sha, context, 'success', 'trusted checks passed',
@@ -58,6 +58,21 @@ class StatusIntentTests(unittest.TestCase):
             result = ci_status.publish(records, **kwargs)
         self.assertTrue(fake.reported)
         return result, fake
+
+    def test_closed_pr_and_accepted_local_testing_suppress_cancellation_reporting(self):
+        for closed in (False, True):
+            path, record = self.record()
+            pull = dict(self.pull)
+            if closed:
+                pull["state"] = "closed"
+                replies = [self.run, pull]
+            else:
+                pull["labels"] = [dict(name="self-tested")]
+                replies = [self.run, pull, dict(statuses=[dict(context="self-tested/7", state="success", id=1)])]
+            ok, fake = self.publish([(path, record)], replies)
+            self.assertTrue(ok)
+            self.assertFalse(any(call[0] == "POST" for call in fake.calls))
+            self.assertFalse(path.exists())
 
     def test_intent_saved_before_any_request_and_invalid_sha_does_not_write(self):
         with patch.object(ci_status, 'GitHub') as api:
