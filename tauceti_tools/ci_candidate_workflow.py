@@ -952,13 +952,20 @@ def main(argv=None):
             with open(args.github_output, "a") as output:
                 output.write(f"artifact-name={artifact_name(request, context['run_id'], context['attempt'])}\n")
         if args.publish_statuses:
-            publish_statuses(
-                request,
-                policy,
-                context,
-                result,
-                writer=GitHub(source_status_target=(policy.execution.repository.name, request.head)),
-            )
+            try:
+                publish_statuses(
+                    request,
+                    policy,
+                    context,
+                    result,
+                    writer=GitHub(source_status_target=(policy.execution.repository.name, request.head)),
+                )
+            except (APIError, Deferred, OSError):
+                # Retain a truthful retryable result rather than a green artifact
+                # in a failed run, which would require manual reconciliation.
+                result["verdicts"]["publication"] = "infrastructure"
+                Path(args.output).write_text(json.dumps(result, sort_keys=True) + "\n")
+                print("::warning::source candidate status publication unavailable; retaining infrastructure result")
         return 0 if all(value in {"success", "not_required"} for value in result["verdicts"].values()) else 1
     if args.command == "member-policy" and any(
         result.get(flag) == "1"

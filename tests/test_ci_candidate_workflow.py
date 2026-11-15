@@ -248,6 +248,32 @@ class Workflow(unittest.TestCase):
         cw.publish_statuses(self.request, self.policy, self.context, result, writer=writer)
         self.assertEqual(writer.request.call_args_list[0].args[2]["state"], "error")
 
+    def test_status_api_failure_retains_a_verified_retryable_result(self):
+        from unittest.mock import Mock
+
+        writer = Mock()
+        writer.request.side_effect = github_api.APIError("POST", "statuses", 503, {})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence, output = root / "evidence.json", root / "result.json"
+            evidence.write_text(json.dumps(self.evidence))
+            with (
+                patch.dict(os.environ, {"TAUCETI_GITHUB_WRITE_ROLE": "ci-status-app"}),
+                patch.object(cw, "context_from_environment", return_value=self.context),
+                patch.object(cw, "load_request", return_value=(self.request, self.policy)),
+                patch.object(cw, "GitHubEvidence", return_value=self.publisher_reader()),
+                patch.object(cw, "GitHub", return_value=writer),
+            ):
+                code = cw.main(["finalize", "--policy", "trusted.json", "--configuration", "trusted.toml",
+                                "--evidence", str(evidence), "--output", str(output), "--publish-statuses"])
+            self.assertEqual(code, 1)
+            result = json.loads(output.read_text())
+            self.assertEqual(result["verdicts"]["publication"], "infrastructure")
+            metadata = dict(run(self.request, self.policy), conclusion="failure")
+            verified = cc.verify_result(self.request, self.policy, result, metadata,
+                                        run_id=self.context["run_id"], attempt=self.context["attempt"])
+            self.assertEqual(cc.classify_verdicts(verified), "infrastructure")
+
     def test_finalizer_verifies_explicit_trusted_publisher_group_and_labels(self):
         selector = dict(group="TauCetiQueueControl", labels=["self-hosted", "linux", "x64",
                         "tauceti-fleet-queue-control", "fleet-" + "a" * 32])
