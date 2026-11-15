@@ -55,6 +55,22 @@ new activity, skipping only updates older than the start of a finished PR check;
 changes during that check remain eligible. Build and review completions are discovered even without a PR edit. An hourly
 recovery trigger and manual dispatch can resume work without a new PR event.
 
+With `--prioritize-self-tested`, a paginated GraphQL inventory finds labelled heads
+whose PR-specific acceptance status is missing before any workflow-history scan.
+The normal pinned assessment still checks the live label, author membership,
+changed paths and current head. Each batch assesses at most 100 priority requests;
+untouched requests precede retries so a failing PR cannot monopolize the queue.
+Unfinished assertions are checkpointed with their head, first observation and last
+attempt. The job summary reports the count and oldest observed waiting age. This
+age is a lower bound on request latency, not the PR's update age. A failed read or
+quota hold reports retained, unverified inventory rather than a zero backlog.
+
+`--budget-seconds` stops new assessments before the workflow's token expires;
+the existing checkpoint retains the remaining work. Scheduled sweeps use
+`--all-open`, which resumes their complete PR inventory without rereading workflow
+history or restarting the completed prefix. A resumed sweep finishes its captured
+inventory; the next fresh sweep also includes PRs opened in the meantime.
+
 Restoration verifies the producing workflow and event through GitHub. A
 `pull_request_target` run executes trusted base code even when its recorded head
 repository is a fork; ordinary `pull_request` runs cannot supply progress. Other

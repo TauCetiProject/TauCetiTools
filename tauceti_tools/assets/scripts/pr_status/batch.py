@@ -46,6 +46,8 @@ from urllib.parse import parse_qsl, urlencode
 
 import core
 import labels
+import priority
+from github_api import Deferred
 
 REPO = core.REPO
 # Runs finish within GitHub's six-hour job limit, so a run that completed after `since` was created
@@ -226,6 +228,16 @@ def load_progress(path, since):
         if parsed.utcoffset() != dt.timedelta(0):
             raise ValueError('Progress timestamps must be UTC')
     timestamp(state['watermark'])
+    pending_local = state.setdefault('self_tested_pending', {})
+    if not isinstance(pending_local, dict):
+        raise ValueError('Invalid self-tested pending inventory')
+    for key, record in pending_local.items():
+        if (not key.isdigit() or int(key) <= 0 or not isinstance(record, dict)
+                or not re.fullmatch(r'[0-9a-f]{40}', record.get('head', ''))):
+            raise ValueError('Invalid self-tested pending commit')
+        timestamp(record.get('first_seen_at'))
+        if 'last_attempt_at' in record:
+            timestamp(record['last_attempt_at'])
     blocked = state['blocked_until']
     if type(blocked) not in (int, float) or not 0 <= blocked < math.inf:
         raise ValueError('Invalid quota deadline')
@@ -273,9 +285,13 @@ def main(argv=None):
     ap.add_argument("--dry-run", action="store_true", help="list work; write nothing")
     ap.add_argument("--state-in", help="previous progress/retries JSON checkpoint")
     ap.add_argument("--state-out", help="where to checkpoint progress, including on failure")
+    ap.add_argument("--prioritize-self-tested", action="store_true", help="assess pending local assertions before run discovery")
+    ap.add_argument("--self-tested-limit", type=int, default=100, help="maximum priority assessments in one batch")
+    ap.add_argument("--budget-seconds", type=int, default=2400, help="stop starting work before this batch duration")
+    ap.add_argument("--all-open", action="store_true", help="checkpoint a complete open-PR sweep without workflow-history discovery")
     args = ap.parse_args(argv)
-    if any(number <= 0 for number in args.pr):
-        ap.error('--pr must be a positive PR number')
+    if any(number <= 0 for number in args.pr) or args.self_tested_limit <= 0 or args.budget_seconds <= 0:
+        ap.error('PR numbers, self-tested limit and budget must be positive')
     try:
         state = load_progress(args.state_in, args.since)
     except (OSError, ValueError, KeyError, TypeError):
@@ -283,16 +299,62 @@ def main(argv=None):
         state = load_progress(None, args.since)
     output = None if args.dry_run else args.state_out
     lock = threading.Lock()
+    deadline = time.monotonic() + args.budget_seconds
+    priority_observed = False
     try:
         if state['blocked_until'] > time.time():
             log(f"deferred until epoch {state['blocked_until']}; pending work retained")
             return 0 if args.dry_run else 1
+        if args.prioritize_self_tested:
+            state['self_tested_pending'] = priority.scan(REPO, state['self_tested_pending'],
+                                                       now=iso(dt.datetime.now(dt.timezone.utc)))
+            priority_observed = True
+            if state['self_tested_pending']:
+                save_progress(output, state)
+                ordered = sorted(state['self_tested_pending'],
+                                 key=lambda n: (state['self_tested_pending'][n].get('last_attempt_at', ''),
+                                                state['self_tested_pending'][n]['first_seen_at'], int(n)))
+                if args.dry_run:
+                    for number in ordered:
+                        log(f"would prioritize self-tested #{number}")
+                    return 0
+                priority_observed = False
+                stop = []
+
+                def assess_local(number):
+                    if stop or time.monotonic() >= deadline:
+                        return
+                    with lock:
+                        state['self_tested_pending'][number]['last_attempt_at'] = iso(dt.datetime.now(dt.timezone.utc))
+                        save_progress(output, state)
+                    try:
+                        labels.reconcile(number)
+                    except core.RateLimited as exc:
+                        stop.append(str(exc))
+                    except Exception as exc:
+                        log(f"PR #{number}: priority assessment failed: {exc}")
+
+                with ThreadPoolExecutor(max_workers=PARALLEL) as pool:
+                    list(pool.map(assess_local, ordered[:args.self_tested_limit]))
+                if stop:
+                    log(f"priority assessment stopped: {stop[0]}")
+                    return 1
+                state['self_tested_pending'] = priority.scan(REPO, state['self_tested_pending'],
+                                                           now=iso(dt.datetime.now(dt.timezone.utc)))
+                priority_observed = True
+                save_progress(output, state)
+                if state['self_tested_pending']:
+                    log('self-tested decisions remain; checkpointed before broad run discovery')
+                    return 1
+        if time.monotonic() >= deadline:
+            log('batch time budget reached before broad run discovery')
+            return 1
         if state['active'] is None:
             started = iso(dt.datetime.now(dt.timezone.utc))
             since = iso(dt.datetime.fromisoformat(state['watermark'].replace('Z', '+00:00')) - dt.timedelta(minutes=2))
             heads = open_heads()
-            by_update = updated_prs(since)
-            by_runs = touched_by_runs(since, heads)
+            by_update = sorted(n for numbers in heads.values() for n in numbers) if args.all_open else updated_prs(since)
+            by_runs = set() if args.all_open else touched_by_runs(since, heads)
             ordered = list(dict.fromkeys(args.pr + by_update + sorted(by_runs) + sorted(int(n) for n in state['retry'])))
             state['active'] = {"started_at": started, "pending": ordered,
                                "completed": {}}
@@ -303,8 +365,8 @@ def main(argv=None):
             # Include collapsed events since discovery, but omit activity known
             # to precede the start of an already completed reconciliation.
             since = iso(dt.datetime.fromisoformat(active['started_at'].replace('Z', '+00:00')) - dt.timedelta(minutes=2))
-            by_update = updated_prs(since, active['completed'])
-            by_runs = touched_by_runs(since, heads, active['completed'])
+            by_update = ([] if args.all_open else updated_prs(since, active['completed']))
+            by_runs = set() if args.all_open else touched_by_runs(since, heads, active['completed'])
             active['pending'] = list(dict.fromkeys(args.pr + active['pending'] + by_update + sorted(by_runs)))
             # Only advance after both discovery streams were read completely.
             active['started_at'] = discovered
@@ -320,6 +382,9 @@ def main(argv=None):
 
         def one(number):
             if stop:
+                return
+            if time.monotonic() >= deadline:
+                stop.append(('budget', 'batch time budget reached'))
                 return
             failed = False
             checked_from = iso(dt.datetime.now(dt.timezone.utc))
@@ -354,7 +419,14 @@ def main(argv=None):
         state['active'] = None
         log(f"done: {len(ordered)} PRs; failures queued for retry: {failures}")
         return 0
+    except Deferred as exc:
+        state['blocked_until'] = max(state['blocked_until'], exc.until)
+        log(f"priority inventory deferred until epoch {exc.until}")
+        return 1
     finally:
+        if args.prioritize_self_tested:
+            priority.report(state['self_tested_pending'], observed=priority_observed,
+                            now=iso(dt.datetime.now(dt.timezone.utc)))
         if not args.dry_run:
             save_progress(output, state)
 
