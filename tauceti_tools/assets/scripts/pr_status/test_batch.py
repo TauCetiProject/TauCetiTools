@@ -91,6 +91,16 @@ class ResumeTests(unittest.TestCase):
     def read(self):
         return json.loads(self.path.read_text())
 
+    def test_full_sweep_resumes_without_restarting_prefix_or_listing_runs(self):
+        with patch.object(batch, 'touched_by_runs', side_effect=AssertionError('sweep must not scan workflow history')):
+            self.labels.side_effect = lambda n: (_ for _ in ()).throw(core.RateLimited('quota')) if n == '2' else None
+            self.assertEqual(batch.main(self.args + ['--all-open']), 1)
+            self.assertEqual(self.read()['active']['pending'], [2, 3])
+            self.labels.reset_mock()
+            self.labels.side_effect = None
+            self.assertEqual(batch.main(self.args + ['--all-open']), 0)
+            self.assertEqual([c.args[0] for c in self.labels.call_args_list], ['2', '3'])
+
     def test_run_discovery_queries_only_installed_workflows(self):
         with patch.object(batch, 'lines', return_value=['.github/workflows/pr-build.yml']), \
                 patch.object(batch, 'workflow_runs', return_value=[]) as runs:
@@ -257,9 +267,7 @@ class ResumeTests(unittest.TestCase):
 
 class ProvenanceTests(unittest.TestCase):
     def test_exact_restore_selector_rejects_untrusted_pr_workflows(self):
-        workflow = Path(__file__).resolve().parents[2] / '.github/workflows/pr-status.yml'
-        text = workflow.read_text()
-        query = workflow.parents[2].joinpath('scripts/pr_status/trusted-run.jq').read_text()
+        query = Path(__file__).with_name('trusted-run.jq').read_text()
         base = {'repository': {'full_name': 'TauCetiProject/TauCeti'},
                 'head_repository': {'full_name': 'TauCetiProject/TauCeti'},
                 'event': 'workflow_run', 'path': '.github/workflows/pr-status.yml', 'head_branch': 'main'}
