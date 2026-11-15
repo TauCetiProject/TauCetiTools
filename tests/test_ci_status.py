@@ -69,7 +69,8 @@ class StatusIntentTests(unittest.TestCase):
             else:
                 pull["labels"] = [dict(name="self-tested")]
                 replies = [self.run, pull, dict(statuses=[dict(context="self-tested/7", state="success", id=1)])]
-            ok, fake = self.publish([(path, record)], replies)
+            with patch.object(ci_status, "eligible", return_value=not closed):
+                ok, fake = self.publish([(path, record)], replies)
             self.assertTrue(ok)
             self.assertFalse(any(call[0] == "POST" for call in fake.calls))
             self.assertFalse(path.exists())
@@ -85,24 +86,10 @@ class StatusIntentTests(unittest.TestCase):
             self.assertEqual(json.loads(path.read_text()), record)
             api.assert_not_called()
 
-    def test_newer_self_tested_route_fences_all_old_pr_statuses_but_not_staging(self):
-        assertion = dict(context='self-tested/7', state='success',
-                         target_url='https://github.com/Owner/Repo/actions/runs/124',
-                         created_at='2026-10-21T02:01:00Z')
-        for context in ('build', 'scope', 'bump-guard'):
-            _, record = self.record(context)
-            self.assertTrue(ci_status.newer_status(record, ({'self-tested/7': assertion}, True),
-                                                   self.run['run_started_at']))
-            self.assertFalse(ci_status.newer_status(dict(record, pr=None),
-                                                    ({'self-tested/7': assertion}, True),
-                                                    self.run['run_started_at']))
-            self.assertFalse(ci_status.newer_status(record, ({'self-tested/8': assertion}, True),
-                                                    self.run['run_started_at']))
+    def test_old_receipt_does_not_override_current_label_intent(self):
         _, record = self.record()
-        for changes in ({'state': 'failure'}, {'target_url': 'https://github.com/Owner/Repo/actions/runs/122'},
-                        {'created_at': '2026-10-21T01:59:00Z'}):
-            self.assertFalse(ci_status.newer_status(record, ({'self-tested/7': dict(assertion, **changes)}, True),
-                                                    self.run['run_started_at']))
+        assertion = dict(context="self-tested/7",state="success")
+        self.assertFalse(ci_status.newer_status(record, ({"self-tested/7":assertion},True),self.run["run_started_at"]))
 
     def test_healthy_three_status_group_reuses_identity_and_status_snapshot(self):
         records = [self.record(context) for context in ('bump-guard', 'build', 'scope')]

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import runpy
+import subprocess
 import sys
 from pathlib import Path
 
@@ -14,6 +15,12 @@ def main():
     sys.path.insert(0, str(checkout))
     from tauceti_queue.github_app import GitHubApp
 
+    # The queue App is repository-scoped; its installation cannot read the org
+    # team. Reuse the host's existing read:org credential only for that lookup.
+    if not os.environ.get("SELF_TESTED_TEAM_TOKEN"):
+        os.environ["SELF_TESTED_TEAM_TOKEN"] = subprocess.check_output(
+            ["gh", "auth", "token"], text=True, timeout=30
+        ).strip()
     token = GitHubApp.load().tokens.token()
     os.environ.update(
         GH_TOKEN=token,

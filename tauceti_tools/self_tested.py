@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
+from functools import lru_cache
 
 LABEL = "self-tested"
 CONTEXT = "self-tested"
@@ -57,58 +59,143 @@ def latest_status(rows, context=CONTEXT):
     return max(rows, key=lambda r: r.get("id") or 0, default={})
 
 
-def accepted(labels, status, *, member=False, branch=""):
-    """`status` is the latest dedicated status on the current head, never a build result."""
-    return bool(member and requested(labels, branch) and (status or "").lower() == "success")
+def accepted(labels, status=None, *, member=False, branch=""):
+    """The persistent author declaration is sufficient; old receipt statuses are ignored.
+
+    Callers that grant admission must also validate membership and source scope.
+    Review scheduling can use this signal without granting merge authority.
+    """
+    return bool(member and requested(labels, branch))
 
 
-def gh_read(path):
-    result = subprocess.run(["gh", "api", path], capture_output=True, text=True, timeout=30)
+def gh_read(path, *, token=None):
+    env = dict(os.environ)
+    if token:
+        env["GH_TOKEN"] = token
+        env.pop("GITHUB_TOKEN", None)
+    result = subprocess.run(["gh", "api", path], env=env, capture_output=True, text=True, timeout=30)
     if result.returncode:
-        raise RuntimeError("self-tested GitHub observation unavailable")
+        error = RuntimeError("self-tested GitHub observation unavailable")
+        if "HTTP 404" in result.stderr:
+            error.status = 404
+        raise error
     return json.loads(result.stdout)
 
 
-def membership(repo, author, read=gh_read, *, strict=False):
+_MEMBERS = {}
+
+
+def membership(repo, author, read=gh_read, *, strict=False, cache=False):
     configured = team(repo)
     if not configured or not author:
         return False
+    key = configured, author
+    if cache and key in _MEMBERS and time.monotonic() - _MEMBERS[key][0] < 60:
+        return _MEMBERS[key][1]
     try:
         org, slug = configured.split("/", 1)
-        return read(f"orgs/{org}/teams/{slug}/memberships/{author}").get("state") == "active"
-    except (OSError, ValueError, TypeError, AttributeError, KeyError, RuntimeError, subprocess.SubprocessError):
+        path = f"orgs/{org}/teams/{slug}/memberships/{author}"
+        token = os.environ.get("SELF_TESTED_TEAM_TOKEN") or os.environ.get("TAUCETI_TEAM_TOKEN")
+        value = (gh_read(path, token=token) if token else read(path)).get("state") == "active"
+        if cache:
+            _MEMBERS[key] = time.monotonic(), value
+        return value
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        AttributeError,
+        KeyError,
+        RuntimeError,
+        subprocess.SubprocessError,
+    ) as error:
+        if getattr(error, "status", None) == 404:
+            return False
         if strict:
             raise
-        return False  # Read-only consumers remain conservative when membership is unknown.
+        return False  # Unknown membership never grants admission.
+
+
+def items(read, path):
+    page = 1
+    while True:
+        rows = read(path + ("&" if "?" in path else "?") + f"per_page=100&page={page}")
+        if not isinstance(rows, list):
+            raise RuntimeError("incomplete self-tested source evidence")
+        yield from rows
+        if len(rows) < 100:
+            return
+        page += 1
+
+
+class _ReadAPI:
+    def __init__(self, read):
+        self.read = read
+
+    def request(self, method, path):
+        if method != "GET":
+            raise ValueError("self-tested eligibility is read-only")
+        return self.read(path)
+
+    def items(self, path):
+        return list(items(self.read, path))
+
+
+@lru_cache(maxsize=1)
+def _bump_policy():
+    from tauceti_tools.templates import import_shared
+
+    return import_shared("self_tested.py", "_self_tested_bump_guard")
+
+
+def eligible(pr, repo, *, paths=None, read=gh_read, member_read=None):
+    """Validate the current persistent declaration inline; no statuses or writes.
+
+    Ordinary mathematics uses the author's team membership and exact diff paths.
+    The automatic-bump exception still validates its labeller and real pin guard.
+    Membership is cached for at most one minute within a consumer process.
+    """
+    branch = (pr.get("head") or {}).get("ref", "")
+    if (
+        not team(repo)
+        or pr.get("state") != "open"
+        or (pr.get("base") or {}).get("ref") != os.environ.get("TAUCETI_BASE_BRANCH", "main")
+        or not requested(pr.get("labels"), branch)
+    ):
+        return False
+    bump = branch.startswith(BUMP_BRANCH)
+    author = (pr.get("user") or {}).get("login", "")
+    if bump:
+        if not automatic_bump(pr, repo):
+            return False
+        events = list(items(read, f"repos/{repo}/issues/{pr['number']}/events"))
+        labels = [e for e in events if e.get("event") == "labeled" and (e.get("label") or {}).get("name") == LABEL]
+        if not labels:
+            return False
+        author = (max(labels, key=lambda e: e.get("id", 0)).get("actor") or {}).get("login", "")
+    if not membership(repo, author, member_read or read, strict=True, cache=True):
+        return False
+    if paths is None:
+        files = list(items(read, f"repos/{repo}/pulls/{pr['number']}/files"))
+        if pr.get("changed_files") is not None and len(files) != pr["changed_files"]:
+            raise RuntimeError("incomplete self-tested diff")
+        paths = [f["filename"] for f in files]
+        paths.extend(f.get("previous_filename", "") for f in files if f.get("status") == "renamed")
+    if not (allowed_bump_paths(paths) if bump else allowed_paths(paths)):
+        return False
+    if bump:
+        verdict, _ = _bump_policy().check_bump(_ReadAPI(read), repo, pr["head"]["sha"])
+        if verdict is None:
+            raise RuntimeError("bump-guard evidence unavailable")
+        return verdict
+    return True
 
 
 def observe(repo, number, head, read=gh_read):
-    """Consume the existing assessment's PR/head-bound result and current label.
-
-    The existing PR assessment resolves team membership and records its decision.
-    Consumers reuse that result like scope/build statuses; no picker handshake,
-    second App permission or independently cached team roster is needed.
-    """
-    if not team(repo):
-        return False
+    """Read current PR evidence directly; no Actions receipt or label history."""
     try:
         pr = read(f"repos/{repo}/pulls/{number}")
-        if (
-            pr.get("state") != "open"
-            or pr.get("head", {}).get("sha") != head
-            or pr.get("base", {}).get("ref") != os.environ.get("TAUCETI_BASE_BRANCH", "main")
-            or not requested(pr.get("labels"), pr.get("head", {}).get("ref", ""))
-            or (pr.get("head", {}).get("ref", "").startswith(BUMP_BRANCH) and not automatic_bump(pr, repo))
-        ):
-            return False
-        rows = read(f"repos/{repo}/commits/{head}/status?per_page=100").get("statuses", [])
-        status = latest_status(rows, context(number)).get("state", "")
-        return accepted(
-            pr.get("labels"),
-            status,
-            member=True,
-            branch=pr.get("head", {}).get("ref", ""),
-        )
+        return pr.get("head", {}).get("sha") == head and eligible(pr, repo, read=read)
     except (OSError, ValueError, TypeError, AttributeError, KeyError, RuntimeError, subprocess.SubprocessError):
         return False
 
@@ -122,4 +209,3 @@ def allowed_bump_paths(paths, prefix="TauCeti/"):
     return bool(set(paths) & set(PIN_FILES)) and all(
         (p.startswith(prefix) or p in PIN_FILES) and "\n" not in p and "\r" not in p for p in paths
     )
-
