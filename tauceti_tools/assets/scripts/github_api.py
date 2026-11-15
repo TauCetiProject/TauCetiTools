@@ -119,7 +119,16 @@ class GitHub:
     GraphQL costs and observed quota headers to stderr and the Actions summary.
     """
 
-    def __init__(self, *, max_wait=180, jitter=0):
+    def __init__(self, *, max_wait=180, jitter=0, source_status_target=None):
+        # Only the isolated finalizer opts into this exact execution-SHA write.
+        # The candidate build keeps the default read-only source guard.
+        if source_status_target is not None and (
+            not isinstance(source_status_target, tuple) or len(source_status_target) != 2
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", source_status_target[0])
+            or not re.fullmatch(r"[0-9a-f]{40}", source_status_target[1])
+        ):
+            raise ValueError("source status target requires an exact execution repository and SHA")
+        self.source_status_target = source_status_target
         self.max_wait = max_wait
         self.waited = 0
         self.jitter = jitter
@@ -178,7 +187,13 @@ class GitHub:
             execution = json.loads(os.environ.get("TAUCETI_CI_EXECUTION_REPOSITORY", "{}"))
             parts = path.lstrip("/").split("?", 1)[0].split("/")
             repo = "/".join(parts[1:3]) if len(parts) >= 4 and parts[0] == "repos" else ""
-            if (method != "GET" or repo not in allowed
+            status_write = (
+                self.source_status_target is not None and method == "POST" and read is not True
+                and path == f"repos/{self.source_status_target[0]}/statuses/{self.source_status_target[1]}"
+                and repo == execution.get("name") and isinstance(data, dict)
+                and data.get("context") in {"build", "bump-guard"}
+            )
+            if not status_write and (method != "GET" or repo not in allowed
                     or (repo == execution.get("name") and parts[3] != "actions")):
                 raise ValueError("source metadata/publication requires the native source adapter")
         read = method == "GET" if read is None else read

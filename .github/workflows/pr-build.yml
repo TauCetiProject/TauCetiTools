@@ -1882,7 +1882,6 @@ jobs:
           cp -a "$RUNNER_TEMP/tauceti-shared-scripts/." ./scripts/
           echo "PYTHONPATH=$PYTHONPATH" >> "$GITHUB_ENV"
       - name: Select CI API credentials
-        if: ${{ env.SOURCE_CANDIDATE != 'true' }}
         id: ci-api
         uses: ./.tauceti-tools/.github/actions/ci-credentials
         with:
@@ -1891,8 +1890,8 @@ jobs:
           workflow-token: ${{ github.token }}
           read-app-id: ${{ secrets.CI_READ_APP_ID }}
           read-app-private-key: ${{ secrets.CI_READ_APP_PRIVATE_KEY }}
-          status-app-id: ${{ env.SOURCE_CANDIDATE != 'true' && secrets.CI_STATUS_APP_ID || '' }}
-          status-app-private-key: ${{ env.SOURCE_CANDIDATE != 'true' && secrets.CI_STATUS_APP_PRIVATE_KEY || '' }}
+          status-app-id: ${{ secrets.CI_STATUS_APP_ID }}
+          status-app-private-key: ${{ secrets.CI_STATUS_APP_PRIVATE_KEY }}
 
       - name: Post the terminal merge-group build status
         if: ${{ env.SOURCE_CANDIDATE != 'true' }}
@@ -1918,6 +1917,8 @@ jobs:
         if: ${{ always() && env.SOURCE_CANDIDATE == 'true' }}
         env:
           GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
+          GH_TOKEN: ${{ steps.ci-api.outputs.status-token }}
+          TAUCETI_GITHUB_WRITE_ROLE: ${{ steps.ci-api.outputs.status-role }}
           SOURCE_JOB_RESULT: ${{ needs.sandboxed-build.result }}
           CI_SOURCE_PUBLISHER_RUNNER: ${{ inputs.source_candidate_control_runner }}
           SOURCE_BUILD_STATE: ${{ needs.sandboxed-build.outputs.build-state }}
@@ -1956,7 +1957,8 @@ jobs:
           python3 -m tauceti_tools.ci_candidate_workflow finalize \
             --policy .tauceti/ci-source.json --configuration tauceti.toml \
             --evidence "$RUNNER_TEMP/source-build-evidence.json" \
-            --output "$RUNNER_TEMP/source-candidate-result.json" --github-output "$GITHUB_OUTPUT"
+            --output "$RUNNER_TEMP/source-candidate-result.json" --github-output "$GITHUB_OUTPUT" \
+            --publish-statuses
 
       - name: Retain the source execution result
         if: ${{ always() && env.SOURCE_CANDIDATE == 'true' && steps.source_result.outputs.artifact-name != '' }}

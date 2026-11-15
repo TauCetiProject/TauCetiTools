@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .assets.scripts import ci_checkout, ci_git
+from .assets.scripts.github_api import APIError, Deferred, GitHub
 from .ci_candidate import (
     MAX_MEMBER_MANIFEST_BYTES,
     MAX_MEMBERS,
@@ -649,12 +650,7 @@ def publication_verdict(request, policy, context, reader, *, clock=time.monotoni
                         and all(isinstance(label, str) for label in job["labels"])
                         and sorted(job["labels"]) == sorted(expected["labels"])
                     )
-                if (
-                    not runner_matches
-                    or type(build_runner) is not int
-                    or build_runner <= 0
-                    or build_runner == runner
-                ):
+                if not runner_matches or type(build_runner) is not int or build_runner <= 0 or build_runner == runner:
                     raise EvidenceUnavailable("publisher did not acquire the caller's isolated runner")
                 isolated = True
             if job.get("status") == "completed":
@@ -763,6 +759,40 @@ def context_from_environment(env):
     return context
 
 
+def publish_statuses(request, policy, context, result, *, writer):
+    """The isolated trusted finalizer reports its exact candidate to GitHub protection."""
+    tested = result.get("tested") or {}
+    expected = make_result(
+        request,
+        policy,
+        context,
+        tested_commit=tested.get("commit"),
+        tested_tree=tested.get("tree"),
+        verdicts=result["verdicts"],
+    )
+    if result != expected:
+        raise ValueError("status result differs from the exact finalizer request or producer")
+    # A successful build includes its isolated cache publication. Never give
+    # GitHub a green build while the result still reports missing outputs.
+    complete = all(value in {"success", "not_required"} for value in result["verdicts"].values())
+    for name, context_name in (("build", "build"), ("bump_guard", "bump-guard")):
+        verdict = result["verdicts"][name]
+        state = verdict if verdict in {"success", "failure"} else "error"
+        if name == "build" and state == "success" and not complete:
+            state = "error"
+        writer.request(
+            "POST",
+            f"repos/{policy.execution.repository.name}/statuses/{request.head}",
+            {
+                "context": context_name,
+                "state": state,
+                "description": "Verified exact source-candidate CI result",
+                "target_url": f"https://github.com/{policy.execution.repository.name}/actions/runs/{context['run_id']}",
+            },
+            idempotent=True,
+        )
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -802,7 +832,12 @@ def main(argv=None):
     parser.add_argument("--members-file")
     parser.add_argument("--members-output")
     parser.add_argument("--receipt-output")
+    parser.add_argument("--publish-statuses", action="store_true")
     args = parser.parse_args(argv)
+    if args.publish_statuses and (
+        args.command != "finalize" or os.environ.get("TAUCETI_GITHUB_WRITE_ROLE") != "ci-status-app"
+    ):
+        parser.error("candidate statuses require the isolated finalizer's configured CI status App")
     args.configuration = str(source_configuration_path(args.configuration))
     context = context_from_environment(os.environ)
     request, policy = load_request(
@@ -916,6 +951,14 @@ def main(argv=None):
         if args.github_output:
             with open(args.github_output, "a") as output:
                 output.write(f"artifact-name={artifact_name(request, context['run_id'], context['attempt'])}\n")
+        if args.publish_statuses:
+            publish_statuses(
+                request,
+                policy,
+                context,
+                result,
+                writer=GitHub(source_status_target=(policy.execution.repository.name, request.head)),
+            )
         return 0 if all(value in {"success", "not_required"} for value in result["verdicts"].values()) else 1
     if args.command == "member-policy" and any(
         result.get(flag) == "1"
@@ -929,7 +972,15 @@ def main(argv=None):
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (ValueError, OSError, ForgeError, EvidenceUnavailable, subprocess.SubprocessError) as error:
+    except (
+        ValueError,
+        OSError,
+        ForgeError,
+        EvidenceUnavailable,
+        APIError,
+        Deferred,
+        subprocess.SubprocessError,
+    ) as error:
         # Remote/API exceptions are already scrubbed; avoid replaying Git stderr
         # or attacker-controlled JSON into GitHub workflow command syntax.
         raise SystemExit(f"source candidate {type(error).__name__}") from None
