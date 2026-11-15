@@ -763,6 +763,19 @@ class RoutingEntrypoint(unittest.TestCase):
                               NAMESPACE_ENABLED='true', NAMESPACE_BUILD_CAP='8')
         self.assertEqual(output['pool'], 'github')
 
+    def test_namespace_cap_normalizes_operator_whitespace_and_leading_zeroes(self):
+        for cap in (' 8 ', '08', '008'):
+            with self.subTest(cap=cap):
+                self.assertEqual(fleet_runner.namespace_policy({}, dict(NAMESPACE_ENABLED='true', NAMESPACE_BUILD_CAP=cap)),
+                                 (True, 8))
+
+    def test_invalid_project_namespace_defaults_fail_closed(self):
+        for cap in (True, 65, -1, 8.5):
+            with self.subTest(cap=cap), redirect_stdout(io.StringIO()):
+                self.assertEqual(fleet_runner.namespace_policy(dict(namespace_enabled=True, namespace_build_cap=cap),
+                                                              dict(NAMESPACE_ENABLED='', NAMESPACE_BUILD_CAP='')),
+                                 (False, 0))
+
     def test_partial_fleet_reservations_exclude_observed_targets(self):
         config, inventory = self.staging_fixture()
         queued = [[v["name"] for v in inventory["runners"][1]["labels"]]]

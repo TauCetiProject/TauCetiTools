@@ -440,7 +440,7 @@ def namespace_policy(config, environment):
         enabled = {"true": True, "false": False}.get(override)
     cap = environment.get("NAMESPACE_BUILD_CAP") or config.get("namespace_build_cap", 20)
     if (type(enabled) is not bool or isinstance(cap, bool)
-            or not re.fullmatch(r"(?:0|[1-9][0-9]?)", str(cap)) or not 0 <= int(cap) <= 64):
+            or not re.fullmatch(r"[0-9]{1,3}", str(cap).strip()) or not 0 <= int(cap) <= 64):
         print("::warning::Invalid Namespace controls; Namespace disabled (enabled=true/false, cap=0..64)")
         return False, 0
     cap = int(cap)
