@@ -1,9 +1,11 @@
 """Persistent declarations use inline author/scope eligibility, with no Actions receipts."""
 
+import base64
 import copy
 import importlib.util
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -176,6 +178,21 @@ class PersistentRouteTests(unittest.TestCase):
             self.assertFalse(policy.accepted(labels, status, member=False))
         self.assertFalse(policy.accepted(labels + [dict(name="full-lint")], member=True))
         self.assertFalse(policy.accepted(labels, member=True, branch="lint-repair/x"))
+
+    def test_inline_bump_reads_allow_missing_alternative_lakefile_from_queue_client(self):
+        class Missing(RuntimeError):
+            status = 404
+
+        class QueueRead:
+            def request(self, method, path):
+                if "/lakefile.lean?" in path:
+                    raise Missing("no alternative Lake file")
+                return dict(type="file", encoding="base64", content=base64.b64encode(b"pins").decode())
+
+        with tempfile.TemporaryDirectory() as directory:
+            route.fetch_guard_files(QueueRead(), REPO, HEAD, Path(directory))
+            self.assertFalse((Path(directory) / "lakefile.lean").exists())
+            self.assertTrue((Path(directory) / "lakefile.toml").exists())
 
     def test_bumps_keep_their_trusted_labeller_and_real_pin_guard(self):
         self.api.pr["user"]["login"] = policy.BUMP_AUTHOR
