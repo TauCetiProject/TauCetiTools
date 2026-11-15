@@ -697,6 +697,24 @@ class RoutingEntrypoint(unittest.TestCase):
             self.assertIn(f"namespace_cap={cap}", self.last_shared_urls[0])
             self.assertIn(f"{count}/{cap}; inventory=complete", self.last_log)
 
+    def test_explicit_namespace_opt_in_respects_eight_build_boundary(self):
+        config='[services.fleet]\nnamespace_enabled=true\nnamespace_build_cap=8\npr_order=["namespace","github"]\n'
+        for count,expected in ((0,'namespace'),(7,'namespace'),(8,'github'),(9,'github')):
+            with self.subTest(count=count):
+                snapshot=self.shared(busy=20,routing_version=2,namespace_busy=count,queued_fleet=[])
+                output,_=self.pick(dict(state=dict(shared=snapshot)),config=config,GITHUB_STATE_TOKEN='state',FLEET_JOB_KIND='pr')
+                self.assertEqual(output['pool'],expected)
+                if expected=='namespace':
+                    self.assertIn('nscloud-ubuntu-24.04-amd64-8x16-with-features',json.loads(output['runner']))
+                    self.assertEqual(output['fleet'],'false')
+                    self.assertEqual(output['github'],'false')
+
+    def test_namespace_opt_in_cannot_use_partial_capacity_as_spare(self):
+        config='[services.fleet]\nnamespace_enabled=true\nnamespace_build_cap=8\npr_order=["namespace","github"]\n'
+        snapshot=self.shared(busy=20,namespace_busy_lower_bound=0)
+        output,_=self.pick(dict(state=dict(shared=snapshot)),config=config,GITHUB_STATE_TOKEN='state')
+        self.assertEqual(output['pool'],'github')
+
     def test_partial_fleet_reservations_exclude_observed_targets(self):
         config, inventory = self.staging_fixture()
         queued = [[v["name"] for v in inventory["runners"][1]["labels"]]]
