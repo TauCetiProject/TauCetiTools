@@ -715,6 +715,54 @@ class RoutingEntrypoint(unittest.TestCase):
         output,_=self.pick(dict(state=dict(shared=snapshot)),config=config,GITHUB_STATE_TOKEN='state')
         self.assertEqual(output['pool'],'github')
 
+    def test_runtime_namespace_switch_overrides_project_default(self):
+        snapshot = self.shared(busy=20, routing_version=2, namespace_busy=0, queued_fleet=[])
+        for default, override, expected in ((False, 'true', 'namespace'), (True, 'false', 'github'),
+                                            (True, ' FALSE ', 'github'), (False, 'TRUE', 'namespace')):
+            with self.subTest(default=default, override=override):
+                config = ('[services.fleet]\nnamespace_enabled=' + str(default).lower()
+                          + '\npr_order=["namespace","github"]\n')
+                output, _ = self.pick(dict(state=dict(shared=snapshot)), config=config,
+                                      GITHUB_STATE_TOKEN='state', NAMESPACE_ENABLED=override)
+                self.assertEqual(output['pool'], expected)
+                self.assertEqual(output['namespace_enabled'], str(expected == 'namespace').lower())
+
+    def test_runtime_namespace_caps_control_admission_and_stable_slot_prefix(self):
+        config = '[services.fleet]\nnamespace_enabled=true\nnamespace_build_cap=8\npr_order=["namespace","github"]\n'
+        for cap in (1, 4, 8, 20, 64):
+            for busy in (cap - 1, cap):
+                with self.subTest(cap=cap, busy=busy):
+                    snapshot = self.shared(busy=20, routing_version=2, namespace_busy=busy, queued_fleet=[])
+                    output, _ = self.pick(dict(state=dict(shared=snapshot)), config=config,
+                                          GITHUB_STATE_TOKEN='state', NAMESPACE_BUILD_CAP=str(cap))
+                    self.assertEqual(output['pool'], 'namespace' if busy < cap else 'github')
+                    self.assertEqual(output['namespace_cap'], str(cap))
+                    self.assertEqual(output['namespace_slot'], str(5 % cap))
+
+    def test_zero_or_invalid_namespace_controls_preserve_fleet_routing(self):
+        config, inventory = self.staging_fixture()
+        config = config.replace('[services.fleet]\n', '[services.fleet]\nnamespace_enabled=true\n')
+        config = config.replace('staging_order=', 'pr_order=')
+        endpoint = 'orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1'
+        snapshot = self.shared(busy=20, routing_version=2, namespace_busy=0, queued_fleet=[])
+        for overrides in ({'NAMESPACE_BUILD_CAP': '0'}, {'NAMESPACE_BUILD_CAP': '-1'},
+                          {'NAMESPACE_BUILD_CAP': '65'}, {'NAMESPACE_BUILD_CAP': 'many'},
+                          {'NAMESPACE_ENABLED': 'yes'}, {'NAMESPACE_BUILD_CAP': '8\nrunner=evil'}):
+            with self.subTest(overrides=overrides):
+                output, _ = self.pick(dict(state=dict(shared=snapshot), fleet={endpoint: inventory}),
+                                      config=config, GITHUB_STATE_TOKEN='state', FLEET_CI_ENABLED='true',
+                                      FLEET_READ_TOKEN='fleet', FLEET_RUNNER_GROUP_ID='3', **overrides)
+                self.assertEqual(output['pool'], 'chris')
+                self.assertEqual(output['namespace_cap'], '0')
+                self.assertEqual(output['namespace_slot'], '0')
+                self.assertEqual(output['namespace_enabled'], 'false')
+
+    def test_runtime_namespace_enable_still_requires_complete_capacity(self):
+        snapshot = self.shared(busy=20, namespace_busy_lower_bound=0)
+        output, _ = self.pick(dict(state=dict(shared=snapshot)), GITHUB_STATE_TOKEN='state',
+                              NAMESPACE_ENABLED='true', NAMESPACE_BUILD_CAP='8')
+        self.assertEqual(output['pool'], 'github')
+
     def test_partial_fleet_reservations_exclude_observed_targets(self):
         config, inventory = self.staging_fixture()
         queued = [[v["name"] for v in inventory["runners"][1]["labels"]]]
