@@ -31,28 +31,25 @@ ambiguous cancellation is logged and reobserved on the next pass, without
 repeating the POST in the same pass. Cancellation never publishes a CI verdict.
 Status publication also checks closure, current head and accepted local testing.
 
-Enable the companion `tauceti-ci-cleanup.service` and `tauceti-ci-cleanup.timer`
-on the same host for cleanup every three minutes, independently of Actions
-runner capacity. Install both unit files alongside the existing recovery units,
-then run `systemctl --user daemon-reload` and
-`systemctl --user enable --now tauceti-ci-cleanup.timer`. Both commands use the
-same release, GitHub App wrapper and nonblocking host lock: overlapping passes
-leave the next timer to retry. The cleanup-only pass never dispatches new builds.
-The existing hourly recovery timer and worker/CI admissions remain enabled.
+There is no additional cleanup daemon or timer. The existing hourly recovery
+pass calls the same lifecycle reconciler using the active-run inventory it
+already collected, before it considers replacement builds. It catches missed
+or coalesced events and interrupted cancellation attempts. Systemd continues to
+serialize that existing service; worker/CI admissions remain enabled.
 
 The generated `pr-ci-cleanup.yml` provides the fast event path for closure,
 head changes, routing-label changes and successful `self-tested/<PR>` statuses.
 It runs only trusted default-branch tools and uses `actions: write`. Burst events
-coalesce globally; the host sweep covers any event whose pending run collapses.
+coalesce globally; the existing hourly host sweep covers any event whose pending run collapses.
 A targeted pass scans that PR's branch plus manual dispatches on main, then
-filters by exact PR identity. The complete host sweep covers historical branches.
+filters by exact PR identity. The existing hourly host sweep covers historical branches.
 
 For reviewable previews, run `python scripts/ci_recovery.py --repo OWNER/REPO
 --cleanup-only` (optionally `--pr NUMBER`); add `--apply` to cancel. JSON logs name
 the PR, tested head, run attempt and cancellation reason. Each pass reports
 counts, deferred API errors, the oldest observed obsolete run's age and an
 `overdue` flag after five minutes. Remaining obsolete runs are visible rather
-than being reported as successfully cancelled. Inspect both services' journals.
+than being reported as successfully cancelled. Inspect the existing recovery service's journal.
 
 Missing-build recovery still checks immutable current PR heads, statuses, live
 builds and recent dispatches immediately before replacement. A genuine current-

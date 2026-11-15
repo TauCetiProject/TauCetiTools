@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import os
 import runpy
 import sys
@@ -11,14 +10,6 @@ from pathlib import Path
 
 
 def main():
-    directory = Path(os.environ.get("XDG_RUNTIME_DIR") or Path.home() / ".local/state/tauceti-ci-recovery")
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    lock = (directory / "tauceti-ci-recovery.lock").open("a")
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        print("ci-recovery: another cleanup/recovery pass owns the lock; next timer will retry")
-        return
     checkout = Path(os.environ.get("TAUCETI_QUEUE_CHECKOUT", Path.home() / "TauCetiQueue"))
     sys.path.insert(0, str(checkout))
     from tauceti_queue.github_app import GitHubApp
