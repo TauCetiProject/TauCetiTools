@@ -873,8 +873,9 @@ class ShippedWorkflow(unittest.TestCase):
                          "${{ inputs.source_candidate_control_runner }}")
         credentials = self.step("Select CI API credentials", job="finalize-merge-group-build")
         self.assertEqual(credentials["with"]["status-app-id"], "${{ secrets.CI_STATUS_APP_ID }}")
-        self.assertNotIn("if", credentials)
+        self.assertEqual(credentials["if"], "${{ env.SOURCE_CANDIDATE != 'true' || inputs.source_candidate_github_statuses }}")
         self.assertIn("--publish-statuses", finalizer["run"])
+        self.assertFalse(self.value[True]["workflow_call"]["inputs"]["source_candidate_github_statuses"]["default"])
         builder_credentials = self.step("Select CI API credentials")
         self.assertIn("env.SOURCE_CANDIDATE != 'true'", builder_credentials["with"]["status-app-id"])
 
