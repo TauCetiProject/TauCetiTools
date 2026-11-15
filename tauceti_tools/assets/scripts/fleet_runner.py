@@ -328,7 +328,7 @@ def discover_machines(runners):
     return [dict(name="fleet", machine_id=identity) for identity in sorted(identities)]
 
 
-def route(*, kind, order, machines, runner_pages, observed, github_budget, namespace_cap, excluded=(), selection_key="", pr_queue_limit=0):
+def route(*, kind, order, machines, runner_pages, observed, github_budget, namespace_cap, excluded=(), selection_key="", pr_queue_limit=0, namespace_enabled=False):
     """Choose in the configured preference order using one bounded observation.
 
     Limits are approximate: simultaneous pickers can observe the same spare slot.
@@ -373,8 +373,9 @@ def route(*, kind, order, machines, runner_pages, observed, github_budget, names
         print("::warning::Fleet configuration or inventory invalid; retaining cloud choices")
         resolved, ranked, discovered, backlog = {}, [], [], []
     for name in order:
-        # Ignore retired pool names even in older configuration and retries.
         if name == "namespace":
+            if namespace_enabled and name not in excluded and observed.get("namespace_busy") is not None and observed["namespace_busy"] < namespace_cap:
+                return dict(pool="namespace")
             continue
         if name in excluded or name in resolved and resolved[name]["machine_id"] in excluded:
             continue
@@ -440,6 +441,9 @@ def route_main():
     kind = environment.get("FLEET_JOB_KIND", "other")
     budget = int(environment.get("BUDGET") or "18")
     namespace_cap = int(environment.get("NAMESPACE_BUILD_CAP") or config.get("namespace_build_cap", 20))
+    namespace_enabled = config.get("namespace_enabled", False)
+    if type(namespace_enabled) is not bool:
+        raise ObservationError("namespace_enabled must be a boolean")
     pr_queue_limit = config.get("pr_queue_limit", 0)
     observed = dict(github_busy=None, namespace_busy=None, queued_fleet=None)
     token = environment.get("GH_TOKEN", "")
@@ -453,7 +457,8 @@ def route_main():
     except (OSError, ValueError, KeyError, TypeError):
         print("::warning::Shared capacity unavailable; retaining native runner fallback")
     order = config.get("staging_order" if kind == "staging" else "pr_order", ["github", "fleet"])
-    order = [name for name in order if name != "namespace"]
+    if not namespace_enabled:
+        order = [name for name in order if name != "namespace"]
     excluded = set()
     attempt = int(environment["GITHUB_RUN_ATTEMPT"])
     if attempt > 1 and kind != "pr":
@@ -491,7 +496,7 @@ def route_main():
     runner_pages = fleet_inventory(environment, repository) if inventory_read else []
     candidate = route(kind=kind, order=ready_order, machines=config.get("machines", {}), runner_pages=runner_pages,
                       observed=observed, github_budget=budget, namespace_cap=namespace_cap, excluded=excluded,
-                      selection_key=environment["GITHUB_RUN_ID"], pr_queue_limit=pr_queue_limit)
+                      selection_key=environment["GITHUB_RUN_ID"], pr_queue_limit=pr_queue_limit, namespace_enabled=namespace_enabled)
     selected = None if candidate.get("waiting") else candidate
     scanned = False
     # A configured shared service owns the bounded organization scan. A partial
@@ -513,9 +518,13 @@ def route_main():
         runner_pages = fleet_inventory(environment, repository)
     selected = selected or route(kind=kind, order=order, machines=config.get("machines", {}), runner_pages=runner_pages,
                      observed=observed, github_budget=budget, namespace_cap=namespace_cap, excluded=excluded or (),
-                     selection_key=environment["GITHUB_RUN_ID"], pr_queue_limit=pr_queue_limit)
+                     selection_key=environment["GITHUB_RUN_ID"], pr_queue_limit=pr_queue_limit, namespace_enabled=namespace_enabled)
     target = "ubuntu-24.04"
-    if selected["pool"] != "github":
+    if selected["pool"] == "namespace":
+        staging = kind == "staging"
+        target = [f"nscloud-ubuntu-24.04-amd64-{'16x32' if staging else '8x16'}-with-features" + (";job.priority=1" if staging else ""),
+                  "namespace-features:container.privileged=true" + (f";github.run-id={environment['GITHUB_RUN_ID']}" if staging else "")]
+    elif selected["pool"] != "github":
         labels = selected["labels"]
         if kind == "pr":
             # Availability chooses a pool, not a disposable runner. GitHub can
@@ -525,7 +534,7 @@ def route_main():
         target = dict(group="TauCetiFleet", labels=labels)
     values = dict(runner=json.dumps(target, separators=(",", ":")), pool=selected["pool"],
                   queued_pr=selected.get("queued_pr"), pr_queue_limit=pr_queue_limit,
-                  fleet=str(selected["pool"] != "github").lower(),
+                  fleet=str(selected["pool"] not in ("github", "namespace")).lower(),
                   github=str(selected["pool"] == "github").lower(), busy=observed["github_busy"],
                   namespace_busy=observed["namespace_busy"], namespace_busy_lower_bound=observed.get("namespace_busy_lower_bound"),
                   placement_unavailable=observed.get("placement_unavailable"), budget=budget, namespace_cap=namespace_cap,
