@@ -205,21 +205,15 @@ def assess(pr, repo=None, now=None):
                              jq=".merge_base_commit.sha").strip()
     if not merge_base:
         raise RuntimeError(f"No merge base for #{number} from the compare API")
-    from tauceti_tools.self_tested import context, requested
+    from tauceti_tools.self_tested import requested
     from self_tested import reconcile as reconcile_local_route
     paths = None
     local = False
     if requested(current.get("labels"), current["head"].get("ref", "")):
-        # Reuse this head's existing assessment; metadata-only updates do not
-        # repeat membership, path or bump checks.
-        local = all(statuses.get(c) == "success" for c in (context(number), "scope", "bump-guard"))
-        if not local:
-            paths = diff_engine().git_diff(f"https://github.com/{repo}", merge_base, head)
-            local = reconcile_local_route(number, repo, pr=current, statuses=statuses, paths=paths)
-        if local and os.environ.get("SELF_TESTED_WRITE_TOKEN"):
-            statuses.update({context(number): "success", "scope": "success", "bump-guard": "success"})
-    elif any(label.get("name") == "self-tested" for label in current.get("labels", [])):
-        reconcile_local_route(number, repo, pr=current, statuses=statuses)
+        paths = diff_engine().git_diff(f"https://github.com/{repo}", merge_base, head)
+        local = reconcile_local_route(number, repo, pr=current, paths=paths)
+        if local and set(paths) & {"lake-manifest.json", "lean-toolchain"}:
+            statuses["bump-guard"] = "success"  # Real inline guard, never a published receipt.
     result = classify(current, comments, statuses, paths or [], merge_base, now=now, self_tested=local)
     if paths is None and result["category"] in {"needs-human-review", "merge-check-failed"}:
         paths = diff_engine().git_diff(f"https://github.com/{repo}", merge_base, head)
