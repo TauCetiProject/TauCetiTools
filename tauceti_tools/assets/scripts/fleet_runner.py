@@ -335,7 +335,7 @@ def route(*, kind, order, machines, runner_pages, observed, github_budget, names
     Only a complete Namespace count below its cap establishes spare capacity.
     Partial counts retain evidence of saturation; unknown capacity is skipped.
     """
-    if type(github_budget) is not int or github_budget < 1 or type(namespace_cap) is not int or namespace_cap < 1:
+    if type(github_budget) is not int or github_budget < 1 or type(namespace_cap) is not int or namespace_cap < 0:
         raise ObservationError("invalid capacity budgets")
     if kind != "pr":
         pr_queue_limit = 0
@@ -432,6 +432,21 @@ def fleet_inventory(environment, repository):
     return runner_pages
 
 
+def namespace_policy(config, environment):
+    """Runtime controls override project defaults; invalid controls disable Namespace."""
+    enabled = config.get("namespace_enabled", False)
+    override = environment.get("NAMESPACE_ENABLED", "").strip().lower()
+    if override:
+        enabled = {"true": True, "false": False}.get(override)
+    cap = environment.get("NAMESPACE_BUILD_CAP") or config.get("namespace_build_cap", 20)
+    if (type(enabled) is not bool or isinstance(cap, bool)
+            or not re.fullmatch(r"[0-9]{1,3}", str(cap).strip()) or not 0 <= int(cap) <= 64):
+        print("::warning::Invalid Namespace controls; Namespace disabled (enabled=true/false, cap=0..64)")
+        return False, 0
+    cap = int(cap)
+    return enabled and cap > 0, cap
+
+
 def route_main():
     environment = os.environ
     repository = environment["GITHUB_REPOSITORY"]
@@ -440,10 +455,7 @@ def route_main():
     config = tomllib.loads(Path("tauceti.toml").read_text())["services"]["fleet"]
     kind = environment.get("FLEET_JOB_KIND", "other")
     budget = int(environment.get("BUDGET") or "18")
-    namespace_cap = int(environment.get("NAMESPACE_BUILD_CAP") or config.get("namespace_build_cap", 20))
-    namespace_enabled = config.get("namespace_enabled", False)
-    if type(namespace_enabled) is not bool:
-        raise ObservationError("namespace_enabled must be a boolean")
+    namespace_enabled, namespace_cap = namespace_policy(config, environment)
     pr_queue_limit = config.get("pr_queue_limit", 0)
     observed = dict(github_busy=None, namespace_busy=None, queued_fleet=None)
     token = environment.get("GH_TOKEN", "")
@@ -453,7 +465,7 @@ def route_main():
     if fallback and fallback != token:
         readers.append((fallback, int(environment.get("REPOSITORY_API_RESERVE") or "250")))
     try:
-        observed = shared_capacity(repository, environment.get("GITHUB_STATE_TOKEN", ""), namespace_cap) or observed
+        observed = shared_capacity(repository, environment.get("GITHUB_STATE_TOKEN", ""), max(1, namespace_cap)) or observed
     except (OSError, ValueError, KeyError, TypeError):
         print("::warning::Shared capacity unavailable; retaining native runner fallback")
     order = config.get("staging_order" if kind == "staging" else "pr_order", ["github", "fleet"])
@@ -538,6 +550,8 @@ def route_main():
                   github=str(selected["pool"] == "github").lower(), busy=observed["github_busy"],
                   namespace_busy=observed["namespace_busy"], namespace_busy_lower_bound=observed.get("namespace_busy_lower_bound"),
                   placement_unavailable=observed.get("placement_unavailable"), budget=budget, namespace_cap=namespace_cap,
+                  namespace_slot=int(environment["GITHUB_RUN_ID"]) % max(1, namespace_cap),
+                  namespace_enabled=str(namespace_enabled).lower(),
                   attempt=environment["GITHUB_RUN_ATTEMPT"])
     with open(environment["GITHUB_OUTPUT"], "a") as out:
         out.write("".join(f"{k}={v if v is not None else ''}\n" for k, v in values.items()))
@@ -559,7 +573,7 @@ def route_main():
         message += f"; waiting for shared fleet PR capacity ({selected['queued_pr']}/{pr_queue_limit} observed waiting)"
         if observed.get("snapshot_age_seconds") is not None:
             message += f"; queue observation age={observed['snapshot_age_seconds']}s"
-    message += " (approximate cap)."
+    message += f"; Namespace enabled={str(namespace_enabled).lower()} (approximate cap)."
     print(message)
     if environment.get("GITHUB_STEP_SUMMARY"):
         with open(environment["GITHUB_STEP_SUMMARY"], "a") as out:

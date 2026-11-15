@@ -785,6 +785,43 @@ Deploy the capacity service first and verify fresh snapshots advertise
 requested fleet jobs are included. Older cached snapshots remain useful for
 running capacity but cannot authorize intentionally waiting PR work.
 
+### Runtime Namespace controls
+
+Wire the repository variables `NAMESPACE_ENABLED` and `NAMESPACE_BUILD_CAP` into
+the picker's environment once. Afterwards operators can change either variable
+in GitHub's repository settings or with `gh variable set`, without a source PR:
+
+```sh
+gh variable set NAMESPACE_ENABLED --repo OWNER/REPO --body true
+gh variable set NAMESPACE_BUILD_CAP --repo OWNER/REPO --body 8
+# Gracefully stop admitting new Namespace work:
+gh variable set NAMESPACE_ENABLED --repo OWNER/REPO --body false
+```
+
+An explicit `true` or `false` overrides `[services.fleet].namespace_enabled`.
+The cap accepts integers from zero through 64 and overrides `namespace_build_cap`;
+zero also disables Namespace. Empty variables use the project defaults, which
+disable Namespace unless explicitly opted in. Invalid settings disable Namespace
+while preserving GitHub and fleet routing. Namespace must appear in the applicable
+pool preference list, and capacity observations must still be complete.
+
+The cap observation alone cannot prevent simultaneous pickers from overshooting.
+Consumers that need a scheduler ceiling must share the same
+`tauceti-namespace-build-<namespace_slot>` concurrency groups across every Namespace
+build workflow, with `queue: max` and `cancel-in-progress: false`. The picker emits
+`namespace_slot = run_id % namespace_cap` from the validated policy. Consumers must
+bound accepted slots to `0 <= slot < cap <= 64` and use slot zero on invalid output.
+Never include the cap or workflow name in the group name: resizing must reuse the
+same slot prefix. Fixed slots can reduce utilization when jobs collide.
+
+Changes apply to new picker executions using the new settings. Already-admitted
+jobs, including jobs queued in scheduler groups, keep their original policy and
+finish normally. Lowering the cap drains towards the new limit rather than killing
+work. GitHub may retain variable values in already-created workflow runs, so this
+is not an emergency stop of jobs previously queued. Scheduler groups are scoped to
+one repository; enabling Namespace in another repository needs a shared admission
+mechanism if an organization-wide ceiling is required.
+
 ## Cache
 
 `services.cache.mode = "off"` leaves ordinary local builds available. Hosted or custom cache
