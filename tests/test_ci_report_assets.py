@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -35,6 +36,24 @@ class PublishedReportsTests(unittest.TestCase):
             self.assertTrue(all(call.args[0].startswith('/v1/ci/') for call in fetch.call_args_list))
             self.assertEqual(json.loads((out / 'ci-freshness.json').read_text())['source'],
                              'published-live-reports')
+
+    def test_manifest_with_historical_coverage_over_one_megabyte(self):
+        manifest, responses = self.manifest()
+        manifest['coverage'] = {'observations': 'x' * (1024 * 1024)}
+        responses['/v1/ci/manifest.json'] = json.dumps(manifest).encode()
+
+        def open_report(request, timeout):
+            path = request.full_url.removeprefix(reports.ORIGIN)
+            return io.BytesIO(responses[path])
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                reports.urllib.request, 'urlopen', side_effect=open_report):
+            self.assertEqual(reports.cache(Path(directory)), [])
+
+    def test_fetch_still_bounds_downloads_and_identifies_oversized_asset(self):
+        with patch.object(reports.urllib.request, 'urlopen', return_value=io.BytesIO(b'x' * 33)):
+            with self.assertRaisesRegex(ValueError, r'/large.svg.*32 bytes'):
+                reports.fetch('/large.svg', 32)
 
     def test_bad_digest_preserves_the_entire_previous_group(self):
         manifest, responses = self.manifest()

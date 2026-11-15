@@ -10,6 +10,10 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 ORIGIN = 'https://ci-data.taucetiproject.org'
+# The manifest includes detailed historical coverage, not just the eleven chart URLs.
+# Its live size exceeded 1 MiB in November 2026; retain a bounded download with room
+# for that coverage to grow independently of the chart assets.
+MANIFEST_LIMIT = 16 * 1024 * 1024
 GROUPS = {
     'fleet': ['ci-fleet-72h.svg', 'ci-fleet-30d.svg'],
     'daily': ['ci-build-duration.svg', 'ci-build-wait.svg', 'ci-runner-minutes.svg',
@@ -25,14 +29,14 @@ def fetch(path, limit):
     with urllib.request.urlopen(request, timeout=15) as response:
         data = response.read(limit + 1)
     if len(data) > limit:
-        raise ValueError('Published report exceeds size limit')
+        raise ValueError(f'Published report {path} exceeds size limit ({limit} bytes)')
     return data
 
 
 def cache(out):
     out.mkdir(parents=True, exist_ok=True)
     try:
-        manifest = json.loads(fetch('/v1/ci/manifest.json', 1024 * 1024))
+        manifest = json.loads(fetch('/v1/ci/manifest.json', MANIFEST_LIMIT))
         if (manifest.get('schema') != 'tauceti-ci.manifest/v1' or
                 manifest.get('mode') != 'live' or manifest.get('history', {}).get('status') != 'ready'):
             raise ValueError('Published CI charts are not ready')
