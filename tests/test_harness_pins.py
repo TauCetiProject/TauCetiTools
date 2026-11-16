@@ -5,6 +5,7 @@ import copy
 import json
 import tempfile
 import unittest
+import unittest.mock
 import urllib.parse
 from pathlib import Path
 
@@ -492,3 +493,72 @@ class Reconcile(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PullRequestCheck(unittest.TestCase):
+    def setUp(self):
+        self.api = FakeGitHub()
+        self.api.blobs = {}
+        original = self.api.get
+
+        def get(path):
+            self.assertFalse(path.startswith("orgs/"), "classification must not need organization access")
+            return original(path)
+
+        self.api.get = get
+
+    def test_classification_needs_only_repository_reads(self):
+        result = hp.pull_request_check(self.api, PROJECT, 9, bound=["pr-build.yml"])
+        self.assertEqual((result["head"], result["changes_pins"], result["errors"]), (PR_HEAD, True, []))
+        self.api.project[PR_HEAD] = self.api.project[PR_BASE]
+        self.api.sources[PR_HEAD] = self.api.sources[PR_BASE]
+        self.assertFalse(hp.pull_request_check(self.api, PROJECT, 9, bound=["pr-build.yml"])["changes_pins"])
+
+    def test_command_line_outputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            with (
+                unittest.mock.patch.object(hp, "GitHub", lambda token: self.api),
+                unittest.mock.patch("builtins.print"),
+            ):
+                code = hp.main(
+                    [
+                        "pr-check",
+                        "--project",
+                        PROJECT,
+                        "--pr",
+                        "9",
+                        "--bound-workflow",
+                        "pr-build.yml",
+                        "--github-output",
+                        str(output),
+                    ]
+                )
+            self.assertEqual(code, 0)
+            values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+            self.assertEqual(values["changed"], "true")
+            self.assertEqual(values["state"], "pending")
+            self.assertEqual(values["head"], PR_HEAD)
+
+
+class RoutedCredentials(unittest.TestCase):
+    def test_organization_paths_use_the_runner_group_credential(self):
+        calls = []
+
+        class Recorder:
+            def __init__(self, name):
+                self.name = name
+
+            def get(self, path):
+                calls.append((self.name, path))
+
+            def patch(self, path, data):
+                calls.append((self.name, "PATCH " + path))
+
+        api = hp.Routed(Recorder("repo"), Recorder("org"))
+        api.get("repos/x/y")
+        api.get("orgs/x/actions/runner-groups/3")
+        api.patch("orgs/x/actions/runner-groups/3", {})
+        with self.assertRaises(hp.ApiError):
+            api.patch("repos/x/y", {})
+        self.assertEqual([c[0] for c in calls], ["repo", "org", "org"])

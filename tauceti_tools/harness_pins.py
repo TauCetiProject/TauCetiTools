@@ -676,6 +676,24 @@ class GitHub:
         return self.request("PATCH", path, data)
 
 
+class Routed:
+    """Repository reads with one credential, organization runner-group access with another."""
+
+    def __init__(self, repository_api, organization_api):
+        self.repository_api, self.organization_api = repository_api, organization_api
+
+    def _for(self, path):
+        return self.organization_api if path.startswith("orgs/") else self.repository_api
+
+    def get(self, path):
+        return self._for(path).get(path)
+
+    def patch(self, path, data):
+        if not path.startswith("orgs/"):
+            raise ApiError(0, "only organization runner groups are written")
+        return self.organization_api.patch(path, data)
+
+
 def pages(api, path, key=None, *, limit=50):
     found = []
     for page in range(1, limit + 1):
@@ -852,14 +870,44 @@ def unfinished_heads(api, project, workflows, repository):
     return heads
 
 
-def reconcile(api, project, *, branch="main", pr=None, prune=False, bound=(), dry_run=False):
-    organization = project.split("/")[0]
+def _main_revision(api, project, branch):
     head = api.get(f"repos/{project}/commits/{branch}")
-    main, parents = head["sha"], [p["sha"] for p in head.get("parents") or []]
     probe = Repositories(api, project, "")
-    repository, revision = harness(probe.source(main))
+    repository, revision = harness(probe.source(head["sha"]))
     repos = Repositories(api, project, repository)
     repos.blobs, repos.files, repos.trees = probe.blobs, probe.files, probe.trees
+    return head["sha"], [p["sha"] for p in head.get("parents") or []], repository, revision, repos
+
+
+def _classify(api, repos, project, number, bound):
+    """A pull request's literal errors, and its harness needs if its merge would change them."""
+    pull = api.get(f"repos/{project}/pulls/{int(number)}")
+    head = pull["head"]["sha"]
+    result = {"number": int(number), "head": head, "changes_pins": False, "errors": []}
+    try:
+        pr_repository, _ = harness(repos.source(head))
+        if pr_repository != repos.repository:
+            raise DerivationError(f"the pull request changes the harness repository to {pr_repository}")
+        result["errors"] += check_literals(repos.source(head), repos.workflows(head), bound)
+        base = api.get(f"repos/{project}/compare/{pull['base']['sha']}...{head}?per_page=1")["merge_base_commit"]["sha"]
+        needs = repos.needs(head)
+        if needs != repos.needs(base):
+            result["changes_pins"] = True
+            return result, needs
+    except DerivationError as error:
+        result["errors"].append(str(error))
+    return result, None
+
+
+def pull_request_check(api, project, number, *, branch="main", bound=()):
+    """Classify a pull request using repository reads only; no organization access is needed."""
+    _, _, _, _, repos = _main_revision(api, project, branch)
+    return _classify(api, repos, project, number, bound)[0]
+
+
+def reconcile(api, project, *, branch="main", pr=None, prune=False, bound=(), dry_run=False):
+    organization = project.split("/")[0]
+    main, parents, repository, revision, repos = _main_revision(api, project, branch)
     report = {"main": main, "harness": repository, "revision": revision, "errors": [], "written": {}}
     main_workflows = repos.workflows(main)
     report["errors"] += [f"main: {e}" for e in check_literals(repos.source(main), main_workflows, bound)]
@@ -870,32 +918,15 @@ def reconcile(api, project, *, branch="main", pr=None, prune=False, bound=(), dr
     retain = {gid: set(entries) for gid, entries in required.items()}
 
     if pr is not None:
-        pull = api.get(f"repos/{project}/pulls/{int(pr)}")
-        head_sha = pull["head"]["sha"]
-        report["pr"] = {"number": int(pr), "head": head_sha}
-        problems = []
-        try:
-            pr_repository, _ = harness(repos.source(head_sha))
-            if pr_repository != repository:
-                raise DerivationError(f"the pull request changes the harness repository to {pr_repository}")
-            problems += check_literals(repos.source(head_sha), repos.workflows(head_sha), bound)
-            base = api.get(f"repos/{project}/compare/{pull['base']['sha']}...{head_sha}?per_page=1")[
-                "merge_base_commit"
-            ]["sha"]
-            pr_needs = repos.needs(head_sha)
-            changed = pr_needs != repos.needs(base)
-            report["pr"]["changes_pins"] = changed
-            if changed:
-                pr_required, pr_add, pr_errors = _admit(pr_needs, groups, repos, untrusted=True)
-                problems += pr_errors
-                for gid, entries in pr_add.items():
-                    add.setdefault(gid, set()).update(entries)
-                for gid, entries in pr_required.items():
-                    retain.setdefault(gid, set()).update(entries)
-                report["pr"]["required"] = {str(gid): sorted(e) for gid, e in pr_required.items()}
-        except DerivationError as error:
-            problems.append(str(error))
-        report["pr"]["errors"] = problems
+        report["pr"], pr_needs = _classify(api, repos, project, pr, bound)
+        if pr_needs is not None:
+            pr_required, pr_add, pr_errors = _admit(pr_needs, groups, repos, untrusted=True)
+            report["pr"]["errors"] += pr_errors
+            for gid, entries in pr_add.items():
+                add.setdefault(gid, set()).update(entries)
+            for gid, entries in pr_required.items():
+                retain.setdefault(gid, set()).update(entries)
+            report["pr"]["required"] = {str(gid): sorted(e) for gid, e in pr_required.items()}
 
     remove = {}
     if prune:
@@ -953,6 +984,13 @@ def pr_state(report):
 # Command line
 
 
+def _outputs(path, **items):
+    if path:
+        with path.open("a") as output:
+            for key, value in items.items():
+                output.write(f"{key}={str(value).splitlines()[0] if value else ''}\n")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="python3 -m tauceti_tools.harness_pins", description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -964,15 +1002,18 @@ def main(argv=None):
         )
         if name == "set":
             command.add_argument("revision")
-    command = sub.add_parser("reconcile")
-    command.add_argument("--project", required=True, help="owner/repository whose CI calls the harness")
-    command.add_argument("--branch", default="main")
-    command.add_argument("--pr", type=int)
-    command.add_argument("--prune", action="store_true")
-    command.add_argument("--dry-run", action="store_true")
-    command.add_argument("--bound-workflow", action="append", default=[])
-    command.add_argument("--token-env", default="GH_TOKEN")
-    command.add_argument("--github-output", type=Path)
+    for name in ("pr-check", "reconcile"):
+        command = sub.add_parser(name)
+        command.add_argument("--project", required=True, help="owner/repository whose CI calls the harness")
+        command.add_argument("--branch", default="main")
+        command.add_argument("--pr", type=int, required=name == "pr-check")
+        command.add_argument("--bound-workflow", action="append", default=[])
+        command.add_argument("--token-env", default="GH_TOKEN", help="Repository read credential")
+        command.add_argument("--github-output", type=Path)
+        if name == "reconcile":
+            command.add_argument("--org-token-env", default="ORG_TOKEN", help="Runner-group credential")
+            command.add_argument("--prune", action="store_true")
+            command.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     try:
         if args.command == "literals":
@@ -986,9 +1027,28 @@ def main(argv=None):
             for path in set_revision(args.root, args.revision, args.bound_workflow):
                 print(path)
             return 0
-        api = GitHub(os.environ.get(args.token_env, ""))
+        repository_api = GitHub(os.environ.get(args.token_env, ""))
+        if args.command == "pr-check":
+            result = pull_request_check(
+                repository_api, args.project, args.pr, branch=args.branch, bound=args.bound_workflow
+            )
+            state, description = pr_state({"pr": result})
+            if result["changes_pins"] and state == "success":
+                state, description = "pending", "Admitting this PR's harness pins in the runner groups"
+            print(json.dumps(result, indent=2, sort_keys=True))
+            for error in result["errors"]:
+                print(f"::error::{error}")
+            _outputs(
+                args.github_output,
+                head=result["head"],
+                changed=str(result["changes_pins"]).lower(),
+                state=state,
+                description=description,
+            )
+            return 0
+        organization_api = GitHub(os.environ.get(args.org_token_env) or os.environ.get(args.token_env, ""))
         report = reconcile(
-            api,
+            Routed(repository_api, organization_api),
             args.project,
             branch=args.branch,
             pr=args.pr,
@@ -996,7 +1056,7 @@ def main(argv=None):
             bound=args.bound_workflow,
             dry_run=args.dry_run,
         )
-    except DerivationError as error:
+    except (DerivationError, ApiError) as error:
         print(f"::error::{error}")
         return 1
     print(json.dumps(report, indent=2, sort_keys=True))
@@ -1004,10 +1064,9 @@ def main(argv=None):
         print(f"::error::{error}")
     for gid, entries in report["unadmitted_main"].items():
         print(f"::error::runner group {gid} does not admit main's {', '.join(entries)}")
-    if args.github_output and args.pr is not None:
+    if args.pr is not None:
         state, description = pr_state(report)
-        with args.github_output.open("a") as output:
-            output.write(f"state={state}\ndescription={description}\n")
+        _outputs(args.github_output, head=report["pr"]["head"], state=state, description=description)
     if args.pr is not None:
         return 0 if pr_state(report)[0] == "success" else 1
     return 1 if report["errors"] or report["unadmitted_main"] else 0
