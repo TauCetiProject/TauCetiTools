@@ -3,7 +3,9 @@
 import base64
 import copy
 import importlib.util
+import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -210,6 +212,127 @@ class PersistentRouteTests(unittest.TestCase):
                 self.decide()
         self.api.pr["user"]["login"] = "ordinary-author"
         self.assertFalse(self.decide())
+
+
+class BumpTransportTests(unittest.TestCase):
+    def setUp(self):
+        from test_bump_manifest import fixture
+        pr, mathlib, base = fixture()
+        self.pr, self.mathlib, self.base = pr, mathlib, base
+        self.calls = []
+        self.forward = True
+        self.error = None
+        self.malformed = False
+        self.no_change = False
+        self.environment = patch.dict(os.environ, TAUCETI_CONF_SNAPSHOT='', TAUCETI_SOURCE_CANDIDATE='',
+                                      TAUCETI_REPO=REPO, GH_READ_TOKEN='', GH_TOKEN='fixture-token',
+                                      TAUCETI_GITHUB_WRITE_ROLE='test-bump-read')
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+
+    def request(self, method, path):
+        self.assertEqual(method, 'GET')
+        self.calls.append(path)
+        if path.startswith('repos/leanprover-community/'):
+            if self.error:
+                raise self.error
+            if '/compare/' in path:
+                if self.malformed:
+                    return {}
+                return {'status': 'ahead' if self.forward else 'behind'}
+            if '/actions/' in path:
+                return {'workflow_runs': [{'head_branch': 'master', 'status': 'completed', 'conclusion': 'success'}]}
+            content = json.dumps(self.mathlib) if '/lake-manifest.json?' in path else 'leanprover/lean4:v4.31.0\n'
+        else:
+            if path.endswith('/branches/main'):
+                return {'commit': {'sha': 'c'*40}}
+            if '/compare/' in path:
+                return {'merge_base_commit': {'sha': 'd'*40}}
+            filename = path.split('/contents/', 1)[1].split('?', 1)[0]
+            if filename == 'lakefile.lean':
+                raise route.APIError(method, path, 404, {})
+            manifest = self.pr if path.endswith(HEAD) and not self.no_change else self.base
+            content = {'lakefile.toml': 'name = "TauCeti"\n', 'lake-manifest.json': json.dumps(manifest),
+                       'lean-toolchain': 'leanprover/lean4:v4.31.0\n'}[filename]
+        return {'type': 'file', 'encoding': 'base64', 'content': base64.b64encode(content.encode()).decode()}
+
+    def check(self, api=None):
+        return route.check_bump(api or self, REPO, HEAD)
+
+    def upstream(self):
+        return [path for path in self.calls if path.startswith('repos/leanprover-community/')]
+
+    def test_real_guard_uses_each_structured_observation_once_and_keeps_its_verdict(self):
+        passed, output = self.check()
+        self.assertTrue(passed, output)
+        self.assertIn('forward-only bump validated', output)
+        self.assertEqual(len(self.upstream()), 5)
+        self.assertEqual(len(set(self.upstream())), 5)
+
+    def test_actual_backward_bump_still_fails_without_later_reads(self):
+        self.forward = False
+        passed, output = self.check()
+        self.assertFalse(passed)
+        self.assertIn('not a forward move', output)
+        self.assertEqual(len(self.upstream()), 1)
+
+    def test_no_pin_change_does_not_read_upstream(self):
+        self.no_change = True
+        passed, output = self.check()
+        self.assertTrue(passed, output)
+        self.assertEqual(self.upstream(), [])
+
+    def test_unreadable_upstream_is_unknown_rather_than_a_failed_guard(self):
+        self.error = route.APIError('GET', 'repos/upstream/compare', 403, {'message': 'not authorized'})
+        passed, output = self.check()
+        self.assertIsNone(passed)
+        self.assertIn('inputs unavailable', output)
+
+    def test_missing_upstream_fields_remain_unknown(self):
+        self.malformed = True
+        passed, output = self.check()
+        self.assertIsNone(passed)
+        self.assertIn('inputs unavailable', output)
+
+    def test_real_guard_cached_quota_refusal_updates_shared_hold_and_stops_upstream_dispatch(self):
+        self.environment.stop()
+        self.environment = patch.dict(os.environ, TAUCETI_CONF_SNAPSHOT='', TAUCETI_SOURCE_CANDIDATE='',
+                                      TAUCETI_REPO=REPO, GH_READ_TOKEN='fixture-read-token',
+                                      GH_TOKEN='fixture-write-token', TAUCETI_GITHUB_READ_ROLE='test-bump-read')
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+        client = route.GitHub(max_wait=0)
+        real_run = subprocess.run
+        upstream = []
+
+        def transport(argv, *args, **kwargs):
+            if argv[:2] != ['gh', 'api']:
+                return real_run(argv, *args, **kwargs)
+            self.assertEqual(kwargs['env']['GH_TOKEN'], 'fixture-read-token')
+            path = argv[argv.index('--method')+2]
+            if path.startswith('repos/leanprover-community/'):
+                upstream.append(path)
+                return subprocess.CompletedProcess(argv, 1, '',
+                    'gh: API rate limit already exceeded for installation ID 143500674.')
+            try:
+                body, status = self.request('GET', path), 200
+            except route.APIError as error:
+                body, status = error.data, error.status
+            import time
+            headers = ('HTTP/2 '+str(status)+'\nX-RateLimit-Resource: core\n'
+                       'X-RateLimit-Remaining: 100\nX-RateLimit-Reset: '+str(int(time.time())+3600)+'\n\n')
+            return subprocess.CompletedProcess(argv, 0, headers+json.dumps(body), '')
+
+        with patch('github_api.subprocess.run', side_effect=transport):
+            with self.assertRaises(route.Deferred):
+                self.check(client)
+            self.assertEqual(len(upstream), 1)
+            self.assertIn(('test-bump-read', 'core'), client.quota_state.blocked)
+            other = route.GitHub(max_wait=0, quota_state=client.quota_state)
+            with self.assertRaises(route.Deferred):
+                other.request('GET', 'repos/other/repo/pulls/1')
+            self.assertEqual(other.stats, {})
+        self.assertEqual(client.stats['test-bump-read']['resources']['core']['requests'], len(self.calls)+1)
 
 
 if __name__ == "__main__":
