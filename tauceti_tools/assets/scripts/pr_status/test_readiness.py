@@ -199,7 +199,7 @@ class ReadEvidence(unittest.TestCase):
         self.assertFalse(expired['eligible'])
         self.assertEqual(expired['category'], 'awaiting-CI')
         self.assertEqual(eligibility.call_count, 2)
-        self.assertEqual(diff.return_value.git_diff.call_count, 2)
+        self.assertEqual(diff.return_value.git_diff.call_count, 1)
 
     def node(self):
         return {"number": 1, "state": "OPEN", "isDraft": False, "baseRefName": "main",

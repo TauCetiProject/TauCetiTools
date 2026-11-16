@@ -246,15 +246,19 @@ def assess(pr, repo=None, now=None):
         from self_tested import reconcile as reconcile_local_route, decide as decide_local_route
         paths = None
         local = False
+        def changed_paths():
+            if core.transport is not None and core.transport.shared_evidence is not None:
+                return core.transport.changed_paths(repo, number, merge_base, head)
+            return diff_engine().git_diff(f'https://github.com/{repo}', merge_base, head)
         if cheap is None and requested(current.get("labels"), current["head"].get("ref", "")):
-            paths = diff_engine().git_diff(f"https://github.com/{repo}", merge_base, head)
+            paths = changed_paths()
             local = (decide_local_route(core.transport.client(), repo, number, pr=current, paths=paths)
                      if core.transport is not None else reconcile_local_route(number, repo, pr=current, paths=paths))
             if local and set(paths) & {"lake-manifest.json", "lean-toolchain"}:
                 statuses["bump-guard"] = "success"  # Real inline guard, never a published receipt.
         result = classify(current, comments, statuses, paths or [], merge_base, now=now, self_tested=local)
         if paths is None and result["category"] in {"needs-human-review", "merge-check-failed"}:
-            paths = diff_engine().git_diff(f"https://github.com/{repo}", merge_base, head)
+            paths = changed_paths()
             result = classify(current, comments, statuses, paths, merge_base, now=now, self_tested=local)
     after, _, _ = evidence(number, repo, comments=False)
     if routing_state(after) != routing_state(current):

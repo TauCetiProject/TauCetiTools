@@ -305,6 +305,15 @@ class GitHub:
             if status == 304 and cached:
                 return cached[1]
             if 200 <= status < 300 and result.returncode == 0:
+                if headers.get('x-ratelimit-remaining') == '0':
+                    try:
+                        reset = float(headers.get('x-ratelimit-reset', ''))
+                        if not math.isfinite(reset) or reset <= time.time():
+                            reset = time.time()+3600
+                    except (ValueError, OverflowError):
+                        reset = time.time()+3600
+                    with self.quota_state.lock:
+                        self.blocked[quota_key] = max(self.blocked.get(quota_key, 0), reset+5)
                 if conditional and method == "GET" and headers.get("etag"):
                     self.cached[cache_key] = (headers["etag"], payload)
                 return payload
@@ -347,7 +356,7 @@ class GitHub:
                     # Missing reset data must not license a fast retry against an exhausted quota.
                     try:
                         reset = float(headers.get("x-ratelimit-reset") or now + 3600)
-                        if not math.isfinite(reset):
+                        if not math.isfinite(reset) or reset <= now:
                             reset = now + 3600
                     except (ValueError, OverflowError):
                         reset = now + 3600

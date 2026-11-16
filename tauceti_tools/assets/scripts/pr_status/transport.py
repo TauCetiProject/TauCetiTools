@@ -29,7 +29,7 @@ class ReconciliationAPI:
         self.policy = None
         self.cache_hits = 0
         self.comparisons = comparisons if comparisons is not None else {}
-        self.git_stats = dict(fetches=0, prepare_seconds=0, cache_bytes=0, reused_comparisons=0)
+        self.git_stats = dict(fetches=0, prepare_seconds=0, cache_bytes=0, reused_comparisons=0, reused_paths=0)
         self.known_labels = set()
         self.shared_evidence = None
         self.git_cache = None
@@ -61,8 +61,29 @@ class ReconciliationAPI:
         with self.decision_lock:
             self.git_stats['prepare_seconds'] += time.monotonic()-started
             self.git_stats['cache_bytes'] = git_inputs._du(self.git_cache)
-            self.comparisons[str(number)] = dict(identity, merge_base=value)
+            record = dict(identity, merge_base=value)
+            if (cached.get('repository') == repository and cached.get('head') == head
+                    and cached.get('merge_base') == value and isinstance(cached.get('paths'), list)):
+                record['paths'] = cached['paths']
+            self.comparisons[str(number)] = record
         return value
+
+    def changed_paths(self, repository, number, merge_base, head):
+        from readiness import diff_engine
+        with self.decision_lock:
+            record = self.comparisons.get(str(number), {})
+            if (record.get('repository') == repository and record.get('head') == head
+                    and record.get('merge_base') == merge_base and isinstance(record.get('paths'), list)
+                    and all(isinstance(path, str) for path in record['paths'])):
+                self.git_stats['reused_paths'] += 1
+                return list(record['paths'])
+        paths = diff_engine().git_diff('https://github.com/'+repository, merge_base, head)
+        with self.decision_lock:
+            record = self.comparisons.get(str(number), {})
+            if (record.get('repository') == repository and record.get('head') == head
+                    and record.get('merge_base') == merge_base):
+                record['paths'] = list(paths)
+        return paths
 
     def client(self):
         if not hasattr(self.local, 'client'):
