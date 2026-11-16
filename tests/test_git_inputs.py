@@ -4,11 +4,45 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from tauceti_tools.git_inputs import _git, changed_paths, snapshot
+from tauceti_tools.git_inputs import _git, changed_paths, snapshot, merge_base
 
 
 class GitInputs(unittest.TestCase):
+    def test_merge_bases_use_complete_cached_ancestry_without_warm_fetches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, cache = root/'source', root/'cache'
+            source.mkdir()
+            def git(*args):
+                return subprocess.check_output(['git', '-C', str(source), *args],
+                                               stderr=subprocess.DEVNULL, text=True).strip()
+            git('init', '-q', '-b', 'main')
+            git('config', 'user.name', 'fixture')
+            git('config', 'user.email', 'fixture@example.org')
+            git('config', 'uploadpack.allowFilter', 'true')
+            def commit(name):
+                (source/name).write_text(name)
+                git('add', '.')
+                git('commit', '-qm', name)
+                return git('rev-parse', 'HEAD')
+            base = commit('base')
+            main = commit('main')
+            git('checkout', '-qb', 'feature', base)
+            first = commit('first')
+            head = commit('head')
+            self.assertEqual(merge_base(source, main, head, cache_dir=cache), base)
+            def warm(repo, args, *a, **kw):
+                self.assertNotEqual(args[0], 'fetch', 'verified cached ancestry must need no network')
+                return _git(repo, args, *a, **kw)
+            with patch('tauceti_tools.git_inputs._git', side_effect=warm):
+                self.assertEqual(merge_base(source, main, head, cache_dir=cache), base)
+                self.assertEqual(merge_base(source, first, head, cache_dir=cache), first)
+            git('checkout', '-q', 'main')
+            moved = commit('moved')
+            self.assertEqual(merge_base(source, moved, head, cache_dir=cache), base)
+
     def test_snapshots_are_shallow_reusable_and_keep_named_comparison_refs(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

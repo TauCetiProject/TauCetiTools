@@ -15,6 +15,8 @@ import sys
 import core
 import readiness
 from github_api import Deferred
+from tauceti_tools.github_state import Unavailable
+from tauceti_tools.git_inputs import PreparationUnavailable
 
 REPO = core.REPO
 
@@ -176,7 +178,7 @@ def main(argv):
     core.transport = ReconciliationAPI()
     try:
         return _main(argv)
-    except Deferred as exc:
+    except (Deferred, Unavailable, PreparationUnavailable) as exc:
         log(f'PR status reconciliation deferred: {exc}')
         return 75
     finally:

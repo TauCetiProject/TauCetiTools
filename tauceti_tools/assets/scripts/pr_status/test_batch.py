@@ -9,6 +9,8 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import patch
+from unittest.mock import Mock
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import batch
@@ -91,6 +93,51 @@ class ResumeTests(unittest.TestCase):
 
     def read(self):
         return json.loads(self.path.read_text())
+
+    def test_shared_batches_retain_missing_evidence_and_never_scan_workflow_history(self):
+        from tauceti_tools.github_state import Unavailable
+        service = SimpleNamespace(repository=batch.REPO, stats={},
+                                  _get=Mock(return_value={'revision': 100}),
+                                  query=Mock(return_value={'data': [dict(number=n, headRefOid=str(n)*40)
+                                                                   for n in (1, 2, 3)]}),
+                                  changes=Mock(return_value=(101, [])))
+        inventory = service.query.return_value
+        service.query.side_effect = lambda operation, **args: (inventory if operation == 'open_prs' else
+            dict(revision=100, data=[dict(ref='refs/heads/main', object={'sha': 'b'*40})]))
+        self.labels.side_effect = lambda n: (_ for _ in ()).throw(Unavailable('coverage_issue_comments')) if n == '2' else None
+        with patch.dict(os.environ, TAUCETI_PR_STATUS_SHARED_EVIDENCE='true'), \
+             patch('shared.State', return_value=service), \
+             patch.object(batch, 'touched_by_runs', side_effect=AssertionError('no workflow history')), \
+             patch.object(batch, 'open_heads', side_effect=AssertionError('no direct inventory')), \
+             patch.object(batch, 'updated_prs', side_effect=AssertionError('no direct PR polling')):
+            self.assertEqual(batch.main(self.args), 75)
+            saved = self.read()
+            self.assertEqual(saved['active']['pending'], [2])
+            self.assertEqual(saved['retry'], {})
+            self.assertEqual(saved['shared_discovery']['revision'], 100)
+            self.labels.side_effect = None
+            self.labels.reset_mock()
+            self.assertEqual(batch.main(self.args), 0)
+        self.assertEqual(self.labels.call_args_list[0].args, ('2',))
+        self.assertEqual(sum(c.args == ('open_prs',) for c in service.query.call_args_list), 1)
+        service.changes.assert_called_once_with(100)
+        self.assertEqual(self.read()['shared_discovery']['revision'], 101)
+
+    def test_shared_discovery_covers_changes_arriving_during_assessment(self):
+        service = SimpleNamespace(repository=batch.REPO, stats={}, _get=Mock(return_value={'revision': 100}),
+                                  query=Mock(return_value={'data': [dict(number=1, headRefOid='a'*40)]}),
+                                  changes=Mock(return_value=(101, [dict(kind='issue_comments', id='42', parent='1')])))
+        inventory = service.query.return_value
+        service.query.side_effect = lambda operation, **args: (inventory if operation == 'open_prs' else
+            dict(revision=100, data=[dict(ref='refs/heads/main', object={'sha': 'b'*40})]))
+        with patch.dict(os.environ, TAUCETI_PR_STATUS_SHARED_EVIDENCE='true'), patch('shared.State', return_value=service):
+            self.assertEqual(batch.main(self.args), 0)
+            self.assertEqual(self.read()['shared_discovery']['revision'], 100)
+            self.labels.reset_mock()
+            self.assertEqual(batch.main(self.args), 0)
+        self.labels.assert_called_once_with('1')
+        service.changes.assert_called_once_with(100)
+
 
     def test_four_inflight_refusals_stop_dispatch_and_restore_bucket_until_reset(self):
         barrier = threading.Barrier(4)

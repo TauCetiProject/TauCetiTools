@@ -483,6 +483,16 @@ connection and SQL-phase times up to cancellation.
 
 ## Client behavior
 
+Authenticated consumers may send `X-TauCeti-Observe-Only: true` to use the
+existing observation-only query path without the public query rate limit.
+Authentication and repository scope still apply. These reads do not create
+repair demand or revive dormant verification; consumers can request bounded
+repair separately through an ordinary authenticated query when coverage is
+missing. Cached selected-resource responses expose
+`X-TauCeti-Checked-Revision`, the boundary through which their unchanged evidence
+was revalidated. The JSON representation and ETag remain unchanged. Inventory
+grace responses do not claim a newer verified boundary.
+
 Clients request the newest available service data, including conditional reads.
 They do not impose an age threshold or validate with GitHub before spending.
 Unavailable coverage, invalid client credentials, or failed transport uses the

@@ -22,6 +22,13 @@ class MaintenanceScriptTests(unittest.TestCase):
                                         capture_output=True, text=True, timeout=60)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_shared_readiness_and_incremental_discovery_contracts(self):
+        for script in ('test_shared.py', 'test_discovery.py'):
+            with self.subTest(script=script):
+                result = subprocess.run([sys.executable, str(ROOT/'tauceti_tools/assets/scripts/pr_status'/script)],
+                                        capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+
     def test_dispatched_build_discovery_regressions(self):
         result = subprocess.run([
             sys.executable, str(ROOT / "tauceti_tools/assets/scripts/pr_status/test_batch.py"),

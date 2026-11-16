@@ -22,6 +22,19 @@ def reply(status=200, data=None, headers=None):
 
 
 class CIAPI(unittest.TestCase):
+    def test_last_successful_read_closes_only_its_exhausted_bucket(self):
+        client = api.GitHub(max_wait=0)
+        replies = [reply(data={'data': {'ok': True}}, headers={'X-RateLimit-Resource': 'graphql',
+                   'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '5000'}), reply(data={'rest': True})]
+        with patch.object(api.subprocess, 'run', side_effect=replies) as request, \
+             patch.object(api.time, 'time', return_value=1000), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(client.graphql('query { viewer { login } }', {}), {'ok': True})
+            with self.assertRaises(api.Deferred) as caught:
+                client.graphql('query { viewer { login } }', {})
+            self.assertEqual(caught.exception.until, 5005)
+            self.assertEqual(client.request('GET', 'repos/o/r'), {'rest': True})
+        self.assertEqual(request.call_count, 2)
+
     def test_cached_cli_refusal_is_shared_by_bucket_and_reuses_known_reset(self):
         quota = api.QuotaState()
         first, second = api.GitHub(max_wait=0, quota_state=quota), api.GitHub(max_wait=0, quota_state=quota)
