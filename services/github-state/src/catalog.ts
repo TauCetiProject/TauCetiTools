@@ -64,7 +64,7 @@ export function recipes(repository: string, q: Query, cursor?: string, page = 1)
     case 'checks': return [rest(`/commits/${args.sha}/check-runs` + suffix,x=>x)];
     case 'workflow_runs': return [rest('/actions/runs' + suffix + (args.after?'&created='+encodeURIComponent('>='+args.after):''))];
     case 'workflow_jobs': return [rest(`/actions/runs/${args.id}${args.attempt?'/attempts/'+args.attempt:''}/jobs` + suffix)];
-    case 'refs': return [rest('/git/matching-refs/heads/' + suffix)];
+    case 'refs': return [rest('/git/matching-refs/heads/' + (args.name || '') + suffix)];
     case 'repository': return [rest('',x=>x,false)];
     default: throw new Error('no upstream recipe');
   }

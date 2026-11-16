@@ -58,9 +58,10 @@ def check_bump(api, repo, head):
                 text=True,
                 timeout=120,
             )
+    except Deferred:
+        raise
     except (
         APIError,
-        Deferred,
         OSError,
         ValueError,
         TypeError,

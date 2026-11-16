@@ -5,15 +5,18 @@ assessments immediately; no per-PR quota probe or retry sleep is needed.
 """
 
 import json
+import os
 import re
 import subprocess
 import threading
+import tempfile
+import time
 
 from github_api import APIError, GitHub, QuotaState
 
 
 class ReconciliationAPI:
-    def __init__(self, holds=()):
+    def __init__(self, holds=(), *, decisions=None, comparisons=None):
         self.quota = QuotaState()
         for hold in holds:
             self.quota.blocked[(hold['credential'], hold['resource'])] = hold['until']
@@ -21,7 +24,45 @@ class ReconciliationAPI:
         self.clients = []
         self.lock = threading.Lock()
         self.label_lock = threading.Lock()
+        self.decision_lock = threading.RLock()
+        self.decisions = decisions if decisions is not None else {}
+        self.policy = None
+        self.cache_hits = 0
+        self.comparisons = comparisons if comparisons is not None else {}
+        self.git_stats = dict(fetches=0, prepare_seconds=0, cache_bytes=0, reused_comparisons=0)
         self.known_labels = set()
+        self.shared_evidence = None
+        self.git_cache = None
+        if os.environ.get('TAUCETI_PR_STATUS_SHARED_EVIDENCE') == 'true':
+            from shared import Evidence
+            self.shared_evidence = Evidence(os.environ.get('GH_REPO', 'TauCetiProject/TauCeti'))
+            self.git_directory = tempfile.TemporaryDirectory(prefix='pr-status-git-inputs-')
+            self.git_cache = self.git_directory.name
+            from shared import policy_identity
+            self.policy = policy_identity(os.environ.get('TAUCETI_REVIEW_RUNNER', '.tauceti-review/runner'))
+
+    def merge_base(self, repository, number, base, head):
+        from tauceti_tools import git_inputs
+        identity = dict(repository=repository, base=base, head=head)
+        with self.decision_lock:
+            cached = self.comparisons.get(str(number), {})
+            if (all(cached.get(k) == v for k, v in identity.items())
+                    and re.fullmatch('[0-9a-f]{40}', cached.get('merge_base', ''))):
+                self.git_stats['reused_comparisons'] += 1
+                return cached['merge_base']
+        def run_git(directory, args, *a, **kw):
+            if args[0] == 'fetch':
+                with self.decision_lock:
+                    self.git_stats['fetches'] += 1
+            return git_inputs._git(directory, args, *a, **kw)
+        started = time.monotonic()
+        value = git_inputs.merge_base('https://github.com/'+repository, base, head,
+                                     cache_dir=self.git_cache, run_git=run_git)
+        with self.decision_lock:
+            self.git_stats['prepare_seconds'] += time.monotonic()-started
+            self.git_stats['cache_bytes'] = git_inputs._du(self.git_cache)
+            self.comparisons[str(number)] = dict(identity, merge_base=value)
+        return value
 
     def client(self):
         if not hasattr(self.local, 'client'):
@@ -78,3 +119,7 @@ class ReconciliationAPI:
     def report(self):
         for client in self.clients:
             client.report()
+        if self.shared_evidence is not None:
+            print('github-state-summary: ' + json.dumps(dict(self.shared_evidence.state.stats,
+                                                           unchanged_decisions=self.cache_hits), sort_keys=True))
+            print('pr-status-git-inputs: ' + json.dumps(self.git_stats, sort_keys=True))

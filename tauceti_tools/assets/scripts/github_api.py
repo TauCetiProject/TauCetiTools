@@ -180,6 +180,9 @@ class GitHub:
             resource = "other"
         quota = {k: headers.get(f"x-ratelimit-{k}") if str(headers.get(f"x-ratelimit-{k}", "")).isdigit()
                  else None for k in ("limit", "remaining", "reset")}
+        counts = stat.setdefault('resources', {}).setdefault(resource, dict(requests=0, reads=0, writes=0))
+        counts['requests'] += 1
+        counts['reads' if read else 'writes'] += 1
         path = safe_path(path)
         stat["buckets"][resource] = quota
         # Only fixed API paths and numeric quota values are logged, never tokens or PR bodies.

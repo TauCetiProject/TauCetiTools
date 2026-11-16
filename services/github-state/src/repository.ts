@@ -3821,7 +3821,7 @@ export class RepositoryState extends DurableObject<Env> {
         const [meta,first,changes]=await this.store.batch([
           {sql:"SELECT value FROM meta WHERE key='revision'"},
           {sql:'SELECT MIN(revision) AS revision FROM changes'},
-          {sql:'SELECT revision,at,kind,id,tombstone FROM changes WHERE revision>? ORDER BY revision LIMIT 1000',bindings:[after]}
+          {sql:'SELECT c.revision,c.at,c.kind,c.id,c.tombstone,r.parent FROM changes c LEFT JOIN resources r ON r.kind=c.kind AND r.id=c.id WHERE c.revision>? ORDER BY c.revision LIMIT 1000',bindings:[after]}
         ]);
         const revision=JSON.parse(meta.toArray()[0]?.value || '0'),oldest=first.one().revision;
         this.revisionState.value=Math.max(this.revisionState.value ?? 0,revision);
