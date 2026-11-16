@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
@@ -91,10 +92,40 @@ class ResumeTests(unittest.TestCase):
     def read(self):
         return json.loads(self.path.read_text())
 
+    def test_four_inflight_refusals_stop_dispatch_and_restore_bucket_until_reset(self):
+        barrier = threading.Barrier(4)
+        self.updated.return_value = list(range(1, 101))
+        def refusal(*args, **kwargs):
+            barrier.wait(timeout=5)
+            return subprocess.CompletedProcess([], 1, '',
+                'gh: API rate limit already exceeded for installation ID 143500674.')
+        def assess(number):
+            batch.core.transport.client().graphql('query { rateLimit { cost } }', {})
+        self.labels.side_effect = assess
+        with patch.object(batch, 'PARALLEL', 4), patch('github_api.subprocess.run', side_effect=refusal) as run, \
+             patch('github_api.time.time', return_value=1000):
+            self.assertEqual(batch.main(self.args), 75)
+        self.assertEqual(run.call_count, 4)
+        saved = self.read()
+        self.assertEqual(saved['active']['pending'], list(range(1, 101)))
+        self.assertEqual(saved['retry'], {})
+        self.assertEqual(saved['quota_holds'], [{'credential': 'gh-default', 'resource': 'graphql', 'until': 4605}])
+        self.labels.reset_mock()
+        self.heads.reset_mock()
+        with patch('github_api.time.time', return_value=2000):
+            self.assertEqual(batch.main(self.args), 75)
+        self.labels.assert_not_called()
+        self.heads.assert_not_called()
+        self.labels.side_effect = None
+        with patch('github_api.time.time', return_value=4606):
+            self.assertEqual(batch.main(self.args), 0)
+        self.assertEqual(self.labels.call_count, 100)
+        self.assertIsNone(self.read()['active'])
+
     def test_full_sweep_resumes_without_restarting_prefix_or_listing_runs(self):
         with patch.object(batch, 'touched_by_runs', side_effect=AssertionError('sweep must not scan workflow history')):
             self.labels.side_effect = lambda n: (_ for _ in ()).throw(core.RateLimited('quota')) if n == '2' else None
-            self.assertEqual(batch.main(self.args + ['--all-open']), 1)
+            self.assertEqual(batch.main(self.args + ['--all-open']), 75)
             self.assertEqual(self.read()['active']['pending'], [2, 3])
             self.labels.reset_mock()
             self.labels.side_effect = None
@@ -139,13 +170,13 @@ class ResumeTests(unittest.TestCase):
                 core._block_for(600)
                 raise core.RateLimited('quota')
         self.labels.side_effect = label
-        self.assertEqual(batch.main(self.args), 1)
+        self.assertEqual(batch.main(self.args), 75)
         failed = self.read()
         self.assertEqual(failed['active']['pending'], [2, 3])
         self.assertEqual(failed['retry'], {})
         self.labels.reset_mock()
         self.heads.reset_mock()
-        self.assertEqual(batch.main(self.args), 1)
+        self.assertEqual(batch.main(self.args), 75)
         self.labels.assert_not_called()
         self.heads.assert_not_called()
         # Simulate the deadline passing, including in the old worker's breaker.
@@ -177,7 +208,7 @@ class ResumeTests(unittest.TestCase):
 
     def test_per_pr_failure_is_queued_without_holding_healthy_work_back(self):
         self.labels.side_effect = lambda n: (_ for _ in ()).throw(RuntimeError('bad input')) if n == '2' else None
-        self.assertEqual(batch.main(self.args), 0)
+        self.assertEqual(batch.main(self.args), 1)
         self.assertEqual(self.read()['retry'], {'2': 1})
         self.updated.return_value = []
         self.labels.reset_mock()
@@ -188,10 +219,10 @@ class ResumeTests(unittest.TestCase):
 
     def test_persistent_failure_remains_retryable_after_many_passes(self):
         self.labels.side_effect = lambda n: (_ for _ in ()).throw(RuntimeError('temporary API failure')) if n == '2' else None
-        self.assertEqual(batch.main(self.args), 0)
+        self.assertEqual(batch.main(self.args), 1)
         self.updated.return_value = []
         for _ in range(8):
-            self.assertEqual(batch.main(self.args), 0)
+            self.assertEqual(batch.main(self.args), 1)
         self.assertEqual(self.read()['retry'], {'2': 9})
         self.labels.side_effect = None
         self.assertEqual(batch.main(self.args), 0)
@@ -259,7 +290,7 @@ class ResumeTests(unittest.TestCase):
                 raise core.RateLimited('quota')
         self.labels.side_effect = label
         with patch.object(batch.dt, 'datetime', Clock):
-            self.assertEqual(batch.main(self.args), 1)
+            self.assertEqual(batch.main(self.args), 75)
         # A build finishing at 09:00:30 may have arrived after the snapshot read.
         # Its update must not be suppressed by the later 09:01 completion time.
         self.assertEqual(self.read()['active']['completed']['1'], '2026-10-19T09:00:00Z')

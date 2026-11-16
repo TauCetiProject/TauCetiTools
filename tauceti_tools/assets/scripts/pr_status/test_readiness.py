@@ -212,7 +212,7 @@ class ReadEvidence(unittest.TestCase):
         current = copy.deepcopy(PR)
         current['labels'] = [{'name': 'self-tested'}]
         current['head']['ref'] = 'math'
-        missing = {}
+        missing = {'scope': 'success'}
         fake = MagicMock()
         fake.git_diff.return_value = PATHS
         import self_tested
@@ -223,10 +223,10 @@ class ReadEvidence(unittest.TestCase):
              patch.object(self_tested, 'reconcile', return_value=True) as assess:
             result = readiness.assess(1, repo='owner/repo', now=NOW)
         self.assertTrue(result['eligible'], result)
-        assess.assert_called_once_with(1, 'owner/repo', pr=current, statuses=missing, paths=PATHS)
+        assess.assert_called_once_with(1, 'owner/repo', pr=current, paths=PATHS)
         fake.git_diff.assert_called_once()
 
-    def test_current_head_assessment_is_reused_without_rechecking_eligibility(self):
+    def test_old_receipt_does_not_skip_direct_eligibility(self):
         current = copy.deepcopy(PR)
         current['labels'] = [{'name': 'self-tested'}]
         statuses = {'self-tested/1': 'success', 'scope': 'success', 'bump-guard': 'success'}
@@ -236,10 +236,10 @@ class ReadEvidence(unittest.TestCase):
         with patch.object(readiness, 'evidence', return_value=(current, [board()], statuses)), \
              patch.object(readiness.core, 'gh_api', return_value=MERGE_BASE), \
              patch.object(readiness, 'diff_engine', return_value=fake), \
-             patch.object(self_tested, 'reconcile') as assess:
+             patch.object(self_tested, 'reconcile', return_value=True) as assess:
             result = readiness.assess(1, repo='owner/repo', now=NOW)
         self.assertTrue(result['eligible'], result)
-        assess.assert_not_called()
+        assess.assert_called_once_with(1, 'owner/repo', pr=current, paths=PATHS)
         fake.git_diff.assert_called_once()
 
     def test_only_approved_active_prs_fetch_diff(self):

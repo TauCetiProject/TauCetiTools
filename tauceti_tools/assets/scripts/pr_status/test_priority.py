@@ -60,7 +60,7 @@ class PriorityTests(unittest.TestCase):
                     patch.object(batch, "open_heads", side_effect=AssertionError("expensive discovery")), \
                     patch.object(batch.core, "_BLOCKED_UNTIL", 0):
                 self.assertEqual(batch.main(["--since", "2026-11-15T00:00:00Z", "--state-out", str(state),
-                                             "--prioritize-self-tested", "--self-tested-limit", "1"]), 1)
+                                             "--prioritize-self-tested", "--self-tested-limit", "1"]), 75)
                 assess.assert_called_once_with("1")
             saved = json.loads(state.read_text())
             self.assertEqual(saved["self_tested_pending"], {"2": pending["2"]})

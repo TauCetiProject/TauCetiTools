@@ -90,10 +90,14 @@ class RateLimited(RuntimeError):
 # for each one and blow the job's timeout long before doing any work.
 _BLOCKED_UNTIL = 0.0
 _BLOCK_LOCK = threading.Lock()  # batch.py calls gh_api from several threads
+transport = None  # Installed by reconciliation entrypoints, not housekeeping.
 
 
 def _rate_limited(stderr):
     """Is this stderr a rate limit? Status first, wording second."""
+    from github_api import cached_quota_refusal
+    if cached_quota_refusal(stderr):
+        return True
     found = _HTTP_STATUS.search(stderr)
     status = int(found.group(1) or found.group(2)) if found else None
     if status == 429:
@@ -207,6 +211,8 @@ def gh_api(path, jq=None, paginate=False):
     limit blocks the others meanwhile; separate workflow jobs sharing an
     installation budget do not coordinate.
     """
+    if transport is not None:
+        return transport.read(path, jq=jq, paginate=paginate)
     now = time.time()
     if now < _BLOCKED_UNTIL:
         raise RateLimited(
