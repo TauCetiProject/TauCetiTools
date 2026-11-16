@@ -1,11 +1,13 @@
 """Real Git graphs exercise CI identity validation and hostile-checkout isolation."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 SCRIPT = Path(__file__).parents[1] / "tauceti_tools/assets/scripts/ci_git.py"
 spec = importlib.util.spec_from_file_location("ci_git", SCRIPT)
@@ -167,6 +169,129 @@ class CiGitTests(unittest.TestCase):
 
     def test_asset_copies_match(self):
         self.assertEqual(SCRIPT.read_bytes(), (SCRIPT.parents[1] / "project/scripts/ci_git.py").read_bytes())
+
+
+
+class ReviewSizeTests(unittest.TestCase):
+    """PR CI and the staging member policy share this measure, so it must match GitHub's PR totals."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.repo = Path(self.temp.name) / "repo"
+        self.repo.mkdir()
+        self.git("init", "--quiet", "-b", "main")
+        self.git("config", "user.name", "CI Test")
+        self.git("config", "user.email", "ci@example.invalid")
+        (self.repo / "lean-toolchain").write_text("leanprover/lean4:v4.23.0\n")
+        (self.repo / "lake-manifest.json").write_text("{}\n")
+        (self.repo / "TauCeti").mkdir()
+        # Distinct lines keep similarity meaningful for rename detection.
+        self.write("TauCeti/Brenier.lean", 1200)
+        self.write("TauCeti/Other.lean", 10)
+        self.base = self.commit("base")
+
+    def git(self, *args):
+        return subprocess.check_output(["git", "-C", str(self.repo), *args], stderr=subprocess.PIPE).decode().strip()
+
+    def write(self, path, lines, start=0):
+        target = self.repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("".join(f"theorem t{start + i} : {i} = {i} := rfl\n" for i in range(lines)))
+
+    def commit(self, message):
+        self.git("add", "--all")
+        self.git("commit", "--quiet", "--allow-empty", "-m", message)
+        return self.git("rev-parse", "HEAD")
+
+    def measure(self, head=None):
+        with ci_git.object_reader(self.repo) as git:
+            return ci_git.review_size(git, self.base, head or self.commit("head"))
+
+    def test_pure_rename_counts_one_file_and_no_lines(self):
+        self.git("mv", "TauCeti/Other.lean", "TauCeti/Renamed.lean")
+        size = self.measure()
+        self.assertEqual((size["additions"], size["deletions"], size["files"]), (0, 0, 1))
+        self.assertEqual(size["new_lean_files"], [])
+        self.assertFalse(size["too_large"])
+
+    def test_rename_with_edits_counts_only_the_edits(self):
+        self.git("mv", "TauCeti/Brenier.lean", "TauCeti/Moved.lean")
+        lines = (self.repo / "TauCeti/Moved.lean").read_text().splitlines(keepends=True)
+        lines[5] = "-- edited\n"
+        (self.repo / "TauCeti/Moved.lean").write_text("".join(lines) + "-- appended\n")
+        size = self.measure()
+        self.assertEqual((size["additions"], size["deletions"], size["files"]), (2, 1, 1))
+        self.assertEqual(size["new_files_too_long"], [])
+
+    def test_move_into_new_directory_with_new_sibling_matches_github(self):
+        # The PR 40160 shape: Brenier.lean becomes Brenier/Basic.lean beside new files.
+        self.git("mv", "TauCeti/Brenier.lean", "TauCeti/Brenier.lean.tmp")
+        (self.repo / "TauCeti/Brenier").mkdir()
+        self.git("mv", "TauCeti/Brenier.lean.tmp", "TauCeti/Brenier/Basic.lean")
+        lines = (self.repo / "TauCeti/Brenier/Basic.lean").read_text().splitlines(keepends=True)
+        (self.repo / "TauCeti/Brenier/Basic.lean").write_text("".join(lines[:1000] + ["-- moved\n"]))
+        self.write("TauCeti/Brenier/Dual.lean", 900, start=5000)
+        size = self.measure()
+        self.assertEqual((size["additions"], size["deletions"], size["files"]), (901, 200, 2))
+        self.assertEqual(size["new_lean_files"], [("TauCeti/Brenier/Dual.lean", 900)])
+        self.assertFalse(size["too_large"])
+        self.assertEqual(size["new_files_too_long"], [])
+
+    def test_binary_files_count_as_files_with_zero_lines(self):
+        (self.repo / "TauCeti/Data.lean").write_bytes(b"\0binary\n" * 3000)
+        size = self.measure()
+        self.assertEqual((size["additions"], size["deletions"], size["files"]), (0, 0, 1))
+        self.assertEqual(size["new_lean_files"], [("TauCeti/Data.lean", 0)])
+
+    def test_line_caps_and_lake_pin_exemption(self):
+        self.write("TauCeti/Other.lean", 2001, start=9000)
+        size = self.measure()
+        self.assertEqual((size["additions"], size["deletions"]), (2001, 10))
+        self.assertFalse(size["pins_changed"])
+        self.assertTrue(size["too_large"])
+        (self.repo / "lean-toolchain").write_text("leanprover/lean4:v4.24.0\n")
+        size = self.measure()
+        self.assertTrue(size["pins_changed"])
+        self.assertFalse(size["too_large"])
+
+    def test_file_cap_applies_to_pin_bumps(self):
+        (self.repo / "lean-toolchain").write_text("leanprover/lean4:v4.24.0\n")
+        for index in range(ci_git.REVIEW_FILE_CAP):
+            (self.repo / "TauCeti" / f"F{index}.lean").write_text(f"-- {index}\n")
+        size = self.measure()
+        self.assertEqual(size["files"], ci_git.REVIEW_FILE_CAP + 1)
+        self.assertTrue(size["too_large"])
+
+    def test_added_file_length_uses_line_count(self):
+        self.write("TauCeti/Exact.lean", 1000, start=7000)
+        self.write("TauCeti/Long.lean", 1001, start=8000)
+        self.write("TauCeti/notes.txt", 1500, start=9000)
+        size = self.measure()
+        self.assertEqual(size["new_lean_files"], [("TauCeti/Exact.lean", 1000), ("TauCeti/Long.lean", 1001)])
+        self.assertEqual(size["new_files_too_long"], [("TauCeti/Long.lean", 1001)])
+
+    def test_unusual_filenames_and_cli(self):
+        self.git("mv", "TauCeti/Other.lean", "TauCeti/Tab\tand\nnewline.lean")
+        head = self.commit("head")
+        output = subprocess.check_output(
+            [sys.executable, str(SCRIPT), "review-size", "--checkout", str(self.repo), "--base", self.base, "--head", head]
+        )
+        size = json.loads(output)
+        self.assertEqual((size["additions"], size["deletions"], size["files"]), (0, 0, 1))
+        self.assertEqual(size["new_lean_files"], [])
+
+    def test_unknown_commits_fail_closed(self):
+        with ci_git.object_reader(self.repo) as git:
+            with self.assertRaises((ValueError, subprocess.CalledProcessError)):
+                ci_git.review_size(git, self.base, "1" * 40)
+
+    def test_malformed_output_is_rejected(self):
+        for raw in (b"3\t1\tpath", b"3\t1\t\0old\0", b"x\t1\tpath\0"):
+            git = Mock()
+            git.run.return_value.stdout = raw
+            with self.assertRaises(ValueError):
+                ci_git.review_size(git, self.base, self.base)
 
 
 if __name__ == "__main__":

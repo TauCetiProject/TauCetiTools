@@ -677,7 +677,9 @@ class PinGuard(unittest.TestCase):
             self.assertEqual(json.loads((root / "member-policy.json").read_text()), rejection)
             self.assertIn("TOO_LARGE=1\n", (root / "environment").read_text())
 
-    def member_policy(self, *, added_lines=0, existing_lines=0, pin_changed=False, binary=False, orphan=False):
+    def member_policy(
+        self, *, added_lines=0, existing_lines=0, pin_changed=False, binary=False, orphan=False, moved_lines=0
+    ):
         config = policy()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -702,9 +704,14 @@ class PinGuard(unittest.TestCase):
 
             (writer / "Old.lean").write_text("old\n")
             (writer / "lean-toolchain").write_text("leanprover/lean4:v4.35.0\n")
+            if moved_lines:
+                (writer / "Moved.lean").write_text("".join(f"line {i}\n" for i in range(moved_lines)))
             git("add", ".")
             git("commit", "-qm", "base")
             base = git("rev-parse", "HEAD")
+            if moved_lines:
+                (writer / "Moved").mkdir()
+                git("mv", "Moved.lean", "Moved/Basic.lean")
             if added_lines:
                 (writer / "New.lean").write_text("new\n" * added_lines)
             if existing_lines:
@@ -740,6 +747,8 @@ class PinGuard(unittest.TestCase):
             self.member_policy(existing_lines=2001, pin_changed=True), {"SOURCE_SIZE_POLICY_COMPLETE": "1"}
         )
         self.assertEqual(self.member_policy(binary=True), {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
+        # A moved file is neither new nor a full rewrite, matching the PR CI review-size guard.
+        self.assertEqual(self.member_policy(moved_lines=2500), {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
         self.assertEqual(
             self.member_policy(added_lines=1, orphan=True),
             {"SOURCE_SIZE_POLICY_COMPLETE": "1", "SOURCE_MEMBER_POLICY_REJECTED": "1"},

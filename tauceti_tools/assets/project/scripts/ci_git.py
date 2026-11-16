@@ -261,6 +261,105 @@ def lint_metadata(checkout, base, head):
                 "commits": commits}
 
 
+# Per-PR review caps. PR CI and the staging candidate's retained-member policy
+# both apply them through `review_size`, so the two checks cannot disagree.
+REVIEW_LINE_CAP = 2000
+REVIEW_FILE_CAP = 2000
+NEW_FILE_LINE_CAP = 1000
+
+
+def _diff_records(raw, stat_field):
+    """Split `git diff -z` output into (stat, paths) records.
+
+    With `-z`, an ordinary record is `stat<path>\0` and a rename is
+    `stat\0<old>\0<new>\0`, where stat ends in a tab for --numstat and in NUL
+    for --name-status. `stat_field` parses the leading field into (stat, path),
+    returning an empty path when the two-path rename form follows.
+    """
+    fields = raw.split(b"\0")
+    if fields.pop() != b"":
+        raise ValueError("malformed Git diff output")
+    records = []
+    index = 0
+    while index < len(fields):
+        stat, name, index = stat_field(fields, index)
+        if name:
+            records.append((stat, (name,)))
+            continue
+        if index + 2 > len(fields) or not fields[index] or not fields[index + 1]:
+            raise ValueError("truncated Git rename record")
+        records.append((stat, (fields[index], fields[index + 1])))
+        index += 2
+    return records
+
+
+def _numstat_field(fields, index):
+    parts = fields[index].split(b"\t", 2)
+    if len(parts) != 3:
+        raise ValueError("malformed Git line statistics")
+    return (parts[0], parts[1]), parts[2], index + 1
+
+
+def _status_field(fields, index):
+    if index + 1 >= len(fields):
+        raise ValueError("truncated Git status record")
+    status = fields[index]
+    # Copies and renames carry two paths; every other status carries one.
+    if status[:1] in (b"R", b"C"):
+        return status, b"", index + 1
+    return status, fields[index + 1], index + 2
+
+
+def review_size(git, base, head):
+    """Measure one PR's review size between exact commits from local objects.
+
+    Use the merge base as `base`, as GitHub does for a PR. Renames are detected
+    at Git's default similarity, so a moved file is one changed file whose lines
+    are only its edits, and its destination is not a new file. Binary files
+    count as changed files with zero lines, as on GitHub. Unreadable statistics
+    raise ValueError so that every caller fails closed.
+    """
+    git.commit(base)
+    git.commit(head)
+    diff = ("diff", "--no-ext-diff", "--no-textconv", "--find-renames", "-z")
+    numstat = _diff_records(git.run(*diff, "--numstat", base, head, "--").stdout, _numstat_field)
+    additions = deletions = 0
+    added_lines = {}
+    pins = {name.encode() for name in PINS}
+    pins_changed = False
+    for (adds, dels), names in numstat:
+        if adds == dels == b"-":
+            adds = dels = b"0"
+        if not (adds.isdigit() and dels.isdigit()):
+            raise ValueError("unreadable Git line statistics")
+        additions += int(adds)
+        deletions += int(dels)
+        added_lines[names[-1]] = int(adds)
+        pins_changed = pins_changed or bool(pins.intersection(names))
+    statuses = _diff_records(
+        git.run(*diff, "--name-status", "--diff-filter=A", base, head, "--").stdout, _status_field
+    )
+    new_lean_files = []
+    for status, names in statuses:
+        if status != b"A" or len(names) != 1 or names[0] not in added_lines:
+            raise ValueError("inconsistent Git added-file listing")
+        if names[0].endswith(b".lean"):
+            new_lean_files.append((os.fsdecode(names[0]), added_lines[names[0]]))
+    lines_capped = additions > REVIEW_LINE_CAP or deletions > REVIEW_LINE_CAP
+    return {
+        "additions": additions,
+        "deletions": deletions,
+        "files": len(numstat),
+        "pins_changed": pins_changed,
+        "new_lean_files": sorted(new_lean_files),
+        # A Lake-pin bump's diff is forced upstream, so only the file cap applies.
+        "too_large": len(numstat) > REVIEW_FILE_CAP or (lines_capped and not pins_changed),
+        "new_files_too_long": sorted(
+            (name, lines) for name, lines in new_lean_files if lines > NEW_FILE_LINE_CAP
+        ),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -280,6 +379,10 @@ def main():
     lint.add_argument("--checkout", required=True)
     lint.add_argument("--base", required=True)
     lint.add_argument("--head", required=True)
+    size = commands.add_parser("review-size", help="measure a PR's rename-aware review size as JSON")
+    size.add_argument("--checkout", required=True)
+    size.add_argument("--base", required=True, help="exact merge base")
+    size.add_argument("--head", required=True)
     args = parser.parse_args()
     try:
         if args.command == "resolve":
@@ -293,6 +396,9 @@ def main():
                                      staging_ref=args.staging_ref, token=token, credential_origin=credential)))
         elif args.command == "tree-entry":
             print(tree_entry(args.checkout, args.commit, args.path))
+        elif args.command == "review-size":
+            with object_reader(args.checkout) as git:
+                print(json.dumps(review_size(git, args.base, args.head), sort_keys=True))
         else:
             print(json.dumps(lint_metadata(args.checkout, args.base, args.head)))
     except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
