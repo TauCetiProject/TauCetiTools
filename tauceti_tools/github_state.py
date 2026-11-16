@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 DEFAULT_URL = 'https://github-state.taucetiproject.org'
 MAX_BYTES = 32 << 20
@@ -44,11 +45,14 @@ class State:
         with self.lock:
             if self.transport_hold > time.monotonic():
                 raise Unavailable('transport_hold')
-        headers = {'User-Agent': 'TauCetiTools/shared-evidence', 'Accept': 'application/json'}
+        headers = {'User-Agent': 'TauCetiTools/shared-evidence', 'Accept': 'application/json',
+                   'Cache-Control': 'no-cache'}
+        request_id = uuid.uuid4().hex
+        headers['X-Request-ID'] = request_id
         if self.token:
             headers['Authorization'] = 'Bearer ' + self.token
         request = urllib.request.Request(self.url + '/v1/' + endpoint + '?' + urllib.parse.urlencode(
-            dict(repository=self.repository, **params)), headers=headers)
+            dict(repository=self.repository, request_id=request_id, **params)), headers=headers)
         with self.lock:
             self.stats['requests'] += 1
             operation = params.get('operation', endpoint)
@@ -57,6 +61,7 @@ class State:
         try:
             with urllib.request.urlopen(request, timeout=60) as response:
                 body = response.read(MAX_BYTES + 1)
+                checked_header = getattr(response, 'headers', {}).get('X-TauCeti-Checked-Revision')
             if len(body) > MAX_BYTES:
                 raise Unavailable('response_too_large')
             value = json.loads(body)
@@ -67,10 +72,14 @@ class State:
             raise Unavailable('transport_' + type(error).__name__) from None
         if not isinstance(value, dict):
             raise Unavailable('invalid_response')
+        if checked_header is not None:
+            if not checked_header.isdigit():
+                raise Unavailable('invalid_checked_revision')
+            value['checked_revision'] = int(checked_header)
         return value
 
     def query(self, operation, **args):
-        pages, cursor, seen, revision, total_bytes = [], None, set(), None, 0
+        pages, cursor, seen, revision, total_bytes, checked = [], None, set(), None, 0, None
         while True:
             params = dict(operation=operation, args=json.dumps(args, sort_keys=True))
             if cursor:
@@ -86,6 +95,10 @@ class State:
             if revision is not None and value['revision'] != revision:
                 raise Unavailable('mixed_pagination_revision')
             revision = value['revision']
+            if checked is None:
+                checked = value.get('checked_revision', revision)
+                if type(checked) is not int or checked < revision:
+                    raise Unavailable('invalid_checked_revision')
             total_bytes += len(json.dumps(value['data']).encode())
             if total_bytes > 2*MAX_BYTES or len(pages) >= 1000:
                 raise Unavailable('snapshot_too_large')
@@ -102,6 +115,7 @@ class State:
             value['data'] = [row for page in pages for row in page]
         with self.lock:
             self.stats['complete'] += 1
+        value['checked_revision'] = checked
         return value
 
     def changes(self, after, *, through=None):

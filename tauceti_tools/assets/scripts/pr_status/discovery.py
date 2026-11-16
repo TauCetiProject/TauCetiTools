@@ -11,7 +11,9 @@ def seed(state):
     boundary = value.get('revision')
     if type(boundary) is not int or boundary < 0:
         raise Unavailable('invalid_change_boundary')
-    inventory = state.query('open_prs')['data']
+    snapshot = state.query('open_prs')
+    boundary = min(boundary, snapshot.get('checked_revision', snapshot.get('revision', boundary)))
+    inventory = snapshot['data']
     if not isinstance(inventory, list):
         raise Unavailable('invalid_open_inventory')
     heads = {}

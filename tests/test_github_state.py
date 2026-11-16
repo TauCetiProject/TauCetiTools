@@ -60,6 +60,15 @@ class SharedStateTests(unittest.TestCase):
             with self.assertRaisesRegex(Unavailable, 'snapshot_too_large'):
                 state.query('issue_comments', number=7)
 
+    def test_revalidation_header_bounds_coherence_without_mutating_wire_revision(self):
+        reply = io.BytesIO(json.dumps(page([])).encode())
+        reply.headers = {'X-TauCeti-Checked-Revision': '20'}
+        state = State('org/repo')
+        with patch('urllib.request.urlopen', return_value=reply):
+            result = state.query('issue_comments', number=7)
+        self.assertEqual(result['revision'], 10)
+        self.assertEqual(result['checked_revision'], 20)
+
     def test_transport_outage_is_coordinated_without_repeated_requests(self):
         state = State('org/repo')
         with patch('urllib.request.urlopen', side_effect=OSError('secret URL')) as request:

@@ -129,18 +129,19 @@ class Evidence:
         if preliminary is not None and preliminary(pr) is not None:
             self.headers[number] = pr
             return pr, [], {}
-        revisions = dict(pr=header['revision'])
+        revisions = dict(pr=header.get('checked_revision', header['revision']))
         if pr['base']['ref'] == 'main':
             main = self.main_ref()
             pr['base']['sha'] = next(row['object']['sha'] for row in main['data'] if row['ref'] == 'refs/heads/main')
-            revisions['refs'] = main['revision']
+            revisions['refs'] = main.get('checked_revision', main['revision'])
         history, status = {'data': []}, {'data': []}
         if comments:
             history = self.state.query('issue_comments', number=number)
             status = self.state.query('statuses', sha=pr['head']['sha'])
             if not isinstance(history['data'], list) or not isinstance(status['data'], list):
                 raise Unavailable('invalid_readiness_histories')
-            revisions.update(issue_comments=history['revision'], statuses=status['revision'])
+            revisions.update(issue_comments=history.get('checked_revision', history['revision']),
+                             statuses=status.get('checked_revision', status['revision']))
         prior = self.fences.get(number) if not comments else None
         checked = prior or revisions
         before, after = min(checked.values()), max(revisions.values())

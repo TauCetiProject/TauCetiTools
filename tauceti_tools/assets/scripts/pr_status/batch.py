@@ -459,6 +459,11 @@ def main(argv=None):
             outcome.update(status='planned', reason='dry run')
             return 0
         save_progress(output, state)
+        if core.transport.shared_evidence is not None:
+            # Main is shared by every ordinary readiness assessment. Establish
+            # it once before dispatch, rather than probing the same cold
+            # resource separately for every pending PR.
+            core.transport.shared_evidence.main_ref()
         stop, failures, deferred_evidence = [], [], []
 
         def one(number):

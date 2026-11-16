@@ -101,6 +101,9 @@ class ResumeTests(unittest.TestCase):
                                   query=Mock(return_value={'data': [dict(number=n, headRefOid=str(n)*40)
                                                                    for n in (1, 2, 3)]}),
                                   changes=Mock(return_value=(101, [])))
+        inventory = service.query.return_value
+        service.query.side_effect = lambda operation, **args: (inventory if operation == 'open_prs' else
+            dict(revision=100, data=[dict(ref='refs/heads/main', object={'sha': 'b'*40})]))
         self.labels.side_effect = lambda n: (_ for _ in ()).throw(Unavailable('coverage_issue_comments')) if n == '2' else None
         with patch.dict(os.environ, TAUCETI_PR_STATUS_SHARED_EVIDENCE='true'), \
              patch('shared.State', return_value=service), \
@@ -116,7 +119,7 @@ class ResumeTests(unittest.TestCase):
             self.labels.reset_mock()
             self.assertEqual(batch.main(self.args), 0)
         self.assertEqual(self.labels.call_args_list[0].args, ('2',))
-        service.query.assert_called_once_with('open_prs')
+        self.assertEqual(sum(c.args == ('open_prs',) for c in service.query.call_args_list), 1)
         service.changes.assert_called_once_with(100)
         self.assertEqual(self.read()['shared_discovery']['revision'], 101)
 
@@ -124,6 +127,9 @@ class ResumeTests(unittest.TestCase):
         service = SimpleNamespace(repository=batch.REPO, stats={}, _get=Mock(return_value={'revision': 100}),
                                   query=Mock(return_value={'data': [dict(number=1, headRefOid='a'*40)]}),
                                   changes=Mock(return_value=(101, [dict(kind='issue_comments', id='42', parent='1')])))
+        inventory = service.query.return_value
+        service.query.side_effect = lambda operation, **args: (inventory if operation == 'open_prs' else
+            dict(revision=100, data=[dict(ref='refs/heads/main', object={'sha': 'b'*40})]))
         with patch.dict(os.environ, TAUCETI_PR_STATUS_SHARED_EVIDENCE='true'), patch('shared.State', return_value=service):
             self.assertEqual(batch.main(self.args), 0)
             self.assertEqual(self.read()['shared_discovery']['revision'], 100)

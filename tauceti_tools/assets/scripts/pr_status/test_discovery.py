@@ -38,6 +38,15 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(checkpoint['shared_discovery']['revision'], 100)
         self.assertEqual(checkpoint['shared_discovery']['heads'], {'9': 'c'*40})
 
+    def test_inventory_grace_cannot_advance_past_unobserved_events(self):
+        state, checkpoint = Mock(), {}
+        state._get.return_value = dict(revision=100)
+        state.query.return_value = dict(revision=95, data=[dict(number=7, headRefOid='a'*40)])
+        discovery.discover(state, checkpoint, 'pin', repair_limit=0)
+        self.assertEqual(checkpoint['shared_discovery']['revision'], 95)
+        state.changes.return_value = 101, [dict(revision=97, kind='pr', id='8')]
+        self.assertEqual(discovery.discover(state, checkpoint, 'pin', repair_limit=0), [8])
+
     def test_main_and_policy_changes_invalidate_all_prs(self):
         state, checkpoint = Mock(), self.checkpoint()
         state.changes.return_value = 11, [dict(kind='refs', id='refs/heads/main')]
