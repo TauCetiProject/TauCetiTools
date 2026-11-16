@@ -108,6 +108,32 @@ def diff_guards(root, selected):
         raise Violation("PR diff guards failed:\n" + "\n".join("  " + m for m in result["violations"]))
 
 
+def dot_notation(root, selected, modules):
+    """PR CI's dot-notation namespace lint, scoped to changed modules exactly as CI scopes it."""
+    library = LEAN_ROOT.replace(".", "/")
+    baseline = root / "scripts/lint-dot-notation-baseline.txt"  # the project's policy file wins
+    if not baseline.is_file():
+        baseline = SCRIPTS / "lint-dot-notation-baseline.txt"
+    args = [
+        "--baseline",
+        baseline,
+        "--mathlib-root",
+        root / ".lake/packages/mathlib/Mathlib",
+        "--source-root",
+        root / library,
+        "--context-cache",
+        root / ".lake/dot-notation-context/context.json",
+    ]
+    with tempfile.TemporaryDirectory(prefix="local-dot-notation-") as name:
+        if selected["mode"] == "scoped":
+            directory = Path(name)
+            archive = directory / "base.tar"
+            archive.write_bytes(git(root, "archive", selected["merge_base"], library))
+            subprocess.run(["tar", "-xf", str(archive), "-C", str(directory)], check=True)
+            args += ["--only-modules", modules, "--base-source-root", directory / library]
+        run("lint-dot-notation.py", *args)
+
+
 def shims(root, selected, policy):
     manifest = root / LEAN_ROOT.replace(".", "/") / "mathlib-shims.json"
     merge = selected["merge_base"]
@@ -139,7 +165,18 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "phase",
-        choices=("verify", "test", "lint", "sources", "axioms", "module-system", "style", "environment", "shim-expiry"),
+        choices=(
+            "verify",
+            "test",
+            "lint",
+            "sources",
+            "axioms",
+            "module-system",
+            "style",
+            "dot-notation",
+            "environment",
+            "shim-expiry",
+        ),
     )
     parser.add_argument("--base", default=os.environ.get("TAUCETI_VERIFY_BASE"))
     parser.add_argument(
@@ -183,6 +220,8 @@ def main(argv=None):
         if args.phase in ("style", "lint", "verify"):
             env.update(LINT_CHANGED_ONLY="1" if selected["mode"] == "scoped" else "0", LINT_ONLY_MODULES=str(modules))
             run("lint-style.sh", env=env)
+        if args.phase in ("dot-notation", "lint", "verify"):
+            dot_notation(root, selected, modules)
         if args.phase in ("environment", "lint", "verify"):
             run("local_lint.py", "--modules", modules, env=env)
     return 0

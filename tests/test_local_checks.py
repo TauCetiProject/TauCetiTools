@@ -113,6 +113,28 @@ class LocalChecks(unittest.TestCase):
                 checks.sources(self.root, checks.scope(self.root, self.base, "ordinary"))
             checks.sources(self.root, checks.scope(self.root, parent, "ordinary"))
 
+    def test_lint_runs_ci_dot_notation_lint_scoped_like_ci(self):
+        calls = []
+
+        def record(name, *args, **kwargs):
+            if name == "lint-dot-notation.py":
+                base = Path(args[args.index("--base-source-root") + 1]) if "--base-source-root" in args else None
+                calls.append((args, base is not None and (base / "A.lean").is_file()))
+
+        (self.root / "TauCeti/A.lean").write_text("module\n-- edited\n")
+        with patch.object(checks, "run", side_effect=record), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(checks.main(["dot-notation"]), 0)
+            (self.root / "lean-toolchain").write_text("leanprover/lean4:v4.36.0\n")
+            self.git("add", "lean-toolchain")
+            self.assertEqual(checks.main(["dot-notation"]), 0)
+        (scoped, base_extracted), (full, _) = calls
+        self.assertTrue(base_extracted)
+        self.assertEqual(scoped[scoped.index("--source-root") + 1], self.root / "TauCeti")
+        self.assertEqual(Path(scoped[scoped.index("--only-modules") + 1]).name, "modules.txt")
+        self.assertEqual(scoped[scoped.index("--baseline") + 1], checks.SCRIPTS / "lint-dot-notation-baseline.txt")
+        # A Lake-pin change checks the whole library, as CI does.
+        self.assertNotIn("--only-modules", full)
+
     def test_unknown_scope_never_runs_checks(self):
         self.git("update-ref", "-d", "refs/remotes/origin/main")
         with patch.object(checks, "run") as run:
