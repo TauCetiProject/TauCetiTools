@@ -316,42 +316,16 @@ def member_size_policy(request, policy, context, workspace):
             if len(bases) != 1:
                 values["SOURCE_MEMBER_POLICY_REJECTED"] = "1"
                 continue
-            rows = git.run(
-                "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--numstat", "-z", bases[0], member.head, "--"
-            ).stdout.split(b"\0")
-            changed = {}
-            for row in rows:
-                if not row:
-                    continue
-                adds, deletes, name = row.split(b"\t", 2)
-                if adds == deletes == b"-":
-                    # Preserve GitHub's zero line counts for binary files;
-                    # they still count toward file limits and path scope.
-                    changed[name] = (0, 0)
-                    continue
-                if not adds.isdigit() or not deletes.isdigit():
-                    values["DIFF_UNKNOWN"] = "1"
-                    values["SOURCE_SIZE_POLICY_COMPLETE"] = "0"
-                    continue
-                changed[name] = (int(adds), int(deletes))
-            pins = bool({b"lake-manifest.json", b"lean-toolchain"} & changed.keys())
-            if len(changed) > 2000 or (
-                not pins and (sum(a for a, _ in changed.values()) > 2000 or sum(d for _, d in changed.values()) > 2000)
-            ):
+            # The same rename-aware measure as PR CI's review-size guards.
+            try:
+                size = ci_git.review_size(git, bases[0], member.head)
+            except ValueError:
+                values["DIFF_UNKNOWN"] = "1"
+                values["SOURCE_SIZE_POLICY_COMPLETE"] = "0"
+                continue
+            if size["too_large"]:
                 values["TOO_LARGE"] = "1"
-            added = git.run(
-                "diff",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--no-renames",
-                "--name-only",
-                "--diff-filter=A",
-                "-z",
-                bases[0],
-                member.head,
-                "--",
-            ).stdout.split(b"\0")
-            if any(name.endswith(b".lean") and changed.get(name, (0, 0))[0] > 1000 for name in added if name):
+            if size["new_files_too_long"]:
                 values["NEWFILE_TOO_LONG"] = "1"
     return values
 
