@@ -489,6 +489,16 @@ The policy file uses this shape:
 }
 ```
 
+`harness_revision` is the only record of the shared harness revision. Every
+`uses: <harness>/.github/...@` and `tools_ref`/`tools-ref` literal in the caller, in
+any workflow that calls a harness reusable workflow, and in any workflow already
+pinned at that revision is derived from it. Change all of them together with
+`python -m tauceti_tools.harness_pins set <sha>`. The merge-policy scope guard
+(`lint_scope_files.py --policy`) refuses a change to the policy or a workflow
+that leaves a bound literal at another revision, binding at both the base and the
+head. Restricted runner-group allow-lists are derived from the same protected
+main by the hosted fleet broker, never edited alongside the pin.
+
 Mixed queues explicitly add a nonempty `member_sources` array of complete
 repository identity records to the trusted policy. It includes `source` (the
 Forgejo retention repository) and each allowed originating repository, for
