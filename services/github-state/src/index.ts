@@ -39,7 +39,7 @@ async function query(req:Request,env:Env,q:Query,request_id:string): Promise<Res
     }
   }
   let response:Response;const started=Date.now();
-  try {response=await stub(env.REPOSITORIES,repo.id).fetch('https://internal/'+(authenticated?'query':'public-query'),{method:'POST',headers:{'If-None-Match':req.headers.get('If-None-Match') || '','x-request-id':request_id,'x-query-dispatched-at':String(started),'x-query-readonly':authenticated?'0':'1'},body:JSON.stringify({...q,repository:repo.name})});}
+  try {response=await stub(env.REPOSITORIES,repo.id).fetch('https://internal/'+(authenticated?'query':'public-query'),{method:'POST',headers:{'If-None-Match':req.headers.get('If-None-Match') || '','x-request-id':request_id,'x-query-dispatched-at':String(started),'x-query-readonly':authenticated && req.headers.get('X-TauCeti-Observe-Only')!=='true'?'0':'1'},body:JSON.stringify({...q,repository:repo.name})});}
   catch(error) {
     const reason=classify(error);
     if (reason==='storage_full') await noteRepositoryFull(env,repo.id,'query',started).catch(()=>{});

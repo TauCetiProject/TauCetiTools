@@ -40,8 +40,10 @@ class State:
         self.lock = threading.Lock()
         self.stats = {'requests': 0, 'complete': 0, 'unavailable': 0}
         self.transport_hold = 0
+        self.repair_demands = set()
+        self.repair_budget = 5
 
-    def _get(self, endpoint, **params):
+    def _get(self, endpoint, *, _observe_only=False, **params):
         with self.lock:
             if self.transport_hold > time.monotonic():
                 raise Unavailable('transport_hold')
@@ -49,6 +51,8 @@ class State:
                    'Cache-Control': 'no-cache'}
         request_id = uuid.uuid4().hex
         headers['X-Request-ID'] = request_id
+        if _observe_only:
+            headers['X-TauCeti-Observe-Only'] = 'true'
         if self.token:
             headers['Authorization'] = 'Bearer ' + self.token
         request = urllib.request.Request(self.url + '/v1/' + endpoint + '?' + urllib.parse.urlencode(
@@ -84,7 +88,11 @@ class State:
             params = dict(operation=operation, args=json.dumps(args, sort_keys=True))
             if cursor:
                 params['cursor'] = cursor
-            value = self._get('query', **params)
+            value = self._get('query', _observe_only=True, **params)
+            if (value.get('version') == 1 and value.get('repository') == self.repository
+                    and value.get('operation') == operation and value.get('status') == 'unavailable'
+                    and value.get('complete') is False):
+                self._demand(operation, args)
             if (value.get('version') != 1 or value.get('repository') != self.repository
                     or value.get('operation') != operation or value.get('status') != 'ok'
                     or value.get('complete') is not True or value.get('coverage') != 'complete'
@@ -117,6 +125,21 @@ class State:
             self.stats['complete'] += 1
         value['checked_revision'] = checked
         return value
+
+    def _demand(self, operation, args):
+        """Only cold resources request repair; bound and coalesce the whole batch."""
+        if not self.token:
+            return
+        key = operation, json.dumps(args, sort_keys=True)
+        with self.lock:
+            if key in self.repair_demands or len(self.repair_demands) >= self.repair_budget:
+                return
+            self.repair_demands.add(key)
+            self.stats['repair_demands'] = len(self.repair_demands)
+        try:
+            self._get('query', operation=operation, args=key[1])
+        except Unavailable:
+            pass  # Demand is not verified coverage; keep the original work pending.
 
     def changes(self, after, *, through=None):
         """Finish one observed change boundary before exposing its watermark."""

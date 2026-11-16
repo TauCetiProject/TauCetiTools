@@ -73,6 +73,33 @@ test('unchanged cached evidence reports the revision through which it was revali
  }finally{await mf.dispose();}
 });
 
+test('authenticated observation reads never revive verification or request cold repairs',async()=>{
+ const mf=await runtime(async()=>{throw Error('unexpected upstream request');},{},{repositoryAlarms:false,repositoryExtension:`
+ async fetch(req){
+  const path=new URL(req.url).pathname;
+  if(path==='/fixture/observe'){
+   await this.atomic(async state=>{
+    await state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
+    await state.put('pr','7',{number:7,state:'OPEN',headRefOid:'a'.repeat(40)},Date.now());
+    await state.store.exec('INSERT INTO collections VALUES(?,?,?,?,?,?,?)','pr:{"number":7}','pr','{"number":7}',1,Date.now(),await state.revision(),null);
+   });return Response.json({ok:true});
+  }
+  if(path==='/fixture/demands')return Response.json({jobs:(await this.store.exec('SELECT COUNT(*) n FROM jobs')).one().n,demand:(await this.store.exec('SELECT COUNT(*) n FROM demand')).one().n});
+  return super.fetch(req);
+ }`});
+ try{
+  const ns=await mf.getDurableObjectNamespace('REPOSITORIES'),stub=ns.get(ns.idFromName(repository.id));
+  await send(stub,'/fixture/observe',{});
+  for(const operation of ['pr','issue_comments']){
+   const url='https://test/v1/query?'+new URLSearchParams({repository:repository.name,operation,args:'{"number":7}'});
+   const result=await (await mf.dispatchFetch(url,{headers:{Authorization:'Bearer client','X-TauCeti-Observe-Only':'true'}})).json();
+   assert.equal(result.status,operation==='pr'?'ok':'unavailable');
+  }
+  const metrics=await (await send(stub,'/fixture/demands',{})).json();
+  assert.deepEqual(metrics,{jobs:0,demand:0});
+ }finally{await mf.dispose();}
+});
+
 test('the retained change journal identifies deleted comment parents for incremental readers',async()=>{
  const mf=await runtime(async()=>{throw Error('unexpected upstream request');},{},{repositoryAlarms:false,repositoryExtension:`
  async fetch(req){

@@ -69,6 +69,18 @@ class SharedStateTests(unittest.TestCase):
         self.assertEqual(result['revision'], 10)
         self.assertEqual(result['checked_revision'], 20)
 
+    def test_cold_repair_demand_is_coalesced_and_bounded_across_the_batch(self):
+        state = State('org/repo', token='client')
+        missing = dict(version=1, repository='org/repo', operation='pr', status='unavailable',
+                       complete=False, revision=1, reason='coverage_unavailable')
+        with patch.object(state, '_get', return_value=missing) as get:
+            for number in list(range(1, 11))+[1, 2]:
+                with self.assertRaises(Unavailable):
+                    state.query('pr', number=number)
+        self.assertEqual(state.stats['repair_demands'], 5)
+        self.assertEqual(sum(c.kwargs.get('_observe_only') is True for c in get.call_args_list), 12)
+        self.assertEqual(sum('_observe_only' not in c.kwargs for c in get.call_args_list), 5)
+
     def test_transport_outage_is_coordinated_without_repeated_requests(self):
         state = State('org/repo')
         with patch('urllib.request.urlopen', side_effect=OSError('secret URL')) as request:
