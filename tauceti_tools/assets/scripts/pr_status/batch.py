@@ -18,8 +18,8 @@ A PR has had activity since T if any of these holds:
 
 For each such PR it reconciles the GitHub lifecycle label from current state.
 
-A rate limit or a listing past GitHub's cap fails
-the run. The next run resumes its pending work; only finishing the scan advances its watermark. A single
+A quota or time-budget hold exits 75 (deferred); genuine errors exit 1.
+The next run resumes its pending work; only finishing the scan advances its watermark. A single
 PR's failure does not: that PR is handed to the next run through --state-out/--state-in and retried
 on later passes, so a temporary failure cannot strand a PR or hold healthy PRs back.
 
@@ -37,6 +37,7 @@ import datetime as dt
 import json
 import re
 import math
+import os
 from pathlib import Path
 import threading
 import time
@@ -48,6 +49,7 @@ import core
 import labels
 import priority
 from github_api import Deferred
+from transport import ReconciliationAPI
 
 REPO = core.REPO
 # Runs finish within GitHub's six-hour job limit, so a run that completed after `since` was created
@@ -241,6 +243,15 @@ def load_progress(path, since):
     blocked = state['blocked_until']
     if type(blocked) not in (int, float) or not 0 <= blocked < math.inf:
         raise ValueError('Invalid quota deadline')
+    holds = state.setdefault('quota_holds', [])
+    if not isinstance(holds, list):
+        raise ValueError('Invalid quota holds')
+    for hold in holds:
+        if (not isinstance(hold, dict) or not isinstance(hold.get('credential'), str)
+                or hold.get('resource') not in {'core', 'graphql', 'search'}
+                or type(hold.get('until')) not in (int, float)
+                or not 0 <= hold['until'] < math.inf):
+            raise ValueError('Invalid quota hold')
     retry = state['retry']
     if not isinstance(retry, dict) or any(not k.isdigit() or int(k) <= 0 or
             type(v) is not int or v < 1 for k, v in retry.items()):
@@ -270,6 +281,8 @@ def save_progress(path, state):
     while workers are active. The workflow uploads the file even on failure.
     """
     state['blocked_until'] = max(state['blocked_until'], core._BLOCKED_UNTIL)
+    if core.transport is not None:
+        state['quota_holds'] = core.transport.holds()
     if path:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -298,13 +311,23 @@ def main(argv=None):
         log('::warning::Invalid PR-status checkpoint; rebuilding from the fallback window')
         state = load_progress(None, args.since)
     output = None if args.dry_run else args.state_out
+    previous_transport = core.transport
+    core.transport = ReconciliationAPI(state['quota_holds'])
+    outcome = {'status': 'error', 'reason': 'batch interrupted'}
+
+    def deferred(reason):
+        outcome.update(status='deferred', reason=reason)
+        log(f'deferred: {reason}; progress retained')
+        return 75
+
     lock = threading.Lock()
     deadline = time.monotonic() + args.budget_seconds
     priority_observed = False
     try:
         if state['blocked_until'] > time.time():
-            log(f"deferred until epoch {state['blocked_until']}; pending work retained")
-            return 0 if args.dry_run else 1
+            return deferred(f"quota hold until epoch {state['blocked_until']}")
+        if any(h['until'] > time.time() for h in state['quota_holds']):
+            return deferred('persisted credential/resource quota hold')
         if args.prioritize_self_tested:
             state['self_tested_pending'] = priority.scan(REPO, state['self_tested_pending'],
                                                        now=iso(dt.datetime.now(dt.timezone.utc)))
@@ -317,6 +340,7 @@ def main(argv=None):
                 if args.dry_run:
                     for number in ordered:
                         log(f"would prioritize self-tested #{number}")
+                    outcome.update(status='planned', reason='dry run')
                     return 0
                 priority_observed = False
                 stop = []
@@ -329,7 +353,7 @@ def main(argv=None):
                         save_progress(output, state)
                     try:
                         labels.reconcile(number)
-                    except core.RateLimited as exc:
+                    except (core.RateLimited, Deferred) as exc:
                         stop.append(str(exc))
                     except Exception as exc:
                         log(f"PR #{number}: priority assessment failed: {exc}")
@@ -338,17 +362,17 @@ def main(argv=None):
                     list(pool.map(assess_local, ordered[:args.self_tested_limit]))
                 if stop:
                     log(f"priority assessment stopped: {stop[0]}")
-                    return 1
+                    return deferred(stop[0])
                 state['self_tested_pending'] = priority.scan(REPO, state['self_tested_pending'],
                                                            now=iso(dt.datetime.now(dt.timezone.utc)))
                 priority_observed = True
                 save_progress(output, state)
                 if state['self_tested_pending']:
                     log('self-tested decisions remain; checkpointed before broad run discovery')
-                    return 1
+                    return deferred('self-tested decisions remain')
         if time.monotonic() >= deadline:
             log('batch time budget reached before broad run discovery')
-            return 1
+            return deferred('batch time budget reached before discovery')
         if state['active'] is None:
             started = iso(dt.datetime.now(dt.timezone.utc))
             since = iso(dt.datetime.fromisoformat(state['watermark'].replace('Z', '+00:00')) - dt.timedelta(minutes=2))
@@ -376,6 +400,7 @@ def main(argv=None):
         if args.dry_run:
             for number in ordered:
                 log(f"would reconcile #{number}")
+            outcome.update(status='planned', reason='dry run')
             return 0
         save_progress(output, state)
         stop, failures = [], []
@@ -390,7 +415,7 @@ def main(argv=None):
             checked_from = iso(dt.datetime.now(dt.timezone.utc))
             try:
                 labels.reconcile(str(number))
-            except core.RateLimited as exc:
+            except (core.RateLimited, Deferred) as exc:
                 stop.append(('quota', str(exc)))
                 return
             except Exception as exc:
@@ -412,23 +437,38 @@ def main(argv=None):
             list(pool.map(one, ordered))
         if stop:
             log(f"stopping: {stop[0][1]}; {len(active['pending'])} PRs retained")
-            return 1
+            if failures:
+                outcome.update(status='error', reason='assessment failures alongside deferred work')
+                return 1
+            return deferred(stop[0][1])
         # Advance to a completely read discovery boundary, never merely to
         # this workflow run's creation time.
         state['watermark'] = active['started_at']
         state['active'] = None
         log(f"done: {len(ordered)} PRs; failures queued for retry: {failures}")
-        return 0
-    except Deferred as exc:
-        state['blocked_until'] = max(state['blocked_until'], exc.until)
-        log(f"priority inventory deferred until epoch {exc.until}")
-        return 1
+        outcome.update(status='error' if failures else 'completed', reason='discovery boundary completed')
+        return 1 if failures else 0
+    except (Deferred, core.RateLimited) as exc:
+        return deferred(str(exc))
     finally:
         if args.prioritize_self_tested:
             priority.report(state['self_tested_pending'], observed=priority_observed,
                             now=iso(dt.datetime.now(dt.timezone.utc)))
-        if not args.dry_run:
-            save_progress(output, state)
+        try:
+            if not args.dry_run:
+                state['last_outcome'] = outcome
+                save_progress(output, state)
+        finally:
+            try:
+                core.transport.report()
+            finally:
+                core.transport = previous_transport
+        log('pr-status-outcome: ' + json.dumps(outcome, sort_keys=True))
+        if os.environ.get('GITHUB_STEP_SUMMARY'):
+            pending = len((state.get('active') or {}).get('pending', []))
+            with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as stream:
+                stream.write(f"\nPR status reconciliation: **{outcome['status']}**. "
+                             f"{pending} pending; {len(state['retry'])} queued errors.\n")
 
 
 if __name__ == "__main__":

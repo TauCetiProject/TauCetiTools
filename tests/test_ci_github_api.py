@@ -22,6 +22,33 @@ def reply(status=200, data=None, headers=None):
 
 
 class CIAPI(unittest.TestCase):
+    def test_cached_cli_refusal_is_shared_by_bucket_and_reuses_known_reset(self):
+        quota = api.QuotaState()
+        first, second = api.GitHub(max_wait=0, quota_state=quota), api.GitHub(max_wait=0, quota_state=quota)
+        cached = subprocess.CompletedProcess([], 1, '',
+            'gh: API rate limit already exceeded for installation ID 143500674.')
+        responses = [reply(data={'data': {'ok': True}}, headers={
+            'X-RateLimit-Resource': 'graphql', 'X-RateLimit-Remaining': '1', 'X-RateLimit-Reset': '5000'}), cached,
+            reply(data={'ok': True})]
+        with patch.object(api.subprocess, 'run', side_effect=responses) as run, \
+             patch.object(api.time, 'time', return_value=1000), contextlib.redirect_stderr(io.StringIO()):
+            first.graphql('query { viewer { login } }', {})
+            with self.assertRaises(api.Deferred) as caught:
+                second.graphql('query { viewer { login } }', {})
+            self.assertEqual(caught.exception.resource, 'graphql')
+            self.assertEqual(caught.exception.until, 5005)
+            with self.assertRaises(api.Deferred):
+                first.graphql('query { viewer { login } }', {})
+            self.assertEqual(first.request('GET', 'repos/o/r'), {'ok': True})
+            self.assertEqual(run.call_count, 3)
+
+    def test_only_exact_cached_refusal_is_quota_without_http_status(self):
+        for message in ['gh: API rate limit already exceeded for installation ID 1.',
+                        'API rate limit already exceeded for installation ID 123']:
+            self.assertTrue(api.cached_quota_refusal(message))
+        for message in ['not found: rate limit', 'gh: Bad credentials', 'HTTP 404 rate limit exceeded']:
+            self.assertFalse(api.cached_quota_refusal(message))
+
     def test_primary_quota_far_reset_makes_one_call_and_marks_trusted_step(self):
         with tempfile.TemporaryDirectory() as directory:
             envfile = Path(directory) / "env"

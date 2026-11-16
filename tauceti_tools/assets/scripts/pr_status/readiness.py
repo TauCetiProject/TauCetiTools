@@ -130,6 +130,9 @@ _FIELDS = """number state isDraft baseRefName baseRefOid headRefOid headRefName 
 
 
 def graphql(query, **variables):
+    if core.transport is not None:
+        data = core.transport.client().graphql(query, variables)
+        return data['repository']['pullRequest']
     if time.time() < core._BLOCKED_UNTIL:
         raise core.RateLimited("GitHub reads paused after a rate limit")
     cmd = ["gh", "api", "graphql", "-f", "query=" + query]
@@ -157,7 +160,7 @@ def evidence(number, repo, comments=True):
     declaration = ", $cursor:String" if comments else ""
     query = ("query($owner:String!, $name:String!, $number:Int!" + declaration + ") { "
              "repository(owner:$owner,name:$name) { pullRequest(number:$number) { " +
-             _FIELDS + comment_fields + " } } }")
+             _FIELDS + comment_fields + " } } rateLimit { cost remaining resetAt } }")
     variables = dict(owner=owner, name=name, number=number)
     rows = []
     first = None
@@ -206,12 +209,13 @@ def assess(pr, repo=None, now=None):
     if not merge_base:
         raise RuntimeError(f"No merge base for #{number} from the compare API")
     from tauceti_tools.self_tested import requested
-    from self_tested import reconcile as reconcile_local_route
+    from self_tested import reconcile as reconcile_local_route, decide as decide_local_route
     paths = None
     local = False
     if requested(current.get("labels"), current["head"].get("ref", "")):
         paths = diff_engine().git_diff(f"https://github.com/{repo}", merge_base, head)
-        local = reconcile_local_route(number, repo, pr=current, paths=paths)
+        local = (decide_local_route(core.transport.client(), repo, number, pr=current, paths=paths)
+                 if core.transport is not None else reconcile_local_route(number, repo, pr=current, paths=paths))
         if local and set(paths) & {"lake-manifest.json", "lean-toolchain"}:
             statuses["bump-guard"] = "success"  # Real inline guard, never a published receipt.
     result = classify(current, comments, statuses, paths or [], merge_base, now=now, self_tested=local)
@@ -235,6 +239,7 @@ def assess(pr, repo=None, now=None):
         # per-PR workflow, worker protocol, or Bors state is needed for cleanup.
         result["clear_deprecation_request"] = True
     result["checked_at"] = int(time.time()) if now is None else now
+    result["labels"] = [label['name'] for label in after.get('labels', [])]
     return result
 
 
