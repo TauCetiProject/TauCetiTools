@@ -62,6 +62,20 @@ missing coverage, bounded repair demands and reused decisions.
 and immutable-result reuse. `pr-status-pending` reports retained work and its
 oldest observed age.
 
+Self-tested Mathlib bumps run the existing `check-bump.sh` over observations
+obtained through the caller's structured GitHub client. A missing observation
+stops the local check; the parent fetches that resource once and reruns the
+trusted check with its recorded response. The guard needs at most five upstream
+resources and the adapter permits at most eight. Standard GitHub access tokens
+are removed from its child environment. The observations are temporary and
+scoped to that guard invocation.
+
+These selected upstream reads contribute to the same credential/resource
+telemetry and quota hold as the rest of reconciliation. A refusal propagates as
+a resumable deferral; unreadable or malformed responses remain unknown. Genuine
+pin-policy failures retain the guard's verdict. The separate multi-upstream
+resolver retains its existing transport.
+
 Compare the same recorded evidence against the prior deployed reader. Include
 additional service-side upstream collection in that comparison: a warm
 observation must not merely move repeated reads to the service's installation.
