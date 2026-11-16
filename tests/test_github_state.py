@@ -53,6 +53,13 @@ class SharedStateTests(unittest.TestCase):
             with self.assertRaisesRegex(Unavailable, 'change_log_gap'):
                 state.changes(1)
 
+    def test_total_pagination_size_is_bounded(self):
+        state = State('org/repo')
+        with patch('tauceti_tools.github_state.MAX_BYTES', 32), \
+             patch.object(state, '_get', side_effect=[page(['x'*30], cursor='next'), page(['y'*30])]):
+            with self.assertRaisesRegex(Unavailable, 'snapshot_too_large'):
+                state.query('issue_comments', number=7)
+
     def test_transport_outage_is_coordinated_without_repeated_requests(self):
         state = State('org/repo')
         with patch('urllib.request.urlopen', side_effect=OSError('secret URL')) as request:

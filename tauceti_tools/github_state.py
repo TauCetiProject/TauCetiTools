@@ -70,7 +70,7 @@ class State:
         return value
 
     def query(self, operation, **args):
-        pages, cursor, seen, revision = [], None, set(), None
+        pages, cursor, seen, revision, total_bytes = [], None, set(), None, 0
         while True:
             params = dict(operation=operation, args=json.dumps(args, sort_keys=True))
             if cursor:
@@ -86,11 +86,14 @@ class State:
             if revision is not None and value['revision'] != revision:
                 raise Unavailable('mixed_pagination_revision')
             revision = value['revision']
+            total_bytes += len(json.dumps(value['data']).encode())
+            if total_bytes > 2*MAX_BYTES or len(pages) >= 1000:
+                raise Unavailable('snapshot_too_large')
             pages.append(value['data'])
             cursor = value.get('cursor')
             if not cursor:
                 break
-            if not isinstance(cursor, str) or cursor in seen or not isinstance(value['data'], list):
+            if not isinstance(cursor, str) or len(cursor) > 512 or cursor in seen or not isinstance(value['data'], list):
                 raise Unavailable('invalid_cursor')
             seen.add(cursor)
         if len(pages) > 1:

@@ -166,6 +166,7 @@ class ReadEvidence(unittest.TestCase):
         current = copy.deepcopy(PR)
         current.update(user={'login': 'peer'}, labels=[{'name': 'self-tested'}])
         current['head']['ref'] = 'math'
+        statuses = {k: v for k, v in STATUSES.items() if k != 'build'}
         api = ReconciliationAPI()
         api.shared_evidence, api.git_cache, api.policy = MagicMock(), 'verified-git-cache', 'policy-pin'
         key = 'Org/team', 'peer'
@@ -174,7 +175,7 @@ class ReadEvidence(unittest.TestCase):
         self.addCleanup(lambda: declarations._MEMBERS.pop(key, None) if previous is None
                         else declarations._MEMBERS.__setitem__(key, previous))
         with patch.object(readiness.core, 'transport', api), \
-             patch.object(readiness, 'evidence', side_effect=lambda *a, **kw: (copy.deepcopy(current), [board()], STATUSES)), \
+             patch.object(readiness, 'evidence', side_effect=lambda *a, **kw: (copy.deepcopy(current), [board()], statuses)), \
              patch.dict('os.environ', TAUCETI_SELF_TESTED_TEAM='Org/team'), \
              patch.object(readiness.core, 'gh_api', side_effect=AssertionError('no direct API reads')), \
              patch('tauceti_tools.git_inputs.merge_base', return_value=MERGE_BASE), \
@@ -186,13 +187,19 @@ class ReadEvidence(unittest.TestCase):
             current['labels'].append({'name': 'ready-to-merge'})
             current['base']['sha'] = 'new-main-same-merge-base'
             second = readiness.assess(1, repo='owner/repo')
+            self.assertEqual(api.decisions['1']['valid_until'], saved_until)
+            api.decisions['1']['valid_until'] = 0
+            declarations._MEMBERS[key] = time.monotonic()-61, False
+            eligibility.return_value = False
+            expired = readiness.assess(1, repo='owner/repo')
         self.assertTrue(first['eligible'])
         self.assertTrue(second['eligible'])
         self.assertIn('ready-to-merge', second['labels'])
         self.assertEqual(api.cache_hits, 1)
-        self.assertEqual(api.decisions['1']['valid_until'], saved_until)
-        eligibility.assert_called_once()
-        diff.return_value.git_diff.assert_called_once()
+        self.assertFalse(expired['eligible'])
+        self.assertEqual(expired['category'], 'awaiting-CI')
+        self.assertEqual(eligibility.call_count, 2)
+        self.assertEqual(diff.return_value.git_diff.call_count, 2)
 
     def node(self):
         return {"number": 1, "state": "OPEN", "isDraft": False, "baseRefName": "main",

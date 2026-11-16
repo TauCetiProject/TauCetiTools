@@ -499,6 +499,7 @@ def main(argv=None):
                             else:
                                 heads.pop(key, None)
                                 state['decisions'].pop(key, None)
+                                state['comparisons'].pop(key, None)
                 active['completed'][key] = checked_from
                 active['pending'].remove(number)
                 save_progress(output, state)
