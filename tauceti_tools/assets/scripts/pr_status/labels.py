@@ -14,6 +14,7 @@ import sys
 
 import core
 import readiness
+from github_api import Deferred
 
 REPO = core.REPO
 
@@ -171,7 +172,21 @@ def reconcile_all():
 
 def main(argv):
     from transport import ReconciliationAPI
+    previous = core.transport
     core.transport = ReconciliationAPI()
+    try:
+        return _main(argv)
+    except Deferred as exc:
+        log(f'PR status reconciliation deferred: {exc}')
+        return 75
+    finally:
+        try:
+            core.transport.report()
+        finally:
+            core.transport = previous
+
+
+def _main(argv):
     if argv[1:] == ["reconcile-all"]:
         return reconcile_all()
     if len(argv) != 3 or argv[1] != "reconcile":
