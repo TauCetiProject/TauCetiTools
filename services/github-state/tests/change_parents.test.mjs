@@ -100,6 +100,22 @@ test('authenticated observation reads never revive verification or request cold 
  }finally{await mf.dispose();}
 });
 
+test('a cold empty-status observation costs one upstream read and invents no successful guard',async()=>{
+ const head='1fd1d72a46cb0ff9bbfd37772909efeeee863df1';let requests=0;
+ const mf=await runtime(async(req,url)=>{
+  requests++;
+  if(url.pathname==='/graphql')return response({data:{rateLimit:{cost:1,remaining:4999,resetAt:new Date(Date.now()+300000).toISOString()},repository:{object:{oid:head,status:null}}}});
+  assert.equal(url.pathname,'/repos/org/repo/commits/'+head+'/status');
+  return response({sha:head,statuses:[]},'core');
+ });
+ try{
+  const ns=await mf.getDurableObjectNamespace('INSTALLATIONS'),stub=ns.get(ns.idFromName('200'));
+  const result=await (await send(stub,'/read',{repository,query:{operation:'statuses',args:{sha:head}},page:1})).json();
+  assert.equal(requests,1);
+  assert.deepEqual(result.data,[]);
+ }finally{await mf.dispose();}
+});
+
 test('the retained change journal identifies deleted comment parents for incremental readers',async()=>{
  const mf=await runtime(async()=>{throw Error('unexpected upstream request');},{},{repositoryAlarms:false,repositoryExtension:`
  async fetch(req){
