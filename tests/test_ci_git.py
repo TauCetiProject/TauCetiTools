@@ -281,6 +281,54 @@ class ReviewSizeTests(unittest.TestCase):
         self.assertEqual((size["additions"], size["deletions"], size["files"]), (0, 0, 1))
         self.assertEqual(size["new_lean_files"], [])
 
+    def guards(self, **kwargs):
+        with ci_git.object_reader(self.repo) as git:
+            return ci_git.pr_guards(git, self.base, self.commit("head"), **kwargs)
+
+    def test_pr_guards_report_every_failed_guard_and_scope(self):
+        self.assertEqual(self.guards()["violations"], [])
+        self.write("TauCeti/Long.lean", 2001, start=8000)
+        (self.repo / "scripts").mkdir()
+        (self.repo / "scripts/tool.py").write_text("print()\n")
+        (self.repo / "lakefile.toml").write_text('name = "x"\n')
+        (self.repo / "docbuild/docs").mkdir(parents=True)
+        (self.repo / "docbuild/docs/references.bib").write_text("@book{x}\n")
+        result = self.guards()
+        self.assertEqual(result["out_of_scope"], ["lakefile.toml", "scripts/tool.py"])
+        too_large, long_file, scope = result["violations"]
+        self.assertIn("too large to review: +2004", too_large)
+        self.assertIn("TauCeti/Long.lean: new Lean files must be at most 1000 lines (found 2001)", long_file)
+        self.assertIn("lakefile.toml, scripts/tool.py", scope)
+        self.assertEqual(len(self.guards(scope=False)["violations"]), 2)
+
+    def test_scope_sees_both_sides_of_a_rename_out_of_the_library(self):
+        self.git("mv", "TauCeti/Other.lean", "Other.lean")
+        self.assertEqual(self.guards()["out_of_scope"], ["Other.lean"])
+        self.assertEqual(ci_git.out_of_scope(["TauCeti.lean", "TauCeti/A.lean", "TauCetiX/A.lean"]),
+                         ["TauCetiX/A.lean"])
+
+    def test_pr_guards_and_scope_cli(self):
+        self.write("TauCeti/Long.lean", 1001, start=8000)
+        head = self.commit("head")
+        output = subprocess.check_output(
+            [sys.executable, str(SCRIPT), "pr-guards", "--checkout", str(self.repo), "--base", self.base, "--head", head]
+        )
+        result = json.loads(output)
+        self.assertEqual(result["new_files_too_long"], [["TauCeti/Long.lean", 1001]])
+        self.assertEqual(len(result["violations"]), 1)
+        outside = subprocess.run(
+            [sys.executable, str(SCRIPT), "scope"], input=b"TauCeti/A.lean\nlean-toolchain\n.github/x.yml\n",
+            check=True, capture_output=True,
+        ).stdout
+        self.assertEqual(outside, b".github/x.yml\n")
+
+    def test_repository_reader_reads_worktrees(self):
+        head = self.commit("head")
+        worktree = Path(self.temp.name) / "worktree"
+        self.git("worktree", "add", "--quiet", "--detach", str(worktree), head)
+        with ci_git.repository_reader(worktree) as git:
+            self.assertEqual(ci_git.pr_guards(git, self.base, head)["violations"], [])
+
     def test_unknown_commits_fail_closed(self):
         with ci_git.object_reader(self.repo) as git:
             with self.assertRaises((ValueError, subprocess.CalledProcessError)):

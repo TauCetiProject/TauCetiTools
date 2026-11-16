@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 
 
@@ -207,6 +208,21 @@ def object_reader(checkout):
         yield Git(Path(directory) / "repo.git", directory, objects=objects)
 
 
+@contextmanager
+def repository_reader(repository):
+    """Read the object database of a local repository, worktree or bare clone.
+
+    Only the object directory is borrowed, as in `object_reader`; the repository's
+    configuration, attributes and hooks never reach the diff.
+    """
+    objects = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "--path-format=absolute", "--git-path", "objects"],
+        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120,
+    ).stdout.decode().strip()
+    with tempfile.TemporaryDirectory(prefix="ci-git-read-") as directory:
+        yield Git(Path(directory) / "repo.git", directory, objects=Path(objects).resolve(strict=True))
+
+
 def tree_entry(checkout, commit, path):
     """Return mode/type/OID for a pin, including symlinks so the caller rejects them."""
     sha(commit)
@@ -360,6 +376,68 @@ def review_size(git, base, head):
     }
 
 
+# Root files a PR may change without a human merge, beside the library directory and its
+# root module. Lakefiles are deliberately absent. The queue's admission allow-list is
+# TauCetiReview `default_allow_files`; the two must agree.
+SCOPE_ROOT_FILES = ("lake-manifest.json", "lean-toolchain", "docbuild/docs/references.bib")
+
+
+def out_of_scope(paths, lean_root="TauCeti"):
+    """Changed paths outside the library and the allowed root files, which need a human merge."""
+    directory = lean_root.replace(".", "/")
+    allowed = {directory + ".lean", *SCOPE_ROOT_FILES}
+    return sorted({p for p in paths if not (p.startswith(directory + "/") or p in allowed)})
+
+
+def changed_paths(git, base, head):
+    """Every path a diff touches, both sides of a rename included."""
+    git.commit(base)
+    git.commit(head)
+    raw = git.run("diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z",
+                  base, head, "--").stdout
+    fields = raw.split(b"\0")
+    if fields.pop() != b"":
+        raise ValueError("malformed Git name listing")
+    return [os.fsdecode(name) for name in fields]
+
+
+def guard_violations(result):
+    """One readable sentence per failed PR-level diff guard in a `pr_guards` result."""
+    messages = []
+    if result["too_large"]:
+        messages.append(
+            f"too large to review: +{result['additions']} / -{result['deletions']} lines across "
+            f"{result['files']} files (cap: {REVIEW_LINE_CAP} added lines, {REVIEW_LINE_CAP} removed "
+            f"lines, {REVIEW_FILE_CAP} files; Lake-pin bumps are exempt from the line caps). "
+            "Split it into smaller PRs, one topic each."
+        )
+    for name, lines in result["new_files_too_long"]:
+        messages.append(
+            f"{name}: new Lean files must be at most {NEW_FILE_LINE_CAP} lines (found {lines}). "
+            "Split it, or grow an existing file (allowed up to 1500)."
+        )
+    if result.get("out_of_scope"):
+        messages.append(
+            "changes paths outside the library and the Lake pins, which need a human merge: "
+            + ", ".join(result["out_of_scope"])
+        )
+    return messages
+
+
+def pr_guards(git, base, head, *, lean_root="TauCeti", scope=True):
+    """The PR-level diff guards, from local Git objects only.
+
+    PR CI, `lake lint`, queue admission and the staging member policy all call this,
+    so no forge's PR totals are consulted and the four cannot disagree. `base` is the
+    exact merge base. `scope=False` leaves path scope to a caller with its own
+    human-merge route. Unreadable statistics raise ValueError, so callers fail closed.
+    """
+    result = review_size(git, base, head)
+    result["out_of_scope"] = out_of_scope(changed_paths(git, base, head), lean_root) if scope else []
+    result["violations"] = guard_violations(result)
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -383,6 +461,14 @@ def main():
     size.add_argument("--checkout", required=True)
     size.add_argument("--base", required=True, help="exact merge base")
     size.add_argument("--head", required=True)
+    guards = commands.add_parser("pr-guards", help="run the PR-level diff guards as JSON")
+    guards.add_argument("--checkout", required=True)
+    guards.add_argument("--base", required=True, help="exact merge base")
+    guards.add_argument("--head", required=True)
+    guards.add_argument("--lean-root", default="TauCeti")
+    guards.add_argument("--no-scope", action="store_true", help="leave path scope to the caller")
+    scope = commands.add_parser("scope", help="print changed paths (one per line on stdin) needing a human merge")
+    scope.add_argument("--lean-root", default="TauCeti")
     args = parser.parse_args()
     try:
         if args.command == "resolve":
@@ -396,6 +482,13 @@ def main():
                                      staging_ref=args.staging_ref, token=token, credential_origin=credential)))
         elif args.command == "tree-entry":
             print(tree_entry(args.checkout, args.commit, args.path))
+        elif args.command == "pr-guards":
+            with object_reader(args.checkout) as git:
+                print(json.dumps(pr_guards(git, args.base, args.head, lean_root=args.lean_root,
+                                           scope=not args.no_scope), sort_keys=True))
+        elif args.command == "scope":
+            for path in out_of_scope([line for line in sys.stdin.read().split("\n") if line], args.lean_root):
+                print(path)
         elif args.command == "review-size":
             with object_reader(args.checkout) as git:
                 print(json.dumps(review_size(git, args.base, args.head), sort_keys=True))
