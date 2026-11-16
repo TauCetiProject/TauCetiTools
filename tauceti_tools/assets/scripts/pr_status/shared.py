@@ -17,7 +17,7 @@ def policy_identity(runner):
     import tauceti_tools.self_tested as declarations
     sources = [Path(declarations.__file__)]
     for root in roots:
-        sources += sorted(root.glob('*.py'))
+        sources += [source for source in sorted(root.glob('*.py')) if not source.name.startswith('test_')]
     for source in sources:
         digest.update(source.name.encode() + b'\0' + source.read_bytes() + b'\0')
     return digest.hexdigest()
