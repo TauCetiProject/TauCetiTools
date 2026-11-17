@@ -33,6 +33,10 @@ RESULT_FILE = "source-candidate-result.json"
 RECEIPT_SCHEMA = "tauceti-ci.source-candidate-request/v1"
 RECEIPT_FILE = "source-candidate-request.json"
 VERDICTS = frozenset({"build", "scope", "bump_guard", "publication"})
+# The shared harness runs only from this branch, resolved by GitHub when the caller's
+# `uses: <harness>/.github/workflows/pr-build.yml@main` starts. Runner groups admit only that ref,
+# so a fork or another branch of the harness cannot run with the source credentials.
+HARNESS_BRANCH = "main"
 
 
 class EvidenceUnavailable(RuntimeError):
@@ -125,7 +129,6 @@ class ExecutionPolicy:
     credential_origin: Forge
     workflow: str
     harness: RepositoryIdentity
-    harness_revision: str
     base_branch: str
     execution_branch: str
     require_publication: bool
@@ -153,7 +156,6 @@ class ExecutionPolicy:
         if self.credential_origin != self.source.repository.forge:
             raise ValueError("source credential origin differs from policy")
         _workflow(self.workflow)
-        _hex(self.harness_revision, 40, "harness revision")
         _hex(self.config_digest, 64, "project configuration digest")
         for branch in (self.base_branch, self.execution_branch):
             if not isinstance(branch, str) or not re.fullmatch(r"[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*", branch):
@@ -172,7 +174,6 @@ class ExecutionPolicy:
                 "credential_origin",
                 "workflow",
                 "harness",
-                "harness_revision",
                 "base_branch",
                 "execution_branch",
                 "require_publication",
@@ -193,7 +194,6 @@ class ExecutionPolicy:
             Forge(origin["kind"], origin["url"]),
             value["workflow"],
             RepositoryIdentity.parse(value["harness"]),
-            value["harness_revision"],
             value["base_branch"],
             value["execution_branch"],
             value["require_publication"],
@@ -209,7 +209,6 @@ class ExecutionPolicy:
             "credential_origin": {"kind": self.credential_origin.kind, "url": self.credential_origin.url},
             "workflow": self.workflow,
             "harness": self.harness.record(),
-            "harness_revision": self.harness_revision,
             "base_branch": self.base_branch,
             "execution_branch": self.execution_branch,
             "require_publication": self.require_publication,
@@ -336,7 +335,6 @@ class CandidateRequest:
     source: RepositoryIdentity
     execution: RepositoryIdentity
     workflow_revision: str
-    harness_revision: str
     config_digest: str
     batch_id: int
     batch_version: int
@@ -353,7 +351,6 @@ class CandidateRequest:
             _hex(value, 64, label)
         for value, label in (
             (self.workflow_revision, "workflow revision"),
-            (self.harness_revision, "harness revision"),
             (self.head, "candidate head"),
             (self.base, "candidate base"),
             (self.tree, "candidate tree"),
@@ -441,7 +438,6 @@ class CandidateRequest:
                 "source",
                 "execution",
                 "workflow_revision",
-                "harness_revision",
                 "config_digest",
                 "batch_id",
                 "batch_version",
@@ -471,7 +467,6 @@ class CandidateRequest:
             RepositoryIdentity.parse(value["source"]),
             RepositoryIdentity.parse(value["execution"]),
             value["workflow_revision"],
-            value["harness_revision"],
             value["config_digest"],
             value["batch_id"],
             value["batch_version"],
@@ -491,7 +486,6 @@ class CandidateRequest:
             self.policy_digest != policy.digest
             or self.source != policy.source
             or self.execution != policy.execution
-            or self.harness_revision != policy.harness_revision
             or self.config_digest != policy.config_digest
         ):
             raise ValueError("candidate request differs from trusted policy")
@@ -512,7 +506,6 @@ class CandidateRequest:
             "source": self.source.record(),
             "execution": self.execution.record(),
             "workflow_revision": self.workflow_revision,
-            "harness_revision": self.harness_revision,
             "config_digest": self.config_digest,
             "batch_id": self.batch_id,
             "batch_version": self.batch_version,
@@ -541,11 +534,12 @@ def check_workflow_context(request, policy, context, *, harness_file=".github/wo
         "workflow_sha": request.workflow_revision,
         "workflow_ref": f"{policy.execution.repository.name}/{policy.workflow}@refs/heads/{policy.execution_branch}",
         "harness_repository": policy.harness.repository.name,
-        "harness_sha": policy.harness_revision,
+        "harness_ref": f"{policy.harness.repository.name}/{harness_file}@refs/heads/{HARNESS_BRANCH}",
         "harness_file": harness_file,
     }
     if not isinstance(context, dict) or any(context.get(key) != value for key, value in expected.items()):
         raise ValueError("candidate execution context differs from trusted workflow")
+    _hex(context.get("harness_sha"), 40, "harness revision")
     _positive(context.get("run_id"), "workflow run ID")
     _positive(context.get("attempt"), "workflow attempt")
 
@@ -588,12 +582,17 @@ def check_run_metadata(request, policy, run, *, run_id, attempt, require_complet
         or repository.get("full_name") != policy.execution.repository.name
     ):
         raise ValueError("evidence belongs to a different execution repository")
-    required = f"{policy.harness.repository.name}/.github/workflows/pr-build.yml@{policy.harness_revision}"
+    path = f"{policy.harness.repository.name}/.github/workflows/pr-build.yml"
     workflows = run.get("referenced_workflows")
     if not isinstance(workflows, list) or not any(
-        isinstance(w, dict) and w.get("path") == required and w.get("sha") == policy.harness_revision for w in workflows
+        isinstance(w, dict)
+        and w.get("path") in {f"{path}@{HARNESS_BRANCH}", f"{path}@refs/heads/{HARNESS_BRANCH}"}
+        and w.get("ref") == f"refs/heads/{HARNESS_BRANCH}"
+        and isinstance(w.get("sha"), str)
+        and re.fullmatch(r"[0-9a-f]{40}", w["sha"]) is not None
+        for w in workflows
     ):
-        raise ValueError("evidence did not execute the pinned reusable build workflow")
+        raise ValueError("evidence did not execute the reusable build workflow from the harness main branch")
 
 
 def artifact_name(request, run_id, attempt):
@@ -616,7 +615,6 @@ def _producer(request, policy, run_id, attempt):
         "workflow": policy.workflow,
         "workflow_revision": request.workflow_revision,
         "harness": policy.harness.record(),
-        "harness_revision": policy.harness_revision,
     }
 
 

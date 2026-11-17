@@ -53,7 +53,7 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_existing_policy_validation_still_applies(self):
         with self.assertRaises(ConfigError):
-            parse((CONFIG + '\n[tools.tools]\nrepo="one/Tools"\nref="main"\n').encode())
+            parse((CONFIG + '\n[tools.tools]\nrepo="one/Tools"\nref="develop"\n').encode())
 
     def test_qualified_github_upstreams_are_normalized_for_legacy_consumers(self):
         project = parse(

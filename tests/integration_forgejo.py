@@ -332,7 +332,7 @@ ROOT_PATH = {root}/log
                         ci_candidate.RepositoryIdentity(RepositoryRef(GITHUB, "example/Execution"), 42),
                         api.forge, ".github/workflows/pr-build.yml",
                         ci_candidate.RepositoryIdentity(RepositoryRef(GITHUB, "example/Tools"), 43),
-                        "a" * 40, "main", "main", True, "1" * 64,
+                        "main", "main", True, "1" * 64,
                     )
                     candidate_configuration = root / "ci-source-project.toml"
                     candidate_configuration.write_text(
@@ -346,7 +346,7 @@ ROOT_PATH = {root}/log
                     )
                     candidate_request = ci_candidate.CandidateRequest(
                         "1" * 32, "2" * 32, candidate_policy.digest, candidate_policy.source,
-                        candidate_policy.execution, "b" * 40, candidate_policy.harness_revision,
+                        candidate_policy.execution, "b" * 40,
                         candidate_policy.config_digest, 1, 1, ci_head, ci_base, ci_tree,
                         (ci_candidate.Member(ci_pull["number"], ci_head),),
                     )
@@ -355,6 +355,7 @@ ROOT_PATH = {root}/log
                         "repository": "example/Execution", "repository_id": "42", "workflow_sha": "b" * 40,
                         "workflow_ref": "example/Execution/.github/workflows/pr-build.yml@refs/heads/main",
                         "harness_repository": "example/Tools", "harness_sha": "a" * 40,
+                        "harness_ref": "example/Tools/.github/workflows/pr-build.yml@refs/heads/main",
                         "harness_file": ".github/workflows/pr-build.yml", "run_id": 101, "attempt": 1,
                     }
                     for retained in (candidate_request.retained_ref, candidate_request.member_ref(candidate_request.members[0])):
@@ -375,7 +376,10 @@ ROOT_PATH = {root}/log
                     ci_checkout.materialize(request_job, "head", ci_head)
                     self.assertEqual((request_job / "pr/Source.lean").read_text(), "example : True := trivial\n")
                     self.assertFalse((request_job / "pr/Later.lean").exists())
-                    publisher_context = dict(candidate_context, harness_file=".github/workflows/publish-lake-cache.yml")
+                    publisher_context = dict(
+                        candidate_context, harness_file=".github/workflows/publish-lake-cache.yml",
+                        harness_ref="example/Tools/.github/workflows/publish-lake-cache.yml@refs/heads/main",
+                    )
                     pin = ci_candidate_workflow.toolchain_pin(
                         candidate_request, candidate_policy, publisher_context, root / "ci-publisher-pin.git",
                         token=native_tokens[0],
@@ -392,6 +396,7 @@ ROOT_PATH = {root}/log
                         GITHUB_WORKFLOW_REF="example/Execution/.github/workflows/pr-build.yml@refs/heads/main",
                         GITHUB_RUN_ID="101", GITHUB_RUN_ATTEMPT="1",
                         CI_SOURCE_HARNESS_REPOSITORY="example/Tools", CI_SOURCE_HARNESS_SHA="a" * 40,
+                        CI_SOURCE_HARNESS_REF="example/Tools/.github/workflows/pr-build.yml@refs/heads/main",
                         CI_SOURCE_HARNESS_FILE=".github/workflows/pr-build.yml")
                     child = subprocess.run([
                         sys.executable, "-B", "-S", "-m", "tauceti_tools.ci_candidate_workflow", "resolve",
