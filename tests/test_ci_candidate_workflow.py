@@ -772,6 +772,96 @@ class PinGuard(unittest.TestCase):
         self.assertEqual(orphan["reasons"], ["no merge base with the candidate base"])
         self.assertNotIn("additions", orphan)
 
+    def chain_policy(self, *, split, forgejo=False, extra_trailer=False):
+        """A two-member queue chain: member 17 accepted a 1001-line new file; the chain commit for
+        it either keeps it (`split=False`) or carries a repair that split it into two files."""
+        config = policy()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            writer = root / "writer"
+            subprocess.run(["git", "init", "-q", "-b", "main", str(writer)], check=True)
+            env = dict(
+                os.environ,
+                GIT_AUTHOR_NAME="Fixture",
+                GIT_AUTHOR_EMAIL="fixture@example.invalid",
+                GIT_COMMITTER_NAME="Fixture",
+                GIT_COMMITTER_EMAIL="fixture@example.invalid",
+                GIT_CONFIG_GLOBAL="/dev/null",
+                GIT_CONFIG_NOSYSTEM="1",
+            )
+
+            def git(*args):
+                return (
+                    subprocess.check_output(["git", "-C", str(writer), *args], env=env, stderr=subprocess.DEVNULL)
+                    .decode()
+                    .strip()
+                )
+
+            (writer / "Old.lean").write_text("old\n")
+            git("add", ".")
+            git("commit", "-qm", "base")
+            base = git("rev-parse", "HEAD")
+            git("checkout", "-qb", "pr17")
+            (writer / "New.lean").write_text("new\n" * 1001)
+            git("add", ".")
+            git("commit", "-qm", "member 17")
+            accepted17 = git("rev-parse", "HEAD")
+            git("checkout", "-q", base)
+            git("checkout", "-qb", "pr18")
+            (writer / "Other.lean").write_text("other\n" * 10)
+            git("add", ".")
+            git("commit", "-qm", "member 18")
+            accepted18 = git("rev-parse", "HEAD")
+            git("checkout", "-q", base)
+            git("checkout", "-qb", "chain")
+            repository = "forgejo/operator/source@7" if forgejo else "TauCetiProject/TauCeti"
+            if split:
+                (writer / "New.lean").write_text("new\n" * 600)
+                (writer / "New2.lean").write_text("new\n" * 401)
+            else:
+                (writer / "New.lean").write_text("new\n" * 1001)
+            git("add", ".")
+            forged = f"\n\nAccepted-Head: {accepted18}" if extra_trailer else ""
+            git("commit", "-qm", f"member 17\n\nSource-PR: {repository}#17\nAccepted-Head: {accepted17}"
+                + "\n\nRepair: split New.lean in two." + forged)
+            first = git("rev-parse", "HEAD")
+            (writer / "Other.lean").write_text("other\n" * 10)
+            git("add", ".")
+            git("commit", "-qm", f"member 18\n\nSource-PR: {repository}#18\nAccepted-Head: {accepted18}")
+            head, tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+            workspace = root / "job"
+            workspace.mkdir()
+            subprocess.run(
+                ["git", "clone", "-q", "--bare", "--mirror", str(writer), str(workspace / ".ci-source.git")],
+                check=True, env=env,
+            )
+            members = (cc.Member(17, accepted17), cc.Member(18, accepted18))
+            req = replace(request(config), head=head, base=base, tree=tree, members=members)
+            with contextlib.redirect_stdout(io.StringIO()):
+                return cw.member_size_policy(req, config, context(req, config), workspace), first, base
+
+    def test_member_policy_measures_each_members_commit_as_it_sits_in_the_batch_chain(self):
+        # The accepted head adds a 1001-line new file; a repair in the batch split it, which lands.
+        values, _, _ = self.chain_policy(split=True)
+        self.assertEqual(values, {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
+        values, _, _ = self.chain_policy(split=True, forgejo=True)
+        self.assertEqual(values, {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
+        values, first, base = self.chain_policy(split=False)
+        (record,) = values.pop("rejected_members")
+        self.assertEqual(values, {"SOURCE_SIZE_POLICY_COMPLETE": "1", "NEWFILE_TOO_LONG": "1"})
+        self.assertEqual((record["source_pr"], record["measured"]), (17, "batch-commit"))
+        self.assertEqual((record["batch_commit"], record["parent"]), (first, base))
+        self.assertRegex(record["head"], "^[0-9a-f]{40}$")
+        self.assertNotEqual(record["head"], first)
+
+    def test_member_policy_measures_the_accepted_head_when_the_chain_commit_is_ambiguous(self):
+        # Two distinct Accepted-Head values on member 17's commit: it is not mapped, so its accepted
+        # head (the unsplit file) is measured, which no in-batch repair can satisfy.
+        values, _, _ = self.chain_policy(split=True, extra_trailer=True)
+        (record,) = values["rejected_members"]
+        self.assertEqual((record["source_pr"], record["measured"]), (17, "accepted-head"))
+        self.assertNotIn("batch_commit", record)
+
     def test_member_policy_cli_keeps_member_records_out_of_the_workflow_environment(self):
         config = policy()
         req = request(config)

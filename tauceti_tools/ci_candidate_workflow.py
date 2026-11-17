@@ -299,28 +299,75 @@ def fetch(request, policy, context, workspace, *, token=None, client=None):
 
 
 MEMBER_REJECTION_PREFIX = "MEMBER-POLICY-REJECTED "
+# The identity trailers the merge queue writes on each member's squash commit (TauCetiWorker
+# `tauceti_queue/chain.py`). A repair appends its explanation after them, so any line may hold them.
+CHAIN_TRAILER = re.compile(r"^(Source-PR|Accepted-Head):[ \t]+(\S.*?)\s*$", re.M)
+
+
+def batch_commits(git, base, head, members):
+    """Each member's own commit in the candidate's chain, as `{member: (commit, parent)}`.
+
+    The queue builds a batch as one single-parent squash commit per member on the base, each naming
+    its member in `Source-PR` (ending in `#<number>` on every forge) and `Accepted-Head` trailers that
+    survive every rebase and repair. A member is mapped only when exactly one first-parent commit
+    between the base and the head carries exactly one value of each trailer, matching its accepted
+    head and number, and that commit has a single parent. Anything else (no trailers, a duplicate, a
+    merge commit) leaves the member unmapped, and the caller measures its accepted head instead.
+    """
+    raw = git.run("log", "-z", "--first-parent", "--format=%H %P%n%B", f"{base}..{head}", "--").stdout
+    found = {}
+    for entry in raw.decode("utf-8", "replace").split("\0"):
+        identity, _, message = entry.strip("\n").partition("\n")
+        if not identity:
+            continue
+        commit, *parents = identity.split()
+        values = {"Source-PR": set(), "Accepted-Head": set()}
+        for token, value in CHAIN_TRAILER.findall(message):
+            values[token].add(value)
+        if len(values["Source-PR"]) != 1 or len(values["Accepted-Head"]) != 1:
+            continue
+        (source_pr,), (accepted,) = values["Source-PR"], values["Accepted-Head"]
+        number = source_pr.rpartition("#")[2]
+        if number.isdigit():
+            found.setdefault((accepted, int(number)), []).append((commit, parents))
+    mapped = {}
+    for member in members:
+        commits = found.get((member.head, member.pr), [])
+        same = sum(1 for other in members if (other.head, other.pr) == (member.head, member.pr))
+        if same == 1 and len(commits) == 1 and len(commits[0][1]) == 1:
+            mapped[member] = (ci_git.sha(commits[0][0]), ci_git.sha(commits[0][1][0]))
+    return mapped
 
 
 def member_size_policy(request, policy, context, workspace):
-    """Apply the shared PR-level diff guards to exact retained members using only local Git objects.
+    """Apply the shared PR-level diff guards to each member's diff as it lands, from local Git objects.
+
+    A member is measured by its own commit in the candidate's chain against that commit's parent,
+    which is exactly what landing the batch adds for it. A repair inside the batch, such as splitting a
+    too-long new file, therefore counts. A member whose chain commit cannot be identified (see
+    `batch_commits`) is measured by its accepted head against its merge base with the candidate base.
 
     Each rejected member is also named in `rejected_members` and on one
-    `MEMBER-POLICY-REJECTED {json}` line, so the queue can withdraw exactly that member.
+    `MEMBER-POLICY-REJECTED {json}` line, with its accepted head and, when measured in the chain,
+    `batch_commit` and `parent`, so the queue can repair or withdraw exactly that member.
     """
     check_workflow_context(request, policy, context)
     objects = Path(workspace) / ci_checkout.STORE / "objects"
     values = {"SOURCE_SIZE_POLICY_COMPLETE": "1"}
     rejected = []
 
-    def reject(member, reasons, size=None):
+    def reject(member, reasons, size=None, chained=None):
         source = member.source or policy.source
         record = {
             "source_pr": member.pr,
             "source": source.record(),
             "source_forge": source.repository.forge.key,
             "head": member.head,
+            "measured": "batch-commit" if chained else "accepted-head",
             "reasons": reasons,
         }
+        if chained:
+            record.update(batch_commit=chained[0], parent=chained[1])
         if size is not None:
             record.update(additions=size["additions"], deletions=size["deletions"], files=size["files"])
         rejected.append(record)
@@ -328,23 +375,30 @@ def member_size_policy(request, policy, context, workspace):
 
     with tempfile.TemporaryDirectory(prefix="source-member-policy-") as home:
         git = ci_git.Git(Path(home) / "reader.git", home, objects=objects)
+        git.commit(request.head)
+        git.commit(request.base)
+        chained = batch_commits(git, request.base, request.head, request.accepted_members)
         for member in request.accepted_members:
             git.commit(member.head)
-            comparison = git.run("merge-base", "--all", request.base, member.head, check=False)
-            if comparison.returncode == 1 and not comparison.stdout:
-                values["SOURCE_MEMBER_POLICY_REJECTED"] = "1"
-                reject(member, ["no merge base with the candidate base"])
-                continue
-            comparison.check_returncode()
-            bases = comparison.stdout.decode().splitlines()
-            if len(bases) != 1:
-                values["SOURCE_MEMBER_POLICY_REJECTED"] = "1"
-                reject(member, ["no unique merge base with the candidate base"])
-                continue
+            if member in chained:
+                commit, parent = chained[member]
+            else:
+                comparison = git.run("merge-base", "--all", request.base, member.head, check=False)
+                if comparison.returncode == 1 and not comparison.stdout:
+                    values["SOURCE_MEMBER_POLICY_REJECTED"] = "1"
+                    reject(member, ["no merge base with the candidate base"])
+                    continue
+                comparison.check_returncode()
+                bases = comparison.stdout.decode().splitlines()
+                if len(bases) != 1:
+                    values["SOURCE_MEMBER_POLICY_REJECTED"] = "1"
+                    reject(member, ["no unique merge base with the candidate base"])
+                    continue
+                parent, commit = bases[0], member.head
             # The same shared guards as PR CI, `lake lint` and queue admission. Path scope
             # keeps its own human-merge route, so only the size guards apply here.
             try:
-                size = ci_git.pr_guards(git, bases[0], member.head, scope=False)
+                size = ci_git.pr_guards(git, parent, commit, scope=False)
             except ValueError:
                 values["DIFF_UNKNOWN"] = "1"
                 values["SOURCE_SIZE_POLICY_COMPLETE"] = "0"
@@ -354,7 +408,7 @@ def member_size_policy(request, policy, context, workspace):
             if size["new_files_too_long"]:
                 values["NEWFILE_TOO_LONG"] = "1"
             if size["violations"]:
-                reject(member, size["violations"], size)
+                reject(member, size["violations"], size, chained.get(member))
     if rejected:
         values["rejected_members"] = rejected
     return values
