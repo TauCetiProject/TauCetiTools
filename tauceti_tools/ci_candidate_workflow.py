@@ -298,11 +298,34 @@ def fetch(request, policy, context, workspace, *, token=None, client=None):
     return value
 
 
+MEMBER_REJECTION_PREFIX = "MEMBER-POLICY-REJECTED "
+
+
 def member_size_policy(request, policy, context, workspace):
-    """Apply existing per-PR caps to exact retained members using only local Git objects."""
+    """Apply the shared PR-level diff guards to exact retained members using only local Git objects.
+
+    Each rejected member is also named in `rejected_members` and on one
+    `MEMBER-POLICY-REJECTED {json}` line, so the queue can withdraw exactly that member.
+    """
     check_workflow_context(request, policy, context)
     objects = Path(workspace) / ci_checkout.STORE / "objects"
     values = {"SOURCE_SIZE_POLICY_COMPLETE": "1"}
+    rejected = []
+
+    def reject(member, reasons, size=None):
+        source = member.source or policy.source
+        record = {
+            "source_pr": member.pr,
+            "source": source.record(),
+            "source_forge": source.repository.forge.key,
+            "head": member.head,
+            "reasons": reasons,
+        }
+        if size is not None:
+            record.update(additions=size["additions"], deletions=size["deletions"], files=size["files"])
+        rejected.append(record)
+        print(MEMBER_REJECTION_PREFIX + json.dumps(record, sort_keys=True), flush=True)
+
     with tempfile.TemporaryDirectory(prefix="source-member-policy-") as home:
         git = ci_git.Git(Path(home) / "reader.git", home, objects=objects)
         for member in request.accepted_members:
@@ -310,15 +333,18 @@ def member_size_policy(request, policy, context, workspace):
             comparison = git.run("merge-base", "--all", request.base, member.head, check=False)
             if comparison.returncode == 1 and not comparison.stdout:
                 values["SOURCE_MEMBER_POLICY_REJECTED"] = "1"
+                reject(member, ["no merge base with the candidate base"])
                 continue
             comparison.check_returncode()
             bases = comparison.stdout.decode().splitlines()
             if len(bases) != 1:
                 values["SOURCE_MEMBER_POLICY_REJECTED"] = "1"
+                reject(member, ["no unique merge base with the candidate base"])
                 continue
-            # The same rename-aware measure as PR CI's review-size guards.
+            # The same shared guards as PR CI, `lake lint` and queue admission. Path scope
+            # keeps its own human-merge route, so only the size guards apply here.
             try:
-                size = ci_git.review_size(git, bases[0], member.head)
+                size = ci_git.pr_guards(git, bases[0], member.head, scope=False)
             except ValueError:
                 values["DIFF_UNKNOWN"] = "1"
                 values["SOURCE_SIZE_POLICY_COMPLETE"] = "0"
@@ -327,6 +353,10 @@ def member_size_policy(request, policy, context, workspace):
                 values["TOO_LARGE"] = "1"
             if size["new_files_too_long"]:
                 values["NEWFILE_TOO_LONG"] = "1"
+            if size["violations"]:
+                reject(member, size["violations"], size)
+    if rejected:
+        values["rejected_members"] = rejected
     return values
 
 
@@ -903,6 +933,8 @@ def main(argv=None):
         with open(args.github_env, "a") as output:
             if args.command in {"bootstrap", "lint-scope", "member-policy", "bump-policy"}:
                 for key, value in result.items():
+                    if args.command == "member-policy" and key == "rejected_members":
+                        continue  # machine-readable evidence stays in the output file and log lines
                     if not isinstance(value, str) or "\n" in value or "\r" in value:
                         raise ValueError("invalid workflow environment setting")
                     output.write(f"{key}={value}\n")

@@ -55,7 +55,7 @@ class LocalChecks(unittest.TestCase):
         ):
 
             def invoke(argv, **kw):
-                if argv[0] == "git":
+                if Path(argv[0]).name == "git":
                     return actual_run(argv, **kw)
                 calls.append(argv[:2])
                 return subprocess.CompletedProcess(argv, 0)
@@ -78,6 +78,62 @@ class LocalChecks(unittest.TestCase):
             (self.root / "TauCeti/New.lean").write_text("public import TauCetiReview\n")
             with self.assertRaisesRegex(checks.Violation, "roadmap/review"):
                 checks.sources(self.root, selected)
+
+    def test_lint_runs_the_shared_pr_diff_guards_on_the_working_tree(self):
+        selected = checks.scope(self.root, self.base, "ordinary")
+        with patch.object(checks, "run"), contextlib.redirect_stdout(io.StringIO()):
+            # Untracked scratch outside the library is not PR content.
+            (self.root / "NOTES.md").write_text("scratch\n")
+            checks.sources(self.root, selected)
+            # A tracked edit outside the library is.
+            (self.root / "scripts").mkdir()
+            (self.root / "scripts/tool.py").write_text("print()\n")
+            self.git("add", "scripts/tool.py")
+            with self.assertRaisesRegex(checks.Violation, "human merge: scripts/tool.py"):
+                checks.sources(self.root, selected)
+            self.git("rm", "-q", "--cached", "scripts/tool.py")
+            (self.root / "TauCeti/A.lean").write_text("module\n" + "".join(f"-- {i}\n" for i in range(2001)))
+            with self.assertRaisesRegex(checks.Violation, "too large to review"):
+                checks.sources(self.root, selected)
+            # The Lake-pin bump exemption from the line caps applies locally too.
+            (self.root / "lean-toolchain").write_text("leanprover/lean4:v4.36.0\n")
+            self.git("add", "lean-toolchain")
+            checks.sources(self.root, selected)
+        # Nothing was staged or committed by the measurement.
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.base)
+        self.assertEqual(self.git("diff", "--cached", "--name-only"), "lean-toolchain")
+
+    def test_base_override_measures_from_the_given_revision(self):
+        (self.root / "TauCeti/B.lean").write_text("".join(f"-- {i}\n" for i in range(1500)))
+        self.git("add", ".")
+        self.git("commit", "-qm", "batch parent adds a long file")
+        parent = self.git("rev-parse", "HEAD")
+        with patch.object(checks, "run"), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(checks.Violation, "1000 lines"):
+                checks.sources(self.root, checks.scope(self.root, self.base, "ordinary"))
+            checks.sources(self.root, checks.scope(self.root, parent, "ordinary"))
+
+    def test_lint_runs_ci_dot_notation_lint_scoped_like_ci(self):
+        calls = []
+
+        def record(name, *args, **kwargs):
+            if name == "lint-dot-notation.py":
+                base = Path(args[args.index("--base-source-root") + 1]) if "--base-source-root" in args else None
+                calls.append((args, base is not None and (base / "A.lean").is_file()))
+
+        (self.root / "TauCeti/A.lean").write_text("module\n-- edited\n")
+        with patch.object(checks, "run", side_effect=record), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(checks.main(["dot-notation"]), 0)
+            (self.root / "lean-toolchain").write_text("leanprover/lean4:v4.36.0\n")
+            self.git("add", "lean-toolchain")
+            self.assertEqual(checks.main(["dot-notation"]), 0)
+        (scoped, base_extracted), (full, _) = calls
+        self.assertTrue(base_extracted)
+        self.assertEqual(scoped[scoped.index("--source-root") + 1], self.root / "TauCeti")
+        self.assertEqual(Path(scoped[scoped.index("--only-modules") + 1]).name, "modules.txt")
+        self.assertEqual(scoped[scoped.index("--baseline") + 1], checks.SCRIPTS / "lint-dot-notation-baseline.txt")
+        # A Lake-pin change checks the whole library, as CI does.
+        self.assertNotIn("--only-modules", full)
 
     def test_unknown_scope_never_runs_checks(self):
         self.git("update-ref", "-d", "refs/remotes/origin/main")

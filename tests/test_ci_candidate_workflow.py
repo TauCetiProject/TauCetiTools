@@ -1,3 +1,4 @@
+import contextlib
 import copy
 import io
 import json
@@ -737,22 +738,61 @@ class PinGuard(unittest.TestCase):
             return cw.member_size_policy(req, config, context(req, config), workspace)
 
     def test_retained_member_new_file_and_total_size_guards_use_real_local_objects(self):
-        self.assertEqual(
-            self.member_policy(added_lines=1001), {"SOURCE_SIZE_POLICY_COMPLETE": "1", "NEWFILE_TOO_LONG": "1"}
-        )
-        self.assertEqual(
-            self.member_policy(existing_lines=2001), {"SOURCE_SIZE_POLICY_COMPLETE": "1", "TOO_LARGE": "1"}
-        )
-        self.assertEqual(
-            self.member_policy(existing_lines=2001, pin_changed=True), {"SOURCE_SIZE_POLICY_COMPLETE": "1"}
-        )
+        def flags(**kwargs):
+            values = self.member_policy(**kwargs)
+            values.pop("rejected_members", None)
+            return values
+
+        self.assertEqual(flags(added_lines=1001), {"SOURCE_SIZE_POLICY_COMPLETE": "1", "NEWFILE_TOO_LONG": "1"})
+        self.assertEqual(flags(existing_lines=2001), {"SOURCE_SIZE_POLICY_COMPLETE": "1", "TOO_LARGE": "1"})
+        self.assertEqual(self.member_policy(existing_lines=2001, pin_changed=True), {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
         self.assertEqual(self.member_policy(binary=True), {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
         # A moved file is neither new nor a full rewrite, matching the PR CI review-size guard.
         self.assertEqual(self.member_policy(moved_lines=2500), {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
         self.assertEqual(
-            self.member_policy(added_lines=1, orphan=True),
+            flags(added_lines=1, orphan=True),
             {"SOURCE_SIZE_POLICY_COMPLETE": "1", "SOURCE_MEMBER_POLICY_REJECTED": "1"},
         )
+
+    def test_rejected_members_are_named_for_targeted_withdrawal(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            values = self.member_policy(existing_lines=2001)
+        (record,) = values["rejected_members"]
+        self.assertEqual(record["source_pr"], 17)
+        self.assertEqual(record["source"], policy().source.record())
+        self.assertEqual(record["source_forge"], policy().source.repository.forge.key)
+        self.assertRegex(record["head"], "^[0-9a-f]{40}$")
+        self.assertEqual((record["additions"], record["deletions"], record["files"]), (2001, 0, 1))
+        self.assertIn("too large to review", record["reasons"][0])
+        (line,) = [x for x in output.getvalue().splitlines() if x.startswith(cw.MEMBER_REJECTION_PREFIX)]
+        self.assertEqual(json.loads(line[len(cw.MEMBER_REJECTION_PREFIX):]), record)
+        with contextlib.redirect_stdout(io.StringIO()):
+            (orphan,) = self.member_policy(added_lines=1, orphan=True)["rejected_members"]
+        self.assertEqual(orphan["reasons"], ["no merge base with the candidate base"])
+        self.assertNotIn("additions", orphan)
+
+    def test_member_policy_cli_keeps_member_records_out_of_the_workflow_environment(self):
+        config = policy()
+        req = request(config)
+        record = {"source_pr": 17, "head": "a" * 40, "reasons": ["too large"]}
+        rejection = {"SOURCE_SIZE_POLICY_COMPLETE": "1", "TOO_LARGE": "1", "rejected_members": [record]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                patch.object(cw, "load_request", return_value=(req, config)),
+                patch.object(cw, "context_from_environment", return_value=context(req, config)),
+                patch.object(cw, "member_size_policy", return_value=rejection),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                status = cw.main(
+                    ["member-policy", "--policy", "trusted-policy.json", "--configuration", "trusted.toml",
+                     "--workspace", str(root), "--output", str(root / "member-policy.json"),
+                     "--github-env", str(root / "environment")]
+                )
+            self.assertEqual(status, 1)
+            self.assertEqual(json.loads((root / "member-policy.json").read_text())["rejected_members"], [record])
+            self.assertEqual((root / "environment").read_text(), "SOURCE_SIZE_POLICY_COMPLETE=1\nTOO_LARGE=1\n")
 
     def test_source_pin_changes_use_the_configured_upstream_guard_without_legacy_source_bindings(self):
         root_tools = Path(__file__).resolve().parents[1]

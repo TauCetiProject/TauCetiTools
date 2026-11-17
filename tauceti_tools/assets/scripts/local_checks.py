@@ -9,11 +9,13 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
+from tauceti_tools.assets.scripts import ci_git
 from tauceti_tools.local_scope import LEAN_ROOT, POLICIES, git, local_main, scope, untracked
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -38,30 +40,98 @@ def sources(root, selected):
     for path in [root_module, *directory.rglob("*.lean")]:
         if boundary.search(path.read_text()):
             raise Violation(f"{path}: library sources must not import roadmap/review modules")
-    # The new-file limit is relative to the same merge base as the existing local scope.
-    added = {
-        name.decode(errors="surrogateescape")
-        for name in git(
-            root,
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--find-renames",
-            "--diff-filter=A",
-            "--name-only",
-            "-z",
-            selected["merge_base"],
-            "--",
-        ).split(b"\0")
-        if name
-    } | untracked(root)
-    for name in selected["changed"]:
-        path = root / name
-        if name.endswith(".lean") and path.is_file() and name in added:
-            count = len(path.read_bytes().splitlines())
-            if count > 1000:
-                raise Violation(f"{name}: new Lean files must be at most 1000 lines (found {count})")
+    diff_guards(root, selected)
     print("local-sources: PASS", flush=True)
+
+
+def working_tree_commit(root):
+    """A commit of the tree a push would carry: HEAD plus every tracked edit and untracked library file.
+
+    It lives only in the object database. Untracked files outside the library are scratch,
+    not PR content, so they are left out, as the local scope's untracked inventory does.
+    """
+    with tempfile.TemporaryDirectory(prefix="local-guard-index-") as name:
+        index = Path(name) / "index"
+        current = Path(git(root, "rev-parse", "--path-format=absolute", "--git-path", "index").decode().strip())
+        if current.is_file():
+            shutil.copyfile(current, index)  # keeps the stat cache, so unchanged files are not rehashed
+        env = dict(
+            os.environ,
+            GIT_INDEX_FILE=str(index),
+            GIT_AUTHOR_NAME="lake lint",
+            GIT_AUTHOR_EMAIL="lake-lint@localhost",
+            GIT_COMMITTER_NAME="lake lint",
+            GIT_COMMITTER_EMAIL="lake-lint@localhost",
+        )
+
+        def command(*args, stdin=None):
+            return subprocess.run(
+                ["git", "--no-optional-locks", "-C", str(root), *args],
+                env=env,
+                input=stdin,
+                check=True,
+                capture_output=True,
+            ).stdout
+
+        if not current.is_file():
+            command("read-tree", "HEAD")
+        command("add", "--update", "--", ".")
+        library = LEAN_ROOT.replace(".", "/")
+        extra = sorted(p for p in untracked(root) if p == library + ".lean" or p.startswith(library + "/"))
+        if extra:
+            command(
+                "add",
+                "--force",
+                "--pathspec-from-file=-",
+                "--pathspec-file-nul",
+                stdin=b"".join(os.fsencode(p) + b"\0" for p in extra),
+            )
+        tree = command("write-tree").decode().strip()
+        return command("commit-tree", tree, "-p", "HEAD", "-m", "lake lint working tree").decode().strip()
+
+
+def diff_guards(root, selected):
+    """PR CI's diff guards (review size, new-file length, scope) on the working tree.
+
+    The same shared function as PR CI, queue admission and the staging member policy,
+    measured from the same merge base as the rest of the local scope (`--base` overrides it).
+    """
+    head = working_tree_commit(root)
+    with ci_git.repository_reader(root) as reader:
+        result = ci_git.pr_guards(reader, selected["merge_base"], head, lean_root=LEAN_ROOT)
+    print(
+        f"diff size: +{result['additions']} / -{result['deletions']} across {result['files']} files"
+        f" against {selected['merge_base']}",
+        flush=True,
+    )
+    if result["violations"]:
+        raise Violation("PR diff guards failed:\n" + "\n".join("  " + m for m in result["violations"]))
+
+
+def dot_notation(root, selected, modules):
+    """PR CI's dot-notation namespace lint, scoped to changed modules exactly as CI scopes it."""
+    library = LEAN_ROOT.replace(".", "/")
+    baseline = root / "scripts/lint-dot-notation-baseline.txt"  # the project's policy file wins
+    if not baseline.is_file():
+        baseline = SCRIPTS / "lint-dot-notation-baseline.txt"
+    args = [
+        "--baseline",
+        baseline,
+        "--mathlib-root",
+        root / ".lake/packages/mathlib/Mathlib",
+        "--source-root",
+        root / library,
+        "--context-cache",
+        root / ".lake/dot-notation-context/context.json",
+    ]
+    with tempfile.TemporaryDirectory(prefix="local-dot-notation-") as name:
+        if selected["mode"] == "scoped":
+            directory = Path(name)
+            archive = directory / "base.tar"
+            archive.write_bytes(git(root, "archive", selected["merge_base"], library))
+            subprocess.run(["tar", "-xf", str(archive), "-C", str(directory)], check=True)
+            args += ["--only-modules", modules, "--base-source-root", directory / library]
+        run("lint-dot-notation.py", *args)
 
 
 def shims(root, selected, policy):
@@ -95,7 +165,18 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "phase",
-        choices=("verify", "test", "lint", "sources", "axioms", "module-system", "style", "environment", "shim-expiry"),
+        choices=(
+            "verify",
+            "test",
+            "lint",
+            "sources",
+            "axioms",
+            "module-system",
+            "style",
+            "dot-notation",
+            "environment",
+            "shim-expiry",
+        ),
     )
     parser.add_argument("--base", default=os.environ.get("TAUCETI_VERIFY_BASE"))
     parser.add_argument(
@@ -139,6 +220,8 @@ def main(argv=None):
         if args.phase in ("style", "lint", "verify"):
             env.update(LINT_CHANGED_ONLY="1" if selected["mode"] == "scoped" else "0", LINT_ONLY_MODULES=str(modules))
             run("lint-style.sh", env=env)
+        if args.phase in ("dot-notation", "lint", "verify"):
+            dot_notation(root, selected, modules)
         if args.phase in ("environment", "lint", "verify"):
             run("local_lint.py", "--modules", modules, env=env)
     return 0
