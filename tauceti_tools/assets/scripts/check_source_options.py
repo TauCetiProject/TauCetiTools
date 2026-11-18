@@ -194,4 +194,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except OSError as error:  # Exit 1 is reserved for rejected sources.
+        print(f"check_source_options: {error}")
+        raise SystemExit(2) from None

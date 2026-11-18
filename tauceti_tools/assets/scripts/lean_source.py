@@ -987,6 +987,15 @@ class ParsingContext:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Exit 1 for new findings and 2 when the lint could not run, so CI can tell them apart."""
+    try:
+        return _main(argv)
+    except OSError as error:
+        print(f"lint-dot-notation: error: {error}", file=sys.stderr)
+        return 2
+
+
+def _main(argv: list[str] | None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--baseline", type=pathlib.Path, default=pathlib.Path(
         "scripts/lint-dot-notation-baseline.txt"))
