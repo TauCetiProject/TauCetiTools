@@ -27,11 +27,6 @@ MACHINE_LABEL = "ubuntu-24.04"
 API_ROOT = "https://api.github.com/repos/" + REPO
 
 
-def named(job, name):
-    """A job of this workflow, also when a caller's stub prefixes it with `<caller job> / `."""
-    return job["name"] == name or job["name"].endswith(" / " + name)
-
-
 _client = None
 
 
@@ -60,7 +55,7 @@ def publication_job(data):
     jobs = data["jobs"]
     if data["total_count"] != len(jobs) or len(jobs) > 100:
         raise ValueError("incomplete jobs response")
-    matches = [job for job in jobs if named(job, PUBLISHER)]
+    matches = [job for job in jobs if job["name"] == PUBLISHER]
     if len(matches) > 1:
         raise ValueError("ambiguous publisher")
     return matches[0] if matches else None
@@ -89,7 +84,7 @@ def isolated_runner(data, job, run_id):
                         and bool(re.fullmatch("fleet-" + machine[:12] + r"-[a-f0-9]{16}", job.get("runner_name", ""))))
         except (ValueError, TypeError):
             return False
-    sandbox = [item for item in data["jobs"] if named(item, "sandboxed-build")]
+    sandbox = [item for item in data["jobs"] if item["name"] == "sandboxed-build"]
     return (isolated and bool(job.get("runner_name"))
             and len(sandbox) == 1 and bool(sandbox[0].get("runner_name"))
             and job["runner_name"] != sandbox[0]["runner_name"])

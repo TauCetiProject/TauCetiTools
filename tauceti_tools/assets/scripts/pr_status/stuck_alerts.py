@@ -440,7 +440,7 @@ def detect_missing_required_status():
                          conclusion=(c.get("conclusion") or "").lower(),
                          updated_at=c.get("completedAt") or "")
                     for c in pr["checks"] if c.get("__typename") == "CheckRun"
-                    and (c.get("name") or "").split(" / ")[-1] == "sandboxed-build"]
+                    and c.get("name") == "sandboxed-build"]
             runs.sort(key=lambda r: r["updated_at"], reverse=True)
         else:
             runs = gh_stream(

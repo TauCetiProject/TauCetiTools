@@ -8,9 +8,7 @@ are copied into `PROJECT/scripts/` and run against PROJECT's own `.github/`.
 
 Tests that need Lean, Lake or bwrap (`test_check_imports.py`, `test_ci_checkout.py`,
 `test_lake_cache_publish.py`) run in later steps of the `project-fixtures` job, and
-`test_lint_dot_notation.py` and `test_claims_access.py` run in the `package` job. When PROJECT's
-`pr-build.yml` is a stub calling this repository's reusable pr-build, this script first puts this
-revision's copy in its place, so those later steps check it as well.
+`test_lint_dot_notation.py` and `test_claims_access.py` run in the `package` job.
 """
 
 import os
@@ -64,21 +62,6 @@ DESELECTED = {
         "Recovery.test_workflow_preserves_app_writes_and_filters_title_edits"],
 }
 
-# These cases assert the literal text of TauCeti's own pr-build.yml (its `TauCeti` paths, triggers,
-# title and local action paths). Once that file is a stub, they would read this revision's
-# parameterised copy instead, which tests/test_*.py check directly.
-STUB_DESELECTED = {
-    "test_bors_staging_identity.py": ["ConcurrencyTests.test_same_candidate_supersedes_across_runs"],
-    "test_bors_train_identity.py": [
-        "TrainIdentityTests.test_trusted_checkout_precedes_resolution_and_shared_validation_is_reused"],
-    "test_check_expired_mathlib_shims.py": [
-        "ExpiredMathlibShimTests.test_workflow_uses_integration_base_and_scopes_feature_probes"],
-    "test_pick_runner.py": ["PickerWorkflow.test_pr_title_contains_immutable_head_and_bors_title_is_unchanged"],
-    "test_prepare_pr_integration.py": [
-        "WorkflowContract.test_no_new_trigger_or_pr_cache_producer_and_pinned_sandbox_stays"],
-    "test_workflow_pins.py": ["ContentWorkflowCompleteness.test_long_build_refreshes_credentials_before_terminal_reporting"],
-}
-
 # Runs one test file without the deselected cases, failing if a deselected case no longer exists.
 FILTERED = """
 import importlib.util, pathlib, sys, unittest
@@ -102,30 +85,7 @@ sys.exit(not unittest.TextTestRunner().run(suite).wasSuccessful())
 """
 
 
-def use_this_build_workflow(project):
-    """Test this revision's pr-build once the project's pr-build.yml only calls it.
-
-    The workflow tests read `.github/workflows/pr-build.yml` from the project. When that file is a
-    stub calling TauCetiTools' reusable pr-build, put this revision's copy, and the actions it
-    uses, in its place, so the tests check the build the project actually runs.
-    """
-    workflows = project / ".github/workflows"
-    if "TauCetiTools/.github/workflows/pr-build.yml@" not in (workflows / "pr-build.yml").read_text():
-        return False
-    tools = HERE.parents[1]
-    # The project's own publish-lake-cache.yml stays: its post-merge ci.yml still calls it.
-    shutil.copyfile(tools / ".github/workflows/pr-build.yml", workflows / "pr-build.yml")
-    for name in ("restore-lean-toolchain", "restore-mathlib-ltars"):
-        shutil.copytree(tools / ".github/actions" / name, project / ".github/actions" / name, dirs_exist_ok=True)
-    print("testing this revision's pr-build.yml in place of the project's stub", flush=True)
-    return True
-
-
 def main(project):
-    deselected = {name: list(cases) for name, cases in DESELECTED.items()}
-    if use_this_build_workflow(project):
-        for name, cases in STUB_DESELECTED.items():
-            deselected[name] = deselected.get(name, []) + cases
     scripts = project / "scripts"
     for path in sorted((HERE / "tauceti").iterdir()):
         shutil.copyfile(path, scripts / path.name)
@@ -133,7 +93,7 @@ def main(project):
     commands = []
     for name in TOOLS_TESTS + TAUCETI_TESTS:
         path = f"scripts/{name}"
-        skip = deselected.get(name)
+        skip = DESELECTED.get(name)
         commands.append([sys.executable, "-c", FILTERED, path, *skip] if skip else [sys.executable, path])
     commands.append(["node", "--test", "scripts/test_labels_from_comments.cjs"])
     failed = []

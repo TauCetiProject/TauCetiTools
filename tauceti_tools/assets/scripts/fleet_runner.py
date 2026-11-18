@@ -253,7 +253,7 @@ def namespace_labels(labels):
     return any(label.startswith(("nscloud-", "namespace-profile-")) for label in labels)
 
 
-CONTROL_JOBS = {"pick", "pick-runner", "recover", "retry-status", "publish", "finalize-merge-group-build", "finalize-batch"}
+CONTROL_JOBS = {"pick", "recover", "retry-status", "publish", "finalize-merge-group-build", "finalize-batch"}
 
 
 def build_job(job):
@@ -403,8 +403,7 @@ def failed_placements(read, repository, run_id, attempt):
     excluded = set()
     for prior in range(max(1, attempt - 3), attempt):
         jobs = pages(read, f"repos/{repository}/actions/runs/{run_id}/attempts/{prior}/jobs", "jobs")
-        # A caller's stub prefixes reusable-workflow jobs with `<caller job> / `.
-        builds = [j for j in jobs if str(j.get("name", "")).split(" / ")[-1] == "sandboxed-build"]
+        builds = [j for j in jobs if j.get("name") == "sandboxed-build"]
         if len(builds) > 1:
             raise ObservationError("ambiguous prior build placement")
         for job in builds:

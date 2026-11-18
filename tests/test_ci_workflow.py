@@ -394,7 +394,7 @@ else:
         self.assertNotIn("TOOLS_CI_REVISION", source)
         self.assertIn("uses: ./.tauceti-tools/.github/actions/ci-credentials", source)
         self.assertNotIn("gh api", source)
-        self.assertIn("inputs.source_candidate_enabled && fromJSON(inputs.source_candidate_control_runner)", source)
+        self.assertIn("inputs.source_candidate_control_runner || '\"ubuntu-24.04\"'", source)
         retry = (ROOT / "tauceti_tools/assets/project/.github/workflows/retry-ci-status.yml").read_text()
         self.assertIn("workflows: [pr-build]", retry)
         self.assertIn("__TOOLS_REPO__/.github/workflows/retry-ci-status.yml@__TOOLS_REF__", retry)
