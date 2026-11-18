@@ -282,6 +282,8 @@ def main():
                   'tested_commit_sha': os.environ.get('CI_RESOURCE_TESTED_COMMIT'),
                   'tested_tree_sha': os.environ.get('CI_RESOURCE_TESTED_TREE'),
                   'dependency_bump': os.environ.get('CI_RESOURCE_DEPENDENCY_BUMP', 'unknown'),
+                  # pr-build observes each sandboxed phase step separately; absent for one step.
+                  'sandbox_phase': os.environ.get('SANDBOX_PHASE'),
                   'started_at': started, 'completed_at': now(), 'elapsed_s': time.monotonic() - start,
                   'exit_code': code, 'cancel_signals': cancelled,
                   'command_accounting_scope': ('partial-reaped-descendants' if interrupted else 'reaped-descendants')

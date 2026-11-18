@@ -27,6 +27,20 @@ class Progress(unittest.TestCase):
             self.assertNotIn("PRIVATE", str(value))
             self.assertEqual(value["last_progress_at"], "1970-01-01T00:01:40Z")
 
+    def test_a_later_phase_session_reads_the_finished_build_log_at_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "phases.tsv").write_text("build\t1\nlint-env\t2\n")
+            (path / "lake-build.log").write_text(
+                "".join(f"✔ [{i}/20000] Built TauCeti.Module{i} (1s)\n" for i in range(20000)))
+            self.assertGreater((path / "lake-build.log").stat().st_size, 2 * 262144)
+            counters = progress.Counters(path)
+            first = counters.sample(clock=lambda: 100)
+            self.assertEqual(first["completed_modules"], 20000)
+            self.assertEqual(first["phase"], "lint-env")
+            # Nothing new: no progress is reported by later samples.
+            self.assertEqual(counters.sample(clock=lambda: 200), first)
+
     def test_candidate_symlink_and_fifo_are_never_followed_or_blocking(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "telemetry"

@@ -149,19 +149,40 @@ class WorkflowPhaseSteps(unittest.TestCase):
     def test_build_step_combines_the_phase_outcomes(self):
         build = self.steps[self.indices[-1] + 1]
         self.assertEqual(build['id'], 'build')
-        self.assertEqual(build['if'], "${{ !cancelled() && steps.sandbox_build.outcome != 'skipped' }}")
-        self.assertEqual(re.findall(r'\$\{\{ steps\.(\w+)\.outcome \}\}', build['env']['OUTCOMES']),
-                         [step['id'] for step in self.phase_steps])
-        for outcomes, expected in (('success ' * 6, 0), ('success failure skipped skipped skipped skipped', 1),
-                                   ('success success success success success failure', 1),
-                                   ('success cancelled skipped skipped skipped skipped', 1)):
+        ids = [step['id'] for step in self.phase_steps]
+        self.assertEqual(re.findall(r'\$\{\{ steps\.(\w+)\.outcome \}\}', build['env']['OUTCOMES']), ids)
+        condition = build['if'].strip()
+        self.assertTrue(condition.startswith('${{ always() && ') and condition.endswith('}}'))
+        self.assertEqual(sorted(set(re.findall(r'steps\.(\w+)\.outcome', condition))), sorted(ids))
+
+        def runs(outcomes):
+            """Evaluate the step's `if` (GitHub's && || format contains) for the given outcomes."""
+            expression = condition[3:-2].replace('&&', ' and ').replace('||', ' or ').replace('always()', 'True')
+            expression = re.sub(r'steps\.(\w+)\.outcome', lambda m: repr(outcomes[m[1]]), expression)
+            return eval(expression, {'contains': lambda text, item: item in text,  # noqa: S307
+                                     'format': lambda text, *values: text.format(*values)})
+
+        def combined(outcomes):
+            """The `build` step's outcome: skipped, or its script's result."""
+            if not runs(dict(zip(ids, outcomes, strict=True))):
+                return 'skipped'
+            result = subprocess.run(['bash', '-e', '-c', build['run']], capture_output=True, text=True,
+                                    env=dict(os.environ, OUTCOMES=' '.join(outcomes)))
+            return 'success' if result.returncode == 0 else 'failure'
+
+        for outcomes, expected in (
+            (['success'] * 6, 'success'),
+            (['success', 'failure'] + ['skipped'] * 4, 'failure'),
+            (['success'] * 5 + ['failure'], 'failure'),
+            (['failure'] + ['skipped'] * 5, 'failure'),
+            # A cancellation that interrupts a phase, or comes between two phases.
+            (['success', 'cancelled'] + ['skipped'] * 4, 'skipped'),
+            (['success', 'success'] + ['skipped'] * 4, 'skipped'),
+            # The build never started.
+            (['skipped'] * 6, 'skipped'),
+        ):
             with self.subTest(outcomes=outcomes):
-                result = subprocess.run(['bash', '-e', '-c', build['run']], env=dict(os.environ, OUTCOMES=outcomes),
-                                        capture_output=True, text=True)
-                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
-        text = WORKFLOW.read_text()
-        for step in self.phase_steps:
-            self.assertEqual(text.count(f"steps.{step['id']}.outcome"), 2 if step is self.phase_steps[0] else 1)
+                self.assertEqual(combined(outcomes), expected)
 
     def test_reporting_attributes_each_phase_step(self):
         import importlib.util

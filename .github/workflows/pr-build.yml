@@ -1663,11 +1663,14 @@ jobs:
         run: *sandboxed-phase
 
       # The sandboxed build's single outcome, as when one step ran every phase: success when every
-      # phase passed, failure when one failed (the later phases are then skipped), and skipped when
-      # the build never started or the run was cancelled.
+      # phase passed and failure when one failed (the later phases are then skipped), even if the
+      # run is cancelled afterwards. Otherwise, when the build never started or a cancellation
+      # interrupted it, this step is skipped, which every reader treats as the former `cancelled`.
       - name: Combine the sandboxed phase outcomes
         id: build
-        if: ${{ !cancelled() && steps.sandbox_build.outcome != 'skipped' }}
+        if: >-
+          ${{ always() && (contains(format('{0} {1} {2} {3} {4} {5}', steps.sandbox_build.outcome, steps.sandbox_audits.outcome, steps.sandbox_module_system.outcome, steps.sandbox_lint_env.outcome, steps.sandbox_lint_style.outcome, steps.sandbox_finish.outcome), 'failure') ||
+          (steps.sandbox_build.outcome == 'success' && steps.sandbox_audits.outcome == 'success' && steps.sandbox_module_system.outcome == 'success' && steps.sandbox_lint_env.outcome == 'success' && steps.sandbox_lint_style.outcome == 'success' && steps.sandbox_finish.outcome == 'success')) }}
         env:
           OUTCOMES: ${{ steps.sandbox_build.outcome }} ${{ steps.sandbox_audits.outcome }} ${{ steps.sandbox_module_system.outcome }} ${{ steps.sandbox_lint_env.outcome }} ${{ steps.sandbox_lint_style.outcome }} ${{ steps.sandbox_finish.outcome }}
         run: |
