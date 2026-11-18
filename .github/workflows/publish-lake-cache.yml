@@ -20,6 +20,11 @@ on:
         type: string
         default: '"ubuntu-24.04"'
         description: 'Trusted caller-selected JSON runner labels; never read from candidate data.'
+      fleet_routing: {type: boolean, default: false}
+      control_runner:
+        type: string
+        default: '"ubuntu-24.04"'
+        description: 'With fleet_routing, JSON runs-on for bors staging publication.'
       revision:
         description: Immutable TauCeti revision whose output map is being published
         required: true
@@ -53,7 +58,9 @@ jobs:
   publish:
     # A NEW ephemeral runner for this job, separate from the candidate sandbox.
     # Direct labels request no privileged container, cache volume, git mirror or tool cache.
-    runs-on: ${{ fromJSON(inputs.source_candidate_enabled && inputs.source_candidate_control_runner || '"ubuntu-24.04"') }}
+    # Staging uses the caller's reserved disposable control capacity when fleet_routing is on;
+    # other publishers retain their cloud route.
+    runs-on: ${{ inputs.source_candidate_enabled && fromJSON(inputs.source_candidate_control_runner) || inputs.fleet_routing && (github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging') && fromJSON(inputs.control_runner) || 'ubuntu-24.04' }}
     timeout-minutes: 15
     outputs:
       published: ${{ steps.result.outputs.published }}
@@ -178,7 +185,20 @@ jobs:
           ./elan-init -y --default-toolchain none
           rm -f elan.tar.gz elan-init
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
-          "$HOME/.elan/bin/elan" toolchain install "$TOOLCHAIN"
+          # Retry the identical official release after transient download failures.
+          # Exhaustion stays fatal; later validation/publication must not run.
+          for toolchain_attempt in 1 2 3; do
+            if "$HOME/.elan/bin/elan" toolchain install "$TOOLCHAIN"; then
+              break
+            else
+              toolchain_status=$?
+            fi
+            if [ "$toolchain_attempt" -eq 3 ]; then
+              exit "$toolchain_status"
+            fi
+            echo "::warning::official toolchain install failed; retry $toolchain_attempt/3"
+            sleep "$((toolchain_attempt * 5))"
+          done
           printf 'name=%s\n' "$TOOLCHAIN" >> "$GITHUB_OUTPUT"
 
       - name: Copy native staging data into the credential boundary

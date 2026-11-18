@@ -181,7 +181,9 @@ def cancelled_before_build(api, repo, run):
     return jobs is not None and all(
         job.get("status") == "completed"
         and (job.get("name", "").startswith("pick-runner /")
-             or job.get("name") == "sandboxed-build" and not job.get("runner_id") and not job.get("runner_name"))
+             or job.get("name", "").split(" / ")[-1] == "pick-runner"
+             or job.get("name", "").split(" / ")[-1] == "sandboxed-build"
+             and not job.get("runner_id") and not job.get("runner_name"))
         for job in jobs
     )
 

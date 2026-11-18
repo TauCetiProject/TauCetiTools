@@ -210,6 +210,8 @@ class Selection(unittest.TestCase):
                          observed=dict(github_busy=0, namespace_busy=0, queued_fleet=[]),
                          github_budget=18, namespace_cap=20, excluded=excluded)
         self.assertEqual(selected["pool"], "chris")
+        failed["name"] = "pr-build / sandboxed-build"
+        self.assertEqual(failed_placements(read, "Test/code", 42, 2), {"a" * 32})
         failed["runner_id"] = 1
         self.assertFalse(failed_placements(read, "Test/code", 42, 2))
 
