@@ -142,7 +142,8 @@ contributor rather than on the project, and treating a backlog there as
 something to fix would point effort at exactly the wrong place. They are
 reported, marked with `*`, and excluded from the bottleneck.
 
-Live depths come from the same pinned merge gate as Auto-merge. The report shows
+Live depths come from the merge gate that the project's checkout-merge-policy action
+checks out (TauCeti reads TauCetiReview main). The report shows
 label disagreements and unknown reads, with actual queue membership and any
 Mathlib reservation separately. A reservation does not remove `ready-to-merge`
 from an otherwise eligible PR, and its presence alone does not explain historical
@@ -173,7 +174,7 @@ To work offline, dump a snapshot once and replay it:
 ```
 scripts/pr_stats_graphs.py --dump-data snap.json --out-dir /tmp/charts
 scripts/pipeline_health.py --data snap.json
-# With the pinned engine at .tauceti-review/runner or TAUCETI_REVIEW_RUNNER:
+# With the merge-policy engine at .tauceti-review/runner or TAUCETI_REVIEW_RUNNER:
 scripts/pipeline_health.py --data snap.json --verify-readiness
 ```
 
