@@ -1054,12 +1054,12 @@ jobs:
           fi
 
       - name: Candidate source shape guard (reject symlinks)
-        id: source_shape
         if: ${{ env.INFRA != '1' }}
         run: |
           test -d pr/${{ inputs.lean_root }} && test ! -L pr/${{ inputs.lean_root }}
           if find pr/${{ inputs.lean_root }} -type l -print | grep -q .; then
             echo "::error::symlinks are not allowed under ${{ inputs.lean_root }}/"
+            echo "SOURCE_REJECTED=1" >> "$GITHUB_ENV"
             exit 1
           fi
           test -f pr/${{ inputs.lean_root }}.lean && test ! -L pr/${{ inputs.lean_root }}.lean
@@ -1094,19 +1094,21 @@ jobs:
           fi
 
       - name: Import-boundary guard (${{ inputs.lean_root }}/ and ${{ inputs.lean_root }}.lean ⊬ roadmap/review)
-        id: import_boundary
         if: ${{ env.INFRA != '1' }}
         run: |
           if grep -rIn -E '^[[:space:]]*import[[:space:]]+(${{ inputs.roadmap_dir }}|TauCetiReview)\b' pr/${{ inputs.lean_root }}/ pr/${{ inputs.lean_root }}.lean; then
             echo "::error::${{ inputs.lean_root }}/ must not import ${{ inputs.roadmap_dir }} or TauCetiReview"
+            echo "SOURCE_REJECTED=1" >> "$GITHUB_ENV"
             exit 1
           fi
 
       - name: Reject option overrides and metaprogramming (allow local macros)
-        id: source_options
         if: ${{ env.INFRA != '1' }}
         run: |
-          python3 gate/scripts/check_source_options.py pr/${{ inputs.lean_root }}/ pr/${{ inputs.lean_root }}.lean
+          # Exit 1 is a rejected source; any other failure means the check did not complete.
+          rc=0; python3 gate/scripts/check_source_options.py pr/${{ inputs.lean_root }}/ pr/${{ inputs.lean_root }}.lean || rc=$?
+          if [ "$rc" = 1 ]; then echo "SOURCE_REJECTED=1" >> "$GITHUB_ENV"; fi
+          exit "$rc"
 
       # The trusted checker requires each source-only PR that declares a new temporary Mathlib shim
       # to record a concrete expiry target in ${{ inputs.lean_root }}'s AI-owned registry. Keeping the registry under
@@ -1178,8 +1180,10 @@ jobs:
         id: import_headers
         if: ${{ env.INFRA != '1' }}
         run: |
-          python3 gate/scripts/check-imports.py --root pr \
-            --lean "$(cd pr && elan which lean)"
+          rc=0; python3 gate/scripts/check-imports.py --root pr \
+            --lean "$(cd pr && elan which lean)" || rc=$?
+          if [ "$rc" = 1 ]; then echo "SOURCE_REJECTED=1" >> "$GITHUB_ENV"; fi
+          exit "$rc"
 
       # Restore only Mathlib's compressed, content-addressed `.ltar` download store from a
       # trusted main publisher. This workflow never writes that GitHub Actions cache. The keys
@@ -1326,15 +1330,18 @@ jobs:
           restore-keys: dot-notation-context-v1-${{ hashFiles('gate/scripts/lean_source.py') }}-
 
       - name: Dot-notation namespace lint (Mathlib type namespaces stay at root)
-        id: dot_notation
         if: ${{ env.INFRA != '1' }}
         run: |
+          rc=0
           python3 gate/scripts/lint-dot-notation.py \
             --context-cache ".ci-dot-notation-context/context.json" \
             --baseline gate/scripts/lint-dot-notation-baseline.txt \
             --mathlib-root pr/.lake/packages/mathlib/Mathlib \
             --source-root pr/${{ inputs.lean_root }} \
-            ${DOT_ONLY_MODULES:+--only-modules "$DOT_ONLY_MODULES" --base-source-root base/${{ inputs.lean_root }}}
+            ${DOT_ONLY_MODULES:+--only-modules "$DOT_ONLY_MODULES" --base-source-root base/${{ inputs.lean_root }}} || rc=$?
+          # Exit 1 reports new findings; 2 means the lint could not run.
+          if [ "$rc" = 1 ]; then echo "SOURCE_REJECTED=1" >> "$GITHUB_ENV"; fi
+          exit "$rc"
 
       # Enable Lake's built-in artifact cache for the build below ONLY when the public read
       # endpoints are configured (repo variables). Until then this is a no-op: LAKE_*
@@ -1769,14 +1776,11 @@ jobs:
           fi
           post_status bump-guard "$bg_state" "$bg_desc"
 
-          # A guard that rejects the candidate's own sources before the build is a source
-          # failure: the build is skipped, but the verdict is decided and repairable.
+          # A guard that rejected the candidate's own sources before the build (SOURCE_REJECTED,
+          # set only on a completed check's rejection) is a decided, repairable source failure
+          # even though the build was skipped. A guard that could not run stays infrastructure.
           source_check=success
-          for outcome in '${{ steps.source_shape.outcome }}' '${{ steps.import_boundary.outcome }}' \
-                         '${{ steps.source_options.outcome }}' '${{ steps.import_headers.outcome }}' \
-                         '${{ steps.dot_notation.outcome }}'; do
-            if [ "$outcome" = failure ]; then source_check=failure; fi
-          done
+          if [ "${SOURCE_REJECTED:-}" = 1 ]; then source_check=failure; fi
 
           # build: the actionable exact-candidate verdict consumed by the autonomous bump/fix-ci
           # workers. It includes the sandboxed build plus shim metadata and exact-expiry failures,
