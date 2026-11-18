@@ -299,6 +299,18 @@ class CandidateContracts(unittest.TestCase):
                     if value not in allowed:
                         with self.assertRaises(ValueError):
                             make()
+                        # The verifier must refuse the same value in a result built elsewhere.
+                        forged = cc.make_result(
+                            req,
+                            config,
+                            ctx,
+                            tested_commit=req.head,
+                            tested_tree=req.tree,
+                            verdicts=dict(self.verdicts, publication=min(allowed)),
+                        )
+                        forged["verdicts"]["publication"] = value
+                        with self.assertRaisesRegex(ValueError, "^invalid result verdict$"):
+                            cc.verify_result(req, config, forged, fresh, run_id=101, attempt=2)
                         continue
                     result = make()
                     conclusion = "success" if value in {"success", "not_required"} else "failure"
