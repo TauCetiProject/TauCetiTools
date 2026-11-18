@@ -152,7 +152,8 @@ jobs:
           LEAN_SYSROOT="$("$LEAN" --print-prefix)"
           export LEAN LEAN_SYSROOT
           export SHADOW_REPORT="$RUNNER_TEMP/shadow-audit-report.json"
-          python3 scripts/test_shadow_audits.py
+          # ShadowWorkflowTest checks TauCeti's shadow-audits.yml, which TauCeti is deleting.
+          python3 scripts/test_shadow_audits.py ShadowRecordsTest ShadowLeanTest
       - name: Fetch Mathlib for the header and lint fixtures
         working-directory: project
         run: lake exe cache get
