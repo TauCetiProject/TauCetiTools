@@ -20,6 +20,7 @@ from .ci_candidate import (
     MAX_MEMBER_MANIFEST_BYTES,
     MAX_MEMBERS,
     MEMBER_MANIFEST_FILE,
+    PR_LANE,
     CandidateRequest,
     ExecutionPolicy,
     artifact_name,
@@ -30,6 +31,7 @@ from .ci_candidate import (
     make_result,
     read_json,
     receipt_artifact_name,
+    requires_publication,
 )
 from .ci_candidate_evidence import EvidenceUnavailable, GitHubEvidence
 from .forge import GITHUB, ForgeError, Forgejo
@@ -177,7 +179,9 @@ def bootstrap(request, policy, context, configuration_path, scripts, *, policy_d
         "TAUCETI_SOURCE_REPOSITORY": json.dumps(policy.source.record(), sort_keys=True),
         "TAUCETI_CI_EXECUTION_REPOSITORY": json.dumps(policy.execution.record(), sort_keys=True),
         "TAUCETI_CACHE_REPOSITORY": policy.execution.repository.name,
-        "CI_SOURCE_REQUIRE_PUBLICATION": "true" if policy.require_publication else "false",
+        "CI_SOURCE_REQUIRE_PUBLICATION": "true" if requires_publication(request, policy) else "false",
+        # The workflow stages cache outputs for batch runs; a per-PR request must not.
+        "CI_SOURCE_STAGE_CACHE": "false" if request.lane == PR_LANE else "true",
         "TAUCETI_UPSTREAMS": json.dumps(project.github_upstreams),
         "TAUCETI_CI_GITHUB_READ_REPOSITORIES": json.dumps(
             sorted(
@@ -490,6 +494,10 @@ def toolchain_pin(request, policy, context, store, *, token=None, client=None):
 def native_lint_policy(request, policy, context, *, client):
     """Collect native metadata before any dependency executable runs on the job."""
     check_workflow_context(request, policy, context)
+    if request.lane == PR_LANE:
+        # Per-PR evidence is shared by every PR at the same head, so it must
+        # not depend on any one PR's branch name or labels.
+        return False
     if len(request.accepted_members) > MAX_MEMBERS or any(
         member.source is not None and member.source != policy.source for member in request.accepted_members
     ):
@@ -633,7 +641,7 @@ def publication_execution(run, builder, publisher):
 
 def publication_verdict(request, policy, context, reader, *, clock=time.monotonic, sleep=time.sleep):
     """Require this attempt's isolated publisher and its exact-map confirmation."""
-    if not policy.require_publication:
+    if not requires_publication(request, policy):
         return "not_required"
     start = clock()
     acquired = False
@@ -767,7 +775,7 @@ def finalize(request, policy, context, evidence, *, reader=None):
         "bump_guard": evidence.get("bump_guard")
         if evidence.get("bump_guard") in {"success", "failure"}
         else "infrastructure",
-        "publication": "infrastructure" if policy.require_publication else "not_required",
+        "publication": "infrastructure" if requires_publication(request, policy) else "not_required",
     }
     if evidence.get("scope_rejected") == "1" and evidence.get("scope") == "failure":
         verdicts["scope"] = "failure"
@@ -776,7 +784,7 @@ def finalize(request, policy, context, evidence, *, reader=None):
     if evidence.get("pins_known") != "1" or evidence.get("bump_complete") != "1":
         verdicts["bump_guard"] = "infrastructure"
     if build == "success":
-        if policy.require_publication and evidence.get("publication_staged") != "true":
+        if requires_publication(request, policy) and evidence.get("publication_staged") != "true":
             verdicts["publication"] = "infrastructure"
         else:
             try:

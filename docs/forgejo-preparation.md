@@ -551,6 +551,14 @@ Mixed requests force full lint if any member originates outside the native
 retention repository; those members never cause cross-origin API requests using
 the native read credential.
 
+A request may carry `"lane":"pr"` to mark a per-PR build rather than a staging
+candidate. Staging requests omit the key, so their records and digests are
+unchanged. The lane is part of the request digest, so a per-PR result can never
+answer a staging request. A per-PR request never stages or publishes cache
+outputs (its `publication` verdict is always `not_required`, whatever the
+policy's `require_publication`), and it always runs full lint, so its evidence
+does not depend on any PR's branch name or labels.
+
 Deploy the pinned harness and execution policy before enabling a mixed producer.
 Do not rewrite frozen in-flight requests into the new policy: retain their original
 policy, configuration, caller and attestation identity through recovery. Legacy
