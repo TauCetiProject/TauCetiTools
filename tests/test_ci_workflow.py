@@ -227,7 +227,9 @@ else:
 
     def test_all_sandboxes_mount_source_objects_for_frozen_and_ordinary_candidates(self):
         steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["sandboxed-build"]["steps"]
-        build = next(s["run"] for s in steps if s.get("id") == "build")
+        phases = {s["run"] for s in steps if "SANDBOX_PHASE" in s.get("env", {})}
+        self.assertEqual(len(phases), 1)
+        (build,) = phases
         probes = [s["run"] for s in steps if "probe_mounts=(" in s.get("run", "")]
         self.assertEqual(len(probes), 2)
         for batch in ("true", "false"):

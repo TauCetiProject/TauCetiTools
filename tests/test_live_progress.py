@@ -21,11 +21,14 @@ class WorkflowIsolation(unittest.TestCase):
         self.assertEqual(job["permissions"]["id-token"], "write")
         caller = yaml.safe_load((ROOT / "tauceti_tools/assets/project/.github/workflows/pr-build.yml").read_text())
         self.assertEqual(caller["permissions"]["id-token"], "write")
-        build = next(s["run"] for s in job["steps"] if s.get("id") == "build")
-        self.assertIn('"${progress_observer[@]}" "${resource_observer[@]}" env -i /usr/bin/bwrap', build)
-        self.assertNotIn("--setenv ACTIONS_ID_TOKEN", build)
-        self.assertIn("--unshare-pid --unshare-net", build)
-        self.assertIn("--remount-ro /", build)
+        phases = [s for s in job["steps"] if "SANDBOX_PHASE" in s.get("env", {})]
+        self.assertEqual(len(phases), 6)
+        for step in phases:
+            build = step["run"]
+            self.assertIn('"${progress_observer[@]}" "${resource_observer[@]}" env -i /usr/bin/bwrap', build)
+            self.assertNotIn("--setenv ACTIONS_ID_TOKEN", build)
+            self.assertIn("--unshare-pid --unshare-net", build)
+            self.assertIn("--remount-ro /", build)
 
     def test_post_build_shim_probe_cannot_reach_the_job_oidc_or_host_processes(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/pr-build.yml").read_text())
