@@ -74,8 +74,9 @@ jobs:
           python -m unittest discover -s tests -p test_local_axioms.py
       - name: Verify bulk restoration and native publication with stock Lake
         run: python tauceti_tools/assets/scripts/test_bulk_unpack_cache.py --integration
-  # Lean, Lake and header fixtures that need a real Mathlib project. TauCeti `main` supplies the
-  # project; every script under test is this revision's, materialized over its `scripts/` by setup.
+  # Script unit tests, and Lean, Lake and header fixtures that need a real Mathlib project. TauCeti
+  # `main` supplies the project; every script under test is this revision's, materialized over its
+  # `scripts/` by setup. tests/project/tauceti/ checks workflows that stay in TauCeti.
   project-fixtures:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -99,6 +100,12 @@ jobs:
         with:
           tools-repository: ${{ github.repository }}
           project-directory: project
+      - name: Checkout the project's pinned merge policy (read-only)
+        uses: ./project/.github/actions/checkout-merge-policy
+      - name: Script unit tests and TauCeti workflow tests
+        env:
+          TAUCETI_REVIEW_RUNNER: ${{ github.workspace }}/.tauceti-review/runner
+        run: python3 tools/tests/project/run_unit_tests.py project
       - name: Install the bundled bubblewrap
         run: |
           set -euo pipefail
