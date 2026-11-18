@@ -1,10 +1,11 @@
 name: Prepare shared Tau Ceti tools
-description: Install pinned shared tools and materialize trusted scripts using base-owned configuration
+description: Run this action's own shared tools and materialize trusted scripts using base-owned configuration
 inputs:
   tools-repository:
     required: true
   tools-ref:
-    required: true
+    description: Ignored and kept for existing callers; the tools are the revision of this action itself
+    required: false
   project-directory:
     default: .
   source-mirror-enabled:
@@ -13,21 +14,16 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      with:
-        repository: ${{ inputs.tools-repository }}
-        ref: ${{ inputs.tools-ref }}
-        path: .tauceti-tools
-        persist-credentials: false
     - shell: bash
       env:
+        ACTION_PATH: ${{ github.action_path }}
         PROJECT_DIRECTORY: ${{ inputs.project-directory }}
         SOURCE_MIRROR_ENABLED: ${{ inputs.source-mirror-enabled }}
         TOOLS_REPOSITORY: ${{ inputs.tools-repository }}
-        TOOLS_REVISION: ${{ inputs.tools-ref }}
       run: |
         set -euo pipefail
-        tools_directory="$GITHUB_WORKSPACE/.tauceti-tools"
+        # The action's own checkout is the shared tools: one revision, resolved once by `uses:`.
+        tools_directory="$(cd "$ACTION_PATH/../../.." && pwd)"
         project_directory="$GITHUB_WORKSPACE/$PROJECT_DIRECTORY"
         # Helper checkouts must never be swept into a caller's generated commit.
         if git -C "$project_directory" rev-parse --git-dir >/dev/null 2>&1; then
@@ -35,13 +31,12 @@ runs:
         fi
         export PYTHONPATH="$tools_directory${PYTHONPATH:+:$PYTHONPATH}"
         if [ "$SOURCE_MIRROR_ENABLED" = true ]; then
-          test "$(git -C "$tools_directory" rev-parse HEAD)" = "$TOOLS_REVISION"
           python3 -m tauceti_tools.ci_mirror_workflow bootstrap \
             --configuration "$project_directory/tauceti.toml" \
             --policy "$project_directory/.tauceti/ci-source.json" \
             --scripts "$RUNNER_TEMP/tauceti-shared-scripts" --policy-dir "$project_directory/scripts" \
             --github-env "$GITHUB_ENV" --provenance "$RUNNER_TEMP/source-mirror-context.json" \
-            --harness-repository "$TOOLS_REPOSITORY" --harness-sha "$TOOLS_REVISION"
+            --harness-repository "$TOOLS_REPOSITORY"
         elif [ "$SOURCE_MIRROR_ENABLED" = false ]; then
           python3 -m tauceti_tools config environment --conf "$project_directory/tauceti.toml" --github-env "$GITHUB_ENV"
           python3 -m tauceti_tools materialize "$RUNNER_TEMP/tauceti-shared-scripts" --conf "$project_directory/tauceti.toml" --policy-dir "$project_directory/scripts"

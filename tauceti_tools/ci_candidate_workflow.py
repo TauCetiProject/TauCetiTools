@@ -798,6 +798,7 @@ def context_from_environment(env):
         "workflow_ref": "GITHUB_WORKFLOW_REF",
         "harness_repository": "CI_SOURCE_HARNESS_REPOSITORY",
         "harness_sha": "CI_SOURCE_HARNESS_SHA",
+        "harness_ref": "CI_SOURCE_HARNESS_REF",
         "harness_file": "CI_SOURCE_HARNESS_FILE",
     }
     context = {key: env.get(name) for key, name in names.items()}

@@ -379,7 +379,7 @@ elif path.endswith('/actions/runs/9'):
                 'run_started_at': '2026-10-21T00:00:00Z'}
 elif path.endswith('/pulls/42'):
     head, base = os.environ['CURRENT'].split()
-    response = {'head': {'sha': head}, 'base': {'ref': base}}
+    response = {'state': 'open', 'head': {'sha': head}, 'base': {'ref': base}}
 elif '/commits/' in path and '/statuses?' in path:
     response = []
 else:

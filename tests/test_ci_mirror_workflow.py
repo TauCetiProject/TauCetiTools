@@ -57,7 +57,6 @@ class MirrorWorkflow(unittest.TestCase):
             "checkout_sha": "b" * 40,
             "workflow_ref": "team/Execution/.github/workflows/ci.yml@refs/heads/main",
             "harness_repository": "team/Tools",
-            "harness_sha": self.policy.harness_revision,
             "run_id": "101",
             "attempt": "2",
         }
@@ -102,7 +101,7 @@ class MirrorWorkflow(unittest.TestCase):
             ("checkout_sha", "c" * 40),
             ("sha", "0" * 40),
             ("workflow_ref", "team/Other/.github/workflows/ci.yml@refs/heads/main"),
-            ("harness_sha", "main"),
+            ("harness_repository", "fork/Tools"),
             ("event_name", "repository_dispatch"),
             ("run_id", "0"),
             ("attempt", ""),
@@ -236,8 +235,11 @@ class MirrorWorkflow(unittest.TestCase):
         action = yaml.safe_load((ASSETS.parent.parent / ".github/actions/setup/action.yml").read_text())
         step = next(item for item in action["runs"]["steps"] if item.get("shell") == "bash")
         self.assertEqual(
-            set(step["env"]), {"PROJECT_DIRECTORY", "SOURCE_MIRROR_ENABLED", "TOOLS_REPOSITORY", "TOOLS_REVISION"}
+            set(step["env"]), {"ACTION_PATH", "PROJECT_DIRECTORY", "SOURCE_MIRROR_ENABLED", "TOOLS_REPOSITORY"}
         )
+        self.assertEqual(step["env"]["ACTION_PATH"], "${{ github.action_path }}")
+        self.assertFalse(action["inputs"]["tools-ref"]["required"])
+        self.assertFalse(any("actions/checkout" in item.get("uses", "") for item in action["runs"]["steps"]))
         self.assertEqual(action["inputs"]["source-mirror-enabled"]["default"], "false")
         subprocess.run(["bash", "-n"], input=step["run"], text=True, check=True)
 
@@ -291,13 +293,13 @@ class MirrorWorkflow(unittest.TestCase):
             for path in paths:
                 text = Path(path).read_text()
                 self.assertIn("source-mirror-enabled: true", text, path)
-                self.assertIn("team/Tools/.github/actions/setup@" + self.policy.harness_revision, text, path)
+                self.assertIn("team/Tools/.github/actions/setup@main", text, path)
                 self.assertNotIn("__TOOLS_", text)
                 self.assertNotIn("__SOURCE_MIRROR", text)
             ci = (Path(directory) / ".github/workflows/ci.yml").read_text()
             self.assertIn("publication-required: true", ci)
             self.assertIn(
-                "uses: team/Tools/.github/workflows/publish-lake-cache.yml@" + self.policy.harness_revision, ci
+                "uses: team/Tools/.github/workflows/publish-lake-cache.yml@main", ci
             )
             self.assertNotIn("uses: ./.github/workflows/publish-lake-cache.yml", ci)
             pages = yaml.safe_load((Path(directory) / ".github/workflows/pages.yml").read_text())

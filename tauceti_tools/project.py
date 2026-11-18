@@ -428,8 +428,11 @@ def _validate(raw: dict, source: str) -> Project:
         if not isinstance(value, dict):
             raise ConfigError(f"tools.{name} must have repo and ref fields")
         repository(value.get("repo", ""), f"tools.{name}.repo")
+        # [tools.tools] may follow TauCetiTools' protected main branch (TauCeti does); other tools are pinned.
+        if name == "tools" and value.get("ref") == "main":
+            continue
         if not isinstance(value.get("ref"), str) or not REF_RE.fullmatch(value["ref"]):
-            raise ConfigError(f"tools.{name}.ref must be a full immutable 40-character commit SHA. Run gh api repos/{value['repo']}/commits/HEAD --jq .sha and put the returned SHA in ref under [tools.{name}].")
+            raise ConfigError(f"tools.{name}.ref must be a full immutable 40-character commit SHA{' or main' if name == 'tools' else ''}. Run gh api repos/{value['repo']}/commits/HEAD --jq .sha and put the returned SHA in ref under [tools.{name}].")
     review = _table(raw, "review")
     if "rubrics" in review and (
         not isinstance(review["rubrics"], list)

@@ -145,11 +145,17 @@ class ProjectTests(unittest.TestCase):
         text = initial_configuration("one/Project", "human")
         for bad in (
             text.replace('active_dir = "ProjectRoadmap"', 'active_dir = "../other"'),
-            text + '\n[tools.tools]\nrepo="one/Tools"\nref="main"\n',
+            text + '\n[tools.tools]\nrepo="one/Tools"\nref="develop"\n',
+            text + '\n[tools.tools]\nrepo="one/Tools"\nref="refs/heads/main"\n',
+            text + '\n[tools.review]\nrepo="one/Review"\nref="main"\n',
+            text + '\n[tools.progress]\nrepo="one/Progress"\nref="main"\n',
             text.replace('roots = ["Project"]', 'roots = ["$(env)"]'),
         ):
             with self.assertRaises(ConfigError):
                 parse(bad.encode())
+        # Only TauCetiTools may follow its protected main branch.
+        project = parse((text + '\n[tools.tools]\nrepo="one/Tools"\nref="main"\n').encode())
+        self.assertEqual(project.tool("tools")["ref"], "main")
 
     def test_inaccessible_repository_has_no_false_absence_or_implicit_creation(self):
         class Unavailable:

@@ -51,7 +51,6 @@ def bootstrap(policy, configuration, context, scripts, *, policy_dir=None, clien
         or context.get("repository_id") != str(policy.execution.native_id)
         or context.get("ref") != "refs/heads/" + policy.execution_branch
         or context.get("harness_repository") != policy.harness.repository.name
-        or context.get("harness_sha") != policy.harness_revision
     ):
         raise ValueError("mirror build context differs from its approved source/execution/harness")
     revision = context.get("sha")
@@ -147,7 +146,6 @@ def bootstrap(policy, configuration, context, scripts, *, policy_dir=None, clien
         "policy_digest": policy.digest,
         "configuration_digest": policy.config_digest,
         "harness": policy.harness.record(),
-        "harness_revision": policy.harness_revision,
         "workflow_ref": caller,
         "run_id": int(context["run_id"]),
         "attempt": int(context["attempt"]),
@@ -188,7 +186,7 @@ def write_workflows(policy, configuration, destination):
         raw = add_setup_steps(raw, source_mirror=True)
         text = render(raw, project, source_ci=True)
         text = text.replace("__TOOLS_REPO__", policy.harness.repository.name).replace(
-            "__TOOLS_REF__", policy.harness_revision
+            "__TOOLS_REF__", cc.HARNESS_BRANCH
         )
         text = pin_actions(text)
         target = directory / name
@@ -208,7 +206,6 @@ def main(argv=None):
     parser.add_argument("--github-env", type=Path)
     parser.add_argument("--provenance", type=Path)
     parser.add_argument("--harness-repository")
-    parser.add_argument("--harness-sha")
     args = parser.parse_args(argv)
     configuration = args.configuration.read_bytes()
     policy = cc.ExecutionPolicy.parse(cc.read_json(args.policy.read_bytes()), configuration=configuration)
@@ -219,9 +216,9 @@ def main(argv=None):
         return 0
     if any(
         value is None
-        for value in [args.scripts, args.github_env, args.provenance, args.harness_repository, args.harness_sha]
+        for value in [args.scripts, args.github_env, args.provenance, args.harness_repository]
     ):
-        parser.error("bootstrap requires scripts, github-env, provenance, harness-repository and harness-sha")
+        parser.error("bootstrap requires scripts, github-env, provenance and harness-repository")
     names = {
         "event_name": "GITHUB_EVENT_NAME",
         "repository": "GITHUB_REPOSITORY",
@@ -254,7 +251,7 @@ def main(argv=None):
         timeout=30,
         text=True,
     ).strip()
-    context.update(harness_repository=args.harness_repository, harness_sha=args.harness_sha)
+    context.update(harness_repository=args.harness_repository)
     env, provenance = bootstrap(policy, configuration, context, args.scripts, policy_dir=args.policy_dir)
     lines = []
     for name, value in env.items():
