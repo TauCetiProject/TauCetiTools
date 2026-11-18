@@ -288,6 +288,23 @@ class BumpTransportTests(unittest.TestCase):
         self.assertIsNone(passed)
         self.assertIn('inputs unavailable', output)
 
+    def test_caller_transport_deferral_propagates_instead_of_unknown(self):
+        class CallerDeferred(RuntimeError):
+            def __init__(self):
+                super().__init__('read deferred')
+                self.retry_at = 1234.0
+
+        self.error = CallerDeferred()
+        with self.assertRaises(CallerDeferred):
+            self.check()
+
+        class Early:
+            def request(api, method, path):
+                raise CallerDeferred()
+
+        with self.assertRaises(CallerDeferred):
+            self.check(Early())
+
     def test_missing_upstream_fields_remain_unknown(self):
         self.malformed = True
         passed, output = self.check()
