@@ -74,6 +74,106 @@ jobs:
           python -m unittest discover -s tests -p test_local_axioms.py
       - name: Verify bulk restoration and native publication with stock Lake
         run: python tauceti_tools/assets/scripts/test_bulk_unpack_cache.py --integration
+  # Script unit tests, and Lean, Lake and header fixtures that need a real Mathlib project. TauCeti
+  # `main` supplies the project; every script under test is this revision's, materialized over its
+  # `scripts/` by setup. tests/project/tauceti/ checks workflows that stay in TauCeti.
+  project-fixtures:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BWRAP_VER: 0.9.0-1build1
+      BWRAP_DEB_SHA256: dde30d1f24da50446d647ed504ec8dc5a714f171974d054c70a589b48ba38b48
+      BWRAP_SHA256: 3e33f8255e1411ada346db27028c25ef5ba4fa3327754a2321ea4c8732a3bc10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tools
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: TauCetiProject/TauCeti
+          ref: main
+          path: project
+          persist-credentials: false
+      - name: Materialize this revision's scripts into the project
+        uses: ./tools/.github/actions/setup
+        with:
+          tools-repository: ${{ github.repository }}
+          project-directory: project
+      - name: Checkout the project's pinned merge policy (read-only)
+        uses: ./project/.github/actions/checkout-merge-policy
+      - name: Script unit tests and TauCeti workflow tests
+        env:
+          TAUCETI_REVIEW_RUNNER: ${{ github.workspace }}/.tauceti-review/runner
+        run: python3 tools/tests/project/run_unit_tests.py project
+      - name: Install the bundled bubblewrap
+        run: |
+          set -euo pipefail
+          deb="bubblewrap_${BWRAP_VER}_amd64.deb"
+          cp "$RUNNER_TEMP/tauceti-shared-scripts/vendor/$deb" bwrap.deb
+          echo "${BWRAP_DEB_SHA256}  bwrap.deb" | sha256sum -c -
+          sudo dpkg -i bwrap.deb >/dev/null
+          echo "${BWRAP_SHA256}  /usr/bin/bwrap" | sha256sum -c -
+          rm -f bwrap.deb
+          if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = 1 ]; then
+            printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' \
+              'profile bwrap /usr/bin/bwrap flags=(unconfined) {' '  userns,' '}' \
+              | sudo tee /etc/apparmor.d/bwrap >/dev/null
+            sudo apparmor_parser -r /etc/apparmor.d/bwrap
+          fi
+          /usr/bin/bwrap --version
+      - name: Install pinned elan and the project toolchain
+        env:
+          ELAN_SHA256: df0b2b3a439961ffcbb3985214365ffe40f49bc871df04dff268c7d8e21ca8b2
+          ELAN_VER: v4.2.3
+        run: |
+          if ! curl --fail --retry 3 --retry-all-errors --connect-timeout 15 --max-time 60 -sSL -H "Accept: application/octet-stream" \
+            "https://github.com/leanprover/elan/releases/download/${ELAN_VER}/elan-x86_64-unknown-linux-gnu.tar.gz?download=1" -o elan.tar.gz; then
+            curl --fail --retry 3 --retry-all-errors --connect-timeout 15 --max-time 60 -sSL -H "Accept: application/octet-stream" \
+              "https://api.github.com/repos/leanprover/elan/releases/assets/441516216" -o elan.tar.gz
+          fi
+          echo "${ELAN_SHA256}  elan.tar.gz" | sha256sum -c -
+          tar -xzf elan.tar.gz elan-init
+          ./elan-init -y --default-toolchain none
+          rm -f elan.tar.gz elan-init
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.elan/bin:$PATH"
+          elan toolchain install "$(cat project/lean-toolchain)"
+      - name: Import, checkout and Lake publication fixtures
+        working-directory: project
+        run: |
+          export ELAN_TOOLCHAIN="$(cat lean-toolchain)"
+          LEAN="$(elan which lean)"
+          LEAN_SYSROOT="$("$LEAN" --print-prefix)"
+          export LEAN LEAN_SYSROOT
+          # An explicit native test must not silently skip for absent tools.
+          command -v bwrap
+          test -x "$LEAN_SYSROOT/bin/lake"
+          python3 scripts/test_check_imports.py
+          python3 scripts/test_ci_checkout.py --integration
+          python3 scripts/test_lake_cache_publish.py --integration
+      - name: Full versus shadow audit fixtures
+        working-directory: project
+        run: |
+          LEAN="$(elan which lean)"
+          LEAN_SYSROOT="$("$LEAN" --print-prefix)"
+          export LEAN LEAN_SYSROOT
+          export SHADOW_REPORT="$RUNNER_TEMP/shadow-audit-report.json"
+          # ShadowWorkflowTest checks TauCeti's shadow-audits.yml, which TauCeti is deleting.
+          python3 scripts/test_shadow_audits.py ShadowRecordsTest ShadowLeanTest
+      - name: Fetch Mathlib for the header and lint fixtures
+        working-directory: project
+        run: lake exe cache get
+      - name: Header audit equivalence tests
+        working-directory: project
+        run: lake env python3 scripts/test_header_style.py
+      - name: Downstream unused-argument lint regression
+        working-directory: project
+        run: |
+          out="$RUNNER_TEMP/downstream-lint-driver"
+          bash scripts/build-lint-driver.sh . scripts/LintEnvDriver.lean "$out"
+          python3 scripts/test_downstream_unused_arguments.py . "$out/lint-env-driver"
+
   github-state:
     runs-on: ubuntu-24.04
     steps:
