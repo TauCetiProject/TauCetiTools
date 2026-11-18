@@ -3,9 +3,8 @@
 Run with: python3 scripts/test_bwrap_pin.py
 
 pr-build.yml sandboxes untrusted PR sources; pr-profile.yml measures them; nightly-verify.yml
-sandboxes a cache-restored build that imports the artifacts it is judging; shadow-audits.yml
-runs isolated research comparisons. The dependency warmer runs only a trusted synthetic fixture,
-using a separate probe policy. All five pin the
+sandboxes a cache-restored build that imports the artifacts it is judging. The dependency warmer
+runs only a trusted synthetic fixture, using a separate probe policy. All four pin the
 bubblewrap package, its .deb's SHA-256 and the SHA-256 of the binary that .deb installs, and
 any of them would be weakened by trusting a different binary than the others.
 
@@ -35,7 +34,6 @@ WORKFLOWS = (
     ROOT / ".github/workflows/pr-build.yml",
     ROOT / ".github/workflows/pr-profile.yml",
     ROOT / ".github/workflows/nightly-verify.yml",
-    ROOT / ".github/workflows/shadow-audits.yml",
     ROOT / ".github/workflows/warm-dependencies.yml",
 )
 # Only these workflows run candidate code. The warmer's source-free project and
@@ -122,9 +120,6 @@ class BwrapPin(unittest.TestCase):
         "pr-build.yml": ("pr",),
         "pr-profile.yml": ("base", "head"),
         "nightly-verify.yml": ("reference",),
-        # The workflow's inline probe mounts only system paths. The research harness
-        # binds resolved artifact roots read-only; it has no writable .lake overlay.
-        "shadow-audits.yml": (),
     }
 
     # Any bwrap invocation must look exactly like this. Anything else is either an unsafe
@@ -208,9 +203,7 @@ class BwrapPin(unittest.TestCase):
                          for s in job.get("steps", [])]
                 install = [i for i, n in enumerate(names) if "Install bubblewrap" in n]
                 sandboxed = [i for i, n in enumerate(names)
-                             if "under bwrap" in n or "heartbeats" in n or "under bwrap," in n
-                             or n in ("Full versus shadow acceptance fixtures",
-                                      "Compare full-library cold and warm shadow passes")]
+                             if "under bwrap" in n or "heartbeats" in n]
                 self.assertTrue(install, "no bubblewrap install step")
                 for s in sandboxed:
                     self.assertTrue(any(i < s for i in install),
