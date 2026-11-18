@@ -53,6 +53,14 @@ requires a separate operator grant.
 A [disposable project](examples/disposable-project) supplies separate content and roadmap trees
 with real immutable tool and Mathlib pins. It does not create repositories or enroll hosted services.
 
+## If `main` breaks CI
+
+Projects that call these workflows and actions at `@main` (TauCeti does) run every new commit on
+`main` immediately. If a commit breaks their CI, an administrator reverts it directly on `main`
+(`git revert <commit> && git push`); branch protection does not bind administrators. The revert
+takes effect on the next CI run, and on the next deploy for services that install TauCetiTools
+(the merge queue, repair workers and fleet hosts). Fix the change and re-land it through a normal PR.
+
 ## CI reporting collection
 
 Routine reporting uses job webhooks and bounded service-side recovery. The site
