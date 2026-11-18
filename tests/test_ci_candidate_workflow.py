@@ -76,6 +76,7 @@ class Workflow(unittest.TestCase):
             "size_complete": "1",
             "infrastructure": "",
             "build_outcome": "success",
+            "source_check": "success",
             "job_result": "success",
         }
 
@@ -522,6 +523,16 @@ class Workflow(unittest.TestCase):
         )
         self.assertEqual(result["verdicts"]["scope"], "failure")
         self.assertEqual(cc.classify_verdicts(result["verdicts"]), "policy_failure")
+
+    def test_failed_pre_build_source_check_is_a_source_failure(self):
+        failed = dict(self.evidence, build_state="failure", job_result="failure", build_outcome="skipped")
+        result = cw.finalize(self.request, self.policy, self.context, dict(failed, source_check="failure"))
+        self.assertEqual(result["verdicts"]["build"], "failure")
+        self.assertEqual(cc.classify_verdicts(result["verdicts"]), "source_failure")
+        for evidence in (failed, dict(failed, source_check="failure", infrastructure="1")):
+            with self.subTest(evidence=evidence):
+                result = cw.finalize(self.request, self.policy, self.context, evidence)
+                self.assertEqual(cc.classify_verdicts(result["verdicts"]), "infrastructure")
 
     def test_explicitly_unrequired_publication_remains_bound_to_policy(self):
         config = replace(self.policy, require_publication=False)

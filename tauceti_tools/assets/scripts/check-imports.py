@@ -47,9 +47,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--driver", type=Path,
                         default=Path(__file__).resolve().with_name("ImportHeaders.lean"))
     args = parser.parse_args(argv)
+    root = args.root.resolve()
     try:
-        root = args.root.resolve()
         sources = inventory(root)
+    except ValueError as error:  # A symlinked or missing source is the candidate's own problem.
+        print(f"check-imports: {error}")
+        return 1
+    except OSError as error:
+        print(f"check-imports: {error}")
+        return 2
+    try:
         result = subprocess.run([args.lean, "--run", str(args.driver.resolve())],
                                 input=json.dumps(sources), capture_output=True,
                                 text=True, check=False,
@@ -82,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except (OSError, ValueError, TypeError) as error:
         print(f"check-imports: {error}")
-        return 1
+        return 2  # The check did not complete; 1 is reserved for header problems.
 
 
 if __name__ == "__main__":

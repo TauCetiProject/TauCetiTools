@@ -253,7 +253,7 @@ theorem example' : True := trivial
                 result = subprocess.CompletedProcess([], 0, stdout, "")
                 with patch.object(check.subprocess, "run", return_value=result):
                     status, output = self.run_check({})
-                self.assertEqual(status, 1, output)
+                self.assertEqual(status, 2, output)
 
     def test_a_driver_panic_cannot_return_a_clean_report(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -267,7 +267,7 @@ theorem example' : True := trivial
             with contextlib.redirect_stdout(io.StringIO()) as output:
                 status = check.main(["--root", str(root), "--lean", LEAN,
                                      "--driver", str(driver)])
-            self.assertEqual(status, 1, output.getvalue())
+            self.assertEqual(status, 2, output.getvalue())
             self.assertIn("driver exited", output.getvalue())
             self.assertIn("fixture", output.getvalue())
 

@@ -743,6 +743,7 @@ def finalize(request, policy, context, evidence, *, reader=None):
         "size_complete",
         "infrastructure",
         "build_outcome",
+        "source_check",
     }:
         raise ValueError("invalid trusted build evidence")
     tested_commit, tested_tree = evidence.get("tested_commit"), evidence.get("tested_tree")
@@ -750,13 +751,18 @@ def finalize(request, policy, context, evidence, *, reader=None):
     if not identity:
         tested_commit = tested_tree = None
     state = evidence.get("build_state")
+    # A pre-build source check that rejected the tested sources decides the build as
+    # failed even though the build step itself was skipped.
+    decided = evidence.get("build_outcome") in {"success", "failure"} or (
+        evidence.get("source_check") == "failure" and state == "failure"
+    )
     build = (
         state
         if identity
         and state in {"success", "failure"}
         and evidence.get("job_result") in {"success", "failure"}
         and evidence.get("infrastructure") != "1"
-        and evidence.get("build_outcome") in {"success", "failure"}
+        and decided
         else "infrastructure"
     )
     if build == "success" and evidence.get("job_result") != "success":

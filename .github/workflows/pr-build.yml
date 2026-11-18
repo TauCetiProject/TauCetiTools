@@ -273,6 +273,7 @@ jobs:
       source-size-complete: ${{ steps.report.outputs.source-size-complete }}
       source-infrastructure: ${{ steps.report.outputs.source-infrastructure }}
       source-build-outcome: ${{ steps.build.outcome }}
+      source-check: ${{ steps.report.outputs.source-check }}
       tested-sha: ${{ steps.integration.outputs.tested_sha }}
       tested-tree: ${{ steps.integration.outputs.tested_tree }}
     env:
@@ -1058,6 +1059,7 @@ jobs:
           test -d pr/${{ inputs.lean_root }} && test ! -L pr/${{ inputs.lean_root }}
           if find pr/${{ inputs.lean_root }} -type l -print | grep -q .; then
             echo "::error::symlinks are not allowed under ${{ inputs.lean_root }}/"
+            echo "SOURCE_REJECTED=1" >> "$GITHUB_ENV"
             exit 1
           fi
           test -f pr/${{ inputs.lean_root }}.lean && test ! -L pr/${{ inputs.lean_root }}.lean
@@ -1096,13 +1098,17 @@ jobs:
         run: |
           if grep -rIn -E '^[[:space:]]*import[[:space:]]+(${{ inputs.roadmap_dir }}|TauCetiReview)\b' pr/${{ inputs.lean_root }}/ pr/${{ inputs.lean_root }}.lean; then
             echo "::error::${{ inputs.lean_root }}/ must not import ${{ inputs.roadmap_dir }} or TauCetiReview"
+            echo "SOURCE_REJECTED=1" >> "$GITHUB_ENV"
             exit 1
           fi
 
       - name: Reject option overrides and metaprogramming (allow local macros)
         if: ${{ env.INFRA != '1' }}
         run: |
-          python3 gate/scripts/check_source_options.py pr/${{ inputs.lean_root }}/ pr/${{ inputs.lean_root }}.lean
+          # Exit 1 is a rejected source; any other failure means the check did not complete.
+          rc=0; python3 gate/scripts/check_source_options.py pr/${{ inputs.lean_root }}/ pr/${{ inputs.lean_root }}.lean || rc=$?
+          if [ "$rc" = 1 ]; then echo "SOURCE_REJECTED=1" >> "$GITHUB_ENV"; fi
+          exit "$rc"
 
       # The trusted checker requires each source-only PR that declares a new temporary Mathlib shim
       # to record a concrete expiry target in ${{ inputs.lean_root }}'s AI-owned registry. Keeping the registry under
@@ -1174,8 +1180,10 @@ jobs:
         id: import_headers
         if: ${{ env.INFRA != '1' }}
         run: |
-          python3 gate/scripts/check-imports.py --root pr \
-            --lean "$(cd pr && elan which lean)"
+          rc=0; python3 gate/scripts/check-imports.py --root pr \
+            --lean "$(cd pr && elan which lean)" || rc=$?
+          if [ "$rc" = 1 ]; then echo "SOURCE_REJECTED=1" >> "$GITHUB_ENV"; fi
+          exit "$rc"
 
       # Restore only Mathlib's compressed, content-addressed `.ltar` download store from a
       # trusted main publisher. This workflow never writes that GitHub Actions cache. The keys
@@ -1324,12 +1332,16 @@ jobs:
       - name: Dot-notation namespace lint (Mathlib type namespaces stay at root)
         if: ${{ env.INFRA != '1' }}
         run: |
+          rc=0
           python3 gate/scripts/lint-dot-notation.py \
             --context-cache ".ci-dot-notation-context/context.json" \
             --baseline gate/scripts/lint-dot-notation-baseline.txt \
             --mathlib-root pr/.lake/packages/mathlib/Mathlib \
             --source-root pr/${{ inputs.lean_root }} \
-            ${DOT_ONLY_MODULES:+--only-modules "$DOT_ONLY_MODULES" --base-source-root base/${{ inputs.lean_root }}}
+            ${DOT_ONLY_MODULES:+--only-modules "$DOT_ONLY_MODULES" --base-source-root base/${{ inputs.lean_root }}} || rc=$?
+          # Exit 1 reports new findings; 2 means the lint could not run.
+          if [ "$rc" = 1 ]; then echo "SOURCE_REJECTED=1" >> "$GITHUB_ENV"; fi
+          exit "$rc"
 
       # Enable Lake's built-in artifact cache for the build below ONLY when the public read
       # endpoints are configured (repo variables). Until then this is a no-op: LAKE_*
@@ -1764,6 +1776,12 @@ jobs:
           fi
           post_status bump-guard "$bg_state" "$bg_desc"
 
+          # A guard that rejected the candidate's own sources before the build (SOURCE_REJECTED,
+          # set only on a completed check's rejection) is a decided, repairable source failure
+          # even though the build was skipped. A guard that could not run stays infrastructure.
+          source_check=success
+          if [ "${SOURCE_REJECTED:-}" = 1 ]; then source_check=failure; fi
+
           # build: the actionable exact-candidate verdict consumed by the autonomous bump/fix-ci
           # workers. It includes the sandboxed build plus shim metadata and exact-expiry failures,
           # but never a merge-policy verdict. An out-of-scope scripts/.github change still receives
@@ -1785,6 +1803,8 @@ jobs:
             state=failure; desc="build not run — tested H/B/T identity missing or invalid"
           elif [ "${{ steps.import_headers.outcome }}" = "failure" ]; then
             state=failure; desc="import header preflight failed — see importing-file/header diagnostics"
+          elif [ "$source_check" = failure ]; then
+            state=failure; desc="build not run: a pre-build source check failed; see the failed guard step"
           elif [ "${{ steps.build.outcome }}" = "failure" ]; then
             state=failure; desc="sandboxed build, audit, or simp-NF lint failed"
           elif { [ -n "${{ env.SHIM_COVERAGE_RC }}" ] \
@@ -1877,6 +1897,7 @@ jobs:
               fi
               echo "source-size-complete=${SOURCE_SIZE_POLICY_COMPLETE:-}"
               echo "source-infrastructure=${INFRA:-}"
+              echo "source-check=$source_check"
             } >> "$GITHUB_OUTPUT"
           fi
 
@@ -2162,6 +2183,7 @@ jobs:
           SOURCE_SIZE_COMPLETE: ${{ needs.sandboxed-build.outputs.source-size-complete }}
           SOURCE_INFRASTRUCTURE: ${{ needs.sandboxed-build.outputs.source-infrastructure }}
           SOURCE_BUILD_OUTCOME: ${{ needs.sandboxed-build.outputs.source-build-outcome }}
+          SOURCE_CHECK: ${{ needs.sandboxed-build.outputs.source-check }}
           CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
           CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
           CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
@@ -2179,7 +2201,7 @@ jobs:
                     "pins_known": "SOURCE_PINS_KNOWN",
                     "bump_complete": "SOURCE_BUMP_COMPLETE",
                     "size_complete": "SOURCE_SIZE_COMPLETE", "infrastructure": "SOURCE_INFRASTRUCTURE",
-                    "build_outcome": "SOURCE_BUILD_OUTCOME"}
+                    "build_outcome": "SOURCE_BUILD_OUTCOME", "source_check": "SOURCE_CHECK"}
           value = {key: os.environ.get(name) for key, name in fields.items()}
           (Path(os.environ["RUNNER_TEMP"]) / "source-build-evidence.json").write_text(json.dumps(value))
           PYTHON

@@ -471,6 +471,11 @@ end TauCeti
                 self.assertEqual(lint.main(args), 0)
             self.assertIn("1 new", stdout.getvalue())
             self.assertIn("1 ratchetable", stdout.getvalue())
+            self.assertIn("\nTauCeti/Test.lean:3:0: error: dot-notation namespace lint: "
+                          "TauCeti.Foo.bar puts", stdout.getvalue())
+            with contextlib.redirect_stderr(io.StringIO()):
+                missing = ["--only-modules", str(root / "missing.txt")]
+                self.assertEqual(lint.main([*args, *missing]), 2)
 
 
 class ParsingContextTests(unittest.TestCase):
