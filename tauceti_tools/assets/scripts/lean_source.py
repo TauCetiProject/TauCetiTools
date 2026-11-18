@@ -1087,6 +1087,14 @@ def main(argv: list[str] | None = None) -> int:
     print("result sort such as `: Type _` or `: Prop`.\n")
     for finding in new:
         print(f"  {finding.render()}")
+    # One compiler-style line per finding, relative to the project root, so the queue's
+    # log reader hands each one to a repair task with its location and the remedy.
+    for finding in new:
+        path = finding.path.relative_to(args.source_root.parent).as_posix()
+        print(f"{path}:{finding.line}:0: error: dot-notation namespace lint: {finding.declaration} "
+              "puts a Mathlib type's namespace inside `namespace TauCeti`; move the declaration "
+              "to the type's root namespace, or give a Tau Ceti type's definition an explicit "
+              "result sort")
     return 1
 
 

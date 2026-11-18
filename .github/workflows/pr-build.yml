@@ -273,6 +273,7 @@ jobs:
       source-size-complete: ${{ steps.report.outputs.source-size-complete }}
       source-infrastructure: ${{ steps.report.outputs.source-infrastructure }}
       source-build-outcome: ${{ steps.build.outcome }}
+      source-check: ${{ steps.report.outputs.source-check }}
       tested-sha: ${{ steps.integration.outputs.tested_sha }}
       tested-tree: ${{ steps.integration.outputs.tested_tree }}
     env:
@@ -1053,6 +1054,7 @@ jobs:
           fi
 
       - name: Candidate source shape guard (reject symlinks)
+        id: source_shape
         if: ${{ env.INFRA != '1' }}
         run: |
           test -d pr/${{ inputs.lean_root }} && test ! -L pr/${{ inputs.lean_root }}
@@ -1092,6 +1094,7 @@ jobs:
           fi
 
       - name: Import-boundary guard (${{ inputs.lean_root }}/ and ${{ inputs.lean_root }}.lean ⊬ roadmap/review)
+        id: import_boundary
         if: ${{ env.INFRA != '1' }}
         run: |
           if grep -rIn -E '^[[:space:]]*import[[:space:]]+(${{ inputs.roadmap_dir }}|TauCetiReview)\b' pr/${{ inputs.lean_root }}/ pr/${{ inputs.lean_root }}.lean; then
@@ -1100,6 +1103,7 @@ jobs:
           fi
 
       - name: Reject option overrides and metaprogramming (allow local macros)
+        id: source_options
         if: ${{ env.INFRA != '1' }}
         run: |
           python3 gate/scripts/check_source_options.py pr/${{ inputs.lean_root }}/ pr/${{ inputs.lean_root }}.lean
@@ -1322,6 +1326,7 @@ jobs:
           restore-keys: dot-notation-context-v1-${{ hashFiles('gate/scripts/lean_source.py') }}-
 
       - name: Dot-notation namespace lint (Mathlib type namespaces stay at root)
+        id: dot_notation
         if: ${{ env.INFRA != '1' }}
         run: |
           python3 gate/scripts/lint-dot-notation.py \
@@ -1764,6 +1769,15 @@ jobs:
           fi
           post_status bump-guard "$bg_state" "$bg_desc"
 
+          # A guard that rejects the candidate's own sources before the build is a source
+          # failure: the build is skipped, but the verdict is decided and repairable.
+          source_check=success
+          for outcome in '${{ steps.source_shape.outcome }}' '${{ steps.import_boundary.outcome }}' \
+                         '${{ steps.source_options.outcome }}' '${{ steps.import_headers.outcome }}' \
+                         '${{ steps.dot_notation.outcome }}'; do
+            if [ "$outcome" = failure ]; then source_check=failure; fi
+          done
+
           # build: the actionable exact-candidate verdict consumed by the autonomous bump/fix-ci
           # workers. It includes the sandboxed build plus shim metadata and exact-expiry failures,
           # but never a merge-policy verdict. An out-of-scope scripts/.github change still receives
@@ -1785,6 +1799,8 @@ jobs:
             state=failure; desc="build not run — tested H/B/T identity missing or invalid"
           elif [ "${{ steps.import_headers.outcome }}" = "failure" ]; then
             state=failure; desc="import header preflight failed — see importing-file/header diagnostics"
+          elif [ "$source_check" = failure ]; then
+            state=failure; desc="build not run: a pre-build source check failed; see the failed guard step"
           elif [ "${{ steps.build.outcome }}" = "failure" ]; then
             state=failure; desc="sandboxed build, audit, or simp-NF lint failed"
           elif { [ -n "${{ env.SHIM_COVERAGE_RC }}" ] \
@@ -1877,6 +1893,7 @@ jobs:
               fi
               echo "source-size-complete=${SOURCE_SIZE_POLICY_COMPLETE:-}"
               echo "source-infrastructure=${INFRA:-}"
+              echo "source-check=$source_check"
             } >> "$GITHUB_OUTPUT"
           fi
 
@@ -2162,6 +2179,7 @@ jobs:
           SOURCE_SIZE_COMPLETE: ${{ needs.sandboxed-build.outputs.source-size-complete }}
           SOURCE_INFRASTRUCTURE: ${{ needs.sandboxed-build.outputs.source-infrastructure }}
           SOURCE_BUILD_OUTCOME: ${{ needs.sandboxed-build.outputs.source-build-outcome }}
+          SOURCE_CHECK: ${{ needs.sandboxed-build.outputs.source-check }}
           CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
           CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
           CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
@@ -2179,7 +2197,7 @@ jobs:
                     "pins_known": "SOURCE_PINS_KNOWN",
                     "bump_complete": "SOURCE_BUMP_COMPLETE",
                     "size_complete": "SOURCE_SIZE_COMPLETE", "infrastructure": "SOURCE_INFRASTRUCTURE",
-                    "build_outcome": "SOURCE_BUILD_OUTCOME"}
+                    "build_outcome": "SOURCE_BUILD_OUTCOME", "source_check": "SOURCE_CHECK"}
           value = {key: os.environ.get(name) for key, name in fields.items()}
           (Path(os.environ["RUNNER_TEMP"]) / "source-build-evidence.json").write_text(json.dumps(value))
           PYTHON

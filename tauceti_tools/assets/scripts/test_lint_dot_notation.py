@@ -471,6 +471,8 @@ end TauCeti
                 self.assertEqual(lint.main(args), 0)
             self.assertIn("1 new", stdout.getvalue())
             self.assertIn("1 ratchetable", stdout.getvalue())
+            self.assertIn("\nTauCeti/Test.lean:3:0: error: dot-notation namespace lint: "
+                          "TauCeti.Foo.bar puts", stdout.getvalue())
 
 
 class ParsingContextTests(unittest.TestCase):
