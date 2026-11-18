@@ -112,6 +112,10 @@ def check_bump(api, repo, head):
         RuntimeError,
         subprocess.SubprocessError,
     ) as error:
+        # A caller's transport may defer a read with its own exception carrying
+        # retry_at (the queue's paced client does). That is a retry, not missing evidence.
+        if getattr(error, "retry_at", None) is not None:
+            raise
         return None, f"bump-guard inputs unavailable: {type(error).__name__}"
     return result.returncode == 0, result.stdout + result.stderr
 
