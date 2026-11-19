@@ -326,14 +326,16 @@ def _status_field(fields, index):
     return status, fields[index + 1], index + 2
 
 
-def review_size(git, base, head):
+def review_size(git, base, head, *, large_refactor=False):
     """Measure one PR's review size between exact commits from local objects.
 
     Use the merge base as `base`, as GitHub does for a PR. Renames are detected
     at Git's default similarity, so a moved file is one changed file whose lines
     are only its edits, and its destination is not a new file. Binary files
     count as changed files with zero lines, as on GitHub. Unreadable statistics
-    raise ValueError so that every caller fails closed.
+    raise ValueError so that every caller fails closed. `large_refactor` is the caller's
+    verdict from `large_refactor_approved`: it lifts the file and line caps, never the
+    new-file cap.
     """
     git.commit(base)
     git.commit(head)
@@ -367,13 +369,87 @@ def review_size(git, base, head):
         "deletions": deletions,
         "files": len(numstat),
         "pins_changed": pins_changed,
+        "large_refactor": bool(large_refactor),
         "new_lean_files": sorted(new_lean_files),
         # A Lake-pin bump's diff is forced upstream, so only the file cap applies.
-        "too_large": len(numstat) > REVIEW_FILE_CAP or (lines_capped and not pins_changed),
+        # An admin-approved large refactor skips all three caps.
+        "too_large": not large_refactor
+        and (len(numstat) > REVIEW_FILE_CAP or (lines_capped and not pins_changed)),
         "new_files_too_long": sorted(
             (name, lines) for name, lines in new_lean_files if lines > NEW_FILE_LINE_CAP
         ),
     }
+
+
+# A repository admin's `large-refactor` label lifts the three review-size caps for one PR,
+# for a mechanical change that cannot sensibly be split. Every caller of `pr_guards` asks
+# `large_refactor_approved` with its own GitHub read credential.
+LARGE_REFACTOR_LABEL = "large-refactor"
+
+
+def _github_time(value):
+    import datetime as dt
+
+    return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc).timestamp()
+
+
+def large_refactor_approved(read, repo, number, labels, committed_at):
+    """Whether PR `number` of the GitHub repository `repo` is an admin-approved large refactor.
+
+    `read(path)` returns parsed JSON for a GitHub REST GET; `labels` are the PR's current label
+    names; `committed_at` is the head commit's committer time (Unix seconds, from local objects).
+    It holds when the label is present, its latest `labeled` event is by a user who is a
+    repository admin now, that event is later than the head's committer time and no force push
+    followed it. So removing the label ends the exemption, and a push after labelling ends it
+    too unless the pushed commit claims an older committer time. Unreadable evidence raises.
+    """
+    if LARGE_REFACTOR_LABEL not in {str(name).lower() for name in labels}:
+        return False
+    events, page = [], 1
+    while True:
+        rows = read(f"repos/{repo}/issues/{int(number)}/events?per_page=100&page={page}")
+        if not isinstance(rows, list):
+            raise ValueError("unreadable PR events")
+        events += rows
+        if len(rows) < 100:
+            break
+        page += 1
+    labelled = [e for e in events if e.get("event") == "labeled"
+                and str((e.get("label") or {}).get("name", "")).lower() == LARGE_REFACTOR_LABEL]
+    if not labelled:
+        return False
+    latest = max(labelled, key=lambda e: e["id"])
+    if any(e.get("event") == "head_ref_force_pushed" and e["id"] > latest["id"] for e in events):
+        return False
+    if _github_time(latest["created_at"]) <= committed_at:
+        return False
+    actor = latest.get("actor") or {}
+    login, actor_id = actor.get("login"), actor.get("id")
+    if not isinstance(login, str) or not login or type(actor_id) is not int:
+        return False
+    from urllib.parse import quote
+
+    permission = read(f"repos/{repo}/collaborators/{quote(login, safe='')}/permission")
+    if not isinstance(permission, dict):
+        raise ValueError("unreadable collaborator permission")
+    return (permission.get("role_name") or permission.get("permission")) == "admin" and (
+        permission.get("user") or {}).get("id") == actor_id
+
+
+def large_refactor_head(read, repo, number, git, head):
+    """`large_refactor_approved` for a PR whose current head must be exactly `head`."""
+    pull = read(f"repos/{repo}/pulls/{int(number)}")
+    if not isinstance(pull, dict) or not isinstance(pull.get("labels"), list):
+        raise ValueError("unreadable pull request")
+    if (pull.get("head") or {}).get("sha") != head:
+        return False
+    labels = [label.get("name", "") for label in pull["labels"] if isinstance(label, dict)]
+    return large_refactor_approved(read, repo, number, labels, committer_time(git, head))
+
+
+def committer_time(git, commit):
+    """A commit's committer time in Unix seconds, from local objects."""
+    return int(git.run("show", "-s", "--format=%ct", git.commit(commit)).stdout.decode().strip())
 
 
 # Root files a PR may change without a human merge, beside the library directory and its
@@ -424,7 +500,7 @@ def guard_violations(result):
     return messages
 
 
-def pr_guards(git, base, head, *, lean_root="TauCeti", scope=True):
+def pr_guards(git, base, head, *, lean_root="TauCeti", scope=True, large_refactor=False):
     """The PR-level diff guards, from local Git objects only.
 
     PR CI, `lake lint`, queue admission and the staging member policy all call this,
@@ -432,10 +508,29 @@ def pr_guards(git, base, head, *, lean_root="TauCeti", scope=True):
     exact merge base. `scope=False` leaves path scope to a caller with its own
     human-merge route. Unreadable statistics raise ValueError, so callers fail closed.
     """
-    result = review_size(git, base, head)
+    result = review_size(git, base, head, large_refactor=large_refactor)
     result["out_of_scope"] = out_of_scope(changed_paths(git, base, head), lean_root) if scope else []
     result["violations"] = guard_violations(result)
     return result
+
+
+def _cli_large_refactor(pr, git, head):
+    """The CLI's `--large-refactor-pr OWNER/NAME#NUMBER` verdict, read with GH_READ_TOKEN."""
+    if not pr:
+        return False
+    repo, _, number = pr.rpartition("#")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) or not number.isdigit():
+        raise ValueError("--large-refactor-pr must be OWNER/NAME#NUMBER")
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from github_api import GitHub
+
+    api = GitHub(max_wait=60)
+    try:
+        return large_refactor_head(lambda path: api.request("GET", path), repo, int(number), git, head)
+    except (RuntimeError, ValueError, KeyError, TypeError) as error:
+        # Unknown evidence never lifts a cap; the ordinary caps still apply.
+        print(f"ci-git: large-refactor label unverified: {type(error).__name__}", file=sys.stderr)
+        return False
 
 
 def main():
@@ -461,12 +556,18 @@ def main():
     size.add_argument("--checkout", required=True)
     size.add_argument("--base", required=True, help="exact merge base")
     size.add_argument("--head", required=True)
+    size.add_argument("--large-refactor-pr", metavar="OWNER/NAME#NUMBER",
+                      help="lift the size caps if this GitHub PR, at --head, has an admin's large-refactor "
+                           "label (reads with GH_READ_TOKEN)")
     guards = commands.add_parser("pr-guards", help="run the PR-level diff guards as JSON")
     guards.add_argument("--checkout", required=True)
     guards.add_argument("--base", required=True, help="exact merge base")
     guards.add_argument("--head", required=True)
     guards.add_argument("--lean-root", default="TauCeti")
     guards.add_argument("--no-scope", action="store_true", help="leave path scope to the caller")
+    guards.add_argument("--large-refactor-pr", metavar="OWNER/NAME#NUMBER",
+                        help="lift the size caps if this GitHub PR, at --head, has an admin's large-refactor "
+                             "label (reads with GH_READ_TOKEN)")
     scope = commands.add_parser("scope", help="print changed paths (one per line on stdin) needing a human merge")
     scope.add_argument("--lean-root", default="TauCeti")
     args = parser.parse_args()
@@ -484,14 +585,16 @@ def main():
             print(tree_entry(args.checkout, args.commit, args.path))
         elif args.command == "pr-guards":
             with object_reader(args.checkout) as git:
+                exempt = _cli_large_refactor(args.large_refactor_pr, git, args.head)
                 print(json.dumps(pr_guards(git, args.base, args.head, lean_root=args.lean_root,
-                                           scope=not args.no_scope), sort_keys=True))
+                                           scope=not args.no_scope, large_refactor=exempt), sort_keys=True))
         elif args.command == "scope":
             for path in out_of_scope([line for line in sys.stdin.read().split("\n") if line], args.lean_root):
                 print(path)
         elif args.command == "review-size":
             with object_reader(args.checkout) as git:
-                print(json.dumps(review_size(git, args.base, args.head), sort_keys=True))
+                exempt = _cli_large_refactor(args.large_refactor_pr, git, args.head)
+                print(json.dumps(review_size(git, args.base, args.head, large_refactor=exempt), sort_keys=True))
         else:
             print(json.dumps(lint_metadata(args.checkout, args.base, args.head)))
     except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
