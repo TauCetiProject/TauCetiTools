@@ -436,8 +436,9 @@ Byte integrity alone does not establish proof correctness.
 
 `withImportModules` keeps mmap-backed names alive through both checks and frees the
 regions before returning an exit code. Render every imported name inside the callback.
-A failed ownership check stops the axiom scan. When the import itself fails on an incompatible
-duplicate, the metadata scan then reports every colliding declaration, not only the first.
+The ownership and axiom checks both run and report, and the exit status fails if either fails.
+When the import itself fails on an incompatible duplicate, the metadata scan then reports every
+colliding declaration, not only the first; the axiom scan needs that environment, so it does not run.
 -/
 
 /-- Print a phase and write best-effort epoch timestamps to `AUDIT_PHASES_FILE`, if set. -/
@@ -453,7 +454,8 @@ def phase (name : String) : IO Unit := do
         file.putStr s!"{name}\t{timestamp.stdout.trimAscii}\n"
     catch _ => pure ()
 
-/-- Run ownership then axioms, or ownership alone with `--duplicates-only`.
+/-- Run ownership then axioms (both always, failing if either fails), or ownership alone with
+`--duplicates-only`.
 The research-only `--shadow-inventory` prints the complete JSON module inventory and returns 0.
 `--shadow-snapshot` runs full ownership/axiom checks and emits JSON results per owner;
 `--shadow-incremental` does the same with the axiom scope from `AXIOMS_ONLY_MODULES`
@@ -487,12 +489,14 @@ def main (args : List String) : IO UInt32 := do
         if args == ["--shadow-incremental"] then
           return ← ShadowAudit.snapshot env localModules false only
         phase "audit-duplicates"
-        let status ← DuplicateDeclarations.check env localModules
-        if status != 0 || args == ["--duplicates-only"] then return status
+        let ownership ← DuplicateDeclarations.check env localModules
+        if args == ["--duplicates-only"] then return ownership
+        -- The axiom scan is independent of ownership, so it runs and reports after a collision too.
         phase "audit-axioms"
         let (audited, messages, _) ← Prod.fst <$> Core.CoreM.toIO (AxiomAudit.auditResults only)
           { fileName := "<axioms>", fileMap := default } { env }
-        AxiomAudit.report only audited messages) (trustLevel := 1024)
+        let axioms ← AxiomAudit.report only audited messages
+        return max ownership axioms) (trustLevel := 1024)
   catch e =>
     IO.eprintln s!"audit-driver: {e}"
     -- `Lean.throwAlreadyImported`. The scan only adds diagnostics; the status stays a failure.
@@ -500,4 +504,6 @@ def main (args : List String) : IO UInt32 := do
       try
         discard <| DuplicateDeclarations.reportImportCollisions (← AxiomAudit.auditedModules)
       catch scanError => IO.eprintln s!"audit-driver: {scanError}"
+    if args.isEmpty then
+      IO.eprintln "audit-driver: axioms were not checked: the TauCeti modules could not be imported."
     return 1

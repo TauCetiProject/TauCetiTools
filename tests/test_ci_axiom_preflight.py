@@ -97,8 +97,8 @@ if name == 'local-axioms': sys.exit(int(os.environ['LOCAL_STATUS']))
             with self.subTest(arguments=arguments):
                 result, calls, _, _ = self.sandbox(**arguments)
                 self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
-                if 'duplicate_status' in arguments:
-                    self.assertFalse(any(c[0] == 'local-axioms' for c in calls))
+                # A duplicate failure does not hide the scoped axiom findings.
+                self.assertEqual(sum(c[0] == 'local-axioms' for c in calls), 0 if 'scoped' in arguments else 1)
                 self.assertFalse(any(c[0] == 'lean' for c in calls))
 
     def test_existing_workflow_selects_full_audits_for_batches_and_pin_changes(self):
