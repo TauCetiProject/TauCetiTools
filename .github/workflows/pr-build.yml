@@ -1225,8 +1225,10 @@ jobs:
             echo "::notice::Lake artifact cache not configured — building ${{ inputs.lean_root }}/ from scratch (set the LAKE_CACHE_*_PUBLIC repo variables to enable)"
           fi
           # A merge-group head is the exact commit GitHub will land. Stage its outputs after every
-          # sandboxed audit so the required build can wait for publication.
+          # sandboxed audit so the required build can wait for publication. A per-PR
+          # source request is not a landing candidate, so its trusted bootstrap disables staging.
           if [ "${{ env.IS_BATCH }}" = "true" ] \
+             && { [ "${SOURCE_CANDIDATE:-false}" != true ] || [ "${CI_SOURCE_STAGE_CACHE:-true}" != false ]; } \
              && [ -n "$S3_ARTIFACT_ENDPOINT" ] && [ -n "$S3_REVISION_ENDPOINT" ]; then
             echo "STAGE_LAKE_CACHE=1" >> "$GITHUB_ENV"
             echo "::notice::merge-group outputs will be staged for pre-landing publication"

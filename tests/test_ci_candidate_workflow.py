@@ -540,6 +540,49 @@ class Workflow(unittest.TestCase):
         result = cw.finalize(req, config, context(req, config), self.evidence)
         self.assertEqual(result["verdicts"]["publication"], "not_required")
 
+    def test_bootstrap_publication_and_cache_staging_follow_the_request_lane(self):
+        lax = replace(self.policy, require_publication=False)
+        cases = (
+            (None, self.policy, "true", "true"),
+            (None, lax, "false", "true"),
+            ("pr", self.policy, "false", "false"),
+            ("pr", lax, "false", "false"),
+        )
+        for lane, config, publication, staging in cases:
+            with self.subTest(lane=lane, required=config.require_publication), tempfile.TemporaryDirectory() as d:
+                conf = Path(d) / "tauceti.toml"
+                conf.write_bytes(CONFIG)
+                req = replace(request(config), lane=lane)
+                env = cw.bootstrap(req, config, context(req, config), conf, Path(d) / "scripts")
+                self.assertEqual(env["CI_SOURCE_REQUIRE_PUBLICATION"], publication)
+                self.assertEqual(env["CI_SOURCE_STAGE_CACHE"], staging)
+
+    def test_pr_lane_finalizes_without_publication_even_if_outputs_were_staged(self):
+        req = replace(self.request, lane="pr")
+        ctx = context(req, self.policy)
+        reader = unittest.mock.Mock()
+        for staged in ("true", "false"):
+            with self.subTest(staged=staged):
+                result = cw.finalize(
+                    req, self.policy, ctx, dict(self.evidence, publication_staged=staged), reader=reader
+                )
+                self.assertEqual(
+                    result["verdicts"],
+                    {"build": "success", "scope": "success", "bump_guard": "success", "publication": "not_required"},
+                )
+                self.assertEqual(result["request"]["lane"], "pr")
+                self.assertEqual(cc.classify_verdicts(result["verdicts"]), "passed")
+        reader.get.assert_not_called()
+        failed = cw.finalize(req, self.policy, ctx, dict(self.evidence, build_state="failure", job_result="failure"))
+        self.assertEqual(failed["verdicts"]["build"], "failure")
+        self.assertEqual(failed["verdicts"]["publication"], "not_required")
+
+    def test_pr_lane_always_runs_full_lint_without_reading_pr_metadata(self):
+        client = unittest.mock.Mock()
+        req = replace(self.request, lane="pr")
+        self.assertFalse(cw.native_lint_policy(req, self.policy, context(req, self.policy), client=client))
+        client.request.assert_not_called()
+
 
 class Evidence(unittest.TestCase):
     def setUp(self):
@@ -1028,6 +1071,44 @@ class ShippedWorkflow(unittest.TestCase):
         self.assertFalse(self.value[True]["workflow_call"]["inputs"]["source_candidate_github_statuses"]["default"])
         builder_credentials = self.step("Select CI API credentials")
         self.assertIn("env.SOURCE_CANDIDATE != 'true'", builder_credentials["with"]["status-app-id"])
+
+    def test_cache_staging_is_skipped_only_for_per_pr_source_requests(self):
+        step = self.step("Configure the Lake artifact cache (no-op unless the public endpoints are set)")
+        shell = step["run"].replace("${{ env.IS_BATCH }}", "true")
+        shell = re.sub(r"\$\{\{.*?\}\}", "Math", shell)
+        endpoints = {
+            "PUBLIC_ARTIFACT_ENDPOINT": "https://cache.example/a",
+            "PUBLIC_REVISION_ENDPOINT": "https://cache.example/r",
+            "S3_ARTIFACT_ENDPOINT": "https://upload.example/a",
+            "S3_REVISION_ENDPOINT": "https://upload.example/r",
+        }
+        source = {
+            "SOURCE_CANDIDATE": "true",
+            "TAUCETI_CACHE_ARTIFACT_URL": endpoints["PUBLIC_ARTIFACT_ENDPOINT"],
+            "TAUCETI_CACHE_REVISION_URL": endpoints["PUBLIC_REVISION_ENDPOINT"],
+        }
+        cases = (
+            # Merge-group and Bors runs never see the source-only variables.
+            ({}, True),
+            ({**source, "CI_SOURCE_REQUIRE_PUBLICATION": "true", "CI_SOURCE_STAGE_CACHE": "true"}, True),
+            ({**source, "CI_SOURCE_REQUIRE_PUBLICATION": "false", "CI_SOURCE_STAGE_CACHE": "true"}, True),
+            ({**source, "CI_SOURCE_REQUIRE_PUBLICATION": "false", "CI_SOURCE_STAGE_CACHE": "false"}, False),
+        )
+        for extra, staged in cases:
+            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as directory:
+                github_env = Path(directory) / "env"
+                github_env.touch()
+                env = {
+                    key: value
+                    for key, value in os.environ.items()
+                    if not key.startswith(("CI_SOURCE_", "SOURCE_CANDIDATE", "TAUCETI_CACHE_"))
+                }
+                env.update(endpoints, **extra, GITHUB_ENV=str(github_env))
+                child = subprocess.run(
+                    ["bash", "-euo", "pipefail", "-c", shell], cwd=directory, env=env, capture_output=True, text=True
+                )
+                self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
+                self.assertEqual("STAGE_LAKE_CACHE=1" in github_env.read_text().splitlines(), staged)
 
     def test_source_identity_shell_executes_ingress_and_never_the_legacy_helpers(self):
         shell = self.step("Resolve PR head")["run"]

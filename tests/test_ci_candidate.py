@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import zipfile
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from unittest.mock import patch
 
@@ -244,6 +245,97 @@ class CandidateContracts(unittest.TestCase):
         value["harness_revision"] = "a" * 40
         with self.assertRaises(ValueError):
             cc.ExecutionPolicy.parse(value, configuration=b"trusted configuration")
+
+    def test_staging_request_record_and_digest_predate_lanes(self):
+        self.assertIsNone(self.request.lane)
+        self.assertNotIn("lane", self.request.record())
+        # Golden digest of this fixture, computed before lanes existed.
+        self.assertEqual(self.request.digest, "75d7cfaaa4066b4d21a9cb45deef34ffcd600b765d14e4d66d1adeba0ab7121e")
+        self.assertTrue(cc.requires_publication(self.request, self.policy))
+
+    def test_pr_lane_round_trips_and_changes_the_request_digest(self):
+        pr = replace(self.request, lane="pr")
+        record = pr.record()
+        self.assertEqual(record["lane"], "pr")
+        self.assertEqual(cc.CandidateRequest.parse(cc.read_json(cc.canonical(record)), policy=self.policy), pr)
+        self.assertNotEqual(pr.digest, self.request.digest)
+        self.assertFalse(cc.requires_publication(pr, self.policy))
+        self.assertFalse(cc.requires_publication(pr, replace(self.policy, require_publication=False)))
+
+    def test_invalid_lane_values_are_refused(self):
+        for lane in ("", "staging", "PR", 1, ["pr"]):
+            with self.subTest(lane=lane):
+                with self.assertRaises(ValueError):
+                    replace(self.request, lane=lane)
+                with self.assertRaises(ValueError):
+                    cc.CandidateRequest.parse(dict(self.request.record(), lane=lane), policy=self.policy)
+        with self.assertRaises(ValueError):
+            cc.CandidateRequest.parse(dict(self.request.record(), lane=None), policy=self.policy)
+
+    def test_publication_verdicts_follow_the_lane_and_policy(self):
+        lax = replace(self.policy, require_publication=False)
+        cases = (
+            # (lane, policy, allowed publication verdicts)
+            (None, self.policy, {"success", "failure", "infrastructure"}),
+            (None, lax, {"success", "failure", "infrastructure", "not_required"}),
+            ("pr", self.policy, {"not_required"}),
+            ("pr", lax, {"not_required"}),
+        )
+        for lane, config, allowed in cases:
+            req = replace(request(config), lane=lane)
+            ctx, fresh = context(req, config), run(req, config)
+            for value in ("success", "failure", "infrastructure", "not_required"):
+                with self.subTest(lane=lane, required=config.require_publication, value=value):
+                    verdicts = dict(self.verdicts, publication=value)
+                    make = partial(
+                        cc.make_result,
+                        req,
+                        config,
+                        ctx,
+                        tested_commit=req.head,
+                        tested_tree=req.tree,
+                        verdicts=verdicts,
+                    )
+                    if value not in allowed:
+                        with self.assertRaises(ValueError):
+                            make()
+                        # The verifier must refuse the same value in a result built elsewhere.
+                        forged = cc.make_result(
+                            req,
+                            config,
+                            ctx,
+                            tested_commit=req.head,
+                            tested_tree=req.tree,
+                            verdicts=dict(self.verdicts, publication=min(allowed)),
+                        )
+                        forged["verdicts"]["publication"] = value
+                        with self.assertRaisesRegex(ValueError, "^invalid result verdict$"):
+                            cc.verify_result(req, config, forged, fresh, run_id=101, attempt=2)
+                        continue
+                    result = make()
+                    conclusion = "success" if value in {"success", "not_required"} else "failure"
+                    self.assertEqual(
+                        cc.verify_result(
+                            req, config, result, dict(fresh, conclusion=conclusion), run_id=101, attempt=2
+                        ),
+                        verdicts,
+                    )
+
+    def test_pr_lane_result_never_verifies_as_staging_evidence(self):
+        pr = replace(self.request, lane="pr")
+        result = cc.make_result(
+            pr,
+            self.policy,
+            context(pr, self.policy),
+            tested_commit=pr.head,
+            tested_tree=pr.tree,
+            verdicts=dict(self.verdicts, publication="not_required"),
+        )
+        with self.assertRaises(ValueError):
+            self.verify(result)
+        # Nor can a staging result be passed off as per-PR evidence.
+        with self.assertRaises(ValueError):
+            cc.verify_result(pr, self.policy, self.result, run(pr, self.policy), run_id=101, attempt=2)
 
     def test_verified_failed_build_remains_a_failure_result(self):
         result = copy.deepcopy(self.result)

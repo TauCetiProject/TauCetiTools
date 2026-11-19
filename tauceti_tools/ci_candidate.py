@@ -33,6 +33,8 @@ RESULT_FILE = "source-candidate-result.json"
 RECEIPT_SCHEMA = "tauceti-ci.source-candidate-request/v1"
 RECEIPT_FILE = "source-candidate-request.json"
 VERDICTS = frozenset({"build", "scope", "bump_guard", "publication"})
+PR_LANE = "pr"
+LANES = frozenset({PR_LANE})
 # The shared harness runs only from this branch, resolved by GitHub when the caller's
 # `uses: <harness>/.github/workflows/pr-build.yml@main` starts. Runner groups admit only that ref,
 # so a fork or another branch of the harness cannot run with the source credentials.
@@ -343,8 +345,14 @@ class CandidateRequest:
     tree: str
     members: tuple[Member, ...]
     member_manifest: MemberManifest | None = None
+    # Absent for staging candidates, whose records and digests predate lanes.
+    # "pr" marks a per-PR build: it is never staging evidence (the lane is part
+    # of the digest), never publishes cache outputs and always runs full lint.
+    lane: str | None = None
 
     def __post_init__(self):
+        if self.lane is not None and (not isinstance(self.lane, str) or self.lane not in LANES):
+            raise ValueError("invalid candidate request lane")
         for value, label in ((self.request_id, "request ID"), (self.epoch, "queue epoch")):
             _hex(value, 32, label)
         for value, label in ((self.policy_digest, "policy digest"), (self.config_digest, "configuration digest")):
@@ -431,6 +439,7 @@ class CandidateRequest:
         _object(
             value,
             {
+                *(("lane",) if isinstance(value, dict) and "lane" in value else ()),
                 "schema",
                 "request_id",
                 "epoch",
@@ -448,6 +457,10 @@ class CandidateRequest:
         )
         if value["schema"] != SCHEMA or not isinstance(value["members"], (list, dict)):
             raise ValueError("invalid candidate request schema")
+        if "lane" in value and (not isinstance(value["lane"], str) or value["lane"] not in LANES):
+            # Staging requests omit the key; an explicit null or alias would
+            # give one candidate two encodings.
+            raise ValueError("invalid candidate request lane")
         if len(canonical(value)) > MAX_REQUEST_BYTES:
             raise ValueError("candidate request exceeds its bounds")
         manifest = None
@@ -475,6 +488,7 @@ class CandidateRequest:
             candidate["tree"],
             members,
             manifest,
+            value.get("lane"),
         )
         request.check_policy(policy)
         if candidate["retained_ref"] != request.retained_ref:
@@ -513,6 +527,7 @@ class CandidateRequest:
             "members": {"manifest": self.member_manifest.record()}
             if self.member_manifest is not None
             else [member.record() for member in self.members],
+            **({"lane": self.lane} if self.lane is not None else {}),
         }
 
     @property
@@ -672,14 +687,27 @@ def verify_receipt(request, policy, receipt, run, *, run_id, observed_attempt, e
     return {"request_digest": request.digest, "receipt_attempt": receipt_attempt, "observed_attempt": observed_attempt}
 
 
+def requires_publication(request, policy):
+    """Per-PR requests never publish cache outputs, whatever the trusted policy says."""
+    return policy.require_publication and request.lane != PR_LANE
+
+
+def _publication_values(request, policy):
+    if request.lane == PR_LANE:
+        return {"not_required"}
+    if not policy.require_publication:
+        return {"success", "failure", "infrastructure", "not_required"}
+    return {"success", "failure", "infrastructure"}
+
+
 def make_result(request, policy, context, *, tested_commit, tested_tree, verdicts):
     """Called by the isolated trusted finalizer, with trusted job/step evidence."""
     check_workflow_context(request, policy, context)
     _object(verdicts, VERDICTS, "candidate verdicts")
     for key, value in verdicts.items():
-        allowed = {"success", "failure", "infrastructure"}
-        if key == "publication" and not policy.require_publication:
-            allowed.add("not_required")
+        allowed = (
+            _publication_values(request, policy) if key == "publication" else {"success", "failure", "infrastructure"}
+        )
         if not isinstance(value, str) or value not in allowed:
             raise ValueError("invalid candidate verdict")
     if tested_commit is None and tested_tree is None:
@@ -709,9 +737,9 @@ def verify_result(request, policy, result, run, *, run_id, attempt):
     _verify_request_claim(request, policy, result, run_id=run_id, attempt=attempt)
     verdicts = _object(result["verdicts"], VERDICTS, "candidate verdicts")
     for key, value in verdicts.items():
-        allowed = {"success", "failure", "infrastructure"}
-        if key == "publication" and not policy.require_publication:
-            allowed.add("not_required")
+        allowed = (
+            _publication_values(request, policy) if key == "publication" else {"success", "failure", "infrastructure"}
+        )
         if not isinstance(value, str) or value not in allowed:
             raise ValueError("invalid result verdict")
     if result["tested"] is None:
