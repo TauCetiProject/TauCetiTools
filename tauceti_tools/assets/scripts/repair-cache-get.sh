@@ -240,6 +240,14 @@ for i in "${!REVS[@]}"; do
   esac
 done
 
+# bulk-unpack-cache.py prefers these revisions' records, in this order, when it stamps each
+# restored module with an input hash; anything else falls back to Lake's own restoration.
+if [ "${#USED[@]}" -gt 0 ]; then
+  printf '%s\n' "${USED[@]}" > "$CACHE/repair-revisions"
+else
+  rm -f "$CACHE/repair-revisions"
+fi
+
 if [ "${#USED[@]}" -gt 0 ]; then
   used="${USED[*]}"
   reused="$(changed_records)"

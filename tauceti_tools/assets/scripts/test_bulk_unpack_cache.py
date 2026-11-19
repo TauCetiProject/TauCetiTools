@@ -145,6 +145,46 @@ class BulkUnpackTests(unittest.TestCase):
         self.assertFalse(self.record.exists())
         self.assertTrue(duplicate.exists())
 
+    def prefer(self, revision, *hashes):
+        revisions = self.root / ".lake/cache/revisions/TauCeti"
+        revisions.mkdir(parents=True, exist_ok=True)
+        rows = [json.dumps(bulk.SCHEMA)] + [json.dumps([h, "fedcba9876543210.ltar"]) for h in hashes]
+        (revisions / (revision + ".jsonl")).write_text("\n".join(rows) + "\n")
+        with open(self.root / ".lake/cache" / bulk.PREFERRED, "a") as stream:
+            stream.write(revision + "\n")
+
+    def test_shared_archive_is_stamped_with_the_candidate_revisions_input(self):
+        # The base record arrives first; the candidate's record names the same bytes.
+        os.utime(self.record, ns=(1, 1))
+        candidate = self.records / "1111111111111111.json"
+        candidate.write_bytes(self.record.read_bytes())
+        self.prefer("a" * 40, "1111111111111111")
+        selected = []
+        def extracted(records, staging):
+            selected.extend(record["hash"] for record in records)
+            return self.extracted_fixture(records, staging)
+        with patch.object(bulk, "extract_records", side_effect=extracted):
+            self.assertEqual(bulk.unpack(self.root), 1)
+        self.assertEqual(selected, ["1111111111111111"])
+        self.assertFalse(candidate.exists())
+        self.assertTrue(self.record.exists())
+
+    def test_earlier_candidate_revision_ranks_first(self):
+        later = self.records / "1111111111111111.json"
+        later.write_bytes(self.record.read_bytes())
+        self.prefer("a" * 40, "1111111111111111")
+        self.prefer("b" * 40, "0123456789abcdef")
+        ranks = bulk.preferred_inputs(self.root)
+        self.assertEqual(ranks, {"1111111111111111": 0, "0123456789abcdef": 1})
+        self.assertEqual([r["hash"] for r in bulk.selected_records(self.root)], ["1111111111111111"])
+
+    def test_missing_or_malformed_preference_keeps_arrival_order(self):
+        cache = self.root / ".lake/cache"
+        self.assertEqual(bulk.preferred_inputs(self.root), {})
+        (cache / bulk.PREFERRED).write_text("not-a-revision\n" + "c" * 40 + "\n")
+        self.assertEqual(bulk.preferred_inputs(self.root), {})
+        self.assertEqual([r["hash"] for r in bulk.selected_records(self.root)], ["0123456789abcdef"])
+
     def test_historical_records_do_not_disable_other_modules(self):
         duplicate = self.records / "1111111111111111.json"
         duplicate.write_bytes(self.record.read_bytes())

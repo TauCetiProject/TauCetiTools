@@ -47,19 +47,61 @@ def layout(project):
         raise ValueError("unsupported Lake layout")
 
 
+PREFERRED = "repair-revisions"
+UNRANKED = 1 << 30
+
+
+def preferred_inputs(project):
+    """Rank input hashes by the candidate revisions repair-cache-get.sh fetched.
+
+    ``.lake/cache/repair-revisions`` lists those revisions, the candidate's own
+    tip first; each names a native revision map ``revisions/TauCeti/<rev>.jsonl``
+    of ``[input hash, archive]`` rows. A record from an earlier revision ranks
+    first. Without the list every record ranks equally, as before.
+    """
+    cache = project / ".lake/cache"
+    try:
+        revisions = (cache / PREFERRED).read_text().split()
+    except OSError:
+        return {}
+    ranks = {}
+    for rank, revision in enumerate(revisions):
+        if not re.fullmatch(r"[0-9a-f]{40}", revision):
+            continue
+        try:
+            lines = regular(cache / "revisions/TauCeti" / (revision + ".jsonl")).read_text().splitlines()
+        except (OSError, ValueError):
+            continue
+        for line in lines[1:]:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, list) and row and isinstance(row[0], str) and HASH.fullmatch(row[0]):
+                ranks.setdefault(row[0], rank)
+    return ranks
+
+
 def selected_records(project):
     """Read native archive-only selections and retain original mapping bytes.
 
-    Reject unsupported schemas and unsafe archive names. Prepare the first
-    selection for each archive; every alternative mapping stays available to Lake.
+    Reject unsupported schemas and unsafe archive names. Prepare one selection
+    for each archive and module; every alternative mapping stays available to Lake.
     This reads existing native selections; it does not select another ancestor.
     """
     outputs = project / ".lake/cache/outputs/TauCeti"
     artifacts = project / ".lake/cache/artifacts"
     records, archives = [], set()
-    # Base-cache records arrive before repair history. Prefer them for unchanged
-    # modules; this affects speed only, since Lake still selects the current input.
-    paths = sorted(outputs.glob("*.json"), key=lambda path: (path.stat().st_mtime_ns, path.name))
+    # An archive carries no input hash: extraction stamps the selected record's
+    # hash into the trace, and Lake restores the module again, one leantar per
+    # module, when that hash is not the current input. Archives are shared by
+    # every input whose outputs are byte-identical, so the record chosen for a
+    # shared archive matters as much as the version chosen for a module. Prefer
+    # the candidate revisions' own records, the candidate's tip first, then the
+    # base cache's records, which arrive first, in arrival order.
+    ranks = preferred_inputs(project)
+    paths = sorted(outputs.glob("*.json"),
+                   key=lambda path: (ranks.get(path.stem, UNRANKED), path.stat().st_mtime_ns, path.name))
     for path in paths:
         if not HASH.fullmatch(path.stem):
             raise ValueError("unexpected cache record")
