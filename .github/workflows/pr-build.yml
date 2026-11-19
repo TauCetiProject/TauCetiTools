@@ -911,6 +911,8 @@ jobs:
       # documents why. Without the disk, or on anything unexpected, this is the cold path.
       - name: Prepare this batch's staging tree from its previous attempt
         if: ${{ env.INFRA != '1' && env.SOURCE_CANDIDATE == 'true' && env.IS_BATCH == 'true' }}
+        # Optional: if this is cut short, its results are never exported and the job continues cold.
+        continue-on-error: true
         timeout-minutes: 10
         run: |
           python3 gate/scripts/warm_tree.py prepare --workspace "$GITHUB_WORKSPACE" --project pr \
@@ -1352,6 +1354,7 @@ jobs:
       # see the kept tree.
       - name: Join this batch's previous staging tree
         if: ${{ env.INFRA != '1' && env.WARM_VOLUME == '1' }}
+        continue-on-error: true
         timeout-minutes: 10
         run: python3 gate/scripts/warm_tree.py activate --project pr --warm "$WARM_TREE" --github-env "$GITHUB_ENV"
 
@@ -1966,7 +1969,8 @@ jobs:
       # failing, leaves a reusable tree; a cancelled job or an interrupted build leaves none.
       - name: Keep this batch's staging tree for its next attempt
         if: ${{ !cancelled() && env.WARM_ACTIVE == '1' && (steps.sandbox_build.outcome == 'success' || steps.sandbox_build.outcome == 'failure') }}
-        timeout-minutes: 3
+        continue-on-error: true
+        timeout-minutes: 5
         run: python3 gate/scripts/warm_tree.py retain --project pr --key "$WARM_TREE_KEY"
 
   # A queue batch publishes whenever its sandboxed build passed, so the next repair and staging

@@ -1089,6 +1089,7 @@ class ShippedWorkflow(unittest.TestCase):
         join = self.step("Join this batch's previous staging tree")
         keep = self.step("Keep this batch's staging tree for its next attempt")
         for step in (prepare, join, keep):
+            self.assertIs(step["continue-on-error"], True)  # optional: never fails or skips the build
             self.assertNotIn("TOKEN", str(step))
             self.assertNotIn("secrets.", str(step))
         self.assertIn("env.SOURCE_CANDIDATE == 'true' && env.IS_BATCH == 'true'", prepare["if"])

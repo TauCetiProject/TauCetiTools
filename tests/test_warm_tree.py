@@ -3,11 +3,11 @@
 import importlib.util
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "tauceti_tools/assets/scripts/warm_tree.py"
@@ -77,6 +77,29 @@ class WarmTreeCleanup(unittest.TestCase):
                 path.unlink()
         os.mkfifo(self.lake / "cache/fifo")
         self.assertFalse(warm.keep_only_outputs(self.lake))
+
+    def test_unusable_modes_refuse_the_tree(self):
+        for path, mode in ((self.lake / "build/lib", 0o000), (self.lake / "cache/artifacts", 0o500),
+                           (self.lake / "build/lib/lean/TauCeti/A.olean", 0o000)):
+            with self.subTest(path=path.name):
+                path.chmod(mode)
+                try:
+                    self.assertFalse(warm.keep_only_outputs(self.lake))
+                finally:
+                    path.chmod(0o755)
+
+    def test_merge_prunes_a_kept_directory_where_the_fresh_tree_has_a_file(self):
+        target = self.lake.parent / "fresh"
+        (target / "artifacts").mkdir(parents=True)
+        (target / "artifacts/0123.art").write_text("fresh")
+        (target / "outputs").write_text("a fresh file")
+        (self.lake / "cache/outputs/TauCeti").mkdir(parents=True)
+        (self.lake / "cache/outputs/TauCeti/x.json").write_text("kept")
+        (self.lake / "cache/artifacts/4567.art").write_text("kept")
+        warm.merge(self.lake / "cache", target)
+        self.assertEqual((target / "outputs").read_text(), "a fresh file")
+        self.assertEqual((target / "artifacts/0123.art").read_text(), "fresh")
+        self.assertEqual((target / "artifacts/4567.art").read_text(), "kept")
 
     def test_a_symlinked_kept_directory_is_removed_not_followed(self):
         target = self.lake.parent / "outside"

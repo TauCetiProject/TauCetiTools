@@ -31,11 +31,11 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
 import shutil
 import stat
 import subprocess
 import sys
+from pathlib import Path
 
 DEVICE = Path("/dev/disk/by-id/virtio-tauceti-warm")
 MOUNT = Path("/mnt/tauceti-warm")
@@ -45,7 +45,7 @@ MIN_FREE_BYTES = 64 * 1024**3
 MIN_FREE_INODES = 0.1
 
 
-def sudo(*args, check=True, timeout=600):
+def sudo(*args, check=True, timeout=120):
     return subprocess.run(["sudo", "-n", *map(str, args)], check=check, timeout=timeout,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
@@ -75,14 +75,25 @@ def tree_key(project, request_file, members_file):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
+def raise_error(error):
+    raise error
+
+
 def ordinary_tree(root):
-    """Only directories and regular files, checked without following any link."""
-    if not stat.S_ISDIR(os.lstat(root).st_mode):
+    """Only usable directories and readable regular files, checked without following links.
+
+    A previous sandbox can also leave modes Lake cannot use, so those are refused too.
+    """
+    if not stat.S_ISDIR(os.lstat(root).st_mode) or not os.access(root, os.R_OK | os.W_OK | os.X_OK):
         return False
-    for directory, names, files in os.walk(root, followlinks=False):
+    for directory, names, files in os.walk(root, onerror=raise_error):
         for name in names + files:
-            mode = os.lstat(os.path.join(directory, name)).st_mode
-            if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+            path = os.path.join(directory, name)
+            mode = os.lstat(path).st_mode
+            if stat.S_ISDIR(mode):
+                if not os.access(path, os.R_OK | os.W_OK | os.X_OK):
+                    return False
+            elif not stat.S_ISREG(mode) or not os.access(path, os.R_OK):
                 return False
     return True
 
@@ -149,7 +160,7 @@ def reformat(mounted):
     if mounted:
         sudo("umount", MOUNT)
     # mkfs discards the whole device, which returns its space to the host (discard=unmap).
-    sudo("mkfs.ext4", "-q", "-F", "-L", "tauceti-warm", DEVICE)
+    sudo("mkfs.ext4", "-q", "-F", "-L", "tauceti-warm", DEVICE, timeout=300)
     if not mount_volume():
         raise OSError("the freshly formatted disk does not mount")
 
@@ -200,12 +211,15 @@ def prepare(workspace, project, request_file, members_file):
 
 def merge(source, target):
     """Move source's entries under target; existing target entries win."""
-    for directory, names, files in os.walk(source):
+    for directory, names, files in os.walk(source, onerror=raise_error):
         relative = Path(directory).relative_to(source)
         for name in list(names):
-            if not os.path.lexists(target / relative / name):
-                os.rename(Path(directory) / name, target / relative / name)
+            destination = target / relative / name
+            if not os.path.lexists(destination):
+                os.rename(Path(directory) / name, destination)
                 names.remove(name)
+            elif not stat.S_ISDIR(os.lstat(destination).st_mode):
+                names.remove(name)  # a fresh file wins over a kept directory
         for name in files:
             if not os.path.lexists(target / relative / name):
                 os.rename(Path(directory) / name, target / relative / name)
@@ -238,13 +252,13 @@ def retain(project, key):
     lake = Path(project) / ".lake"
     if not bound_to_setup(lake):
         raise OSError("the candidate's .lake is no longer this disk's setup directory")
-    subprocess.run(["sync"], check=False, timeout=300)
-    sudo("umount", lake)
+    subprocess.run(["sync"], check=False, timeout=60)
+    sudo("umount", lake, timeout=60)
     if os.path.lexists(MOUNT / "lake"):
         shutil.rmtree(MOUNT / "lake")
     os.rename(MOUNT / "setup", MOUNT / "lake")
     write_state(key, complete=True)
-    sudo("umount", MOUNT, check=False)
+    sudo("umount", MOUNT, check=False, timeout=60)
     print("warm tree: kept for this batch's next attempt")
     return {}
 
