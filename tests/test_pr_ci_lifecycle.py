@@ -223,7 +223,7 @@ class LifecycleTests(unittest.TestCase):
             redirect_stdout(io.StringIO()),
         ):
             self.assertEqual(ci_recovery.recover(api, REPO, apply=True), [])
-        cleanup.assert_called_once_with(api, REPO, active=[], apply=True, api_reserve=0)
+        cleanup.assert_called_once_with(api, REPO, active=[], apply=True, api_reserve=0, api_budget=0)
 
     def test_standalone_recovery_checkout_contains_its_policy_and_exports_package_root(self):
         root = Path(__file__).parents[1]

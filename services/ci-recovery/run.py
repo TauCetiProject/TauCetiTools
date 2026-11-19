@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import os
 import runpy
-import subprocess
 import sys
 from pathlib import Path
 
@@ -18,13 +17,19 @@ def main():
     sys.path[:0] = [str(root), str(checkout)]
     from tauceti_queue.github_app import GitHubApp
 
-    # The queue App is repository-scoped; its installation cannot read the org
-    # team. Reuse the host's existing read:org credential only for that lookup.
-    if not os.environ.get("SELF_TESTED_TEAM_TOKEN"):
-        os.environ["SELF_TESTED_TEAM_TOKEN"] = subprocess.check_output(
-            ["gh", "auth", "token"], text=True, timeout=30
-        ).strip()
-    token = GitHubApp.load().tokens.token()
+    # Every request, including the self-tested team lookup, uses the queue App's installation;
+    # never the host's personal `gh` login, whose quota every agent on that account shares.
+    tokens = GitHubApp.load().tokens
+    token = tokens.token()
+    granted = getattr(getattr(tokens, "_current", None), "permissions", None) or {}
+    if "members" not in granted and not os.environ.get("SELF_TESTED_TEAM_TOKEN"):
+        # Without the App's organization Members: read permission the team is unknown. Unknown
+        # membership never cancels a build, so this pass keeps every self-tested PR's CI.
+        print(
+            "ci-recovery: the queue App lacks organization Members: read; self-tested cleanup is skipped this pass",
+            file=sys.stderr,
+        )
+        os.environ["TAUCETI_SELF_TESTED_TEAM"] = ""
     os.environ.update(
         GH_TOKEN=token,
         GH_READ_TOKEN=token,

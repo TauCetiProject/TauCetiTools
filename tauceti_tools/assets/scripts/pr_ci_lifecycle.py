@@ -194,11 +194,15 @@ def pulls(api, repo, numbers):
     return values
 
 
-def reserved(api, reserve):
+def reserved(api, reserve, budget=0):
+    """The shared quota is down to `reserve`, or this pass has made `budget` requests (0: no limit)."""
+    stats = getattr(api, "stats", {}).values()
+    if budget and sum(stat.get("requests", 0) for stat in stats) >= budget:
+        return True
     return (
         any(
             str(b.get("remaining", "")).isdigit() and int(b["remaining"]) < reserve
-            for stat in getattr(api, "stats", {}).values()
+            for stat in stats
             for b in stat.get("buckets", {}).values()
         )
         if reserve
@@ -206,7 +210,7 @@ def reserved(api, reserve):
     )
 
 
-def reconcile(api, repo, *, active=None, apply=False, number=None, api_reserve=0, strict=False):
+def reconcile(api, repo, *, active=None, apply=False, number=None, api_reserve=0, api_budget=0, strict=False):
     # Finish every page before mutating the live collection. Each new pass scans
     # current state; an interrupted or ambiguous POST needs no private ledger.
     if active is None:
@@ -235,8 +239,8 @@ def reconcile(api, repo, *, active=None, apply=False, number=None, api_reserve=0
     oldest = 0.0
     observed = 0
     for run in candidates.values():
-        if reserved(api, api_reserve):
-            print("ci-lifecycle: shared API reserve reached; next pass will resume", file=sys.stderr)
+        if reserved(api, api_reserve, api_budget):
+            print("ci-lifecycle: shared API reserve or pass budget reached; next pass will resume", file=sys.stderr)
             break
         number = identity(run)[0]
         try:
