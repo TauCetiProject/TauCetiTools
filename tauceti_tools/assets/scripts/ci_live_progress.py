@@ -21,12 +21,23 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+from collections import deque
 from pathlib import Path
 
 ORIGIN = "https://ci-data.taucetiproject.org"
+# Lake's own job counter, e.g. `✔ [113917/113955] Built TauCeti.X (1.2s)`, and its closing summary.
+LAKE_COUNTER = re.compile(r"^(?:[✔✖⚠ℹ]\s+)?\[(\d{1,9})/(\d{1,9})\]\s")
+LAKE_FINISHED = re.compile(r"^Build completed successfully \((\d{1,9}) jobs?\)")
+MAX_TASKS = 10000000
+# The rate is the counter's advance over at most the last ten minutes of samples, once they span one.
+RATE_WINDOW, RATE_MINIMUM = 600, 60
 PHASES = {
+    "cache-unpack",
     "build",
     "audit-setup",
+    "audit-import",
+    "audit-duplicates",
+    "audit-axioms",
     "audit-module-system",
     "lint-env",
     "lint-style",
@@ -61,9 +72,11 @@ class Counters:
         self.completed, self.failed, self.last_module, self.phase = 0, 0, None, "starting"
         self.last_progress = None
         self.pending = b""
+        self.tasks_done, self.tasks_total = None, None
+        self.task_samples = deque()
 
     def sample(self, clock=time.time):
-        before = (self.completed, self.failed, self.phase)
+        before = (self.completed, self.failed, self.phase, self.tasks_done)
         try:
             data, _, _ = bounded_file(self.root / "phases.tsv")
             names = [line.split("\t", 1)[0] for line in data.decode(errors="replace").splitlines()]
@@ -79,15 +92,37 @@ class Counters:
                     break
         except (OSError, ValueError):
             pass
-        if before != (self.completed, self.failed, self.phase):
-            self.last_progress = stamp(clock())
+        now = clock()
+        if before != (self.completed, self.failed, self.phase, self.tasks_done):
+            self.last_progress = stamp(now)
         return {
             "phase": self.phase,
             "completed_modules": self.completed,
             "failed_modules": self.failed,
             "last_module": self.last_module,
             "last_progress_at": self.last_progress,
+            "completed_tasks": self.tasks_done,
+            "total_tasks": self.tasks_total,
+            "tasks_per_minute": self.rate(now),
         }
+
+    def rate(self, now):
+        """Lake jobs per minute while the build runs; None until samples span RATE_MINIMUM seconds."""
+        samples = self.task_samples
+        if self.tasks_done is None:
+            samples.clear()
+            return None
+        if samples and (self.tasks_done < samples[-1][1] or now < samples[-1][0]):
+            samples.clear()
+        samples.append((now, self.tasks_done))
+        while len(samples) > 2 and now - samples[1][0] >= RATE_WINDOW:
+            samples.popleft()
+        while len(samples) > 256:
+            samples.popleft()
+        start, done = samples[0]
+        if self.phase != "build" or now - start < RATE_MINIMUM:
+            return None
+        return round(min(MAX_TASKS, (self.tasks_done - done) * 60 / (now - start)), 1)
 
 
     def read_log(self):
@@ -96,6 +131,7 @@ class Counters:
         if self.inode != inode or offset < self.offset:
             self.offset, self.inode, self.pending = 0, inode, b""
             self.completed, self.failed = 0, 0
+            self.tasks_done, self.tasks_total = None, None
             data, _, offset = bounded_file(self.root / "lake-build.log", 262144)
         self.offset = offset
         lines = (self.pending + data).split(b"\n")
@@ -109,6 +145,12 @@ class Counters:
                     self.completed += 1
             if re.match(r"^✖\s", line):
                 self.failed += 1
+            counter = LAKE_COUNTER.match(line) or LAKE_FINISHED.match(line)
+            if counter:
+                done = int(counter[1])
+                total = int(counter[2]) if counter.re is LAKE_COUNTER else done
+                if done <= total <= MAX_TASKS:
+                    self.tasks_done, self.tasks_total = done, total
         self.completed, self.failed = min(10000000, self.completed), min(10000000, self.failed)
         return len(data)
 
