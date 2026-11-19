@@ -356,15 +356,24 @@ def scanNames (modules : Array Name) : IO Bool := do
 
 /-- Report every collision after the joint import stopped at the first one: Lean's importer
 names only the first incompatible constant, and the checker above never runs. The scan reads the
-same metadata as `scanNames`. It prints the names with a source declaration range, or, when no
-colliding name has one, every collision that is not a common reserved name, so generated
-auxiliaries of a reported declaration are not listed separately. Returns the number reported. -/
+same metadata as `scanNames`. A declaration without a source range whose prefix is itself a
+colliding name (a structure's recursors, auxiliaries of a reported theorem) is left to its parent's line. A
+common reserved name such as a lazily generated equation is listed only when nothing else is, so
+the failure always names a collision. Returns the number reported. -/
 def reportImportCollisions (modules : Array Name) : IO Nat := do
   let scan ← scanAll modules
-  let explicit := scan.collisions.filter fun (name, _) => scan.explicitNames.contains name
-  let reported := if explicit.isEmpty then
-      scan.collisions.filter fun (name, _) => !commonReservedName scan name
-    else explicit
+  let names : NameSet := scan.collisions.foldl (fun s (name, _) => s.insert name) {}
+  let hasCollidingPrefix (name : Name) : Bool := Id.run do
+    let mut parent := name.getPrefix
+    while !parent.isAnonymous do
+      if names.contains parent then return true
+      parent := parent.getPrefix
+    return false
+  let roots := scan.collisions.filter fun (name, _) =>
+    scan.explicitNames.contains name || !hasCollidingPrefix name
+  let primary := roots.filter fun (name, _) =>
+    scan.explicitNames.contains name || !commonReservedName scan name
+  let reported := if primary.isEmpty then roots else primary
   for (name, previous, mod) in reported do
     IO.eprintln s!"duplicate-declarations: {name} is declared in both {previous} and {mod}"
   if !reported.isEmpty then

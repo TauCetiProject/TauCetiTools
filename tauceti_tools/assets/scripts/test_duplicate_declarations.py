@@ -249,6 +249,29 @@ class DuplicateDeclarationsTest(unittest.TestCase):
                 ])
                 self.assertNotIn("phase audit-axioms", result.stdout)
 
+    def test_failed_import_reports_collisions_without_source_ranges(self):
+        # Declarations a metaprogram adds have no source range and are still reported,
+        # including a name that looks like a reserved equation.
+        def module(imports, body, name, ty):
+            return ("module\npublic import Lean\n" + imports + body
+                    + "open Lean Elab Command in\nrun_cmd liftTermElabM <| addDecl <| .axiomDecl "
+                    + f"{{ name := `{name}, levelParams := [], type := mkConst ``{ty}, "
+                    + "isUnsafe := false }\n")
+        base = "public import TauCeti.Base\n"
+        result = self.fixture({
+            "TauCeti.Base": "module\n@[expose] public def f (n : Nat) := n\n",
+            "TauCeti.A": module("", "public def Clash := 1\n", "Hidden", "Nat"),
+            "TauCeti.B": module("", "public def Clash := true\n", "Hidden", "Bool"),
+            "TauCeti.C": module(base, "", "f.eq_1", "Nat"),
+            "TauCeti.D": module(base, "", "f.eq_1", "Bool"),
+        }, full=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        lines = [line for line in result.stderr.splitlines()
+                 if line.startswith("duplicate-declarations: ")]
+        for name in ("Clash", "Hidden"):
+            self.assertIn(f"duplicate-declarations: {name} is declared in both TauCeti.A and TauCeti.B",
+                          lines)
+
     def test_dependency_only_collision_is_out_of_scope(self):
         result = self.fixture({
             "DependencyA": "module\npublic theorem Collision : True := True.intro\n",
