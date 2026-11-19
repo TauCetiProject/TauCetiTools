@@ -77,6 +77,45 @@ class HostResourcesTests(unittest.TestCase):
         self.assertIsNone(summary['host_used_peak_fraction'])
         self.assertFalse(host.memory_warning(summary))
 
+    def test_the_crossing_survives_later_samples(self):
+        gib = 2**30
+        for later in ({'missing': ['meminfo']},
+                      {'missing': [], 'host_used_bytes': 10 * gib, 'host_memory_total_bytes': 100 * gib},
+                      {'missing': [], 'host_used_bytes': 100 * gib, 'host_memory_total_bytes': 200 * gib}):
+            with self.subTest(later=later):
+                sampler = host.Sampler()
+                samples = iter([{'missing': [], 'host_used_bytes': 85 * gib, 'host_memory_total_bytes': 100 * gib},
+                                later])
+                with patch.object(host, 'snapshot', lambda: dict(next(samples))):
+                    sampler.sample()
+                    sampler.sample()
+                summary = sampler.summary()
+                self.assertAlmostEqual(summary['host_used_peak_fraction'], 0.85)
+                self.assertEqual(summary['host_memory_total_bytes'], 100 * gib)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertTrue(host.memory_warning(summary))
+
+    def test_the_boundary_warns(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(host.memory_warning({'host_used_peak_fraction': 0.8, 'host_used_peak_fraction_bytes': 80,
+                                                 'host_memory_total_bytes': 100}))
+
+    def test_an_unwritable_record_still_warns(self):
+        gib = 2**30
+        sample = {'missing': [], 'host_used_bytes': 90 * gib, 'host_memory_total_bytes': 100 * gib}
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(stdout):
+            out = Path(directory) / 'missing-directory' / 'record.json'
+            self.assertEqual(self.invoke([sys.executable, '-c', 'pass'], out, lambda: dict(sample)), 0)
+        self.assertIn('telemetry unavailable', stdout.getvalue())
+        self.assertIn('::warning title=Build memory headroom::', stdout.getvalue())
+
+    def test_a_capped_record_says_so(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            host.memory_warning({'sample_limit_reached': True})
+        self.assertIn('::notice title=Build memory headroom::', stdout.getvalue())
+
     def test_real_meminfo_reports_the_total(self):
         value = host.snapshot()
         if 'meminfo' not in value['missing']:
