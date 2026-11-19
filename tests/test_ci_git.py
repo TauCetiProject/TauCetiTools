@@ -245,14 +245,30 @@ class ReviewSizeTests(unittest.TestCase):
         self.assertEqual(size["new_lean_files"], [("TauCeti/Data.lean", 0)])
 
     def test_line_caps_and_lake_pin_exemption(self):
-        self.write("TauCeti/Other.lean", 2001, start=9000)
+        self.write("TauCeti/Other.lean", ci_git.REVIEW_ADDED_LINE_CAP, start=9000)
         size = self.measure()
-        self.assertEqual((size["additions"], size["deletions"]), (2001, 10))
+        self.assertEqual((size["additions"], size["deletions"]), (3000, 10))
+        self.assertFalse(size["too_large"])
+        self.write("TauCeti/Other.lean", 3001, start=9000)
+        size = self.measure()
+        self.assertEqual((size["additions"], size["deletions"]), (3001, 10))
         self.assertFalse(size["pins_changed"])
         self.assertTrue(size["too_large"])
         (self.repo / "lean-toolchain").write_text("leanprover/lean4:v4.24.0\n")
         size = self.measure()
         self.assertTrue(size["pins_changed"])
+        self.assertFalse(size["too_large"])
+
+    def test_removed_line_cap_is_separate_and_lower(self):
+        self.write("TauCeti/Old.lean", 2001, start=20000)
+        self.base = self.commit("base with a long file")
+        (self.repo / "TauCeti/Old.lean").unlink()
+        size = self.measure()
+        self.assertEqual((size["additions"], size["deletions"]), (0, 2001))
+        self.assertTrue(size["too_large"])
+        self.write("TauCeti/Old.lean", 1, start=20000)
+        size = self.measure()
+        self.assertEqual((size["additions"], size["deletions"]), (0, 2000))
         self.assertFalse(size["too_large"])
 
     def test_file_cap_applies_to_pin_bumps(self):
@@ -264,12 +280,12 @@ class ReviewSizeTests(unittest.TestCase):
         self.assertTrue(size["too_large"])
 
     def test_added_file_length_uses_line_count(self):
-        self.write("TauCeti/Exact.lean", 1000, start=7000)
-        self.write("TauCeti/Long.lean", 1001, start=8000)
+        self.write("TauCeti/Exact.lean", 1250, start=7000)
+        self.write("TauCeti/Long.lean", 1251, start=8000)
         self.write("TauCeti/notes.txt", 1500, start=9000)
         size = self.measure()
-        self.assertEqual(size["new_lean_files"], [("TauCeti/Exact.lean", 1000), ("TauCeti/Long.lean", 1001)])
-        self.assertEqual(size["new_files_too_long"], [("TauCeti/Long.lean", 1001)])
+        self.assertEqual(size["new_lean_files"], [("TauCeti/Exact.lean", 1250), ("TauCeti/Long.lean", 1251)])
+        self.assertEqual(size["new_files_too_long"], [("TauCeti/Long.lean", 1251)])
 
     def test_unusual_filenames_and_cli(self):
         self.git("mv", "TauCeti/Other.lean", "TauCeti/Tab\tand\nnewline.lean")
@@ -287,7 +303,7 @@ class ReviewSizeTests(unittest.TestCase):
 
     def test_pr_guards_report_every_failed_guard_and_scope(self):
         self.assertEqual(self.guards()["violations"], [])
-        self.write("TauCeti/Long.lean", 2001, start=8000)
+        self.write("TauCeti/Long.lean", 3001, start=8000)
         (self.repo / "scripts").mkdir()
         (self.repo / "scripts/tool.py").write_text("print()\n")
         (self.repo / "lakefile.toml").write_text('name = "x"\n')
@@ -296,8 +312,8 @@ class ReviewSizeTests(unittest.TestCase):
         result = self.guards()
         self.assertEqual(result["out_of_scope"], ["lakefile.toml", "scripts/tool.py"])
         too_large, long_file, scope = result["violations"]
-        self.assertIn("too large to review: +2004", too_large)
-        self.assertIn("TauCeti/Long.lean: new Lean files must be at most 1000 lines (found 2001)", long_file)
+        self.assertIn("too large to review: +3004 / -0 lines across 4 files (cap: 3000 added lines, 2000 removed lines", too_large)
+        self.assertIn("TauCeti/Long.lean: new Lean files must be at most 1250 lines (found 3001)", long_file)
         self.assertIn("lakefile.toml, scripts/tool.py", scope)
         self.assertEqual(len(self.guards(scope=False)["violations"]), 2)
 
@@ -308,13 +324,13 @@ class ReviewSizeTests(unittest.TestCase):
                          ["TauCetiX/A.lean"])
 
     def test_pr_guards_and_scope_cli(self):
-        self.write("TauCeti/Long.lean", 1001, start=8000)
+        self.write("TauCeti/Long.lean", 1251, start=8000)
         head = self.commit("head")
         output = subprocess.check_output(
             [sys.executable, str(SCRIPT), "pr-guards", "--checkout", str(self.repo), "--base", self.base, "--head", head]
         )
         result = json.loads(output)
-        self.assertEqual(result["new_files_too_long"], [["TauCeti/Long.lean", 1001]])
+        self.assertEqual(result["new_files_too_long"], [["TauCeti/Long.lean", 1251]])
         self.assertEqual(len(result["violations"]), 1)
         outside = subprocess.run(
             [sys.executable, str(SCRIPT), "scope"], input=b"TauCeti/A.lean\nlean-toolchain\n.github/x.yml\n",
