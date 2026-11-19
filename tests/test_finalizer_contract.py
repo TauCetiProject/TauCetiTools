@@ -30,22 +30,22 @@ def load_tests(loader, tests, pattern):
 
 
 class PublicationGate(unittest.TestCase):
-    def test_audited_cache_publication_survives_reporting_failure(self):
+    def test_staged_cache_publication_survives_check_and_reporting_failure(self):
+        # A queue batch publishes whenever its sandboxed build passed and staged its outputs, even
+        # when an audit, a lint or status reporting failed: only `build` lets a candidate land.
         gate = yaml.safe_load((ROOT / ".github/workflows/pr-build.yml").read_text())["jobs"]["publish-merge-group-cache"]["if"]
-        for cancelled, result, state, required, expected in (
-            (False, "success", "success", "true", True),
-            (False, "failure", "success", "true", True),
-            (False, "failure", "failure", "true", False),
-            (False, "failure", "", "true", False),
-            (False, "success", "success", "false", False),
-            (True, "cancelled", "success", "true", False),
+        for cancelled, staged, required, expected in (
+            (False, "true", "true", True),
+            (False, "false", "true", False),
+            (False, "", "true", False),
+            (False, "true", "false", False),
+            (True, "true", "true", False),
         ):
-            with self.subTest(cancelled=cancelled, result=result, state=state, required=required):
+            with self.subTest(cancelled=cancelled, staged=staged, required=required):
                 expression = gate.removeprefix("${{").removesuffix("}}")
                 for key, value in {
                     "cancelled()": cancelled,
-                    "needs.sandboxed-build.result": result,
-                    "needs.sandboxed-build.outputs.build-state": state,
+                    "needs.sandboxed-build.outputs.cache-staged": staged,
                     "needs.sandboxed-build.outputs.publication-required": required,
                 }.items():
                     expression = expression.replace(key, repr(value))

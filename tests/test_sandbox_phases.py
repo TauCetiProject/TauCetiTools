@@ -140,7 +140,10 @@ class WorkflowPhaseSteps(unittest.TestCase):
         for step in self.phase_steps:
             with self.subTest(step=step['name']):
                 self.assertEqual(step['run'], first['run'])
-                self.assertEqual(step['if'], "${{ env.INFRA != '1' }}")
+                expected = ("${{ env.INFRA != '1' }}" if step is first else
+                            "${{ !cancelled() && env.INFRA != '1' && (success() || "
+                            "(env.IS_BATCH == 'true' && steps.sandbox_build.outcome == 'success')) }}")
+                self.assertEqual(step['if'], expected)
                 self.assertEqual({k: v for k, v in step['env'].items() if k != 'SANDBOX_PHASE'},
                                  {k: v for k, v in first['env'].items() if k != 'SANDBOX_PHASE'})
                 self.assertNotIn('secrets.', json.dumps(step))
