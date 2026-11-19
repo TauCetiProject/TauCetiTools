@@ -574,8 +574,31 @@ def dispatches(api):
 
 
 class InterruptedBuildTests(unittest.TestCase):
+    def setUp(self):
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.report = Path(temporary.name) / "stuck.json"
+
     def recover(self, api, **kwargs):
+        kwargs.setdefault("stuck_report", self.report)
         return recovery.recover(api, "owner/project", now=NOW, cleanup=False, **kwargs)
+
+    def test_without_a_report_to_remember_it_an_interrupted_build_is_not_retried(self):
+        api = Interrupted([pull(state="FAILURE")], cancelled_runs=[cancelled()], jobs={30: [TIMED_OUT]})
+        self.assertEqual(self.recover(api, apply=True, stuck_report=None), [])
+        self.assertEqual(api.writes, [])
+
+    def test_a_rerun_posting_a_new_status_is_classified_afresh(self):
+        api = Interrupted([pull(state="FAILURE")], cancelled_runs=[cancelled()], jobs={30: [TIMED_OUT]})
+        self.recover(api, apply=True)
+        self.assertEqual(json.loads(self.report.read_text())["memory"]["retried"]["1"]["run"], 30)
+        rerun = pull(state="FAILURE")
+        rerun["commits"]["nodes"][0]["commit"]["status"]["contexts"][0]["createdAt"] = "2026-10-28T17:30:00Z"
+        api.pulls, api.cancelled_runs = [rerun], []  # the rerun failed for real
+        self.recover(api, apply=True)
+        report = json.loads(self.report.read_text())
+        self.assertEqual((report["heads"], report["memory"]["retried"]), ([], {}))
+        self.assertEqual(dispatches(api), ["1"])
 
     def test_build_cancelled_at_the_job_timeout_is_retried_once_without_waiting_for_grace(self):
         api = Interrupted([pull(state="FAILURE")], cancelled_runs=[cancelled()], jobs={30: [TIMED_OUT]})
@@ -639,12 +662,13 @@ class InterruptedBuildTests(unittest.TestCase):
             self.assertEqual(json.loads(report.read_text())["heads"], [])
         self.assertEqual(api.writes, [])
 
-    def test_unwritable_report_does_not_stop_recovery(self):
-        api = Interrupted([pull(state="FAILURE")], cancelled_runs=[cancelled()], jobs={30: [TIMED_OUT]})
-        with TemporaryDirectory() as tmp:
-            blocker = Path(tmp) / "file"
-            blocker.write_text("")
-            self.assertEqual(len(self.recover(api, apply=True, stuck_report=blocker / "stuck.json")), 1)
+    def test_unwritable_report_skips_the_retry_but_not_other_recovery(self):
+        missing = pull(2, head="b" * 40, pushed="2026-10-21T05:00:00Z")
+        api = Interrupted([pull(state="FAILURE"), missing], cancelled_runs=[cancelled()], jobs={30: [TIMED_OUT]})
+        blocker = self.report.parent / "file"
+        blocker.write_text("")
+        self.recover(api, apply=True, stuck_report=blocker / "stuck.json")
+        self.assertEqual(dispatches(api), ["2"])
 
     def test_pass_budget_stops_the_cancelled_run_listing(self):
         api = Interrupted([pull(state="FAILURE")], cancelled_runs=[cancelled()], jobs={30: [TIMED_OUT]})
@@ -691,6 +715,15 @@ class StuckHeadTests(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertEqual(self.stuck([pull(labels=[label])]), [])
         self.assertEqual(len(self.stuck([pull(labels=["ci-failed"])])), 1)
+
+    def test_memory_outlives_a_draft_round_trip_but_not_a_new_verdict_or_two_weeks(self):
+        head = pull(state="FAILURE")
+        entry = dict(recovery.verdict(head), seen=NOW)
+        previous = dict(memory=dict(retried={"1": entry}, exhausted={}))
+        self.assertEqual(recovery.remember(previous, [], {}, [], NOW + 86400)["retried"], {"1": entry})
+        self.assertEqual(recovery.remember(previous, [], {}, [], NOW + 15 * 86400)["retried"], {})
+        moved = pull(state="FAILURE", run_id=31)
+        self.assertEqual(recovery.remember(previous, [moved], {}, [], NOW)["retried"], {})
 
     def test_report_keeps_the_start_of_a_continuing_stuck_period(self):
         heads = self.stuck([pull()])

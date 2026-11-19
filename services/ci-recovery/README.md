@@ -73,9 +73,13 @@ cancelled pr-build run whose `sandboxed-build` job acquired a runner and ended `
 does at GitHub's six-hour timeout), the pass dispatches a replacement build without the startup
 grace. The interrupted run must be the head's original `pull_request_target` attempt: a dispatched
 or rerun build that is interrupted too is left red and reported as stuck, so a build that really
-hangs never loops. The report remembers each retry it requested, so a retry that ends without a
-verdict is not repeated either. One listing of the last two days' cancelled pr-build runs finds the
-candidates, and each costs one jobs read; the pass budget is checked before every page and read.
+hangs never loops. The stuck-head report (below) is the retry memory: each retry is recorded there
+before it is requested, so a retry that ends without a verdict is not repeated, and a pass without
+a writable report (such as the Actions fallback) reports interrupted builds but never retries them.
+A memory entry holds while the head's failing status is the same one (a rerun posts a new status),
+and for two weeks while the PR is not seen open and ready. One listing of the last two days'
+cancelled pr-build runs finds the candidates, and each costs one jobs read; the pass budget is
+checked before the listing and before each jobs read.
 
 Each pass also reports stuck heads: open, non-draft, non-`self-tested` heads that, three hours after
 their last push, have no `build` status and no live pr-build, or whose build and its one retry were
