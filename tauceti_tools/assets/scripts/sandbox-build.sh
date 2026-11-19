@@ -121,13 +121,17 @@ audits_phase() {
   # this trusted bound; timeout remains a process/liveness failure, not an audit finding.
   AUDIT_TIMEOUT="$(command -v timeout)"
   if [ -n "${AXIOMS_ONLY_MODULES:-}" ]; then
+    # The axiom check is independent of ownership: it runs and reports after a duplicate
+    # failure too, and the phase then fails with the duplicate check's status.
+    duplicates_status=0
     AUDIT_PHASES_FILE="$TELEMETRY/phases.tsv" lake env "$AUDIT_TIMEOUT" --signal=TERM --kill-after=30 \
-      3000s "$AUDIT_DRIVER_EXE" --duplicates-only
+      3000s "$AUDIT_DRIVER_EXE" --duplicates-only || duplicates_status=$?
     # Ordinary PRs check the changed files' own compiled declarations, including private proofs.
     # The workflow leaves this scope unset for staging, pin changes and unscopable changes.
     phase audit-axioms
     "$AUDIT_TIMEOUT" --signal=TERM --kill-after=30 3000s \
       "$(dirname "$LINT_DRIVER_EXE")/local-axioms" "$AXIOMS_ONLY_MODULES" TauCeti "$PWD/.lake/build/lib/lean"
+    if [ "$duplicates_status" != 0 ]; then exit "$duplicates_status"; fi
   else
     AUDIT_PHASES_FILE="$TELEMETRY/phases.tsv" lake env "$AUDIT_TIMEOUT" --signal=TERM --kill-after=30 \
       3000s "$AUDIT_DRIVER_EXE"

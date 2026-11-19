@@ -248,6 +248,19 @@ class DuplicateDeclarationsTest(unittest.TestCase):
                     "duplicate-declarations: Third is declared in both TauCeti.C and Dependency",
                 ])
                 self.assertNotIn("phase audit-axioms", result.stdout)
+                self.assertEqual("axioms were not checked" in result.stderr, full)
+
+    def test_full_audit_reports_duplicates_and_axioms(self):
+        # A duplicate does not hide the axiom findings; the audit fails after reporting both.
+        result = self.fixture({
+            "TauCeti.A": "module\npublic theorem Collision : True := True.intro\n",
+            "TauCeti.B": "module\npublic theorem Collision : True := True.intro\n",
+            "TauCeti.Orphan": "module\npublic theorem bad : False := by sorry\n",
+        }, full=True)
+        self.assert_collision(result)
+        self.assertIn("duplicate-declarations: Collision is declared in both", result.stderr)
+        self.assertIn("phase audit-axioms", result.stdout)
+        self.assertIn("bad → [sorryAx]", result.stderr)
 
     def test_failed_import_reports_collisions_without_source_ranges(self):
         # Declarations a metaprogram adds have no source range and are still reported,
