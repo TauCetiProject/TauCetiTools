@@ -785,6 +785,17 @@ Deploy the capacity service first and verify fresh snapshots advertise
 requested fleet jobs are included. Older cached snapshots remain useful for
 running capacity but cannot authorize intentionally waiting PR work.
 
+Set `[services.fleet].pr_overflow_pool = "fleet"` to send additional PR jobs to
+the generic `fleet` tier listed in `pr_order` once every preferred pool is
+saturated or its capacity is unknown.
+The default, `"github"`, retains the usual GitHub fallback. Fleet overflow
+requires a complete runner inventory and at least one online, non-excluded PR
+runner, but does not require a complete queue observation or a known placement.
+It can queue without a bound, including when `pr_queue_limit = 0`: that limit
+controls when later preference tiers are tried, rather than the overflow queue.
+Jobs already waiting on the fleet stay there when cloud capacity becomes free.
+Set `FLEET_CI_ENABLED=false` to stop routing new jobs to the fleet.
+
 ### Runtime Namespace controls
 
 Wire the repository variables `NAMESPACE_ENABLED` and `NAMESPACE_BUILD_CAP` into
