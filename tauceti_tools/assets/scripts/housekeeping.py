@@ -197,6 +197,56 @@ def gh_jsonl(args):
     return [json.loads(line) for line in r.stdout.splitlines() if line.strip()]
 
 
+# Every open PR carrying one label, through GraphQL cursor pagination. `gh pr list --limit N`
+# returns only the newest N, which hid every PR below the newest thousand from the stale and red
+# jobs once the repository passed that many open PRs. Filtering by label on the server keeps the
+# listing to the candidates; the selection below still reads only these fields.
+OPEN_PRS_WITH_LABEL_QUERY = """
+query($owner: String!, $name: String!, $labels: [String!], $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: OPEN, labels: $labels, first: 100, after: $endCursor) {
+      nodes {
+        number isDraft updatedAt headRefName
+        author { __typename login }
+        headRepositoryOwner { login }
+        headRepository { name }
+        labels(first: 100) { nodes { name } }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}"""
+
+
+def pr_from_graphql(node: dict) -> dict:
+    """Reshape a GraphQL pull request node into the `gh pr list --json` shape the jobs read."""
+    author = node.get("author") or {}
+    return {
+        "number": node["number"],
+        "isDraft": node.get("isDraft"),
+        "updatedAt": node.get("updatedAt"),
+        "headRefName": node.get("headRefName") or "",
+        "headRepositoryOwner": node.get("headRepositoryOwner") or {},
+        "headRepository": node.get("headRepository") or {},
+        "author": {"login": author.get("login", ""), "is_bot": author.get("__typename") == "Bot"},
+        "labels": list((node.get("labels") or {}).get("nodes") or []),
+    }
+
+
+def open_prs_with_label(label: str) -> list:
+    """Every open PR carrying `label`, however many PRs are open.
+
+    `-f` keeps every variable a string: `-F` would turn a repository named `123` or `true` into a
+    number or boolean that fails `String!` validation. A failure on any page makes `gh` exit
+    nonzero, so `gh_jsonl` raises rather than returning a partial list.
+    """
+    owner, name = REPO.split("/", 1)
+    nodes = gh_jsonl(["api", "graphql", "--paginate", "-f", f"query={OPEN_PRS_WITH_LABEL_QUERY}",
+                      "-f", f"owner={owner}", "-f", f"name={name}", "-f", f"labels[]={label}",
+                      "--jq", ".data.repository.pullRequests.nodes[]"])
+    return [pr_from_graphql(node) for node in nodes]
+
+
 def ci_failed_since(pr: int):
     """When this PR's current `ci-failed` spell began, or None if it is not currently failing."""
     events = gh_jsonl(["api", "--paginate", f"/repos/{REPO}/issues/{pr}/events?per_page=100",
@@ -319,10 +369,10 @@ def main() -> int:
     # varies with the reading identity. Requiring an associated scoreboard silently made these PRs
     # immortal. Reading labels also avoids another comment-history fetch for every stale candidate.
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=STALE_DAYS)
-    open_prs = gh_json(["pr", "list", "--repo", REPO, "--state", "open", "--limit", "1000",
-                        "--json", "number,isDraft,labels,updatedAt,author,headRefName,headRepositoryOwner,headRepository"]) or []
-    old = [p for p in open_prs if parse_ts(p.get("updatedAt", "")) < cutoff]
-    print(f"stale: {len(old)} open PR(s) untouched for >{STALE_DAYS}d to check{suffix}")
+    awaiting_author = open_prs_with_label("awaiting-author")
+    old = [p for p in awaiting_author if parse_ts(p.get("updatedAt", "")) < cutoff]
+    print(f"stale: {len(old)} of {len(awaiting_author)} awaiting-author PR(s) untouched for "
+          f">{STALE_DAYS}d to check{suffix}")
     for p in old:
         n = p["number"]
         if p.get("isDraft") is not False or has_keep_label(p) or core.automatic_bump(p):
@@ -346,7 +396,7 @@ def main() -> int:
     # at all, because a PR that never went green never reached review and never got one.
     red_cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=CI_FAILED_DAYS)
     # isDraft must be explicitly False, matching stale above: an unknown draft state is never closed.
-    red_candidates = [p for p in open_prs
+    red_candidates = [p for p in open_prs_with_label(CI_FAILED_LABEL)
                       if p.get("isDraft") is False and not has_keep_label(p) and not core.automatic_bump(p)
                       and has_label(p, CI_FAILED_LABEL)]
     print(f"red: {len(red_candidates)} open PR(s) carrying {CI_FAILED_LABEL} to check{suffix}")

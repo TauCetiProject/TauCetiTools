@@ -17,6 +17,7 @@ Pure logic; no network. Run: python3 scripts/test_housekeeping.py
 import datetime
 import os
 import unittest
+import unittest.mock
 from unittest.mock import patch
 
 os.environ.setdefault("REPO", "example/project")
@@ -37,6 +38,82 @@ def labeled(day, name="ci-failed", hour=0):
 
 def unlabeled(day, name="ci-failed", hour=0):
     return {"event": "unlabeled", "created_at": at(day, hour), "label": {"name": name}}
+
+
+def labelled(prs, label):
+    """What the server-side label filter of `open_prs_with_label` returns from `prs`."""
+    return [p for p in prs if hk.has_label(p, label)]
+
+
+def node(number, labels=("awaiting-author",), updated="2020-01-01T00:00:00Z", typename="User"):
+    return {"number": number, "isDraft": False, "updatedAt": updated, "headRefName": f"pr-{number}",
+            "author": {"__typename": typename, "login": "someone"},
+            "headRepositoryOwner": {"login": "someone"}, "headRepository": {"name": "project"},
+            "labels": {"nodes": [{"name": n} for n in labels]}}
+
+
+class FullOpenList(unittest.TestCase):
+    """The stale and red jobs see every open PR, not only the newest thousand.
+
+    `gh pr list --limit 1000` lists newest first, so once a repository had more open PRs than that,
+    every older PR waiting on an idle author was invisible to both jobs and never retired.
+    """
+
+    def test_the_listing_pages_through_graphql_filtered_by_label(self):
+        with patch.object(hk, "REPO", "owner/name"), \
+                patch.object(hk, "gh_jsonl", return_value=[node(7)]) as read:
+            prs = hk.open_prs_with_label("awaiting-author")
+        args = read.call_args.args[0]
+        self.assertEqual(args[:3], ["api", "graphql", "--paginate"])
+        for value in ("owner=owner", "name=name", "labels[]=awaiting-author"):
+            # `-f`, not `-F`: a repository named `123` must stay a string.
+            self.assertEqual(args[args.index(value) - 1], "-f")
+        query = next(a for a in args if a.startswith("query="))
+        # `gh --paginate` feeds pageInfo.endCursor back through the $endCursor variable; a query
+        # that does not pass it to `after:` returns the first page on every request.
+        self.assertIn("after: $endCursor", query)
+        self.assertIn("labels: $labels", query)
+        self.assertIn("pageInfo { hasNextPage endCursor }", query)
+        self.assertNotIn("--limit", args)
+        self.assertEqual([p["number"] for p in prs], [7])
+
+    def test_a_failed_page_aborts_rather_than_returning_a_partial_list(self):
+        failed = unittest.mock.Mock(returncode=1, stdout='{"number": 1}\n', stderr="HTTP 502")
+        with patch.object(hk.subprocess, "run", return_value=failed):
+            with self.assertRaises(RuntimeError):
+                hk.open_prs_with_label("ci-failed")
+
+    def test_nodes_take_the_shape_the_jobs_read(self):
+        pr = hk.pr_from_graphql(node(7, labels=("awaiting-author", "keep")))
+        self.assertEqual(pr["labels"], [{"name": "awaiting-author"}, {"name": "keep"}])
+        self.assertTrue(hk.has_keep_label(pr))
+        self.assertIs(pr["isDraft"], False)
+        self.assertFalse(pr["author"]["is_bot"])
+
+    def test_a_bot_author_still_counts_as_an_automatic_bump(self):
+        bump = node(9, typename="Bot")
+        bump.update(headRefName="bump-mathlib/x", headRepositoryOwner={"login": "TauCetiProject"},
+                    headRepository={"name": "TauCeti"})
+        self.assertTrue(hk.core.automatic_bump(hk.pr_from_graphql(bump), repo="TauCetiProject/TauCeti"))
+
+    def test_a_missing_author_does_not_crash_it(self):
+        # A deleted account comes back as `author: null`.
+        pr = hk.pr_from_graphql({**node(3), "author": None})
+        self.assertFalse(pr["author"]["is_bot"])
+
+    def test_old_prs_beyond_the_newest_thousand_are_retired(self):
+        nodes = [node(n, updated="2099-01-01T00:00:00Z") for n in range(3000, 1000, -1)]
+        nodes.append(node(5))  # the oldest PR, last in a newest-first listing
+        def view(args):
+            if args[:2] == ["pr", "view"]:
+                return {"state": "OPEN", "isDraft": False, "updatedAt": "2020-01-01T00:00:00Z",
+                        "labels": [{"name": "awaiting-author"}]}
+            return []
+        with patch.object(hk, "gh_json", side_effect=view), \
+                patch.object(hk, "gh_jsonl", side_effect=lambda args: nodes if args[:2] == ["api", "graphql"] else []), \
+                patch.object(hk, "close", return_value=True) as close:
+            self.assertEqual(hk.main(), 0)
+        self.assertEqual([c.args[0] for c in close.call_args_list], [5])
 
 
 class LabelSpell(unittest.TestCase):
@@ -118,6 +195,7 @@ class StaleSelection(unittest.TestCase):
         def read(args):
             return live if args[:2] == ["pr", "view"] else [pr]
         with patch.object(hk, "gh_json", side_effect=read), \
+             patch.object(hk, "open_prs_with_label", side_effect=lambda label: labelled([pr], label)), \
              patch.object(hk, "latest_scoreboard_meta", return_value=None) as scoreboard, \
              patch.object(hk, "close", return_value=True) as close:
             self.assertEqual(hk.main(), 0)
@@ -160,6 +238,7 @@ class AutomaticBump(unittest.TestCase):
               "labels": [{"name": "ci-failed"}, {"name": hk.BUDGET_LABEL}]}
         with patch.object(hk.core, "REPO", "TauCetiProject/TauCeti"), \
                 patch.object(hk, "gh_json", return_value=[pr]), \
+                patch.object(hk, "open_prs_with_label", side_effect=lambda label: labelled([pr], label)), \
                 patch.object(hk, "latest_scoreboard_meta", side_effect=AssertionError("bump must not be retired")), \
                 patch.object(hk, "close", side_effect=AssertionError("bump must stay open")):
             self.assertEqual(hk.main(), 0)
