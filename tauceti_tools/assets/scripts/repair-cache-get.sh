@@ -210,8 +210,8 @@ for i in "${!REVS[@]}"; do
   if [ -d "$OUTPUTS" ]; then cp -a "$OUTPUTS/." "$ATTEMPT/"; fi
   # A staging build publishes its outputs to the public cache under the candidate's revision
   # whenever its build passed, so a candidate revision the repair cache lacks is looked up there.
-  outcome=failed
   for SERVICE in "$REPAIR_CACHE_SERVICE" tauceti-public; do
+    outcome=failed
     for attempt in $(seq 1 $ATTEMPTS); do
       LOG="${RUNNER_TEMP:-/tmp}/repair-cache-get-$i-$SERVICE-$attempt.log"
       rc=0

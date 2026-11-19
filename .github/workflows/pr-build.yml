@@ -1714,6 +1714,9 @@ jobs:
             state=failure; desc="build not run — tested H/B/T identity missing or invalid"
           elif [ "${{ steps.import_headers.outcome }}" = "failure" ]; then
             state=failure; desc="import header preflight failed — see importing-file/header diagnostics"
+          elif [ "${{ steps.dot_notation.outcome }}" = "failure" ] && [ "$source_check" != failure ]; then
+            # A queue batch continues past this lint (continue-on-error); its exit 2 means it could not run.
+            state=failure; desc="dot-notation lint did not complete; re-run pr-build"
           elif [ "$source_check" = failure ]; then
             state=failure; desc="a pre-build source check failed; see the failed guard step"
           elif [ "${{ steps.build.outcome }}" = "failure" ]; then
