@@ -59,12 +59,32 @@ def in_scope(labels, targets=(), branch="", roadmap="any", skip=()):
     return bool(areas - set(skip))
 
 
+def _comment_id(comment):
+    value = comment.get("id")
+    text = str(value) if isinstance(value, (int, str)) and not isinstance(value, bool) else ""
+    return int(text) if re.fullmatch(r"[0-9]+", text) else -1
+
+
+def scoreboard_order(comment):
+    """The newest-first ordering key every scoreboard reader shares with the queue's admission rule.
+
+    The last edit counts, with the creation time standing in when a source omits it. Equal
+    timestamps (second resolution) fall to the larger, later-created comment id, so the choice does
+    not depend on the order a source happens to return comments in. Only comments without a usable
+    id fall through to input position, where the later one wins, as in admission.
+    """
+    return (comment.get("updated_at") or comment.get("created_at") or "", _comment_id(comment))
+
+
 def scoreboard(comments):
-    marked = sorted(
-        (c for c in comments or [] if SPEC["scoreboard"] in (c.get("body") or "")),
-        key=lambda c: c.get("updated_at") or "",
-        reverse=True,
-    )
+    marked = [
+        c
+        for _, c in sorted(
+            ((index, c) for index, c in enumerate(comments or []) if SPEC["scoreboard"] in (c.get("body") or "")),
+            key=lambda item: (scoreboard_order(item[1]), item[0]),
+            reverse=True,
+        )
+    ]
     for c in marked:
         matches = re.findall(SPEC["meta_pattern"], c.get("body") or "")
         try:

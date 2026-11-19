@@ -3,8 +3,13 @@
 The Actions sweep remains a fallback. Its nominal hourly schedule can be delayed
 or dropped for hours, and its twenty-dispatch limit cannot drain a large backlog.
 Run the recovery timer on the authoritative queue host hourly to recover missing
-builds across all authors, without a PR-count cap. Systemd serializes passes. Ordinary workflow routing and runner capacity still apply. A pass stops before
-consuming the last 1,500 requests of the shared installation API budget.
+builds across all authors, without a PR-count cap. Systemd serializes passes. Ordinary workflow routing and runner capacity still apply.
+
+The sweeper shares the queue App's installation (7,150 requests an hour) with the queue, and has a
+fixed share of it: a pass stops after `--api-budget 1500` of its own requests, and before consuming
+the last 1,500 requests of the window (`--api-reserve 1500`). The reserve is above the queue's own
+floor (`github_background_floor`, 1,000), so the sweeper always stops before the queue's admission
+reads pause, and those stop before landing, dispatch and commands run short.
 
 Install an immutable copy of this Tools checkout under
 `~/TauCetiCIRecovery/releases/<revision>` and point `~/TauCetiCIRecovery/current`
@@ -12,9 +17,12 @@ at it. Copy the service and timer to `~/.config/systemd/user/`, reload the user
 manager, and enable/start the timer. The wrapper requires the queue checkout and
 its Python environment at `~/TauCetiQueue` (override its import path with
 `TAUCETI_QUEUE_CHECKOUT`) and uses the queue host's existing GitHub App files.
-The wrapper reuses the host's existing organization credential for team membership
-reads; repository credentials are minted per pass. Neither is written into the
-release or journal.
+Every request, including the `self-tested` team membership read, uses an installation token of
+the queue App minted per pass; it is never written into the release or journal, and the host's
+personal `gh` login is not used. The membership read needs the App's organization permission
+**Members: Read-only**. Without it the wrapper logs that and skips self-tested cleanup for the
+pass (unknown membership never cancels a build); missing-build recovery is unaffected.
+`SELF_TESTED_TEAM_TOKEN` in the unit's environment names an explicit token for that read instead.
 
 The shared sweeper first snapshots every active ordinary PR build, including
 `pending`, `waiting`, `queued`, `requested` and `in_progress` runs. Date windows

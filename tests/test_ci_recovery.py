@@ -236,6 +236,14 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(len(self.recover(api, apply=True, api_reserve=1500)), 1)
         self.assertEqual(len(api.writes), 1)
 
+    def test_pass_budget_caps_the_sweepers_share_of_the_installation(self):
+        api = GitHub()
+        api.stats = {"read": {"requests": 1500, "buckets": {"core": {"remaining": "6000"}}}}
+        self.assertEqual(self.recover(api, apply=True, api_reserve=1500, api_budget=1500), [])
+        self.assertEqual(api.writes, [])
+        api.stats["read"]["requests"] = 10
+        self.assertEqual(len(self.recover(api, apply=True, api_reserve=1500, api_budget=1500)), 1)
+
     def test_ignored_label_events_do_not_block_recovery(self):
         ignored = run()
         ignored.update(display_title="Ignored label event 12", status="in_progress")

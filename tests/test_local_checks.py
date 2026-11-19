@@ -71,9 +71,9 @@ class LocalChecks(unittest.TestCase):
     def test_new_file_length_and_import_boundary(self):
         selected = checks.scope(self.root, self.base, "ordinary")
         with patch.object(checks, "run"):
-            (self.root / "TauCeti/New.lean").write_text("\n" * 1001)
+            (self.root / "TauCeti/New.lean").write_text("\n" * 1251)
             selected = checks.scope(self.root, self.base, "ordinary")
-            with self.assertRaisesRegex(checks.Violation, "1000 lines"):
+            with self.assertRaisesRegex(checks.Violation, "1250 lines"):
                 checks.sources(self.root, selected)
             (self.root / "TauCeti/New.lean").write_text("public import TauCetiReview\n")
             with self.assertRaisesRegex(checks.Violation, "roadmap/review"):
@@ -92,7 +92,7 @@ class LocalChecks(unittest.TestCase):
             with self.assertRaisesRegex(checks.Violation, "human merge: scripts/tool.py"):
                 checks.sources(self.root, selected)
             self.git("rm", "-q", "--cached", "scripts/tool.py")
-            (self.root / "TauCeti/A.lean").write_text("module\n" + "".join(f"-- {i}\n" for i in range(2001)))
+            (self.root / "TauCeti/A.lean").write_text("module\n" + "".join(f"-- {i}\n" for i in range(3001)))
             with self.assertRaisesRegex(checks.Violation, "too large to review"):
                 checks.sources(self.root, selected)
             # The Lake-pin bump exemption from the line caps applies locally too.
@@ -109,7 +109,7 @@ class LocalChecks(unittest.TestCase):
         self.git("commit", "-qm", "batch parent adds a long file")
         parent = self.git("rev-parse", "HEAD")
         with patch.object(checks, "run"), contextlib.redirect_stdout(io.StringIO()):
-            with self.assertRaisesRegex(checks.Violation, "1000 lines"):
+            with self.assertRaisesRegex(checks.Violation, "1250 lines"):
                 checks.sources(self.root, checks.scope(self.root, self.base, "ordinary"))
             checks.sources(self.root, checks.scope(self.root, parent, "ordinary"))
 

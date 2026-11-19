@@ -797,9 +797,9 @@ class PinGuard(unittest.TestCase):
             values.pop("rejected_members", None)
             return values
 
-        self.assertEqual(flags(added_lines=1001), {"SOURCE_SIZE_POLICY_COMPLETE": "1", "NEWFILE_TOO_LONG": "1"})
-        self.assertEqual(flags(existing_lines=2001), {"SOURCE_SIZE_POLICY_COMPLETE": "1", "TOO_LARGE": "1"})
-        self.assertEqual(self.member_policy(existing_lines=2001, pin_changed=True), {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
+        self.assertEqual(flags(added_lines=1251), {"SOURCE_SIZE_POLICY_COMPLETE": "1", "NEWFILE_TOO_LONG": "1"})
+        self.assertEqual(flags(existing_lines=3001), {"SOURCE_SIZE_POLICY_COMPLETE": "1", "TOO_LARGE": "1"})
+        self.assertEqual(self.member_policy(existing_lines=3001, pin_changed=True), {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
         self.assertEqual(self.member_policy(binary=True), {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
         # A moved file is neither new nor a full rewrite, matching the PR CI review-size guard.
         self.assertEqual(self.member_policy(moved_lines=2500), {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
@@ -811,13 +811,13 @@ class PinGuard(unittest.TestCase):
     def test_rejected_members_are_named_for_targeted_withdrawal(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            values = self.member_policy(existing_lines=2001)
+            values = self.member_policy(existing_lines=3001)
         (record,) = values["rejected_members"]
         self.assertEqual(record["source_pr"], 17)
         self.assertEqual(record["source"], policy().source.record())
         self.assertEqual(record["source_forge"], policy().source.repository.forge.key)
         self.assertRegex(record["head"], "^[0-9a-f]{40}$")
-        self.assertEqual((record["additions"], record["deletions"], record["files"]), (2001, 0, 1))
+        self.assertEqual((record["additions"], record["deletions"], record["files"]), (3001, 0, 1))
         self.assertIn("too large to review", record["reasons"][0])
         (line,) = [x for x in output.getvalue().splitlines() if x.startswith(cw.MEMBER_REJECTION_PREFIX)]
         self.assertEqual(json.loads(line[len(cw.MEMBER_REJECTION_PREFIX):]), record)
@@ -827,7 +827,7 @@ class PinGuard(unittest.TestCase):
         self.assertNotIn("additions", orphan)
 
     def chain_policy(self, *, split, forgejo=False, extra_trailer=False):
-        """A two-member queue chain: member 17 accepted a 1001-line new file; the chain commit for
+        """A two-member queue chain: member 17 accepted a 1251-line new file; the chain commit for
         it either keeps it (`split=False`) or carries a repair that split it into two files."""
         config = policy()
         with tempfile.TemporaryDirectory() as directory:
@@ -856,7 +856,7 @@ class PinGuard(unittest.TestCase):
             git("commit", "-qm", "base")
             base = git("rev-parse", "HEAD")
             git("checkout", "-qb", "pr17")
-            (writer / "New.lean").write_text("new\n" * 1001)
+            (writer / "New.lean").write_text("new\n" * 1251)
             git("add", ".")
             git("commit", "-qm", "member 17")
             accepted17 = git("rev-parse", "HEAD")
@@ -870,10 +870,10 @@ class PinGuard(unittest.TestCase):
             git("checkout", "-qb", "chain")
             repository = "forgejo/operator/source@7" if forgejo else "TauCetiProject/TauCeti"
             if split:
-                (writer / "New.lean").write_text("new\n" * 600)
-                (writer / "New2.lean").write_text("new\n" * 401)
+                (writer / "New.lean").write_text("new\n" * 650)
+                (writer / "New2.lean").write_text("new\n" * 601)
             else:
-                (writer / "New.lean").write_text("new\n" * 1001)
+                (writer / "New.lean").write_text("new\n" * 1251)
             git("add", ".")
             forged = f"\n\nAccepted-Head: {accepted18}" if extra_trailer else ""
             git("commit", "-qm", f"member 17\n\nSource-PR: {repository}#17\nAccepted-Head: {accepted17}"
@@ -895,7 +895,7 @@ class PinGuard(unittest.TestCase):
                 return cw.member_size_policy(req, config, context(req, config), workspace), first, base
 
     def test_member_policy_measures_each_members_commit_as_it_sits_in_the_batch_chain(self):
-        # The accepted head adds a 1001-line new file; a repair in the batch split it, which lands.
+        # The accepted head adds a 1251-line new file; a repair in the batch split it, which lands.
         values, _, _ = self.chain_policy(split=True)
         self.assertEqual(values, {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
         values, _, _ = self.chain_policy(split=True, forgejo=True)
