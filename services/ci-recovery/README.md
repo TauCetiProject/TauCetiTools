@@ -68,6 +68,27 @@ job cannot. Explicit old heads do not reserve a newer head. Recovery validates t
 considering build dispatches. Staging remains controller-
 owned. The shared API reserve stops a pass before exhausting the queue's budget.
 
+An interrupted build gets one automatic retry. When a head's current `build` failure comes from a
+cancelled pr-build run whose `sandboxed-build` job acquired a runner and ended `cancelled` (as a job
+does at GitHub's six-hour timeout), the pass dispatches a replacement build without the startup
+grace. The interrupted run must be the head's original `pull_request_target` attempt: a dispatched
+or rerun build that is interrupted too is left red and reported as stuck, so a build that really
+hangs never loops. The report remembers each retry it requested, so a retry that ends without a
+verdict is not repeated either. One listing of the last two days' cancelled pr-build runs finds the
+candidates, and each costs one jobs read; the pass budget is checked before every page and read.
+
+Each pass also reports stuck heads: open, non-draft, non-`self-tested` heads that, three hours after
+their last push, have no `build` status and no live pr-build, or whose build and its one retry were
+both interrupted, and that carry none of the final-state labels (`awaiting-author`,
+`needs-human-review`, `merge-conflict`, `hold`, `wip`, `keep`, `on-hold`). It reuses the pass's PR
+inventory and live-run snapshot, so it costs no extra requests. The journal gets one JSON line per
+stuck head (`stuck_head`, `reason`, `hours`) and a `stuck heads: N, oldest Xh` line. The wrapper
+writes the same list to `~/.local/state/tauceti-ci-recovery/stuck-heads.json`
+(`TAUCETI_CI_STUCK_REPORT` or `--stuck-report` names another path); the merge queue on this host
+shows it in `tauceti-queue status` and sends one direct message when the count stays above zero for
+six hours. The report keeps `stuck_since`, the first pass of the current stuck period, across passes
+up to three hours apart.
+
 Recovery dispatches the ordinary trusted default-branch build. It never approves
 or merges a PR, and it never fabricates a successful status.
 
