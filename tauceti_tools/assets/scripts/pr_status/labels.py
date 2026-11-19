@@ -9,6 +9,7 @@ Requires authenticated gh and TAUCETI_REVIEW_RUNNER pointing to the pinned engin
 """
 
 import json
+import os
 import subprocess
 import sys
 
@@ -148,7 +149,31 @@ def reconcile(pr):
     if desired is not None and desired not in current:
         add_label(pr, desired)
 
+    if status.get("scope_failure"):
+        post_scope_failure(status["head"], status["scope_failure"])
     log(f"PR #{pr}@{status['head']}: {status['reason']} -> label={desired or '(none)'}")
+
+
+def post_scope_failure(head, description):
+    """Post PR CI's failed `scope` status for a self-tested head PR CI skipped.
+
+    The App token that writes labels holds no statuses permission, so this uses the
+    workflow token the job already receives as SELF_TESTED_WRITE_TOKEN. Without it, or on
+    a refused write, the label still tells the author and admission still refuses the head.
+    """
+    token = os.environ.get("SELF_TESTED_WRITE_TOKEN")
+    if not token:
+        log("note: no status credential; the failed scope status was not posted")
+        return
+    env = {**os.environ, "GH_TOKEN": token}
+    env.pop("GITHUB_TOKEN", None)
+    r = subprocess.run(["gh", "api", "--method", "POST", f"/repos/{REPO}/statuses/{head}",
+                        "-f", "state=failure", "-f", "context=scope", "-f", f"description={description}"],
+                       env=env, capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        log(f"note: could not post the failed scope status: {r.stderr.strip()}")
+    else:
+        log("posted scope=failure")
 
 
 
