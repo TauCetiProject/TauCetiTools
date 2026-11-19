@@ -52,9 +52,8 @@ _REPO_ASSOCIATED = ("OWNER", "MEMBER", "COLLABORATOR")
 
 # `gh` exits nonzero on a rate limit without retrying. The sinks driven by
 # pr-status.yml, pr-labels.yml and housekeeping.yml read through gh_api against
-# ONE shared App installation budget; stuck-alerts.yml runs on GITHUB_TOKEN and so
-# has its own. Either way a burst of merges can spend the budget out from under
-# whichever read comes next.
+# ONE shared App installation budget, so a burst of merges can spend the budget
+# out from under whichever read comes next.
 #
 # `gh` writes the API's message followed by "(HTTP <status>)" to stderr, so a rate
 # limit is recognised by STATUS first and wording second. Matching on wording alone
@@ -85,8 +84,8 @@ class RateLimited(RuntimeError):
 
 
 # Once a limit is established, every later read is refused until it resets. Without
-# this a caller that catches per-item failures — stuck_alerts runs ten detectors,
-# housekeeping and label reconciliation loop per PR — would start the full wait again
+# this a caller that catches per-item failures (housekeeping and label
+# reconciliation loop per PR) would start the full wait again
 # for each one and blow the job's timeout long before doing any work.
 _BLOCKED_UNTIL = 0.0
 _BLOCK_LOCK = threading.Lock()  # batch.py calls gh_api from several threads
@@ -312,33 +311,9 @@ def scoreboard_meta_from(comments):
         return {}
 
 
-def scoreboard_meta(pr):
-    """Newest marked scoreboard from any author, matching the worker and auto-merge policy."""
-    return scoreboard_meta_from(issue_comments(pr))
-
-
 def repo_associated_scoreboard_meta(pr):
     """Newest marked scoreboard from a repo-associated author, for destructive consumers."""
     return scoreboard_meta_from(repo_associated_comments(pr))
-
-
-def newest_status(head, context):
-    """(state, updated_at) of the newest commit status for `context`, else (None, None).
-
-    per_page=100 so a burst of unrelated status events cannot push the wanted
-    context (e.g. `build` / `bump-guard`) off the first page and hide it.
-    """
-    out = gh_api(
-        f"/repos/{REPO}/commits/{head}/statuses?per_page=100",
-        jq=f'[.[] | select(.context == "{context}")] | sort_by(.updated_at)'
-           ' | last | {state: (.state // ""), updated_at: (.updated_at // "")}',
-    ).strip()
-    if not out:
-        return None, None
-    row = json.loads(out.splitlines()[0])
-    if not row.get("state"):
-        return None, None
-    return row["state"], row.get("updated_at") or None
 
 
 def review_state(meta, head):

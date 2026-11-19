@@ -33,7 +33,7 @@ test_pr_stats_graphs.py test_queue_release.py test_roadmap_api.py test_roadmap_c
 test_roadmap_label.py test_roadmap_progress.py test_stack_policy.py test_structure_nudge.py
 test_toolchain_tags.py test_web_pins.py
 perf/test_perf.py pr_status/test_batch.py pr_status/test_conflicts.py
-pr_status/test_pr_labels.py pr_status/test_readiness.py pr_status/test_stuck_alerts.py
+pr_status/test_pr_labels.py pr_status/test_readiness.py
 pr_status/test_zulip.py
 """.split()
 
