@@ -299,8 +299,8 @@ test('local obsolete work retires while an installation-wide restriction blocks 
 });
 
 test('durably backed-off malformed members do not strand a healthy item behind the dispatch cap',async()=>{
- const f=await fixture();try{
-  await seed(f,18);const healthy=117;let calls=0;
+ const f=await fixture(),clock=Date.now;try{
+  await seed(f,18);const healthy=117;let calls=0;const now=clock();Date.now=()=>now; // See the failed publication tail test.
   f.env.INSTALLATIONS={idFromName:id=>id,get:()=>({fetch:async(_url,init)=>{
    calls++;const input=JSON.parse(init.body);
    return Response.json(input.query.args.number===healthy?{api:'core',data:[]}:{unavailable:true,reason:'malformed_upstream_response',failure_kind:'member'});
@@ -311,7 +311,7 @@ test('durably backed-off malformed members do not strand a healthy item behind t
   assert.equal(calls,18);assert.equal(rows.filter(j=>j.attempt===1&&j.due>Date.now()).length,17);
   assert.ok(rows.every(j=>j.lease_id===null));
   assert.equal((await f.store.exec("SELECT COUNT(*) n FROM collections WHERE operation='files' AND complete=1")).one().n,1,'retry settlement is not completed coverage');
- }finally{await drainRepairs(f.state);await f.close();}
+ }finally{Date.now=clock;await drainRepairs(f.state);await f.close();}
 });
 
 test('a generic apply TypeError backs off without turning a broken backlog into productive quanta',async()=>{
@@ -349,8 +349,11 @@ test('a malformed internal service envelope backs off without member-data contin
 });
 
 test('a failed publication tail is retained across member-retry-only internal chains',async()=>{
- const f=await fixture();try{
+ // Hold the clock: each failure backs off for 60s, and a slow PostgreSQL drain
+ // can outlast that, making backed-off members and the failed tail due again.
+ const f=await fixture(),clock=Date.now;try{
   await seed(f,24,'issue_comments');await f.store.exec('UPDATE jobs SET due=?',Date.now()-2000);await seed(f,40);
+  const now=clock();Date.now=()=>now;
   const publish=f.state.publishPrepared;let batches=0,files=0;
   f.state.publishPrepared=async function(input,...args){
    if(input.some(p=>p.job.key===key(108,'issue_comments')))throw Error('unclassified publication interruption');
@@ -364,7 +367,7 @@ test('a failed publication tail is retained across member-retry-only internal ch
   await f.state.runAlarm();await drainRepairs(f.state);assert.equal(files,40);assert.equal(batches,1,'failure-heavy independent work must not refetch an unchanged tail every16launches');
   assert.ok(f.state.repairCoordinator.current.failed.has(key(123,'issue_comments')));
   await f.state.runAlarm();await drainRepairs(f.state);assert.equal(batches,2,'a genuine external wake retains ordinary automatic recovery');
- }finally{await drainRepairs(f.state);await f.close();}
+ }finally{Date.now=clock;await drainRepairs(f.state);await f.close();}
 });
 
 test('a late member retry cannot clear an installation restriction by creating a fresh quantum',async()=>{
