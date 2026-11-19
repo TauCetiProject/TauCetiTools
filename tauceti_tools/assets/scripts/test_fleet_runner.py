@@ -268,6 +268,49 @@ class LiveMembership(unittest.TestCase):
             with self.assertRaises(ValueError):
                 pick([], limit=invalid)
 
+    def test_fleet_overflow_routes_saturated_pr_work_to_online_fleet_not_github(self):
+        guest = self.guest()
+        guest['busy'] = True
+        target = ['self-hosted', 'linux', 'x64', 'tauceti-fleet-pr']
+
+        def pick(*, order=None, guests=None, kind='pr', gh=19, ns=8, ns_enabled=True, queued=None,
+                 limit=3, overflow='fleet', excluded=(), total=None):
+            guests = [guest] if guests is None else guests
+            return route(
+                kind=kind,
+                order=order or ['fleet', 'namespace', 'github'],
+                machines={},
+                runner_pages=[dict(total_count=len(guests) if total is None else total, runners=guests)],
+                observed=dict(github_busy=gh, namespace_busy=ns,
+                              queued_fleet=[set(target)] * limit if queued is None else queued,
+                              fleet_queue_complete=True),
+                github_budget=12, namespace_cap=8, pr_queue_limit=limit,
+                namespace_enabled=ns_enabled, pr_overflow_pool=overflow, excluded=excluded)
+
+        # Spare Namespace or GitHub still takes work before overflowing.
+        self.assertEqual(pick(ns=7, gh=19)['pool'], 'namespace')
+        self.assertEqual(pick(ns=8, gh=12)['pool'], 'github')
+        # Once every pool is saturated, overflow waits on the shared fleet PR pool.
+        overflowed = pick(ns=8, gh=13)
+        self.assertEqual(overflowed, dict(pool='fleet', labels=target, waiting=True))
+        # Unknown cloud counts with online PR fleet runners also avoid flooding GitHub.
+        self.assertEqual(pick(ns=None, gh=None), dict(pool='fleet', labels=target, waiting=True))
+        # Default overflow retains GitHub fallback for existing callers.
+        self.assertEqual(pick(ns=8, gh=13, overflow='github'), dict(pool='github', waiting=True))
+        # Offline, empty, staging-only, incomplete, excluded, or non-PR safely fall back to GitHub.
+        self.assertEqual(pick(guests=[])['pool'], 'github')
+        self.assertEqual(pick(guests=[dict(guest, status='offline')])['pool'], 'github')
+        self.assertEqual(pick(guests=[self.guest(kinds=('staging',))])['pool'], 'github')
+        self.assertEqual(pick(guests=[guest], total=2)['pool'], 'github')
+        self.assertEqual(pick(excluded=('a' * 32,))['pool'], 'github')
+        self.assertEqual(pick(excluded=('fleet',))['pool'], 'github')
+        self.assertEqual(pick(order=['namespace', 'github'])['pool'], 'github')
+        self.assertEqual(pick(kind='staging')['pool'], 'github')
+        self.assertEqual(pick(kind='other')['pool'], 'github')
+        for invalid in ('namespace', '', True, 1, None):
+            with self.assertRaises(ValueError):
+                pick(overflow=invalid)
+
     def test_backlog_counts_legacy_and_machine_specific_pr_targets_without_staging(self):
         guest = self.guest()
         guest['busy'] = True
@@ -468,6 +511,43 @@ class RoutingEntrypoint(unittest.TestCase):
                 FLEET_CI_ENABLED='true', FLEET_READ_TOKEN='fleet', FLEET_RUNNER_GROUP_ID='3',
                 GITHUB_STATE_TOKEN='state')
             self.assertEqual(output['pool'], 'github')
+
+    def test_pr_overflow_pool_fleet_queues_on_fleet_when_all_pools_are_saturated(self):
+        guest = LiveMembership().guest()
+        guest['busy'] = True
+        endpoint = 'orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1'
+        target = ['self-hosted', 'linux', 'x64', 'tauceti-fleet-pr']
+        config = ('[services.fleet]\nnamespace_enabled=true\nnamespace_build_cap=8\n'
+                  'pr_order=["fleet","namespace","github"]\npr_queue_limit=3\npr_overflow_pool="fleet"\n')
+        saturated = self.shared(busy=15, routing_version=2, namespace_busy=8,
+                                fleet_queue_version=1, queued_fleet=[target] * 3)
+        output, calls = self.pick(dict(fleet={endpoint: dict(total_count=1, runners=[guest])},
+            state=dict(shared=saturated)), config=config, BUDGET='12',
+            FLEET_CI_ENABLED='true', FLEET_READ_TOKEN='fleet', FLEET_RUNNER_GROUP_ID='3',
+            GITHUB_STATE_TOKEN='state')
+        self.assertEqual(output['pool'], 'fleet')
+        self.assertEqual(json.loads(output['runner']), dict(group='TauCetiFleet', labels=target))
+        self.assertIn('all pools saturated; waiting for shared fleet PR capacity', self.last_log)
+        self.assertFalse(any(token in ('app', 'repository') for token, _ in calls))
+        # Spare Namespace or GitHub still wins before overflowing to busy fleet.
+        spare_ns = self.shared(busy=15, routing_version=2, namespace_busy=7,
+                               fleet_queue_version=1, queued_fleet=[target] * 3)
+        output, _ = self.pick(dict(fleet={endpoint: dict(total_count=1, runners=[guest])},
+            state=dict(shared=spare_ns)), config=config, BUDGET='12',
+            FLEET_CI_ENABLED='true', FLEET_READ_TOKEN='fleet', FLEET_RUNNER_GROUP_ID='3',
+            GITHUB_STATE_TOKEN='state')
+        self.assertEqual(output['pool'], 'namespace')
+        spare_gh = self.shared(busy=10, routing_version=2, namespace_busy=8,
+                               fleet_queue_version=1, queued_fleet=[target] * 3)
+        output, _ = self.pick(dict(fleet={endpoint: dict(total_count=1, runners=[guest])},
+            state=dict(shared=spare_gh)), config=config, BUDGET='12',
+            FLEET_CI_ENABLED='true', FLEET_READ_TOKEN='fleet', FLEET_RUNNER_GROUP_ID='3',
+            GITHUB_STATE_TOKEN='state')
+        self.assertEqual(output['pool'], 'github')
+        # If Fleet CI is disabled, overflow still falls back to GitHub.
+        output, _ = self.pick(dict(state=dict(shared=saturated)), config=config, BUDGET='12',
+            GITHUB_STATE_TOKEN='state')
+        self.assertEqual(output['pool'], 'github')
 
     def test_pr_pool_retry_needs_no_cancelled_placement_history(self):
         guest = LiveMembership().guest()

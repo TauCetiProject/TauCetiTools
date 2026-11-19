@@ -48,6 +48,11 @@ STEP_PHASES = [
     ("reporting", ("Report", "Summarise CI telemetry", "Upload CI telemetry", "Post ", "Complete job")),
     ("Mathlib cache", ("Mathlib's compressed", "Fetch Mathlib", "Require a complete Mathlib")),
     ("Lake cache", ("Lake artifact cache", "TauCeti's own oleans", "Lake archive")),
+    # pr-build's sandboxed phases, one step each; then the older single step that ran them all.
+    ("build", ("Build exact candidate under bwrap, offline",
+               "Record declaration names and stage cache outputs under bwrap")),
+    ("audits", ("Audit the candidate under bwrap", "Check the module system under bwrap")),
+    ("lints", ("Environment lint under bwrap", "Style lint under bwrap")),
     ("build, audits, lints", ("Build exact candidate",)),
     ("lint preparation", ("watchdog toolchain", "environment-lint", "Dot-notation")),
     ("setup and checks", ("",)),

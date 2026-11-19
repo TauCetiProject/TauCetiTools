@@ -43,6 +43,17 @@ class HostResourcesTests(unittest.TestCase):
                 self.assertLessEqual(value['samples'], host.MAX_SAMPLES)
                 self.assertGreaterEqual(value['sampler_cpu_s'], 0)
 
+    def test_record_names_the_sandboxed_phase_it_observed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for phase in ('lint-env', None):
+                out = Path(directory) / f'{phase}.json'
+                environment = {k: v for k, v in os.environ.items() if k != 'SANDBOX_PHASE'}
+                if phase:
+                    environment['SANDBOX_PHASE'] = phase
+                with patch.dict(os.environ, environment, clear=True):
+                    self.assertEqual(self.invoke([sys.executable, '-c', 'pass'], out), 0)
+                self.assertEqual(json.loads(out.read_text())['sandbox_phase'], phase)
+
     def test_missing_proc_and_unwritable_output_are_nonfatal(self):
         with tempfile.TemporaryDirectory() as directory:
             out = Path(directory) / 'observation.json'
@@ -368,7 +379,10 @@ class HostResourcesTests(unittest.TestCase):
 
     def test_workflow_output_is_outside_candidate_mounts_and_nonfatal(self):
         workflow = (HERE.parent / '.github/workflows/pr-build.yml').read_text()
-        self.assertIn('python3 gate/scripts/ci_host_resources.py --out "$RUNNER_TEMP/ci-host-resources.json" --', workflow)
+        # The output is a host path under RUNNER_TEMP, given directly or through `resource_out`.
+        self.assertRegex(workflow, r'python3 gate/scripts/ci_host_resources\.py --out '
+                                   r'"\$(?:RUNNER_TEMP/ci-host-resources\.json|resource_out)" --')
+        self.assertIn('"$RUNNER_TEMP/ci-host-resources', workflow)
         self.assertIn('env -i /usr/bin/bwrap', workflow)
         self.assertNotIn('--bind "$RUNNER_TEMP"', workflow)
         self.assertNotIn('--ro-bind "$RUNNER_TEMP"', workflow)

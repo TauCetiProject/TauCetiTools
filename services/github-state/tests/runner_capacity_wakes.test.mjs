@@ -12,10 +12,12 @@ async function hold(f){
 
 test('an early release never advances the runner request past its existing retry deadline',async()=>{
  const f=installationFixture(),original=globalThis.fetch;try{
-  await hold(f);const readyAt=Date.now()+100;let resolved=false;
-  const wait=f.scheduler.waitRunnerCapacity(readyAt,Date.now()+1000).then(value=>{resolved=true;return value;});
-  f.gates[0].resolve();await f.requests[0];await pause(40);assert.equal(resolved,false);
-  assert.equal(await wait,true);assert.ok(Date.now()>=readyAt);
+  await hold(f);const readyAt=Date.now()+100;let resolvedAt;
+  const wait=f.scheduler.waitRunnerCapacity(readyAt,Date.now()+1000).then(value=>{resolvedAt=Date.now();return value;});
+  // Compare against the resolution time rather than polling after a fixed
+  // pause: on a loaded runner the pause can itself outlast readyAt.
+  f.gates[0].resolve();await f.requests[0];
+  assert.equal(await wait,true);assert.ok(resolvedAt>=readyAt,'an early release must not resolve the wait before its retry deadline');
   assert.equal(f.db.prepare('SELECT COUNT(*) n FROM reservations').get().n,3,'a wake hint does not reserve a slot');
   assert.equal(f.scheduler.capacityWaiters.size,0);
  }finally{await f.close();globalThis.fetch=original;}

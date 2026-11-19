@@ -79,8 +79,11 @@ cache publication.
 The trusted build workflow optionally wraps its existing bwrap launcher with
 `scripts/ci_live_progress.py`. The wrapper stays outside the candidate sandbox,
 retains the launcher's exit status and forwards cancellation. Its background
-reporter samples bounded candidate phase/module counters and descendant CPU/Lean
-process evidence every fifteen seconds. Candidate text is untrusted telemetry;
+reporter samples bounded candidate phase/module counters, Lake's own `[done/total]`
+job counter with its rate over the last ten minutes, and descendant CPU/Lean
+process evidence every fifteen seconds. Each sandboxed step's reporter continues
+the job's session and sequence from a file in `$RUNNER_TEMP`, outside the
+sandbox, because the receiver accepts one session per job. Candidate text is untrusted telemetry;
 only fixed phases, validated module names and numeric counters are sent. The
 reporter never sends raw logs, paths, commands or environment values.
 

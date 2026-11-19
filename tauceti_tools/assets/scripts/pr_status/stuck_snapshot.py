@@ -11,24 +11,20 @@ import os
 
 from github_api import GitHub
 
+# Only the fields stranded-pr, eviction-loop and diverged-head read: head, branch tip,
+# draft flag, labels and the head's commit statuses (`build`, `bump-guard`). Check runs
+# are not fetched; a 100-check rollup per PR dominated this query's cost.
 QUERY = """query($owner:String!, $name:String!, $base:String!, $cursor:String) {
   repository(owner:$owner, name:$name) {
     pullRequests(states:OPEN, baseRefName:$base, first:50, after:$cursor) {
       pageInfo { hasNextPage endCursor }
       nodes {
-        number headRefOid headRefName isDraft updatedAt
-        author { login }
+        number headRefOid headRefName isDraft
         headRepository { nameWithOwner }
         headRef { target { oid } }
         labels(first:100) { nodes { name } pageInfo { hasNextPage } }
         commits(last:1) { nodes { commit { oid
           status { contexts { context state createdAt } }
-          statusCheckRollup { contexts(first:100) {
-            pageInfo { hasNextPage }
-            nodes { __typename ... on CheckRun {
-              name status conclusion completedAt detailsUrl
-            } }
-          } }
         } } }
       }
     }
@@ -241,18 +237,14 @@ class Snapshot:
                 if len(commits) != 1 or commits[0]["commit"]["oid"] != node["headRefOid"]:
                     raise RuntimeError("Watchdog commit does not match the PR head")
                 commit = commits[0]["commit"]
-                rollup = commit["statusCheckRollup"]
-                checks = rollup["contexts"] if rollup else {"nodes": [], "pageInfo": {"hasNextPage": False}}
                 rows.append(dict(
                     number=node["number"], head=node["headRefOid"],
                     head_ref=node["headRefName"],
                     head_repo=(node["headRepository"] or {}).get("nameWithOwner", ""),
                     branch_tip=((node["headRef"] or {}).get("target") or {}).get("oid", ""),
-                    draft=node["isDraft"], updated_at=node["updatedAt"],
-                    author=(node["author"] or {}).get("login", ""),
+                    draft=node["isDraft"],
                     labels=[item["name"] for item in node["labels"]["nodes"]],
                     statuses=(commit["status"] or {}).get("contexts", []),
-                    checks=checks["nodes"], checks_truncated=checks["pageInfo"]["hasNextPage"],
                 ))
             page = connection["pageInfo"]
             if not page["hasNextPage"]:

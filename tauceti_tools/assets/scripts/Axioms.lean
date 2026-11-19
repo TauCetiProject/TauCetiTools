@@ -249,7 +249,8 @@ structure NameScan where
   owners : Std.HashMap Name Owner := {}
   explicitNames : Std.HashSet Name := {}
   parents : Std.HashSet Name := {}
-  collisions : Array Name := #[]
+  /-- Each colliding name with its earlier and later owner. -/
+  collisions : Array (Name × Name × Name) := #[]
 
 /-- Same exact extension-name lookup, last-entry precedence and typed interpretation as Lean's importer. -/
 def moduleEntries {α β σ : Type} [Inhabited σ]
@@ -292,7 +293,7 @@ def scanModule (mod : Name) (localModule : Bool) (parts : Array (ModuleData × C
     if localModule then scan := { scan with parents := scan.parents.insert name.getPrefix }
     if let some previous := scan.owners[name]? then
       if previous.module != mod && (localModule || previous.localModule) then
-        scan := { scan with collisions := scan.collisions.push name }
+        scan := { scan with collisions := scan.collisions.push (name, previous.module, mod) }
       if previous.localModule && !localModule then continue
     scan := { scan with owners := scan.owners.insert name {
       module := mod, localModule,
@@ -330,10 +331,8 @@ def commonReservedName (scan : NameScan) (name : Name) : Bool := Id.run do
     return !base.startsWith "match_"
   return false
 
-/-- Check declaration ownership after the kernel-checked build. Full audits also validate
-combined-import compatibility. An actual collision or an uncommon generated-name exception uses the existing checker, with
-its existing diagnostics and policy. This adds no new audit failure or persistent cache. -/
-def scanNames (modules : Array Name) : IO Bool := do
+/-- Scan the metadata of `modules` and their transitive imports without importing them. -/
+def scanAll (modules : Array Name) : IO NameScan := do
   let mut scan : NameScan := { pending := modules, seen := .ofArray modules }
   let mut i := 0
   while i < scan.pending.size do
@@ -342,11 +341,44 @@ def scanNames (modules : Array Name) : IO Bool := do
     for region in regions.reverse do unsafe region.free
     scan := next
     i := i + batch.size
-  for name in scan.collisions do
+  return scan
+
+/-- Check declaration ownership after the kernel-checked build. Full audits also validate
+combined-import compatibility. An actual collision or an uncommon generated-name exception uses the existing checker, with
+its existing diagnostics and policy. This adds no new audit failure or persistent cache. -/
+def scanNames (modules : Array Name) : IO Bool := do
+  let scan ← scanAll modules
+  for (name, _) in scan.collisions do
     if scan.explicitNames.contains name || !commonReservedName scan name then return false
   IO.println s!"duplicate-declarations: checked {modules.size} TauCeti modules and \
     {scan.pending.size - modules.size} dependency modules; no duplicate declarations."
   return true
+
+/-- Report every collision after the joint import stopped at the first one: Lean's importer
+names only the first incompatible constant, and the checker above never runs. The scan reads the
+same metadata as `scanNames`. A declaration without a source range whose prefix is itself a
+colliding name (a structure's recursors, auxiliaries of a reported theorem) is left to its parent's line. A
+common reserved name such as a lazily generated equation is listed only when nothing else is, so
+the failure always names a collision. Returns the number reported. -/
+def reportImportCollisions (modules : Array Name) : IO Nat := do
+  let scan ← scanAll modules
+  let names : NameSet := scan.collisions.foldl (fun s (name, _) => s.insert name) {}
+  let hasCollidingPrefix (name : Name) : Bool := Id.run do
+    let mut parent := name.getPrefix
+    while !parent.isAnonymous do
+      if names.contains parent then return true
+      parent := parent.getPrefix
+    return false
+  let roots := scan.collisions.filter fun (name, _) =>
+    scan.explicitNames.contains name || !hasCollidingPrefix name
+  let primary := roots.filter fun (name, _) =>
+    scan.explicitNames.contains name || !commonReservedName scan name
+  let reported := if primary.isEmpty then roots else primary
+  for (name, previous, mod) in reported do
+    IO.eprintln s!"duplicate-declarations: {name} is declared in both {previous} and {mod}"
+  if !reported.isEmpty then
+    IO.eprintln "Keep one canonical declaration and import its module from the other files."
+  return reported.size
 
 end DuplicateDeclarations
 
@@ -404,7 +436,8 @@ Byte integrity alone does not establish proof correctness.
 
 `withImportModules` keeps mmap-backed names alive through both checks and frees the
 regions before returning an exit code. Render every imported name inside the callback.
-A failed ownership check stops the axiom scan.
+A failed ownership check stops the axiom scan. When the import itself fails on an incompatible
+duplicate, the metadata scan then reports every colliding declaration, not only the first.
 -/
 
 /-- Print a phase and write best-effort epoch timestamps to `AUDIT_PHASES_FILE`, if set. -/
@@ -462,4 +495,9 @@ def main (args : List String) : IO UInt32 := do
         AxiomAudit.report only audited messages) (trustLevel := 1024)
   catch e =>
     IO.eprintln s!"audit-driver: {e}"
+    -- `Lean.throwAlreadyImported`. The scan only adds diagnostics; the status stays a failure.
+    if ((toString e).splitOn "environment already contains '").length > 1 then
+      try
+        discard <| DuplicateDeclarations.reportImportCollisions (← AxiomAudit.auditedModules)
+      catch scanError => IO.eprintln s!"audit-driver: {scanError}"
     return 1

@@ -21,12 +21,26 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+from collections import deque
 from pathlib import Path
 
 ORIGIN = "https://ci-data.taucetiproject.org"
+# Lake's own job counter, e.g. `✔ [113917/113955] Built TauCeti.X (1.2s)`, and its closing summary.
+LAKE_COUNTER = re.compile(r"^(?:[✔✖⚠ℹ⊘]\s+)?\[(\d{1,9})/(\d{1,9})\]\s")
+LAKE_FINISHED = re.compile(r"^Build completed successfully \((\d{1,9}) jobs?\)")
+MAX_TASKS = 10000000
+# The rate is the counter's advance over the samples of the last ten minutes, once they span one.
+RATE_WINDOW, RATE_MINIMUM = 600, 60
+CHUNK = 262144
+# Bytes of new log read per sample; a larger backlog withholds the rate until it is read.
+SAMPLE_BUDGET = 64 * CHUNK
 PHASES = {
+    "cache-unpack",
     "build",
     "audit-setup",
+    "audit-import",
+    "audit-duplicates",
+    "audit-axioms",
     "audit-module-system",
     "lint-env",
     "lint-style",
@@ -61,45 +75,94 @@ class Counters:
         self.completed, self.failed, self.last_module, self.phase = 0, 0, None, "starting"
         self.last_progress = None
         self.pending = b""
+        self.tasks_done, self.tasks_total = None, None
+        self.task_samples = deque()
+        self.behind = False
 
     def sample(self, clock=time.time):
-        before = (self.completed, self.failed, self.phase)
+        before = (self.completed, self.failed, self.phase, self.tasks_done)
         try:
             data, _, _ = bounded_file(self.root / "phases.tsv")
             names = [line.split("\t", 1)[0] for line in data.decode(errors="replace").splitlines()]
             self.phase = next((v for v in reversed(names) if v in PHASES), "unknown")
         except (OSError, ValueError):
             pass
+        # A session that starts after the build (pr-build runs each sandboxed phase as its own step)
+        # first reads the log it finds to its end, so replaying it is not reported as new progress.
+        catch_up = 4096 if self.inode is None else SAMPLE_BUDGET // CHUNK
+        self.behind = False
         try:
-            data, inode, offset = bounded_file(self.root / "lake-build.log", 262144, self.offset)
-            if self.inode != inode or offset < self.offset:
-                self.offset, self.inode, self.pending = 0, inode, b""
-                self.completed, self.failed = 0, 0
-                data, _, offset = bounded_file(self.root / "lake-build.log", 262144)
-            self.offset = offset
-            lines = (self.pending + data).split(b"\n")
-            self.pending = lines.pop()[-4096:]
-            for raw in lines:
-                line = re.sub(r"\x1b\[[0-9;]*m", "", raw[:4096].decode(errors="replace"))
-                found = re.search(r"(?:Built|Replayed|Building)\s+(TauCeti(?:\.[A-Za-z0-9_\']+){0,30})(?:\s|$)", line)
-                if found and len(found[1]) <= 300:
-                    self.last_module = found[1]
-                    if re.search(r"Built|Replayed", line):
-                        self.completed += 1
-                if re.match(r"^✖\s", line):
-                    self.failed += 1
-            self.completed, self.failed = min(10000000, self.completed), min(10000000, self.failed)
+            for _ in range(catch_up):
+                if self.read_log() < CHUNK:
+                    break
+            else:
+                self.behind = True
         except (OSError, ValueError):
             pass
-        if before != (self.completed, self.failed, self.phase):
-            self.last_progress = stamp(clock())
+        now = clock()
+        if before != (self.completed, self.failed, self.phase, self.tasks_done):
+            self.last_progress = stamp(now)
         return {
             "phase": self.phase,
             "completed_modules": self.completed,
             "failed_modules": self.failed,
             "last_module": self.last_module,
             "last_progress_at": self.last_progress,
+            "completed_tasks": self.tasks_done,
+            "total_tasks": self.tasks_total,
+            "tasks_per_minute": self.rate(now),
         }
+
+    def rate(self, now):
+        """Lake jobs per minute while the build runs; None until samples span RATE_MINIMUM seconds."""
+        samples = self.task_samples
+        if self.tasks_done is None:
+            samples.clear()
+            return None
+        if samples and (self.tasks_done < samples[-1][1] or now < samples[-1][0]):
+            samples.clear()
+        samples.append((now, self.tasks_done))
+        while samples and now - samples[0][0] > RATE_WINDOW:
+            samples.popleft()
+        while len(samples) > 256:
+            samples.popleft()
+        start, done = samples[0]
+        # Counters read from a backlog measure this reader, not the build.
+        if self.phase != "build" or self.behind or now - start < RATE_MINIMUM:
+            return None
+        return round(min(MAX_TASKS, (self.tasks_done - done) * 60 / (now - start)), 1)
+
+
+    def read_log(self):
+        """Count the next bounded chunk of the build log; returns the bytes read."""
+        data, inode, offset = bounded_file(self.root / "lake-build.log", CHUNK, self.offset)
+        if self.inode != inode or offset < self.offset:
+            self.offset, self.inode, self.pending = 0, inode, b""
+            self.completed, self.failed = 0, 0
+            self.tasks_done, self.tasks_total = None, None
+            self.task_samples.clear()
+            data, _, offset = bounded_file(self.root / "lake-build.log", CHUNK)
+        self.offset = offset
+        lines = (self.pending + data).split(b"\n")
+        self.pending = lines.pop()[-4096:]
+        for raw in lines:
+            line = re.sub(r"\x1b\[[0-9;]*m", "", raw[:4096].decode(errors="replace"))
+            found = re.search(r"(?:Built|Replayed|Building)\s+(TauCeti(?:\.[A-Za-z0-9_\']+){0,30})(?:\s|$)", line)
+            if found and len(found[1]) <= 300:
+                self.last_module = found[1]
+                if re.search(r"Built|Replayed", line):
+                    self.completed += 1
+            if re.match(r"^✖\s", line):
+                self.failed += 1
+            counter = LAKE_COUNTER.match(line) or LAKE_FINISHED.match(line)
+            if counter:
+                # A finished job's line shows the jobs finished before it: Lake counts it afterwards.
+                done = int(counter[1]) + 1 if counter.re is LAKE_COUNTER else int(counter[1])
+                total = int(counter[2]) if counter.re is LAKE_COUNTER else done
+                if done <= total <= MAX_TASKS:
+                    self.tasks_done, self.tasks_total = done, total
+        self.completed, self.failed = min(10000000, self.completed), min(10000000, self.failed)
+        return len(data)
 
 
 def process_sample(parent):
@@ -153,8 +216,46 @@ def request(url, token, value=None):
         return json.loads(response.read(16384))
 
 
+def load_session(path):
+    """The job's reporting session, kept across its sandboxed steps outside the sandbox.
+
+    The receiver accepts one session per job, so each step's reporter continues the session and
+    sequence of the previous step's. The file lives in the runner's per-job temporary directory,
+    which no candidate code can write; a missing or invalid file starts a new session."""
+    try:
+        value = json.loads(path.read_text()) if path else None
+        if (
+            isinstance(value, dict)
+            and isinstance(value.get("session"), str)
+            and str(uuid.UUID(value["session"])) == value["session"]
+            and type(value.get("sequence")) is int
+            and 0 <= value["sequence"] < 2**31
+        ):
+            return value["session"], value["sequence"]
+    except (OSError, ValueError):
+        pass
+    return str(uuid.uuid4()), 0
+
+
+def save_session(path, session, sequence):
+    if not path:
+        return
+    try:
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(json.dumps(dict(session=session, sequence=sequence)))
+        os.replace(temporary, path)
+    except OSError:
+        pass
+
+
+def session_path():
+    temp = os.environ.get("RUNNER_TEMP")
+    return Path(temp) / "ci-live-progress-session.json" if temp else None
+
+
 def report(child, args, stop):
-    session, sequence, counters, cpu = str(uuid.uuid4()), 0, Counters(args.telemetry), {}
+    state = session_path()
+    (session, sequence), counters, cpu = load_session(state), Counters(args.telemetry), {}
     token, refresh = None, 0
     while True:
         try:
@@ -173,6 +274,7 @@ def report(child, args, stop):
                 )["value"]
                 refresh = now + 120
             sequence += 1
+            save_session(state, session, sequence)
             active, sample = process_sample(child.pid)
             cpu.update(sample)
             # Bound process receipt history. Missing CPU evidence remains unknown.
