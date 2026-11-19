@@ -54,6 +54,34 @@ class HostResourcesTests(unittest.TestCase):
                     self.assertEqual(self.invoke([sys.executable, '-c', 'pass'], out), 0)
                 self.assertEqual(json.loads(out.read_text())['sandbox_phase'], phase)
 
+    def test_peak_memory_near_the_host_total_warns_without_changing_status(self):
+        gib = 2**30
+        for used, warned in ((70 * gib, False), (81 * gib, True)):
+            with self.subTest(used=used), tempfile.TemporaryDirectory() as directory:
+                out = Path(directory) / 'record.json'
+                sample = {'missing': [], 'host_used_bytes': used, 'host_memory_total_bytes': 100 * gib}
+                stdout = io.StringIO()
+                with contextlib.redirect_stdout(stdout):
+                    code = self.invoke([sys.executable, '-c', 'raise SystemExit(3)'], out, lambda: dict(sample))
+                self.assertEqual(code, 3)
+                value = json.loads(out.read_text())
+                self.assertEqual(value['host_memory_total_bytes'], 100 * gib)
+                self.assertAlmostEqual(value['host_used_peak_fraction'], used / (100 * gib))
+                self.assertEqual('::warning title=Build memory headroom::' in stdout.getvalue(), warned)
+
+    def test_memory_fraction_is_absent_without_a_total(self):
+        sampler = host.Sampler()
+        with patch.object(host, 'snapshot', return_value={'missing': ['meminfo']}):
+            sampler.sample()
+        summary = sampler.summary()
+        self.assertIsNone(summary['host_used_peak_fraction'])
+        self.assertFalse(host.memory_warning(summary))
+
+    def test_real_meminfo_reports_the_total(self):
+        value = host.snapshot()
+        if 'meminfo' not in value['missing']:
+            self.assertGreater(value['host_memory_total_bytes'], value['host_used_bytes'])
+
     def test_missing_proc_and_unwritable_output_are_nonfatal(self):
         with tempfile.TemporaryDirectory() as directory:
             out = Path(directory) / 'observation.json'
