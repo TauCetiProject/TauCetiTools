@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 
 from github_api import APIError, Deferred, GitHub
 from pr_ci_lifecycle import ACTIVE, ordinary, pr_numbers, reconcile, reserved, runs
@@ -21,9 +22,9 @@ query($owner: String!, $name: String!, $after: String) {
     pullRequests(states: OPEN, first: 100, after: $after,
                  orderBy: {field: CREATED_AT, direction: ASC}) {
       nodes {
-        number headRefOid isDraft updatedAt
+        number headRefOid isDraft updatedAt createdAt
         labels(first: 100) { nodes { name } }
-        commits(last: 1) { nodes { commit { oid status { contexts { context state } } } } }
+        commits(last: 1) { nodes { commit { oid committedDate status { contexts { context state targetUrl createdAt } } } } }
       }
       pageInfo { hasNextPage endCursor }
     }
@@ -36,7 +37,7 @@ query($owner: String!, $name: String!, $pr: Int!, $head: GitObjectID!) {
   rateLimit { cost }
   repository(owner: $owner, name: $name) {
     pullRequest(number: $pr) { state isDraft headRefOid labels(first: 100) { nodes { name } } }
-    object(oid: $head) { ... on Commit { status { contexts { context state } } } }
+    object(oid: $head) { ... on Commit { status { contexts { context state targetUrl } } } }
   }
 }
 """
@@ -46,19 +47,53 @@ def timestamp(value):
     return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
 
-def has_preflight(pull, commit):
+def labels(pull):
+    return {label["name"].lower() for label in (pull.get("labels") or {}).get("nodes", [])}
+
+
+def self_tested(pull):
+    # The existing PR assessment owns the routing label. Do not cancel a
+    # label-event run or dispatch a build while it makes that decision.
+    names = labels(pull)
+    return "self-tested" in names and not names & {"full-lint", "lint-repair"}
+
+
+def build_status(commit):
+    """The head's `build` status row with a final state, or None."""
     rows = (commit.get("status") or {}).get("contexts", [])
-    labels = {label["name"].lower() for label in (pull.get("labels") or {}).get("nodes", [])}
-    return any(
-        row["context"] == "build" and row.get("state", "").lower() in {"success", "failure", "error"} for row in rows
-    ) or (
-        # The existing PR assessment owns the routing label. Do not cancel a
-        # label-event run or dispatch a build while it makes that decision.
-        "self-tested" in labels and not labels & {"full-lint", "lint-repair"}
+    return next(
+        (row for row in rows
+         if row["context"] == "build" and row.get("state", "").lower() in {"success", "failure", "error"}),
+        None,
     )
 
 
-def inventory(api, repo):
+def has_preflight(pull, commit):
+    return build_status(commit) is not None or self_tested(pull)
+
+
+def status_run(row):
+    """The Actions run a `build` status links to, or None."""
+    match = re.search(r"/actions/runs/([1-9][0-9]*)", (row or {}).get("targetUrl") or "")
+    return int(match[1]) if match else None
+
+
+def failed_run(commit):
+    """The run whose failing `build` status is the head's current verdict, or None."""
+    row = build_status(commit)
+    return status_run(row) if row and row["state"].lower() in {"failure", "error"} else None
+
+
+def verdict(pull):
+    """The head, run and posting time of the head's failing `build` status: a rerun of the same run
+    posts a new status, so it is a new verdict. None without a failing status."""
+    commit = pull["commits"]["nodes"][-1]["commit"]
+    run_id = failed_run(commit)
+    return None if run_id is None else dict(head=pull["headRefOid"], run=run_id, posted=build_status(commit).get("createdAt"))
+
+
+def inventory(api, repo, observed=None):
+    """Non-draft PRs needing a build; `observed` also collects every consistent non-draft head."""
     owner, name = repo.split("/")
     after, pulls = None, []
     while True:
@@ -66,8 +101,12 @@ def inventory(api, repo):
         page = data["pullRequests"]
         for pull in page["nodes"]:
             commit = pull["commits"]["nodes"][-1]["commit"]
-            if not pull["isDraft"] and (commit["oid"] != pull["headRefOid"] or not has_preflight(pull, commit)):
+            if pull["isDraft"]:
+                continue
+            if commit["oid"] != pull["headRefOid"] or not has_preflight(pull, commit):
                 pulls.append(pull)
+            if observed is not None and commit["oid"] == pull["headRefOid"]:
+                observed.append(pull)
         if not page["pageInfo"]["hasNextPage"]:
             return data["defaultBranchRef"]["name"], pulls
         after = page["pageInfo"]["endCursor"]
@@ -84,18 +123,16 @@ def matches(run, number, head):
     return number in pr_numbers(run) or run["head_sha"] == head
 
 
-def still_missing(api, repo, number, head):
+def still_missing(api, repo, number, head, interrupted=None):
+    """The head still lacks a build, or (`interrupted`: a run id) its verdict is still that run's failure."""
     owner, name = repo.split("/")
     data = api.graphql(CURRENT, dict(owner=owner, name=name, pr=number, head=head))["repository"]
     pull, commit = data["pullRequest"], data["object"]
-    return bool(
-        pull
-        and commit
-        and pull["state"] == "OPEN"
-        and not pull["isDraft"]
-        and pull["headRefOid"] == head
-        and not has_preflight({**pull, "number": number}, commit)
-    )
+    if not (pull and commit and pull["state"] == "OPEN" and not pull["isDraft"] and pull["headRefOid"] == head):
+        return False
+    if interrupted is not None:
+        return not self_tested({**pull, "number": number}) and failed_run(commit) == interrupted
+    return not has_preflight({**pull, "number": number}, commit)
 
 
 def quota_reserved(api, reserve, budget=0):
@@ -183,9 +220,202 @@ def cancelled_before_build(api, repo, run):
     )
 
 
-def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_reserve=0, api_budget=0, cleanup=True):
+# How far back the hourly pass lists cancelled runs. Every interruption is seen by many passes
+# within it; the report's memory keeps what an earlier pass learned about a head after that.
+INTERRUPTED_WINDOW = 2 * 86400
+# A head is stuck once it has gone this long after its last push without CI or a final state.
+STUCK_AFTER = 3 * 3600
+# A stuck period survives a missed pass or two, not a sweeper that stopped running.
+STUCK_STREAK_GAP = 3 * 3600
+STUCK_SCHEMA = "tauceti.ci-recovery.stuck-heads/v1"
+# Labels that already give a head a clear next mover. `ci-failed` is not one: on a head without a
+# `build` status it is left over from an earlier head, and on an interrupted build it describes the
+# infrastructure failure that left the head stuck.
+FINAL_LABELS = frozenset({"awaiting-author", "needs-human-review", "merge-conflict", "hold", "wip", "keep", "on-hold"})
+
+
+def interrupted(api, repo, run):
+    """The run's build was cut off rather than failed: its `sandboxed-build` job acquired a runner
+    and ended `cancelled`, which is how GitHub ends a job at its six-hour timeout."""
+    if not ordinary(run, repo) or run.get("status") != "completed" or run.get("conclusion") != "cancelled":
+        return False
+    jobs = unacquired(api, repo, run)
+    return jobs is not None and any(
+        job.get("name") == "sandboxed-build" and job.get("conclusion") == "cancelled"
+        and (job.get("runner_id") or job.get("runner_name"))
+        for job in jobs
+    )
+
+
+def retried(run):
+    """An interrupted run is itself the head's retry when a dispatch or a rerun produced it."""
+    return run.get("event") != "pull_request_target" or (run.get("run_attempt") or 1) > 1
+
+
+def interrupted_heads(api, repo, observed, now, memory, api_reserve=0, api_budget=0):
+    """Split the open heads whose current `build` failure is an interrupted run into those owed one
+    automatic retry and those whose retry is spent. Also report whether every candidate was
+    classified before the pass budget ran out.
+
+    `memory` (from the previous report) remembers, per PR, the head and interrupted run already
+    retried (`retried`) or found to be an interrupted retry itself (`exhausted`); it holds while the
+    head's status still names that run. Otherwise one listing of recently cancelled pr-build runs
+    finds the candidates, and each costs one more request (its jobs).
+    """
+    candidates, exhausted = {}, {}
+    for pull in observed:
+        run_id = failed_run(pull["commits"]["nodes"][-1]["commit"])
+        if run_id is None or self_tested(pull):
+            continue
+        key, current = str(pull["number"]), verdict(pull)
+        known = [memory.get(kind, {}).get(key) or {} for kind in ("retried", "exhausted")]
+        if any({k: entry.get(k) for k in current} == current for entry in known):
+            exhausted[pull["number"]] = run_id
+        else:
+            candidates.setdefault(run_id, []).append(pull)
+    if not candidates:
+        return [], exhausted, True
+    if quota_reserved(api, api_reserve, api_budget):
+        return [], exhausted, False
+    since = dt.datetime.fromtimestamp(now - INTERRUPTED_WINDOW, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    retry, complete = [], True
+    # Lazily paginated: the budget is checked before each further page or jobs read.
+    for run in runs(api, repo, f"status=cancelled&created=%3E%3D{since}", include_ignored=True):
+        if quota_reserved(api, api_reserve, api_budget):
+            complete = False
+            break
+        if run["id"] not in candidates:
+            continue
+        try:
+            if not interrupted(api, repo, run):
+                continue
+        except APIError as error:
+            print(f"ci-recovery: run {run['id']}: {error}", file=sys.stderr)
+            complete = False
+            continue
+        for pull in candidates[run["id"]]:
+            if retried(run):
+                exhausted[pull["number"]] = run["id"]
+            else:
+                retry.append(dict(pull, interrupted=run))
+    return retry, exhausted, complete
+
+
+def last_push(pull):
+    """When the head arrived, approximately: its commit time, or the PR's creation if that is later.
+    (An old commit pushed later looks older; the queue's alert waits six hours, which absorbs that.)"""
+    commit = pull["commits"]["nodes"][-1]["commit"]
+    times = []
+    for value in (commit.get("committedDate"), pull.get("createdAt")):
+        try:
+            times.append(timestamp(value))
+        except (ValueError, TypeError, AttributeError):
+            pass
+    return max(times, default=None)
+
+
+def stuck_heads(observed, active, exhausted, now):
+    """Open heads that, three hours after their last push, have neither CI nor a final state: no live
+    pr-build, and no `build` status or an interrupted build whose one retry is spent."""
+    heads = []
+    for pull in observed:
+        number, head = pull["number"], pull["headRefOid"]
+        pushed = last_push(pull)
+        if self_tested(pull) or labels(pull) & FINAL_LABELS or pushed is None or now - pushed < STUCK_AFTER:
+            continue
+        if any(run.get("status") in ACTIVE and matches(run, number, head) for run in active):
+            continue
+        commit = pull["commits"]["nodes"][-1]["commit"]
+        if number in exhausted:
+            entry = dict(reason="retry-interrupted", run=exhausted[number])
+        elif build_status(commit) is None:
+            entry = dict(reason="no-ci", run=None)
+        else:
+            continue
+        heads.append(dict(pr=number, head=head, last_push_at=pushed, **entry))
+    heads.sort(key=lambda h: (h["last_push_at"], h["pr"]))
+    return heads
+
+
+def read_stuck_report(path, repo):
+    """The previous report, or an empty one."""
+    try:
+        previous = json.loads(Path(path).expanduser().read_text())
+        if previous.get("schema") == STUCK_SCHEMA and previous.get("repo") == repo:
+            return previous
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return {}
+
+
+# How long the retry memory keeps a PR it no longer sees open and ready (closed, or a draft).
+MEMORY_DAYS = 14
+
+
+def remember(previous, observed, exhausted, dispatched, now):
+    """The retry memory to keep. An entry holds while its PR's head still has the same verdict; a PR
+    the pass did not observe keeps its entry for `MEMORY_DAYS`, so a draft round trip forgets nothing."""
+    current = {str(p["number"]): verdict(p) for p in observed}
+    memory = {}
+    for kind in ("retried", "exhausted"):
+        kept = {}
+        for key, entry in ((previous.get("memory") or {}).get(kind) or {}).items():
+            if not isinstance(entry, dict) or type(entry.get("seen")) not in (int, float):
+                continue
+            if key in current:
+                if current[key] and {k: entry.get(k) for k in current[key]} == current[key]:
+                    kept[key] = dict(entry, seen=now)
+            elif now - entry["seen"] <= MEMORY_DAYS * 86400:
+                kept[key] = entry
+        memory[kind] = kept
+    for number in exhausted:
+        if str(number) not in memory["retried"] and current.get(str(number)):
+            memory["exhausted"][str(number)] = dict(current[str(number)], seen=now)
+    for number, pull in dispatched:
+        memory["retried"][str(number)] = dict(verdict(pull), seen=now)
+    return memory
+
+
+def write_stuck_report(path, repo, heads, now, complete, previous=None, memory=None):
+    """Replace the report the queue's status and alert read, keeping the start of a continuing stuck
+    period. A report that cannot be written is logged (`written` is False); recovery goes on."""
+    path = Path(path).expanduser()
+    previous = read_stuck_report(path, repo) if previous is None else previous
+    since = None
+    if heads:
+        since = now
+        observed = previous.get("observed_at")
+        if (previous.get("heads") and type(previous.get("stuck_since")) in (int, float)
+                and type(observed) in (int, float) and 0 <= now - observed <= STUCK_STREAK_GAP):
+            since = min(previous["stuck_since"], now)
+    report = dict(schema=STUCK_SCHEMA, repo=repo, observed_at=now, complete=complete, stuck_since=since, heads=heads,
+                  memory=memory if memory is not None else previous.get("memory") or {})
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(json.dumps(report, sort_keys=True) + "\n")
+        os.replace(temporary, path)
+        report["written"] = True
+    except OSError as error:
+        print(f"ci-recovery: stuck-head report {path}: {error}", file=sys.stderr)
+        report["written"] = False
+    return report
+
+
+def report_stuck(heads, now):
+    """One journal line per stuck head, then the count and the oldest's age."""
+    for head in heads:
+        print(json.dumps(dict(stuck_head=head["pr"], head=head["head"], reason=head["reason"],
+                              hours=round((now - head["last_push_at"]) / 3600, 1), run=head["run"])), flush=True)
+    oldest = f", oldest {int((now - heads[0]['last_push_at']) // 3600)}h" if heads else ""
+    print(f"ci-recovery: stuck heads: {len(heads)}{oldest}", file=sys.stderr)
+
+
+def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_reserve=0, api_budget=0, cleanup=True,
+            stuck_report=None):
     now = dt.datetime.now(dt.timezone.utc).timestamp() if now is None else now
-    branch, pulls = inventory(api, repo)
+    observed = []
+    branch, pulls = inventory(api, repo, observed)
 
     abandoned, attempted = {}, set()
 
@@ -246,6 +476,21 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
                 if number not in recent or timestamp(run["created_at"]) > timestamp(recent[number]["created_at"]):
                     recent[number] = run
 
+    # An interrupted build gets one automatic retry; a head whose retry was interrupted too, or that
+    # has had no CI for three hours, is reported (before any dispatch can fail the pass).
+    previous = read_stuck_report(stuck_report, repo) if stuck_report else {}
+    retry, exhausted, complete = interrupted_heads(
+        api, repo, observed, now, previous.get("memory") or {}, api_reserve, api_budget
+    )
+    heads = stuck_heads(observed, active, exhausted, now)
+    report_stuck(heads, now)
+    retries = []
+    if stuck_report:
+        write_stuck_report(stuck_report, repo, heads, now, complete, previous,
+                           remember(previous, observed, exhausted, retries, now))
+        # The report is the retry memory: without it, an interrupted build is reported, never retried.
+        pulls.extend(retry)
+
     # Retry the least recently attempted PRs first, so a persistent failure
     # cannot monopolize the next sweep. GitHub's runs provide the retry memory.
     pulls.sort(key=lambda p: timestamp(recent.get(p["number"], {}).get("created_at", p["updatedAt"])))
@@ -255,6 +500,7 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
             print("ci-recovery: shared API reserve or pass budget reached; next pass will resume", file=sys.stderr)
             break
         number, head = pull["number"], pull["headRefOid"]
+        cut_off = (pull.get("interrupted") or {}).get("id")
         if any(matches(run, number, head) and blocking(run) for run in active):
             continue
         try:
@@ -265,15 +511,17 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
             if latest and latest["status"] != "completed" and blocking(latest):
                 continue
             # Lost events can leave no run at all. Allow startup grace from the
-            # PR update in that case instead of stranding it permanently.
-            if (now - timestamp(latest["updated_at"] if latest else pull["updatedAt"]) < min_age
+            # PR update in that case instead of stranding it permanently. An
+            # interrupted run's verdict is already final; it needs no grace.
+            if not (cut_off and latest and latest["id"] == cut_off) and (
+                    now - timestamp(latest["updated_at"] if latest else pull["updatedAt"]) < min_age
                     and (not latest or latest["id"] not in abandoned
                          or abandoned[latest["id"]] != latest.get("run_attempt"))):
                 if not latest or not cancelled_before_build(api, repo, latest):
                     continue
             # Recheck immediately before dispatch. Closed PRs, moved heads and
             # results arriving during the inventory must never trigger a retry.
-            if not still_missing(api, repo, number, head):
+            if not still_missing(api, repo, number, head, cut_off):
                 continue
             if apply:
                 # Refresh this immutable head, and known manual attempts that
@@ -289,12 +537,19 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
                 if any(run.get("status") in ACTIVE and matches(run, number, head) and blocking(run, fresh=True)
                        for run in fresh):
                     continue
-            if apply and not still_missing(api, repo, number, head):
+            if apply and not still_missing(api, repo, number, head, cut_off):
                 continue
         except APIError as error:
             # One inaccessible/deleted PR must not strand the other candidates.
             print(f"ci-recovery: PR #{number}: {error}", file=sys.stderr)
             continue
+        if apply and cut_off:
+            # The retry is spent once requested, whether or not its build ever reports. Record it
+            # first; a retry that cannot be remembered is not made.
+            memory = remember(previous, observed, exhausted, [*retries, (number, pull)], now)
+            if not write_stuck_report(stuck_report, repo, heads, now, complete, previous, memory)["written"]:
+                continue
+            retries.append((number, pull))
         if apply:
             # Never repeat an ambiguous dispatch POST. The next sweep sees the
             # replacement run. A rejected dispatch fails the sweep visibly.
@@ -304,6 +559,8 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
                 {"ref": branch, "inputs": {"pr": str(number)}},
             )
         entry = dict(pr=number, head=head, previous_run=latest["id"] if latest else None, dispatched=apply)
+        if cut_off:
+            entry["retry_of_interrupted"] = cut_off
         selected.append(entry)
         print(json.dumps(entry), flush=True)
         if limit and len(selected) >= limit:
@@ -339,6 +596,11 @@ def main():
     parser.add_argument(
         "--api-budget", type=int, default=0, help="stop this pass after this many GitHub API requests; 0 means no cap"
     )
+    parser.add_argument(
+        "--stuck-report",
+        default=os.environ.get("TAUCETI_CI_STUCK_REPORT") or None,
+        help="write the stuck-head report the merge queue's status and alert read (default: $TAUCETI_CI_STUCK_REPORT)",
+    )
     parser.add_argument("--cleanup-only", action="store_true", help="cancel obsolete PR CI without dispatching builds")
     parser.add_argument("--pr", type=int, help="restrict cleanup to a PR; implies --cleanup-only")
     args = parser.parse_args()
@@ -369,6 +631,7 @@ def main():
             min_age=args.min_age_minutes * 60,
             api_reserve=args.api_reserve,
             api_budget=args.api_budget,
+            stuck_report=args.stuck_report,
         )
         print(
             f"ci-recovery: {'dispatched' if args.apply else 'would dispatch'} {len(selected)} build(s)", file=sys.stderr

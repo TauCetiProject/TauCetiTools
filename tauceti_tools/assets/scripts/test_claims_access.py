@@ -137,9 +137,7 @@ class QueueLanded(unittest.TestCase):
             {"number": 1, "author": {"login": "bob"}, "title": "feat: closed without landing"},
             {"number": 0, "author": {"login": "tauceti-review-bot[bot]"}, "title": ca.LANDED_TITLE + "chore: bump"},
         ]
-        answer = SimpleNamespace(returncode=0, stdout=json.dumps(prs), stderr="")
-        with mock.patch.object(ca, "gh", lambda args, token, check=True: answer):
-            self.assertEqual(ca.queue_landed_prs(), {"alice": [3, 2]})
+        self.assertEqual(ca.queue_landed_prs(prs), {"alice": [3, 2]})
 
     def github(self, *comments, comments_rc=0, compare="behind", compare_rc=0):
         """GitHub answering with these (login, body) comments, and with `compare` for the landed commit."""
@@ -212,6 +210,89 @@ class QueueLanded(unittest.TestCase):
             self.assertFalse(ca.landed_by_queue(7, "main"))
 
 
+def listing_page(nodes, has_next=False, cursor="c1"):
+    """GitHub's answer to one page of `closed_prs`' query."""
+    page = {"nodes": nodes, "pageInfo": {"hasNextPage": has_next, "endCursor": cursor}}
+    return json.dumps({"data": {"repository": {"pullRequests": page}}})
+
+
+def node(number, login="alice", merged=False, title=ca.LANDED_TITLE + "feat: x", typename="User"):
+    """A PR as `closed_prs`' query returns it; no login is a deleted account."""
+    return {
+        "number": number,
+        "title": title,
+        "merged": merged,
+        "author": login and {"__typename": typename, "login": login},
+    }
+
+
+def fields(args):
+    """The `-f name=value` fields of a `gh api graphql` call."""
+    return dict(arg.split("=", 1) for flag, arg in zip(args[2::2], args[3::2], strict=True) if flag == "-f")
+
+
+class ClosedPRs(unittest.TestCase):
+    """`grant` reads the closed PRs updated most recently, whenever they were opened: a PR opened weeks
+    before it lands is behind thousands of newer ones, and landing it updates it."""
+
+    def setUp(self):
+        patcher = mock.patch.object(ca, "REPO", REPO)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def listing(self, *pages):
+        """GitHub answering these pages of nodes in turn, and the calls `closed_prs` made."""
+        calls = []
+
+        def gh(args, token, check=True):
+            calls.append(args)
+            i = len(calls) - 1
+            return SimpleNamespace(
+                returncode=0, stdout=listing_page(pages[i], i + 1 < len(pages), f"c{i + 1}"), stderr=""
+            )
+
+        with mock.patch.object(ca, "gh", gh):
+            prs = ca.closed_prs()
+        return prs, calls
+
+    def test_the_listing_is_ordered_by_last_update_not_by_opening(self):
+        prs, calls = self.listing([node(26410)])
+        self.assertEqual([pr["number"] for pr in prs], [26410])
+        query = fields(calls[0])["query"]
+        self.assertIn("states: [CLOSED, MERGED]", query)
+        self.assertIn("orderBy: {field: UPDATED_AT, direction: DESC}", query)
+        self.assertEqual((fields(calls[0])["owner"], fields(calls[0])["name"]), tuple(REPO.split("/")))
+
+    def test_paging_follows_the_cursor_and_stops_at_the_window(self):
+        with mock.patch.object(ca, "WINDOW", 3):
+            prs, calls = self.listing([node(5), node(4)], [node(3), node(2)], [node(1)])
+        self.assertEqual([pr["number"] for pr in prs], [5, 4, 3])
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("cursor", fields(calls[0]))
+        self.assertEqual(fields(calls[1])["cursor"], "c1")
+
+    def test_paging_stops_at_the_last_page(self):
+        prs, calls = self.listing([node(2)], [node(1)])
+        self.assertEqual([pr["number"] for pr in prs], [2, 1])
+        self.assertEqual(len(calls), 2)
+
+    def test_a_pr_listed_twice_while_paging_is_kept_once(self):
+        prs, _ = self.listing([node(3), node(2)], [node(2), node(1)])
+        self.assertEqual([pr["number"] for pr in prs], [3, 2, 1])
+
+    def test_merged_prs_count_for_their_human_authors(self):
+        prs, _ = self.listing(
+            [
+                node(4, "alice", merged=True, title="feat: merged by GitHub"),
+                node(3, "bob", merged=False, title="feat: closed without landing"),
+                node(2, "tauceti-review", merged=True, typename="Bot"),
+                node(1, None, merged=True),
+            ]
+        )
+        self.assertEqual(ca.merged_pr_authors(prs), {"alice"})
+        self.assertEqual(ca.queue_landed_prs(prs), {})
+
+
 class Grant(unittest.TestCase):
     """What `grant` sends, from what GitHub reports. Every login here can only read the claims repo."""
 
@@ -222,8 +303,13 @@ class Grant(unittest.TestCase):
             calls.append(args)
             path = " ".join(args)
             out = ""
-            if args[:2] == ["pr", "list"]:
-                out = json.dumps(list(merged if "merged" in args else closed))
+            if args[:2] == ["api", "graphql"]:
+                nodes = [
+                    node(pr.get("number", 900 + i), pr["author"]["login"], merged=True, title="feat: x")
+                    for i, pr in enumerate(merged)
+                ]
+                nodes += [node(pr["number"], pr["author"]["login"], title=pr["title"]) for pr in closed]
+                out = listing_page(nodes)
             elif "/invitations?" in path:
                 out = "".join(f"{login} {number} {str(expired).lower()}\n" for login, number, expired in invitations)
             elif path.endswith("/permission --jq .permission"):

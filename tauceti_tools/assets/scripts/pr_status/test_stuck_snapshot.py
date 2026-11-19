@@ -14,12 +14,10 @@ from stuck_snapshot import Snapshot
 
 def node(number=1):
     return dict(number=number, headRefOid="head", headRefName="feature", isDraft=False,
-                updatedAt="2026-11-01T00:00:00Z", author=dict(login="author"),
                 headRepository=dict(nameWithOwner="fork/repo"), headRef=dict(target=dict(oid="tip")),
                 labels=dict(nodes=[], pageInfo=dict(hasNextPage=False)),
                 commits=dict(nodes=[dict(commit=dict(oid="head", status=dict(contexts=[
-                    dict(context="build", state="SUCCESS", createdAt="2026-11-01T00:00:00Z")]),
-                    statusCheckRollup=None))]))
+                    dict(context="build", state="SUCCESS", createdAt="2026-11-01T00:00:00Z")])))]))
 
 
 class Client:
@@ -62,14 +60,6 @@ class SnapshotTests(unittest.TestCase):
         for pages in ([page([broken])], [page([], "same"), page([], "same")]):
             with self.assertRaises(RuntimeError):
                 Snapshot("owner/repo", Client(copy.deepcopy(pages))).pulls()
-
-    def test_cancelled_head_build_is_detected_without_per_pr_run_requests(self):
-        from unittest.mock import patch
-        record = dict(number=8, head="head", draft=False, checks_truncated=False, checks=[dict(
-            __typename="CheckRun", name="sandboxed-build", status="COMPLETED",
-            conclusion="CANCELLED", completedAt="2026-10-01T00:00:00Z")])
-        with patch.object(sa, "open_prs", return_value=[record]), patch.object(sa, "newest_status", return_value=(None, None)):
-            self.assertEqual(sa.detect_missing_required_status()[0]["key"], "missing-status/8")
 
     def test_review_tracking_state_is_batched_without_assuming_absent_prs_closed(self):
         class ReviewClient:

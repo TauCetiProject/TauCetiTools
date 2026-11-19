@@ -1,9 +1,11 @@
 """Exercise recovery decisions and dispatches against GitHub-shaped responses."""
 
 import importlib.util
+import json
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 SCRIPTS = Path(__file__).parents[1] / "tauceti_tools/assets/scripts"
@@ -493,6 +495,252 @@ class AcquisitionTests(unittest.TestCase):
             self.assertEqual(self.recover(api, apply=True), [])
         self.assertEqual(sum("status=" in c.args[1] for c in calls.call_args_list), 5)
         self.assertEqual(api.writes, [])
+
+
+PUSHED = "2026-10-28T13:00:00Z"  # five hours before NOW
+
+
+def pull(number=1, *, head=HEAD, state=None, run_id=30, labels=(), pushed=PUSHED):
+    contexts = [] if state is None else [
+        dict(context="build", state=state, targetUrl=f"https://github.com/owner/project/actions/runs/{run_id}")
+    ]
+    return dict(
+        number=number, headRefOid=head, isDraft=False, updatedAt=pushed, createdAt="2026-10-01T00:00:00Z",
+        labels=dict(nodes=[dict(name=name) for name in labels]),
+        commits=dict(nodes=[dict(commit=dict(oid=head, committedDate=pushed, status=dict(contexts=contexts)))]),
+    )
+
+
+TIMED_OUT = dict(id=1, run_id=30, run_attempt=1, name="sandboxed-build", status="completed", conclusion="cancelled",
+                 runner_name="fleet-pool-runner")
+
+
+def cancelled(**changes):
+    value = queued(
+        id=30, status="completed", conclusion="cancelled", run_started_at="2026-10-28T11:00:00Z",
+        created_at="2026-10-28T11:00:00Z", updated_at="2026-10-28T17:00:05Z",
+    )
+    value.update(changes)
+    return value
+
+
+class Interrupted:
+    """A repository whose open heads, cancelled runs, live runs and jobs are given directly."""
+
+    def __init__(self, pulls, *, cancelled_runs=(), live=(), jobs=None, current=None):
+        self.pulls, self.cancelled_runs, self.live = list(pulls), list(cancelled_runs), list(live)
+        self.jobs = jobs or {}
+        self.current = current
+        self.writes, self.paths = [], []
+
+    def graphql(self, query, variables):
+        if query == recovery.CURRENT:
+            found = next(p for p in self.pulls if p["number"] == variables["pr"])
+            commit = self.current or found["commits"]["nodes"][-1]["commit"]
+            return dict(repository=dict(
+                pullRequest=dict(state="OPEN", isDraft=False, headRefOid=found["headRefOid"], labels=found["labels"]),
+                object=dict(status=commit["status"]),
+            ))
+        return dict(repository=dict(
+            defaultBranchRef=dict(name="main"),
+            pullRequests=dict(nodes=self.pulls, pageInfo=dict(hasNextPage=False, endCursor=None)),
+        ))
+
+    def request(self, method, path, data=None):
+        self.paths.append(path)
+        if method == "POST":
+            self.writes.append((path, data))
+            return None
+        if "/jobs?" in path:
+            run_id = int(path.split("/runs/", 1)[1].split("/", 1)[0])
+            jobs = self.jobs.get(run_id, [])
+            return dict(total_count=len(jobs), jobs=jobs)
+        if "status=cancelled" in path:
+            return dict(total_count=len(self.cancelled_runs), workflow_runs=self.cancelled_runs)
+        if "status=" in path:
+            state = path.split("status=", 1)[1].split("&", 1)[0]
+            return dict(workflow_runs=[r for r in self.live if r["status"] == state])
+        if "head_sha=" in path:
+            head = path.split("head_sha=", 1)[1].split("&", 1)[0]
+            return dict(workflow_runs=[r for r in self.cancelled_runs + self.live if r["head_sha"] == head])
+        if "/actions/runs/" in path:
+            run_id = int(path.rsplit("/", 1)[1])
+            return next(r for r in self.cancelled_runs + self.live if r["id"] == run_id)
+        return dict(workflow_runs=[])
+
+
+def dispatches(api):
+    return [data["inputs"]["pr"] for path, data in api.writes if path.endswith("/dispatches")]
+
+
+class InterruptedBuildTests(unittest.TestCase):
+    def setUp(self):
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.report = Path(temporary.name) / "stuck.json"
+
+    def recover(self, api, **kwargs):
+        kwargs.setdefault("stuck_report", self.report)
+        return recovery.recover(api, "owner/project", now=NOW, cleanup=False, **kwargs)
+
+    def test_without_a_report_to_remember_it_an_interrupted_build_is_not_retried(self):
+        api = Interrupted([pull(state="FAILURE")], cancelled_runs=[cancelled()], jobs={30: [TIMED_OUT]})
+        self.assertEqual(self.recover(api, apply=True, stuck_report=None), [])
+        self.assertEqual(api.writes, [])
+
+    def test_a_rerun_posting_a_new_status_is_classified_afresh(self):
+        api = Interrupted([pull(state="FAILURE")], cancelled_runs=[cancelled()], jobs={30: [TIMED_OUT]})
+        self.recover(api, apply=True)
+        self.assertEqual(json.loads(self.report.read_text())["memory"]["retried"]["1"]["run"], 30)
+        rerun = pull(state="FAILURE")
+        rerun["commits"]["nodes"][0]["commit"]["status"]["contexts"][0]["createdAt"] = "2026-10-28T17:30:00Z"
+        api.pulls, api.cancelled_runs = [rerun], []  # the rerun failed for real
+        self.recover(api, apply=True)
+        report = json.loads(self.report.read_text())
+        self.assertEqual((report["heads"], report["memory"]["retried"]), ([], {}))
+        self.assertEqual(dispatches(api), ["1"])
+
+    def test_build_cancelled_at_the_job_timeout_is_retried_once_without_waiting_for_grace(self):
+        api = Interrupted([pull(state="FAILURE")], cancelled_runs=[cancelled()], jobs={30: [TIMED_OUT]})
+        with TemporaryDirectory() as tmp:
+            report = Path(tmp) / "stuck.json"
+            selected = self.recover(api, apply=True, stuck_report=report)
+            self.assertEqual(selected[0]["retry_of_interrupted"], 30)
+            self.assertEqual(dispatches(api), ["1"])
+            # The retry finished without reporting; it is spent, and the head is reported instead.
+            self.assertEqual(self.recover(api, apply=True, stuck_report=report), [])
+            self.assertEqual(dispatches(api), ["1"])
+            self.assertEqual([h["reason"] for h in json.loads(report.read_text())["heads"]], ["retry-interrupted"])
+
+    def test_six_hour_workflow_without_an_acquired_build_is_not_an_interrupted_build(self):
+        api = Interrupted([pull(state="FAILURE")], cancelled_runs=[cancelled()], jobs={30: []})
+        self.assertEqual(self.recover(api, apply=True), [])
+
+    def test_build_job_cancelled_short_of_the_timeout_is_retried_but_a_real_failure_is_not(self):
+        early = dict(updated_at="2026-10-28T12:00:00Z")
+        for job, count in [
+            (dict(name="sandboxed-build", status="completed", conclusion="cancelled", runner_id=7), 1),
+            (dict(name="sandboxed-build", status="completed", conclusion="failure", runner_id=7), 0),
+            (dict(name="sandboxed-build", status="completed", conclusion="cancelled", runner_id=0), 0),
+        ]:
+            with self.subTest(job=job):
+                job = dict(job, id=1, run_id=30, run_attempt=1)
+                api = Interrupted([pull(state="FAILURE")], cancelled_runs=[cancelled(**early)], jobs={30: [job]})
+                self.assertEqual(len(self.recover(api, apply=True)), count)
+        api = Interrupted([pull(state="FAILURE")], cancelled_runs=[])
+        self.assertEqual(self.recover(api, apply=True), [])
+
+    def test_interrupted_retry_or_rerun_is_reported_not_retried_again(self):
+        for changes in (dict(event="workflow_dispatch", display_title="pr-build pr=1 head=" + HEAD),
+                        dict(run_attempt=2)):
+            with self.subTest(changes=changes), patch("sys.stdout") as out:
+                api = Interrupted([pull(state="FAILURE")], cancelled_runs=[cancelled(**changes)],
+                                  jobs={30: [dict(TIMED_OUT, run_attempt=changes.get("run_attempt", 1))]})
+                with TemporaryDirectory() as tmp:
+                    report = Path(tmp) / "stuck.json"
+                    self.assertEqual(self.recover(api, apply=True, stuck_report=report), [])
+                    heads = json.loads(report.read_text())["heads"]
+                self.assertEqual([(h["pr"], h["reason"], h["run"]) for h in heads], [(1, "retry-interrupted", 30)])
+                self.assertEqual(api.writes, [])
+                self.assertIn('"stuck_head": 1', "".join(str(c.args[0]) for c in out.write.call_args_list))
+
+    def test_reported_interrupted_retry_stays_reported_after_it_leaves_the_listing_window(self):
+        api = Interrupted([pull(state="FAILURE")], cancelled_runs=[cancelled(run_attempt=2)],
+                          jobs={30: [dict(TIMED_OUT, run_attempt=2)]})
+        with TemporaryDirectory() as tmp:
+            report = Path(tmp) / "stuck.json"
+            self.recover(api, stuck_report=report)
+            api.cancelled_runs = []
+            api.pulls = [pull(state="FAILURE", labels=["hold"])]  # a temporary hold keeps the memory
+            self.recover(api, stuck_report=report)
+            self.assertEqual(json.loads(report.read_text())["heads"], [])
+            api.pulls = [pull(state="FAILURE")]
+            self.recover(api, stuck_report=report)
+            self.assertEqual([h["reason"] for h in json.loads(report.read_text())["heads"]], ["retry-interrupted"])
+            api.pulls = [pull(state="FAILURE", run_id=31)]  # a later build's real failure
+            self.recover(api, stuck_report=report)
+            self.assertEqual(json.loads(report.read_text())["heads"], [])
+        self.assertEqual(api.writes, [])
+
+    def test_unwritable_report_skips_the_retry_but_not_other_recovery(self):
+        missing = pull(2, head="b" * 40, pushed="2026-10-21T05:00:00Z")
+        api = Interrupted([pull(state="FAILURE"), missing], cancelled_runs=[cancelled()], jobs={30: [TIMED_OUT]})
+        blocker = self.report.parent / "file"
+        blocker.write_text("")
+        self.recover(api, apply=True, stuck_report=blocker / "stuck.json")
+        self.assertEqual(dispatches(api), ["2"])
+
+    def test_pass_budget_stops_the_cancelled_run_listing(self):
+        api = Interrupted([pull(state="FAILURE")], cancelled_runs=[cancelled()], jobs={30: [TIMED_OUT]})
+        api.stats = {"read": {"requests": 1500}}
+        with TemporaryDirectory() as tmp:
+            report = Path(tmp) / "stuck.json"
+            self.assertEqual(self.recover(api, apply=True, api_budget=1500, stuck_report=report), [])
+            self.assertFalse(json.loads(report.read_text())["complete"])
+        self.assertFalse(any("/jobs?" in path for path in api.paths))
+
+    def test_status_change_before_dispatch_cancels_the_retry(self):
+        moved = pull(state="SUCCESS", run_id=31)["commits"]["nodes"][0]["commit"]
+        api = Interrupted([pull(state="FAILURE")], cancelled_runs=[cancelled()], current=moved,
+                          jobs={30: [TIMED_OUT]})
+        self.assertEqual(self.recover(api, apply=True), [])
+        self.assertEqual(api.writes, [])
+
+    def test_self_tested_heads_are_neither_retried_nor_reported(self):
+        api = Interrupted([pull(state="FAILURE", labels=["self-tested"]), pull(2, head="b" * 40, labels=["self-tested"])],
+                          cancelled_runs=[cancelled()], jobs={30: [TIMED_OUT]})
+        with TemporaryDirectory() as tmp:
+            report = Path(tmp) / "stuck.json"
+            self.assertEqual(self.recover(api, apply=True, stuck_report=report), [])
+            self.assertEqual(json.loads(report.read_text())["heads"], [])
+
+
+class StuckHeadTests(unittest.TestCase):
+    def stuck(self, pulls, live=()):
+        return recovery.stuck_heads(pulls, list(live), {}, NOW)
+
+    def test_head_without_ci_three_hours_after_its_push_is_stuck(self):
+        heads = self.stuck([pull()])
+        self.assertEqual([(h["pr"], h["reason"], h["last_push_at"]) for h in heads],
+                         [(1, "no-ci", recovery.timestamp(PUSHED))])
+        self.assertEqual(self.stuck([pull(pushed="2026-10-28T16:00:00Z")]), [])
+        self.assertEqual(self.stuck([pull(state="FAILURE"), pull(2, state="SUCCESS")]), [])
+        self.assertEqual(len(self.stuck([pull(state="PENDING")])), 1)  # a dead pending status is not CI
+
+    def test_live_run_final_label_or_self_test_is_not_stuck(self):
+        live = queued(status="in_progress", run_attempt=1)
+        self.assertEqual(self.stuck([pull()], live=[live]), [])
+        for label in ("awaiting-author", "needs-human-review", "merge-conflict", "hold", "wip", "keep", "on-hold",
+                      "self-tested"):
+            with self.subTest(label=label):
+                self.assertEqual(self.stuck([pull(labels=[label])]), [])
+        self.assertEqual(len(self.stuck([pull(labels=["ci-failed"])])), 1)
+
+    def test_memory_outlives_a_draft_round_trip_but_not_a_new_verdict_or_two_weeks(self):
+        head = pull(state="FAILURE")
+        entry = dict(recovery.verdict(head), seen=NOW)
+        previous = dict(memory=dict(retried={"1": entry}, exhausted={}))
+        self.assertEqual(recovery.remember(previous, [], {}, [], NOW + 86400)["retried"], {"1": entry})
+        self.assertEqual(recovery.remember(previous, [], {}, [], NOW + 15 * 86400)["retried"], {})
+        moved = pull(state="FAILURE", run_id=31)
+        self.assertEqual(recovery.remember(previous, [moved], {}, [], NOW)["retried"], {})
+
+    def test_report_keeps_the_start_of_a_continuing_stuck_period(self):
+        heads = self.stuck([pull()])
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state" / "stuck.json"
+            first = recovery.write_stuck_report(path, "owner/project", heads, NOW, True)
+            self.assertEqual(first["memory"], {})
+            self.assertEqual(first["stuck_since"], NOW)
+            later = recovery.write_stuck_report(path, "owner/project", heads, NOW + 3600, True)
+            self.assertEqual(later["stuck_since"], NOW)
+            self.assertEqual(json.loads(path.read_text())["observed_at"], NOW + 3600)
+            gap = recovery.write_stuck_report(path, "owner/project", heads, NOW + 5 * 3600, True)
+            self.assertEqual(gap["stuck_since"], NOW + 5 * 3600)
+            clear = recovery.write_stuck_report(path, "owner/project", [], NOW + 6 * 3600, False)
+            self.assertEqual((clear["stuck_since"], clear["complete"]), (None, False))
+            again = recovery.write_stuck_report(path, "owner/project", heads, NOW + 7 * 3600, True)
+            self.assertEqual(again["stuck_since"], NOW + 7 * 3600)
 
 
 if __name__ == "__main__":

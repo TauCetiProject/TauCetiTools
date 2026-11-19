@@ -65,6 +65,20 @@ LANDED_RECORD = re.compile(
 # The accounts whose comments can carry that record. Anyone can paste it into a comment of their own; only
 # the queue's App posts as its bot.
 LANDERS = {name.strip().lower() for name in os.environ.get("LANDERS", "tauceti-queue[bot]").split(",") if name.strip()}
+# How many closed PRs `grant` reads, most recently updated first. Merging or landing a PR updates it, so
+# these hold every PR that landed since the oldest of their updates: four days back in November 2026, for
+# a job scheduled hourly.
+WINDOW = 5000
+CLOSED_PRS = """
+query($owner: String!, $name: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: [CLOSED, MERGED], first: 100, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes { number title merged author { __typename login } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+"""
 
 
 def gh(args, token, check=True):
@@ -107,22 +121,48 @@ def is_sweepable(lease_json, cutoff):
     return 0 < expires <= cutoff
 
 
-def merged_pr_authors():
-    out = gh(["pr", "list", "--repo", REPO, "--state", "merged", "--limit", "5000", "--json", "author"], GH_TOKEN)
-    return human_authors(json.loads(out.stdout or "[]"))
+def closed_prs():
+    """The WINDOW closed and merged PRs updated most recently, each as {number, title, merged, author}, the
+    author in the shape `human_authors` reads. Not the most recently opened, which is what `gh pr list`
+    lists: a PR can land weeks after it was opened, behind thousands of newer PRs. A PR updated while this
+    pages can be listed twice, and is kept once, or be passed over, and is read on the next run."""
+    owner, _, name = REPO.partition("/")
+    prs, seen, cursor = [], set(), None
+    while len(prs) < WINDOW:
+        args = ["api", "graphql", "-f", f"query={CLOSED_PRS}", "-f", f"owner={owner}", "-f", f"name={name}"]
+        if cursor:
+            args += ["-f", f"cursor={cursor}"]
+        page = json.loads(gh(args, GH_TOKEN).stdout)["data"]["repository"]["pullRequests"]
+        for node in page["nodes"] or []:
+            if not node or node["number"] in seen:
+                continue
+            seen.add(node["number"])
+            author = node.get("author")  # None for a deleted account
+            prs.append(
+                {
+                    "number": node["number"],
+                    "title": node.get("title") or "",
+                    "merged": bool(node.get("merged")),
+                    "author": author and {"login": author.get("login"), "is_bot": author.get("__typename") == "Bot"},
+                }
+            )
+        if not page["pageInfo"]["hasNextPage"]:
+            break
+        cursor = page["pageInfo"]["endCursor"]
+    return prs[:WINDOW]
 
 
-def queue_landed_prs():
-    """{author: [PR numbers, newest first]} for the newest closed PRs titled as the merge queue titles a
-    PR it landed. Whether the queue really landed one is checked only for an author not yet admitted
-    (`landed_by_queue`), because that costs requests per PR."""
-    out = gh(
-        ["pr", "list", "--repo", REPO, "--state", "closed", "--limit", "5000", "--json", "number,author,title"],
-        GH_TOKEN,
-    )
+def merged_pr_authors(prs):
+    return human_authors(pr for pr in prs if pr["merged"])
+
+
+def queue_landed_prs(prs):
+    """{author: [PR numbers, most recently updated first]} for those of these PRs titled as the merge queue
+    titles a PR it landed. Whether the queue really landed one is checked only for an author not yet
+    admitted (`landed_by_queue`), because that costs requests per PR."""
     landed = {}
-    for pr in json.loads(out.stdout or "[]"):
-        if (pr.get("title") or "").startswith(LANDED_TITLE):
+    for pr in prs:
+        if pr["title"].startswith(LANDED_TITLE):
             for login in human_authors([pr]):
                 landed.setdefault(login, []).append(pr["number"])
     return landed
@@ -232,8 +272,9 @@ def grant():
     the job still ends red so somebody looks (an org that forbids outside collaborators, or requires
     2FA of them, fails exactly here)."""
     pending = invitations()
-    merged = merged_pr_authors()
-    landed = queue_landed_prs()
+    prs = closed_prs()
+    merged = merged_pr_authors(prs)
+    landed = queue_landed_prs(prs)
     candidates = sorted((merged | set(landed)) - already_admitted(pending))
     invited = 0
     failures = 0

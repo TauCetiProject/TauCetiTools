@@ -30,6 +30,8 @@ def main():
             file=sys.stderr,
         )
         os.environ["TAUCETI_SELF_TESTED_TEAM"] = ""
+    # The merge queue on this host reads this report for its status and its stuck-head alert.
+    os.environ.setdefault("TAUCETI_CI_STUCK_REPORT", str(Path.home() / ".local/state/tauceti-ci-recovery/stuck-heads.json"))
     os.environ.update(
         GH_TOKEN=token,
         GH_READ_TOKEN=token,

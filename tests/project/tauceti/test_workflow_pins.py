@@ -170,14 +170,15 @@ class ContentWorkflowCompleteness(unittest.TestCase):
             "Attest exact-head Lake configuration before executing Lake",
             "Reject option overrides and metaprogramming (allow local macros)",
             "Build the trusted environment-lint driver (before any candidate code runs)",
-            "Build exact candidate under bwrap with workflow-pinned audits, offline",
+            # The sandboxed build: one step, or the first of one step per phase.
+            next(name for name in names if name and name.startswith("Build exact candidate under bwrap")),
             "Report build and bump-guard statuses to the PR head commit",
         ]
         for name in required:
             self.assertIn(name, names)
         self.assertEqual([names.index(name) for name in required],
                          sorted(names.index(name) for name in required))
-        build = next(step for step in steps if step.get("id") == "build")
+        build = steps[names.index(required[5])]
         self.assertIn("sandbox-build.sh", build["run"])
         report = next(step for step in steps if step.get("id") == "report")
         self.assertEqual(report["if"], "always()")
