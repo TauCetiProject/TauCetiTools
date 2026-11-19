@@ -11,7 +11,7 @@ import re
 import sys
 
 from github_api import APIError, Deferred, GitHub
-from pr_ci_lifecycle import ACTIVE, ordinary, pr_numbers, reconcile, runs
+from pr_ci_lifecycle import ACTIVE, ordinary, pr_numbers, reconcile, reserved, runs
 
 INVENTORY = """
 query($owner: String!, $name: String!, $after: String) {
@@ -98,16 +98,13 @@ def still_missing(api, repo, number, head):
     )
 
 
-def quota_reserved(api, reserve):
-    """Leave the shared installation's remaining budget for essential queue operations."""
-    if not reserve:
-        return False
-    for stat in getattr(api, "stats", {}).values():
-        for bucket in stat.get("buckets", {}).values():
-            remaining = bucket.get("remaining")
-            if remaining is not None and str(remaining).isdigit() and int(remaining) < reserve:
-                return True
-    return False
+def quota_reserved(api, reserve, budget=0):
+    """Leave the shared installation's remaining budget for essential queue operations.
+
+    `budget` caps this pass's own requests (0: no cap), so the sweeper's share of the shared
+    installation is fixed however much the inventory grows.
+    """
+    return reserved(api, reserve, budget)
 
 
 
@@ -186,7 +183,7 @@ def cancelled_before_build(api, repo, run):
     )
 
 
-def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_reserve=0, cleanup=True):
+def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_reserve=0, api_budget=0, cleanup=True):
     now = dt.datetime.now(dt.timezone.utc).timestamp() if now is None else now
     branch, pulls = inventory(api, repo)
 
@@ -240,7 +237,7 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
                 continue
             active.append(run)
     if cleanup:
-        reconcile(api, repo, active=all_active, apply=apply, api_reserve=api_reserve)
+        reconcile(api, repo, active=all_active, apply=apply, api_reserve=api_reserve, api_budget=api_budget)
     since = dt.datetime.fromtimestamp(now - max(86400, min_age), dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     pass_started = dt.datetime.fromtimestamp(now, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     for event in ("workflow_dispatch", "repository_dispatch"):
@@ -254,8 +251,8 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
     pulls.sort(key=lambda p: timestamp(recent.get(p["number"], {}).get("created_at", p["updatedAt"])))
     selected = []
     for pull in pulls:
-        if quota_reserved(api, api_reserve):
-            print("ci-recovery: shared API reserve reached; next pass will resume", file=sys.stderr)
+        if quota_reserved(api, api_reserve, api_budget):
+            print("ci-recovery: shared API reserve or pass budget reached; next pass will resume", file=sys.stderr)
             break
         number, head = pull["number"], pull["headRefOid"]
         if any(matches(run, number, head) and blocking(run) for run in active):
@@ -314,8 +311,8 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
     # Useful current-head recovery comes first. Ancient uncancellable shells
     # must not consume the pass's API budget before missing builds can dispatch.
     for run in all_active:
-        if quota_reserved(api, api_reserve):
-            print("ci-recovery: cleanup reached the shared API reserve; next pass will resume", file=sys.stderr)
+        if quota_reserved(api, api_reserve, api_budget):
+            print("ci-recovery: cleanup reached the shared API reserve or pass budget; next pass will resume", file=sys.stderr)
             break
         if (not run.get("display_title", "").startswith("Ignored label event ")
                 and any(matches(run, pull["number"], pull["headRefOid"]) for pull in pulls)):
@@ -339,15 +336,30 @@ def main():
         "--min-age-minutes", type=int, default=90, help="allow the existing status replay to finish first"
     )
     parser.add_argument("--api-reserve", type=int, default=0, help="leave this many shared GitHub API requests unused")
+    parser.add_argument(
+        "--api-budget", type=int, default=0, help="stop this pass after this many GitHub API requests; 0 means no cap"
+    )
     parser.add_argument("--cleanup-only", action="store_true", help="cancel obsolete PR CI without dispatching builds")
     parser.add_argument("--pr", type=int, help="restrict cleanup to a PR; implies --cleanup-only")
     args = parser.parse_args()
-    if args.limit < 0 or args.min_age_minutes < 0 or args.api_reserve < 0 or (args.pr is not None and args.pr < 1):
-        parser.error("limit, minimum age and API reserve must be nonnegative; PR number must be positive")
+    if (
+        min(args.limit, args.min_age_minutes, args.api_reserve, args.api_budget) < 0
+        or args.pr is not None
+        and args.pr < 1
+    ):
+        parser.error("limit, minimum age, API reserve and budget must be nonnegative; PR number must be positive")
     api = GitHub(max_wait=0)
     try:
         if args.cleanup_only or args.pr is not None:
-            reconcile(api, args.repo, apply=args.apply, number=args.pr, api_reserve=args.api_reserve, strict=True)
+            reconcile(
+                api,
+                args.repo,
+                apply=args.apply,
+                number=args.pr,
+                api_reserve=args.api_reserve,
+                api_budget=args.api_budget,
+                strict=True,
+            )
             return 0
         selected = recover(
             api,
@@ -356,6 +368,7 @@ def main():
             limit=args.limit,
             min_age=args.min_age_minutes * 60,
             api_reserve=args.api_reserve,
+            api_budget=args.api_budget,
         )
         print(
             f"ci-recovery: {'dispatched' if args.apply else 'would dispatch'} {len(selected)} build(s)", file=sys.stderr
