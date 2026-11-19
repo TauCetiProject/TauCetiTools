@@ -12,6 +12,7 @@ import datetime
 import json
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("ZULIP_CHANNEL", "Tau Ceti")
 os.environ.setdefault("ZULIP_TOPIC", "Stuck PRs")
@@ -516,86 +517,6 @@ class EvictionLoopTest(unittest.TestCase):
         self.assertEqual(sa.detect_eviction_loops(), [])
 
 
-class MissingStatusTest(unittest.TestCase):
-    def _routes(self, build_status, runs):
-        import json as _j
-        prs = _j.dumps({"number": 8, "head": "def", "draft": False,
-                        "updated_at": _ago(1), "head_ref": "b", "head_repo": "o/r",
-                        "author": "a", "labels": []}) + "\n"
-        # The API returns runs newest first; so does this list.
-        return [("/pulls?state=open", prs),
-                ("/statuses", build_status),
-                ("pr-build.yml/runs", "".join(_j.dumps(r) + "\n" for r in runs))]
-
-    @staticmethod
-    def _run(hours_ago, conclusion="failure", status="completed"):
-        return {"status": status, "conclusion": conclusion, "updated_at": _ago(hours_ago)}
-
-    def test_alerts_when_run_finished_but_no_status(self):
-        _install(self, self._routes("", [self._run(2)]))
-        self.assertEqual([a["key"] for a in sa.detect_missing_required_status()],
-                         ["missing-status/8"])
-
-    def test_silent_while_the_build_is_still_running(self):
-        # No run at all yet: this is ordinary `awaiting-CI`, never an alert.
-        _install(self, self._routes("", []))
-        self.assertEqual(sa.detect_missing_required_status(), [])
-
-    def test_silent_while_a_rerun_is_in_progress(self):
-        # An earlier run concluded, but the head is building again right now; the status it
-        # will post has simply not landed yet.
-        _install(self, self._routes(
-            "", [self._run(0.1, conclusion="", status="in_progress"), self._run(2)]))
-        self.assertEqual(sa.detect_missing_required_status(), [])
-
-    def test_cancelled_run_is_not_proof_of_a_missing_status(self):
-        # A cancelled run (concurrency or manual) never reaches its reporting step, so it
-        # posting no status is by design, not a wedge. A supersede re-dispatches within
-        # minutes, so a recent cancellation is still presumed to be one.
-        _install(self, self._routes("", [self._run(2, conclusion="cancelled")]))
-        self.assertEqual(sa.detect_missing_required_status(), [])
-
-    def test_a_cancellation_nothing_came_after_is_a_wedge(self):
-        """A supersede is followed by the run that replaces it. A cancellation that is
-        still the newest run for a head a day later was not superseded by anything, and
-        nothing will now post the status. PRs 6633, 6583 and 6590 sat wedged exactly
-        this way for three days, each with one cancelled run and no `build` status,
-        invisible here because every cancellation was skipped."""
-        _install(self, self._routes(
-            "", [self._run(sa.ABANDONED_CANCEL_HOURS + 1, conclusion="cancelled")]))
-        found = sa.detect_missing_required_status()
-        self.assertEqual([a["key"] for a in found], ["missing-status/8"])
-        self.assertIn("cancelled", found[0]["body"])
-
-    def test_a_cancellation_still_inside_the_grace_window_stays_quiet(self):
-        # Long enough to be a wedge is the whole distinction; just under it is not.
-        _install(self, self._routes(
-            "", [self._run(sa.ABANDONED_CANCEL_HOURS - 1, conclusion="cancelled")]))
-        self.assertEqual(sa.detect_missing_required_status(), [])
-
-    def test_a_newer_cancellation_over_an_older_one_is_still_read_from_the_newest(self):
-        # Two cancellations, the newer inside the window: something was still being
-        # dispatched recently, so this is churn rather than abandonment.
-        _install(self, self._routes("", [
-            self._run(1, conclusion="cancelled"),
-            self._run(sa.ABANDONED_CANCEL_HOURS + 5, conclusion="cancelled"),
-        ]))
-        self.assertEqual(sa.detect_missing_required_status(), [])
-
-    def test_older_concluded_run_still_alerts_behind_a_cancellation(self):
-        # The run that reported is the older one; a later cancellation does not excuse the
-        # status it never posted.
-        _install(self, self._routes(
-            "", [self._run(0.6, conclusion="cancelled"), self._run(2, conclusion="success")]))
-        self.assertEqual([a["key"] for a in sa.detect_missing_required_status()],
-                         ["missing-status/8"])
-
-    def test_silent_when_the_status_exists(self):
-        _install(self, self._routes(
-            '{"state": "failure", "updated_at": "2026-08-01T00:00:00Z"}', [self._run(2)]))
-        self.assertEqual(sa.detect_missing_required_status(), [])
-
-
 class DivergedHeadTest(unittest.TestCase):
     def _routes(self, tip):
         import json as _j
@@ -632,10 +553,24 @@ class FailingSchedulerTest(unittest.TestCase):
                 "created_at": when.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "url": "https://github.com/x/y/actions/runs/1"}
 
-    def check(self, runs):
+    def check(self, runs, dispatched=()):
         self.addCleanup(setattr, sa, "gh_stream", sa.gh_stream)
-        sa.gh_stream = lambda *a, **k: runs
-        return sa._check_scheduler_health("pages.yml", "pages / doc-gen publish")
+        sa.gh_stream = lambda path, **k: list(dispatched if "event=workflow_dispatch" in path else runs)
+        with patch.object(sa, "_snapshot", None), patch.dict(os.environ, {"TAUCETI_BASE_BRANCH": "main"}):
+            return sa._check_scheduler_health("pages.yml", "pages / doc-gen publish")
+
+    def test_backstop_dispatches_join_the_streak_newest_first(self):
+        # Failing dispatches with no cron delivery are still a red job.
+        self.assertEqual(len(self.check([], [self.sched_run("failure", hours=1),
+                                             self.sched_run("failure", hours=2)])), 1)
+        # A successful dispatch after old red cron runs clears the streak.
+        self.assertEqual(self.check([self.sched_run("failure", hours=20), self.sched_run("failure", hours=30)],
+                                    [self.sched_run("success", hours=1)]), [])
+
+    def test_a_run_without_a_creation_time_fails_closed(self):
+        broken = dict(self.sched_run("failure"), created_at="")
+        with self.assertRaises(ValueError):
+            self.check([self.sched_run("failure")], [broken])
 
     def test_a_streak_of_failures_alerts(self):
         alerts = self.check([self.sched_run("failure", hours=1), self.sched_run("failure", hours=4)])
@@ -683,6 +618,70 @@ class FailingSchedulerTest(unittest.TestCase):
         prefixes = dict(sa.DETECTORS)
         self.assertIn("failing-scheduler", prefixes)
         self.assertEqual(sa.key_prefix("failing-scheduler/pages.yml"), "failing-scheduler")
+
+
+class DeadSchedulerTest(unittest.TestCase):
+    """A backstop dispatch proves a workflow runs; Bors projects have no merge-sweep."""
+
+    def check(self, schedule, dispatch, max_hours=4):
+        def scalar(path, jq, paginate=False):
+            requests.append(path)
+            if path.endswith("/actions/workflows/update.yml"):
+                return ""
+            if "event=schedule" in path:
+                return schedule
+            if "event=workflow_dispatch" in path:
+                self.assertIn("&branch=main&", path)
+                return dispatch
+            raise AssertionError(path)
+        requests = []
+        with (patch.object(sa, "gh_obj", return_value={"state": "active"}),
+              patch.object(sa, "gh_scalar", side_effect=scalar), patch.object(sa, "_snapshot", None),
+              patch.dict(os.environ, {"TAUCETI_BASE_BRANCH": "main"})):
+            return sa._check_scheduler("update.yml", "hourly mathlib bump", max_hours), requests
+
+    def test_a_recent_scheduled_run_needs_no_dispatch_read(self):
+        alerts, requests = self.check(_ago(1), _ago(10))
+        self.assertEqual(alerts, [])
+        self.assertFalse(any("workflow_dispatch" in path for path in requests))
+
+    def test_a_backstop_dispatch_keeps_a_rarely_delivered_cron_alive(self):
+        self.assertEqual(self.check(_ago(30), _ago(1))[0], [])
+        self.assertEqual(self.check("", _ago(1))[0], [])
+
+    def test_overdue_cron_and_dispatch_still_alert(self):
+        alerts, _requests = self.check(_ago(30), _ago(10))
+        self.assertEqual([a["key"] for a in alerts], ["dead-scheduler/update.yml"])
+        self.assertIn("scheduled or dispatched", alerts[0]["body"])
+
+    def test_an_unreadable_dispatch_history_keeps_the_alert(self):
+        def scalar(path, jq, paginate=False):
+            if "event=workflow_dispatch" in path:
+                raise RuntimeError("API unavailable")
+            return _ago(30)
+        with (patch.object(sa, "SCHEDULERS", {"update.yml": ("U", 4)}), patch.object(sa, "_snapshot", None),
+              patch.object(sa, "gh_obj", return_value={"state": "active"}),
+              patch.object(sa, "gh_scalar", side_effect=scalar),
+              patch.object(sa, "DETECTORS", [("dead-scheduler", sa.detect_dead_schedulers)])):
+            self.assertEqual(sa.collect_alerts(), ([], {"dead-scheduler/update.yml"}))
+
+    def test_no_run_of_either_kind_alerts(self):
+        alerts, _requests = self.check("", "")
+        self.assertEqual([a["key"] for a in alerts], ["dead-scheduler/update.yml"])
+
+    def test_merge_sweep_is_checked_only_for_the_github_queue(self):
+        for backend, expected in (("bors", False), ("github-queue", True)):
+            with self.subTest(backend=backend), patch.object(sa, "_snapshot", None), \
+                    patch.dict(os.environ, {"TAUCETI_MERGE_BACKEND": backend}):
+                self.assertEqual("merge-sweep.yml" in sa.active_schedulers(), expected)
+                self.assertIn("update.yml", sa.active_schedulers())
+                with patch.object(sa, "_check_scheduler", return_value=[]) as dead, \
+                        patch.object(sa, "_check_scheduler_health", return_value=[]) as failing:
+                    sa.detect_dead_schedulers()
+                    sa.detect_failing_schedulers()
+                for mock in (dead, failing):
+                    seen = [call.args[0] for call in mock.call_args_list]
+                    self.assertEqual("merge-sweep.yml" in seen, expected)
 
 
 class StuckLintRepairTest(unittest.TestCase):

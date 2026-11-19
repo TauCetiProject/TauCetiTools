@@ -29,11 +29,15 @@ Detectors (each names the infra failure it implies):
                      a later completed review proves recovery. The issue
                      alone does not establish a rubric or engine defect.
   5. dead-scheduler  A scheduled workflow is missing, disabled, or its last
-                     SCHEDULED run is older than its cadence + slack. GitHub
-                     disabled the cron (60-day inactivity), or it errors at dispatch.
+                     scheduled or manually dispatched run on the base branch is
+                     older than its cadence + slack. The workflow backstop
+                     dispatches workflows whose cron GitHub fails to deliver, so a
+                     dispatch proves the job still runs; missing cron delivery on
+                     its own is not alerted. Merge-sweep is checked only under the
+                     GitHub merge queue backend: Bors projects do not run it.
   5b. failing-scheduler
-                     A scheduled workflow whose cron fires on time and whose last
-                     few runs all FAILED. dead-scheduler reads only when runs
+                     A scheduled workflow that starts on time (by cron or backstop
+                     dispatch) and whose last few runs all FAILED. dead-scheduler reads only when runs
                      started, never how they ended, so on its own it cannot tell a
                      healthy job from one that has been red for days -- which is
                      exactly how pages.yml served a stale site unnoticed.
@@ -43,13 +47,6 @@ Detectors (each names the infra failure it implies):
                      repeatedly. One eviction looks like nothing (merge-sweep just
                      re-enqueues), so only the count reveals a broken merge-group
                      build, e.g. a flaky cache.
-  9. missing-status  A concluded pr-build left an open PR's head with no `build`
-                     status. The PR is BLOCKED forever and its label is pinned at
-                     `awaiting-CI`; nothing re-runs pr-build without a push. A
-                     cancelled run counts once it has stayed the newest for the
-                     head past ABANDONED_CANCEL_HOURS: a cancellation is normally
-                     a supersede, but one nothing came after is a wedge, and
-                     skipping every cancellation left three PRs stuck for days.
  10. diverged-head   A PR's recorded head is not its branch tip, so GitHub never
                      recomputes mergeability and it sits at `mergeable: null`,
                      invisible to every mergeability-gated path.
@@ -117,6 +114,7 @@ import os
 import re
 import sys
 import time
+import urllib.parse
 
 # Reuse the proven Zulip client + helpers. Because ZULIP_TOPIC is read at import
 # time, the workflow sets it to "Stuck PRs" and every send/narrow below targets
@@ -146,15 +144,6 @@ STRANDED_HOURS = 6
 # Evictions since the current readiness, within the window, before a bounce counts as a loop.
 EVICTION_LOOP_MIN = 2
 EVICTION_WINDOW_HOURS = 24
-# How long a concluded pr-build may leave its head without a `build` status before that is
-# a wedge rather than a race between the run finishing and the status landing.
-MISSING_STATUS_HOURS = 0.5
-# How long a cancelled pr-build may be the newest run for a head before the cancellation
-# counts as terminal rather than as a head about to be rebuilt. A cancellation is normally
-# a supersede -- the head was re-dispatched and the next run posts the status -- and this
-# runs at eight to eighty-six cancellations a day, so the wait has to be long enough that
-# no ordinary re-dispatch is still pending. A day is many times the slowest build.
-ABANDONED_CANCEL_HOURS = 24
 SCHEDULERS = {
     # workflow file            (human name,               max age hours)
     "update.yml":            ("hourly mathlib bump",       4),
@@ -169,6 +158,8 @@ SCHEDULERS = {
     # routinely delays a scheduled run well past its cadence.
     "merge-conflicts.yml":   ("merge-conflict labels",     2),
 }
+# Workflows only the GitHub merge queue backend runs; Bors projects removed them.
+GITHUB_QUEUE_SCHEDULERS = {"merge-sweep.yml"}
 # How many consecutive failed scheduled runs make a workflow "failing" rather than
 # flaky, and how many recent runs to read to decide. Two is one full cadence of
 # breakage for every workflow in the table above, and enough that a lone network
@@ -324,9 +315,9 @@ def open_prs():
         return _snapshot.pulls()
     return gh_stream(
         f"/repos/{REPO}/pulls?state=open&base=main&per_page=100",
-        jq='.[] | {number, head: .head.sha, draft, updated_at, '
+        jq='.[] | {number, head: .head.sha, draft, '
            'head_ref: .head.ref, head_repo: (.head.repo.full_name // ""), '
-           'author: .user.login, labels: [.labels[].name]}')
+           'labels: [.labels[].name]}')
 
 
 def ready_label_applied_at(number):
@@ -411,84 +402,6 @@ def detect_eviction_loops():
                 f"not repair a deterministic failure."),
         })
     return out
-
-
-def detect_missing_required_status():
-    """An open PR whose head never received a `build` status although pr-build finished.
-
-    A MISSING required status is worse than a red one and cannot self-heal. GitHub holds the PR
-    at BLOCKED because the required check never arrives; the readiness gate keeps its
-    label at `awaiting-CI` instead of moving it to
-    `ci-failed`; and nothing re-runs pr-build without a push, so no event ever corrects
-    it. PR #1358 sat wedged this way for seven days, invisible to the author and review paths
-    alike, after a transient API error killed the status-reporting step mid-way.
-    """
-    out = []
-    for pr in open_prs():
-        if pr.get("draft"):
-            continue
-        head = pr["head"]
-        if newest_status(head, "build")[0] is not None:
-            continue
-        # Only a run that RAN TO A VERDICT proves a status should already be there. A build
-        # still queued or in progress is the ordinary `awaiting-CI` state, and a cancelled run
-        # (a concurrency cancellation when the head is re-dispatched, or a manual cancel) never
-        # reaches its reporting step by design -- neither is a wedge, and alerting on either
-        # would make this detector fire on routine CI churn.
-        if "checks" in pr and not pr["checks_truncated"]:
-            runs = [dict(status="completed" if c["status"] == "COMPLETED" else "in_progress",
-                         conclusion=(c.get("conclusion") or "").lower(),
-                         updated_at=c.get("completedAt") or "")
-                    for c in pr["checks"] if c.get("__typename") == "CheckRun"
-                    and c.get("name") == "sandboxed-build"]
-            runs.sort(key=lambda r: r["updated_at"], reverse=True)
-        else:
-            runs = gh_stream(
-                f"/repos/{REPO}/actions/workflows/pr-build.yml/runs?head_sha={head}&per_page=20",
-                jq='.workflow_runs[] | {status: (.status // ""), conclusion: (.conclusion // ""), '
-                   'updated_at: (.updated_at // "")}', paginate=False)
-        if any(r.get("status") != "completed" for r in runs):
-            continue
-        # Newest run first, so this is the latest run that actually reported a verdict.
-        finished = next((r["updated_at"] for r in runs
-                         if r.get("conclusion") not in ("", "cancelled", "skipped")), "")
-        if finished and hours_since(finished) >= MISSING_STATUS_HOURS:
-            out.append(missing_status_alert(pr, verdict=True))
-            continue
-        if finished:
-            continue
-        # No run reached a verdict, so every one of them was cancelled. That is
-        # ordinarily a supersede: the head was re-dispatched and the next run
-        # will post the status, which is why cancellations are skipped here at
-        # all. But a cancellation that stays the newest run for a head is not a
-        # supersede, because nothing came after it to rebuild. PRs 6633, 6583
-        # and 6590 sat wedged that way for three days, each with exactly one
-        # cancelled run for its head and no `build` status, invisible to this
-        # detector precisely because the run was cancelled.
-        newest = next((r["updated_at"] for r in runs if r.get("updated_at")), "")
-        if not newest or hours_since(newest) < ABANDONED_CANCEL_HOURS:
-            continue
-        out.append(missing_status_alert(pr, verdict=False))
-    return out
-
-
-def missing_status_alert(pr, *, verdict):
-    """The alert for a head that will never receive its required `build` status."""
-    became = ("has a completed pr-build run for its head commit but no `build` commit status"
-              if verdict else
-              "has no `build` commit status, and the only pr-build run for its head was "
-              f"cancelled over {ABANDONED_CANCEL_HOURS:g}h ago with nothing dispatched since")
-    return {
-        "key": f"missing-status/{pr['number']}",
-        "title": "Required `build` status was never posted",
-        "body": (
-            f"https://github.com/{REPO}/pull/{pr['number']} {became}, so it is BLOCKED "
-            f"forever and its label is pinned at `awaiting-CI`.\n\n"
-            f"**Fix:** re-dispatch pr-build for the PR to post the missing status "
-            f"(`gh workflow run pr-build.yml -f pr={pr['number']}`), then fix whatever "
-            f"dropped it — the report step must post all three statuses even when one POST "
-            f"fails."),
-    }
 
 
 def detect_diverged_head():
@@ -712,9 +625,29 @@ def detect_review_stuck():
     return out
 
 
+def merge_backend():
+    """The configured merge backend, read as the snapshot reads it."""
+    if _snapshot is not None:
+        return _snapshot.merge_backend
+    return os.environ.get("TAUCETI_MERGE_BACKEND", "github-queue")
+
+
+def base_branch():
+    if _snapshot is not None:
+        return _snapshot.branch
+    return os.environ.get("TAUCETI_BASE_BRANCH", "main")
+
+
+def active_schedulers():
+    """The scheduled workflows this project runs; Bors projects have no merge-sweep."""
+    if merge_backend() == "bors":
+        return {wf: spec for wf, spec in SCHEDULERS.items() if wf not in GITHUB_QUEUE_SCHEDULERS}
+    return dict(SCHEDULERS)
+
+
 def detect_dead_schedulers():
     out = []
-    for wf, (name, max_hours) in SCHEDULERS.items():
+    for wf, (name, max_hours) in active_schedulers().items():
         try:
             out.extend(_check_scheduler(wf, name, max_hours))
         except Exception as exc:
@@ -736,11 +669,20 @@ def _check_scheduler(wf, name, max_hours):
             f"`{wf}` is `{state}` (GitHub disables a cron after 60 days of repo "
             f"inactivity, or on repeated failure).",
             f"Re-enable it (`gh workflow enable {wf}`) and fix the underlying cause.")]
-    # Only SCHEDULED runs prove the cron fires; a workflow_dispatch or push run
-    # (e.g. pages.yml on a web/ change) must not make a dead schedule look alive.
+    # A scheduled run, or a manual dispatch on the base branch, proves the job still
+    # runs. GitHub delivers few cron runs for these workflows and the workflow backstop
+    # dispatches the overdue ones, so counting only `schedule` runs alerted on healthy
+    # jobs. Push runs (e.g. pages.yml on a web/ change) still do not count: they follow
+    # commits, not a clock. The dispatch read is made only when the cron looks overdue.
     last = gh_scalar(
         f"/repos/{REPO}/actions/workflows/{wf}/runs?event=schedule&per_page=1",
         jq='.workflow_runs[0].created_at // ""')
+    if not last or hours_since(last) >= max_hours:
+        branch = urllib.parse.quote(base_branch(), safe="")
+        dispatched = gh_scalar(
+            f"/repos/{REPO}/actions/workflows/{wf}/runs?event=workflow_dispatch&branch={branch}&per_page=1",
+            jq='.workflow_runs[0].created_at // ""')
+        last = max((stamp for stamp in (last, dispatched) if stamp), key=parse_ts, default="")
     if not last:
         # A workflow only just added has no scheduled run yet and is not broken.
         # Alerting on that turns every new cron into a false emergency for its
@@ -751,13 +693,14 @@ def _check_scheduler(wf, name, max_hours):
             zp.log(f"{wf} has no scheduled run yet but was added "
                    f"{hours_since(created):.1f}h ago; not alerting")
             return []
-        return [_sched_alert(wf, name, f"`{wf}` has no scheduled run on record.",
-                             "Confirm the cron is configured and firing.")]
+        return [_sched_alert(wf, name, f"`{wf}` has no scheduled or dispatched run on record.",
+                             "Confirm the cron is configured and the workflow backstop covers it.")]
     if hours_since(last) >= max_hours:
         return [_sched_alert(wf, name,
-            f"`{wf}`'s last scheduled run was over {max_hours}h ago (its cadence + "
-            f"slack); the schedule has stopped firing.",
-            "Check the Actions tab for a dispatch error or an org-level disable.")]
+            f"`{wf}`'s last scheduled or dispatched run was over {max_hours}h ago (its "
+            f"cadence + slack); neither the cron nor the workflow backstop is starting it.",
+            "Check the Actions tab for a dispatch error or an org-level disable, and the "
+            "workflow backstop's recent cycles.")]
     return []
 
 
@@ -785,7 +728,7 @@ def detect_failing_schedulers():
     cadence anyway.
     """
     out = []
-    for wf, (name, _max_hours) in SCHEDULERS.items():
+    for wf, (name, _max_hours) in active_schedulers().items():
         try:
             out.extend(_check_scheduler_health(wf, name))
         except Exception as exc:
@@ -798,12 +741,18 @@ def detect_failing_schedulers():
 
 
 def _check_scheduler_health(wf, name):
-    runs = gh_stream(
-        f"/repos/{REPO}/actions/workflows/{wf}/runs?event=schedule"
-        f"&per_page={SCHEDULER_RUN_WINDOW}",
-        jq='.workflow_runs[] | {status: (.status // ""), conclusion: (.conclusion // ""), '
-           'created_at: (.created_at // ""), url: (.html_url // "")}',
-        paginate=False)
+    # Backstop dispatches are this job's runs as much as cron deliveries are (see
+    # _check_scheduler), so the streak is read across both, newest first.
+    branch = urllib.parse.quote(base_branch(), safe="")
+    runs = []
+    for event in ("event=schedule", f"event=workflow_dispatch&branch={branch}"):
+        runs.extend(gh_stream(
+            f"/repos/{REPO}/actions/workflows/{wf}/runs?{event}&per_page={SCHEDULER_RUN_WINDOW}",
+            jq='.workflow_runs[] | {status: (.status // ""), conclusion: (.conclusion // ""), '
+               'created_at: (.created_at // ""), url: (.html_url // "")}',
+            paginate=False))
+    # A run without a creation time cannot be ordered; refuse it rather than guess.
+    runs = sorted(runs, key=lambda r: parse_ts(r["created_at"]), reverse=True)[:SCHEDULER_RUN_WINDOW]
     # Queued, in-progress and cancelled runs are evidence of nothing: they are skipped rather
     # than breaking the streak, so a run cancelled by a concurrency policy cannot mask a streak
     # of genuine failures behind it.
@@ -823,8 +772,8 @@ def _check_scheduler_health(wf, name):
         "key": f"failing-scheduler/{wf}",
         "title": f"Scheduler failing — {name}",
         "body": (
-            f"`{wf}`'s last {len(streak)} scheduled runs all failed{bounded}, over the past "
-            f"{since}. The cron is firing, so dead-scheduler cannot see this: whatever the job "
+            f"`{wf}`'s last {len(streak)} scheduled or dispatched runs all failed{bounded}, over "
+            f"the past {since}. The job is starting, so dead-scheduler cannot see this: whatever the job "
             f"publishes has been stale since the last success.\n\n"
             f"Newest failure: {streak[0].get('url') or 'see the Actions tab'}\n\n"
             f"**Fix:** read that run's log and repair the job. If the failure is expected for "
@@ -883,7 +832,6 @@ DETECTORS = [
     ("stale-pin", detect_stale_pin),
     ("stranded-pr", detect_stranded_prs),
     ("eviction-loop", detect_eviction_loops),
-    ("missing-status", detect_missing_required_status),
     ("diverged-head", detect_diverged_head),
     ("review-stuck", detect_review_stuck),
     ("dead-scheduler", detect_dead_schedulers),
