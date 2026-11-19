@@ -1305,10 +1305,18 @@ jobs:
       # use changed modules only in ordinary PR preflight, and global checks at staging. Computed
       # on the host from GitHub metadata and immutable Git objects using trusted tooling,
       # and mounted read-only into the sandbox.
-      - name: Build exact candidate under bwrap with workflow-pinned audits, offline
-        id: build
+      #
+      # The sandboxed build, audits and lints run as consecutive steps, one sandbox-build.sh phase
+      # each, so a run's current step names the phase it is in. Every phase step runs the first
+      # step's `run` (the YAML alias *sandboxed-phase): the same bwrap invocation, mounts and
+      # environment, differing only in SANDBOX_PHASE. Each phase runs only if every earlier step
+      # passed, and the `build` step below combines their outcomes into the one outcome the
+      # reporting steps read.
+      - name: Build exact candidate under bwrap, offline
+        id: sandbox_build
         if: ${{ env.INFRA != '1' }}
         env:
+          SANDBOX_PHASE: build
           CI_RESOURCE_EXPERIMENT: ${{ vars.CI_RESOURCE_EXPERIMENT }}
           # The sandboxed build is always offline: never let Lake reach out to a remote
           # cache from inside the sandbox. When the artifact cache is enabled above, it
@@ -1321,7 +1329,7 @@ jobs:
           CI_RESOURCE_TESTED_COMMIT: ${{ steps.integration.outputs.tested_sha }}
           CI_RESOURCE_TESTED_TREE: ${{ steps.integration.outputs.tested_tree }}
           CI_RESOURCE_DEPENDENCY_BUMP: ${{ env.PINS_KNOWN == '1' && (env.BUMP == '1' && '1' || '0') || 'unknown' }}
-        run: |
+        run: &sandboxed-phase |
           export PATH="$HOME/.elan/bin:$PATH"
           # The sandboxed build/audit/lint body comes from the separately mounted, workflow-pinned
           # gate checkout; candidate scripts are never invoked. Keeping the bwrap bash payload
@@ -1349,9 +1357,13 @@ jobs:
           # would let candidate code drop a `lake` or `bash` earlier on PATH than the real one and
           # have the later audits run it. The explicit PATH below is the other half of that: it
           # never contains a directory the sandbox can write.
+          # The build phase's observations keep the artifact's ci-host-resources.json name; each
+          # later phase writes its own file beside it.
           resource_observer=()
           if [ "$CI_RESOURCE_EXPERIMENT" = "1" ]; then
-            resource_observer=(python3 gate/scripts/ci_host_resources.py --out "$RUNNER_TEMP/ci-host-resources.json" --)
+            resource_out="$RUNNER_TEMP/ci-host-resources.json"
+            if [ "$SANDBOX_PHASE" != build ]; then resource_out="$RUNNER_TEMP/ci-host-resources-$SANDBOX_PHASE.json"; fi
+            resource_observer=(python3 gate/scripts/ci_host_resources.py --out "$resource_out" --)
           fi
           progress_observer=()
           if [ -f gate/scripts/ci_live_progress.py ]; then
@@ -1388,7 +1400,99 @@ jobs:
             --chdir "$PWD/pr" \
             --unshare-user --unshare-ipc --unshare-pid --unshare-net --unshare-uts \
             --unshare-cgroup --disable-userns --die-with-parent --new-session \
-            -- bash -euxo pipefail -c 'exec bash ../gate/scripts/sandbox-build.sh'
+            -- bash -euxo pipefail -c 'exec bash ../gate/scripts/sandbox-build.sh "$1"' sandbox-build "$SANDBOX_PHASE"
+
+      - name: Audit the candidate under bwrap (duplicates, axioms)
+        id: sandbox_audits
+        if: ${{ env.INFRA != '1' }}
+        env:
+          SANDBOX_PHASE: audits
+          CI_RESOURCE_EXPERIMENT: ${{ vars.CI_RESOURCE_EXPERIMENT }}
+          LAKE_NO_CACHE: "true"
+          CI_RESOURCE_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          CI_RESOURCE_TESTED_HEAD: ${{ steps.pr.outputs.status_sha }}
+          CI_RESOURCE_TESTED_BASE: ${{ steps.pr.outputs.base_sha }}
+          CI_RESOURCE_TESTED_COMMIT: ${{ steps.integration.outputs.tested_sha }}
+          CI_RESOURCE_TESTED_TREE: ${{ steps.integration.outputs.tested_tree }}
+          CI_RESOURCE_DEPENDENCY_BUMP: ${{ env.PINS_KNOWN == '1' && (env.BUMP == '1' && '1' || '0') || 'unknown' }}
+        run: *sandboxed-phase
+
+      - name: Check the module system under bwrap
+        id: sandbox_module_system
+        if: ${{ env.INFRA != '1' }}
+        env:
+          SANDBOX_PHASE: module-system
+          CI_RESOURCE_EXPERIMENT: ${{ vars.CI_RESOURCE_EXPERIMENT }}
+          LAKE_NO_CACHE: "true"
+          CI_RESOURCE_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          CI_RESOURCE_TESTED_HEAD: ${{ steps.pr.outputs.status_sha }}
+          CI_RESOURCE_TESTED_BASE: ${{ steps.pr.outputs.base_sha }}
+          CI_RESOURCE_TESTED_COMMIT: ${{ steps.integration.outputs.tested_sha }}
+          CI_RESOURCE_TESTED_TREE: ${{ steps.integration.outputs.tested_tree }}
+          CI_RESOURCE_DEPENDENCY_BUMP: ${{ env.PINS_KNOWN == '1' && (env.BUMP == '1' && '1' || '0') || 'unknown' }}
+        run: *sandboxed-phase
+
+      - name: Environment lint under bwrap
+        id: sandbox_lint_env
+        if: ${{ env.INFRA != '1' }}
+        env:
+          SANDBOX_PHASE: lint-env
+          CI_RESOURCE_EXPERIMENT: ${{ vars.CI_RESOURCE_EXPERIMENT }}
+          LAKE_NO_CACHE: "true"
+          CI_RESOURCE_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          CI_RESOURCE_TESTED_HEAD: ${{ steps.pr.outputs.status_sha }}
+          CI_RESOURCE_TESTED_BASE: ${{ steps.pr.outputs.base_sha }}
+          CI_RESOURCE_TESTED_COMMIT: ${{ steps.integration.outputs.tested_sha }}
+          CI_RESOURCE_TESTED_TREE: ${{ steps.integration.outputs.tested_tree }}
+          CI_RESOURCE_DEPENDENCY_BUMP: ${{ env.PINS_KNOWN == '1' && (env.BUMP == '1' && '1' || '0') || 'unknown' }}
+        run: *sandboxed-phase
+
+      - name: Style lint under bwrap
+        id: sandbox_lint_style
+        if: ${{ env.INFRA != '1' }}
+        env:
+          SANDBOX_PHASE: lint-style
+          CI_RESOURCE_EXPERIMENT: ${{ vars.CI_RESOURCE_EXPERIMENT }}
+          LAKE_NO_CACHE: "true"
+          CI_RESOURCE_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          CI_RESOURCE_TESTED_HEAD: ${{ steps.pr.outputs.status_sha }}
+          CI_RESOURCE_TESTED_BASE: ${{ steps.pr.outputs.base_sha }}
+          CI_RESOURCE_TESTED_COMMIT: ${{ steps.integration.outputs.tested_sha }}
+          CI_RESOURCE_TESTED_TREE: ${{ steps.integration.outputs.tested_tree }}
+          CI_RESOURCE_DEPENDENCY_BUMP: ${{ env.PINS_KNOWN == '1' && (env.BUMP == '1' && '1' || '0') || 'unknown' }}
+        run: *sandboxed-phase
+
+      - name: Record declaration names and stage cache outputs under bwrap
+        id: sandbox_finish
+        if: ${{ env.INFRA != '1' }}
+        env:
+          SANDBOX_PHASE: finish
+          CI_RESOURCE_EXPERIMENT: ${{ vars.CI_RESOURCE_EXPERIMENT }}
+          LAKE_NO_CACHE: "true"
+          CI_RESOURCE_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          CI_RESOURCE_TESTED_HEAD: ${{ steps.pr.outputs.status_sha }}
+          CI_RESOURCE_TESTED_BASE: ${{ steps.pr.outputs.base_sha }}
+          CI_RESOURCE_TESTED_COMMIT: ${{ steps.integration.outputs.tested_sha }}
+          CI_RESOURCE_TESTED_TREE: ${{ steps.integration.outputs.tested_tree }}
+          CI_RESOURCE_DEPENDENCY_BUMP: ${{ env.PINS_KNOWN == '1' && (env.BUMP == '1' && '1' || '0') || 'unknown' }}
+        run: *sandboxed-phase
+
+      # The sandboxed build's single outcome, as when one step ran every phase: success when every
+      # phase passed and failure when one failed (the later phases are then skipped), even if the
+      # run is cancelled afterwards. Otherwise, when the build never started or a cancellation
+      # interrupted it, this step is skipped, which every reader treats as the former `cancelled`.
+      - name: Combine the sandboxed phase outcomes
+        id: build
+        if: >-
+          ${{ always() && (contains(format('{0} {1} {2} {3} {4} {5}', steps.sandbox_build.outcome, steps.sandbox_audits.outcome, steps.sandbox_module_system.outcome, steps.sandbox_lint_env.outcome, steps.sandbox_lint_style.outcome, steps.sandbox_finish.outcome), 'failure') ||
+          (steps.sandbox_build.outcome == 'success' && steps.sandbox_audits.outcome == 'success' && steps.sandbox_module_system.outcome == 'success' && steps.sandbox_lint_env.outcome == 'success' && steps.sandbox_lint_style.outcome == 'success' && steps.sandbox_finish.outcome == 'success')) }}
+        env:
+          OUTCOMES: ${{ steps.sandbox_build.outcome }} ${{ steps.sandbox_audits.outcome }} ${{ steps.sandbox_module_system.outcome }} ${{ steps.sandbox_lint_env.outcome }} ${{ steps.sandbox_lint_style.outcome }} ${{ steps.sandbox_finish.outcome }}
+        run: |
+          echo "sandboxed phase outcomes: $OUTCOMES"
+          for outcome in $OUTCOMES; do
+            [ "$outcome" = success ] || exit 1
+          done
 
       - name: Prepare merge-group cache artifact metadata
         id: cache_stage
@@ -1723,7 +1827,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ci-host-resources-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/ci-host-resources.json
+          path: |
+            ${{ runner.temp }}/ci-host-resources.json
+            ${{ runner.temp }}/ci-host-resources-*.json
           if-no-files-found: warn
           retention-days: 30
 

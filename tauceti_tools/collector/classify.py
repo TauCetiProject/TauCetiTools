@@ -23,8 +23,8 @@ STEP_RULES: list[tuple[str, str]] = [
     ("infra-setup", r"Install|Raise vm|Checkout|Set up|Resolve PR head"),
 ]
 
-# (class, regex on log lines) for failures inside the build step, where build, audits and lints
-# share one step. Checked in order against the failing step's extracted error lines.
+# (class, regex on log lines) for failures inside the sandboxed build, where build, audits and lints
+# may share one step. Checked in order against the failing step's extracted error lines.
 LOG_RULES: list[tuple[str, str]] = [
     # Exit 137 also means an external SIGKILL (for example, OOM). The historical
     # Lean wrapper calls it a deadline expiry even when the process ran for seconds.
@@ -76,7 +76,8 @@ def classify(conclusion: str | None, failed_step: str | None, lines: list[str] |
     if conclusion == "timed_out":
         return "timeout"
     step = failed_step or ""
-    if re.search(r"Build exact candidate|lake build|^Build$", step):
+    # The sandboxed build: one step, or (pr-build's phases) one step per phase "... under bwrap".
+    if re.search(r"Build exact candidate|under bwrap|lake build|^Build$", step):
         # Old records contain successful module names such as KilledByRank and
         # ErrorBound. Filter them here too when rebuilding historical classifications.
         diagnostics = [ANSI.sub("", line).strip() for line in (lines or [])]

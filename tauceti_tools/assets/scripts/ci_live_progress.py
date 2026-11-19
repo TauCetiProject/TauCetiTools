@@ -70,25 +70,13 @@ class Counters:
             self.phase = next((v for v in reversed(names) if v in PHASES), "unknown")
         except (OSError, ValueError):
             pass
+        # A session that starts after the build (pr-build runs each sandboxed phase as its own step)
+        # first reads the log it finds to its end, so replaying it is not reported as new progress.
+        catch_up = 4096 if self.inode is None else 1
         try:
-            data, inode, offset = bounded_file(self.root / "lake-build.log", 262144, self.offset)
-            if self.inode != inode or offset < self.offset:
-                self.offset, self.inode, self.pending = 0, inode, b""
-                self.completed, self.failed = 0, 0
-                data, _, offset = bounded_file(self.root / "lake-build.log", 262144)
-            self.offset = offset
-            lines = (self.pending + data).split(b"\n")
-            self.pending = lines.pop()[-4096:]
-            for raw in lines:
-                line = re.sub(r"\x1b\[[0-9;]*m", "", raw[:4096].decode(errors="replace"))
-                found = re.search(r"(?:Built|Replayed|Building)\s+(TauCeti(?:\.[A-Za-z0-9_\']+){0,30})(?:\s|$)", line)
-                if found and len(found[1]) <= 300:
-                    self.last_module = found[1]
-                    if re.search(r"Built|Replayed", line):
-                        self.completed += 1
-                if re.match(r"^✖\s", line):
-                    self.failed += 1
-            self.completed, self.failed = min(10000000, self.completed), min(10000000, self.failed)
+            for _ in range(catch_up):
+                if self.read_log() < 262144:
+                    break
         except (OSError, ValueError):
             pass
         if before != (self.completed, self.failed, self.phase):
@@ -100,6 +88,29 @@ class Counters:
             "last_module": self.last_module,
             "last_progress_at": self.last_progress,
         }
+
+
+    def read_log(self):
+        """Count the next bounded chunk of the build log; returns the bytes read."""
+        data, inode, offset = bounded_file(self.root / "lake-build.log", 262144, self.offset)
+        if self.inode != inode or offset < self.offset:
+            self.offset, self.inode, self.pending = 0, inode, b""
+            self.completed, self.failed = 0, 0
+            data, _, offset = bounded_file(self.root / "lake-build.log", 262144)
+        self.offset = offset
+        lines = (self.pending + data).split(b"\n")
+        self.pending = lines.pop()[-4096:]
+        for raw in lines:
+            line = re.sub(r"\x1b\[[0-9;]*m", "", raw[:4096].decode(errors="replace"))
+            found = re.search(r"(?:Built|Replayed|Building)\s+(TauCeti(?:\.[A-Za-z0-9_\']+){0,30})(?:\s|$)", line)
+            if found and len(found[1]) <= 300:
+                self.last_module = found[1]
+                if re.search(r"Built|Replayed", line):
+                    self.completed += 1
+            if re.match(r"^✖\s", line):
+                self.failed += 1
+        self.completed, self.failed = min(10000000, self.completed), min(10000000, self.failed)
+        return len(data)
 
 
 def process_sample(parent):
