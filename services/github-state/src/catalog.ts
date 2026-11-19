@@ -64,7 +64,10 @@ export function recipes(repository: string, q: Query, cursor?: string, page = 1)
     case 'checks': return [rest(`/commits/${args.sha}/check-runs` + suffix,x=>x)];
     case 'workflow_runs': return [rest('/actions/runs' + suffix + (args.after?'&created='+encodeURIComponent('>='+args.after):''))];
     case 'workflow_jobs': return [rest(`/actions/runs/${args.id}${args.attempt?'/attempts/'+args.attempt:''}/jobs` + suffix)];
-    case 'refs': return [rest('/git/matching-refs/heads/' + suffix)];
+    case 'refs': return args.name==='main'
+      ? [gql('ref(qualifiedName:"refs/heads/main"){target{oid}}',['ref'],
+          x=>[{ref:'refs/heads/main',object:{sha:x.target.oid,type:'commit'}}],false)]
+      : [rest('/git/matching-refs/heads/' + suffix)];
     case 'repository': return [rest('',x=>x,false)];
     default: throw new Error('no upstream recipe');
   }
@@ -100,6 +103,7 @@ function validateRow(recipe:Recipe,row:any):void {
 }
 function validateScalar(recipe:Recipe,value:any):void {
   if(!value || typeof value!=='object' || Array.isArray(value))throw new UpstreamDataError('malformed scalar resource');
+  if(recipe.operation==='refs' && recipe.api==='graphql' && !/^[a-f0-9]{40}$/.test(value.target?.oid || ''))throw new UpstreamDataError('malformed main reference');
   const id=(v:any)=>typeof v==='number'?Number.isSafeInteger(v) && v>0:typeof v==='string' && /^[1-9][0-9]*$/.test(v);
   if(recipe.operation==='pr') {
     validateRow(recipe,value);

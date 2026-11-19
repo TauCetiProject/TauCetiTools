@@ -242,6 +242,7 @@ def snapshot(
     cache_dir=None,
     parent=None,
     complete=False,
+    ancestry=False,
     fetch_limit=MAX_FETCH_BYTES,
 ):
     """Fetch both endpoints together; keep protocol/credential policy with the caller."""
@@ -262,24 +263,49 @@ def snapshot(
             if cache_dir is None
             else [f"+{base}:refs/tauceti/review/base", f"+{head}:refs/tauceti/review/head"]
         )
-        run_git(
-            directory,
-            [
-                "fetch",
-                "-q",
-                "--no-tags",
-                "--depth",
-                "1",
-                *([] if complete else ["--filter=blob:none"]),
-                "origin",
-                *refs,
-            ],
-            env,
-            None if complete else FETCH_TIMEOUT,
-            disk_cap=fetch_limit,
-            config=("http.lowSpeedLimit=1", f"http.lowSpeedTime={FETCH_TIMEOUT}") if complete else (),
-        )
+        if ancestry and not all(re.fullmatch('[0-9a-f]{40}', sha) for sha in (base, head)):
+            raise ValueError('Ancestry snapshots require exact commit identities')
+        shallow = os.path.isfile(os.path.join(directory, 'shallow')) and os.path.getsize(os.path.join(directory, 'shallow')) > 0
+        known = False
+        if ancestry and cache_dir is not None and not shallow:
+            objects = run_git(directory, ['cat-file', '--batch-check=%(objectname) %(objecttype)'],
+                              {**env, 'GIT_NO_LAZY_FETCH': '1'},
+                              DIFF_TIMEOUT, stdin=(base+'\n'+head+'\n').encode())
+            known = objects.decode().splitlines() == [base+' commit', head+' commit']
+        if not known:
+            run_git(
+                directory,
+                [
+                    "fetch",
+                    "-q",
+                    "--no-tags",
+                    *(['--unshallow'] if ancestry and shallow else [] if ancestry else ['--depth', '1']),
+                    *([] if complete else ['--filter=tree:0' if ancestry else '--filter=blob:none']),
+                    "origin",
+                    *refs,
+                ],
+                env,
+                None if complete else FETCH_TIMEOUT,
+                disk_cap=fetch_limit,
+                config=("http.lowSpeedLimit=1", f"http.lowSpeedTime={FETCH_TIMEOUT}") if complete else (),
+            )
         yield directory, env
+
+
+def merge_base(remote, base, head, *, cache_dir=None, run_git=None):
+    """Find a unique merge base from complete, bounded commit ancestry only.
+
+    Reuse the existing snapshot cache and transport bounds. Fetch no candidate
+    source trees or blobs; a shallow graph or multiple bases cannot authorize a
+    guessed comparison. Exact objects already present need no network request.
+    """
+    run_git = _git if run_git is None else run_git
+    with snapshot(remote, base, head, cache_dir=cache_dir, ancestry=True, run_git=run_git) as (directory, env):
+        value = run_git(directory, ['merge-base', '--all', base, head],
+                     {**env, 'GIT_NO_LAZY_FETCH': '1'}, DIFF_TIMEOUT).decode().splitlines()
+    if len(value) != 1 or not re.fullmatch('[0-9a-f]{40}', value[0]):
+        raise PreparationUnavailable('No unique merge base from verified commit ancestry')
+    return value[0]
 
 
 def _changed_blobs(raw):

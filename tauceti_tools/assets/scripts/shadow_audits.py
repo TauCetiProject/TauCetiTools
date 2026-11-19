@@ -50,6 +50,11 @@ def file_digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def optional_digest(path):
+    """file_digest of path, or None when a project has no such file."""
+    return file_digest(path) if path.is_file() else None
+
+
 def tree_digest(root):
     """Complete toolchain contents, relative paths, symlink targets and permission modes."""
     rows = []
@@ -328,7 +333,7 @@ def observe(session, project, paths, sysroot, driver, toolchain_identity):
                 for name in ("lean-toolchain", "lake-manifest.json", "lakefile.toml", "lakefile.lean")]
         identity = digest((toolchain_identity, file_digest(driver), pins,
                            [(name, file_digest(SCRIPTS / name)) for name in POLICY_FILES],
-                           file_digest(SCRIPTS.parent / ".github/workflows/shadow-audits.yml")))
+                           optional_digest(SCRIPTS.parent / ".github/workflows/shadow-audits.yml")))
         freeze_seconds = time.monotonic() - freeze_start
         frozen_paths = [artifacts_root]
         full_start = time.monotonic()

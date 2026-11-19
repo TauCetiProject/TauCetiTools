@@ -25,7 +25,10 @@ on:
     inputs:
       pr: {type: string, default: ""}
       tools_repository: {type: string, required: true}
-      tools_ref: {type: string, required: true}
+      tools_ref:
+        type: string
+        required: false
+        description: Ignored and kept for existing callers; the tools are this workflow's own revision.
       project_ref: {type: string, required: true}
       lean_root: {type: string, required: true}
       roadmap_dir: {type: string, required: true}
@@ -131,6 +134,7 @@ jobs:
       source-size-complete: ${{ steps.report.outputs.source-size-complete }}
       source-infrastructure: ${{ steps.report.outputs.source-infrastructure }}
       source-build-outcome: ${{ steps.build.outcome }}
+      source-check: ${{ steps.report.outputs.source-check }}
       tested-sha: ${{ steps.integration.outputs.tested_sha }}
       tested-tree: ${{ steps.integration.outputs.tested_tree }}
     env:
@@ -169,16 +173,13 @@ jobs:
         env:
           SOURCE_ENABLED: ${{ inputs.source_candidate_enabled }}
           PROJECT_REF: ${{ inputs.project_ref }}
-          TOOLS_REF: ${{ inputs.tools_ref }}
           TOOLS_REPOSITORY: ${{ inputs.tools_repository }}
-          ACTUAL_TOOLS_REF: ${{ job.workflow_sha }}
           ACTUAL_TOOLS_REPOSITORY: ${{ job.workflow_repository }}
         run: |
           test "$SOURCE_ENABLED" = true
           test "$PROJECT_REF" = "$GITHUB_WORKFLOW_SHA"
-          test "$TOOLS_REF" = "$ACTUAL_TOOLS_REF"
           test "$TOOLS_REPOSITORY" = "$ACTUAL_TOOLS_REPOSITORY"
-          [[ "$PROJECT_REF" =~ ^[0-9a-f]{40}$ && "$TOOLS_REF" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PROJECT_REF" =~ ^[0-9a-f]{40}$ ]]
 
       - name: Checkout workflow-pinned trusted build tooling
         if: ${{ env.INFRA != '1' }}
@@ -193,8 +194,8 @@ jobs:
         if: ${{ env.INFRA != '1' }}
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          repository: ${{ inputs.tools_repository }}
-          ref: ${{ inputs.tools_ref }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .tauceti-tools
           persist-credentials: false
       - name: Prepare trusted project scripts
@@ -205,6 +206,7 @@ jobs:
           CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
           CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
           CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
+          CI_SOURCE_HARNESS_REF: ${{ job.workflow_ref }}
           CI_SOURCE_HARNESS_FILE: ${{ job.workflow_file_path }}
           CI_SOURCE_LEAN_ROOT: ${{ inputs.lean_root }}
           CI_SOURCE_ROADMAP_DIR: ${{ inputs.roadmap_dir }}
@@ -259,6 +261,7 @@ jobs:
           CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
           CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
           CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
+          CI_SOURCE_HARNESS_REF: ${{ job.workflow_ref }}
           CI_SOURCE_HARNESS_FILE: ${{ job.workflow_file_path }}
         run: |
           if [ "${SOURCE_CANDIDATE:-false}" = true ]; then
@@ -367,6 +370,7 @@ jobs:
           CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
           CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
           CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
+          CI_SOURCE_HARNESS_REF: ${{ job.workflow_ref }}
           CI_SOURCE_HARNESS_FILE: ${{ job.workflow_file_path }}
         run: |
           set -euo pipefail
@@ -553,6 +557,7 @@ jobs:
           CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
           CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
           CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
+          CI_SOURCE_HARNESS_REF: ${{ job.workflow_ref }}
           CI_SOURCE_HARNESS_FILE: ${{ job.workflow_file_path }}
         run: |
           python3 -m tauceti_tools.ci_candidate_workflow member-policy \
@@ -560,38 +565,44 @@ jobs:
             --members-file "$RUNNER_TEMP/source-members.json" \
             --workspace "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/source-member-policy.json" --github-env "$GITHUB_ENV"
 
-      - name: Diff size guard — additions, deletions, and changed files each ≤ 2000 (trusted GitHub PR totals; Lake-pin bumps exempt from the line caps)
+      - name: Diff size guard — additions, deletions, and changed files each ≤ 2000 (rename-aware local Git measure shared with staging; Lake-pin bumps exempt from the line caps)
         # Per-PR cap, enforced when each PR is built on pull_request_target (its entry condition to the
         # queue). A merge_group batch is the sum of already-capped PRs, so we don't re-cap the combined
         # size here. The combined batch scope uses a complete local Git diff.
-        # A PR that moves the Lake pins (BUMP=1, set by the scope guard above) is exempt from the
-        # two line caps: its diff is whatever the upstream Mathlib/Lean changes force, so splitting
-        # it is not possible without an intermediate bump. Such a PR still has to pass the trusted
-        # bump validator before anything builds, and the file cap still applies.
+        # The measure is `ci_git.py review-size` on the exact merge base and head. The staging
+        # candidate's retained-member policy calls the same function, so the two checks cannot
+        # disagree. It detects renames like GitHub's PR totals: a moved file counts only its edits.
+        # A PR that moves the Lake pins is exempt from the two line caps: its diff is whatever the
+        # upstream Mathlib/Lean changes force, so splitting it is not possible without an
+        # intermediate bump. Such a PR still has to pass the trusted bump validator before anything
+        # builds, and the file cap still applies.
         if: ${{ env.IS_BATCH != 'true' }}
         env:
-          GH_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
-          GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
-          TAUCETI_GITHUB_READ_ROLE: ${{ steps.ci-api.outputs.read-role }}
-          TAUCETI_GITHUB_WRITE_ROLE: ${{ steps.ci-api.outputs.status-role }}
+          SIZE_BASE: ${{ steps.pr.outputs.mergebase }}
+          SIZE_HEAD: ${{ steps.pr.outputs.sha }}
         run: |
-          # Per-PR review-size policy remains independent of the complete local scope diff.
-          read -r adds dels files < <(python3 gate/scripts/github_api.py "repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.num }}" \
-            --jq '"\(.additions) \(.deletions) \(.changed_files)"')
+          size=""
+          if [ "${MERGEBASE_EXACT:-0}" = "1" ]; then
+            size=$(python3 gate/scripts/ci_git.py review-size --checkout pr --base "$SIZE_BASE" --head "$SIZE_HEAD") || size=""
+          fi
+          printf '%s\n' "$size" > "$RUNNER_TEMP/review-size.json"
+          read -r adds dels files pins too_large < <(printf '%s' "$size" | jq -r \
+            '"\(.additions) \(.deletions) \(.files) \(.pins_changed) \(.too_large)"' 2>/dev/null) || true
           echo "diff size: +$adds / -$dels across $files files (cap: 2000 each)"
-          # Fail closed on non-numeric data: [ -gt ] errors on garbage but an `if` would
-          # swallow that as false, silently passing the guard.
-          if ! [[ "$adds" =~ ^[0-9]+$ && "$dels" =~ ^[0-9]+$ && "$files" =~ ^[0-9]+$ ]]; then
+          # Fail closed on missing or non-numeric data: [ -gt ] errors on garbage but an `if`
+          # would swallow that as false, silently passing the guard.
+          if ! [[ "$adds" =~ ^[0-9]+$ && "$dels" =~ ^[0-9]+$ && "$files" =~ ^[0-9]+$ \
+                  && "$pins" =~ ^(true|false)$ && "$too_large" =~ ^(true|false)$ ]]; then
             echo "DIFF_UNKNOWN=1" >> "$GITHUB_ENV"
-            echo "::error::could not read the PR's diff totals from the GitHub API (+$adds / -$dels / $files files); failing closed"
+            echo "::error::could not measure the PR's diff from local Git objects (+$adds / -$dels / $files files); failing closed"
             exit 1
           fi
-          if [ "${BUMP:-0}" = "1" ] && [ "$files" -le 2000 ]; then
-            echo "::notice::PR moves the Lake pins, so the added/removed line caps do not apply"
-          elif [ "$adds" -gt 2000 ] || [ "$dels" -gt 2000 ] || [ "$files" -gt 2000 ]; then
+          if [ "$too_large" = "true" ]; then
             echo "TOO_LARGE=1" >> "$GITHUB_ENV"
             echo "::error::This PR is too large to review: +$adds / -$dels lines across $files files (cap: 2000 added lines, 2000 removed lines, 2000 files). We cap diff size to keep review manageable — reviewers, AI and human alike, do far better work on small, focused PRs. Please split this into smaller PRs, one topic each. We are open to raising the cap once there is evidence that review is working well at the current size."
             exit 1
+          elif [ "$pins" = "true" ]; then
+            echo "::notice::PR moves the Lake pins, so the added/removed line caps do not apply"
           fi
 
       - name: New-file length guard — newly added .lean files must be ≤ 1000 lines
@@ -599,18 +610,17 @@ jobs:
         # in-build linter ceiling of 1500 (set in lakefile.toml). The split keeps new material
         # small and reviewable while not blocking incremental growth of established files.
         # PR-only, like the diff-size guard: new files enter the library through a PR, and a
-        # merge_group batch is the sum of already-guarded PRs. For an *added* file the GitHub
-        # diff lists every line as an addition, so `.additions` is its line count.
+        # merge_group batch is the sum of already-guarded PRs. Reuses the diff-size guard's
+        # measure, in which a renamed or moved file is not new.
         if: ${{ env.IS_BATCH != 'true' }}
-        env:
-          GH_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
-          GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
-          TAUCETI_GITHUB_READ_ROLE: ${{ steps.ci-api.outputs.read-role }}
-          TAUCETI_GITHUB_WRITE_ROLE: ${{ steps.ci-api.outputs.status-role }}
         run: |
-          long=$(python3 gate/scripts/github_api.py --paginate "repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.num }}/files" \
-            --jq '.[] | select(.status == "added" and (.filename | endswith(".lean")) and .additions > 1000)
-                      | "\(.filename) (\(.additions) lines)"')
+          measured="$RUNNER_TEMP/review-size.json"
+          if ! jq -e '.new_files_too_long | type == "array"' "$measured" >/dev/null 2>&1; then
+            echo "DIFF_UNKNOWN=1" >> "$GITHUB_ENV"
+            echo "::error::could not read the PR's measured new files; failing closed"
+            exit 1
+          fi
+          long=$(jq -r '.new_files_too_long[] | "\(.[0]) (\(.[1]) lines)"' "$measured")
           if [ -n "$long" ]; then
             echo "NEWFILE_TOO_LONG=1" >> "$GITHUB_ENV"
             echo "::error::New .lean files must be at most 1000 lines; these exceed it. Split them, or grow an existing file (allowed up to 1500):"
@@ -834,6 +844,7 @@ jobs:
           CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
           CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
           CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
+          CI_SOURCE_HARNESS_REF: ${{ job.workflow_ref }}
           CI_SOURCE_HARNESS_FILE: ${{ job.workflow_file_path }}
         run: |
           if [ "${SOURCE_CANDIDATE:-false}" = true ]; then
@@ -900,6 +911,7 @@ jobs:
           test -d pr/${{ inputs.lean_root }} && test ! -L pr/${{ inputs.lean_root }}
           if find pr/${{ inputs.lean_root }} -type l -print | grep -q .; then
             echo "::error::symlinks are not allowed under ${{ inputs.lean_root }}/"
+            echo "SOURCE_REJECTED=1" >> "$GITHUB_ENV"
             exit 1
           fi
           test -f pr/${{ inputs.lean_root }}.lean && test ! -L pr/${{ inputs.lean_root }}.lean
@@ -938,13 +950,17 @@ jobs:
         run: |
           if grep -rIn -E '^[[:space:]]*import[[:space:]]+(${{ inputs.roadmap_dir }}|TauCetiReview)\b' pr/${{ inputs.lean_root }}/ pr/${{ inputs.lean_root }}.lean; then
             echo "::error::${{ inputs.lean_root }}/ must not import ${{ inputs.roadmap_dir }} or TauCetiReview"
+            echo "SOURCE_REJECTED=1" >> "$GITHUB_ENV"
             exit 1
           fi
 
       - name: Reject option overrides and metaprogramming (allow local macros)
         if: ${{ env.INFRA != '1' }}
         run: |
-          python3 gate/scripts/check_source_options.py pr/${{ inputs.lean_root }}/ pr/${{ inputs.lean_root }}.lean
+          # Exit 1 is a rejected source; any other failure means the check did not complete.
+          rc=0; python3 gate/scripts/check_source_options.py pr/${{ inputs.lean_root }}/ pr/${{ inputs.lean_root }}.lean || rc=$?
+          if [ "$rc" = 1 ]; then echo "SOURCE_REJECTED=1" >> "$GITHUB_ENV"; fi
+          exit "$rc"
 
       # The trusted checker requires each source-only PR that declares a new temporary Mathlib shim
       # to record a concrete expiry target in ${{ inputs.lean_root }}'s AI-owned registry. Keeping the registry under
@@ -1012,8 +1028,10 @@ jobs:
         id: import_headers
         if: ${{ env.INFRA != '1' }}
         run: |
-          python3 gate/scripts/check-imports.py --root pr \
-            --lean "$(cd pr && elan which lean)"
+          rc=0; python3 gate/scripts/check-imports.py --root pr \
+            --lean "$(cd pr && elan which lean)" || rc=$?
+          if [ "$rc" = 1 ]; then echo "SOURCE_REJECTED=1" >> "$GITHUB_ENV"; fi
+          exit "$rc"
 
       # Restore only Mathlib's compressed, content-addressed `.ltar` download store from a
       # trusted main publisher. This workflow never writes that GitHub Actions cache. The keys
@@ -1107,6 +1125,7 @@ jobs:
           CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
           CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
           CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
+          CI_SOURCE_HARNESS_REF: ${{ job.workflow_ref }}
           CI_SOURCE_HARNESS_FILE: ${{ job.workflow_file_path }}
         run: |
           set -euo pipefail
@@ -1157,12 +1176,16 @@ jobs:
       - name: Dot-notation namespace lint (Mathlib type namespaces stay at root)
         if: ${{ env.INFRA != '1' }}
         run: |
+          rc=0
           python3 gate/scripts/lint-dot-notation.py \
             --context-cache ".ci-dot-notation-context/context.json" \
             --baseline gate/scripts/lint-dot-notation-baseline.txt \
             --mathlib-root pr/.lake/packages/mathlib/Mathlib \
             --source-root pr/${{ inputs.lean_root }} \
-            ${DOT_ONLY_MODULES:+--only-modules "$DOT_ONLY_MODULES" --base-source-root base/${{ inputs.lean_root }}}
+            ${DOT_ONLY_MODULES:+--only-modules "$DOT_ONLY_MODULES" --base-source-root base/${{ inputs.lean_root }}} || rc=$?
+          # Exit 1 reports new findings; 2 means the lint could not run.
+          if [ "$rc" = 1 ]; then echo "SOURCE_REJECTED=1" >> "$GITHUB_ENV"; fi
+          exit "$rc"
 
       # Enable Lake's built-in artifact cache for the build below ONLY when the public read
       # endpoints are configured (repo variables). Until then this is a no-op: LAKE_*
@@ -1202,8 +1225,10 @@ jobs:
             echo "::notice::Lake artifact cache not configured — building ${{ inputs.lean_root }}/ from scratch (set the LAKE_CACHE_*_PUBLIC repo variables to enable)"
           fi
           # A merge-group head is the exact commit GitHub will land. Stage its outputs after every
-          # sandboxed audit so the required build can wait for publication.
+          # sandboxed audit so the required build can wait for publication. A per-PR
+          # source request is not a landing candidate, so its trusted bootstrap disables staging.
           if [ "${{ env.IS_BATCH }}" = "true" ] \
+             && { [ "${SOURCE_CANDIDATE:-false}" != true ] || [ "${CI_SOURCE_STAGE_CACHE:-true}" != false ]; } \
              && [ -n "$S3_ARTIFACT_ENDPOINT" ] && [ -n "$S3_REVISION_ENDPOINT" ]; then
             echo "STAGE_LAKE_CACHE=1" >> "$GITHUB_ENV"
             echo "::notice::merge-group outputs will be staged for pre-landing publication"
@@ -1551,6 +1576,12 @@ jobs:
           fi
           post_status bump-guard "$bg_state" "$bg_desc"
 
+          # A guard that rejected the candidate's own sources before the build (SOURCE_REJECTED,
+          # set only on a completed check's rejection) is a decided, repairable source failure
+          # even though the build was skipped. A guard that could not run stays infrastructure.
+          source_check=success
+          if [ "${SOURCE_REJECTED:-}" = 1 ]; then source_check=failure; fi
+
           # build: the actionable exact-candidate verdict consumed by the autonomous bump/fix-ci
           # workers. It includes the sandboxed build plus shim metadata and exact-expiry failures,
           # but never a merge-policy verdict. An out-of-scope scripts/.github change still receives
@@ -1572,6 +1603,8 @@ jobs:
             state=failure; desc="build not run — tested H/B/T identity missing or invalid"
           elif [ "${{ steps.import_headers.outcome }}" = "failure" ]; then
             state=failure; desc="import header preflight failed — see importing-file/header diagnostics"
+          elif [ "$source_check" = failure ]; then
+            state=failure; desc="build not run: a pre-build source check failed; see the failed guard step"
           elif [ "${{ steps.build.outcome }}" = "failure" ]; then
             state=failure; desc="sandboxed build, audit, or simp-NF lint failed"
           elif { [ -n "${{ env.SHIM_COVERAGE_RC }}" ] \
@@ -1624,7 +1657,7 @@ jobs:
           elif [ "${{ env.TOO_LARGE }}" = "1" ]; then
             sc_state=failure; sc_desc="diff exceeds 2000 added/removed lines or 2000 files — split into smaller PRs to keep review manageable"
           elif [ "${{ env.DIFF_UNKNOWN }}" = "1" ]; then
-            sc_state=failure; sc_desc="could not read PR diff totals from the GitHub API — re-run pr-build"
+            sc_state=failure; sc_desc="could not measure the PR diff from local Git objects — re-run pr-build"
           elif [ "${{ env.NEWFILE_TOO_LONG }}" = "1" ]; then
             sc_state=failure; sc_desc="a newly added .lean file exceeds 1000 lines — split it (existing files may grow to 1500)"
           elif [ "${{ env.OUT_OF_SCOPE }}" = "1" ]; then
@@ -1655,6 +1688,7 @@ jobs:
               fi
               echo "source-size-complete=${SOURCE_SIZE_POLICY_COMPLETE:-}"
               echo "source-infrastructure=${INFRA:-}"
+              echo "source-check=$source_check"
             } >> "$GITHUB_OUTPUT"
           fi
 
@@ -1787,7 +1821,6 @@ jobs:
     uses: ./.github/workflows/publish-lake-cache.yml
     with:
       tools_repository: ${{ inputs.tools_repository }}
-      tools_ref: ${{ inputs.tools_ref }}
       revision: ${{ needs.sandboxed-build.outputs.status-sha }}
       artifact-name: lake-cache-staging-${{ needs.sandboxed-build.outputs.status-sha }}
       reported-toolchain: ${{ needs.sandboxed-build.outputs.reported-toolchain }}
@@ -1832,14 +1865,11 @@ jobs:
         env:
           SOURCE_ENABLED: ${{ inputs.source_candidate_enabled }}
           PROJECT_REF: ${{ inputs.project_ref }}
-          TOOLS_REF: ${{ inputs.tools_ref }}
           TOOLS_REPOSITORY: ${{ inputs.tools_repository }}
-          ACTUAL_TOOLS_REF: ${{ job.workflow_sha }}
           ACTUAL_TOOLS_REPOSITORY: ${{ job.workflow_repository }}
         run: |
           test "$SOURCE_ENABLED" = true
           test "$PROJECT_REF" = "$GITHUB_WORKFLOW_SHA"
-          test "$TOOLS_REF" = "$ACTUAL_TOOLS_REF"
           test "$TOOLS_REPOSITORY" = "$ACTUAL_TOOLS_REPOSITORY"
 
       - name: Check out workflow-pinned finalization tools
@@ -1859,8 +1889,8 @@ jobs:
       - name: Checkout pinned shared implementation
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          repository: ${{ inputs.tools_repository }}
-          ref: ${{ inputs.tools_ref }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .tauceti-tools
           persist-credentials: false
       - name: Prepare trusted project scripts
@@ -1869,6 +1899,7 @@ jobs:
           CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
           CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
           CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
+          CI_SOURCE_HARNESS_REF: ${{ job.workflow_ref }}
           CI_SOURCE_HARNESS_FILE: ${{ job.workflow_file_path }}
           CI_SOURCE_LEAN_ROOT: ${{ inputs.lean_root }}
           CI_SOURCE_ROADMAP_DIR: ${{ inputs.roadmap_dir }}
@@ -1940,9 +1971,11 @@ jobs:
           SOURCE_SIZE_COMPLETE: ${{ needs.sandboxed-build.outputs.source-size-complete }}
           SOURCE_INFRASTRUCTURE: ${{ needs.sandboxed-build.outputs.source-infrastructure }}
           SOURCE_BUILD_OUTCOME: ${{ needs.sandboxed-build.outputs.source-build-outcome }}
+          SOURCE_CHECK: ${{ needs.sandboxed-build.outputs.source-check }}
           CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
           CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
           CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
+          CI_SOURCE_HARNESS_REF: ${{ job.workflow_ref }}
           CI_SOURCE_HARNESS_FILE: ${{ job.workflow_file_path }}
         run: |
           python3 - <<'PYTHON'
@@ -1956,7 +1989,7 @@ jobs:
                     "pins_known": "SOURCE_PINS_KNOWN",
                     "bump_complete": "SOURCE_BUMP_COMPLETE",
                     "size_complete": "SOURCE_SIZE_COMPLETE", "infrastructure": "SOURCE_INFRASTRUCTURE",
-                    "build_outcome": "SOURCE_BUILD_OUTCOME"}
+                    "build_outcome": "SOURCE_BUILD_OUTCOME", "source_check": "SOURCE_CHECK"}
           value = {key: os.environ.get(name) for key, name in fields.items()}
           (Path(os.environ["RUNNER_TEMP"]) / "source-build-evidence.json").write_text(json.dumps(value))
           PYTHON

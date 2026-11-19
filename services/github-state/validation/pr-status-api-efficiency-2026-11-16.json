@@ -1,0 +1,54 @@
+{
+  "observed_at": "2026-11-16T03:46:20.496060+00:00",
+  "prior_tools": "e4ed3eab96457b7425b494b0ea1952319f1d12d6",
+  "implementation_pr": "https://github.com/TauCetiProject/TauCetiTools/pull/274",
+  "backend_version": "72f845cb-38ac-4785-ae66-63d70193fa50",
+  "mode": "read-only production evidence capture plus controlled replay; not production quota attribution",
+  "sample": {
+    "total": 25,
+    "complete": 24,
+    "deferred": [
+      {
+        "number": 41763,
+        "status": "deferred",
+        "reason": "coverage_statuses"
+      }
+    ],
+    "policy_decisions_agree": true,
+    "categories": {
+      "awaiting-CI": 9,
+      "awaiting-author": 2,
+      "None": 13
+    }
+  },
+  "baseline": {
+    "read_requests_lower_bound": 71,
+    "rest": 36,
+    "graphql_requests": 35,
+    "graphql_points_per_query_observed": [
+      1,
+      1
+    ],
+    "terminal_comparison_failures": "Conservatively replayed as failed comparisons, not invented successful checks."
+  },
+  "candidate": {
+    "direct_read_requests": 1,
+    "warm_shared_upstream_reads": 0,
+    "cold_shared_upstream_reads_in_contract_replay": 1,
+    "cold_repair_demands_per_batch_limit": 5,
+    "zero_warm_demand_proof": "services/github-state/tests/change_parents.test.mjs: authenticated observation reads create no jobs, demand, or upstream requests",
+    "cold_cost_proof": "same suite: actual collector normalizes the observed empty-status shape with one upstream read and no successful guard",
+    "read_cost_reduction_lower_bound": 0.971830985915493
+  },
+  "git": {
+    "fetches": 11,
+    "prepare_seconds": 6.84764455887489,
+    "cache_bytes": 66454062,
+    "reused_comparisons": 0
+  },
+  "scope_limits": [
+    "Policy parity covers 24 complete observations. PR41763 remains explicitly deferred in production shared coverage.",
+    "The shared-service cost is counted through controlled observer/collector contracts; installation-wide live quota movement is confounded by other consumers.",
+    "Hosted workflow pin, production label mutation canary, broad activation, quota-reset recovery and sustained event/backfill verification remain incomplete."
+  ]
+}

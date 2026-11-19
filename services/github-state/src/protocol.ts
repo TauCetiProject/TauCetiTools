@@ -92,6 +92,9 @@ export function validateQuery(q: Query): void {
   if (!q || typeof q.repository !== 'string' || !OPERATIONS.has(q.operation) || (q.args && (typeof q.args !== 'object' || Array.isArray(q.args)))) throw new Error('invalid query');
   if (q.allow_observed!==undefined && (typeof q.allow_observed!=='boolean' || q.operation!=='workflow_jobs')) throw new Error('invalid observed coverage preference');
   for (const [key, value] of Object.entries(q.args || {})) {
+    // A selected main ref reuses the refs collection and webhook rows without
+    // enumerating every proposal branch for a readiness consumer.
+    if(q.operation==='refs' && key==='name' && value==='main')continue;
     if(typeof value==='number' && !Number.isSafeInteger(value))throw new Error('unsafe numeric argument; send decimal IDs as strings');
     if(q.operation==='survey') {
       if(!['roadmap','skip','numbers','stages'].includes(key) || typeof value!=='string' || value.length>4096) throw new Error('invalid survey scope');

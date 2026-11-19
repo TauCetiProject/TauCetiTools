@@ -14,6 +14,9 @@ import sys
 
 import core
 import readiness
+from github_api import Deferred
+from tauceti_tools.github_state import Unavailable
+from tauceti_tools.git_inputs import PreparationUnavailable
 
 REPO = core.REPO
 
@@ -43,6 +46,8 @@ def log(msg):
 # ----- GitHub label writes (via gh; core.gh_api handles reads) ----------------
 
 def _run(args):
+    if core.transport is not None:
+        return core.transport.run(args)
     return subprocess.run(["gh", "api", *args], capture_output=True, text=True)
 
 
@@ -65,6 +70,16 @@ def ensure_label(name):
     LABELS would otherwise never reach GitHub and the live label would keep describing behaviour
     this file no longer has. The probe already fetched it, so the comparison is free and only a
     genuine mismatch costs a PATCH."""
+    if core.transport is not None:
+        with core.transport.label_lock:
+            if name not in core.transport.known_labels:
+                _ensure_label(name)
+                core.transport.known_labels.add(name)
+        return
+    _ensure_label(name)
+
+
+def _ensure_label(name):
     probe = _run([f"/repos/{REPO}/labels/{name}"])
     if probe.returncode == 0:
         _reconcile_label_presentation(name, probe.stdout)
@@ -124,7 +139,8 @@ def reconcile(pr):
     if status.get("clear_deprecation_request"):
         remove_label(pr, "needs-rebase")
     desired = status["category"]          # one of STATUS_LABELS, or None (terminal)
-    current = set(current_status_labels(pr))
+    current = (set(status['labels']) & set(STATUS_LABELS) if 'labels' in status
+               else set(current_status_labels(pr)))
 
     for name in current:
         if name != desired:
@@ -157,6 +173,22 @@ def reconcile_all():
 
 
 def main(argv):
+    from transport import ReconciliationAPI
+    previous = core.transport
+    core.transport = ReconciliationAPI()
+    try:
+        return _main(argv)
+    except (Deferred, Unavailable, PreparationUnavailable) as exc:
+        log(f'PR status reconciliation deferred: {exc}')
+        return 75
+    finally:
+        try:
+            core.transport.report()
+        finally:
+            core.transport = previous
+
+
+def _main(argv):
     if argv[1:] == ["reconcile-all"]:
         return reconcile_all()
     if len(argv) != 3 or argv[1] != "reconcile":

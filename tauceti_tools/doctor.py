@@ -231,7 +231,10 @@ def diagnose(project: Project, *, extras=True, github=None) -> list[Finding]:
         status, summary = "failed", "No version selected"
         if pin.get("ref"):
             resolved, pin_error = gh.read(f"repos/{pin['repo']}/commits/{pin['ref']}")
-            status = "unknown" if pin_error else "ready" if resolved.get("sha") == pin["ref"] else "failed"
+            # Only TauCetiTools may follow its protected main branch; every other tool is pinned.
+            follows_main = tool == "tools" and pin["ref"] == "main" and re.fullmatch(r"[0-9a-f]{40}", str(resolved.get("sha")))
+            exact = resolved.get("sha") == pin["ref"] or follows_main
+            status = "unknown" if pin_error else "ready" if exact else "failed"
             summary = pin_error or pin["ref"]
         default_repo = "leanprover/doc-gen4" if tool == "docgen" else (
             "TauCetiProject/"

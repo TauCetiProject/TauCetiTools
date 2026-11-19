@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import zipfile
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from unittest.mock import patch
 
@@ -21,7 +22,6 @@ def policy():
         native,
         ".github/workflows/pr-build.yml",
         cc.RepositoryIdentity(RepositoryRef(GITHUB, "team/Tools"), 43),
-        "a" * 40,
         "pilot",
         "main",
         True,
@@ -37,7 +37,6 @@ def request(config):
         config.source,
         config.execution,
         "b" * 40,
-        config.harness_revision,
         config.config_digest,
         5,
         7,
@@ -57,7 +56,8 @@ def context(req, config):
         "workflow_sha": req.workflow_revision,
         "workflow_ref": f"{config.execution.repository.name}/{config.workflow}@refs/heads/main",
         "harness_repository": config.harness.repository.name,
-        "harness_sha": config.harness_revision,
+        "harness_sha": "a" * 40,
+        "harness_ref": f"{config.harness.repository.name}/.github/workflows/pr-build.yml@refs/heads/main",
         "harness_file": ".github/workflows/pr-build.yml",
         "run_id": 101,
         "attempt": 2,
@@ -76,8 +76,9 @@ def run(req, config):
         "repository": {"id": config.execution.native_id, "full_name": config.execution.repository.name},
         "referenced_workflows": [
             {
-                "path": f"{config.harness.repository.name}/.github/workflows/pr-build.yml@{config.harness_revision}",
-                "sha": config.harness_revision,
+                "path": f"{config.harness.repository.name}/.github/workflows/pr-build.yml@main",
+                "sha": "a" * 40,
+                "ref": "refs/heads/main",
             }
         ],
     }
@@ -180,7 +181,12 @@ class CandidateContracts(unittest.TestCase):
     def test_actual_workflow_context_must_match_both_code_revisions(self):
         for key, wrong in (
             ("workflow_sha", "f" * 40),
-            ("harness_sha", "f" * 40),
+            ("harness_sha", "main"),
+            ("harness_sha", None),
+            ("harness_ref", "team/Tools/.github/workflows/pr-build.yml@refs/heads/other"),
+            ("harness_ref", "fork/Tools/.github/workflows/pr-build.yml@refs/heads/main"),
+            ("harness_ref", "team/Tools/.github/workflows/pr-build.yml@" + "a" * 40),
+            ("harness_ref", None),
             ("harness_repository", "other/Tools"),
             ("repository_id", "99"),
             ("workflow_ref", "team/Execution/.github/workflows/evil.yml@refs/heads/main"),
@@ -217,12 +223,119 @@ class CandidateContracts(unittest.TestCase):
             lambda v: v.update(conclusion="failure"),
             lambda v: v["repository"].update(id=99),
             lambda v: v.update(referenced_workflows=[]),
-            lambda v: v["referenced_workflows"][0].update(sha="1" * 40),
+            lambda v: v["referenced_workflows"][0].update(sha="main"),
+            lambda v: v["referenced_workflows"][0].update(ref="refs/heads/other"),
+            lambda v: v["referenced_workflows"][0].pop("ref"),
+            lambda v: v["referenced_workflows"][0].update(path="team/Tools/.github/workflows/pr-build.yml@other"),
+            lambda v: v["referenced_workflows"][0].update(path="team/Tools/.github/workflows/pr-build.yml@" + "a" * 40),
+            lambda v: v["referenced_workflows"][0].update(path="fork/Tools/.github/workflows/pr-build.yml@main"),
         ):
             value = copy.deepcopy(self.run)
             modify(value)
             with self.subTest(value=value), self.assertRaises((ValueError, cc.EvidenceUnavailable)):
                 self.verify(run_value=value)
+
+    def test_full_ref_spelling_of_harness_main_is_accepted(self):
+        value = copy.deepcopy(self.run)
+        value["referenced_workflows"][0]["path"] = "team/Tools/.github/workflows/pr-build.yml@refs/heads/main"
+        self.assertEqual(self.verify(run_value=value), self.verdicts)
+
+    def test_policy_with_a_harness_revision_is_refused(self):
+        value = self.policy.record(with_config=False)
+        value["harness_revision"] = "a" * 40
+        with self.assertRaises(ValueError):
+            cc.ExecutionPolicy.parse(value, configuration=b"trusted configuration")
+
+    def test_staging_request_record_and_digest_predate_lanes(self):
+        self.assertIsNone(self.request.lane)
+        self.assertNotIn("lane", self.request.record())
+        # Golden digest of this fixture, computed before lanes existed.
+        self.assertEqual(self.request.digest, "75d7cfaaa4066b4d21a9cb45deef34ffcd600b765d14e4d66d1adeba0ab7121e")
+        self.assertTrue(cc.requires_publication(self.request, self.policy))
+
+    def test_pr_lane_round_trips_and_changes_the_request_digest(self):
+        pr = replace(self.request, lane="pr")
+        record = pr.record()
+        self.assertEqual(record["lane"], "pr")
+        self.assertEqual(cc.CandidateRequest.parse(cc.read_json(cc.canonical(record)), policy=self.policy), pr)
+        self.assertNotEqual(pr.digest, self.request.digest)
+        self.assertFalse(cc.requires_publication(pr, self.policy))
+        self.assertFalse(cc.requires_publication(pr, replace(self.policy, require_publication=False)))
+
+    def test_invalid_lane_values_are_refused(self):
+        for lane in ("", "staging", "PR", 1, ["pr"]):
+            with self.subTest(lane=lane):
+                with self.assertRaises(ValueError):
+                    replace(self.request, lane=lane)
+                with self.assertRaises(ValueError):
+                    cc.CandidateRequest.parse(dict(self.request.record(), lane=lane), policy=self.policy)
+        with self.assertRaises(ValueError):
+            cc.CandidateRequest.parse(dict(self.request.record(), lane=None), policy=self.policy)
+
+    def test_publication_verdicts_follow_the_lane_and_policy(self):
+        lax = replace(self.policy, require_publication=False)
+        cases = (
+            # (lane, policy, allowed publication verdicts)
+            (None, self.policy, {"success", "failure", "infrastructure"}),
+            (None, lax, {"success", "failure", "infrastructure", "not_required"}),
+            ("pr", self.policy, {"not_required"}),
+            ("pr", lax, {"not_required"}),
+        )
+        for lane, config, allowed in cases:
+            req = replace(request(config), lane=lane)
+            ctx, fresh = context(req, config), run(req, config)
+            for value in ("success", "failure", "infrastructure", "not_required"):
+                with self.subTest(lane=lane, required=config.require_publication, value=value):
+                    verdicts = dict(self.verdicts, publication=value)
+                    make = partial(
+                        cc.make_result,
+                        req,
+                        config,
+                        ctx,
+                        tested_commit=req.head,
+                        tested_tree=req.tree,
+                        verdicts=verdicts,
+                    )
+                    if value not in allowed:
+                        with self.assertRaises(ValueError):
+                            make()
+                        # The verifier must refuse the same value in a result built elsewhere.
+                        forged = cc.make_result(
+                            req,
+                            config,
+                            ctx,
+                            tested_commit=req.head,
+                            tested_tree=req.tree,
+                            verdicts=dict(self.verdicts, publication=min(allowed)),
+                        )
+                        forged["verdicts"]["publication"] = value
+                        with self.assertRaisesRegex(ValueError, "^invalid result verdict$"):
+                            cc.verify_result(req, config, forged, fresh, run_id=101, attempt=2)
+                        continue
+                    result = make()
+                    conclusion = "success" if value in {"success", "not_required"} else "failure"
+                    self.assertEqual(
+                        cc.verify_result(
+                            req, config, result, dict(fresh, conclusion=conclusion), run_id=101, attempt=2
+                        ),
+                        verdicts,
+                    )
+
+    def test_pr_lane_result_never_verifies_as_staging_evidence(self):
+        pr = replace(self.request, lane="pr")
+        result = cc.make_result(
+            pr,
+            self.policy,
+            context(pr, self.policy),
+            tested_commit=pr.head,
+            tested_tree=pr.tree,
+            verdicts=dict(self.verdicts, publication="not_required"),
+        )
+        with self.assertRaises(ValueError):
+            self.verify(result)
+        # Nor can a staging result be passed off as per-PR evidence.
+        with self.assertRaises(ValueError):
+            cc.verify_result(pr, self.policy, self.result, run(pr, self.policy), run_id=101, attempt=2)
 
     def test_verified_failed_build_remains_a_failure_result(self):
         result = copy.deepcopy(self.result)

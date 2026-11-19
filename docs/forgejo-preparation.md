@@ -482,12 +482,20 @@ The policy file uses this shape:
   "credential_origin": {"kind": "forgejo", "url": "https://git.example.org"},
   "workflow": ".github/workflows/pr-build.yml",
   "harness": {"forge": {"kind": "github", "url": "https://github.com"}, "name": "team/Tools", "id": 43},
-  "harness_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "base_branch": "main",
   "execution_branch": "main",
   "require_publication": true
 }
 ```
+
+The shared harness always runs from its `main` branch: the caller writes
+`uses: <harness>/.github/workflows/pr-build.yml@main`. GitHub resolves `main` once per
+workflow run, and the reusable workflow checks out its tooling at that revision
+(`job.workflow_sha`). Restricted runner groups admit exactly
+`<harness>/.github/workflows/<file>@refs/heads/main`, so no fork or other branch of the
+harness can run with the source credentials. Bootstrap and finalization require
+`job.workflow_ref` to be that ref, and the queue accepts a result only from a run whose
+referenced reusable workflow is the harness's `pr-build.yml` at `refs/heads/main`.
 
 Mixed queues explicitly add a nonempty `member_sources` array of complete
 repository identity records to the trusted policy. It includes `source` (the
@@ -497,14 +505,14 @@ roles are independent; a source may also be the execution repository. Duplicate
 server/repository IDs or case-folded names are rejected. Omitting the field
 preserves the legacy policy bytes and digest; an empty array is invalid.
 
-The example IDs and revision must be replaced with independently verified
+The example IDs must be replaced with independently verified
 deployment values. The policy digest includes the SHA-256 of the exact trusted
-`tauceti.toml` bytes. The queue must independently pin that policy, configuration,
-caller workflow SHA and shared harness SHA before sending a request. A policy
+`tauceti.toml` bytes. The queue must independently pin that policy, configuration
+and caller workflow SHA before sending a request. A policy
 file cannot contain its own enclosing commit SHA; the request carries the caller
 SHA and CI compares it with the actual GitHub workflow context. The workflow
-also compares its tooling inputs with the actual reusable workflow identity
-before checking out executable tooling. GitHub.com's `job.workflow_sha`,
+checks out executable tooling only at the actual reusable workflow revision.
+GitHub.com's `job.workflow_sha`, `job.workflow_ref`,
 `job.workflow_repository` and `job.workflow_file_path` identify the reusable
 workflow; the `github` context identifies its caller. These properties are not
 available on GitHub Enterprise Server. See the [GitHub context reference](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#job-context).
@@ -542,6 +550,14 @@ current review authority, then perform the expected-old main update.
 Mixed requests force full lint if any member originates outside the native
 retention repository; those members never cause cross-origin API requests using
 the native read credential.
+
+A request may carry `"lane":"pr"` to mark a per-PR build rather than a staging
+candidate. Staging requests omit the key, so their records and digests are
+unchanged. The lane is part of the request digest, so a per-PR result can never
+answer a staging request. A per-PR request never stages or publishes cache
+outputs (its `publication` verdict is always `not_required`, whatever the
+policy's `require_publication`), and it always runs full lint, so its evidence
+does not depend on any PR's branch name or labels.
 
 Deploy the pinned harness and execution policy before enabling a mixed producer.
 Do not rewrite frozen in-flight requests into the new policy: retain their original
@@ -605,7 +621,7 @@ the native token nor a GitHub API token in source mode.
 Trusted bootstrap first produces `source-candidate-request.json`, uploaded as
 `source-candidate-request-REQUEST-RUN-ATTEMPT` before native reads or dependency
 execution. Its distinct receipt schema binds the full request/digest and
-producer repository, caller/harness revisions, run and original receipt attempt. It contains no
+producer repository, caller revision, run and original receipt attempt. It contains no
 build verdict, source-availability assertion or source approval. This lets a
 queue verify which stored request owns an in-progress run before adopting or
 cancelling it. A run title remains only a discovery hint. Missing receipt

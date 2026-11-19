@@ -1,11 +1,12 @@
 """Contract tests using the actual pinned Auto-merge engine, without network calls."""
 
 import copy
+import time
 import importlib
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import readiness
 
@@ -158,6 +159,48 @@ class GateContract(unittest.TestCase):
 
 
 class ReadEvidence(unittest.TestCase):
+    def test_shared_unchanged_decision_reuses_gate_without_extending_membership_expiry(self):
+        from transport import ReconciliationAPI
+        from tauceti_tools import self_tested as declarations
+        import self_tested
+        current = copy.deepcopy(PR)
+        current.update(user={'login': 'peer'}, labels=[{'name': 'self-tested'}])
+        current['head']['ref'] = 'math'
+        statuses = {k: v for k, v in STATUSES.items() if k != 'build'}
+        api = ReconciliationAPI()
+        api.shared_evidence, api.git_cache, api.policy = MagicMock(), 'verified-git-cache', 'policy-pin'
+        key = 'Org/team', 'peer'
+        previous = declarations._MEMBERS.get(key)
+        declarations._MEMBERS[key] = time.monotonic()-40, True
+        self.addCleanup(lambda: declarations._MEMBERS.pop(key, None) if previous is None
+                        else declarations._MEMBERS.__setitem__(key, previous))
+        with patch.object(readiness.core, 'transport', api), \
+             patch.object(readiness, 'evidence', side_effect=lambda *a, **kw: (copy.deepcopy(current), [board()], statuses)), \
+             patch.dict('os.environ', TAUCETI_SELF_TESTED_TEAM='Org/team'), \
+             patch.object(readiness.core, 'gh_api', side_effect=AssertionError('no direct API reads')), \
+             patch('tauceti_tools.git_inputs.merge_base', return_value=MERGE_BASE), \
+             patch.object(readiness, 'diff_engine', return_value=SimpleNamespace(git_diff=Mock(return_value=PATHS))) as diff, \
+             patch.object(self_tested, 'decide', return_value=True) as eligibility:
+            first = readiness.assess(1, repo='owner/repo')
+            saved_until = api.decisions['1']['valid_until']
+            self.assertLessEqual(saved_until, time.time()+20)
+            current['labels'].append({'name': 'ready-to-merge'})
+            current['base']['sha'] = 'new-main-same-merge-base'
+            second = readiness.assess(1, repo='owner/repo')
+            self.assertEqual(api.decisions['1']['valid_until'], saved_until)
+            api.decisions['1']['valid_until'] = 0
+            declarations._MEMBERS[key] = time.monotonic()-61, False
+            eligibility.return_value = False
+            expired = readiness.assess(1, repo='owner/repo')
+        self.assertTrue(first['eligible'])
+        self.assertTrue(second['eligible'])
+        self.assertIn('ready-to-merge', second['labels'])
+        self.assertEqual(api.cache_hits, 1)
+        self.assertFalse(expired['eligible'])
+        self.assertEqual(expired['category'], 'awaiting-CI')
+        self.assertEqual(eligibility.call_count, 2)
+        self.assertEqual(diff.return_value.git_diff.call_count, 1)
+
     def node(self):
         return {"number": 1, "state": "OPEN", "isDraft": False, "baseRefName": "main",
                 "baseRefOid": "tip",
@@ -212,7 +255,7 @@ class ReadEvidence(unittest.TestCase):
         current = copy.deepcopy(PR)
         current['labels'] = [{'name': 'self-tested'}]
         current['head']['ref'] = 'math'
-        missing = {}
+        missing = {'scope': 'success'}
         fake = MagicMock()
         fake.git_diff.return_value = PATHS
         import self_tested
@@ -223,10 +266,10 @@ class ReadEvidence(unittest.TestCase):
              patch.object(self_tested, 'reconcile', return_value=True) as assess:
             result = readiness.assess(1, repo='owner/repo', now=NOW)
         self.assertTrue(result['eligible'], result)
-        assess.assert_called_once_with(1, 'owner/repo', pr=current, statuses=missing, paths=PATHS)
+        assess.assert_called_once_with(1, 'owner/repo', pr=current, paths=PATHS)
         fake.git_diff.assert_called_once()
 
-    def test_current_head_assessment_is_reused_without_rechecking_eligibility(self):
+    def test_old_receipt_does_not_skip_direct_eligibility(self):
         current = copy.deepcopy(PR)
         current['labels'] = [{'name': 'self-tested'}]
         statuses = {'self-tested/1': 'success', 'scope': 'success', 'bump-guard': 'success'}
@@ -236,10 +279,10 @@ class ReadEvidence(unittest.TestCase):
         with patch.object(readiness, 'evidence', return_value=(current, [board()], statuses)), \
              patch.object(readiness.core, 'gh_api', return_value=MERGE_BASE), \
              patch.object(readiness, 'diff_engine', return_value=fake), \
-             patch.object(self_tested, 'reconcile') as assess:
+             patch.object(self_tested, 'reconcile', return_value=True) as assess:
             result = readiness.assess(1, repo='owner/repo', now=NOW)
         self.assertTrue(result['eligible'], result)
-        assess.assert_not_called()
+        assess.assert_called_once_with(1, 'owner/repo', pr=current, paths=PATHS)
         fake.git_diff.assert_called_once()
 
     def test_only_approved_active_prs_fetch_diff(self):
@@ -255,7 +298,10 @@ class ReadEvidence(unittest.TestCase):
                  patch.object(readiness, "diff_engine", return_value=fake):
                 result = readiness.assess(1, now=NOW)
                 self.assertEqual(fake.git_diff.called, expected)
-                self.assertIn("compare/tip...current", api.call_args.args[0])
+                if readiness.preliminary(current) is None:
+                    self.assertIn("compare/tip...current", api.call_args.args[0])
+                else:
+                    api.assert_not_called()
                 self.assertEqual(result["eligible"], expected)
 
     @patch.object(readiness, "diff_engine")

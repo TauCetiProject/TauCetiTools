@@ -691,6 +691,21 @@ class Recovery(unittest.TestCase):
         since.assert_not_called()
         self.assertIn("sort=created", api.pages.call_args.args[0])
 
+    def test_batch_recovers_many_prs_after_their_individual_events_were_coalesced(self):
+        state = rl.RecoveryState()
+        unchanged = info(1)
+        changed = info(2)
+        state.success(1, "roadmap/PDE", rl.input_key(unchanged, {"PDE"}))
+        state.success(2, "roadmap/PDE", rl.input_key(changed, {"PDE"}))
+        changed = dict(changed, body="Roadmap: none")
+        new = info(3)
+        api = Mock()
+        api.pages.return_value = [[unchanged, changed, new]]
+        # The wake-up may concern just PR #3. Discovery owns the complete input
+        # set, including PR #2 whose event was replaced before getting a runner.
+        args = self.args(_state=state)
+        self.assertEqual(list(rl.candidates(api, args, {"PDE"})), [2, 3])
+
     def test_workflow_preserves_app_writes_and_filters_title_edits(self):
         root = Path(__file__).resolve().parents[1]
         event = (root / ".github/workflows/roadmap-label.yml").read_text()

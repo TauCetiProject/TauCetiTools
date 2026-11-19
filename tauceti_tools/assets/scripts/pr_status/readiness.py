@@ -39,7 +39,7 @@ def diff_engine():
 
 def routing_state(pr):
     labels = {label["name"].lower() for label in pr.get("labels", [])}
-    return (pr["head"]["sha"], pr["base"]["ref"], pr["state"], pr.get("draft"),
+    return (pr["head"]["sha"], pr["base"]["ref"], pr["base"].get("sha"), pr["state"], pr.get("draft"),
             labels & (sweep_engine().KEEP_LABELS | {"self-tested", "full-lint", "lint-repair"}))
 
 
@@ -57,18 +57,37 @@ def required_rubrics(gate, repo, number):
     return list(rubrics_for(repo, number) if rubrics_for else gate.DEFAULT_RUBRICS)
 
 
+def preliminary(pr):
+    """Reporting states that require no review history, merge base or diff."""
+    result = dict(head=pr['head']['sha'], number=pr['number'], eligible=False,
+                  category=None, reason='PR is closed', gate=None)
+    if pr['state'] != 'open':
+        return result
+    labels = {label['name'].lower() for label in pr.get('labels', [])}
+    if pr.get('draft') or labels & sweep_engine().KEEP_LABELS:
+        result.update(category='on-hold', reason='PR is a draft or intentionally held')
+    elif pr['base']['ref'] != 'main':
+        result.update(category='awaiting-dependency', reason='PR targets another branch, not main')
+    elif pr.get('mergeable') is False:
+        result.update(category='awaiting-author', reason='GitHub reports a merge conflict with the base')
+    else:
+        return None
+    return result
+
+
 def classify(pr, comments, statuses, paths, merge_base_sha, now=None, self_tested=False, repo=None):
     """Pure evaluation of a fetched PR. Reservations and queue capacity are separate.
 
     `paths` are the PR's changed paths and `merge_base_sha` the merge base its diff is taken
     from; the gate accepts a scoreboard only for the merge base it reviewed."""
+    cheap = preliminary(pr)
+    if cheap is not None:
+        return cheap
     gate = engine()
     rubrics = required_rubrics(gate, repo or core.REPO, pr["number"])
     head = pr["head"]["sha"]
     result = {"head": head, "number": pr["number"], "eligible": False,
-              "category": None, "reason": "PR is closed", "gate": None}
-    if pr["state"] != "open":
-        return result
+              "category": None, "reason": "", "gate": None}
     verdict = gate.decide_from_comments(
         comments, head, set(rubrics), paths,
         statuses.get("build", ""), statuses.get("bump-guard", ""),
@@ -76,14 +95,7 @@ def classify(pr, comments, statuses, paths, merge_base_sha, now=None, self_teste
         **({"self_tested": True} if self_tested else {}))
     result["gate"] = verdict
     result["reason"] = verdict["reason"]
-    labels = {label["name"].lower() for label in pr.get("labels", [])}
-    if pr.get("draft") or labels & sweep_engine().KEEP_LABELS:
-        result.update(category="on-hold", reason="PR is a draft or intentionally held")
-    elif pr["base"]["ref"] != "main":
-        result.update(category="awaiting-dependency", reason="PR targets another branch, not main")
-    elif pr.get("mergeable") is False:
-        result.update(category="awaiting-author", reason="GitHub reports a merge conflict with the base")
-    elif verdict["merge"]:
+    if verdict["merge"]:
         result.update(category="ready-to-merge", eligible=True)
     elif statuses.get("build", "").lower() != "success" and not self_tested:
         result["category"] = ("ci-failed" if statuses.get("build", "").lower()
@@ -130,6 +142,9 @@ _FIELDS = """number state isDraft baseRefName baseRefOid headRefOid headRefName 
 
 
 def graphql(query, **variables):
+    if core.transport is not None:
+        data = core.transport.client().graphql(query, variables)
+        return data['repository']['pullRequest']
     if time.time() < core._BLOCKED_UNTIL:
         raise core.RateLimited("GitHub reads paused after a rate limit")
     cmd = ["gh", "api", "graphql", "-f", "query=" + query]
@@ -151,13 +166,17 @@ def graphql(query, **variables):
 
 
 def evidence(number, repo, comments=True):
+    if core.transport is not None and core.transport.shared_evidence is not None:
+        if core.transport.shared_evidence.state.repository != repo:
+            raise RuntimeError('Shared evidence repository identity mismatch')
+        return core.transport.shared_evidence.read(number, comments=comments, preliminary=preliminary)
     owner, name = repo.split("/", 1)
     comment_fields = ("comments(first:100, after:$cursor) { nodes { body updatedAt createdAt author { login } } "
                       "pageInfo { hasNextPage endCursor } }" if comments else "")
     declaration = ", $cursor:String" if comments else ""
     query = ("query($owner:String!, $name:String!, $number:Int!" + declaration + ") { "
              "repository(owner:$owner,name:$name) { pullRequest(number:$number) { " +
-             _FIELDS + comment_fields + " } } }")
+             _FIELDS + comment_fields + " } } rateLimit { cost remaining resetAt } }")
     variables = dict(owner=owner, name=name, number=number)
     rows = []
     first = None
@@ -198,32 +217,49 @@ def assess(pr, repo=None, now=None):
     number = int(pr)
     current, comments, statuses = evidence(number, repo)
     head = current["head"]["sha"]
-    # The same compare the merge job asks, so the merge base is the one it will require;
-    # core.gh_api keeps the rate-limit circuit breaker. A bare head SHA also resolves for fork
-    # PRs, whose heads GitHub keeps in this repository as refs/pull/<n>/head.
-    merge_base = core.gh_api(f"repos/{repo}/compare/{current['base']['sha']}...{head}?per_page=1",
-                             jq=".merge_base_commit.sha").strip()
-    if not merge_base:
+    # Bind the review to the unique base/head comparison, reusing verified
+    # commit ancestry when shared evidence is enabled.
+    cheap = preliminary(current)
+    if cheap is not None:
+        merge_base = ''
+    elif core.transport is not None and core.transport.git_cache is not None:
+        merge_base = core.transport.merge_base(repo, number, current['base']['sha'], head)
+    else:
+        merge_base = core.gh_api(f"repos/{repo}/compare/{current['base']['sha']}...{head}?per_page=1",
+                                 jq=".merge_base_commit.sha").strip()
+    if not merge_base and cheap is None:
         raise RuntimeError(f"No merge base for #{number} from the compare API")
-    from tauceti_tools.self_tested import context, requested
-    from self_tested import reconcile as reconcile_local_route
-    paths = None
-    local = False
-    if requested(current.get("labels"), current["head"].get("ref", "")):
-        # Reuse this head's existing assessment; metadata-only updates do not
-        # repeat membership, path or bump checks.
-        local = all(statuses.get(c) == "success" for c in (context(number), "scope", "bump-guard"))
-        if not local:
-            paths = diff_engine().git_diff(f"https://github.com/{repo}", merge_base, head)
-            local = reconcile_local_route(number, repo, pr=current, statuses=statuses, paths=paths)
-        if local and os.environ.get("SELF_TESTED_WRITE_TOKEN"):
-            statuses.update({context(number): "success", "scope": "success", "bump-guard": "success"})
-    elif any(label.get("name") == "self-tested" for label in current.get("labels", [])):
-        reconcile_local_route(number, repo, pr=current, statuses=statuses)
-    result = classify(current, comments, statuses, paths or [], merge_base, now=now, self_tested=local)
-    if paths is None and result["category"] in {"needs-human-review", "merge-check-failed"}:
-        paths = diff_engine().git_diff(f"https://github.com/{repo}", merge_base, head)
-        result = classify(current, comments, statuses, paths, merge_base, now=now, self_tested=local)
+    cached, key = None, None
+    if core.transport is not None and core.transport.shared_evidence is not None:
+        from shared import decision_key
+        from labels import STATUS_LABELS
+        key = decision_key(current, comments, statuses, merge_base, core.transport.policy, STATUS_LABELS, repo=repo)
+        with core.transport.decision_lock:
+            candidate = core.transport.decisions.get(str(number))
+            if candidate and candidate.get('key') == key and candidate.get('valid_until', 0) > time.time():
+                cached = candidate
+                core.transport.cache_hits += 1
+    if cached is not None:
+        result = dict(cached['result'])
+    else:
+        from tauceti_tools.self_tested import requested
+        from self_tested import reconcile as reconcile_local_route, decide as decide_local_route
+        paths = None
+        local = False
+        def changed_paths():
+            if core.transport is not None and core.transport.shared_evidence is not None:
+                return core.transport.changed_paths(repo, number, merge_base, head)
+            return diff_engine().git_diff(f'https://github.com/{repo}', merge_base, head)
+        if cheap is None and requested(current.get("labels"), current["head"].get("ref", "")):
+            paths = changed_paths()
+            local = (decide_local_route(core.transport.client(), repo, number, pr=current, paths=paths)
+                     if core.transport is not None else reconcile_local_route(number, repo, pr=current, paths=paths))
+            if local and set(paths) & {"lake-manifest.json", "lean-toolchain"}:
+                statuses["bump-guard"] = "success"  # Real inline guard, never a published receipt.
+        result = classify(current, comments, statuses, paths or [], merge_base, now=now, self_tested=local)
+        if paths is None and result["category"] in {"needs-human-review", "merge-check-failed"}:
+            paths = changed_paths()
+            result = classify(current, comments, statuses, paths, merge_base, now=now, self_tested=local)
     after, _, _ = evidence(number, repo, comments=False)
     if routing_state(after) != routing_state(current):
         result.update(eligible=False, category="awaiting-CI" if after["state"] == "open" else None,
@@ -241,6 +277,12 @@ def assess(pr, repo=None, now=None):
         # per-PR workflow, worker protocol, or Bors state is needed for cleanup.
         result["clear_deprecation_request"] = True
     result["checked_at"] = int(time.time()) if now is None else now
+    result["labels"] = [label['name'] for label in after.get('labels', [])]
+    if key is not None and cached is None and routing_state(after) == routing_state(current):
+        from shared import valid_until
+        with core.transport.decision_lock:
+            core.transport.decisions[str(number)] = dict(key=key, valid_until=valid_until(current, comments, repo),
+                                                        result=dict(result))
     return result
 
 

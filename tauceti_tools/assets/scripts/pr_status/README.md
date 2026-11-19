@@ -1,8 +1,8 @@
 # PR status and merge readiness
 
 GitHub lifecycle labels and the pipeline-health report use
-[`readiness.py`](readiness.py), which calls the **same pinned TauCetiReview
-merge gate as Auto-merge**. The label is a presentation of that decision, not an
+[`readiness.py`](readiness.py), which calls the **TauCetiReview merge gate**
+that the project's checkout-merge-policy action checks out (TauCeti reads main). The label is a presentation of that decision, not an
 independent approximation based on a green build and a scoreboard heading.
 
 The adapter reads all comments and current commit statuses through GraphQL, fetches
@@ -55,6 +55,22 @@ new activity, skipping only updates older than the start of a finished PR check;
 changes during that check remain eligible. Build and review completions are discovered even without a PR edit. An hourly
 recovery trigger and manual dispatch can resume work without a new PR event.
 
+With `--prioritize-self-tested`, a paginated GraphQL inventory finds labelled heads
+whose PR-specific acceptance status is missing before any workflow-history scan.
+The normal pinned assessment still checks the live label, author membership,
+changed paths and current head. Each batch assesses at most 100 priority requests;
+untouched requests precede retries so a failing PR cannot monopolize the queue.
+Unfinished assertions are checkpointed with their head, first observation and last
+attempt. The job summary reports the count and oldest observed waiting age. This
+age is a lower bound on request latency, not the PR's update age. A failed read or
+quota hold reports retained, unverified inventory rather than a zero backlog.
+
+`--budget-seconds` stops new assessments before the workflow's token expires;
+the existing checkpoint retains the remaining work. Scheduled sweeps use
+`--all-open`, which resumes their complete PR inventory without rereading workflow
+history or restarting the completed prefix. A resumed sweep finishes its captured
+inventory; the next fresh sweep also includes PRs opened in the meantime.
+
 Restoration verifies the producing workflow and event through GitHub. A
 `pull_request_target` run executes trusted base code even when its recorded head
 repository is a fork; ordinary `pull_request` runs cannot supply progress. Other
@@ -66,10 +82,10 @@ from that fallback, then writes a replacement checkpoint rather than repeatedly
 restoring the corrupt one. Lost state or a hard runner loss before upload can
 repeat work since the last uploaded checkpoint.
 
-The workflows check out the exact policy revision used by Auto-merge, without
-persisting credentials. The workflow-pin tests require labels, the health report,
-and their tests to use that same revision. For local commands, check out that
-revision of TauCetiReview and set:
+The workflows check out the policy through `.github/actions/checkout-merge-policy`,
+without persisting credentials; TauCeti's action checks out TauCetiReview main. The
+workflow-pin tests require labels and the health report to read the policy through
+that action. For local commands, check out the same TauCetiReview revision and set:
 
 ```sh
 export TAUCETI_REVIEW_RUNNER=/path/to/TauCetiReview/runner
@@ -236,8 +252,8 @@ python3 -m unittest test_pr_labels test_readiness test_zulip test_stuck_alerts
 ```
 
 `test_pr_labels` covers the derivation (`core.review_state`) and label reconciliation. `test_readiness`
-runs the pinned merge gate on current/stale/incomplete reviews, ignored old markers,
-human paths, CI and pin guards, and head-move races. It needs the pinned engine
+runs the merge gate on current/stale/incomplete reviews, ignored old markers,
+human paths, CI and pin guards, and head-move races. It needs the engine
 checkout described above. `test_zulip` covers alert transport retry and duplicate-send prevention.
 GitHub and Zulip reads and writes are stubbed in these tests.
 

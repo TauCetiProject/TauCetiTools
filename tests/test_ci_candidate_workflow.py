@@ -1,3 +1,4 @@
+import contextlib
 import copy
 import io
 import json
@@ -75,6 +76,7 @@ class Workflow(unittest.TestCase):
             "size_complete": "1",
             "infrastructure": "",
             "build_outcome": "success",
+            "source_check": "success",
             "job_result": "success",
         }
 
@@ -522,11 +524,64 @@ class Workflow(unittest.TestCase):
         self.assertEqual(result["verdicts"]["scope"], "failure")
         self.assertEqual(cc.classify_verdicts(result["verdicts"]), "policy_failure")
 
+    def test_failed_pre_build_source_check_is_a_source_failure(self):
+        failed = dict(self.evidence, build_state="failure", job_result="failure", build_outcome="skipped")
+        result = cw.finalize(self.request, self.policy, self.context, dict(failed, source_check="failure"))
+        self.assertEqual(result["verdicts"]["build"], "failure")
+        self.assertEqual(cc.classify_verdicts(result["verdicts"]), "source_failure")
+        for evidence in (failed, dict(failed, source_check="failure", infrastructure="1")):
+            with self.subTest(evidence=evidence):
+                result = cw.finalize(self.request, self.policy, self.context, evidence)
+                self.assertEqual(cc.classify_verdicts(result["verdicts"]), "infrastructure")
+
     def test_explicitly_unrequired_publication_remains_bound_to_policy(self):
         config = replace(self.policy, require_publication=False)
         req = request(config)
         result = cw.finalize(req, config, context(req, config), self.evidence)
         self.assertEqual(result["verdicts"]["publication"], "not_required")
+
+    def test_bootstrap_publication_and_cache_staging_follow_the_request_lane(self):
+        lax = replace(self.policy, require_publication=False)
+        cases = (
+            (None, self.policy, "true", "true"),
+            (None, lax, "false", "true"),
+            ("pr", self.policy, "false", "false"),
+            ("pr", lax, "false", "false"),
+        )
+        for lane, config, publication, staging in cases:
+            with self.subTest(lane=lane, required=config.require_publication), tempfile.TemporaryDirectory() as d:
+                conf = Path(d) / "tauceti.toml"
+                conf.write_bytes(CONFIG)
+                req = replace(request(config), lane=lane)
+                env = cw.bootstrap(req, config, context(req, config), conf, Path(d) / "scripts")
+                self.assertEqual(env["CI_SOURCE_REQUIRE_PUBLICATION"], publication)
+                self.assertEqual(env["CI_SOURCE_STAGE_CACHE"], staging)
+
+    def test_pr_lane_finalizes_without_publication_even_if_outputs_were_staged(self):
+        req = replace(self.request, lane="pr")
+        ctx = context(req, self.policy)
+        reader = unittest.mock.Mock()
+        for staged in ("true", "false"):
+            with self.subTest(staged=staged):
+                result = cw.finalize(
+                    req, self.policy, ctx, dict(self.evidence, publication_staged=staged), reader=reader
+                )
+                self.assertEqual(
+                    result["verdicts"],
+                    {"build": "success", "scope": "success", "bump_guard": "success", "publication": "not_required"},
+                )
+                self.assertEqual(result["request"]["lane"], "pr")
+                self.assertEqual(cc.classify_verdicts(result["verdicts"]), "passed")
+        reader.get.assert_not_called()
+        failed = cw.finalize(req, self.policy, ctx, dict(self.evidence, build_state="failure", job_result="failure"))
+        self.assertEqual(failed["verdicts"]["build"], "failure")
+        self.assertEqual(failed["verdicts"]["publication"], "not_required")
+
+    def test_pr_lane_always_runs_full_lint_without_reading_pr_metadata(self):
+        client = unittest.mock.Mock()
+        req = replace(self.request, lane="pr")
+        self.assertFalse(cw.native_lint_policy(req, self.policy, context(req, self.policy), client=client))
+        client.request.assert_not_called()
 
 
 class Evidence(unittest.TestCase):
@@ -677,7 +732,9 @@ class PinGuard(unittest.TestCase):
             self.assertEqual(json.loads((root / "member-policy.json").read_text()), rejection)
             self.assertIn("TOO_LARGE=1\n", (root / "environment").read_text())
 
-    def member_policy(self, *, added_lines=0, existing_lines=0, pin_changed=False, binary=False, orphan=False):
+    def member_policy(
+        self, *, added_lines=0, existing_lines=0, pin_changed=False, binary=False, orphan=False, moved_lines=0
+    ):
         config = policy()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -702,9 +759,14 @@ class PinGuard(unittest.TestCase):
 
             (writer / "Old.lean").write_text("old\n")
             (writer / "lean-toolchain").write_text("leanprover/lean4:v4.35.0\n")
+            if moved_lines:
+                (writer / "Moved.lean").write_text("".join(f"line {i}\n" for i in range(moved_lines)))
             git("add", ".")
             git("commit", "-qm", "base")
             base = git("rev-parse", "HEAD")
+            if moved_lines:
+                (writer / "Moved").mkdir()
+                git("mv", "Moved.lean", "Moved/Basic.lean")
             if added_lines:
                 (writer / "New.lean").write_text("new\n" * added_lines)
             if existing_lines:
@@ -730,20 +792,151 @@ class PinGuard(unittest.TestCase):
             return cw.member_size_policy(req, config, context(req, config), workspace)
 
     def test_retained_member_new_file_and_total_size_guards_use_real_local_objects(self):
-        self.assertEqual(
-            self.member_policy(added_lines=1001), {"SOURCE_SIZE_POLICY_COMPLETE": "1", "NEWFILE_TOO_LONG": "1"}
-        )
-        self.assertEqual(
-            self.member_policy(existing_lines=2001), {"SOURCE_SIZE_POLICY_COMPLETE": "1", "TOO_LARGE": "1"}
-        )
-        self.assertEqual(
-            self.member_policy(existing_lines=2001, pin_changed=True), {"SOURCE_SIZE_POLICY_COMPLETE": "1"}
-        )
+        def flags(**kwargs):
+            values = self.member_policy(**kwargs)
+            values.pop("rejected_members", None)
+            return values
+
+        self.assertEqual(flags(added_lines=1001), {"SOURCE_SIZE_POLICY_COMPLETE": "1", "NEWFILE_TOO_LONG": "1"})
+        self.assertEqual(flags(existing_lines=2001), {"SOURCE_SIZE_POLICY_COMPLETE": "1", "TOO_LARGE": "1"})
+        self.assertEqual(self.member_policy(existing_lines=2001, pin_changed=True), {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
         self.assertEqual(self.member_policy(binary=True), {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
+        # A moved file is neither new nor a full rewrite, matching the PR CI review-size guard.
+        self.assertEqual(self.member_policy(moved_lines=2500), {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
         self.assertEqual(
-            self.member_policy(added_lines=1, orphan=True),
+            flags(added_lines=1, orphan=True),
             {"SOURCE_SIZE_POLICY_COMPLETE": "1", "SOURCE_MEMBER_POLICY_REJECTED": "1"},
         )
+
+    def test_rejected_members_are_named_for_targeted_withdrawal(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            values = self.member_policy(existing_lines=2001)
+        (record,) = values["rejected_members"]
+        self.assertEqual(record["source_pr"], 17)
+        self.assertEqual(record["source"], policy().source.record())
+        self.assertEqual(record["source_forge"], policy().source.repository.forge.key)
+        self.assertRegex(record["head"], "^[0-9a-f]{40}$")
+        self.assertEqual((record["additions"], record["deletions"], record["files"]), (2001, 0, 1))
+        self.assertIn("too large to review", record["reasons"][0])
+        (line,) = [x for x in output.getvalue().splitlines() if x.startswith(cw.MEMBER_REJECTION_PREFIX)]
+        self.assertEqual(json.loads(line[len(cw.MEMBER_REJECTION_PREFIX):]), record)
+        with contextlib.redirect_stdout(io.StringIO()):
+            (orphan,) = self.member_policy(added_lines=1, orphan=True)["rejected_members"]
+        self.assertEqual(orphan["reasons"], ["no merge base with the candidate base"])
+        self.assertNotIn("additions", orphan)
+
+    def chain_policy(self, *, split, forgejo=False, extra_trailer=False):
+        """A two-member queue chain: member 17 accepted a 1001-line new file; the chain commit for
+        it either keeps it (`split=False`) or carries a repair that split it into two files."""
+        config = policy()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            writer = root / "writer"
+            subprocess.run(["git", "init", "-q", "-b", "main", str(writer)], check=True)
+            env = dict(
+                os.environ,
+                GIT_AUTHOR_NAME="Fixture",
+                GIT_AUTHOR_EMAIL="fixture@example.invalid",
+                GIT_COMMITTER_NAME="Fixture",
+                GIT_COMMITTER_EMAIL="fixture@example.invalid",
+                GIT_CONFIG_GLOBAL="/dev/null",
+                GIT_CONFIG_NOSYSTEM="1",
+            )
+
+            def git(*args):
+                return (
+                    subprocess.check_output(["git", "-C", str(writer), *args], env=env, stderr=subprocess.DEVNULL)
+                    .decode()
+                    .strip()
+                )
+
+            (writer / "Old.lean").write_text("old\n")
+            git("add", ".")
+            git("commit", "-qm", "base")
+            base = git("rev-parse", "HEAD")
+            git("checkout", "-qb", "pr17")
+            (writer / "New.lean").write_text("new\n" * 1001)
+            git("add", ".")
+            git("commit", "-qm", "member 17")
+            accepted17 = git("rev-parse", "HEAD")
+            git("checkout", "-q", base)
+            git("checkout", "-qb", "pr18")
+            (writer / "Other.lean").write_text("other\n" * 10)
+            git("add", ".")
+            git("commit", "-qm", "member 18")
+            accepted18 = git("rev-parse", "HEAD")
+            git("checkout", "-q", base)
+            git("checkout", "-qb", "chain")
+            repository = "forgejo/operator/source@7" if forgejo else "TauCetiProject/TauCeti"
+            if split:
+                (writer / "New.lean").write_text("new\n" * 600)
+                (writer / "New2.lean").write_text("new\n" * 401)
+            else:
+                (writer / "New.lean").write_text("new\n" * 1001)
+            git("add", ".")
+            forged = f"\n\nAccepted-Head: {accepted18}" if extra_trailer else ""
+            git("commit", "-qm", f"member 17\n\nSource-PR: {repository}#17\nAccepted-Head: {accepted17}"
+                + "\n\nRepair: split New.lean in two." + forged)
+            first = git("rev-parse", "HEAD")
+            (writer / "Other.lean").write_text("other\n" * 10)
+            git("add", ".")
+            git("commit", "-qm", f"member 18\n\nSource-PR: {repository}#18\nAccepted-Head: {accepted18}")
+            head, tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+            workspace = root / "job"
+            workspace.mkdir()
+            subprocess.run(
+                ["git", "clone", "-q", "--bare", "--mirror", str(writer), str(workspace / ".ci-source.git")],
+                check=True, env=env,
+            )
+            members = (cc.Member(17, accepted17), cc.Member(18, accepted18))
+            req = replace(request(config), head=head, base=base, tree=tree, members=members)
+            with contextlib.redirect_stdout(io.StringIO()):
+                return cw.member_size_policy(req, config, context(req, config), workspace), first, base
+
+    def test_member_policy_measures_each_members_commit_as_it_sits_in_the_batch_chain(self):
+        # The accepted head adds a 1001-line new file; a repair in the batch split it, which lands.
+        values, _, _ = self.chain_policy(split=True)
+        self.assertEqual(values, {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
+        values, _, _ = self.chain_policy(split=True, forgejo=True)
+        self.assertEqual(values, {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
+        values, first, base = self.chain_policy(split=False)
+        (record,) = values.pop("rejected_members")
+        self.assertEqual(values, {"SOURCE_SIZE_POLICY_COMPLETE": "1", "NEWFILE_TOO_LONG": "1"})
+        self.assertEqual((record["source_pr"], record["measured"]), (17, "batch-commit"))
+        self.assertEqual((record["batch_commit"], record["parent"]), (first, base))
+        self.assertRegex(record["head"], "^[0-9a-f]{40}$")
+        self.assertNotEqual(record["head"], first)
+
+    def test_member_policy_measures_the_accepted_head_when_the_chain_commit_is_ambiguous(self):
+        # Two distinct Accepted-Head values on member 17's commit: it is not mapped, so its accepted
+        # head (the unsplit file) is measured, which no in-batch repair can satisfy.
+        values, _, _ = self.chain_policy(split=True, extra_trailer=True)
+        (record,) = values["rejected_members"]
+        self.assertEqual((record["source_pr"], record["measured"]), (17, "accepted-head"))
+        self.assertNotIn("batch_commit", record)
+
+    def test_member_policy_cli_keeps_member_records_out_of_the_workflow_environment(self):
+        config = policy()
+        req = request(config)
+        record = {"source_pr": 17, "head": "a" * 40, "reasons": ["too large"]}
+        rejection = {"SOURCE_SIZE_POLICY_COMPLETE": "1", "TOO_LARGE": "1", "rejected_members": [record]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                patch.object(cw, "load_request", return_value=(req, config)),
+                patch.object(cw, "context_from_environment", return_value=context(req, config)),
+                patch.object(cw, "member_size_policy", return_value=rejection),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                status = cw.main(
+                    ["member-policy", "--policy", "trusted-policy.json", "--configuration", "trusted.toml",
+                     "--workspace", str(root), "--output", str(root / "member-policy.json"),
+                     "--github-env", str(root / "environment")]
+                )
+            self.assertEqual(status, 1)
+            self.assertEqual(json.loads((root / "member-policy.json").read_text())["rejected_members"], [record])
+            self.assertEqual((root / "environment").read_text(), "SOURCE_SIZE_POLICY_COMPLETE=1\nTOO_LARGE=1\n")
 
     def test_source_pin_changes_use_the_configured_upstream_guard_without_legacy_source_bindings(self):
         root_tools = Path(__file__).resolve().parents[1]
@@ -878,6 +1071,44 @@ class ShippedWorkflow(unittest.TestCase):
         self.assertFalse(self.value[True]["workflow_call"]["inputs"]["source_candidate_github_statuses"]["default"])
         builder_credentials = self.step("Select CI API credentials")
         self.assertIn("env.SOURCE_CANDIDATE != 'true'", builder_credentials["with"]["status-app-id"])
+
+    def test_cache_staging_is_skipped_only_for_per_pr_source_requests(self):
+        step = self.step("Configure the Lake artifact cache (no-op unless the public endpoints are set)")
+        shell = step["run"].replace("${{ env.IS_BATCH }}", "true")
+        shell = re.sub(r"\$\{\{.*?\}\}", "Math", shell)
+        endpoints = {
+            "PUBLIC_ARTIFACT_ENDPOINT": "https://cache.example/a",
+            "PUBLIC_REVISION_ENDPOINT": "https://cache.example/r",
+            "S3_ARTIFACT_ENDPOINT": "https://upload.example/a",
+            "S3_REVISION_ENDPOINT": "https://upload.example/r",
+        }
+        source = {
+            "SOURCE_CANDIDATE": "true",
+            "TAUCETI_CACHE_ARTIFACT_URL": endpoints["PUBLIC_ARTIFACT_ENDPOINT"],
+            "TAUCETI_CACHE_REVISION_URL": endpoints["PUBLIC_REVISION_ENDPOINT"],
+        }
+        cases = (
+            # Merge-group and Bors runs never see the source-only variables.
+            ({}, True),
+            ({**source, "CI_SOURCE_REQUIRE_PUBLICATION": "true", "CI_SOURCE_STAGE_CACHE": "true"}, True),
+            ({**source, "CI_SOURCE_REQUIRE_PUBLICATION": "false", "CI_SOURCE_STAGE_CACHE": "true"}, True),
+            ({**source, "CI_SOURCE_REQUIRE_PUBLICATION": "false", "CI_SOURCE_STAGE_CACHE": "false"}, False),
+        )
+        for extra, staged in cases:
+            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as directory:
+                github_env = Path(directory) / "env"
+                github_env.touch()
+                env = {
+                    key: value
+                    for key, value in os.environ.items()
+                    if not key.startswith(("CI_SOURCE_", "SOURCE_CANDIDATE", "TAUCETI_CACHE_"))
+                }
+                env.update(endpoints, **extra, GITHUB_ENV=str(github_env))
+                child = subprocess.run(
+                    ["bash", "-euo", "pipefail", "-c", shell], cwd=directory, env=env, capture_output=True, text=True
+                )
+                self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
+                self.assertEqual("STAGE_LAKE_CACHE=1" in github_env.read_text().splitlines(), staged)
 
     def test_source_identity_shell_executes_ingress_and_never_the_legacy_helpers(self):
         shell = self.step("Resolve PR head")["run"]

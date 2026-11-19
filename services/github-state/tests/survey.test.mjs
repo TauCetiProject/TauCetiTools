@@ -59,3 +59,17 @@ test('old coordination comments and cached fragments do not project claims',()=>
  assert.equal('markers' in facts.summarize([{body}],[]),false);
  assert.equal('markers' in facts.summarizeFragments([{meta:null,rebase_heads:[],marker:{head:'a'.repeat(40),expires_at:9999999999}}],[]),false);
 });
+
+test('scoreboard selection is independent of comment order (the parity fixture checks it against Python)',()=>{
+ const board=(id,updated,state)=>({id,updated_at:updated,body:'<!--tauceti-scoreboard--> <!--tauceti-meta:v1 '+JSON.stringify({head_sha:'a'.repeat(40),states:{reuse:state},submitted_by:'r'+id})+'-->'});
+ const tied=[board('7','2026-11-16T18:00:00Z','green'),board('12','2026-11-16T18:00:00Z','blocking_request'),board('9','2026-11-16T18:00:00Z','green')];
+ for(const order of [[0,1,2],[2,1,0],[1,0,2],[0,2,1]]) assert.equal(facts.summarize(order.map(i=>tied[i]),[]).meta.submitted_by,'r12');
+ const edited=board('6859938902','2026-11-16T18:00:40Z','blocking_request'),posted=board('6924490807','2026-11-16T17:53:30Z','green');
+ assert.equal(facts.summarize([edited,posted],[]).meta.submitted_by,'r6859938902');
+ assert.equal(facts.summarize([posted,edited],[]).meta.submitted_by,'r6859938902');
+ const created=(id,at)=>({...board(id,'', 'green'),created_at:at});
+ assert.equal(facts.summarize([created('2','2026-11-16T11:00:00Z'),created('1','2026-11-16T10:00:00Z')],[]).meta.submitted_by,'r2');
+ assert.equal(facts.summarize([created('1','2026-11-16T12:00:00Z'),created('2','2026-11-16T11:00:00Z')],[]).meta.submitted_by,'r1');
+ const unnumbered=(name,state)=>({...board('x','2026-11-16T18:00:00Z',state),id:undefined,body:board(name,'',state).body});
+ assert.equal(facts.summarize([unnumbered('a','green'),unnumbered('b','blocking_request')],[]).meta.submitted_by,'rb');
+});

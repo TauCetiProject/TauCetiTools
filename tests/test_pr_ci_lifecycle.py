@@ -74,7 +74,19 @@ class GitHub:
 
 class LifecycleTests(unittest.TestCase):
     def reconcile(self, api, runs=None, **kwargs):
-        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+        with (
+            redirect_stdout(io.StringIO()),
+            redirect_stderr(io.StringIO()),
+            patch.object(
+                lifecycle,
+                "local_route",
+                side_effect=lambda api, repo, pr: bool(
+                    pr
+                    and any(x["name"] == "self-tested" for x in pr["labels"]["nodes"])
+                    and not any(x["name"] in {"full-lint", "lint-repair"} for x in pr["labels"]["nodes"])
+                ),
+            ),
+        ):
             return lifecycle.reconcile(api, REPO, active=[run()] if runs is None else runs, **kwargs)
 
     def test_closed_merged_and_superseded_work_is_cancelled_in_every_active_state(self):
@@ -98,30 +110,12 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(api.writes, [])
         self.assertEqual(api.graph_reads, 1)
 
-    def test_self_tested_requires_current_label_head_and_accepted_exact_context(self):
-        assertion = dict(context="self-tested/7", state="SUCCESS")
-        accepted = pull(labels=["self-tested"], statuses=[assertion])
-        api = GitHub(initial=accepted)
-        self.assertEqual(self.reconcile(api, apply=True)[0]["reason"], "self-tested")
-        cases = [
-            pull(labels=["self-tested"]),
-            pull(statuses=[assertion]),
-            pull(labels=["self-tested", "full-lint"], statuses=[assertion]),
-            pull(labels=["self-tested", "lint-repair"], statuses=[assertion]),
-            pull(labels=["self-tested"], statuses=[dict(context="self-tested/8", state="SUCCESS")]),
-            pull(labels=["self-tested"], statuses=[dict(context="self-tested/7", state="FAILURE")]),
-        ]
-        mismatched = copy.deepcopy(accepted)
-        mismatched["commits"]["nodes"][0]["commit"]["oid"] = OLD
-        cases.append(mismatched)
-        truncated = copy.deepcopy(accepted)
-        truncated["labels"]["pageInfo"]["hasNextPage"] = True
-        cases.append(truncated)
-        missing_head = copy.deepcopy(accepted)
-        missing_head.pop("headRefOid")
-        cases.append(missing_head)
-        for pr in cases:
-            api = GitHub(initial=pr)
+    def test_persistent_self_tested_cancels_without_a_receipt(self):
+        for statuses in [[], [dict(context="self-tested/7", state="FAILURE")]]:
+            api = GitHub(initial=pull(labels=["self-tested"], statuses=statuses))
+            self.assertEqual(self.reconcile(api, apply=True)[0]["reason"], "self-tested")
+        for labels in [[], ["self-tested", "full-lint"], ["self-tested", "lint-repair"]]:
+            api = GitHub(initial=pull(labels=labels))
             self.assertEqual(self.reconcile(api, apply=True), [])
             self.assertEqual(api.writes, [])
 
@@ -229,7 +223,7 @@ class LifecycleTests(unittest.TestCase):
             redirect_stdout(io.StringIO()),
         ):
             self.assertEqual(ci_recovery.recover(api, REPO, apply=True), [])
-        cleanup.assert_called_once_with(api, REPO, active=[], apply=True, api_reserve=0)
+        cleanup.assert_called_once_with(api, REPO, active=[], apply=True, api_reserve=0, api_budget=0)
 
     def test_standalone_recovery_checkout_contains_its_policy_and_exports_package_root(self):
         root = Path(__file__).parents[1]

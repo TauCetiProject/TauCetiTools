@@ -11,7 +11,7 @@ from urllib.parse import parse_qsl, urlencode
 
 from github_api import APIError
 
-from tauceti_tools.self_tested import accepted, context, latest_status
+from tauceti_tools.self_tested import eligible, requested
 
 ACTIVE = {"queued", "in_progress", "waiting", "pending", "requested"}
 
@@ -138,7 +138,7 @@ def identity(run):
     return number, None
 
 
-def reason(run, pull):
+def reason(run, pull, *, local=False):
     binding = identity(run)
     if not binding or not pull or pull.get("number") != binding[0]:
         return None
@@ -152,22 +152,31 @@ def reason(run, pull):
     head = binding[1]
     if head and head != current_head:
         return "head-superseded"
-    commit = ((pull.get("commits") or {}).get("nodes") or [{}])[-1].get("commit") or {}
-    label_page = pull.get("labels") or {}
-    if label_page.get("pageInfo", {}).get("hasNextPage") is not False or not pull.get("headRefName"):
-        return None
-    labels = label_page.get("nodes", [])
-    assertion = latest_status((commit.get("status") or {}).get("contexts", []), context(binding[0]))
-    if (
-        head
-        and head == pull.get("headRefOid") == commit.get("oid")
-        and accepted(labels, assertion.get("state"), member=True, branch=pull.get("headRefName", ""))
-    ):
+    labels = (pull.get("labels") or {}).get("nodes", [])
+    if head and head == current_head and local and requested(labels, pull.get("headRefName", "")):
         return "self-tested"
     return None
 
 
-PULL_FIELDS = """number state headRefOid headRefName labels(first:100){nodes{name} pageInfo{hasNextPage}}
+def local_route(api, repo, pull):
+    if not pull or not requested((pull.get("labels") or {}).get("nodes", []), pull.get("headRefName", "")):
+        return False
+    raw = {
+        "number": pull["number"],
+        "state": pull["state"].lower(),
+        "labels": (pull.get("labels") or {}).get("nodes", []),
+        "user": {"login": (pull.get("author") or {}).get("login", "")},
+        "base": {"ref": pull.get("baseRefName", "")},
+        "head": {
+            "sha": pull.get("headRefOid", ""),
+            "ref": pull.get("headRefName", ""),
+            "repo": {"full_name": (pull.get("headRepository") or {}).get("nameWithOwner", "")},
+        },
+    }
+    return eligible(raw, repo, read=lambda path: api.request("GET", path))
+
+
+PULL_FIELDS = """number state headRefOid headRefName baseRefName author{login} headRepository{nameWithOwner} labels(first:100){nodes{name} pageInfo{hasNextPage}}
  commits(last:1){nodes{commit{oid status{contexts{context state}}}}}"""
 
 
@@ -185,11 +194,15 @@ def pulls(api, repo, numbers):
     return values
 
 
-def reserved(api, reserve):
+def reserved(api, reserve, budget=0):
+    """The shared quota is down to `reserve`, or this pass has made `budget` requests (0: no limit)."""
+    stats = getattr(api, "stats", {}).values()
+    if budget and sum(stat.get("requests", 0) for stat in stats) >= budget:
+        return True
     return (
         any(
             str(b.get("remaining", "")).isdigit() and int(b["remaining"]) < reserve
-            for stat in getattr(api, "stats", {}).values()
+            for stat in stats
             for b in stat.get("buckets", {}).values()
         )
         if reserve
@@ -197,7 +210,7 @@ def reserved(api, reserve):
     )
 
 
-def reconcile(api, repo, *, active=None, apply=False, number=None, api_reserve=0, strict=False):
+def reconcile(api, repo, *, active=None, apply=False, number=None, api_reserve=0, api_budget=0, strict=False):
     # Finish every page before mutating the live collection. Each new pass scans
     # current state; an interrupted or ambiguous POST needs no private ledger.
     if active is None:
@@ -226,11 +239,17 @@ def reconcile(api, repo, *, active=None, apply=False, number=None, api_reserve=0
     oldest = 0.0
     observed = 0
     for run in candidates.values():
-        if reserved(api, api_reserve):
-            print("ci-lifecycle: shared API reserve reached; next pass will resume", file=sys.stderr)
+        if reserved(api, api_reserve, api_budget):
+            print("ci-lifecycle: shared API reserve or pass budget reached; next pass will resume", file=sys.stderr)
             break
         number = identity(run)[0]
-        why = reason(run, snapshots.get(number))
+        try:
+            initial = snapshots.get(number)
+            why = reason(run, initial, local=local_route(api, repo, initial))
+        except APIError as error:
+            counts["deferred"] += 1
+            print(f"ci-lifecycle: run {run['id']}: {error}; next pass will recheck", file=sys.stderr)
+            continue
         if not why:
             continue
         observed += 1
@@ -256,7 +275,7 @@ def reconcile(api, repo, *, active=None, apply=False, number=None, api_reserve=0
             # This is the final state read before the cancellation. A reopened
             # PR, restored head or removed label invalidates the earlier decision.
             fresh = pulls(api, repo, [number]).get(number)
-            why = reason(current, fresh)
+            why = reason(current, fresh, local=local_route(api, repo, fresh))
             if not why:
                 continue
             if apply:

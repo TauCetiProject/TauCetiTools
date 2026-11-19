@@ -979,7 +979,10 @@ export class RepositoryState extends DurableObject<Env> {
       else this.noteOrdinaryAlarm(scheduled);
     }
   }
-  async complete(q:Pick<Query,'operation'|'args'>): Promise<boolean> { return (await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length>0; }
+  async complete(q:Pick<Query,'operation'|'args'>): Promise<boolean> {
+    if(q.operation==='refs' && q.args?.name==='main')return (await this.store.exec("SELECT id FROM resources WHERE kind='refs' AND id='refs/heads/main' AND tombstone=0")).toArray().length>0;
+    return (await this.store.exec('SELECT key FROM collections WHERE key=? AND complete=1',queryKey(q))).toArray().length>0;
+  }
   async metric(event:string,q:Query,lane:Lane,value=1): Promise<void> {try{this.repairMetrics.record(event,lane,q.operation,value);}catch(error){try{this.noteFailure('repair_metrics',error);}catch{}}}
   async lane(q:Query,dirty=false,priority=20): Promise<Lane> {
     const demanded=((await this.store.exec<any>('SELECT at FROM demand WHERE key=?',queryKey(q))).toArray()[0]?.at || 0)>Date.now()-300000;
@@ -1222,6 +1225,10 @@ export class RepositoryState extends DurableObject<Env> {
   }
   async rows(q:Query): Promise<any[] | any | null> {
     if(q.operation==='statuses')return this.statusRows(q);
+    if(q.operation==='refs' && q.args?.name==='main') {
+      const row=(await this.store.exec<any>("SELECT data FROM resources WHERE kind='refs' AND id='refs/heads/main' AND tombstone=0")).toArray()[0];
+      return row?[await this.decode(row.data)]:null;
+    }
     const key=queryKey(q), collection=(await this.store.exec<any>('SELECT * FROM collections WHERE key=? AND complete=1',key)).toArray()[0];
     if (!collection) return null;
     if (q.operation==='pr') {
@@ -1360,6 +1367,10 @@ export class RepositoryState extends DurableObject<Env> {
   // Derived results report the stored times of the collections they read:
   // the newest observation and the oldest complete verification.
   async freshness(q:Query): Promise<{observed?:number,verified?:number}> {
+    if(q.operation==='refs' && q.args?.name==='main') {
+      const row=(await this.store.exec<any>("SELECT observed FROM resources WHERE kind='refs' AND id='refs/heads/main' AND tombstone=0")).toArray()[0];
+      return {observed:row?.observed};
+    }
     const args=q.args,number=q.args?.number;
     const sources=q.operation==='survey'?[{key:queryKey({operation:'open_prs'}),kind:'pr'}]
       :q.operation==='progress'?[{key:queryKey({operation:'pr',args}),kind:'pr',id:String(number)},{key:queryKey({operation:'issue_comments',args}),kind:'issue_comments'},{key:queryKey({operation:'review_comments',args}),kind:'review_comments'}]
@@ -3781,11 +3792,13 @@ export class RepositoryState extends DurableObject<Env> {
         const key=(readOnly?'public|':'authenticated|')+queryKey(q)+'|observed:'+Boolean(q.allow_observed)+'|'+(q.cursor || '')+'|pr-epoch:'+(['survey','open_prs'].includes(q.operation)?this.owner.prQueryEpoch:['pr','progress'].includes(q.operation)?this.owner.prQueryEpochs.get(String(q.args?.number)) || 0:0);
         const completed=readOnly?this.publicCompletedQueries:this.completedQueries;
         const cached=completed.get(key);
+        const checkedRevision=!q.cursor && cached && cached.expires>Date.now()?await this.revision():undefined;
         if (!q.cursor && cached && cached.expires>Date.now() &&
-          (cached.result.revision===(await this.revision()) || ['survey','open_prs','open_issues'].includes(q.operation) && Date.now()-cached.built<10000 || !await this.changedQuery(q,cached.result.revision))) {
+          (cached.result.revision===checkedRevision || ['survey','open_prs','open_issues'].includes(q.operation) && Date.now()-cached.built<10000 || !await this.changedQuery(q,cached.result.revision))) {
           requestCoverage=cached.result.coverage || 'unknown';
           if(!readOnly)this.backgroundDemand(q);
-          return json(cached.result,200,{ETag:tag(cached.result.revision),...headers});
+          return json(cached.result,200,{ETag:tag(cached.result.revision),
+            ...(!['survey','open_prs','open_issues'].includes(q.operation)?{'X-TauCeti-Checked-Revision':String(checkedRevision)}:{}),...headers});
         }
         let pending=this.inflightQueries.get(key);
         if (!pending) {
@@ -3821,7 +3834,7 @@ export class RepositoryState extends DurableObject<Env> {
         const [meta,first,changes]=await this.store.batch([
           {sql:"SELECT value FROM meta WHERE key='revision'"},
           {sql:'SELECT MIN(revision) AS revision FROM changes'},
-          {sql:'SELECT revision,at,kind,id,tombstone FROM changes WHERE revision>? ORDER BY revision LIMIT 1000',bindings:[after]}
+          {sql:'SELECT c.revision,c.at,c.kind,c.id,c.tombstone,r.parent FROM changes c LEFT JOIN resources r ON r.kind=c.kind AND r.id=c.id WHERE c.revision>? ORDER BY c.revision LIMIT 1000',bindings:[after]}
         ]);
         const revision=JSON.parse(meta.toArray()[0]?.value || '0'),oldest=first.one().revision;
         this.revisionState.value=Math.max(this.revisionState.value ?? 0,revision);

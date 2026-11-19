@@ -18,8 +18,8 @@ A PR has had activity since T if any of these holds:
 
 For each such PR it reconciles the GitHub lifecycle label from current state.
 
-A rate limit or a listing past GitHub's cap fails
-the run. The next run resumes its pending work; only finishing the scan advances its watermark. A single
+A quota or time-budget hold exits 75 (deferred); genuine errors exit 1.
+The next run resumes its pending work; only finishing the scan advances its watermark. A single
 PR's failure does not: that PR is handed to the next run through --state-out/--state-in and retried
 on later passes, so a temporary failure cannot strand a PR or hold healthy PRs back.
 
@@ -37,6 +37,7 @@ import datetime as dt
 import json
 import re
 import math
+import os
 from pathlib import Path
 import threading
 import time
@@ -46,6 +47,12 @@ from urllib.parse import parse_qsl, urlencode
 
 import core
 import labels
+import priority
+from github_api import Deferred
+from transport import ReconciliationAPI
+from tauceti_tools.github_state import Unavailable
+from tauceti_tools.git_inputs import PreparationUnavailable
+import discovery
 
 REPO = core.REPO
 # Runs finish within GitHub's six-hour job limit, so a run that completed after `since` was created
@@ -226,9 +233,67 @@ def load_progress(path, since):
         if parsed.utcoffset() != dt.timedelta(0):
             raise ValueError('Progress timestamps must be UTC')
     timestamp(state['watermark'])
+    waiting = state.setdefault('first_pending', {})
+    if not isinstance(waiting, dict):
+        state['first_pending'] = {}
+    else:
+        for number, since in list(waiting.items()):
+            try:
+                timestamp(since)
+                if not isinstance(number, str) or not number.isdigit() or int(number) <= 0:
+                    raise ValueError('invalid pending identity')
+            except (ValueError, TypeError):
+                waiting.pop(number, None)
+    # Decision/comparison caches are disposable; malformed cache entries must
+    # not discard the retained work queue or authorize an unverified decision.
+    def number_key(key):
+        return isinstance(key, str) and key.isdigit() and int(key) > 0
+    decisions = state.get('decisions', {})
+    state['decisions'] = {key: record for key, record in decisions.items()
+        if number_key(key) and isinstance(record, dict)
+        and re.fullmatch('[0-9a-f]{64}', str(record.get('key', '')))
+        and type(record.get('valid_until')) in (int, float) and 0 <= record['valid_until'] < math.inf
+        and isinstance(record.get('result'), dict)
+        and record['result'].get('category') in {*labels.STATUS_LABELS, None}
+        and type(record['result'].get('eligible')) is bool
+        and isinstance(record['result'].get('head'), str)} if isinstance(decisions, dict) else {}
+    comparisons = state.get('comparisons', {})
+    state['comparisons'] = {key: record for key, record in comparisons.items()
+        if number_key(key) and isinstance(record, dict) and record.get('repository') == REPO
+        and all(re.fullmatch('[0-9a-f]{40}', str(record.get(field, '')))
+                for field in ('base', 'head', 'merge_base'))} if isinstance(comparisons, dict) else {}
+    discovery_state = state.get('shared_discovery')
+    if discovery_state is not None and not (
+            isinstance(discovery_state, dict) and type(discovery_state.get('revision')) is int
+            and discovery_state['revision'] >= 0 and type(discovery_state.get('repair_after')) is int
+            and discovery_state['repair_after'] >= 0
+            and re.fullmatch('[0-9a-f]{64}', str(discovery_state.get('policy', '')))
+            and isinstance(discovery_state.get('heads'), dict)
+            and all(number_key(key) and re.fullmatch('[0-9a-f]{40}', str(head))
+                    for key, head in discovery_state['heads'].items())):
+        state.pop('shared_discovery', None)
+    pending_local = state.setdefault('self_tested_pending', {})
+    if not isinstance(pending_local, dict):
+        raise ValueError('Invalid self-tested pending inventory')
+    for key, record in pending_local.items():
+        if (not key.isdigit() or int(key) <= 0 or not isinstance(record, dict)
+                or not re.fullmatch(r'[0-9a-f]{40}', record.get('head', ''))):
+            raise ValueError('Invalid self-tested pending commit')
+        timestamp(record.get('first_seen_at'))
+        if 'last_attempt_at' in record:
+            timestamp(record['last_attempt_at'])
     blocked = state['blocked_until']
     if type(blocked) not in (int, float) or not 0 <= blocked < math.inf:
         raise ValueError('Invalid quota deadline')
+    holds = state.setdefault('quota_holds', [])
+    if not isinstance(holds, list):
+        raise ValueError('Invalid quota holds')
+    for hold in holds:
+        if (not isinstance(hold, dict) or not isinstance(hold.get('credential'), str)
+                or hold.get('resource') not in {'core', 'graphql', 'search'}
+                or type(hold.get('until')) not in (int, float)
+                or not 0 <= hold['until'] < math.inf):
+            raise ValueError('Invalid quota hold')
     retry = state['retry']
     if not isinstance(retry, dict) or any(not k.isdigit() or int(k) <= 0 or
             type(v) is not int or v < 1 for k, v in retry.items()):
@@ -247,6 +312,8 @@ def load_progress(path, since):
             numbers = active[field]
             if not isinstance(numbers, list) or any(type(n) is not int or n <= 0 for n in numbers) or len(set(numbers)) != len(numbers):
                 raise ValueError('Invalid pending PRs')
+            for number in numbers:
+                state['first_pending'].setdefault(str(number), active['started_at'])
     return state
 
 
@@ -258,6 +325,8 @@ def save_progress(path, state):
     while workers are active. The workflow uploads the file even on failure.
     """
     state['blocked_until'] = max(state['blocked_until'], core._BLOCKED_UNTIL)
+    if core.transport is not None:
+        state['quota_holds'] = core.transport.holds()
     if path:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -273,26 +342,97 @@ def main(argv=None):
     ap.add_argument("--dry-run", action="store_true", help="list work; write nothing")
     ap.add_argument("--state-in", help="previous progress/retries JSON checkpoint")
     ap.add_argument("--state-out", help="where to checkpoint progress, including on failure")
+    ap.add_argument("--prioritize-self-tested", action="store_true", help="assess pending local assertions before run discovery")
+    ap.add_argument("--self-tested-limit", type=int, default=100, help="maximum priority assessments in one batch")
+    ap.add_argument("--budget-seconds", type=int, default=2400, help="stop starting work before this batch duration")
+    ap.add_argument("--all-open", action="store_true", help="checkpoint a complete open-PR sweep without workflow-history discovery")
     args = ap.parse_args(argv)
-    if any(number <= 0 for number in args.pr):
-        ap.error('--pr must be a positive PR number')
+    if any(number <= 0 for number in args.pr) or args.self_tested_limit <= 0 or args.budget_seconds <= 0:
+        ap.error('PR numbers, self-tested limit and budget must be positive')
     try:
         state = load_progress(args.state_in, args.since)
     except (OSError, ValueError, KeyError, TypeError):
         log('::warning::Invalid PR-status checkpoint; rebuilding from the fallback window')
         state = load_progress(None, args.since)
     output = None if args.dry_run else args.state_out
-    lock = threading.Lock()
+    previous_transport = core.transport
+    core.transport = ReconciliationAPI(state['quota_holds'], decisions=state.setdefault('decisions', {}),
+                                       comparisons=state.setdefault('comparisons', {}))
+    outcome = {'status': 'error', 'reason': 'batch interrupted'}
+
+    def deferred(reason):
+        outcome.update(status='deferred', reason=reason)
+        log(f'deferred: {reason}; progress retained')
+        return 75
+
+    lock = core.transport.decision_lock
+    deadline = time.monotonic() + args.budget_seconds
+    priority_observed = False
     try:
         if state['blocked_until'] > time.time():
-            log(f"deferred until epoch {state['blocked_until']}; pending work retained")
-            return 0 if args.dry_run else 1
-        if state['active'] is None:
+            return deferred(f"quota hold until epoch {state['blocked_until']}")
+        if any(h['until'] > time.time() for h in state['quota_holds']):
+            return deferred('persisted credential/resource quota hold')
+        if args.prioritize_self_tested:
+            state['self_tested_pending'] = priority.scan(REPO, state['self_tested_pending'],
+                                                       now=iso(dt.datetime.now(dt.timezone.utc)))
+            priority_observed = True
+            if state['self_tested_pending']:
+                save_progress(output, state)
+                ordered = sorted(state['self_tested_pending'],
+                                 key=lambda n: (state['self_tested_pending'][n].get('last_attempt_at', ''),
+                                                state['self_tested_pending'][n]['first_seen_at'], int(n)))
+                if args.dry_run:
+                    for number in ordered:
+                        log(f"would prioritize self-tested #{number}")
+                    outcome.update(status='planned', reason='dry run')
+                    return 0
+                priority_observed = False
+                stop = []
+
+                def assess_local(number):
+                    if stop or time.monotonic() >= deadline:
+                        return
+                    with lock:
+                        state['self_tested_pending'][number]['last_attempt_at'] = iso(dt.datetime.now(dt.timezone.utc))
+                        save_progress(output, state)
+                    try:
+                        labels.reconcile(number)
+                    except (core.RateLimited, Deferred) as exc:
+                        stop.append(str(exc))
+                    except Exception as exc:
+                        log(f"PR #{number}: priority assessment failed: {exc}")
+
+                with ThreadPoolExecutor(max_workers=PARALLEL) as pool:
+                    list(pool.map(assess_local, ordered[:args.self_tested_limit]))
+                if stop:
+                    log(f"priority assessment stopped: {stop[0]}")
+                    return deferred(stop[0])
+                state['self_tested_pending'] = priority.scan(REPO, state['self_tested_pending'],
+                                                           now=iso(dt.datetime.now(dt.timezone.utc)))
+                priority_observed = True
+                save_progress(output, state)
+                if state['self_tested_pending']:
+                    log('self-tested decisions remain; checkpointed before broad run discovery')
+                    return deferred('self-tested decisions remain')
+        if time.monotonic() >= deadline:
+            log('batch time budget reached before broad run discovery')
+            return deferred('batch time budget reached before discovery')
+        if core.transport.shared_evidence is not None:
+            discovered = iso(dt.datetime.now(dt.timezone.utc))
+            dirty = discovery.discover(core.transport.shared_evidence.state, state, core.transport.policy,
+                                       full=args.all_open and state['active'] is None)
+            active = state['active'] or dict(started_at=discovered, pending=[], completed={})
+            active['pending'] = list(dict.fromkeys(args.pr + active['pending'] + dirty
+                                                  + sorted(map(int, state['retry']))))
+            active['started_at'] = discovered
+            state['active'] = active
+        elif state['active'] is None:
             started = iso(dt.datetime.now(dt.timezone.utc))
             since = iso(dt.datetime.fromisoformat(state['watermark'].replace('Z', '+00:00')) - dt.timedelta(minutes=2))
             heads = open_heads()
-            by_update = updated_prs(since)
-            by_runs = touched_by_runs(since, heads)
+            by_update = sorted(n for numbers in heads.values() for n in numbers) if args.all_open else updated_prs(since)
+            by_runs = set() if args.all_open else touched_by_runs(since, heads)
             ordered = list(dict.fromkeys(args.pr + by_update + sorted(by_runs) + sorted(int(n) for n in state['retry'])))
             state['active'] = {"started_at": started, "pending": ordered,
                                "completed": {}}
@@ -303,30 +443,45 @@ def main(argv=None):
             # Include collapsed events since discovery, but omit activity known
             # to precede the start of an already completed reconciliation.
             since = iso(dt.datetime.fromisoformat(active['started_at'].replace('Z', '+00:00')) - dt.timedelta(minutes=2))
-            by_update = updated_prs(since, active['completed'])
-            by_runs = touched_by_runs(since, heads, active['completed'])
+            by_update = ([] if args.all_open else updated_prs(since, active['completed']))
+            by_runs = set() if args.all_open else touched_by_runs(since, heads, active['completed'])
             active['pending'] = list(dict.fromkeys(args.pr + active['pending'] + by_update + sorted(by_runs)))
             # Only advance after both discovery streams were read completely.
             active['started_at'] = discovered
         active = state['active']
         ordered = list(active['pending'])
+        for number in ordered:
+            state['first_pending'].setdefault(str(number), active['started_at'])
         log(f"scan {active['started_at']}: {len(ordered)} pending PRs; {len(state['retry'])} queued retries")
         if args.dry_run:
             for number in ordered:
                 log(f"would reconcile #{number}")
+            outcome.update(status='planned', reason='dry run')
             return 0
         save_progress(output, state)
-        stop, failures = [], []
+        if core.transport.shared_evidence is not None:
+            # Main is shared by every ordinary readiness assessment. Establish
+            # it once before dispatch, rather than probing the same cold
+            # resource separately for every pending PR.
+            core.transport.shared_evidence.main_ref()
+        stop, failures, deferred_evidence = [], [], []
 
         def one(number):
             if stop:
+                return
+            if time.monotonic() >= deadline:
+                stop.append(('budget', 'batch time budget reached'))
                 return
             failed = False
             checked_from = iso(dt.datetime.now(dt.timezone.utc))
             try:
                 labels.reconcile(str(number))
-            except core.RateLimited as exc:
+            except (core.RateLimited, Deferred) as exc:
                 stop.append(('quota', str(exc)))
+                return
+            except (Unavailable, PreparationUnavailable) as exc:
+                deferred_evidence.append(number)
+                log(f'PR #{number}: {exc}; pending repair retained')
                 return
             except Exception as exc:
                 failed = True
@@ -339,6 +494,17 @@ def main(argv=None):
                     state['retry'][key] = attempt
                 else:
                     state['retry'].pop(key, None)
+                    state['first_pending'].pop(key, None)
+                    if core.transport.shared_evidence is not None:
+                        header = core.transport.shared_evidence.headers.get(number)
+                        if header is not None:
+                            heads = state['shared_discovery']['heads']
+                            if header['state'] == 'open':
+                                heads[key] = header['head']['sha']
+                            else:
+                                heads.pop(key, None)
+                                state['decisions'].pop(key, None)
+                                state['comparisons'].pop(key, None)
                 active['completed'][key] = checked_from
                 active['pending'].remove(number)
                 save_progress(output, state)
@@ -347,16 +513,47 @@ def main(argv=None):
             list(pool.map(one, ordered))
         if stop:
             log(f"stopping: {stop[0][1]}; {len(active['pending'])} PRs retained")
-            return 1
+            if failures:
+                outcome.update(status='error', reason='assessment failures alongside deferred work')
+                return 1
+            return deferred(stop[0][1])
+        if deferred_evidence:
+            if failures:
+                outcome.update(status='error', reason='assessment failures alongside incomplete shared evidence')
+                return 1
+            return deferred(f'{len(deferred_evidence)} PRs await complete shared evidence')
         # Advance to a completely read discovery boundary, never merely to
         # this workflow run's creation time.
         state['watermark'] = active['started_at']
         state['active'] = None
         log(f"done: {len(ordered)} PRs; failures queued for retry: {failures}")
-        return 0
+        outcome.update(status='error' if failures else 'completed', reason='discovery boundary completed')
+        return 1 if failures else 0
+    except (Deferred, core.RateLimited, Unavailable) as exc:
+        return deferred(str(exc))
     finally:
-        if not args.dry_run:
-            save_progress(output, state)
+        if args.prioritize_self_tested:
+            priority.report(state['self_tested_pending'], observed=priority_observed,
+                            now=iso(dt.datetime.now(dt.timezone.utc)))
+        try:
+            if not args.dry_run:
+                state['last_outcome'] = outcome
+                save_progress(output, state)
+        finally:
+            try:
+                core.transport.report()
+            finally:
+                core.transport = previous_transport
+        log('pr-status-outcome: ' + json.dumps(outcome, sort_keys=True))
+        oldest = min(state['first_pending'].values(), default=None)
+        age = max(0, int(time.time()-dt.datetime.fromisoformat(oldest.replace('Z', '+00:00')).timestamp())) if oldest else 0
+        log('pr-status-pending: ' + json.dumps(dict(count=len(state['first_pending']), oldest_seconds=age)))
+        if os.environ.get('GITHUB_STEP_SUMMARY'):
+            pending = len((state.get('active') or {}).get('pending', []))
+            with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as stream:
+                stream.write(f"\nPR status reconciliation: **{outcome['status']}**. "
+                             f"{pending} pending; {len(state['retry'])} queued errors; "
+                             f"oldest observed wait {age}s.\n")
 
 
 if __name__ == "__main__":

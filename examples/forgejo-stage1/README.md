@@ -45,7 +45,7 @@ required before production cutover; installing these callers alone is insufficie
 
 The shared setup action has an explicit `source-mirror-enabled: true` mode for
 trusted main jobs. It verifies the protected execution repository ID, branch,
-workflow and checkout commit, immutable harness pin, source repository ID, and
+workflow and checkout commit, harness repository, source repository ID, and
 that exact commit's ancestry on protected source main on the configured Forgejo
 server. An older mirrored main is accepted when source main has advanced; an
 unmerged source commit is refused. Source reads use
@@ -54,7 +54,7 @@ cache namespace is explicitly the GitHub execution repository. Shared state is
 disabled for this path.
 
 Render the existing canonical CI, API-docs, and Pages workflows into a local
-review checkout using a policy whose harness revision contains this support.
+review checkout. The rendered workflows use the shared harness at `main`.
 This command requires the flagship `web/` and `docbuild/` layout, `[features]
 docs = true`, and matching source/execution branch names. It refuses other project
 layouts rather than installing workflows for absent projects:
@@ -77,8 +77,8 @@ The generated Pages workflow disables its legacy GitHub `docgen` branch writer;
 read the published `docs/SOURCE_SHA` for the documentation revision.
 
 Each qualified setup uploads a `source-mirror-context-RUN-ATTEMPT-JOB` artifact
-with source/execution identities, commit, configuration/policy digests, and harness
-pin and captured source-main tip. This is diagnostic build context with seven-day
+with source/execution identities, commit, configuration/policy digests, harness
+repository and captured source-main tip. This is diagnostic build context with seven-day
 artifact retention, not durable publication attestation or a passing merge verdict.
 The cache's exact revision map and published docs' `SOURCE_SHA` identify their
 outputs. Save the context artifacts with the cutover evidence before they expire.

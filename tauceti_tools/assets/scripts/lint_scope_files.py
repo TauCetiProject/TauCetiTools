@@ -7,6 +7,7 @@ Missing objects cause the caller to fall back to full lint.
 """
 
 import argparse
+import contextlib
 import os
 from pathlib import Path
 import re
@@ -16,9 +17,8 @@ import sys
 import tempfile
 
 
-def changed_files(checkout, base, head, *, include_deleted=False):
-    if not all(re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (base, head)):
-        raise ValueError("expected immutable commit SHAs")
+@contextlib.contextmanager
+def _object_reader(checkout):
     objects = (Path(checkout) / ".git" / "objects").resolve(strict=True)
     # Locate the runner's Git once (also supports Nix installations); subprocesses
     # get only the minimal PATH below and cannot search the candidate checkout.
@@ -35,6 +35,13 @@ def changed_files(checkout, base, head, *, include_deleted=False):
         env["GIT_OBJECT_DIRECTORY"] = str(objects)
         command = [git, "--no-replace-objects", f"--git-dir={repository}",
                    "-c", "core.attributesFile=/dev/null"]
+        yield command, env
+
+
+def changed_files(checkout, base, head, *, include_deleted=False):
+    if not all(re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (base, head)):
+        raise ValueError("expected immutable commit SHAs")
+    with _object_reader(checkout) as (command, env):
         for sha in (base, head):
             kind = subprocess.check_output(command + ["cat-file", "-t", sha], env=env)
             if kind != b"commit\n":

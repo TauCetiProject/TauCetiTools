@@ -8,12 +8,26 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class MaintenanceScriptTests(unittest.TestCase):
+    def test_self_tested_priority_and_checkpoint_regressions(self):
+        for name, cases in (("test_batch.py", ["ResumeTests", "ProvenanceTests"]),
+                            ("test_priority.py", [])):
+            result = subprocess.run([sys.executable, str(ROOT / "tauceti_tools/assets/scripts/pr_status" / name), *cases],
+                                    capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_watchdog_and_recovery_regressions(self):
         for script in ("test_maintenance_builds.py", "pr_status/test_stuck_snapshot.py", "pr_status/test_stuck_alerts.py"):
             with self.subTest(script=script):
                 result = subprocess.run([sys.executable, str(ROOT / "tauceti_tools/assets/scripts" / script)],
                                         capture_output=True, text=True, timeout=60)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_shared_readiness_and_incremental_discovery_contracts(self):
+        for script in ('test_shared.py', 'test_discovery.py'):
+            with self.subTest(script=script):
+                result = subprocess.run([sys.executable, str(ROOT/'tauceti_tools/assets/scripts/pr_status'/script)],
+                                        capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
 
     def test_dispatched_build_discovery_regressions(self):
         result = subprocess.run([

@@ -15,7 +15,7 @@ from pathlib import Path
 import bors_scope_approval
 from github_api import APIError, Deferred, GitHub
 
-from tauceti_tools.self_tested import accepted, context, latest_status
+from tauceti_tools.self_tested import eligible
 
 SCHEMA = "tauceti-ci.pr-status-intent/v1"
 CONTEXTS = {"build", "bump-guard", "scope"}
@@ -154,12 +154,8 @@ def fence(api, record):
                 or (pull.get("head") or {}).get("sha") != record["sha"]
                 or (pull.get("base") or {}).get("ref") != record["base_ref"]):
             return False
-        if any(label.get("name") == "self-tested" for label in pull.get("labels", [])):
-            rows = api.request("GET", f"repos/{repo}/commits/{record['sha']}/status?per_page=100").get("statuses", [])
-            assertion = latest_status(rows, context(record["pr"]))
-            if accepted(pull["labels"], assertion.get("state"), member=True,
-                        branch=(pull.get("head") or {}).get("ref", "")):
-                return False  # Accepted local testing owns this head, even during cancellation finalizers.
+        if eligible(pull, repo, read=lambda path: api.request("GET", path)):
+            return False  # The persistent local-testing route owns this ordinary PR.
     return current
 
 
@@ -212,16 +208,6 @@ def timestamp(value):
 
 def newer_status(record, snapshot, started_at):
     latest, complete = snapshot
-    assertion = latest.get(f"self-tested/{record.get('pr')}")
-    if assertion and assertion.get("state") == "success":
-        url = assertion.get("target_url", "")
-        match = re.fullmatch(rf"https://github\.com/{re.escape(record['repo'])}/actions/runs/([1-9][0-9]*)", url)
-        if match and int(match[1]) > record["run_id"]:
-            try:
-                if timestamp(assertion.get("created_at")) > timestamp(started_at):
-                    return True  # A newer preflight replaced this ordinary build, including cancellation reports.
-            except ValueError:
-                return None
     row = latest.get(record["payload"]["context"])
     if row is None:
         return False if complete else None

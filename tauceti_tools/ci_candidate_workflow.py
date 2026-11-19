@@ -20,6 +20,7 @@ from .ci_candidate import (
     MAX_MEMBER_MANIFEST_BYTES,
     MAX_MEMBERS,
     MEMBER_MANIFEST_FILE,
+    PR_LANE,
     CandidateRequest,
     ExecutionPolicy,
     artifact_name,
@@ -30,6 +31,7 @@ from .ci_candidate import (
     make_result,
     read_json,
     receipt_artifact_name,
+    requires_publication,
 )
 from .ci_candidate_evidence import EvidenceUnavailable, GitHubEvidence
 from .forge import GITHUB, ForgeError, Forgejo
@@ -177,7 +179,9 @@ def bootstrap(request, policy, context, configuration_path, scripts, *, policy_d
         "TAUCETI_SOURCE_REPOSITORY": json.dumps(policy.source.record(), sort_keys=True),
         "TAUCETI_CI_EXECUTION_REPOSITORY": json.dumps(policy.execution.record(), sort_keys=True),
         "TAUCETI_CACHE_REPOSITORY": policy.execution.repository.name,
-        "CI_SOURCE_REQUIRE_PUBLICATION": "true" if policy.require_publication else "false",
+        "CI_SOURCE_REQUIRE_PUBLICATION": "true" if requires_publication(request, policy) else "false",
+        # The workflow stages cache outputs for batch runs; a per-PR request must not.
+        "CI_SOURCE_STAGE_CACHE": "false" if request.lane == PR_LANE else "true",
         "TAUCETI_UPSTREAMS": json.dumps(project.github_upstreams),
         "TAUCETI_CI_GITHUB_READ_REPOSITORIES": json.dumps(
             sorted(
@@ -298,61 +302,119 @@ def fetch(request, policy, context, workspace, *, token=None, client=None):
     return value
 
 
+MEMBER_REJECTION_PREFIX = "MEMBER-POLICY-REJECTED "
+# The identity trailers the merge queue writes on each member's squash commit (TauCetiWorker
+# `tauceti_queue/chain.py`). A repair appends its explanation after them, so any line may hold them.
+CHAIN_TRAILER = re.compile(r"^(Source-PR|Accepted-Head):[ \t]+(\S.*?)\s*$", re.M)
+
+
+def batch_commits(git, base, head, members):
+    """Each member's own commit in the candidate's chain, as `{member: (commit, parent)}`.
+
+    The queue builds a batch as one single-parent squash commit per member on the base, each naming
+    its member in `Source-PR` (ending in `#<number>` on every forge) and `Accepted-Head` trailers that
+    survive every rebase and repair. A member is mapped only when exactly one first-parent commit
+    between the base and the head carries exactly one value of each trailer, matching its accepted
+    head and number, and that commit has a single parent. Anything else (no trailers, a duplicate, a
+    merge commit) leaves the member unmapped, and the caller measures its accepted head instead.
+    """
+    raw = git.run("log", "-z", "--first-parent", "--format=%H %P%n%B", f"{base}..{head}", "--").stdout
+    found = {}
+    for entry in raw.decode("utf-8", "replace").split("\0"):
+        identity, _, message = entry.strip("\n").partition("\n")
+        if not identity:
+            continue
+        commit, *parents = identity.split()
+        values = {"Source-PR": set(), "Accepted-Head": set()}
+        for token, value in CHAIN_TRAILER.findall(message):
+            values[token].add(value)
+        if len(values["Source-PR"]) != 1 or len(values["Accepted-Head"]) != 1:
+            continue
+        (source_pr,), (accepted,) = values["Source-PR"], values["Accepted-Head"]
+        number = source_pr.rpartition("#")[2]
+        if number.isdigit():
+            found.setdefault((accepted, int(number)), []).append((commit, parents))
+    mapped = {}
+    for member in members:
+        commits = found.get((member.head, member.pr), [])
+        same = sum(1 for other in members if (other.head, other.pr) == (member.head, member.pr))
+        if same == 1 and len(commits) == 1 and len(commits[0][1]) == 1:
+            mapped[member] = (ci_git.sha(commits[0][0]), ci_git.sha(commits[0][1][0]))
+    return mapped
+
+
 def member_size_policy(request, policy, context, workspace):
-    """Apply existing per-PR caps to exact retained members using only local Git objects."""
+    """Apply the shared PR-level diff guards to each member's diff as it lands, from local Git objects.
+
+    A member is measured by its own commit in the candidate's chain against that commit's parent,
+    which is exactly what landing the batch adds for it. A repair inside the batch, such as splitting a
+    too-long new file, therefore counts. A member whose chain commit cannot be identified (see
+    `batch_commits`) is measured by its accepted head against its merge base with the candidate base.
+
+    Each rejected member is also named in `rejected_members` and on one
+    `MEMBER-POLICY-REJECTED {json}` line, with its accepted head and, when measured in the chain,
+    `batch_commit` and `parent`, so the queue can repair or withdraw exactly that member.
+    """
     check_workflow_context(request, policy, context)
     objects = Path(workspace) / ci_checkout.STORE / "objects"
     values = {"SOURCE_SIZE_POLICY_COMPLETE": "1"}
+    rejected = []
+
+    def reject(member, reasons, size=None, chained=None):
+        source = member.source or policy.source
+        record = {
+            "source_pr": member.pr,
+            "source": source.record(),
+            "source_forge": source.repository.forge.key,
+            "head": member.head,
+            "measured": "batch-commit" if chained else "accepted-head",
+            "reasons": reasons,
+        }
+        if chained:
+            record.update(batch_commit=chained[0], parent=chained[1])
+        if size is not None:
+            record.update(additions=size["additions"], deletions=size["deletions"], files=size["files"])
+        rejected.append(record)
+        print(MEMBER_REJECTION_PREFIX + json.dumps(record, sort_keys=True), flush=True)
+
     with tempfile.TemporaryDirectory(prefix="source-member-policy-") as home:
         git = ci_git.Git(Path(home) / "reader.git", home, objects=objects)
+        git.commit(request.head)
+        git.commit(request.base)
+        chained = batch_commits(git, request.base, request.head, request.accepted_members)
         for member in request.accepted_members:
             git.commit(member.head)
-            comparison = git.run("merge-base", "--all", request.base, member.head, check=False)
-            if comparison.returncode == 1 and not comparison.stdout:
-                values["SOURCE_MEMBER_POLICY_REJECTED"] = "1"
+            if member in chained:
+                commit, parent = chained[member]
+            else:
+                comparison = git.run("merge-base", "--all", request.base, member.head, check=False)
+                if comparison.returncode == 1 and not comparison.stdout:
+                    values["SOURCE_MEMBER_POLICY_REJECTED"] = "1"
+                    reject(member, ["no merge base with the candidate base"])
+                    continue
+                comparison.check_returncode()
+                bases = comparison.stdout.decode().splitlines()
+                if len(bases) != 1:
+                    values["SOURCE_MEMBER_POLICY_REJECTED"] = "1"
+                    reject(member, ["no unique merge base with the candidate base"])
+                    continue
+                parent, commit = bases[0], member.head
+            # The same shared guards as PR CI, `lake lint` and queue admission. Path scope
+            # keeps its own human-merge route, so only the size guards apply here.
+            try:
+                size = ci_git.pr_guards(git, parent, commit, scope=False)
+            except ValueError:
+                values["DIFF_UNKNOWN"] = "1"
+                values["SOURCE_SIZE_POLICY_COMPLETE"] = "0"
                 continue
-            comparison.check_returncode()
-            bases = comparison.stdout.decode().splitlines()
-            if len(bases) != 1:
-                values["SOURCE_MEMBER_POLICY_REJECTED"] = "1"
-                continue
-            rows = git.run(
-                "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--numstat", "-z", bases[0], member.head, "--"
-            ).stdout.split(b"\0")
-            changed = {}
-            for row in rows:
-                if not row:
-                    continue
-                adds, deletes, name = row.split(b"\t", 2)
-                if adds == deletes == b"-":
-                    # Preserve GitHub's zero line counts for binary files;
-                    # they still count toward file limits and path scope.
-                    changed[name] = (0, 0)
-                    continue
-                if not adds.isdigit() or not deletes.isdigit():
-                    values["DIFF_UNKNOWN"] = "1"
-                    values["SOURCE_SIZE_POLICY_COMPLETE"] = "0"
-                    continue
-                changed[name] = (int(adds), int(deletes))
-            pins = bool({b"lake-manifest.json", b"lean-toolchain"} & changed.keys())
-            if len(changed) > 2000 or (
-                not pins and (sum(a for a, _ in changed.values()) > 2000 or sum(d for _, d in changed.values()) > 2000)
-            ):
+            if size["too_large"]:
                 values["TOO_LARGE"] = "1"
-            added = git.run(
-                "diff",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--no-renames",
-                "--name-only",
-                "--diff-filter=A",
-                "-z",
-                bases[0],
-                member.head,
-                "--",
-            ).stdout.split(b"\0")
-            if any(name.endswith(b".lean") and changed.get(name, (0, 0))[0] > 1000 for name in added if name):
+            if size["new_files_too_long"]:
                 values["NEWFILE_TOO_LONG"] = "1"
+            if size["violations"]:
+                reject(member, size["violations"], size, chained.get(member))
+    if rejected:
+        values["rejected_members"] = rejected
     return values
 
 
@@ -432,6 +494,10 @@ def toolchain_pin(request, policy, context, store, *, token=None, client=None):
 def native_lint_policy(request, policy, context, *, client):
     """Collect native metadata before any dependency executable runs on the job."""
     check_workflow_context(request, policy, context)
+    if request.lane == PR_LANE:
+        # Per-PR evidence is shared by every PR at the same head, so it must
+        # not depend on any one PR's branch name or labels.
+        return False
     if len(request.accepted_members) > MAX_MEMBERS or any(
         member.source is not None and member.source != policy.source for member in request.accepted_members
     ):
@@ -575,7 +641,7 @@ def publication_execution(run, builder, publisher):
 
 def publication_verdict(request, policy, context, reader, *, clock=time.monotonic, sleep=time.sleep):
     """Require this attempt's isolated publisher and its exact-map confirmation."""
-    if not policy.require_publication:
+    if not requires_publication(request, policy):
         return "not_required"
     start = clock()
     acquired = False
@@ -685,6 +751,7 @@ def finalize(request, policy, context, evidence, *, reader=None):
         "size_complete",
         "infrastructure",
         "build_outcome",
+        "source_check",
     }:
         raise ValueError("invalid trusted build evidence")
     tested_commit, tested_tree = evidence.get("tested_commit"), evidence.get("tested_tree")
@@ -692,13 +759,18 @@ def finalize(request, policy, context, evidence, *, reader=None):
     if not identity:
         tested_commit = tested_tree = None
     state = evidence.get("build_state")
+    # A pre-build source check that rejected the tested sources decides the build as
+    # failed even though the build step itself was skipped.
+    decided = evidence.get("build_outcome") in {"success", "failure"} or (
+        evidence.get("source_check") == "failure" and state == "failure"
+    )
     build = (
         state
         if identity
         and state in {"success", "failure"}
         and evidence.get("job_result") in {"success", "failure"}
         and evidence.get("infrastructure") != "1"
-        and evidence.get("build_outcome") in {"success", "failure"}
+        and decided
         else "infrastructure"
     )
     if build == "success" and evidence.get("job_result") != "success":
@@ -709,7 +781,7 @@ def finalize(request, policy, context, evidence, *, reader=None):
         "bump_guard": evidence.get("bump_guard")
         if evidence.get("bump_guard") in {"success", "failure"}
         else "infrastructure",
-        "publication": "infrastructure" if policy.require_publication else "not_required",
+        "publication": "infrastructure" if requires_publication(request, policy) else "not_required",
     }
     if evidence.get("scope_rejected") == "1" and evidence.get("scope") == "failure":
         verdicts["scope"] = "failure"
@@ -718,7 +790,7 @@ def finalize(request, policy, context, evidence, *, reader=None):
     if evidence.get("pins_known") != "1" or evidence.get("bump_complete") != "1":
         verdicts["bump_guard"] = "infrastructure"
     if build == "success":
-        if policy.require_publication and evidence.get("publication_staged") != "true":
+        if requires_publication(request, policy) and evidence.get("publication_staged") != "true":
             verdicts["publication"] = "infrastructure"
         else:
             try:
@@ -740,6 +812,7 @@ def context_from_environment(env):
         "workflow_ref": "GITHUB_WORKFLOW_REF",
         "harness_repository": "CI_SOURCE_HARNESS_REPOSITORY",
         "harness_sha": "CI_SOURCE_HARNESS_SHA",
+        "harness_ref": "CI_SOURCE_HARNESS_REF",
         "harness_file": "CI_SOURCE_HARNESS_FILE",
     }
     context = {key: env.get(name) for key, name in names.items()}
@@ -929,6 +1002,8 @@ def main(argv=None):
         with open(args.github_env, "a") as output:
             if args.command in {"bootstrap", "lint-scope", "member-policy", "bump-policy"}:
                 for key, value in result.items():
+                    if args.command == "member-policy" and key == "rejected_members":
+                        continue  # machine-readable evidence stays in the output file and log lines
                     if not isinstance(value, str) or "\n" in value or "\r" in value:
                         raise ValueError("invalid workflow environment setting")
                     output.write(f"{key}={value}\n")

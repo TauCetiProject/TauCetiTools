@@ -17,6 +17,7 @@ import re
 import random
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 
@@ -42,11 +43,27 @@ class APIError(RuntimeError):
 class Deferred(RuntimeError):
     """Stop this credential's requests; a later reconciliation must retry."""
 
-    def __init__(self, credential, until):
+    def __init__(self, credential, until, resource=None):
         self.until = until
+        self.credential, self.resource = credential, resource
         mark_quota_unavailable()
         reset = dt.datetime.fromtimestamp(until, dt.timezone.utc).isoformat()
         super().__init__(f"GitHub {credential} rate limited; deferred until {reset}")
+
+
+class QuotaState:
+    """Quota observations shared by clients in one process, without sharing tokens."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.blocked = {}
+        self.observed = {}
+
+
+def cached_quota_refusal(message):
+    """Recognize gh's cached refusal, which has no HTTP response attached."""
+    return bool(re.fullmatch(r"(?:gh: )?API rate limit already exceeded for installation ID \d+\.?",
+                             message.strip(), re.IGNORECASE))
 
 
 def response(raw):
@@ -119,7 +136,7 @@ class GitHub:
     GraphQL costs and observed quota headers to stderr and the Actions summary.
     """
 
-    def __init__(self, *, max_wait=180, jitter=0, source_status_target=None):
+    def __init__(self, *, max_wait=180, jitter=0, source_status_target=None, quota_state=None):
         # Only the isolated finalizer opts into this exact execution-SHA write.
         # The candidate build keeps the default read-only source guard.
         if source_status_target is not None and (
@@ -133,7 +150,8 @@ class GitHub:
         self.waited = 0
         self.jitter = jitter
         self.cached = {}
-        self.blocked = {}
+        self.quota_state = quota_state or QuotaState()
+        self.blocked = self.quota_state.blocked
         self.stats = {}
         self.known_labels = set()
         self.last_write = None
@@ -162,6 +180,9 @@ class GitHub:
             resource = "other"
         quota = {k: headers.get(f"x-ratelimit-{k}") if str(headers.get(f"x-ratelimit-{k}", "")).isdigit()
                  else None for k in ("limit", "remaining", "reset")}
+        counts = stat.setdefault('resources', {}).setdefault(resource, dict(requests=0, reads=0, writes=0))
+        counts['requests'] += 1
+        counts['reads' if read else 'writes'] += 1
         path = safe_path(path)
         stat["buckets"][resource] = quota
         # Only fixed API paths and numeric quota values are logged, never tokens or PR bodies.
@@ -201,8 +222,13 @@ class GitHub:
         if source_candidate:
             env["GH_HOST"] = "github.com"
         now = time.time()
-        if self.blocked.get(credential, 0) > now:
-            raise Deferred(credential, self.blocked[credential])
+        resource = "graphql" if path.lstrip("/") == "graphql" else (
+            "search" if path.lstrip("/").startswith("search/") else "core")
+        quota_key = (credential, resource)
+        with self.quota_state.lock:
+            until = self.blocked.get(quota_key, 0)
+        if until > now:
+            raise Deferred(credential, until, resource)
         renewed = False
         for attempt in range(3):
             # GitHub recommends at least a second between mutative requests.
@@ -235,13 +261,34 @@ class GitHub:
                     if secret:
                         diagnostic = diagnostic.replace(secret, "[redacted]")
                 status, headers, payload = 0, {}, {"message": diagnostic[:300]}
+                if cached_quota_refusal(diagnostic):
+                    status = 403
+            # A missing header must not misattribute a GraphQL request to REST.
+            headers.setdefault("x-ratelimit-resource", resource)
+            with self.quota_state.lock:
+                previous = self.quota_state.observed.get(quota_key, {})
+                if status == 403 and isinstance(payload, dict) and cached_quota_refusal(str(payload.get("message", ""))):
+                    if previous.get("x-ratelimit-reset"):
+                        headers["x-ratelimit-reset"] = previous["x-ratelimit-reset"]
+                self.quota_state.observed[quota_key] = {**previous, **headers}
             self.last_headers = headers
-            self._record(credential, method, path, status, headers, read)
+            rate = {}
             if path == "graphql" and isinstance(payload, dict):
                 rate = (payload.get("data") or {}).get("rateLimit") or {}
-                if "cost" in rate:
-                    stat = self.stats[credential]
-                    stat["graphql_points"] = stat.get("graphql_points", 0) + rate["cost"]
+                if isinstance(rate.get('remaining'), int):
+                    headers['x-ratelimit-remaining'] = str(rate['remaining'])
+                if rate.get('resetAt'):
+                    try:
+                        headers['x-ratelimit-reset'] = str(int(dt.datetime.fromisoformat(
+                            rate['resetAt'].replace('Z', '+00:00')).timestamp()))
+                    except (ValueError, TypeError, OverflowError):
+                        pass
+                with self.quota_state.lock:
+                    self.quota_state.observed[quota_key].update(headers)
+            self._record(credential, method, path, status, headers, read)
+            if "cost" in rate:
+                stat = self.stats[credential]
+                stat["graphql_points"] = stat.get("graphql_points", 0) + rate["cost"]
             # GraphQL can refuse a query with HTTP 200 and an errors array.
             if path == "graphql" and isinstance(payload, dict) and payload.get("errors"):
                 message = "; ".join(item.get("message", "GraphQL error") for item in payload["errors"])
@@ -258,6 +305,15 @@ class GitHub:
             if status == 304 and cached:
                 return cached[1]
             if 200 <= status < 300 and result.returncode == 0:
+                if headers.get('x-ratelimit-remaining') == '0':
+                    try:
+                        reset = float(headers.get('x-ratelimit-reset', ''))
+                        if not math.isfinite(reset) or reset <= time.time():
+                            reset = time.time()+3600
+                    except (ValueError, OverflowError):
+                        reset = time.time()+3600
+                    with self.quota_state.lock:
+                        self.blocked[quota_key] = max(self.blocked.get(quota_key, 0), reset+5)
                 if conditional and method == "GET" and headers.get("etag"):
                     self.cached[cache_key] = (headers["etag"], payload)
                 return payload
@@ -300,7 +356,7 @@ class GitHub:
                     # Missing reset data must not license a fast retry against an exhausted quota.
                     try:
                         reset = float(headers.get("x-ratelimit-reset") or now + 3600)
-                        if not math.isfinite(reset):
+                        if not math.isfinite(reset) or reset <= now:
                             reset = now + 3600
                     except (ValueError, OverflowError):
                         reset = now + 3600
@@ -310,8 +366,9 @@ class GitHub:
                 delay = math.ceil(delay + random.uniform(0, self.jitter))
                 until = now + delay
                 if attempt == 2 or self.waited + delay > self.max_wait:
-                    self.blocked[credential] = until
-                    raise Deferred(credential, until)
+                    with self.quota_state.lock:
+                        self.blocked[quota_key] = max(self.blocked.get(quota_key, 0), until)
+                    raise Deferred(credential, until, resource)
                 print(f"github-api: {credential} waiting {delay}s before retry", file=sys.stderr)
                 time.sleep(delay)
                 self.waited += delay
