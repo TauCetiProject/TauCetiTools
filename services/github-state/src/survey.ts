@@ -33,14 +33,17 @@ export function issueFragment(c:any): any {
   const body=c.body || '',meta=matches(spec.meta_pattern,body);
   const parsed=meta.length?parse(meta[meta.length-1][1]):null;
   const rebase=spec.rebase_authors.includes(c.user?.login) && body.startsWith('Merge-queue recovery for head `')?body.split(/\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]/).flatMap((line:string)=>line.match(/^<!--tauceti-rebase:v1 ([a-f0-9]{40})-->$/)?.slice(1) || []):[];
-  return {id:String(c.id),updated:c.updated_at || '',meta:body.includes(spec.scoreboard)?compactMeta(parsed):null,rebase_heads:rebase};
+  return {id:String(c.id),updated:c.updated_at || c.created_at || '',meta:body.includes(spec.scoreboard)?compactMeta(parsed):null,rebase_heads:rebase};
 }
 export function reviewFragment(c:any): any {
   const body=c.body || '',root=c.in_reply_to_id==null?matches(spec.rubric_pattern,body)[0]?.[1]:null;
   return {id:String(c.id),parent:c.in_reply_to_id==null?null:String(c.in_reply_to_id),root:root || null,reply:!body.includes('tauceti-reply:') && !body.includes('tauceti-rubric:'),created_at:c.created_at ?? null};
 }
+const commentId=(c:any)=>/^[0-9]+$/.test(String(c.id))?BigInt(c.id):-1n;
 export function summarizeFragments(issues:any[],reviews:any[]): any {
-  const sorted=[...issues].sort((a,b)=>a.updated<b.updated?1:a.updated>b.updated?-1:0);
+  // Newest first: the last edit, then the larger comment id, then the later input position,
+  // exactly as survey_facts.scoreboard and the queue's admission rule order them.
+  const sorted=issues.map((c,index)=>({c,index})).sort((a,b)=>a.c.updated<b.c.updated?1:a.c.updated>b.c.updated?-1:commentId(b.c)<commentId(a.c)?-1:commentId(b.c)>commentId(a.c)?1:b.index-a.index).map(x=>x.c);
   const meta=sorted.find(c=>c.meta!==null)?.meta ?? null;
   const roots=new Map(reviews.filter(c=>c.root).map(c=>[c.id,c.root]));
   let contest:any=null;
