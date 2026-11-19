@@ -46,30 +46,77 @@ class Progress(unittest.TestCase):
             path = Path(directory)
             (path / "phases.tsv").write_text("cache-unpack\t1\nbuild\t2\n")
             log = path / "lake-build.log"
-            log.write_text("✔ [100/1000] Replayed Mathlib.Foo\n")
+            # Lake numbers a finished job's line by the jobs finished before it.
+            log.write_text("✔ [99/1000] Replayed Mathlib.Foo\n")
             counters = progress.Counters(path)
             first = counters.sample(clock=lambda: 1000)
             self.assertEqual((first["completed_tasks"], first["total_tasks"]), (100, 1000))
             self.assertIsNone(first["tasks_per_minute"])
             with log.open("a") as stream:
                 stream.write("  info: [999/1000] candidate text indented under a job is ignored\n")
-                stream.write("✔ [400/1000] Built TauCeti.Example (1s)\n")
+                stream.write("⚠ [399/1000] Built TauCeti.Example (1s)\n")
             second = counters.sample(clock=lambda: 1120)
             self.assertEqual(second["completed_tasks"], 400)
             self.assertEqual(second["tasks_per_minute"], 150.0)
             with log.open("a") as stream:
-                stream.write("✔ [2000/1000] Built TauCeti.Impossible\nBuild completed successfully (1000 jobs).\n")
+                stream.write("✔ [1000/1000] Built TauCeti.Impossible\nBuild completed successfully (1000 jobs).\n")
             last = counters.sample(clock=lambda: 1240)
             self.assertEqual((last["completed_tasks"], last["total_tasks"]), (1000, 1000))
-            # Only samples from the last ten minutes count towards the rate.
-            later = counters.sample(clock=lambda: 1240 + 900)
-            self.assertEqual(later["tasks_per_minute"], 0.0)
+            # Only samples from the last ten minutes count towards the rate: none after a gap.
+            self.assertIsNone(counters.sample(clock=lambda: 1240 + 900)["tasks_per_minute"])
+            self.assertEqual(counters.sample(clock=lambda: 1240 + 990)["tasks_per_minute"], 0.0)
+
+    def test_a_replaced_log_starts_a_new_rate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "phases.tsv").write_text("build\t1\n")
+            log = path / "lake-build.log"
+            log.write_text("✔ [9/1000] Built TauCeti.A\n")
+            counters = progress.Counters(path)
+            counters.sample(clock=lambda: 100)
+            replacement = path / "replacement.log"
+            replacement.write_text("✔ [499/1000] Built TauCeti.B\n")
+            os.replace(replacement, log)
+            value = counters.sample(clock=lambda: 200)
+            self.assertEqual(value["completed_tasks"], 500)
+            self.assertIsNone(value["tasks_per_minute"])
+
+    def test_a_log_backlog_is_read_before_any_rate_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "phases.tsv").write_text("build\t1\n")
+            log = path / "lake-build.log"
+            log.write_text("✔ [0/200000] Built TauCeti.A\n")
+            counters = progress.Counters(path)
+            counters.sample(clock=lambda: 100)
+            line = "✔ [{}/200000] Built TauCeti.Module{} (1s)" + " " * 60 + "\n"
+            with log.open("a") as stream:
+                stream.write("".join(line.format(i, i) for i in range(1, 200000)))
+            self.assertGreater(log.stat().st_size, progress.SAMPLE_BUDGET)
+            behind = counters.sample(clock=lambda: 200)
+            self.assertLess(behind["completed_tasks"], 200000)
+            self.assertIsNone(behind["tasks_per_minute"])
+            caught_up = counters.sample(clock=lambda: 215)
+            self.assertEqual(caught_up["completed_tasks"], 200000)
+            self.assertIsNotNone(caught_up["tasks_per_minute"])
+
+    def test_each_sandboxed_step_continues_the_job_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "session.json"
+            session, sequence = progress.load_session(state)
+            self.assertEqual(sequence, 0)
+            progress.save_session(state, session, 7)
+            self.assertEqual(progress.load_session(state), (session, 7))
+            for bad in ("{", '{"session": "x", "sequence": 1}', '{"session": "%s", "sequence": -1}' % session):
+                state.write_text(bad)
+                self.assertEqual(progress.load_session(state)[1], 0)
+            self.assertEqual(progress.load_session(None)[1], 0)
 
     def test_no_counter_and_no_rate_outside_the_build(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
             (path / "phases.tsv").write_text("build\t1\naudit-axioms\t2\n")
-            (path / "lake-build.log").write_text("✔ [5/9] Built TauCeti.Example (1s)\n")
+            (path / "lake-build.log").write_text("✔ [4/9] Built TauCeti.Example (1s)\n")
             counters = progress.Counters(path)
             counters.sample(clock=lambda: 100)
             value = counters.sample(clock=lambda: 400)
