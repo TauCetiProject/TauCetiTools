@@ -225,6 +225,30 @@ class DuplicateDeclarationsTest(unittest.TestCase):
             "TauCeti.B": "module\npublic def Collision := 1\n",
         }), first="Dependency")
 
+    def test_failed_import_reports_every_collision(self):
+        # Lean's importer stops at the first incompatible constant; every collision is still
+        # reported, one parseable line each, and the audit fails (a dependency bump, batch 459).
+        for full in (False, True):
+            with self.subTest(full=full):
+                result = self.fixture({
+                    "Dependency": "module\npublic def First := 1\npublic def Second := 2\n"
+                                  "public def Third := 3\n",
+                    "TauCeti.A": "module\npublic import Dependency\n",
+                    "TauCeti.B": "module\npublic def First := true\n",
+                    "TauCeti.C": "module\npublic def Second := true\n"
+                                 "public structure Third where\n  x : Nat\n",
+                }, full=full)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("environment already contains", result.stderr)
+                lines = [line for line in result.stderr.splitlines()
+                         if line.startswith("duplicate-declarations: ")]
+                self.assertEqual(sorted(lines), [
+                    "duplicate-declarations: First is declared in both TauCeti.B and Dependency",
+                    "duplicate-declarations: Second is declared in both TauCeti.C and Dependency",
+                    "duplicate-declarations: Third is declared in both TauCeti.C and Dependency",
+                ])
+                self.assertNotIn("phase audit-axioms", result.stdout)
+
     def test_dependency_only_collision_is_out_of_scope(self):
         result = self.fixture({
             "DependencyA": "module\npublic theorem Collision : True := True.intro\n",
