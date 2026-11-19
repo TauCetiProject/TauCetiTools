@@ -79,14 +79,23 @@ class WarmTreeCleanup(unittest.TestCase):
         self.assertFalse(warm.keep_only_outputs(self.lake))
 
     def test_unusable_modes_refuse_the_tree(self):
+        (self.lake / "build/lib/lean/TauCeti/A.trace").write_text("{}")
+        (self.lake / "cache/outputs/TauCeti").mkdir(parents=True)
+        (self.lake / "cache/outputs/TauCeti/0123.json").write_text("{}")
         for path, mode in ((self.lake / "build/lib", 0o000), (self.lake / "cache/artifacts", 0o500),
-                           (self.lake / "build/lib/lean/TauCeti/A.olean", 0o000)):
+                           (self.lake / "build/lib/lean/TauCeti/A.olean", 0o000),
+                           (self.lake / "build/lib/lean/TauCeti/A.trace", 0o444),
+                           (self.lake / "cache/outputs/TauCeti/0123.json", 0o444)):
             with self.subTest(path=path.name):
                 path.chmod(mode)
                 try:
                     self.assertFalse(warm.keep_only_outputs(self.lake))
                 finally:
                     path.chmod(0o755)
+        # Lake's own read-only artifacts are fine.
+        (self.lake / "build/lib/lean/TauCeti/A.olean").chmod(0o444)
+        (self.lake / "cache/artifacts/0123.art").chmod(0o444)
+        self.assertTrue(warm.keep_only_outputs(self.lake))
 
     def test_merge_prunes_a_kept_directory_where_the_fresh_tree_has_a_file(self):
         target = self.lake.parent / "fresh"

@@ -82,11 +82,13 @@ def raise_error(error):
 def ordinary_tree(root):
     """Only usable directories and readable regular files, checked without following links.
 
-    A previous sandbox can also leave modes Lake cannot use, so those are refused too.
+    A previous sandbox can also leave modes Lake cannot use, so those are refused too. Lake
+    makes its own artifacts read-only, but rewrites traces, hashes and output mappings in place.
     """
     if not stat.S_ISDIR(os.lstat(root).st_mode) or not os.access(root, os.R_OK | os.W_OK | os.X_OK):
         return False
     for directory, names, files in os.walk(root, onerror=raise_error):
+        mapping = os.sep + "outputs" in directory[len(str(root)):]
         for name in names + files:
             path = os.path.join(directory, name)
             mode = os.lstat(path).st_mode
@@ -94,6 +96,8 @@ def ordinary_tree(root):
                 if not os.access(path, os.R_OK | os.W_OK | os.X_OK):
                     return False
             elif not stat.S_ISREG(mode) or not os.access(path, os.R_OK):
+                return False
+            elif (mapping or name.endswith((".trace", ".hash"))) and not os.access(path, os.W_OK):
                 return False
     return True
 
