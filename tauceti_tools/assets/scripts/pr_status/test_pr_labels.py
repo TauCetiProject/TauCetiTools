@@ -456,7 +456,7 @@ class ScopeFailure(unittest.TestCase):
         return calls
 
     STATUS = {"category": "ci-failed", "head": "a" * 40, "reason": "PR-level diff guards failed: x",
-              "labels": [], "scope_failure": "diff exceeds 2000 added/removed lines or 2000 files"}
+              "labels": [], "scope_failure": "diff exceeds 3000 added lines, 2000 removed lines or 2000 files"}
 
     def test_posts_with_the_workflow_status_credential(self):
         calls = self.reconcile(self.STATUS, {"SELF_TESTED_WRITE_TOKEN": "workflow", "GITHUB_TOKEN": "app",

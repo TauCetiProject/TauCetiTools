@@ -39,10 +39,10 @@ def diff_engine():
 
 # PR CI's `scope` descriptions for the PR-level diff guards (.github/workflows/pr-build.yml), in
 # its order. A self-tested PR skips PR CI, so these are posted for it here, word for word.
-SCOPE_TOO_LARGE = ("diff exceeds 2000 added/removed lines or 2000 files \u2014 split into smaller PRs "
-                   "to keep review manageable")
+SCOPE_TOO_LARGE = ("diff exceeds 3000 added lines, 2000 removed lines or 2000 files \u2014 split into smaller "
+                   "PRs to keep review manageable")
 SCOPE_UNMEASURED = "could not measure the PR diff from local Git objects \u2014 re-run pr-build"
-SCOPE_NEW_FILE = "a newly added .lean file exceeds 1000 lines \u2014 split it (existing files may grow to 1500)"
+SCOPE_NEW_FILE = "a newly added .lean file exceeds 1250 lines \u2014 split it (existing files may grow to 1500)"
 # The queue's sentence for an unmeasurable diff (TauCetiWorker tauceti_queue/diff_guard.py).
 UNMEASURABLE = "could not measure the PR's diff from local Git objects"
 

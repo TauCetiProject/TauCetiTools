@@ -373,11 +373,11 @@ class SelfTestedDiffGuards(unittest.TestCase):
 
     def test_measure_is_the_shared_pr_guards_on_fetched_objects(self):
         import tempfile
-        cases = (({f"TauCeti/Part{i}.lean": 700 for i in range(3)}, readiness.SCOPE_TOO_LARGE,
-                  "too large to review: +2100 / -0 lines across 3 files"),
-                 ({"TauCeti/Long.lean": 1001}, readiness.SCOPE_NEW_FILE,
-                  "TauCeti/Long.lean: new Lean files must be at most 1000 lines (found 1001)"),
-                 ({"TauCeti/Short.lean": 1000}, "", None))
+        cases = (({f"TauCeti/Part{i}.lean": 700 for i in range(5)}, readiness.SCOPE_TOO_LARGE,
+                  "too large to review: +3500 / -0 lines across 5 files"),
+                 ({"TauCeti/Long.lean": 1251}, readiness.SCOPE_NEW_FILE,
+                  "TauCeti/Long.lean: new Lean files must be at most 1250 lines (found 1251)"),
+                 ({"TauCeti/Short.lean": 1250}, "", None))
         for files, scope, sentence in cases:
             with tempfile.TemporaryDirectory() as tmp:
                 remote, base, head = guard_repository(tmp, files)
@@ -428,7 +428,7 @@ class SelfTestedDiffGuards(unittest.TestCase):
             return readiness.assess(1, repo="owner/repo", now=NOW), measure
 
     def test_oversized_self_tested_head_is_a_failed_build_with_a_failed_scope(self):
-        sentence = "too large to review: +2992 / -0 lines across 5 files"
+        sentence = "too large to review: +3992 / -0 lines across 5 files"
         for comments in ([board()], []):
             result, measure = self.assess(([sentence], readiness.SCOPE_TOO_LARGE), comments=comments)
             measure.assert_called_once_with("owner/repo", MERGE_BASE, HEAD)
