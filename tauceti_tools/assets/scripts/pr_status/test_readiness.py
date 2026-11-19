@@ -400,7 +400,10 @@ class SelfTestedDiffGuards(unittest.TestCase):
 
     def test_descriptions_are_pr_ci_word_for_word(self):
         from pathlib import Path
-        workflow = (Path(readiness.__file__).resolve().parents[4] / ".github/workflows/pr-build.yml")
+        # TauCetiTools' own workflow here; TauCeti's when the scripts are materialized there.
+        workflow = next(directory / ".github/workflows/pr-build.yml"
+                        for directory in Path(readiness.__file__).resolve().parents
+                        if (directory / ".github/workflows/pr-build.yml").is_file())
         text = workflow.read_text()
         for description, variable in ((readiness.SCOPE_TOO_LARGE, "TOO_LARGE"),
                                       (readiness.SCOPE_UNMEASURED, "DIFF_UNKNOWN"),
@@ -433,6 +436,24 @@ class SelfTestedDiffGuards(unittest.TestCase):
             self.assertEqual(result["category"], "ci-failed")
             self.assertEqual(result["reason"], "PR-level diff guards failed: " + sentence)
             self.assertEqual(result["scope_failure"], readiness.SCOPE_TOO_LARGE)
+
+    def test_a_head_that_moves_during_assessment_gets_no_status(self):
+        current = copy.deepcopy(PR)
+        current["labels"] = [{"name": "self-tested"}]
+        current["head"]["ref"] = "math"
+        moved = copy.deepcopy(current)
+        moved["head"]["sha"] = "moved"
+        fake = MagicMock()
+        fake.git_diff.return_value = PATHS
+        import self_tested
+        with patch.object(readiness, "evidence", side_effect=[(current, [board()], {}), (moved, [], {})]), \
+             patch.object(readiness.core, "gh_api", return_value=MERGE_BASE), \
+             patch.object(readiness, "diff_engine", return_value=fake), \
+             patch.object(readiness, "diff_guards", return_value=(["too large"], readiness.SCOPE_TOO_LARGE)), \
+             patch.object(self_tested, "reconcile", return_value=True):
+            result = readiness.assess(1, repo="owner/repo", now=NOW)
+        self.assertEqual((result["head"], result["category"]), ("moved", "awaiting-CI"))
+        self.assertNotIn("scope_failure", result)
 
     def test_long_new_file_is_a_failed_merge_check(self):
         result, _ = self.assess((["TauCeti/Long.lean: new Lean files ..."], readiness.SCOPE_NEW_FILE))

@@ -310,6 +310,7 @@ def assess(pr, repo=None, now=None):
                     result["scope_failure"] = scope
     after, _, _ = evidence(number, repo, comments=False)
     if routing_state(after) != routing_state(current):
+        result.pop("scope_failure", None)  # Measured for the old head; never post it on the new one.
         result.update(eligible=False, category="awaiting-CI" if after["state"] == "open" else None,
                       reason="PR changed while collecting merge evidence; awaiting reconciliation",
                       head=after["head"]["sha"])
