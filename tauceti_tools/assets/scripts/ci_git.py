@@ -279,9 +279,10 @@ def lint_metadata(checkout, base, head):
 
 # Per-PR review caps. PR CI and the staging candidate's retained-member policy
 # both apply them through `review_size`, so the two checks cannot disagree.
-REVIEW_LINE_CAP = 2000
+REVIEW_ADDED_LINE_CAP = 3000
+REVIEW_REMOVED_LINE_CAP = 2000
 REVIEW_FILE_CAP = 2000
-NEW_FILE_LINE_CAP = 1000
+NEW_FILE_LINE_CAP = 1250
 
 
 def _diff_records(raw, stat_field):
@@ -363,7 +364,7 @@ def review_size(git, base, head, *, large_refactor=False):
             raise ValueError("inconsistent Git added-file listing")
         if names[0].endswith(b".lean"):
             new_lean_files.append((os.fsdecode(names[0]), added_lines[names[0]]))
-    lines_capped = additions > REVIEW_LINE_CAP or deletions > REVIEW_LINE_CAP
+    lines_capped = additions > REVIEW_ADDED_LINE_CAP or deletions > REVIEW_REMOVED_LINE_CAP
     return {
         "additions": additions,
         "deletions": deletions,
@@ -483,7 +484,7 @@ def guard_violations(result):
     if result["too_large"]:
         messages.append(
             f"too large to review: +{result['additions']} / -{result['deletions']} lines across "
-            f"{result['files']} files (cap: {REVIEW_LINE_CAP} added lines, {REVIEW_LINE_CAP} removed "
+            f"{result['files']} files (cap: {REVIEW_ADDED_LINE_CAP} added lines, {REVIEW_REMOVED_LINE_CAP} removed "
             f"lines, {REVIEW_FILE_CAP} files; Lake-pin bumps are exempt from the line caps). "
             "Split it into smaller PRs, one topic each."
         )
