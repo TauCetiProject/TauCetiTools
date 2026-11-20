@@ -64,7 +64,7 @@ class BulkUnpackTests(unittest.TestCase):
         # Native Lake's final -o build must reuse the downloaded archives instead of repacking.
         for record in records:
             module = "Fixture0" if record["hash"] == "0123456789abcdef" else "Fixture1"
-            archive = self.root / ".lake/build/lib/lean/TauCeti" / (module + ".ltar")
+            archive = self.root / ".lake/build/ir/TauCeti" / (module + ".ltar")
             self.assertTrue(os.path.samefile(archive, record["file"]))
         self.assertFalse(self.record.exists())
 
@@ -241,7 +241,7 @@ class BulkUnpackTests(unittest.TestCase):
         records = bulk.selected_records(self.root)
         with tempfile.TemporaryDirectory(dir=self.root / ".lake") as temporary:
             with patch.object(bulk, "extract_records", side_effect=self.extracted_fixture):
-                combined, satisfied, _ = bulk.assemble(self.root, records, Path(temporary))
+                combined, satisfied, _, _ = bulk.assemble(self.root, records, Path(temporary))
             self.record.write_text("changed")
             with self.assertRaisesRegex(ValueError, "changed during"):
                 bulk.publish(self.root, combined, satisfied)
@@ -261,6 +261,158 @@ class BulkUnpackTests(unittest.TestCase):
         self.assertTrue((self.root / ".lake/build/lib/lean/TauCeti/Fixture.olean").is_file())
 
 
+    EXTENSIONS = ("olean", "olean.server", "olean.private", "ilean", "ir.sig", "ir", "c")
+
+    def names(self, index):
+        return {ext: f"{index + 1:x}00000000000000{n}.{ext}" for n, ext in enumerate(self.EXTENSIONS, 1)}
+
+    def module_outputs(self, index):
+        names = self.names(index)
+        return {"m": True, "o": [names["olean"], names["olean.server"], names["olean.private"]],
+                "i": names["ilean"], "rs": names["ir.sig"], "r": names["ir"], "c": names["c"]}
+
+    def native_fixture(self, records, staging, outputs=None, extra=(), omit=()):
+        """Extract each record as a module whose trace names its outputs as Lake packs them."""
+        result = []
+        for index, record in enumerate(records):
+            module = f"Fixture{index}"
+            (self.root / "TauCeti").mkdir(exist_ok=True)
+            (self.root / "TauCeti" / (module + ".lean")).write_text("module\n")
+            base = staging / str(index)
+            base.mkdir(parents=True, exist_ok=True)
+            files = []
+            for extension in (*self.EXTENSIONS, *extra):
+                if extension in omit:
+                    continue
+                directory = "ir" if extension == "c" else "lib/lean"
+                source = base / (module + "." + extension)
+                source.write_bytes(f"{index} {extension}".encode())
+                files.append((source, f"{directory}/TauCeti/{module}.{extension}"))
+            trace = base / (module + ".trace")
+            trace.write_text(json.dumps({"schemaVersion": "2025-09-10", "depHash": record["hash"],
+                                         "outputs": self.module_outputs(index) if outputs is None else outputs}))
+            files.append((trace, f"lib/lean/TauCeti/{module}.trace"))
+            result.append((record, "TauCeti." + module, files))
+        return result
+
+    def hashed(self, wrong=()):
+        """Stand in for the Lake hash helper; modules listed in `wrong` hash to other bytes."""
+        def value(path):
+            module, extension = Path(path).name.split(".", 1)
+            index = int(module.removeprefix("Fixture"))
+            return 0 if index in wrong else int(self.names(index)[extension].split(".")[0], 16)
+        class Helper:
+            returncode = 0
+            def __init__(self, args, **kwargs):
+                self.paths = json.loads(Path(args[-1]).read_text())
+            def communicate(self, timeout=None):
+                return "\n".join(json.dumps([path, value(path)]) for path in self.paths), None
+        return Helper
+
+    def second_record(self):
+        second = self.records / "1111111111111111.json"
+        second.write_text(json.dumps({"schemaVersion": bulk.SCHEMA, "data": "2222222222222222.ltar"}))
+        (self.artifacts / "2222222222222222.ltar").write_bytes(b"another archive")
+        return second
+
+    def unpack_native(self, helper, **fixture):
+        with patch.object(bulk, "extract_records",
+                          side_effect=lambda records, staging: self.native_fixture(records, staging, **fixture)), \
+                patch.object(bulk.subprocess, "check_output", return_value="/toolchain\n"), \
+                patch.object(bulk.subprocess, "Popen", side_effect=helper) as popen:
+            restored = bulk.unpack(self.root)
+        return restored, popen
+
+    def installed(self):
+        return sorted(p.name for p in self.artifacts.iterdir() if not p.name.endswith(".ltar"))
+
+    def test_verified_outputs_are_installed_in_the_expanded_cache(self):
+        restored, popen = self.unpack_native(self.hashed())
+        self.assertEqual(restored, 1)
+        self.assertEqual(popen.call_args.args[0][:2], ["/toolchain/bin/lean", "--run"])
+        self.assertEqual(Path(popen.call_args.args[0][2]).name, "CacheHash.lean")
+        build = self.root / ".lake/build"
+        for extension, name in self.names(0).items():
+            directory = "ir" if extension == "c" else "lib/lean"
+            output = build / directory / "TauCeti" / ("Fixture0." + extension)
+            # Lake resolves the trace's names here, so it never rehashes or recaches them.
+            self.assertTrue(os.path.samefile(output, self.artifacts / name))
+            self.assertEqual(output.stat().st_mode & 0o777, 0o444)
+        # Lake's own caching leaves the reused archive read-only as well.
+        self.assertEqual(self.archive.stat().st_mode & 0o777, 0o444)
+        self.assertFalse(self.record.exists())
+
+    def test_unverified_module_is_left_to_stock_lake_beside_installed_ones(self):
+        second = self.second_record()
+        restored, _ = self.unpack_native(self.hashed(wrong=(1,)))
+        self.assertEqual(restored, 1)
+        self.assertEqual(self.installed(), sorted(self.names(0).values()))
+        # The rejected module could resolve through names other modules installed,
+        # so it is not prepared at all: its mapping makes Lake restore and hash it.
+        lib = self.root / ".lake/build/lib/lean/TauCeti"
+        self.assertTrue((lib / "Fixture0.olean").is_file())
+        self.assertFalse((lib / "Fixture1.olean").exists())
+        self.assertFalse(self.record.exists())
+        self.assertTrue(second.exists())
+
+    def test_nothing_verified_keeps_the_previous_restoration(self):
+        self.second_record()
+        restored, _ = self.unpack_native(self.hashed(wrong=(0, 1)))
+        self.assertEqual(restored, 2)
+        self.assertEqual(self.installed(), [])
+        self.assertTrue((self.root / ".lake/build/lib/lean/TauCeti/Fixture1.olean").is_file())
+
+    def test_failed_hash_helper_installs_nothing(self):
+        class Failed:
+            returncode = 1
+            def __init__(self, *args, **kwargs):
+                pass
+            def communicate(self, timeout=None):
+                return "", None
+            def kill(self):
+                pass
+            def wait(self):
+                pass
+        self.second_record()
+        restored, _ = self.unpack_native(Failed)
+        self.assertEqual(restored, 2)
+        self.assertEqual(self.installed(), [])
+
+    def test_trace_and_outputs_must_correspond_one_to_one(self):
+        names = self.names(0)
+        complete = self.module_outputs(0)
+        cases = {
+            "extra output": dict(extra=("bc",)),
+            "missing descriptor": dict(outputs={k: v for k, v in complete.items() if k != "c"}),
+            "wrong extension": dict(outputs={**complete, "i": names["ilean"].replace("ilean", "ir")}),
+            "module mode contradicts the oleans": dict(outputs={**complete, "m": False}),
+            "missing module mode": dict(outputs={k: v for k, v in complete.items() if k != "m"}),
+            # The outputs below are absent from the archive as well as from the trace.
+            "IR without its signature": dict(outputs={k: v for k, v in complete.items() if k != "rs"},
+                                             omit=("ir.sig",)),
+            "postponed compilation": dict(outputs={k: v for k, v in complete.items() if k not in ("rs", "r", "c")},
+                                          omit=("ir.sig", "ir", "c")),
+            "module without IR": dict(outputs={k: v for k, v in complete.items() if k not in ("rs", "r")},
+                                      omit=("ir.sig", "ir")),
+            "other archive": dict(outputs={**complete, "l": "0000000000000000.ltar"}),
+            "unknown key": dict(outputs={**complete, "x": 1}),
+            "not an object": dict(outputs=[names["olean"]]),
+        }
+        record = dict(hash="0123456789abcdef", archive=self.archive.name)
+        for label, fixture in cases.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
+                ((record, module, files),) = self.native_fixture([record], Path(tmp), **fixture)
+                self.assertEqual(bulk.expanded_artifacts(record, module, files), [])
+        with tempfile.TemporaryDirectory() as tmp:
+            ((record, module, files),) = self.native_fixture(
+                [record], Path(tmp), outputs={**complete, "l": self.archive.name})
+            self.assertEqual(len(bulk.expanded_artifacts(record, module, files)), 7)
+        with tempfile.TemporaryDirectory() as tmp:
+            plain = {"m": False, "o": [names["olean"]], "i": names["ilean"], "c": names["c"]}
+            ((record, module, files),) = self.native_fixture(
+                [record], Path(tmp), outputs=plain, omit=("olean.server", "olean.private", "ir.sig", "ir"))
+            self.assertEqual(len(bulk.expanded_artifacts(record, module, files)), 3)
+            self.assertEqual(bulk.expanded_artifacts(dict(record, hash="ffffffffffffffff"), module, files), [])
 
 @unittest.skipUnless(INTEGRATION, "pass --integration with the pinned Lake installed")
 class StockLakeTests(unittest.TestCase):
@@ -311,6 +463,15 @@ class StockLakeTests(unittest.TestCase):
                         self.assertEqual(restored, 3 if change else 4)
                         if change:
                             self.assertFalse((path / ".lake/build/lib/lean/TauCeti/C.olean").exists())
+                        # Lake finds each downloaded archive at its `Module.ltarFile`.
+                        archive = (path / ".lake/build/ir/TauCeti/A.ltar").stat().st_ino
+                        downloaded = (path / ".lake/cache/artifacts").glob("*.ltar")
+                        self.assertIn(archive, {p.stat().st_ino for p in downloaded})
+                        # Each restored trace resolves in the expanded cache to the restored file.
+                        for trace in (path / ".lake/build/lib/lean/TauCeti").glob("*.trace"):
+                            name = json.loads(trace.read_text())["outputs"]["o"][0]
+                            self.assertTrue(os.path.samefile(trace.with_suffix(".olean"),
+                                                             path / ".lake/cache/artifacts" / name))
                     if change:
                         run(path, "build", "--no-build", expected=3)
                     log = run(path, "build", "--iofail", "--rehash", "-o", ".lake/map.jsonl")
@@ -322,6 +483,11 @@ class StockLakeTests(unittest.TestCase):
                             self.assertIn("Built TauCeti.D", log)
                         else:
                             self.assertNotIn("Built TauCeti", log)
+                            # Lake took its cached-artifact path: it did not rehash and
+                            # recache the restored outputs, which writes these hash files.
+                            self.assertFalse((path / ".lake/build/lib/lean/TauCeti/A.olean.hash").exists())
+                            # The output map reused the downloaded archive instead of repacking it.
+                            self.assertEqual((path / ".lake/build/ir/TauCeti/A.ltar").stat().st_ino, archive)
                     lines = (path / ".lake/map.jsonl").read_text().splitlines()
                     maps.append((json.loads(lines[0]), dict(map(json.loads, lines[1:]))))
                 self.assertEqual(maps[0], maps[1])

@@ -3,7 +3,7 @@
 
 Temporary workaround for https://github.com/leanprover/lean4/pull/15868.
 Native Lake remains responsible for input/output validity and publication. Retain
-the original archive beside each module so the final native output map reuses it
+the original archive at each module's `ltarFile` so the final native output map reuses it
 without repacking. Run inside the offline PR sandbox before library code.
 """
 
@@ -47,6 +47,10 @@ def layout(project):
         raise ValueError("unsupported Lake layout")
 
 
+HASHER = Path(__file__).resolve().parent / "CacheHash.lean"
+# Lake's module trace output keys (`ModuleOutputDescrs.toJson`) and their extensions.
+DESCRIPTORS = {"o": ("olean", "olean.server", "olean.private"), "i": ("ilean",),
+               "rs": ("ir.sig",), "r": ("ir",), "c": ("c",), "b": ("bc",)}
 PREFERRED = "repair-revisions"
 UNRANKED = 1 << 30
 
@@ -180,14 +184,117 @@ def extract_records(records, staging):
     return extracted
 
 
+def expanded_artifacts(record, module, files):
+    """Name each restored output by the content hash its archive's own trace records.
+
+    Lake's writable artifact cache first resolves a module's trace outputs against
+    `.lake/cache/artifacts`. When they are absent, Lake reads, hashes and caches
+    every output of every restored module itself, which dominates a fully cached
+    build. Return `(extracted file, build-relative path, artifact name)` triples, or
+    nothing when the trace and the outputs do not correspond one to one in the
+    shape Lake writes for the trace's module mode.
+    """
+    parts = module.split(".")
+    stem = Path(*parts[:-1], parts[-1])
+    by_relative = {relative: source for source, relative in files}
+    trace_relative = str(Path("lib/lean", stem)) + ".trace"
+    try:
+        trace = json.loads(regular(by_relative[trace_relative]).read_text())
+    except (KeyError, OSError, ValueError):
+        return []
+    outputs = trace.get("outputs") if isinstance(trace, dict) else None
+    if (not isinstance(outputs, dict) or trace.get("depHash") != record["hash"]
+            or not set(outputs) <= set(DESCRIPTORS) | {"m", "l"}
+            or outputs.get("l", record["archive"]) != record["archive"]):
+        return []
+    # Lake reads the module mode from "m" and the IR from "c" alone. Accept only the
+    # complete shapes it caches for compiled modules: a module-system build has
+    # three olean parts, the IR signature, IR and C; any other has one olean and C.
+    # Postponed compilation and anything else stays with stock Lake.
+    module_system = outputs.get("m")
+    if (not isinstance(module_system, bool) or not isinstance(outputs.get("o"), list)
+            or len(outputs["o"]) != (3 if module_system else 1)
+            or set(outputs) - {"b", "l"} != ({"m", "o", "i", "rs", "r", "c"} if module_system
+                                             else {"m", "o", "i", "c"})):
+        return []
+    named = {}
+    for key, extensions in DESCRIPTORS.items():
+        if key not in outputs:
+            continue
+        values = outputs[key] if key == "o" else [outputs[key]]
+        if not isinstance(values, list) or len(values) > len(extensions):
+            return []
+        for extension, name in zip(extensions, values):
+            if not isinstance(name, str) or not re.fullmatch(r"[0-9a-f]{16}\." + re.escape(extension), name):
+                return []
+            directory = "ir" if extension in ("c", "bc") else "lib/lean"
+            named[str(Path(directory, stem)) + "." + extension] = name
+    if set(named) != set(by_relative) - {trace_relative}:
+        return []
+    return [(by_relative[relative], relative, name) for relative, name in sorted(named.items())]
+
+
+def verified(groups, staging):
+    """Return the indices of the modules whose every output hashes to its name.
+
+    Stock Lake names cached outputs by hashing them. Hash the same bytes with the
+    toolchain's own Lake hash (CacheHash.lean, as TauCetiWorker does) so a cache
+    entry never names other bytes. Return None when the helper fails.
+    """
+    paths = [str(source) for group in groups for source, _, _ in group]
+    if not paths:
+        return set()
+    helpers = []
+    try:
+        lean = Path(subprocess.check_output(["lean", "--print-prefix"], text=True).strip()) / "bin/lean"
+        cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+        for index in range(min(16, cpus, len(paths))):
+            request = staging / f"hash-request-{index}.json"
+            request.write_text(json.dumps(paths[index::min(16, cpus, len(paths))]))
+            helpers.append(subprocess.Popen([str(lean), "--run", str(HASHER), str(request)],
+                                            stdout=subprocess.PIPE, text=True))
+        hashes = {}
+        for helper in helpers:
+            output, _ = helper.communicate(timeout=1800)
+            if helper.returncode != 0:
+                raise subprocess.CalledProcessError(helper.returncode, "CacheHash.lean")
+            for line in output.splitlines():
+                path, value = json.loads(line)
+                hashes[path] = f"{value:016x}"
+        if len(hashes) != len(paths):
+            raise ValueError("incomplete artifact hashes")
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
+        for helper in helpers:
+            helper.kill()
+            helper.wait()
+        print(f"::warning::bulk-unpack-cache: cannot verify expanded artifacts ({error}); "
+              "Lake will cache every module itself", flush=True)
+        return None
+    return {index for index, group in enumerate(groups)
+            if group and all(hashes[str(source)] == name.split(".", 1)[0] for source, _, name in group)}
+
+
+def install(project, expanded):
+    """Hard-link restored outputs into the artifact cache under their trace names.
+
+    Lake's own `cacheArtifact` makes both names read-only and keeps an existing
+    cache entry. A failure leaves the remaining modules to stock Lake.
+    """
+    build, artifacts = project / ".lake/build", project / ".lake/cache/artifacts"
+    for relative, name in expanded:
+        os.chmod(build / relative, 0o444)
+        try:
+            os.link(build / relative, artifacts / name)
+        except FileExistsError:
+            os.chmod(artifacts / name, 0o444)
+
+
 def assemble(project, records, staging):
     """Validate one native bulk extraction and assemble a private build tree."""
     extracted = extract_records(records, staging / "unpacked")
     combined = staging / "build"
     combined.mkdir()
-    modules, targets, satisfied = set(), set(), []
-    archives = []
-    plans = []
+    modules, candidates = set(), []
     for record, module, files in extracted:
         # Prepare one version, retaining every alternative mapping. A different
         # current input still hits its original record and Lake restores that
@@ -195,16 +302,28 @@ def assemble(project, records, staging):
         if module in modules:
             continue
         modules.add(module)
-        if not source_present(project, module):
+        if source_present(project, module):
+            candidates.append((record, module, files, expanded_artifacts(record, module, files)))
+    # None installs nothing and keeps every module, exactly as before expansion.
+    accepted = verified([group for *_, group in candidates], staging) or None
+    targets, satisfied, archives, plans, expanded = set(), [], [], [], []
+    for index, (record, module, files, group) in enumerate(candidates):
+        # Once any module's names are installed, a module that failed verification
+        # could resolve through them; leave its mapping to stock Lake's restoration,
+        # which hashes what it extracts.
+        if accepted is not None and index not in accepted:
             continue
         for source, relative in files:
             if relative in targets:
                 raise ValueError("overlapping module output")
             targets.add(relative)
             plans.append((source, combined / relative))
-        archive_target = combined / "lib/lean" / Path(*module.split(".")).with_suffix(".ltar")
+        # Lake's `Module.ltarFile` is the IR path, `ir/<module>.ltar`.
+        archive_target = combined / "ir" / Path(*module.split(".")).with_suffix(".ltar")
         archives.append((Path(record["file"]), archive_target))
         satisfied.append(record)
+        if accepted is not None:
+            expanded.extend((relative, name) for _, relative, name in group)
     # Validate all modules before publishing or changing any selected mappings.
     for source, target in plans:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -212,15 +331,20 @@ def assemble(project, records, staging):
     for source, target in archives:
         target.parent.mkdir(parents=True, exist_ok=True)
         os.link(source, target)
-    return combined, satisfied, dict(bulk_archives=len(records), satisfied_records=len(satisfied),
-                                    historical_archives=len(extracted) - len(modules))
+        if accepted is not None:
+            os.chmod(target, 0o444)  # Lake's own caching makes the archive read-only too.
+    return combined, satisfied, expanded, dict(
+        bulk_archives=len(records), satisfied_records=len(satisfied),
+        historical_archives=len(extracted) - len(modules), expanded_artifacts=len(expanded),
+        unverified_modules=0 if accepted is None else len(candidates) - len(accepted))
 
 
-def publish(project, combined, satisfied):
-    """Publish a complete private tree, then remove only satisfied mappings.
+def publish(project, combined, satisfied, expanded=()):
+    """Publish a complete private tree, install its expanded artifacts, then remove
+    only satisfied mappings.
 
     Recheck captured mapping bytes before the atomic rename. Archive bytes and
-    publication snapshots remain untouched. If a later unlink fails, the complete
+    publication snapshots remain untouched. If a later step fails, the complete
     tree stays published and remaining mappings permit native Lake restoration;
     mapping cleanup is not a single atomic transaction with tree publication.
     """
@@ -230,6 +354,7 @@ def publish(project, combined, satisfied):
         if regular(record["path"]).read_bytes() != record["original"]:
             raise ValueError("selected cache record changed during preparation")
     combined.rename(project / ".lake/build")
+    install(project, expanded)
     for record in satisfied:
         record["path"].unlink()
 
@@ -248,11 +373,11 @@ def unpack(project: Path) -> int:
         if not records:
             return 0
         with tempfile.TemporaryDirectory(prefix="bulk-unpack-", dir=project / ".lake") as temporary:
-            combined, satisfied, result = assemble(project, records, Path(temporary))
+            combined, satisfied, expanded, result = assemble(project, records, Path(temporary))
             if not satisfied:
                 print("bulk-unpack-cache: no unambiguous current sources; using stock Lake restoration")
                 return 0
-            publish(project, combined, satisfied)
+            publish(project, combined, satisfied, expanded)
         result["seconds"] = time.monotonic() - started
         print("bulk-unpack-cache: " + json.dumps(result, sort_keys=True), flush=True)
         return len(satisfied)
