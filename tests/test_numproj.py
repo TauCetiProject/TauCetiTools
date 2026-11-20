@@ -296,16 +296,6 @@ class Scanner(unittest.TestCase):
                 'def t : {n : Nat // True} := ⟨42, trivial⟩\nlocal notation "s₀" => t\ndef a : Nat := s₀.1\n',
                 "def a : Nat := (s₀).val",
             ),
-            # a notation token covering the rewritten name
-            (
-                'local notation "s.val" => (42 : Nat)\ndef a : Nat := s.1\n',
-                "def a : Nat := (s).val",
-            ),
-            # a notation token reaching into what follows the rewritten name
-            (
-                'local notation "s.val+0" => (42 : Nat)\ndef a : Nat := s.1+0\n',
-                "def a : Nat := (s).val+0",
-            ),
             # a non-ASCII identifier
             ("def ℘s := s\ndef ℘s.val : Nat := 42\ndef a : Nat := ℘s.1\n", "def a : Nat := (℘s).val"),
             # an escaped identifier containing `.1`
@@ -336,6 +326,20 @@ class Scanner(unittest.TestCase):
         ):
             with self.subTest(text=text):
                 result, found, declined, _ = self.scan(text)
+                self.assertEqual((result.returncode, found, len(declined)), (0, set(), 1), result.stderr)
+
+    def test_declines_rewrites_a_dotted_notation_token_could_capture(self):
+        prelude = "def s : {n : Nat // True} := ⟨7, trivial⟩\n"
+        for body in (
+            'def N.s : {n : Nat // True} := ⟨7, trivial⟩\nlocal notation "N.s" => s\ndef a : Nat := N.s.1\n',
+            'postfix:max ".val" => (fun (_ : {n : Nat // True}) => (42 : Nat))\ndef a : Nat := (s).1\n',
+            'local prefix:max "~" => (fun (n : Nat) => n)\nlocal notation "~s.val" => (42 : Nat)\n'
+            "def a : Nat := ~s.1\n",
+            'local notation "s.val" => (42 : Nat)\ndef a : Nat := s.1\n',
+            'local notation "s.val+0" => (42 : Nat)\ndef a : Nat := s.1+0\n',
+        ):
+            with self.subTest(body=body):
+                result, found, declined, _ = self.scan(prelude + body)
                 self.assertEqual((result.returncode, found, len(declined)), (0, set(), 1), result.stderr)
 
     def test_declines_an_escaped_identifier_containing_an_opening_guillemet(self):

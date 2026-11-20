@@ -78,6 +78,23 @@ def chainAt (line : Array Char) (col : Nat) : Option (Nat × Array Comp) := Id.r
   if comps.isEmpty then return none
   return some (start, comps)
 
+/-- Whether some notation token containing a `.` followed by an identifier character (`"N.s"`,
+`".val"`, `"~s.val"`) occurs in the line once the projection whose digits start at `col` is
+rewritten to `field`. Such a token can be lexed differently around the new `.field` than around
+the digits, so the rewrite is declined. Lean and Mathlib define almost no such tokens. -/
+def dottedTokenCaptures (ctxs : Array (ContextInfo × LocalContext)) (line : Array Char)
+    (col : Nat) (field : Name) : Bool := Id.run do
+  let mut j := col
+  while j < line.size && line[j]!.isDigit do j := j + 1
+  let rewritten := (line.extract 0 col).foldl String.push "" ++ field.toString ++
+    (line.extract j line.size).foldl String.push ""
+  for (ctx, _) in ctxs do
+    for tk in (Parser.getTokenTable ctx.env).values do
+      let cs := tk.toList
+      let dotted := (cs.zip (cs.drop 1)).any fun (a, b) => a == '.' && isIdRest b
+      if dotted && (rewritten.splitOn tk).length > 1 then return true
+  return false
+
 /-- The receiver span to parenthesize for the projection whose digits start at `col` of line
 `ln`, when its named form would not parse as intended. Written as an identifier, `s.1.foo`
 becomes the single identifier `s.val.foo`; a global declaration that this name (from the
@@ -277,7 +294,11 @@ def scanFile (opts : Options) (path : String) : IO Bool := do
     let row := s!"{path}\t{p.line}\t{p.column}\t"
     match agreed[(p.line, p.column)]? with
     | some field =>
-      match ← receiverSpan (ctxs.getD pos #[]) (lines[p.line - 1]?.getD #[]) p.line p.column agreed with
+      let line := lines[p.line - 1]?.getD #[]
+      if dottedTokenCaptures (ctxs.getD pos #[]) line p.column field then
+        IO.println s!"{row}?"
+        continue
+      match ← receiverSpan (ctxs.getD pos #[]) line p.line p.column agreed with
       | some none => IO.println s!"{row}{field}"
       | some (some (a, b)) => IO.println s!"{row}{field}\t{a}:{b}"
       | none => IO.println s!"{row}?"
