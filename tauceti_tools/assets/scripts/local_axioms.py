@@ -42,14 +42,15 @@ def cache_root():
     return root
 
 
-def checker(driver, prefix, cache):
+def checker(driver, prefix, cache, link_args=()):
     # Cheap metadata identity; do not hash/walk the installed Lean distribution on every check.
     # The worker separately fingerprints its complete installation for verification receipts.
     inputs = [prefix / "bin/lean", prefix / "bin/leanc"]
     inputs += sorted((prefix / "lib/lean").glob("libleanshared*"))
     for mod in ("Environment", "Util/FoldConsts", "Util/Path"):
         inputs += sorted((prefix / "lib/lean/Lean" / mod).parent.glob(Path(mod).name + ".olean*"))
-    key = hashlib.sha256(json.dumps([driver.read_text(), [identity(p) for p in inputs]]).encode()).hexdigest()
+    parts = [driver.read_text(), [identity(p) for p in inputs]] + ([list(link_args)] if link_args else [])
+    key = hashlib.sha256(json.dumps(parts).encode()).hexdigest()
     destination = cache / key
     # Every key uses the same lock: twenty cold workers must not compile twenty versions at once.
     fd = os.open(cache / "build.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
@@ -77,7 +78,10 @@ def checker(driver, prefix, cache):
                 env["LEAN_PATH"] = ""
                 subprocess.run([str(prefix / "bin/lean"), "-c", "Main.c", "Main.lean"], cwd=work, env=env, check=True)
                 subprocess.run(
-                    [str(prefix / "bin/leanc"), "-O1", "-o", "checker", "Main.c"], cwd=work, env=env, check=True
+                    [str(prefix / "bin/leanc"), "-O1", *link_args, "-o", "checker", "Main.c"],
+                    cwd=work,
+                    env=env,
+                    check=True,
                 )
                 os.replace(work / "checker", destination)
         # Keep four recent versions; interrupted builds are removed by TemporaryDirectory.
