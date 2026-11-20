@@ -14,8 +14,9 @@ mkdir -p "$dir"
 openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=*.$domain" -addext "subjectAltName=DNS:*.$domain" \
   -keyout "$dir/proxy.key" -out "$dir/proxy.pem" 2>/dev/null
 docker network create neon-local >/dev/null
+# neon.max_cluster_size is the Neon project's storage limit, which migration preflight reads.
 docker run -d --name neon-local-postgres --network neon-local -e POSTGRES_PASSWORD=postgres postgres:18 \
-  -c max_connections=500 >/dev/null
+  -c max_connections=500 -c neon.max_cluster_size=1TB >/dev/null
 # TCP readiness: the image's first-start initialisation server listens only on its socket.
 until docker exec neon-local-postgres pg_isready -h 127.0.0.1 -U postgres -q; do sleep 1; done
 docker exec -i neon-local-postgres psql -q -U postgres -v ON_ERROR_STOP=1 < "$(dirname "$0")/local-neon.sql"

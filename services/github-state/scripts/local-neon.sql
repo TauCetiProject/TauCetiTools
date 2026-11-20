@@ -7,9 +7,6 @@ GRANT pg_signal_backend TO github_state_test_migration;
 CREATE ROLE github_state_test_app LOGIN PASSWORD 'app';
 GRANT github_state_test_app TO github_state_test_migration;
 CREATE DATABASE github_state_test OWNER github_state_test_migration;
--- The project's storage limit, which migration preflight reads from Neon's setting.
-ALTER SYSTEM SET neon.max_cluster_size = '1TB';
-SELECT pg_reload_conf();
 -- Neon's proxy, in its local PostgreSQL authentication mode, reads endpoint IP allow lists here.
 CREATE SCHEMA neon_control_plane;
 CREATE TABLE neon_control_plane.endpoints (endpoint_id VARCHAR(255) PRIMARY KEY, allowed_ips VARCHAR(255));
