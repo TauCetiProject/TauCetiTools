@@ -6,9 +6,7 @@ anything, which makes it the one transition nothing else here can see. Every oth
 trigger in this repository is scoped to the PR -- `pull_request_target`, a
 `pr-build` / `Review` `workflow_run`, an `issue_comment` -- and the base moving
 fires none of them. So a PR could pick up a conflict and nothing anywhere said so:
-`stuck_alerts.py` deliberately skips a conflicting PR (it is not being wrongly
-withheld by the merge path) and `housekeeping.py` only retires PRs that are
-blocking under review, so a conflicted-but-approved PR was reaped by nothing
+`housekeeping.py` only retires PRs that are blocking under review, so a conflicted-but-approved PR was reaped by nothing
 either. It rotted silently.
 
 The `merge-conflict` label is deliberately NOT part of the mutually-exclusive set
@@ -37,9 +35,8 @@ Two ordering decisions carry the weight, and both are deliberate:
     schedules the merge. Those PRs are re-read a few times; any that stay unknown
     are LEFT EXACTLY AS THEY ARE -- not labelled, not cleared -- while every PR
     whose state we do know is still processed. A PR whose head has diverged from
-    its branch tip can sit at `mergeable: null` indefinitely (that is what
-    `stuck_alerts.py`'s `diverged-head` detector is for), and one such PR must not
-    be able to stop the others being labelled.
+    its branch tip can sit at `mergeable: null` indefinitely, and one such PR must
+    not be able to stop the others being labelled.
 
 A PR carrying a hold label is left entirely alone, not labelled-but-silent. The
 label means "the author has been told", and labelling without commenting would
@@ -79,7 +76,7 @@ LABEL_DESCRIPTION = "No longer merges cleanly into its base branch; needs a reba
 UNKNOWN_ROUNDS = 4
 UNKNOWN_WAIT_SECONDS = 10.0
 
-# Mirrors stuck_alerts.HOLD_LABELS: a PR carrying one of these is parked on purpose.
+# A PR carrying one of these is parked on purpose.
 HOLD_LABELS = {"keep", "hold", "wip", "human", "do-not-close", "blocked"}
 
 COMMENT = """\

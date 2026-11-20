@@ -110,10 +110,8 @@ trigger is scoped to the PR (`pull_request_target`, a `pr-build` / `Review`
 `workflow_run`, an `issue_comment`), and the base moving fires none of them.
 Before [`merge-conflicts.yml`](../../.github/workflows/merge-conflicts.yml) a PR
 could pick up a conflict and *nothing anywhere said so* — no label, no comment, no
-alert. `stuck_alerts.py` deliberately skips a conflicting PR (it is not being
-wrongly withheld by the merge path) and `housekeeping.py` only retires PRs that
-are blocking under review, so a conflicted-but-approved PR was reaped by nothing
-either. It rotted silently.
+alert. `housekeeping.py` only retires PRs that are blocking under review, so a
+conflicted-but-approved PR was reaped by nothing either. It rotted silently.
 
 [`conflicts.py`](conflicts.py) runs every fifteen minutes: one GraphQL query reads
 the whole open queue, `merge-conflict` goes on a PR that has stopped merging and
@@ -160,12 +158,11 @@ Two ordering decisions carry the weight:
   which mathlib4 uses for the same job: on UNKNOWN it returns from the middle of
   its loop, and once its retries are spent returns an empty result, abandoning
   that page of PRs and every later one. A PR whose head has diverged from its
-  branch tip sits at `mergeable: null` indefinitely — precisely what
-  `stuck_alerts.py`'s `diverged-head` detector exists to catch — so one such PR
-  could stop every other conflict being labelled.
+  branch tip sits at `mergeable: null` indefinitely, so one such PR could stop
+  every other conflict being labelled.
 
-A PR carrying a hold label (`keep`/`hold`/`wip`/`human`/`do-not-close`/`blocked`,
-matching `stuck_alerts.py`) is left entirely alone rather than labelled-but-silent:
+A PR carrying a hold label (`keep`/`hold`/`wip`/`human`/`do-not-close`/`blocked`)
+is left entirely alone rather than labelled-but-silent:
 the label means "the author has been told", so labelling without commenting would
 leave the conflict silent for good once the hold came off. Only open PRs are read,
 so a PR closed while labelled keeps the label — accurate, but it means that
@@ -176,34 +173,10 @@ Note that labelling and commenting both bump the PR's `updatedAt`, which
 seven-day stale-close clock. That is the intended trade: a PR that just learned it
 conflicts should get its week to act on it.
 
-## Stuck-automation alerts (Tau Ceti > "Stuck PRs")
+## Zulip setup
 
-[`stuck_alerts.py`](stuck_alerts.py), driven by
-[`stuck-alerts.yml`](../../.github/workflows/stuck-alerts.yml) hourly, posts to a
-second topic (**Stuck PRs**) whenever Tau Ceti's own automation wedges and cannot
-recover on its own. It reuses `core`'s GitHub-truth helpers and `zulip`'s Zulip
-client (pointed at the topic via `ZULIP_TOPIC`) and is idempotent the same way:
-one bot message per active alert, tagged with a hidden `<!--stuck:v1 <key>-->`
-marker, edited to a ✅ checkmark when the situation clears and never re-posted
-while it persists.
-
-This is an **emergency channel, not a help queue.** Every alert means a piece of
-infrastructure needs fixing so the wedge cannot recur, not that a human should
-hand-hold one PR. It fires on: a pinned Mathlib commit that is more than three days
-old, regardless of when the manifest changed, linking the active `bump-mathlib/` repair PR
-(`bump_latest.py` retargets that PR, keeping its repairs, once its own target is two days old);
-an in-scope, fully-green PR the merge path never
-merged; an open `Review stuck: PR #…` issue; a scheduled workflow that is disabled
-or overdue; and `main` gone red. It
-**deliberately does not** alert on normal backlog (a PR awaiting its first review
-verdict, changes-requested nobody addressed, open roadmap issues); the module
-docstring lists the full catalogue and the reasoning.
-
-Run `python3 scripts/pr_status/stuck_alerts.py --dry-run` (with `gh` authenticated)
-to print the alerts it would post without touching Zulip. Its run goes red only on
-a persistent Zulip config break.
-
-## One-time setup
+[`zulip.py`](zulip.py) is the Zulip client that `toolchain_tags.py` uses to post to
+its own topic (set via `ZULIP_TOPIC`). It needs a bot and two secrets:
 
 1. **Create a dedicated Zulip bot** (Zulip → Settings → Bots → Add a new bot,
    type *Generic*). Subscribe it to the **Tau Ceti** channel: a bot can only
@@ -229,12 +202,7 @@ Label reconciliation needs no Zulip credentials: `pr-status.yml` and `pr-labels.
 (`APP_ID` / `APP_PRIVATE_KEY`) already configured for the roadmap and merge
 workflows, scoped to this repo, and provisions lifecycle labels on first use.
 
-## Alert delivery and label backfill
-
-The alert client authenticates and checks channel membership before delivering
-alerts. Missing credentials or a persistent authorization failure make the run
-fail visibly; transient network failures are logged for the next scheduled retry.
-PR feed posting, reactions, and historical post backfill have been removed.
+## Label backfill
 
 To reconcile GitHub labels locally with an authenticated `gh`:
 
@@ -248,13 +216,13 @@ python3 scripts/pr_status/labels.py reconcile-all
 
 ```bash
 cd scripts/pr_status
-python3 -m unittest test_pr_labels test_readiness test_zulip test_stuck_alerts
+python3 -m unittest test_pr_labels test_readiness test_zulip
 ```
 
 `test_pr_labels` covers the derivation (`core.review_state`) and label reconciliation. `test_readiness`
 runs the merge gate on current/stale/incomplete reviews, ignored old markers,
 human paths, CI and pin guards, and head-move races. It needs the engine
-checkout described above. `test_zulip` covers alert transport retry and duplicate-send prevention.
+checkout described above. `test_zulip` covers Zulip transport retry and duplicate-send prevention.
 GitHub and Zulip reads and writes are stubbed in these tests.
 
 GitHub reads require `gh` and `jq`. The read helper captures response headers,

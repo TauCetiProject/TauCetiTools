@@ -27,9 +27,6 @@ class MaintenanceControlRunnersTests(unittest.TestCase):
                         target = str(job.get("runs-on", ""))
                         self.assertNotIn("nscloud-", target, workflow.name)
                         self.assertNotIn("namespace-features:", target, workflow.name)
-                alerts = (root / ".github/workflows/stuck-alerts.yml").read_text()
-                self.assertNotIn("__MAINTENANCE_RUNNER__", alerts)
-                alert_runner = yaml.safe_load(alerts)["jobs"]["stuck-alerts"]["runs-on"]
                 status_text = (root / ".github/workflows/pr-status.yml").read_text()
                 self.assertNotIn("__MAINTENANCE_RUNNER__", status_text)
                 status = yaml.safe_load(status_text)
@@ -44,11 +41,10 @@ class MaintenanceControlRunnersTests(unittest.TestCase):
                 self.assertIn("github.event.label.name == 'ready-to-merge'", merge_text)
                 if repository == "TauCetiProject/TauCeti":
                     update = yaml.safe_load((root / ".github/workflows/update.yml").read_text())
-                    runners = [alert_runner] + status_runners + [job["runs-on"] for job in update["jobs"].values()]
+                    runners = status_runners + [job["runs-on"] for job in update["jobs"].values()]
                     for runner in runners:
                         self.assertEqual(runner, "ubuntu-24.04")
                 else:
-                    self.assertEqual(alert_runner, "ubuntu-latest")
                     self.assertTrue(all(runner == "ubuntu-latest" for runner in status_runners))
                     self.assertFalse((root / ".github/workflows/update.yml").exists())
 
