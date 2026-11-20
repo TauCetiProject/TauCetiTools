@@ -601,8 +601,7 @@ It must never retry the same broken preparation indefinitely or replace its
 manifest silently.
 
 Source bootstrap materializes portable build scripts without exporting legacy
-unqualified source bindings. Native PR branch/label reads select lint scope;
-unavailable, changed-head or full-lint observations select full-library lint.
+unqualified source bindings. Every source candidate lints the whole library.
 The GitHub helper permits only configured execution/dependency reads and refuses
 source metadata or status writes before credential selection. Candidate audits,
 scope and pin guards continue to run. Exact retained members receive the same
