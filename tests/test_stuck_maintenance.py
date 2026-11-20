@@ -1,4 +1,4 @@
-"""Exercise installed watchdog and maintenance recovery entrypoints in CI."""
+"""Exercise installed maintenance recovery entrypoints in CI."""
 import subprocess
 import sys
 import unittest
@@ -15,8 +15,8 @@ class MaintenanceScriptTests(unittest.TestCase):
                                     capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_watchdog_and_recovery_regressions(self):
-        for script in ("test_maintenance_builds.py", "pr_status/test_stuck_snapshot.py", "pr_status/test_stuck_alerts.py"):
+    def test_recovery_regressions(self):
+        for script in ("test_maintenance_builds.py",):
             with self.subTest(script=script):
                 result = subprocess.run([sys.executable, str(ROOT / "tauceti_tools/assets/scripts" / script)],
                                         capture_output=True, text=True, timeout=60)

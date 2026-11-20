@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Zulip transport and credential checks for automation alerts.
+"""Zulip transport and credential checks for automation posts.
 
 Callers configure ZULIP_CHANNEL and ZULIP_TOPIC before importing this module.
 The client sends and updates alert messages; it has no PR feed or reaction sink.
@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 
 CHANNEL = os.environ.get("ZULIP_CHANNEL", "Tau Ceti")
-TOPIC = os.environ.get("ZULIP_TOPIC", "Stuck PRs")
+TOPIC = os.environ.get("ZULIP_TOPIC", "Toolchain tags")
 
 
 class ConfigError(RuntimeError):
@@ -147,16 +147,3 @@ def check(z):
             f"bot (user {bot_id}) is not subscribed to channel {CHANNEL!r}; "
             f"it cannot post or react there. Subscribe it and re-run.")
     log(f"OK: authenticated as user {bot_id}, subscribed to {CHANNEL!r}")
-
-
-def fail_config(msg):
-    """Report a persistent config break loudly: a GitHub Actions error
-    annotation (visible in the run summary even under `continue-on-error`) plus a
-    non-zero exit so the workflow run goes red. See the module docstring."""
-    log(f"CONFIG ERROR: {msg}")
-    if os.environ.get("GITHUB_ACTIONS") == "true":
-        # Escape the workflow-command payload so a %, CR, or LF in the error text
-        # (e.g. a Zulip JSON body) can't malform or truncate the annotation.
-        safe = msg.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-        print(f"::error title=Zulip alert integration is broken::{safe}", flush=True)
-    return 1

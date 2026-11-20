@@ -1136,7 +1136,7 @@ def extra_findings(project, gh, again):
         "claims": ("content", ["claims-access.yml"]),
         "docs": ("content", ["api-docs.yml", "pages.yml"] if project.legacy else ["api-docs.yml"]),
         "progress": ("roadmap", ["ci.yml", "progress-merge.yml"]),
-        "zulip": ("content", ["stuck-alerts.yml"]),
+        "zulip": ("roadmap", ["progress-announce.yml"]),
         "fleet": ("content", ["pick-runner.yml"]),
         "security_audit": ("content", ["nightly-verify.yml"]),
     }
@@ -1144,6 +1144,10 @@ def extra_findings(project, gh, again):
         enabled = project.feature(name)
         if not enabled:
             results.append(Finding("features." + name, "disabled", name + ": off", "Optional feature disabled"))
+            continue
+        if name == "zulip" and not project.feature("progress"):
+            results.append(Finding("features." + name, "disabled", name + ": inactive without progress",
+                                   "Zulip announcements come from the roadmap's progress-announce.yml, which needs features.progress"))
             continue
         repository = project.repos.get(role)
         missing, inaccessible = [], []
@@ -1177,7 +1181,7 @@ def extra_findings(project, gh, again):
         if name == "zulip":
             steps += [
                 "Set publication.zulip_site, zulip_channel and zulip_topic to the intended destination. At the site's /#settings/your-bots create a Generic bot, subscribe it to that channel, and store its email and API key as ZULIP_EMAIL and ZULIP_API_KEY in the content and roadmap repositories that publish announcements.",
-                "Inspect a recent stuck-alerts.yml run. Its credential check must succeed without skipping.",
+                "Inspect a recent progress-announce.yml run in the roadmap repository. Its Zulip post must succeed without skipping.",
             ]
         if name == "fleet":
             steps += [
