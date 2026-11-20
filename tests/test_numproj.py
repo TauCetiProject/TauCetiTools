@@ -341,6 +341,10 @@ class Scanner(unittest.TestCase):
             "def s₂ : {x : {n : Nat // True} // True} := ⟨⟨7, trivial⟩, trivial⟩\n"
             'local postfix:max ".val.val" => (fun (_ : {x : {n : Nat // True} // True}) => (42 : Nat))\n'
             "def a : Nat := (s₂).1.1\n",
+            # an escaped field name
+            "structure S where\n  «+» : Nat\n"
+            'postfix:max ".«+»" => (fun (_ : S) => (42 : Nat))\n'
+            "def a (t : S) : Nat := (t).1\n",
         ):
             with self.subTest(body=body):
                 result, found, declined, _ = self.scan(prelude + body)

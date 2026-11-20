@@ -78,7 +78,7 @@ def chainAt (line : Array Char) (col : Nat) : Option (Nat × Array Comp) := Id.r
   if comps.isEmpty then return none
   return some (start, comps)
 
-/-- Whether some notation token containing a `.` followed by an identifier character (`"N.s"`,
+/-- Whether some notation token containing a `.` followed by an identifier character or `«` (`"N.s"`,
 `".val"`, `"~s.val"`, `".val.val"`) could be lexed differently once this line's projections are
 rewritten: it occurs in the line with every rewrite on it applied, or it contains `.field` (so
 inserted parentheses could expose it, as in `(s).val`). The rewrite is then declined. Lean and
@@ -95,11 +95,13 @@ def dottedTokenCaptures (ctxs : Array (ContextInfo × LocalContext)) (line : Arr
     else
       rewritten := rewritten.push line[i]!
       i := i + 1
+  -- A field that needs escaping (`«+»`) is left to the author.
+  if field.toString.contains '«' then return true
   let dotField := "." ++ field.toString
   for (ctx, _) in ctxs do
     for tk in (Parser.getTokenTable ctx.env).values do
       let cs := tk.toList
-      let dotted := (cs.zip (cs.drop 1)).any fun (a, b) => a == '.' && isIdRest b
+      let dotted := (cs.zip (cs.drop 1)).any fun (a, b) => a == '.' && (isIdRest b || b == '«')
       if dotted && ((rewritten.splitOn tk).length > 1 || (tk.splitOn dotField).length > 1) then
         return true
   return false
