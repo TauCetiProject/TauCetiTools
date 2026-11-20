@@ -29,54 +29,47 @@ class Rewrite(unittest.TestCase):
         line = tool["replace_proj"](line, 4, "left")
         self.assertEqual(tool["replace_proj"](line, 2, "property"), "x.property.left")
 
-    def test_antiquotation_is_parenthesized(self):
+    def test_receiver_span_is_parenthesized(self):
         line = "congr($h.1 0 1)"
-        self.assertEqual(tool["replace_proj"](line, line.index("1 0"), "val"), "congr(($h).val 0 1)")
-        line = "congr($h₀.2)"
-        self.assertEqual(tool["replace_proj"](line, line.index("2)"), "property"), "congr(($h₀).property)")
-
-    def test_qualified_and_typed_antiquotations_are_parenthesized(self):
-        line = "congr($h.eq.1)"
-        self.assertEqual(tool["replace_proj"](line, line.index("1)"), "val"), "congr(($h.eq).val)")
+        self.assertEqual(tool["replace_proj"](line, 9, "val", (6, 8)), "congr(($h).val 0 1)")
         line = "congr($h:term.1)"
-        self.assertEqual(tool["replace_proj"](line, line.index("1)"), "val"), "congr(($h:term).val)")
+        self.assertEqual(tool["replace_proj"](line, 14, "val", (6, 13)), "congr(($h:term).val)")
+        self.assertEqual(tool["replace_proj"]("f s.1 0", 4, "val", (2, 3)), "f (s).val 0")
+        self.assertEqual(tool["replace_proj"]("f ℘s.1", 5, "val", (2, 4)), "f (℘s).val")
+        self.assertEqual(tool["replace_proj"]("f «a.1».1", 8, "val", (2, 7)), "f («a.1»).val")
 
-    def test_chained_antiquotation_projections(self):
+    def test_chained_projections_share_one_span(self):
         line = "congr($h.1.1)"
-        self.assertEqual(tool["replace_projs"](line, [(9, "val"), (11, "val")]), "congr(($h).val.val)")
+        edits = [(9, "val", (6, 8)), (11, "val", (6, 8))]
+        self.assertEqual(tool["replace_projs"](line, edits), "congr(($h).val.val)")
+        self.assertEqual(
+            tool["replace_projs"]("f N.s.1.2", [(6, "val", (2, 5)), (8, "property", (2, 5))]), "f (N.s).val.property"
+        )
+
+    def test_refuses_a_span_that_is_not_a_receiver(self):
+        with self.assertRaises(ValueError):
+            tool["replace_proj"]("f s.1", 4, "val", (0, 2))
 
     def test_refuses_a_position_that_is_not_a_projection(self):
         with self.assertRaises(ValueError):
             tool["replace_proj"]("x + 1", 4, "val")
 
     def test_parse_findings_ignores_noise(self):
-        found, conflicts = tool["parse_findings"]("A.lean\t3\t7\tval\nwarning: something\nA.lean\t3\t7\tval\n")
-        self.assertEqual((dict(found), conflicts), ({"A.lean": {(3, 7, "val")}}, []))
+        found, declined = tool["parse_findings"]("A.lean\t3\t7\tval\nwarning: something\nA.lean\t3\t7\tval\n")
+        self.assertEqual((dict(found), declined), ({"A.lean": {(3, 7, "val", None)}}, []))
 
-    def test_parse_findings_reports_conflicts(self):
-        found, conflicts = tool["parse_findings"]("A.lean\t3\t7\t\n")
-        self.assertEqual((dict(found), conflicts), ({}, ["A.lean:3:8"]))
+    def test_parse_findings_reads_spans_and_declines(self):
+        found, declined = tool["parse_findings"]("A.lean\t3\t7\tval\t2:6\nA.lean\t4\t1\t?\nA.lean\t5\t1\t!\t`T.val`\n")
+        self.assertEqual(dict(found), {"A.lean": {(3, 7, "val", (2, 6))}})
+        self.assertEqual([where for where, _ in declined], ["A.lean:4:2", "A.lean:5:2"])
 
     def test_digits_and_parentheses_use_original_columns(self):
         line = "(x.1, congr($h.1))"
-        edits = [(line.index("1,"), "val"), (line.index("1)"), "val")]
+        edits = [(line.index("1,"), "val"), (line.index("1)"), "val", (12, 14))]
         self.assertEqual(tool["replace_projs"](line, edits), "(x.val, congr(($h).val))")
         line = "congr($a.1 + $b.2)"
-        edits = [(line.index("1 "), "val"), (line.index("2)"), "property")]
+        edits = [(9, "val", (6, 8)), (line.index("2)"), "property", (13, 15))]
         self.assertEqual(tool["replace_projs"](line, edits), "congr(($a).val + ($b).property)")
-
-    def test_marked_identifier_receivers_are_parenthesized(self):
-        self.assertEqual(tool["replace_proj"]("f s.1 0", 4, "(val"), "f (s).val 0")
-        line = "f N.s.1.2"
-        edits = [(6, "val"), (8, "(property")]
-        self.assertEqual(tool["replace_projs"](line, edits), "f (N.s).val.property")
-        self.assertEqual(tool["replace_proj"]("congr($h.1)", 9, "(val"), "congr(($h).val)")
-
-    def test_escaped_antiquotation_is_parenthesized(self):
-        line = "congr($«h».1)"
-        self.assertEqual(tool["replace_proj"](line, line.index("1)"), "val"), "congr(($«h»).val)")
-        line = "congr($A.«b c».1)"
-        self.assertEqual(tool["replace_proj"](line, line.index("1)"), "val"), "congr(($A.«b c»).val)")
 
 
 class Wrap(unittest.TestCase):
@@ -149,7 +142,7 @@ class Wrap(unittest.TestCase):
             path = Path(name) / "A.lean"
             tail = 'tail" ++ toString (foo ' + " ".join(["arg"] * 20) + " x.1)"
             path.write_text(f'def s : String := "head\n{tail}\n')
-            count, unwrapped = tool["apply"]({str(path): {(2, tail.index(".1") + 1, "val")}})
+            count, unwrapped = tool["apply"]({str(path): {(2, tail.index(".1") + 1, "val", None)}})
             self.assertEqual((count, unwrapped), (1, [f"{path}:2"]))
             self.assertEqual(path.read_text().split("\n")[1], tail.replace("x.1", "x.val"))
 
@@ -184,7 +177,7 @@ class Wrap(unittest.TestCase):
             long_untouched = "-- " + "u" * 120
             touched = "  exact foo " + " ".join(["arg"] * 21) + " x.1"
             path.write_text(f"{long_untouched}\n{touched}\n")
-            count, unwrapped = tool["apply"]({str(path): {(2, touched.index(".1") + 1, "val")}})
+            count, unwrapped = tool["apply"]({str(path): {(2, touched.index(".1") + 1, "val", None)}})
             self.assertEqual((count, unwrapped), (1, []))
             lines = path.read_text().split("\n")
             self.assertEqual(lines[0], long_untouched)
@@ -194,121 +187,124 @@ class Wrap(unittest.TestCase):
 
 @unittest.skipUnless(LEAN, "set LEAN to run the compiled scanner")
 class Scanner(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.work = tempfile.TemporaryDirectory()
+        prefix = Path(subprocess.check_output([LEAN, "--print-prefix"], text=True).strip())
+        cache = Path(cls.work.name) / "cache"
+        cache.mkdir(mode=0o700)
+        with patch.dict(os.environ, TAUCETI_NUMPROJ_CACHE=str(cache), PATH=f"{prefix / 'bin'}:{os.environ['PATH']}"):
+            cls.binary = tool["scanner"]()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.work.cleanup()
+
+    def scan(self, text, name="Fixture.lean"):
+        """Scanner status, findings and declines for a file with `text`, and its path."""
+        source = Path(self.work.name) / name
+        source.write_text(text)
+        result = subprocess.run(
+            [str(self.binary), *tool["OPTIONS"], str(source)],
+            capture_output=True,
+            text=True,
+            env=dict(os.environ, LEAN_PATH=""),
+        )
+        found, declined = tool["parse_findings"](result.stdout)
+        return result, found.get(str(source), set()), [where for where, _ in declined], source
+
+    def rewrite(self, text):
+        """The file after scanning and rewriting `text`, after checking that it still compiles."""
+        result, _, declined, source = self.scan(text)
+        self.assertEqual((result.returncode, declined), (0, []), result.stderr)
+        tool["apply"](tool["parse_findings"](result.stdout)[0])
+        check = subprocess.run([LEAN, str(source)], capture_output=True, text=True, env=dict(os.environ, LEAN_PATH=""))
+        self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+        return source.read_text()
+
     def test_flags_subtype_projections_but_not_exempt_structures(self):
-        with tempfile.TemporaryDirectory() as name:
-            work = Path(name)
-            source = work / "Fixture.lean"
-            source.write_text(
-                "def f (x : {n : Nat // 0 < n}) : Nat := x.1\n"
-                "theorem g (x : {n : Nat // 0 < n}) : 0 < x.1 := x.2\n"
-                "def h (p : Nat × Nat) : Nat := p.1\n"
-                "theorem k (a b : Prop) (h : a ∧ b) : a := h.1\n"
-            )
-            prefix = Path(subprocess.check_output([LEAN, "--print-prefix"], text=True).strip())
-            cache = work / "cache"
-            cache.mkdir(mode=0o700)
-            with patch.dict(
-                os.environ, TAUCETI_NUMPROJ_CACHE=str(cache), PATH=f"{prefix / 'bin'}:{os.environ['PATH']}"
-            ):
-                binary = tool["scanner"]()
-                env = dict(os.environ, LEAN_PATH="")
-                out = subprocess.run(
-                    [str(binary), *tool["OPTIONS"], str(source)], capture_output=True, text=True, env=env, check=True
-                ).stdout
-            found = tool["parse_findings"](out)[0][str(source)]
-            lines = source.read_text().split("\n")
-            expected = {
-                (1, lines[0].index("x.1") + 2, "val"),
-                (2, lines[1].index("x.1") + 2, "val"),
-                (2, lines[1].index("x.2") + 2, "property"),
-            }
-            self.assertEqual(found, expected)
+        text = (
+            "def f (x : {n : Nat // 0 < n}) : Nat := x.1\n"
+            "theorem g (x : {n : Nat // 0 < n}) : 0 < x.1 := x.2\n"
+            "def h (p : Nat × Nat) : Nat := p.1\n"
+            "theorem k (a b : Prop) (h : a ∧ b) : a := h.1\n"
+        )
+        result, found, declined, _ = self.scan(text)
+        lines = text.split("\n")
+        expected = {
+            (1, lines[0].index("x.1") + 2, "val", None),
+            (2, lines[1].index("x.1") + 2, "val", None),
+            (2, lines[1].index("x.2") + 2, "property", None),
+        }
+        self.assertEqual((result.returncode, found, declined), (0, expected, []))
 
     def test_reports_projections_whose_elaborations_disagree(self):
-        with tempfile.TemporaryDirectory() as name:
-            work = Path(name)
-            source = work / "Macro.lean"
-            source.write_text(
-                "structure S where\n  first : Nat\n"
-                "structure T where\n  second : Nat\n"
-                'macro "both " t:term : term => `(Prod.mk (($t) : S → Nat) (($t) : T → Nat))\n'
-                "def f := both (·.1)\n"
-            )
-            prefix = Path(subprocess.check_output([LEAN, "--print-prefix"], text=True).strip())
-            cache = work / "cache"
-            cache.mkdir(mode=0o700)
-            with patch.dict(
-                os.environ, TAUCETI_NUMPROJ_CACHE=str(cache), PATH=f"{prefix / 'bin'}:{os.environ['PATH']}"
-            ):
-                binary = tool["scanner"]()
-            result = subprocess.run(
-                [str(binary), *tool["OPTIONS"], str(source)],
-                capture_output=True,
-                text=True,
-                env=dict(os.environ, LEAN_PATH=""),
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            found, conflicts = tool["parse_findings"](result.stdout)
-            column = source.read_text().split("\n")[5].index("1)") + 1
-            self.assertEqual((dict(found), conflicts), ({}, [f"{source}:6:{column}"]))
+        text = (
+            "structure S where\n  first : Nat\n"
+            "structure T where\n  second : Nat\n"
+            'macro "both " t:term : term => `(Prod.mk (($t) : S → Nat) (($t) : T → Nat))\n'
+            "def f := both (·.1)\n"
+        )
+        result, found, declined, source = self.scan(text)
+        column = text.split("\n")[5].index("1)") + 1
+        self.assertEqual((result.returncode, found, declined), (0, set(), [f"{source}:6:{column}"]))
 
     def test_parenthesizes_receivers_a_global_name_would_capture(self):
-        with tempfile.TemporaryDirectory() as name:
-            work = Path(name)
-            source = work / "Capture.lean"
-            source.write_text(
-                "def s : {n : Nat // True} := ⟨7, trivial⟩\n"
-                "def s.val : Nat := 42\n"
-                "def a : Nat := s.1\n"
-                "def b (t : {n : Nat // True}) : Nat := t.1\n"
-                "namespace N\ndef u : {n : Nat // True} := ⟨1, trivial⟩\ndef u.property : Nat := 0\nend N\n"
-                "open N in theorem c : True := u.2\n"
-                "example : a = 7 := rfl\n"
-            )
-            prefix = Path(subprocess.check_output([LEAN, "--print-prefix"], text=True).strip())
-            cache = work / "cache"
-            cache.mkdir(mode=0o700)
-            with patch.dict(
-                os.environ, TAUCETI_NUMPROJ_CACHE=str(cache), PATH=f"{prefix / 'bin'}:{os.environ['PATH']}"
-            ):
-                binary = tool["scanner"]()
-            result = subprocess.run(
-                [str(binary), *tool["OPTIONS"], str(source)],
-                capture_output=True,
-                text=True,
-                env=dict(os.environ, LEAN_PATH=""),
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            found, _ = tool["parse_findings"](result.stdout)
-            self.assertEqual(found[str(source)], {(3, 17, "(val"), (4, 41, "val"), (9, 32, "(property")})
-            tool["apply"](found)
-            lines = source.read_text().split("\n")
-            self.assertEqual(lines[2], "def a : Nat := (s).val")
-            self.assertTrue(lines[3].endswith(":= t.val") and lines[8].endswith(":= (u).property"))
-            # the rewritten file still means the same: `a` is 7, not `s.val`'s 42
-            subprocess.run([LEAN, str(source)], check=True, capture_output=True, env=dict(os.environ, LEAN_PATH=""))
+        prelude = "def s : {n : Nat // True} := ⟨7, trivial⟩\n"
+        cases = [
+            # a global `s.val`
+            ("def s.val : Nat := 42\ndef a : Nat := s.1\n", "def a : Nat := (s).val"),
+            # through a namespace that is open
+            (
+                "namespace N\ndef s.val : Nat := 42\nend N\nopen N in def a : Nat := s.1\n",
+                "open N in def a : Nat := (s).val",
+            ),
+            # a trailing component: `s.val.succ` names a global even though `s.val` does not
+            ("def s.val.succ : Nat := 42\ndef a : Nat := s.1.succ\n", "def a : Nat := (s).val.succ"),
+            # a non-ASCII identifier
+            ("def ℘s := s\ndef ℘s.val : Nat := 42\ndef a : Nat := ℘s.1\n", "def a : Nat := (℘s).val"),
+            # an escaped identifier containing `.1`
+            ("def «s.1» := s\ndef «s.1».val : Nat := 42\ndef a : Nat := «s.1».1\n", "def a : Nat := («s.1»).val"),
+            # only one of a macro's elaborations sees the capturing global
+            (
+                "namespace N\ndef s.val : Nat := 42\nend N\n"
+                'macro "both " t:term : term => `(Prod.mk $t (open N in $t))\n'
+                "def a : Nat × Nat := both s.1\n",
+                "def a : Nat × Nat := both (s).val",
+            ),
+        ]
+        for body, expected in cases:
+            with self.subTest(body=body):
+                lines = self.rewrite(prelude + body + "example : a = a := rfl\n").split("\n")
+                self.assertIn(expected, lines)
+        lines = self.rewrite(prelude + "def b (t : {n : Nat // True}) : Nat := t.1\n").split("\n")
+        self.assertIn("def b (t : {n : Nat // True}) : Nat := t.val", lines)
+
+    def test_values_are_unchanged_by_parenthesized_rewrites(self):
+        text = "def s : {n : Nat // True} := ⟨7, trivial⟩\ndef s.val.succ : Nat := 42\ndef a : Nat := s.1.succ\n"
+        rewritten = self.rewrite(text + "example : a = 8 := rfl\n")
+        self.assertIn("(s).val.succ", rewritten)
+
+    def test_declines_a_field_a_type_synonym_redefines(self):
+        text = (
+            "def T := {n : Nat // True}\n"
+            "def T.val (_ : T) : Nat := 42\n"
+            "def a (x : T) : Nat := x.1\n"
+            "def b (x : {n : Nat // True}) : Nat := x.1\n"
+        )
+        result, found, declined, source = self.scan(text)
+        lines = text.split("\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(found, {(4, lines[3].index("x.1") + 2, "val", None)})
+        self.assertEqual(declined, [f"{source}:3:{lines[2].index('x.1') + 3}"])
 
     def test_reports_elaboration_errors_as_incomplete(self):
-        with tempfile.TemporaryDirectory() as name:
-            work = Path(name)
-            source = work / "Bad.lean"
-            source.write_text("def bad : Nat := does_not_exist\ndef f (x : {n : Nat // 0 < n}) : Nat := x.1\n")
-            prefix = Path(subprocess.check_output([LEAN, "--print-prefix"], text=True).strip())
-            cache = work / "cache"
-            cache.mkdir(mode=0o700)
-            with patch.dict(
-                os.environ, TAUCETI_NUMPROJ_CACHE=str(cache), PATH=f"{prefix / 'bin'}:{os.environ['PATH']}"
-            ):
-                binary = tool["scanner"]()
-            result = subprocess.run(
-                [str(binary), *tool["OPTIONS"], str(source)],
-                capture_output=True,
-                text=True,
-                env=dict(os.environ, LEAN_PATH=""),
-            )
-            self.assertEqual(result.returncode, tool["INCOMPLETE"])
-            self.assertIn("does_not_exist", result.stderr)
-            self.assertEqual(tool["parse_findings"](result.stdout)[0][str(source)], {(2, 42, "val")})
+        result, found, _, _ = self.scan(
+            "def bad : Nat := does_not_exist\ndef f (x : {n : Nat // 0 < n}) : Nat := x.1\n"
+        )
+        self.assertEqual(result.returncode, tool["INCOMPLETE"])
+        self.assertIn("does_not_exist", result.stderr)
+        self.assertEqual(found, {(2, 42, "val", None)})
 
 
 class Command(unittest.TestCase):

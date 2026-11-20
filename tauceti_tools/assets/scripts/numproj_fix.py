@@ -30,57 +30,32 @@ OPTIONS = ["-DElab.async=false", "-Dweak.linter.mathlibStandardSet=true"]
 SUBSCRIPT = "₀₁₂₃₄₅₆₇₈₉"
 
 
-def _receiver_start(line, dot, colon=False):
-    """Start column of the identifier (with dotted components, `«escaped»` ones included, and
-    with `:` too when `colon`, for `$h:term`) that ends just before the `.` at `dot`."""
-    start = dot
-    while start > 0:
-        if line[start - 1].isalnum() or line[start - 1] in "_'!?." + (":" if colon else "") + SUBSCRIPT:
-            start -= 1
-        elif line[start - 1] == "\u00bb":  # «escaped identifier component»
-            opening = line.rfind("\u00ab", 0, start - 1)
-            if opening < 0:
-                break
-            start = opening
-        else:
-            break
-    return start
-
-
 def replace_projs(line, edits):
-    """Replace the projection digits at each `(col, field)` of `edits` (columns of `line`).
-
-    Some receivers become parenthesized, up to the chain's first numeric projection: an
-    antiquotation (`$h.1.2` -> `($h).val.property`, since `$h.val` would parse as `$(h.val)`), and
-    an identifier when the field starts with `(`, the scanner's mark that `s.val` would resolve to
-    a global declaration (`s.1` -> `(s).val`). Every edit, digits and parentheses alike, is located
-    in the original line and they are applied right to left."""
-    receivers, ops = set(), []
-    for col, field in edits:
+    """Replace the projection digits at each `(col, field)` or `(col, field, (start, end))` of
+    `edits` (columns of `line`). With a span, the scanner found that the named form would not parse
+    as intended, and the receiver from `start` to `end` (the `.` before the first rewritten
+    projection) becomes parenthesized: `$h.1` -> `($h).val`, or `s.1` -> `(s).val` when a global
+    `s.val` exists. All edits are located in the original line and applied right to left."""
+    spans, ops = set(), []
+    for col, field, *span in edits:
         digits = re.match(r"\d+", line[col:])
         if not digits or col == 0 or line[col - 1] != ".":
             raise ValueError(f"no numeric projection at column {col}: {line!r}")
-        paren = field.startswith("(")
-        ops.append((col, col + len(digits.group(0)), field.removeprefix("(")))
-        start = _receiver_start(line, col - 1, colon=True)
-        if start > 0 and line[start - 1] == "$" and start < col - 1:
-            receivers.add(start - 1)
-        elif paren:
-            start = _receiver_start(line, col - 1)
-            if start == col - 1:
-                raise ValueError(f"no identifier receiver at column {col}: {line!r}")
-            receivers.add(start)
-    for start in receivers:
-        dot = start + re.search(r"\.\d", line[start:]).start()
-        ops += [(start, start, "("), (dot, dot, ")")]
+        ops.append((col, col + len(digits.group(0)), field))
+        if span and span[0]:
+            spans.add(span[0])
+    for start, end in spans:
+        if not 0 <= start < end < len(line) or line[end] != ".":
+            raise ValueError(f"no receiver at columns {start}:{end}: {line!r}")
+        ops += [(start, start, "("), (end, end, ")")]
     for start, end, text in sorted(ops, reverse=True):
         line = line[:start] + text + line[end:]
     return line
 
 
-def replace_proj(line, col, field):
+def replace_proj(line, col, field, span=None):
     """`replace_projs` for a single projection."""
-    return replace_projs(line, [(col, field)])
+    return replace_projs(line, [(col, field, span)])
 
 
 RAW_STRING = re.compile(r'r(#*)"')
@@ -240,14 +215,14 @@ def next_token_column(lines, lexes, i):
 
 
 def apply(findings):
-    """Apply `{path: {(line, col, field)}}` in place. Returns (replacements, unwrapped lines)."""
+    """Apply `{path: {(line, col, field, span)}}` in place. Returns (replacements, unwrapped lines)."""
     count, unwrapped = 0, []
     for path, edits in findings.items():
         lines = Path(path).read_text(encoding="utf-8").split("\n")
         touched = set()
         by_line = collections.defaultdict(list)
-        for line, col, field in edits:
-            by_line[line - 1].append((col, field))
+        for line, col, field, span in edits:
+            by_line[line - 1].append((col, field, span))
         for i, line_edits in by_line.items():
             lines[i] = replace_projs(lines[i], line_edits)
             touched.add(i)
@@ -269,17 +244,24 @@ def apply(findings):
 
 
 def parse_findings(text):
-    """`{path: {(line, col, field)}}` from the scanner's output, and the `path:line:col`
-    positions it could not name a field for (an empty field)."""
-    findings, conflicts = collections.defaultdict(set), []
+    """`{path: {(line, col, field, span)}}` from the scanner's output (`span` a `(start, end)`
+    receiver to parenthesize, or None), and the `(path:line:col, reason)` it declined."""
+    findings, declined = collections.defaultdict(set), []
     for row in text.splitlines():
         parts = row.split("\t")
-        if len(parts) == 4 and parts[1].isdigit() and parts[2].isdigit():
-            if parts[3]:
-                findings[parts[0]].add((int(parts[1]), int(parts[2]), parts[3]))
-            else:
-                conflicts.append(f"{parts[0]}:{parts[1]}:{int(parts[2]) + 1}")
-    return findings, conflicts
+        if len(parts) not in (4, 5) or not (parts[1].isdigit() and parts[2].isdigit()):
+            continue
+        line, col, field = int(parts[1]), int(parts[2]), parts[3]
+        where = f"{parts[0]}:{line}:{col + 1}"
+        if field == "?":
+            declined.append((where, "its elaborations disagree on the field, or its receiver is unclear"))
+        elif field == "!":
+            reason = parts[4] if len(parts) == 5 else "a type synonym"
+            declined.append((where, f"the named field might resolve to another declaration ({reason})"))
+        else:
+            span = tuple(int(n) for n in parts[4].split(":")) if len(parts) == 5 else None
+            findings[parts[0]].add((line, col, field, span))
+    return findings, declined
 
 
 def cache_root():
@@ -350,16 +332,16 @@ def main(argv=None):
         print("numproj: no Lean files to scan")
         return 0
     output, incomplete = scan(scanner(), files, args.jobs)
-    findings, conflicts = parse_findings(output)
+    findings, declined = parse_findings(output)
     count, unwrapped = apply(findings)
     print(f"numproj: replaced {count} numeric projection(s) in {len(findings)} of {len(files)} file(s)")
     for where in unwrapped:
         print(f"numproj: {where}: could not rewrap a line over {LIMIT} columns; split it by hand")
-    for where in conflicts:
-        print(f"numproj: {where}: this projection names different fields in different elaborations; rewrite it by hand")
+    for where, reason in declined:
+        print(f"numproj: {where}: not rewritten, as {reason}; rewrite it by hand")
     for path in incomplete:
         print(f"numproj: {path}: did not elaborate cleanly; fix it and run numproj again")
-    return 1 if unwrapped or conflicts or incomplete else 0
+    return 1 if unwrapped or declined or incomplete else 0
 
 
 if __name__ == "__main__":
