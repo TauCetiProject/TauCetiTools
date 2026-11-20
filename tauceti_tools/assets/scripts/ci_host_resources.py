@@ -22,6 +22,11 @@ INTERVAL = 5
 MAX_SAMPLES = 2880
 DESCENDANT_GRACE = 1.0
 MAX_READ = 65536
+# Warn when the build's peak used memory (MemTotal - MemAvailable, the kernel's estimate of what
+# cannot be had back without swapping) comes within 20% of the host's (the VM's) RAM. A warning
+# only; the command's status never changes. Five-second samples can miss a short spike, so the
+# absence of a warning is evidence of headroom, not proof.
+MEMORY_WARN_FRACTION = 0.8
 
 
 def now():
@@ -47,6 +52,7 @@ def snapshot():
             elif name == 'meminfo':
                 mem = {line.split(':')[0]: int(line.split()[1]) for line in value.splitlines()}
                 result['host_used_bytes'] = (mem['MemTotal'] - mem['MemAvailable']) * 1024
+                result['host_memory_total_bytes'] = mem['MemTotal'] * 1024
             elif name == 'diskstats':
                 # Whole devices only (sysfs partition marker); avoid summing partitions twice.
                 devices = {}
@@ -71,6 +77,7 @@ class Sampler:
     def __init__(self):
         self.first = self.last = None
         self.peak = None
+        self.peak_fraction = None  # (fraction, used, total) of the sample nearest its total
         self.samples = 0
         self.attempts = 0
         self.missing = set()
@@ -100,6 +107,9 @@ class Sampler:
                 self.missing.update(value['missing'])
                 if 'host_used_bytes' in value:
                     self.peak = max(self.peak or 0, value['host_used_bytes'])
+                    total = value.get('host_memory_total_bytes')
+                    if total and (self.peak_fraction is None or value['host_used_bytes'] / total > self.peak_fraction[0]):
+                        self.peak_fraction = (value['host_used_bytes'] / total, value['host_used_bytes'], total)
             except Exception:
                 self.missing.add('sampler-error')
             finally:
@@ -153,7 +163,13 @@ class Sampler:
                 'sampled_elapsed_s': self.ended - self.started if self.started is not None else None,
                 'missing': sorted(self.missing),
                 'host_cpu_busy_fraction': busy / total if total else None,
-                'host_used_peak_bytes': self.peak, 'host_pressure_stall_us': pressure,
+                'host_used_peak_bytes': self.peak,
+                # from the one sample nearest its own total, so a later failed read or a changed total
+                # cannot hide an earlier crossing
+                'host_memory_total_bytes': self.peak_fraction[2] if self.peak_fraction else None,
+                'host_used_peak_fraction': self.peak_fraction[0] if self.peak_fraction else None,
+                'host_used_peak_fraction_bytes': self.peak_fraction[1] if self.peak_fraction else None,
+                'host_pressure_stall_us': pressure,
                 'host_device_io_bytes': devices}
 
 
@@ -174,6 +190,22 @@ def descendant_accounting():
         return lambda: libc.prctl(36, previous.value, 0, 0, 0)
     except (AttributeError, OSError):
         return None
+
+
+def memory_warning(record):
+    """A GitHub warning annotation when peak used memory reached MEMORY_WARN_FRACTION of the total."""
+    fraction, peak, total = (record.get('host_used_peak_fraction'), record.get('host_used_peak_fraction_bytes'),
+                             record.get('host_memory_total_bytes'))
+    if record.get('sample_limit_reached'):
+        print('::notice title=Build memory headroom::memory was sampled for the first '
+              f'{MAX_SAMPLES * INTERVAL // 3600} hours only; a later peak is not in this record', flush=True)
+    if fraction is None or fraction < MEMORY_WARN_FRACTION:
+        return False
+    print(f'::warning title=Build memory headroom::peak used memory {peak / 2**30:.1f} GiB is '
+          f'{100 * fraction:.0f}% of this host\'s {total / 2**30:.1f} GiB (warning at '
+          f'{100 * MEMORY_WARN_FRACTION:.0f}%); give the runner more memory or fewer parallel jobs '
+          'before the build outgrows it', flush=True)
+    return True
 
 
 def main():
@@ -297,6 +329,11 @@ def main():
         temporary.replace(out)
     except Exception as error:
         print('::warning::host resource telemetry unavailable: ' + type(error).__name__, flush=True)
+    try:
+        # Independent of the record: an unwritable output must not hide a memory warning.
+        memory_warning(sampler.summary())
+    except Exception:
+        pass
     return code if code >= 0 else 128 - code
 
 
