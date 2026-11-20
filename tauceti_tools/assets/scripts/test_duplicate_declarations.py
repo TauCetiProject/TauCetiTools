@@ -145,6 +145,28 @@ class DuplicateDeclarationsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("phase audit-import", result.stdout)
 
+    def test_match_congruence_equations_are_allowed(self):
+        # Lean realizes `<matcher>.congr_eq_<i>` on demand in each module that needs it (rc1's
+        # `simp [g]` does so); naming it forces the same realization on every toolchain.
+        uses = "public theorem {} : True := by have := @g.match_1.congr_eq_1.{{0}}; trivial\n"
+        result = self.fixture({
+            "TauCeti.Base": "module\n@[expose] public def g (p : Nat × Nat) : Nat :=\n"
+                            "  match p with | (a, b) => a + b\n",
+            "TauCeti.A": "module\npublic import TauCeti.Base\n" + uses.format("usesA"),
+            "TauCeti.B": "module\npublic import TauCeti.Base\n" + uses.format("usesB"),
+        })
+        # The metadata scan accepts them; the fixture's full audit covers the import checker.
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("phase audit-import", result.stdout)
+
+    def test_user_theorem_named_like_a_match_congruence_equation_is_not_exempt(self):
+        self.assert_collision(self.fixture({
+            "TauCeti.A": "module\npublic theorem g.match_1.congr_eq_1 : True := True.intro\n",
+            "TauCeti.B": "module\npublic theorem g.match_1.congr_eq_1 : True := True.intro\n",
+            "TauCeti.Base": "module\n@[expose] public def g (p : Nat × Nat) : Nat :=\n"
+                            "  match p with | (a, b) => a + b\n",
+        }), "g.match_1.congr_eq_1")
+
     def test_user_congruence_theorem_is_not_a_generated_name_exception(self):
         self.assert_collision(self.fixture({
             "TauCeti.Base": "module\n@[expose] public def f (n : Nat) := n\n",
