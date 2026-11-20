@@ -52,6 +52,10 @@ def parser():
     upgrade.add_argument("--apply", action="store_true")
     upgrade.add_argument("--tool", choices=("tools", "review", "progress", "docgen", "bors"), required=True)
     upgrade.add_argument("--ref", required=True)
+    numproj = sub.add_parser(
+        "numproj", help="Replace numeric projections (x.1) with named ones; run from a built project checkout"
+    )
+    numproj.add_argument("args", nargs=argparse.REMAINDER)
     script = sub.add_parser("script")
     script.add_argument("name")
     script.add_argument("args", nargs=argparse.REMAINDER)
@@ -110,6 +114,12 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     try:
         conf, argv = conf_argument(argv)
+        if argv[:1] == ["numproj"]:
+            from .templates import ASSETS
+
+            # Stdlib-only and needs no project configuration: the scanner reads the checkout itself.
+            # Its options are the script's own, so pass the arguments through unparsed.
+            return subprocess.call([sys.executable, str(ASSETS / "scripts/numproj_fix.py"), *argv[1:]])
         args = parser().parse_args(argv)
         if args.command == "init":
             return init_config(args)
