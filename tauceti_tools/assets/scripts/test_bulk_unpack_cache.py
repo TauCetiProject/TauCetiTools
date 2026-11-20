@@ -64,7 +64,7 @@ class BulkUnpackTests(unittest.TestCase):
         # Native Lake's final -o build must reuse the downloaded archives instead of repacking.
         for record in records:
             module = "Fixture0" if record["hash"] == "0123456789abcdef" else "Fixture1"
-            archive = self.root / ".lake/build/lib/lean/TauCeti" / (module + ".ltar")
+            archive = self.root / ".lake/build/ir/TauCeti" / (module + ".ltar")
             self.assertTrue(os.path.samefile(archive, record["file"]))
         self.assertFalse(self.record.exists())
 
@@ -463,6 +463,10 @@ class StockLakeTests(unittest.TestCase):
                         self.assertEqual(restored, 3 if change else 4)
                         if change:
                             self.assertFalse((path / ".lake/build/lib/lean/TauCeti/C.olean").exists())
+                        # Lake finds each downloaded archive at its `Module.ltarFile`.
+                        archive = (path / ".lake/build/ir/TauCeti/A.ltar").stat().st_ino
+                        downloaded = (path / ".lake/cache/artifacts").glob("*.ltar")
+                        self.assertIn(archive, {p.stat().st_ino for p in downloaded})
                         # Each restored trace resolves in the expanded cache to the restored file.
                         for trace in (path / ".lake/build/lib/lean/TauCeti").glob("*.trace"):
                             name = json.loads(trace.read_text())["outputs"]["o"][0]
@@ -482,6 +486,8 @@ class StockLakeTests(unittest.TestCase):
                             # Lake took its cached-artifact path: it did not rehash and
                             # recache the restored outputs, which writes these hash files.
                             self.assertFalse((path / ".lake/build/lib/lean/TauCeti/A.olean.hash").exists())
+                            # The output map reused the downloaded archive instead of repacking it.
+                            self.assertEqual((path / ".lake/build/ir/TauCeti/A.ltar").stat().st_ino, archive)
                     lines = (path / ".lake/map.jsonl").read_text().splitlines()
                     maps.append((json.loads(lines[0]), dict(map(json.loads, lines[1:]))))
                 self.assertEqual(maps[0], maps[1])

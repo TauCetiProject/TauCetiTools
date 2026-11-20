@@ -3,7 +3,7 @@
 
 Temporary workaround for https://github.com/leanprover/lean4/pull/15868.
 Native Lake remains responsible for input/output validity and publication. Retain
-the original archive beside each module so the final native output map reuses it
+the original archive at each module's `ltarFile` so the final native output map reuses it
 without repacking. Run inside the offline PR sandbox before library code.
 """
 
@@ -318,7 +318,8 @@ def assemble(project, records, staging):
                 raise ValueError("overlapping module output")
             targets.add(relative)
             plans.append((source, combined / relative))
-        archive_target = combined / "lib/lean" / Path(*module.split(".")).with_suffix(".ltar")
+        # Lake's `Module.ltarFile` is the IR path, `ir/<module>.ltar`.
+        archive_target = combined / "ir" / Path(*module.split(".")).with_suffix(".ltar")
         archives.append((Path(record["file"]), archive_target))
         satisfied.append(record)
         if accepted is not None:
