@@ -255,6 +255,21 @@ class ReviewSizeTests(unittest.TestCase):
         self.assertTrue(size["pins_changed"])
         self.assertFalse(size["too_large"])
 
+    def test_large_refactor_lifts_the_three_caps_but_not_the_new_file_cap(self):
+        for index in range(ci_git.REVIEW_FILE_CAP):
+            (self.repo / "TauCeti" / f"F{index}.lean").write_text(f"-- {index}\n")
+        self.write("TauCeti/Long.lean", 2001, start=8000)
+        head = self.commit("head")
+        with ci_git.object_reader(self.repo) as git:
+            plain = ci_git.pr_guards(git, self.base, head, scope=False)
+            exempt = ci_git.pr_guards(git, self.base, head, scope=False, large_refactor=True)
+        self.assertTrue(plain["too_large"])
+        self.assertFalse(exempt["too_large"])
+        self.assertTrue(exempt["large_refactor"])
+        self.assertEqual(exempt["violations"], [
+            "TauCeti/Long.lean: new Lean files must be at most 1000 lines (found 2001). "
+            "Split it, or grow an existing file (allowed up to 1500)."])
+
     def test_file_cap_applies_to_pin_bumps(self):
         (self.repo / "lean-toolchain").write_text("leanprover/lean4:v4.24.0\n")
         for index in range(ci_git.REVIEW_FILE_CAP):
@@ -340,6 +355,59 @@ class ReviewSizeTests(unittest.TestCase):
             git.run.return_value.stdout = raw
             with self.assertRaises(ValueError):
                 ci_git.review_size(git, self.base, self.base)
+
+
+class LargeRefactorTests(unittest.TestCase):
+    LABELLED = 1_800_000_000  # 2027-01-15T08:00:00Z
+
+    def event(self, id, event, *, label="large-refactor", login="admin", actor_id=1, at=None):
+        at = self.LABELLED if at is None else at
+        import datetime as dt
+
+        stamp = dt.datetime.fromtimestamp(at, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return {"id": id, "event": event, "label": {"name": label}, "actor": {"login": login, "id": actor_id},
+                "created_at": stamp}
+
+    def approved(self, events, *, role="admin", user_id=1, labels=("large-refactor",), committed=None):
+        reads = []
+
+        def read(path):
+            reads.append(path)
+            if "/events?" in path:
+                return events if path.endswith("page=1") else []
+            return {"role_name": role, "user": {"id": user_id}}
+
+        committed = self.LABELLED - 60 if committed is None else committed
+        return ci_git.large_refactor_approved(read, "o/r", 7, labels, committed), reads
+
+    def test_admin_label_after_the_head_commit_approves(self):
+        verdict, reads = self.approved([self.event(1, "labeled", login="someone", actor_id=9),
+                                        self.event(2, "labeled")])
+        self.assertTrue(verdict)
+        self.assertEqual(reads, ["repos/o/r/issues/7/events?per_page=100&page=1",
+                                 "repos/o/r/collaborators/admin/permission"])
+
+    def test_missing_label_reads_nothing(self):
+        verdict, reads = self.approved([self.event(1, "labeled")], labels=("self-tested",))
+        self.assertFalse(verdict)
+        self.assertEqual(reads, [])
+
+    def test_latest_labeller_must_be_an_admin_with_the_same_id(self):
+        self.assertFalse(self.approved([self.event(1, "labeled")], role="maintain")[0])
+        self.assertFalse(self.approved([self.event(1, "labeled")], user_id=2)[0])
+        events = [self.event(1, "labeled"), self.event(2, "unlabeled"), self.event(3, "labeled", login="w", actor_id=5)]
+        self.assertFalse(self.approved(events, user_id=1)[0])
+
+    def test_a_later_head_or_force_push_ends_the_exemption(self):
+        self.assertFalse(self.approved([self.event(1, "labeled")], committed=self.LABELLED + 1)[0])
+        events = [self.event(1, "labeled"), {"id": 2, "event": "head_ref_force_pushed"}]
+        self.assertFalse(self.approved(events)[0])
+        events = [{"id": 1, "event": "head_ref_force_pushed"}, self.event(2, "labeled")]
+        self.assertTrue(self.approved(events)[0])
+
+    def test_unreadable_events_raise(self):
+        with self.assertRaises(ValueError):
+            ci_git.large_refactor_approved(lambda path: {"message": "x"}, "o/r", 7, ["large-refactor"], 0)
 
 
 if __name__ == "__main__":
