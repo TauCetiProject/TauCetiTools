@@ -14,7 +14,7 @@ permissions:
 # Linux jobs run on the fleet's TauCetiInfra runners (native-disk slots on our own
 # machines) when the repository variable FLEET_INFRA_CI is 'true', and on GitHub-hosted
 # ubuntu-24.04 otherwise: unset or change that variable to fall back. Fork pull requests
-# always run hosted. package and project-fixtures stay hosted for now.
+# always run hosted.
 jobs:
   bubblewrap:
     runs-on: ${{ vars.FLEET_INFRA_CI == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('{"group":"TauCetiInfra","labels":["self-hosted","linux","x64","tauceti-fleet-infra"]}') || 'ubuntu-24.04' }}
@@ -35,9 +35,7 @@ jobs:
       caller_repository: ${{ github.repository }}
       caller_revision: ${{ github.workflow_sha }}
   package:
-    # Stays GitHub-hosted for now: on the fleet's native-disk runners its tests start the setup-python interpreter with a clean environment, and the
-    # GitHub-built Python finds libpython only under /opt/hostedtoolcache.
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.FLEET_INFRA_CI == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('{"group":"TauCetiInfra","labels":["self-hosted","linux","x64","tauceti-fleet-infra"]}') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -92,8 +90,7 @@ jobs:
   # `main` supplies the project; every script under test is this revision's, materialized over its
   # `scripts/` by setup. tests/project/tauceti/ checks workflows that stay in TauCeti.
   project-fixtures:
-    # Stays GitHub-hosted for now: on the fleet's native-disk runners its fixtures need node and other tools of GitHub's runner image.
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.FLEET_INFRA_CI == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('{"group":"TauCetiInfra","labels":["self-hosted","linux","x64","tauceti-fleet-infra"]}') || 'ubuntu-24.04' }}
     timeout-minutes: 45
     env:
       BWRAP_VER: 0.9.0-1build1
