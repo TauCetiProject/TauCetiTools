@@ -243,7 +243,7 @@ def interrupted(api, repo, run):
         return False
     jobs = unacquired(api, repo, run)
     return jobs is not None and any(
-        job.get("name") == "sandboxed-build" and job.get("conclusion") == "cancelled"
+        job.get("name", "").split(" / ")[-1] == "sandboxed-build" and job.get("conclusion") == "cancelled"
         and (job.get("runner_id") or job.get("runner_name"))
         for job in jobs
     )

@@ -142,7 +142,6 @@ jobs:
     timeout-minutes: 5
     continue-on-error: true
     permissions:
-      issues: write
       statuses: write
       pull-requests: read
       actions: read
