@@ -1,6 +1,7 @@
 name: github-state-postgres
-# The real-database suite costs about 30 hosted job-minutes a run, so PRs run it only when they
-# change the service it tests (or this workflow); every main push still runs it.
+# The PostgreSQL contract suite. Pull requests that change the service run it against a local
+# PostgreSQL behind Neon's proxy, so the production driver is unchanged and no secrets are needed;
+# every main push runs it against the isolated Neon test branch.
 on:
   push:
     branches: [main]
@@ -14,8 +15,32 @@ concurrency:
 permissions:
   contents: read
 jobs:
-  github-state-postgres:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+  local:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Start PostgreSQL behind Neon's proxy
+        run: services/github-state/scripts/local-neon.sh "$RUNNER_TEMP/neon-local" >> "$GITHUB_ENV"
+      - run: npm ci && npm run test:postgres
+        env:
+          POSTGRES_TEST_CONCURRENCY: '8'
+          POSTGRES_TEST_REPORT: ${{ runner.temp }}/postgres-test-results.xml
+        working-directory: services/github-state
+      - name: Upload PostgreSQL test timings
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgres-test-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/postgres-test-results.xml
+          if-no-files-found: warn
+          retention-days: 7
+  neon:
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     # Real database round trips are materially slower from GitHub-hosted runners
     # than the previous Namespace placement. Keep a finite full-suite budget.

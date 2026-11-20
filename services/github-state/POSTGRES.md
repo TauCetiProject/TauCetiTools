@@ -119,8 +119,9 @@ its compute and migrations untouched.
 Credentials are held in operator secrets and server/CI secret stores, never in
 this repository or client configuration. CI receives only the two isolated test
 URLs as `STATE_TEST_POSTGRES_URL` and `STATE_TEST_POSTGRES_MIGRATION_URL`; it has
-no Neon API key or production credential. The PostgreSQL CI job runs for trusted
-repository branches. Fork pull requests still run the SQLite suite.
+no Neon API key or production credential. Only `main` pushes use them; pull requests
+run the PostgreSQL suite against a local database (README, "PostgreSQL CI budget and
+timings").
 
 ## Explicit test setup
 
