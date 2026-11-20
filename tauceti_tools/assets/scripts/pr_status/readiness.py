@@ -5,6 +5,8 @@ second interpretation of scoreboards. Set TAUCETI_REVIEW_RUNNER to its pinned
 checkout's runner directory (the workflows provision it without credentials).
 """
 
+from concurrent.futures import ThreadPoolExecutor
+import contextvars
 import functools
 from datetime import datetime, timezone
 import importlib
@@ -346,6 +348,19 @@ def queue_snapshot(repo):
             "reservation_holder": sweep.reservation_holder(entries, datetime.now(timezone.utc))}
 
 
+# Pull requests assessed at once. Each assessment is a few sequential reads, so one at a time
+# leaves the audit waiting on the network for well over an hour at ~3,000 open pull requests.
+# Kept small: GitHub's secondary limits penalise bursts of concurrent requests from one token.
+AUDIT_WORKERS = max(1, int(os.environ.get("TAUCETI_READINESS_WORKERS", "4") or "4"))
+
+
+def _audit_one(number, repo):
+    try:
+        return assess(number, repo=repo)
+    except (RuntimeError, subprocess.CalledProcessError, KeyError, ValueError) as exc:
+        return {"number": number, "eligible": None, "category": None, "reason": str(exc)}
+
+
 def audit(snapshot):
     """Validate current stages without trusting labels; retain failures as unknown."""
     try:
@@ -355,16 +370,15 @@ def audit(snapshot):
         return {"checked_at": int(time.time()), "prs": {},
                 "queue": {"known": False, "reason": str(exc)}, "error": str(exc)}
     repo = snapshot["repo"]
-    results = {}
-    for pr in snapshot["prs"]:
-        if pr["state"] != "OPEN" or pr["is_draft"]:
-            continue
-        number = pr["number"]
-        try:
-            results[str(number)] = assess(number, repo=repo)
-        except (RuntimeError, subprocess.CalledProcessError, KeyError, ValueError) as exc:
-            results[str(number)] = {"number": number, "eligible": None,
-                                    "category": None, "reason": str(exc)}
+    numbers = [pr["number"] for pr in snapshot["prs"] if pr["state"] == "OPEN" and not pr["is_draft"]]
+    # One report, so one membership answer per author is enough for the whole audit. The answers
+    # belong to this audit alone; each worker runs in a copy of a context that carries them.
+    from tauceti_tools.self_tested import RunMembership, membership_run
+    with membership_run(RunMembership()), ThreadPoolExecutor(max_workers=AUDIT_WORKERS) as pool:
+        futures = [pool.submit(contextvars.copy_context().run, _audit_one, number, repo)
+                   for number in numbers]
+        assessed = [future.result() for future in futures]
+    results = {str(number): result for number, result in zip(numbers, assessed)}
     try:
         queue = queue_snapshot(repo)
     except (RuntimeError, subprocess.CalledProcessError, KeyError, ValueError) as exc:

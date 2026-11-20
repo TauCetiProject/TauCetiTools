@@ -332,6 +332,40 @@ class ReadEvidence(unittest.TestCase):
                     readiness.graphql("query")
             self.assertEqual(run.call_count, 1)
 
+    def test_audit_assesses_open_prs_concurrently_and_keeps_each_result_with_its_pr(self):
+        import threading
+        import tauceti_tools.self_tested as policy
+        snapshot = {"repo": "owner/repo", "prs": [
+            {"number": n, "state": "OPEN" if n != 3 else "CLOSED", "is_draft": n == 4} for n in range(1, 9)]}
+        seen_runs, lock, active, peak = [], threading.Lock(), [0], [0]
+
+        def assess(number, repo=None):
+            with lock:
+                active[0] += 1
+                peak[0] = max(peak[0], active[0])
+                seen_runs.append(policy._RUN.get())
+            time.sleep(0.05)
+            with lock:
+                active[0] -= 1
+            if number == 5:
+                raise RuntimeError("evidence unavailable")
+            return {"number": number, "eligible": True, "category": None}
+
+        with patch.object(readiness, "engine"), patch.object(readiness, "assess", side_effect=assess), \
+             patch.object(readiness, "queue_snapshot", return_value={"known": False, "reason": "x"}), \
+             patch.object(readiness, "AUDIT_WORKERS", 3):
+            result = readiness.audit(snapshot)
+        self.assertEqual(sorted(result["prs"], key=int), ["1", "2", "5", "6", "7", "8"])
+        self.assertEqual(result["prs"]["6"]["number"], 6)
+        self.assertIsNone(result["prs"]["5"]["eligible"])
+        self.assertEqual(result["prs"]["5"]["reason"], "evidence unavailable")
+        self.assertGreater(peak[0], 1)
+        self.assertLessEqual(peak[0], 3)
+        # Every worker sees the same audit-scoped membership answers, and they end with the audit.
+        self.assertEqual(len({id(run) for run in seen_runs}), 1)
+        self.assertIsInstance(seen_runs[0], policy.RunMembership)
+        self.assertIsNone(policy._RUN.get())
+
     def test_missing_policy_publishes_unverified_audit(self):
         with patch.object(readiness, "engine", side_effect=RuntimeError("missing policy")):
             result = readiness.audit({"repo": "owner/repo", "prs": []})
