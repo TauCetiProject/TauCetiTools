@@ -129,6 +129,7 @@ def load_jobs(db: sqlite3.Connection, since: float, until: float) -> list[dict]:
         if not created:
             continue
         kind = reporting_kind(kind, labels, runner_name)
+        name = name.split(" / ")[-1]  # a called workflow's jobs are `<caller job> / <job>`
         key, wait_series = classify(name, kind, trigger)
         total, fetched = counts.get((workflow, run_created[:13]), (1, 1))
         out.append({

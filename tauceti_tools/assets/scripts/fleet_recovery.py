@@ -53,7 +53,8 @@ def build_job(data):
     jobs = data["jobs"]
     if data["total_count"] != len(jobs) or len(jobs) > 100:
         raise ValueError("incomplete job observation")
-    found = [j for j in jobs if j["name"] == "sandboxed-build"]
+    # A caller's stub prefixes reusable-workflow jobs with `<caller job> / `.
+    found = [j for j in jobs if j["name"] == "sandboxed-build" or j["name"].endswith(" / sandboxed-build")]
     if len(found) > 1:
         raise ValueError("ambiguous sandbox job")
     return found[0] if found else None

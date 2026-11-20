@@ -1104,7 +1104,9 @@ class ShippedWorkflow(unittest.TestCase):
         self.assertNotIn("WARM", self.step("Restore source candidate repair outputs")["if"])
 
     def test_source_publication_and_finalizer_use_separate_trusted_control_capacity(self):
-        control = "${{ fromJSON(inputs.source_candidate_enabled && inputs.source_candidate_control_runner || '\"ubuntu-24.04\"') }}"
+        control = ("${{ inputs.source_candidate_enabled && fromJSON(inputs.source_candidate_control_runner) || "
+                   "inputs.fleet_routing && (github.event_name == 'repository_dispatch' && "
+                   "github.event.action == 'tauceti-bors-staging') && fromJSON(inputs.control_runner) || 'ubuntu-24.04' }}")
         jobs = self.value["jobs"]
         self.assertEqual(jobs["finalize-merge-group-build"]["runs-on"], control)
         publisher = jobs["publish-merge-group-cache"]

@@ -87,6 +87,12 @@ class FinalizerTests(unittest.TestCase):
         self.assertEqual(result[0], "success")
         self.assertGreater(elapsed, 300)
 
+    def test_jobs_of_a_stub_caller_are_found_by_their_prefixed_names(self):
+        publisher = dict(job(), name="pr-build / " + finalizer.PUBLISHER)
+        self.assertEqual(finalizer.publication_job(jobs(publisher)), publisher)
+        sandbox = dict(name="pr-build / sandboxed-build", runner_name="nsc-sandbox")
+        self.assertTrue(finalizer.isolated_runner(dict(jobs=[sandbox]), publisher, 12))
+
     def test_ambiguous_or_truncated_job_listing_is_not_publication_evidence(self):
         for response in [jobs(job(), job()), dict(total_count=101, jobs=[job()])]:
             with self.subTest(response=response):
