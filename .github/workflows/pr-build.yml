@@ -903,6 +903,22 @@ jobs:
           rm -rf pr/.lake
           mkdir -p pr/.lake
 
+      # A queue staging attempt on a reserved Fleet staging slot may reuse the build/ and cache/
+      # that the previous attempt of the same batch (same accepted members, toolchain and Lake
+      # manifest) left on the slot's persistent disk. Here the kept tree stays hidden: pr/.lake
+      # becomes a fresh empty directory on that disk, so trusted setup runs as on a cold runner.
+      # The kept tree joins it only immediately before the sandboxed build. scripts/warm_tree.py
+      # documents why. Without the disk, or on anything unexpected, this is the cold path.
+      - name: Prepare this batch's staging tree from its previous attempt
+        if: ${{ env.INFRA != '1' && env.SOURCE_CANDIDATE == 'true' && env.IS_BATCH == 'true' }}
+        # Optional: if this is cut short, its results are never exported and the job continues cold.
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          python3 gate/scripts/warm_tree.py prepare --workspace "$GITHUB_WORKSPACE" --project pr \
+            --request "$RUNNER_TEMP/source-candidate-request.json" \
+            --members "$RUNNER_TEMP/source-members.json" --github-env "$GITHUB_ENV"
+
       - name: Attest integrated Lake configuration before executing Lake
         if: ${{ env.INFRA != '1' && env.IS_BATCH != 'true' }}
         env:
@@ -1257,8 +1273,9 @@ jobs:
       # trusted script retains hash-verified artifacts between attempts and retries only missing
       # downloads. If all attempts remain incomplete, it discards the partial cache and falls
       # back to no cache so ci.yml's post-merge build has the same final semantics.
+      # A kept tree already holds this batch's outputs; the repair outputs below still arrive.
       - name: Fetch ${{ inputs.lean_root }}'s own oleans from the Lake cache (network, no token; no PR code)
-        if: ${{ env.INFRA != '1' && env.TAUCETI_CACHE_ENABLED == '1' }}
+        if: ${{ env.INFRA != '1' && env.TAUCETI_CACHE_ENABLED == '1' && env.WARM_TREE != '1' }}
         env:
           # Passed under non-LAKE_ names so Lake never sees the deprecated endpoint
           # environment variables; the script hands it the endpoints through a `--service` config.
@@ -1332,6 +1349,15 @@ jobs:
       # passed, except in a queue batch, where every phase after a passing build runs whatever
       # an earlier check found, so one run reports every failing check. The `build` step below
       # combines their outcomes into the one outcome the reporting steps read.
+      # After every trusted setup step and before any candidate code: from here on only the
+      # sandbox and the post-sandbox steps, which already treat pr/.lake as candidate-written,
+      # see the kept tree.
+      - name: Join this batch's previous staging tree
+        if: ${{ env.INFRA != '1' && env.WARM_VOLUME == '1' }}
+        continue-on-error: true
+        timeout-minutes: 10
+        run: python3 gate/scripts/warm_tree.py activate --project pr --warm "$WARM_TREE" --github-env "$GITHUB_ENV"
+
       - name: Build exact candidate under bwrap, offline
         id: sandbox_build
         if: ${{ env.INFRA != '1' }}
@@ -1938,6 +1964,14 @@ jobs:
       - name: GitHub API quota unavailable
         if: ${{ always() && failure() && env.TAUCETI_CI_QUOTA_UNAVAILABLE == '1' }}
         run: exit 1
+
+      # Last, after every step that reads pr/.lake. Only a build that ran to an outcome, passing or
+      # failing, leaves a reusable tree; a cancelled job or an interrupted build leaves none.
+      - name: Keep this batch's staging tree for its next attempt
+        if: ${{ !cancelled() && env.WARM_ACTIVE == '1' && (steps.sandbox_build.outcome == 'success' || steps.sandbox_build.outcome == 'failure') }}
+        continue-on-error: true
+        timeout-minutes: 5
+        run: python3 gate/scripts/warm_tree.py retain --project pr --key "$WARM_TREE_KEY"
 
   # A queue batch publishes whenever its sandboxed build passed, so the next repair and staging
   # attempt restore it even when an audit or lint failed; every consumer reruns the audits on its
