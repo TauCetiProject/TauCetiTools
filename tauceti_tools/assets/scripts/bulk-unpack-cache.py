@@ -145,6 +145,16 @@ def source_present(project, module):
     return source.is_file() and not source.is_symlink()
 
 
+def raise_stack_limit():
+    """leantar 0.1.21 overflows the default 8 MiB stack on a large olean; lift it to the hard limit."""
+    try:
+        import resource
+        _, hard = resource.getrlimit(resource.RLIMIT_STACK)
+        resource.setrlimit(resource.RLIMIT_STACK, (hard, hard))
+    except (ImportError, OSError, ValueError):
+        pass
+
+
 def extract_records(records, staging):
     """One native extraction for all selected archives, never into a live build."""
     if not records:
@@ -160,7 +170,8 @@ def extract_records(records, staging):
     cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
     env.setdefault("RAYON_NUM_THREADS", str(min(16, cpus)))
     print(f"bulk-unpack-cache: restoring {len(records)} archives in one invocation", flush=True)
-    subprocess.run([str(leantar), "-x", "-j", "-"], input=json.dumps(requests), text=True, check=True, env=env)
+    subprocess.run([str(leantar), "-x", "-j", "-"], input=json.dumps(requests), text=True, check=True, env=env,
+                   preexec_fn=raise_stack_limit)
     extracted = []
     for record in records:
         base = staging / record["hash"]

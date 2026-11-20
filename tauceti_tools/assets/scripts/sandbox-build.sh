@@ -23,6 +23,11 @@
 # order in this one invocation, as before.
 set -euxo pipefail
 
+# leantar 0.1.21 (Lean v4.37.0-rc1) overflows the default 8 MiB stack packing a large olean
+# (TauCeti.Algebra.Lie.F4.ModularLattice: exit 139); every process this script starts, Lake's
+# `-o` packing and cache staging included, inherits the larger limit.
+ulimit -s unlimited 2>/dev/null || ulimit -s "$(ulimit -H -s)" 2>/dev/null || true
+
 PHASES=(build audits module-system lint-env lint-style finish)
 if [ "$#" -eq 0 ]; then
   selected=("${PHASES[@]}")
