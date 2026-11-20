@@ -106,6 +106,10 @@ def receiverSpan (ctxs : Array (ContextInfo × LocalContext)) (line : Array Char
   if start > 0 && line[start - 1]! == '$' then return some (some (start - 1, comps[r0]!.col - 1))
   let candidate := (comps.extract 0 segEnd).foldl (init := Name.anonymous) fun n c =>
     if c.numeric then n ++ (agreed.getD (ln, c.col) .anonymous) else Name.str n c.text
+  -- A receiver that is a notation token (`local notation "s" => t`) stops being one inside the
+  -- longer identifier `s.val`.
+  for (ctx, _) in ctxs do
+    if ((Parser.getTokenTable ctx.env).find? comps[0]!.text).isSome then return some span
   -- A local whose name covers a rewritten component (`let x.val := 42`) would win as well.
   let comps' := candidate.components
   for (_, lctx) in ctxs do

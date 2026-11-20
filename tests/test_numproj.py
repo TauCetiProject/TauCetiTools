@@ -291,6 +291,11 @@ class Scanner(unittest.TestCase):
             ),
             # a trailing component: `s.val.succ` names a global even though `s.val` does not
             ("def s.val.succ : Nat := 42\ndef a : Nat := s.1.succ\n", "def a : Nat := (s).val.succ"),
+            # a receiver that is a notation token
+            (
+                'def t : {n : Nat // True} := ⟨42, trivial⟩\nlocal notation "s₀" => t\ndef a : Nat := s₀.1\n',
+                "def a : Nat := (s₀).val",
+            ),
             # a non-ASCII identifier
             ("def ℘s := s\ndef ℘s.val : Nat := 42\ndef a : Nat := ℘s.1\n", "def a : Nat := (℘s).val"),
             # an escaped identifier containing `.1`
