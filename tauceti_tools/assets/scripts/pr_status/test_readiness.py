@@ -334,13 +334,13 @@ class ReadEvidence(unittest.TestCase):
         import tauceti_tools.self_tested as policy
         snapshot = {"repo": "owner/repo", "prs": [
             {"number": n, "state": "OPEN" if n != 3 else "CLOSED", "is_draft": n == 4} for n in range(1, 9)]}
-        seen_ttl, lock, active, peak = [], threading.Lock(), [0], [0]
+        seen_runs, lock, active, peak = [], threading.Lock(), [0], [0]
 
         def assess(number, repo=None):
             with lock:
                 active[0] += 1
                 peak[0] = max(peak[0], active[0])
-                seen_ttl.append(policy.MEMBERSHIP_CACHE_SECONDS)
+                seen_runs.append(policy._RUN.get())
             time.sleep(0.05)
             with lock:
                 active[0] -= 1
@@ -348,7 +348,6 @@ class ReadEvidence(unittest.TestCase):
                 raise RuntimeError("evidence unavailable")
             return {"number": number, "eligible": True, "category": None}
 
-        before = policy.MEMBERSHIP_CACHE_SECONDS
         with patch.object(readiness, "engine"), patch.object(readiness, "assess", side_effect=assess), \
              patch.object(readiness, "queue_snapshot", return_value={"known": False, "reason": "x"}), \
              patch.object(readiness, "AUDIT_WORKERS", 3):
@@ -359,8 +358,10 @@ class ReadEvidence(unittest.TestCase):
         self.assertEqual(result["prs"]["5"]["reason"], "evidence unavailable")
         self.assertGreater(peak[0], 1)
         self.assertLessEqual(peak[0], 3)
-        self.assertTrue(all(ttl == float("inf") for ttl in seen_ttl))
-        self.assertEqual(policy.MEMBERSHIP_CACHE_SECONDS, before)
+        # Every worker sees the same audit-scoped membership answers, and they end with the audit.
+        self.assertEqual(len({id(run) for run in seen_runs}), 1)
+        self.assertIsInstance(seen_runs[0], policy.RunMembership)
+        self.assertIsNone(policy._RUN.get())
 
     def test_missing_policy_publishes_unverified_audit(self):
         with patch.object(readiness, "engine", side_effect=RuntimeError("missing policy")):

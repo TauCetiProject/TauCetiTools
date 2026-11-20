@@ -11,7 +11,10 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import lru_cache
 
 LABEL = "self-tested"
@@ -83,10 +86,73 @@ def gh_read(path, *, token=None):
 
 
 _MEMBERS = {}
-# How long a cached answer serves callers that pass cache=True. Admission keeps this short so a
-# removal from the team takes effect quickly; a one-off report (the readiness audit) extends it to
-# its whole run, because it asks about the same few authors for thousands of pull requests.
-MEMBERSHIP_CACHE_SECONDS = 60.0
+
+
+class RunMembership:
+    """Membership answers for one report run, shared by its worker threads.
+
+    A report such as the readiness audit asks about the same few authors for thousands of pull
+    requests with one credential, so within the run one answer per author is enough, a 404
+    included. Admission never sees these answers: they live only in this object, which the run
+    installs with `membership_run` and drops when it ends.
+    """
+
+    def __init__(self):
+        self._answers = {}
+        self._locks = {}
+        self._lock = threading.Lock()
+
+    def answer(self, key, lookup):
+        with self._lock:
+            if key in self._answers:
+                return self._answers[key]
+            key_lock = self._locks.setdefault(key, threading.Lock())
+        with key_lock:  # One request per author, however many workers ask at once.
+            with self._lock:
+                if key in self._answers:
+                    return self._answers[key]
+            value = lookup()
+            with self._lock:
+                self._answers[key] = value
+            return value
+
+
+_RUN = ContextVar("self_tested_membership_run", default=None)
+
+
+@contextmanager
+def membership_run(run):
+    """Answer cached membership lookups in this context (and copies of it) from `run`."""
+    token = _RUN.set(run)
+    try:
+        yield run
+    finally:
+        _RUN.reset(token)
+
+
+_LOOKUP_ERRORS = (
+    OSError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    KeyError,
+    RuntimeError,
+    subprocess.SubprocessError,
+)
+
+
+def _lookup(configured, author, read):
+    """The team's answer and whether GitHub gave one: (value, True), or (False, False) for a 404,
+    which means not a member or not visible to this credential. Other failures raise."""
+    try:
+        org, slug = configured.split("/", 1)
+        path = f"orgs/{org}/teams/{slug}/memberships/{author}"
+        token = os.environ.get("SELF_TESTED_TEAM_TOKEN") or os.environ.get("TAUCETI_TEAM_TOKEN")
+        return (gh_read(path, token=token) if token else read(path)).get("state") == "active", True
+    except _LOOKUP_ERRORS as error:
+        if getattr(error, "status", None) == 404:
+            return False, False
+        raise
 
 
 def membership(repo, author, read=gh_read, *, strict=False, cache=False):
@@ -94,30 +160,18 @@ def membership(repo, author, read=gh_read, *, strict=False, cache=False):
     if not configured or not author:
         return False
     key = configured, author
-    if cache and key in _MEMBERS and time.monotonic() - _MEMBERS[key][0] < MEMBERSHIP_CACHE_SECONDS:
-        return _MEMBERS[key][1]
+    run = _RUN.get() if cache else None
     try:
-        org, slug = configured.split("/", 1)
-        path = f"orgs/{org}/teams/{slug}/memberships/{author}"
-        token = os.environ.get("SELF_TESTED_TEAM_TOKEN") or os.environ.get("TAUCETI_TEAM_TOKEN")
-        value = (gh_read(path, token=token) if token else read(path)).get("state") == "active"
-        if cache:
+        if run is not None:
+            # Within one run (one credential), a 404 is kept like any other answer.
+            return run.answer(key, lambda: _lookup(configured, author, read)[0])
+        if cache and key in _MEMBERS and time.monotonic() - _MEMBERS[key][0] < 60:
+            return _MEMBERS[key][1]
+        value, answered = _lookup(configured, author, read)
+        if cache and answered:
             _MEMBERS[key] = time.monotonic(), value
         return value
-    except (
-        OSError,
-        ValueError,
-        TypeError,
-        AttributeError,
-        KeyError,
-        RuntimeError,
-        subprocess.SubprocessError,
-    ) as error:
-        if getattr(error, "status", None) == 404:
-            # A definite answer (not a member, or not visible to this token), so cache it too.
-            if cache:
-                _MEMBERS[key] = time.monotonic(), False
-            return False
+    except _LOOKUP_ERRORS:
         if strict:
             raise
         return False  # Unknown membership never grants admission.

@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -150,7 +151,7 @@ class PersistentRouteTests(unittest.TestCase):
         self.assertFalse(self.decide())
         self.assertEqual(sum(p.startswith("orgs/") for _, p in self.api.calls), 2)
 
-    def test_a_404_is_cached_like_any_other_answer(self):
+    def _missing(self):
         original = self.api.request
 
         def missing(method, path):
@@ -161,18 +162,73 @@ class PersistentRouteTests(unittest.TestCase):
                 raise error
             return original(method, path)
 
-        with patch.object(self.api, "request", side_effect=missing):
-            self.assertFalse(self.decide())
-            self.assertFalse(self.decide())
-        self.assertEqual(sum(p.startswith("orgs/") for _, p in self.api.calls), 1)
+        return patch.object(self.api, "request", side_effect=missing)
 
-    def test_a_report_can_extend_the_cache_to_its_whole_run(self):
+    def lookups(self):
+        return sum(p.startswith("orgs/") for _, p in self.api.calls)
+
+    def test_admission_does_not_cache_a_404(self):
+        with self._missing():
+            self.assertFalse(self.decide())
+            self.assertFalse(self.decide())
+        self.assertEqual(self.lookups(), 2)
+
+    def test_a_run_keeps_one_answer_per_author_including_a_404(self):
+        with policy.membership_run(policy.RunMembership()):
+            with self._missing():
+                self.assertFalse(self.decide())
+                self.assertFalse(self.decide())
+        self.assertEqual(self.lookups(), 1)
+        with policy.membership_run(policy.RunMembership()):
+            self.assertTrue(self.decide())
+            self.assertTrue(self.decide())
+        self.assertEqual(self.lookups(), 2)
+
+    def test_a_run_neither_reads_nor_fills_the_admission_cache(self):
         self.assertTrue(self.decide())
         for key, (at, value) in policy._MEMBERS.copy().items():
             policy._MEMBERS[key] = (at - 3600, value)
-        with patch.object(policy, "MEMBERSHIP_CACHE_SECONDS", float("inf")):
-            self.assertTrue(self.decide())
-        self.assertEqual(sum(p.startswith("orgs/") for _, p in self.api.calls), 1)
+        with policy.membership_run(policy.RunMembership()):
+            self.api.member = False
+            self.assertFalse(self.decide())
+        self.assertEqual(self.lookups(), 2)
+        self.assertTrue(all(time_value[1] for time_value in policy._MEMBERS.values()))
+        self.assertFalse(self.decide())  # The expired admission entry is not revived.
+        self.assertEqual(self.lookups(), 3)
+
+    def test_a_run_does_not_cache_an_unknown_answer(self):
+        run = policy.RunMembership()
+        calls = []
+
+        def unavailable():
+            calls.append(1)
+            raise RuntimeError("membership unavailable")
+
+        for _ in range(2):
+            with self.assertRaises(RuntimeError):
+                run.answer(("team", "author"), unavailable)
+        self.assertEqual(len(calls), 2)
+
+    def test_concurrent_misses_in_a_run_make_one_request(self):
+        import threading
+        run = policy.RunMembership()
+        calls, start = [], threading.Barrier(4)
+
+        def lookup():
+            calls.append(1)
+            time.sleep(0.05)
+            return True
+
+        def ask():
+            start.wait()
+            self.assertTrue(run.answer(("team", "author"), lookup))
+
+        threads = [threading.Thread(target=ask) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(len(calls), 1)
 
     def test_observe_uses_live_label_and_scope_not_a_status(self):
         self.assertTrue(policy.observe(REPO, 7, HEAD, lambda p: self.api.request("GET", p)))
