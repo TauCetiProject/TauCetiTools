@@ -53,8 +53,9 @@ if [ "$status" = 124 ] || [ "$status" = 137 ]; then
     case "$argument" in *.lean) source="$argument" ;; esac
   done
   # `timeout` reports 124 for its own TERM and 137 once it escalates to KILL, which is only after the
-  # deadline. A KILL before the deadline came from elsewhere, usually the kernel's out-of-memory killer.
-  if [ "$status" = 124 ] || awk -v s="$started" -v e="$(date +%s.%N)" -v d="$deadline" 'BEGIN { exit !(e - s >= d) }'; then
+  # deadline plus the grace period. An earlier KILL came from elsewhere, usually the kernel's
+  # out-of-memory killer.
+  if [ "$status" = 124 ] || awk -v s="$started" -v e="$(date +%s.%N)" -v d="$deadline" -v g="$grace" 'BEGIN { exit !(e - s >= d + g) }'; then
     echo "error: Lean process for $source exceeded the ${deadline}s wall-clock limit (TERM, then KILL after ${grace}s)" >&2
   else
     echo "error: Lean process for $source was killed by signal 9 after ${elapsed}s, likely out of memory" >&2
