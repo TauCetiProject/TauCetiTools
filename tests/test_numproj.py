@@ -160,7 +160,14 @@ class Wrap(unittest.TestCase):
         for head in ("try exact F", "all_goals exact F", "case _ => exact F", "· try exact F", "exact F <;> simp"):
             with self.subTest(head=head):
                 self.assertIsNone(tool["wrap"](f"  {head} {args}"))
+        for head in ("show_term exact F", "set_option maxHeartbeats 400 in exact F", "· /- c -/ try exact F"):
+            with self.subTest(head=head):
+                self.assertIsNone(tool["wrap"](f"  {head} {args}"))
         self.assertIsNotNone(tool["wrap"](f"  · exact F {args}"))
+        for head in ("·   exact F", "· · exact F"):
+            pieces = tool["wrap"](f"  {head} {args}")
+            column = pieces[0].index("exact")
+            self.assertTrue(all(len(p) - len(p.lstrip()) > column for p in pieces[1:]), pieces)
 
     def test_an_inline_by_body_is_split_at_most_once(self):
         line = "  let y := (by exact F " + " ".join(["x.val"] * 30) + "); return y"
@@ -329,6 +336,13 @@ class Scanner(unittest.TestCase):
                 result, found, declined, source = self.scan(text)
                 self.assertEqual((result.returncode, found), (0, set()), result.stderr)
                 self.assertEqual(len(declined), 1)
+
+    def test_parenthesizes_receivers_a_local_name_would_capture(self):
+        text = (
+            "def f (x : {n : Nat // True}) : Nat := by\n  let x.val := 42\n  exact x.1\n"
+            "example : f ⟨7, trivial⟩ = 7 := rfl\n"
+        )
+        self.assertIn("  exact (x).val", self.rewrite(text))
 
     def test_reports_elaboration_errors_as_incomplete(self):
         result, found, _, _ = self.scan(

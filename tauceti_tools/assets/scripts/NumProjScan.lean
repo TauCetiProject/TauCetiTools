@@ -92,7 +92,7 @@ component, would win over the projection, so the receiver must be written `(s).v
 always for an antiquotation (`$h.1`, since `$h.val` is `$(h.val)`), and conservatively when the
 chain cannot be parsed. Numeric components that are findings count as rewritten (`agreed`); one
 kept as is ends the identifier, after which only projection syntax follows. -/
-def receiverSpan (ctxs : Array ContextInfo) (line : Array Char) (ln col : Nat)
+def receiverSpan (ctxs : Array (ContextInfo × LocalContext)) (line : Array Char) (ln col : Nat)
     (agreed : Std.HashMap (Nat × Nat) Name) : IO (Option (Option (Nat × Nat))) := do
   let some (start, comps) := chainAt line col | return none
   let some k := comps.findIdx? (·.col == col) | return none
@@ -112,7 +112,13 @@ def receiverSpan (ctxs : Array ContextInfo) (line : Array Char) (ln col : Nat)
   if start > 0 && line[start - 1]! == '$' then return some (some (start - 1, comps[r0]!.col - 1))
   let candidate := (comps.extract 0 segEnd).foldl (init := Name.anonymous) fun n c =>
     if c.numeric then n ++ (agreed.getD (ln, c.col) .anonymous) else Name.str n c.text
-  for ctx in ctxs do
+  -- A local whose name covers a rewritten component (`let x.val := 42`) would win as well.
+  let comps' := candidate.components
+  for (_, lctx) in ctxs do
+    for j in [r0 + 1:comps'.length + 1] do
+      if (lctx.findFromUserName? ((comps'.take j).foldl (· ++ ·) .anonymous)).isSome then
+        return some span
+  for (ctx, _) in ctxs do
     let resolutions ← try ctx.runCoreM (resolveGlobalName candidate) catch _ => pure [(.anonymous, [])]
     -- The projection parse keeps component `r0` and all later ones as field accesses.
     if resolutions.any (fun (_, fields) => fields.length < segEnd - r0) then return some span
@@ -211,7 +217,7 @@ def scanFile (opts : Options) (path : String) : IO Bool := do
   -- every elaboration agrees on the field and none of them would resolve the named field to a
   -- type synonym's declaration.
   let mut byPos : Std.HashMap String.Pos.Raw (Array (Option Name)) := {}
-  let mut ctxs : Std.HashMap String.Pos.Raw (Array ContextInfo) := {}
+  let mut ctxs : Std.HashMap String.Pos.Raw (Array (ContextInfo × LocalContext)) := {}
   let mut synonym : Std.HashMap String.Pos.Raw String := {}
   let mut order : Array String.Pos.Raw := #[]
   for t in s.commandState.infoState.trees do
@@ -223,13 +229,13 @@ def scanFile (opts : Options) (path : String) : IO Bool := do
             if let some fn := i.expr.constName? then
               if let some field := projField? ctx.env fn then
                 if let some r := idx.getRange? (canonicalOnly := true) then
-                  return acc.push (r, fn, field, ctx)
+                  return acc.push (r, fn, field, ctx, i.lctx)
       return acc
-    for (r, fn, field, ctx) in hits do
+    for (r, fn, field, ctx, lctx) in hits do
       let pos := r.start
       unless byPos.contains pos do order := order.push pos
       byPos := byPos.alter pos fun fs => some ((fs.getD #[]).push field)
-      ctxs := ctxs.alter pos fun cs => some ((cs.getD #[]).push ctx)
+      ctxs := ctxs.alter pos fun cs => some ((cs.getD #[]).push (ctx, lctx))
       if let some f := field then
         -- The innermost terms around the digits that apply `fn`; without one, decline. All of
         -- that size are checked: a macro can elaborate the same syntax more than once, and

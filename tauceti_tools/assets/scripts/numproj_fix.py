@@ -160,10 +160,24 @@ def break_points(line):
 
 
 COMBINATOR = (
-    r"(try|all_goals|any_goals|focus|repeat|repeat'|iterate|first|case|case'|next|on_goal|pick_goal"
-    r"|classical|with_reducible|with_reducible_and_instances|with_unfolding_all|solve|fail_if_success"
-    r"|guard_target|refine_lift)(?![\w'])"
+    r"(try|all_goals|any_goals|focus|repeat|repeat'|repeat1'|iterate|first|case|case'|next|on_goal"
+    r"|pick_goal|classical|with_reducible|with_reducible_and_instances|with_unfolding_all"
+    r"|with_unfolding_none|with_implicit|show_term|unhygienic|solve|fail_if_success|guard_target"
+    r"|refine_lift|set_option|open|nofun|nomatch|conv|calc|match|induction|cases|rcases|obtain)(?![\w'])"
 )
+
+
+def _head_column(line, kinds):
+    """Column of the line's first code token after any bullets (`·`, `.`) and comments."""
+    i = 0
+    while i < len(line):
+        if line[i].isspace() or kinds[i] == COMMENT:
+            i += 1
+        elif kinds[i] == CODE and line[i] in "·." and line[i + 1 : i + 2].isspace():
+            i += 1
+        else:
+            return i
+    return i
 
 
 def _inside_inline_by(line, kinds, col):
@@ -187,7 +201,8 @@ def _inside_inline_by(line, kinds, col):
 
 def wrap(line, next_indent=None):
     """Split `line` into lines of at most LIMIT columns, or return None if no safe split exists.
-    Continuations are indented four columns deeper than the original line. A line opening a
+    Continuations are indented four columns deeper than the original line, and deeper than its
+    first token after bullets. A line opening a
     `by`/`do`/`{` block that the next code (starting at column `next_indent`, more indented)
     continues is left alone: moving the block's first item would misalign the rest."""
     indent = len(line) - len(line.lstrip(" "))
@@ -199,12 +214,14 @@ def wrap(line, next_indent=None):
     if any(kind == STRING and ch == "{" for kind, ch in zip(kinds, line, strict=True)):
         # An interpolated string (`s!"{x.1} {"a b"}"`) may nest literals the lexer cannot see.
         return None
-    if re.match(r"([·.]\s+)?" + COMBINATOR, line.lstrip()) or "<;>" in "".join(
-        c if k == CODE else " " for k, c in zip(kinds, line, strict=True)
-    ):
-        # A nested tactic (`try exact f x`) may start at or after the continuation column, which
-        # would turn the continuation into a tactic of its own.
+    code = "".join(c if k == CODE else " " for k, c in zip(kinds, line, strict=True))
+    head = _head_column(line, kinds)
+    if re.match(COMBINATOR, line[head:]) or "<;>" in code or re.search(r"(?<![\w.])in(?![\w.'])", code):
+        # A nested tactic (`try exact f x`, `set_option o v in exact f x`) may start at or after
+        # the continuation column, which would turn the continuation into a tactic of its own.
         return None
+    # Continuations go deeper than the line's first tactic or term (after bullets: `· · exact`).
+    cont = max(indent + 4, head + 2)
     for semi in (i for i, (kind, ch) in enumerate(zip(kinds, line, strict=True)) if kind == CODE and ch == ";"):
         if not _inside_inline_by(line, kinds, semi):
             # `stmt; stmt` in a `do` block: a split could move a statement's end into a new one.
@@ -220,7 +237,7 @@ def wrap(line, next_indent=None):
         ]
         cut = max(preferred) if preferred and max(preferred) > max(points) - 30 else max(points)
         out.append(rest[:cut])
-        rest = " " * (indent + 4) + rest[cut + 1 :]
+        rest = " " * cont + rest[cut + 1 :]
         if re.search(r"(?<![\w.])(by|do)$", out[-1]) and len(rest) > LIMIT:
             # The rest is that block's body, which must not be split again.
             return None
