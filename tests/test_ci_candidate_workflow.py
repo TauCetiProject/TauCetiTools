@@ -733,9 +733,12 @@ class PinGuard(unittest.TestCase):
             self.assertIn("TOO_LARGE=1\n", (root / "environment").read_text())
 
     def member_policy(
-        self, *, added_lines=0, existing_lines=0, pin_changed=False, binary=False, orphan=False, moved_lines=0
+        self, *, added_lines=0, existing_lines=0, pin_changed=False, binary=False, orphan=False, moved_lines=0,
+        github=False, read=None,
     ):
         config = policy()
+        if github:
+            config = replace(config, member_sources=(config.source, config.execution))
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             writer = root / "writer"
@@ -788,8 +791,39 @@ class PinGuard(unittest.TestCase):
             subprocess.run(
                 ["git", "clone", "-q", "--bare", str(writer), str(workspace / ".ci-source.git")], check=True, env=env
             )
-            req = replace(request(config), head=head, base=base, tree=tree, members=(cc.Member(17, member_head),))
-            return cw.member_size_policy(req, config, context(req, config), workspace)
+            source = config.execution if github else None
+            req = replace(request(config), head=head, base=base, tree=tree,
+                          members=(cc.Member(17, member_head, source),))
+            return cw.member_size_policy(req, config, context(req, config), workspace,
+                                         read=read and partial(read, member_head))
+
+    def test_an_admin_large_refactor_label_lifts_the_caps_for_a_github_member_only(self):
+        reads = []
+
+        def read(head, path):
+            reads.append(path)
+            if path == "repos/team/Execution/pulls/17":
+                return {"head": {"sha": head}, "labels": [{"name": "large-refactor"}]}
+            if "/events?" in path:
+                return [{"id": 1, "event": "labeled", "label": {"name": "large-refactor"},
+                         "actor": {"login": "admin", "id": 5}, "created_at": "2100-01-01T00:00:00Z"}]
+            return {"role_name": "admin", "user": {"id": 5}}
+
+        exempt = self.member_policy(existing_lines=3001, github=True, read=read)
+        self.assertEqual(exempt, {"SOURCE_SIZE_POLICY_COMPLETE": "1", "LARGE_REFACTOR_MEMBERS": "17"})
+        self.assertEqual(reads[0], "repos/team/Execution/pulls/17")
+        # A member of the native forge is never looked up on GitHub.
+        reads.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            native = self.member_policy(existing_lines=3001, read=read)
+        self.assertEqual(native["TOO_LARGE"], "1")
+        self.assertEqual(reads, [])
+        # Without the label the caps apply.
+        with contextlib.redirect_stdout(io.StringIO()):
+            unlabelled = self.member_policy(
+                existing_lines=3001, github=True,
+                read=lambda head, path: {"head": {"sha": head}, "labels": []})
+        self.assertEqual(unlabelled["TOO_LARGE"], "1")
 
     def test_retained_member_new_file_and_total_size_guards_use_real_local_objects(self):
         def flags(**kwargs):

@@ -343,7 +343,7 @@ def batch_commits(git, base, head, members):
     return mapped
 
 
-def member_size_policy(request, policy, context, workspace):
+def member_size_policy(request, policy, context, workspace, *, read=None):
     """Apply the shared PR-level diff guards to each member's diff as it lands, from local Git objects.
 
     A member is measured by its own commit in the candidate's chain against that commit's parent,
@@ -354,6 +354,10 @@ def member_size_policy(request, policy, context, workspace):
     Each rejected member is also named in `rejected_members` and on one
     `MEMBER-POLICY-REJECTED {json}` line, with its accepted head and, when measured in the chain,
     `batch_commit` and `parent`, so the queue can repair or withdraw exactly that member.
+
+    A GitHub member whose PR, still at its accepted head, carries a repository admin's
+    `large-refactor` label (`ci_git.large_refactor_head`) skips the three size caps. `read` is
+    the GitHub REST reader; without one, or for a member of another forge, the caps apply.
     """
     check_workflow_context(request, policy, context)
     objects = Path(workspace) / ci_checkout.STORE / "objects"
@@ -401,8 +405,18 @@ def member_size_policy(request, policy, context, workspace):
                 parent, commit = bases[0], member.head
             # The same shared guards as PR CI, `lake lint` and queue admission. Path scope
             # keeps its own human-merge route, so only the size guards apply here.
+            source = (member.source or policy.source).repository
+            exempt = False
+            if read is not None and source.forge == GITHUB:
+                try:
+                    exempt = ci_git.large_refactor_head(read, source.name, member.pr, git, member.head)
+                except (EvidenceUnavailable, OSError, ValueError, KeyError, TypeError):
+                    exempt = False  # Unknown evidence never lifts a cap.
+                if exempt:
+                    values["LARGE_REFACTOR_MEMBERS"] = " ".join(
+                        filter(None, (values.get("LARGE_REFACTOR_MEMBERS"), str(member.pr))))
             try:
-                size = ci_git.pr_guards(git, parent, commit, scope=False)
+                size = ci_git.pr_guards(git, parent, commit, scope=False, large_refactor=exempt)
             except ValueError:
                 values["DIFF_UNKNOWN"] = "1"
                 values["SOURCE_SIZE_POLICY_COMPLETE"] = "0"
@@ -972,7 +986,18 @@ def main(argv=None):
     elif args.command == "member-policy":
         if not args.workspace:
             parser.error("member-policy requires --workspace")
-        result = member_size_policy(request, policy, context, args.workspace)
+        read = None
+        if os.environ.get("GH_READ_TOKEN") and policy.execution.repository.forge == GITHUB:
+            evidence = GitHubEvidence(policy, token=os.environ["GH_READ_TOKEN"], token_origin=GITHUB)
+            prefix = f"repos/{policy.execution.repository.name}/"
+
+            def read(path):
+                # The execution credential reads only its own repository, the GitHub source.
+                if not path.lower().startswith(prefix.lower()):
+                    raise ValueError("large-refactor evidence is outside the execution repository")
+                return evidence.get("/" + path[len(prefix):])
+
+        result = member_size_policy(request, policy, context, args.workspace, read=read)
     elif args.command == "bump-policy":
         if not args.base_dir or not args.mergebase_dir or not args.checkout:
             parser.error("bump-policy requires --base-dir, --mergebase-dir and --checkout")

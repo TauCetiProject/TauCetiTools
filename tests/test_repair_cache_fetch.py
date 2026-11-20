@@ -59,8 +59,11 @@ case "$FAKE_LAKE_MODE" in
   revs)
     # One mapping file per published revision, lines `<record> <artifact> <content>`; Lake
     # downloads only the artifacts not already in the cache.
+    # The public service's revisions are published under `public/`.
     rev="${*: -1}"; rev="${rev#--rev=}"
-    [ -f "$FAKE_REPAIR/$rev" ] || { echo "error: one/Project: outputs not found for revision $rev"; exit 1; }
+    published="$FAKE_REPAIR"
+    case " $* " in *" --service tauceti-public "*) published="$FAKE_REPAIR/public" ;; esac
+    [ -f "$published/$rev" ] || { echo "error: one/Project: outputs not found for revision $rev"; exit 1; }
     mkdir -p "$out" "$LAKE_CACHE_DIR/artifacts"
     while read -r record artifact content; do
       if [ ! -e "$LAKE_CACHE_DIR/artifacts/$artifact" ]; then
@@ -69,7 +72,7 @@ case "$FAKE_LAKE_MODE" in
         echo "info: Project: downloaded artifact $artifact"
       fi
       echo "$content" > "$out/$record.json"
-    done < "$FAKE_REPAIR/$rev"
+    done < "$published/$rev"
     exit 0 ;;
 esac
 """
@@ -163,8 +166,9 @@ class RepairCacheFetch(FetchHarness):
         self.assertEqual(env, {"REPAIR_OUTPUTS_STATE": "absent", "REPAIR_OUTPUTS_REUSED": "0"})
         self.assertEqual(self.records(), before)
         argv = (self.root / "argv").read_text().splitlines()
-        self.assertEqual(argv, [f"cache get --service tauceti-repair --repo one/Project --rev={HEAD}"])
-        config = Path((self.root / "argv.config").read_text().strip()).read_text()
+        self.assertEqual(argv, [f"cache get --service tauceti-repair --repo one/Project --rev={HEAD}",
+                                f"cache get --service tauceti-public --repo one/Project --rev={HEAD}"])
+        config = Path((self.root / "argv.config").read_text().split()[0]).read_text()
         self.assertIn('artifactEndpoint = "https://repair.example.org/artifacts"', config)
         self.assertIn("no repair outputs", (self.root / "summary").read_text())
 
@@ -188,7 +192,8 @@ class RepairCacheFetch(FetchHarness):
                 (self.root / "argv").unlink(missing_ok=True)
                 out, env = self.fetch(mode)
                 self.assertEqual(env["REPAIR_OUTPUTS_STATE"], "absent")
-                self.assertEqual(len((self.root / "argv").read_text().splitlines()), 1)
+                # One question per service: the repair cache, then the public one.
+                self.assertEqual(len((self.root / "argv").read_text().splitlines()), 2)
                 self.assertNotIn("::warning::", out)
                 self.assertNotIn("retrying", out)
 
@@ -236,11 +241,28 @@ class DiscardedBaseCache(FetchHarness):
 class RepairCacheCandidates(FetchHarness):
     """Several candidate revisions: the staging head, the queue's earlier tips, the base."""
 
-    def publish(self, rev, *mapping):
-        (self.root / "published" / rev).write_text("".join(" ".join(m) + "\n" for m in mapping))
+    def publish(self, rev, *mapping, service="published"):
+        directory = self.root / "published" / ("public" if service == "public" else "")
+        directory.mkdir(exist_ok=True)
+        (directory / rev).write_text("".join(" ".join(m) + "\n" for m in mapping))
 
-    def requested(self):
-        return [line.rsplit("--rev=", 1)[1] for line in (self.root / "argv").read_text().splitlines()]
+    def requested(self, service="tauceti-repair"):
+        return [line.rsplit("--rev=", 1)[1] for line in (self.root / "argv").read_text().splitlines()
+                if f"--service {service} " in line]
+
+    def test_revision_missing_from_the_repair_cache_is_fetched_from_staging_publication(self):
+        self.publish(HEAD, ("1111111111111111", "aaaa", "staged-1"), service="public")
+        out, env = self.fetch("revs", revs=(HEAD,))
+        self.assertEqual(env, {"REPAIR_OUTPUTS_STATE": "used", "REPAIR_OUTPUTS_REUSED": "1",
+                               "REPAIR_OUTPUTS_REVS_USED": HEAD})
+        self.assertEqual(self.requested(), [HEAD])
+        self.assertEqual(self.requested("tauceti-public"), [HEAD])
+        self.assertEqual(self.records()["1111111111111111.json"], "staged-1\n")
+
+    def test_a_revision_in_the_repair_cache_is_not_asked_of_the_public_one(self):
+        self.publish(HEAD, ("1111111111111111", "aaaa", "head-1"))
+        self.fetch("revs", revs=(HEAD,))
+        self.assertEqual(self.requested("tauceti-public"), [])
 
     def downloads(self):
         path = self.root / "argv.downloads"
@@ -256,6 +278,8 @@ class RepairCacheCandidates(FetchHarness):
         self.assertEqual(self.records()["1111111111111111.json"], "head-1\n")
         self.assertEqual(self.records()["2222222222222222.json"], "b-2\n")
         self.assertIn("2 artifacts downloaded", out)
+        preferred = self.root / "pr/.lake/cache/repair-revisions"
+        self.assertEqual(preferred.read_text().split(), [HEAD, REV_B])
 
     def test_first_absent_second_present_from_the_environment(self):
         self.publish(REV_B, ("2222222222222222", "bbbb", "b-2"))
@@ -271,6 +295,7 @@ class RepairCacheCandidates(FetchHarness):
         self.assertEqual(env, {"REPAIR_OUTPUTS_STATE": "absent", "REPAIR_OUTPUTS_REUSED": "0"})
         self.assertEqual(self.requested(), [HEAD, REV_B, REV_C])
         self.assertEqual(self.records(), before)
+        self.assertFalse((self.root / "pr/.lake/cache/repair-revisions").exists())
 
     def test_duplicate_artifact_is_fetched_once_and_earlier_records_win(self):
         self.publish(HEAD, ("1111111111111111", "aaaa", "head-1"), ("2222222222222222", "5eed", "head-2"))
