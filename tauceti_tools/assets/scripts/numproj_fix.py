@@ -30,12 +30,12 @@ OPTIONS = ["-DElab.async=false", "-Dweak.linter.mathlibStandardSet=true"]
 SUBSCRIPT = "₀₁₂₃₄₅₆₇₈₉"
 
 
-def _antiquotation_start(line, dot):
-    """Column of the `$` when the projection whose `.` is at `dot` applies to an antiquotation
-    such as `$h`, `$«h»`, `$h.eq` or `$h:term` (possibly after earlier projections), else None."""
+def _receiver_start(line, dot, colon=False):
+    """Start column of the identifier (with dotted components, `«escaped»` ones included, and
+    with `:` too when `colon`, for `$h:term`) that ends just before the `.` at `dot`."""
     start = dot
     while start > 0:
-        if line[start - 1].isalnum() or line[start - 1] in "_'!?.:" + SUBSCRIPT:
+        if line[start - 1].isalnum() or line[start - 1] in "_'!?." + (":" if colon else "") + SUBSCRIPT:
             start -= 1
         elif line[start - 1] == "\u00bb":  # «escaped identifier component»
             opening = line.rfind("\u00ab", 0, start - 1)
@@ -44,27 +44,35 @@ def _antiquotation_start(line, dot):
             start = opening
         else:
             break
-    return start - 1 if start > 0 and line[start - 1] == "$" and start < dot else None
+    return start
 
 
 def replace_projs(line, edits):
     """Replace the projection digits at each `(col, field)` of `edits` (columns of `line`).
 
-    An antiquotation receiver becomes parenthesized: `$h.1.2` -> `($h).val.property`, since
-    `$h.val` would parse as `$(h.val)`. Every edit, digits and parentheses alike, is located in
-    the original line and they are applied right to left."""
-    receivers, ops = {}, []
+    Some receivers become parenthesized, up to the chain's first numeric projection: an
+    antiquotation (`$h.1.2` -> `($h).val.property`, since `$h.val` would parse as `$(h.val)`), and
+    an identifier when the field starts with `(`, the scanner's mark that `s.val` would resolve to
+    a global declaration (`s.1` -> `(s).val`). Every edit, digits and parentheses alike, is located
+    in the original line and they are applied right to left."""
+    receivers, ops = set(), []
     for col, field in edits:
         digits = re.match(r"\d+", line[col:])
         if not digits or col == 0 or line[col - 1] != ".":
             raise ValueError(f"no numeric projection at column {col}: {line!r}")
-        ops.append((col, col + len(digits.group(0)), field))
-        dollar = _antiquotation_start(line, col - 1)
-        if dollar is not None:
-            # The receiver ends at the first numeric projection of the chain.
-            receivers[dollar] = min(receivers.get(dollar, col - 1), col - 1)
-    for dollar, dot in receivers.items():
-        ops += [(dollar, dollar, "("), (dot, dot, ")")]
+        paren = field.startswith("(")
+        ops.append((col, col + len(digits.group(0)), field.removeprefix("(")))
+        start = _receiver_start(line, col - 1, colon=True)
+        if start > 0 and line[start - 1] == "$" and start < col - 1:
+            receivers.add(start - 1)
+        elif paren:
+            start = _receiver_start(line, col - 1)
+            if start == col - 1:
+                raise ValueError(f"no identifier receiver at column {col}: {line!r}")
+            receivers.add(start)
+    for start in receivers:
+        dot = start + re.search(r"\.\d", line[start:]).start()
+        ops += [(start, start, "("), (dot, dot, ")")]
     for start, end, text in sorted(ops, reverse=True):
         line = line[:start] + text + line[end:]
     return line
@@ -77,52 +85,60 @@ def replace_proj(line, col, field):
 
 RAW_STRING = re.compile(r'r(#*)"')
 CHAR_LITERAL = re.compile(r"'(\\.|[^'\\\n])'")
+CODE, STRING, COMMENT, ESCAPED = "c", "s", "m", "i"
 
 
-def code_mask(line):
-    """For each column, whether it is code: not inside a string or character literal, a block
-    comment (nested), a line comment or an escaped identifier. Also lexes a whole file."""
-    mask, i, depth, n = [True] * len(line), 0, 0, len(line)
+def lex(text):
+    """For each column, its kind: CODE, or inside a STRING (string, character or raw string
+    literal), a COMMENT (line, or nested block) or an ESCAPED identifier `«...»`. Also returns the
+    columns where string literals and escaped identifiers start. Lexes a line or a whole file."""
+    kinds, starts, i, depth, n = [CODE] * len(text), set(), 0, 0, len(text)
 
-    def skip(j):  # mask columns i..j inclusive (clamped), return the next column
-        mask[i : j + 1] = [False] * (min(j + 1, n) - i)
+    def mark(j, kind):  # columns i..j inclusive (clamped) are `kind`; returns the next column
+        kinds[i : j + 1] = [kind] * (min(j + 1, n) - i)
         return j + 1
 
     def after_identifier_char(i):
-        return i > 0 and (line[i - 1].isalnum() or line[i - 1] in "_'" + SUBSCRIPT)
+        return i > 0 and (text[i - 1].isalnum() or text[i - 1] in "_'" + SUBSCRIPT)
 
     while i < n:
-        ch = line[i]
+        ch = text[i]
         if depth:
-            if line.startswith("/-", i):
+            if text.startswith("/-", i):
                 depth, step = depth + 1, 2
-            elif line.startswith("-/", i):
+            elif text.startswith("-/", i):
                 depth, step = depth - 1, 2
             else:
                 step = 1
-            i = skip(i + step - 1)
-        elif line.startswith("/-", i):
-            depth, i = 1, skip(i + 1)
-        elif line.startswith("--", i):
-            eol = line.find("\n", i)
-            i = skip((n if eol < 0 else eol) - 1)
-        elif ch == "\u00ab":  # «escaped identifier», never spanning lines
-            eol = line.find("\n", i)
-            eol = n if eol < 0 else eol
-            close = line.find("\u00bb", i, eol)
-            i = skip(eol - 1 if close < 0 else close)
-        elif ch == "r" and (raw := RAW_STRING.match(line, i)) and not after_identifier_char(i):
+            i = mark(i + step - 1, COMMENT)
+        elif text.startswith("/-", i):
+            depth, i = 1, mark(i + 1, COMMENT)
+        elif text.startswith("--", i):
+            eol = text.find("\n", i)
+            i = mark((n if eol < 0 else eol) - 1, COMMENT)
+        elif ch == "\u00ab":  # «escaped identifier», which may span lines
+            close = text.find("\u00bb", i + 1)
+            starts.add(i)
+            i = mark(n - 1 if close < 0 else close, ESCAPED)
+        elif ch == "r" and (raw := RAW_STRING.match(text, i)) and not after_identifier_char(i):
             hashes = raw.group(1)
-            close = line.find('"' + hashes, raw.end())
-            i = skip(n - 1 if close < 0 else close + len(hashes))
-        elif ch == '"' or (ch == "'" and CHAR_LITERAL.match(line, i) and not after_identifier_char(i)):
+            close = text.find('"' + hashes, raw.end())
+            starts.add(i)
+            i = mark(n - 1 if close < 0 else close + len(hashes), STRING)
+        elif ch == '"' or (ch == "'" and CHAR_LITERAL.match(text, i) and not after_identifier_char(i)):
             j = i + 1
-            while j < n and line[j] != ch:
-                j += 2 if line[j] == "\\" else 1
-            i = skip(j)
+            while j < n and text[j] != ch:
+                j += 2 if text[j] == "\\" else 1
+            starts.add(i)
+            i = mark(j, STRING)
         else:
             i += 1
-    return mask
+    return kinds, starts
+
+
+def code_mask(text):
+    """For each column, whether it is code (see `lex`)."""
+    return [kind == CODE for kind in lex(text)[0]]
 
 
 LAYOUT = r"(?<![\w.])(by|do|let|have|show|suffices|obtain|match|calc|fun|from)(?![\w.'])"
@@ -178,6 +194,10 @@ def wrap(line, next_indent=None):
         return None
     if next_indent is not None and next_indent > indent and opens_block(line):
         return None
+    kinds, _ = lex(line)
+    if any(kind == STRING and ch == "{" for kind, ch in zip(kinds, line, strict=True)):
+        # An interpolated string (`s!"{x.1} {"a b"}"`) may nest literals the lexer cannot see.
+        return None
     out, rest = [], line
     while len(rest) > LIMIT:
         floor = len(rest) - len(rest.lstrip(" ")) + 8
@@ -194,25 +214,27 @@ def wrap(line, next_indent=None):
     return out
 
 
-def line_masks(lines):
-    """Per line, its `code_mask` lexed in the context of the whole file, and whether the line
-    begins in code (not inside a multi-line string or block comment)."""
-    text = "\n".join(lines)
-    mask, out, offset = code_mask(text), [], 0
+def line_lexes(lines):
+    """Per line: its `lex` kinds in the context of the whole file, the columns where its string
+    literals and escaped identifiers start, and whether the line begins in code."""
+    kinds, starts = lex("\n".join(lines))
+    out, offset = [], 0
     for line in lines:
-        begins_in_code = offset == 0 or mask[offset - 1]
-        out.append((mask[offset : offset + len(line)], begins_in_code))
+        begins_in_code = offset == 0 or kinds[offset - 1] == CODE
+        line_starts = {k - offset for k in starts if offset <= k < offset + len(line)}
+        out.append((kinds[offset : offset + len(line)], line_starts, begins_in_code))
         offset += len(line) + 1
     return out
 
 
-def next_code_column(lines, masks, i):
-    """Column of the first code token after `lines[i]` (skipping blank lines and comments, and
-    looking past a comment's close on the same line), or None at the end of the file."""
+def next_token_column(lines, lexes, i):
+    """Column of the first token after `lines[i]` (skipping blank lines and comments, looking past
+    a comment's close on the same line, and counting literals and escaped identifiers where they
+    start), or None at the end of the file."""
     for j in range(i + 1, len(lines)):
-        mask = masks[j][0]
+        kinds, starts, _ = lexes[j]
         for col, ch in enumerate(lines[j]):
-            if mask[col] and not ch.isspace():
+            if not ch.isspace() and (kinds[col] == CODE or col in starts):
                 return col
     return None
 
@@ -230,12 +252,12 @@ def apply(findings):
             lines[i] = replace_projs(lines[i], line_edits)
             touched.add(i)
             count += len(line_edits)
-        masks = line_masks(lines)
+        lexes = line_lexes(lines)
         out = []
         for i, text in enumerate(lines):
             if i in touched and len(text) > LIMIT:
                 # A line that begins inside a multi-line string or comment is left to the author.
-                pieces = wrap(text, next_code_column(lines, masks, i)) if masks[i][1] else None
+                pieces = wrap(text, next_token_column(lines, lexes, i)) if lexes[i][2] else None
                 if pieces is None:
                     unwrapped.append(f"{path}:{i + 1}")
                 else:

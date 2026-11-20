@@ -65,6 +65,13 @@ class Rewrite(unittest.TestCase):
         edits = [(line.index("1 "), "val"), (line.index("2)"), "property")]
         self.assertEqual(tool["replace_projs"](line, edits), "congr(($a).val + ($b).property)")
 
+    def test_marked_identifier_receivers_are_parenthesized(self):
+        self.assertEqual(tool["replace_proj"]("f s.1 0", 4, "(val"), "f (s).val 0")
+        line = "f N.s.1.2"
+        edits = [(6, "val"), (8, "(property")]
+        self.assertEqual(tool["replace_projs"](line, edits), "f (N.s).val.property")
+        self.assertEqual(tool["replace_proj"]("congr($h.1)", 9, "(val"), "congr(($h).val)")
+
     def test_escaped_antiquotation_is_parenthesized(self):
         line = "congr($«h».1)"
         self.assertEqual(tool["replace_proj"](line, line.index("1)"), "val"), "congr(($«h»).val)")
@@ -121,7 +128,7 @@ class Wrap(unittest.TestCase):
         self.assertFalse(any(line.index("«") < b < line.index("»") for b in tool["break_points"](line)))
 
     def next_column(self, lines):
-        return tool["next_code_column"](lines, tool["line_masks"](lines), 0)
+        return tool["next_token_column"](lines, tool["line_lexes"](lines), 0)
 
     def test_continuation_check_skips_blank_lines_and_comments(self):
         self.assertEqual(self.next_column(["x", "", "  -- note", "/- block", "comment -/", "    exact trivial"]), 4)
@@ -130,6 +137,12 @@ class Wrap(unittest.TestCase):
         # a nested comment ends at its matching close
         self.assertEqual(self.next_column(["x", "/- a /- b -/ still -/", "      exact trivial"]), 6)
         self.assertIsNone(self.next_column(["x", "-- end"]))
+        # literals and escaped identifiers are tokens
+        self.assertEqual(self.next_column(["x", '        "done"']), 8)
+        self.assertEqual(self.next_column(["x", "        «y»"]), 8)
+        # the continuation of a literal opened earlier is not
+        self.assertEqual(self.next_column(["x", '  "a', 'b"', "   y"]), 2)
+        self.assertEqual(self.next_column(['x "a', 'b"', "   y"]), 3)
 
     def test_lines_beginning_inside_a_string_or_comment_are_not_wrapped(self):
         with tempfile.TemporaryDirectory() as name:
@@ -141,9 +154,13 @@ class Wrap(unittest.TestCase):
             self.assertEqual(path.read_text().split("\n")[1], tail.replace("x.1", "x.val"))
 
     def test_whole_file_lexing_tracks_multiline_literals(self):
-        masks = tool["line_masks"](['def s := r#"a', 'b "# ++ x', "/- c", "-/ y", "z -- w"])
-        self.assertEqual([begins for _, begins in masks], [True, False, True, False, True])
-        self.assertEqual(masks[1][0], [False] * 4 + [True] * 5)
+        lexes = tool["line_lexes"](['def s := r#"a', 'b "# ++ x', "/- c", "-/ y", "z -- w", "«a", "b».1"])
+        self.assertEqual([begins for _, _, begins in lexes], [True, False, True, False, True, True, False])
+        self.assertEqual(lexes[1][0], ["s"] * 4 + ["c"] * 5)
+
+    def test_interpolated_strings_are_not_wrapped(self):
+        line = '  s!"{x.val} {"' + " ".join(["word"] * 25) + '"}"'
+        self.assertIsNone(tool["wrap"](line))
 
     def test_term_let_and_have_blocks_are_protected(self):
         line = "def g_with_a_rather_long_name_here (x : {n : Nat // True}) : Nat := let y := x.val + x.val"
@@ -234,6 +251,42 @@ class Scanner(unittest.TestCase):
             found, conflicts = tool["parse_findings"](result.stdout)
             column = source.read_text().split("\n")[5].index("1)") + 1
             self.assertEqual((dict(found), conflicts), ({}, [f"{source}:6:{column}"]))
+
+    def test_parenthesizes_receivers_a_global_name_would_capture(self):
+        with tempfile.TemporaryDirectory() as name:
+            work = Path(name)
+            source = work / "Capture.lean"
+            source.write_text(
+                "def s : {n : Nat // True} := ⟨7, trivial⟩\n"
+                "def s.val : Nat := 42\n"
+                "def a : Nat := s.1\n"
+                "def b (t : {n : Nat // True}) : Nat := t.1\n"
+                "namespace N\ndef u : {n : Nat // True} := ⟨1, trivial⟩\ndef u.property : Nat := 0\nend N\n"
+                "open N in theorem c : True := u.2\n"
+                "example : a = 7 := rfl\n"
+            )
+            prefix = Path(subprocess.check_output([LEAN, "--print-prefix"], text=True).strip())
+            cache = work / "cache"
+            cache.mkdir(mode=0o700)
+            with patch.dict(
+                os.environ, TAUCETI_NUMPROJ_CACHE=str(cache), PATH=f"{prefix / 'bin'}:{os.environ['PATH']}"
+            ):
+                binary = tool["scanner"]()
+            result = subprocess.run(
+                [str(binary), *tool["OPTIONS"], str(source)],
+                capture_output=True,
+                text=True,
+                env=dict(os.environ, LEAN_PATH=""),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            found, _ = tool["parse_findings"](result.stdout)
+            self.assertEqual(found[str(source)], {(3, 17, "(val"), (4, 41, "val"), (9, 32, "(property")})
+            tool["apply"](found)
+            lines = source.read_text().split("\n")
+            self.assertEqual(lines[2], "def a : Nat := (s).val")
+            self.assertTrue(lines[3].endswith(":= t.val") and lines[8].endswith(":= (u).property"))
+            # the rewritten file still means the same: `a` is 7, not `s.val`'s 42
+            subprocess.run([LEAN, str(source)], check=True, capture_output=True, env=dict(os.environ, LEAN_PATH=""))
 
     def test_reports_elaboration_errors_as_incomplete(self):
         with tempfile.TemporaryDirectory() as name:
