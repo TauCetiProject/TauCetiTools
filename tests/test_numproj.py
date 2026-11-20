@@ -155,6 +155,19 @@ class Wrap(unittest.TestCase):
         line = "  let " + "n" * 86 + " := x.val; return " + "n" * 86
         self.assertIsNone(tool["wrap"](line))
 
+    def test_nested_tactics_are_not_wrapped(self):
+        args = " ".join(["x.val"] * 16)
+        for head in ("try exact F", "all_goals exact F", "case _ => exact F", "· try exact F", "exact F <;> simp"):
+            with self.subTest(head=head):
+                self.assertIsNone(tool["wrap"](f"  {head} {args}"))
+        self.assertIsNotNone(tool["wrap"](f"  · exact F {args}"))
+
+    def test_an_inline_by_body_is_split_at_most_once(self):
+        line = "  let y := (by exact F " + " ".join(["x.val"] * 30) + "); return y"
+        self.assertIsNone(tool["wrap"](line))
+        line = "  have h : P := by exact F " + " ".join(["x.val"] * 30)
+        self.assertIsNone(tool["wrap"](line))
+
     def test_interpolated_strings_are_not_wrapped(self):
         line = '  s!"{x.val} {"' + " ".join(["word"] * 25) + '"}"'
         self.assertIsNone(tool["wrap"](line))

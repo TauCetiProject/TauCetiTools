@@ -159,6 +159,32 @@ def break_points(line):
     return points
 
 
+COMBINATOR = (
+    r"(try|all_goals|any_goals|focus|repeat|repeat'|iterate|first|case|case'|next|on_goal|pick_goal"
+    r"|classical|with_reducible|with_reducible_and_instances|with_unfolding_all|solve|fail_if_success"
+    r"|guard_target|refine_lift)(?![\w'])"
+)
+
+
+def _inside_inline_by(line, kinds, col):
+    """Whether column `col` lies inside an inline `by` block of `line`: after a `by` whose
+    enclosing bracket is not closed before `col`."""
+    for m in re.finditer(r"(?<![\w.])by(?![\w.'])", line[:col]):
+        if kinds[m.start()] != CODE:
+            continue
+        depth = 0
+        for i in range(m.end(), col):
+            if kinds[i] == CODE and line[i] in "([{⟨":
+                depth += 1
+            elif kinds[i] == CODE and line[i] in ")]}⟩":
+                depth -= 1
+                if depth < 0:
+                    break
+        else:
+            return True
+    return False
+
+
 def wrap(line, next_indent=None):
     """Split `line` into lines of at most LIMIT columns, or return None if no safe split exists.
     Continuations are indented four columns deeper than the original line. A line opening a
@@ -173,12 +199,16 @@ def wrap(line, next_indent=None):
     if any(kind == STRING and ch == "{" for kind, ch in zip(kinds, line, strict=True)):
         # An interpolated string (`s!"{x.1} {"a b"}"`) may nest literals the lexer cannot see.
         return None
-    semis = [i for i, (kind, ch) in enumerate(zip(kinds, line, strict=True)) if kind == CODE and ch == ";"]
-    by = [m.start() for m in re.finditer(r"(?<![\w.])by(?![\w.'])", line) if kinds[m.start()] == CODE]
-    if semis and not (by and by[0] < semis[0]):
-        # `stmt; stmt` outside an inline `by` (which is never split): in a `do` block, a split could
-        # move a statement's end into a new statement.
+    if re.match(r"([·.]\s+)?" + COMBINATOR, line.lstrip()) or "<;>" in "".join(
+        c if k == CODE else " " for k, c in zip(kinds, line, strict=True)
+    ):
+        # A nested tactic (`try exact f x`) may start at or after the continuation column, which
+        # would turn the continuation into a tactic of its own.
         return None
+    for semi in (i for i, (kind, ch) in enumerate(zip(kinds, line, strict=True)) if kind == CODE and ch == ";"):
+        if not _inside_inline_by(line, kinds, semi):
+            # `stmt; stmt` in a `do` block: a split could move a statement's end into a new one.
+            return None
     out, rest = [], line
     while len(rest) > LIMIT:
         floor = len(rest) - len(rest.lstrip(" ")) + 8
@@ -191,6 +221,9 @@ def wrap(line, next_indent=None):
         cut = max(preferred) if preferred and max(preferred) > max(points) - 30 else max(points)
         out.append(rest[:cut])
         rest = " " * (indent + 4) + rest[cut + 1 :]
+        if re.search(r"(?<![\w.])(by|do)$", out[-1]) and len(rest) > LIMIT:
+            # The rest is that block's body, which must not be split again.
+            return None
     out.append(rest)
     return out
 
