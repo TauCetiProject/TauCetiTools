@@ -577,11 +577,6 @@ class Workflow(unittest.TestCase):
         self.assertEqual(failed["verdicts"]["build"], "failure")
         self.assertEqual(failed["verdicts"]["publication"], "not_required")
 
-    def test_pr_lane_always_runs_full_lint_without_reading_pr_metadata(self):
-        client = unittest.mock.Mock()
-        req = replace(self.request, lane="pr")
-        self.assertFalse(cw.native_lint_policy(req, self.policy, context(req, self.policy), client=client))
-        client.request.assert_not_called()
 
 
 class Evidence(unittest.TestCase):

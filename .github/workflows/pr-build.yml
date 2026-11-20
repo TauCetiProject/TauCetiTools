@@ -1161,11 +1161,6 @@ jobs:
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/lint-scope"
-          if [ "${SOURCE_CANDIDATE:-false}" = true ]; then
-            exec python3 -m tauceti_tools.ci_candidate_workflow lint-scope \
-              --policy gate/.tauceti/ci-source.json --configuration gate/tauceti.toml \
-              --observation "$RUNNER_TEMP/source-identity.json" --checkout pr --destination "$out" --output "$RUNNER_TEMP/source-lint-scope.json" --github-env "$GITHUB_ENV"
-          fi
           bash gate/scripts/lint-scope.sh "$out"
           echo "LINT_SCOPE_DIR=$out" >> "$GITHUB_ENV"
 
@@ -1336,8 +1331,8 @@ jobs:
           bash gate/scripts/build-audit-driver.sh pr gate/scripts "$out"
           echo "LINT_DRIVER_DIR=$out" >> "$GITHUB_ENV"
 
-      # Environment lint checks changed modules; staging also checks downstream unusedArguments.
-      # Full-lint and repair PRs select all modules (scripts/lint-scope.sh). Docstrings and style
+      # Environment lint checks changed modules in PR CI; every staging batch, and full-lint and
+      # repair PRs, select all modules (scripts/lint-scope.sh). Docstrings and style
       # use changed modules only in ordinary PR preflight, and global checks at staging. Computed
       # on the host from GitHub metadata and immutable Git objects using trusted tooling,
       # and mounted read-only into the sandbox.

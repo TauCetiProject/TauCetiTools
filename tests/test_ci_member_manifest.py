@@ -60,11 +60,6 @@ class MemberManifests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 cw.check_member_parents(req, invalid)
-        from unittest.mock import Mock
-
-        client = Mock()
-        self.assertFalse(cw.native_lint_policy(req, config, context(req, config), client=client))
-        client.request.assert_not_called()
 
     def test_digest_count_nonce_schema_shape_and_accepted_head_mismatches_fail_closed(self):
         config, req, raw = retained_request()

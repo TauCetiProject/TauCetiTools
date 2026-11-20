@@ -2,14 +2,15 @@
 # lint-scope.sh OUT_DIR — decide what the environment lint (scripts/lint-env.sh) covers.
 #
 # This script selects the TauCeti modules a change touches. The workflow enables
-# LINT_CHANGED_ONLY for ordinary PR preflight; staging and local scoped runs also check
-# downstream unusedArguments, selected from compiled imports in LintEnvDriver.lean.
+# LINT_CHANGED_ONLY for ordinary PR preflight; local scoped runs also check downstream
+# unusedArguments, selected from compiled imports in LintEnvDriver.lean.
 # Other environment linters keep the changed-module scope. A change can still break lint elsewhere (a
-# new simp lemma can take an existing one out of simp normal form); the daily full lint
-# (.github/workflows/lint-full.yml) catches that and opens a repair PR on `lint-repair/main`.
+# new simp lemma can take an existing one out of simp normal form, and some linters consult the
+# whole environment), so every staging batch (merge group, bors staging or source candidate)
+# lints the whole library: staging decides what lands, and must not depend on the scope.
 #
-# The whole library is linted when any PR in scope carries the `full-lint` label or is a repair PR
-# (head branch `lint-repair/...`), or when the PRs in scope cannot be determined.
+# A PR or main push also lints the whole library when any PR in scope carries the `full-lint`
+# label or is a repair PR (head branch `lint-repair/...`), or when the PRs in scope cannot be determined.
 #
 # Inputs (environment):
 #   GH_TOKEN, REPO   GitHub API access and the repository
@@ -74,7 +75,10 @@ case "$EVENT" in
       full "the immutable local commit metadata is unavailable"
     fi
     ;;
-  merge_group|repository_dispatch|push)
+  merge_group|repository_dispatch)
+    full "every staging batch lints the whole library"
+    ;;
+  push)
     [[ "${BASE:-}" =~ ^[0-9a-f]{40}$ && ! "$BASE" =~ ^0+$ ]] || full "no base commit"
     [[ "${HEAD:-}" =~ ^[0-9a-f]{40}$ ]] || full "no head commit"
     if ! compare=$(metadata); then
@@ -86,9 +90,7 @@ case "$EVENT" in
     if ! reason=$(python3 "$tool_dir/lint_scope_policy.py" --check-citations "$REPO" <<<"$compare"); then
       full "${reason:-commit provenance cannot be attributed to this GitHub repository}"
     fi
-    # GitHub merge groups and bors staging both use one squash commit per PR,
-    # titled `... (#N)`. The trusted workflow validates bors staging and its
-    # immutable base/head before calling this script. Unknown titles stay full lint.
+    # Main has one squash commit per PR, titled `... (#N)`. Unknown titles stay full lint.
     prs=$(jq -r '.commits[].commit.message | split("\n")[0]' <<<"$compare" \
       | sed -nE 's/.*\(#([0-9]+)\)$/\1/p' | sort -u)
     ncommits=$(jq '.commits | length' <<<"$compare")

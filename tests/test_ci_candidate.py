@@ -439,13 +439,6 @@ class MixedMemberContracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             replace(self.request, members=(cc.Member(17, "f" * 40), self.request.members[1]))
 
-    def test_mixed_candidates_always_require_full_lint_without_cross_origin_reads(self):
-        client = unittest.mock.Mock()
-        self.assertFalse(
-            cw.native_lint_policy(self.request, self.policy, context(self.request, self.policy), client=client)
-        )
-        client.request.assert_not_called()
-
     def test_qualified_membership_and_policy_change_request_digest(self):
         one = replace(self.request, members=(self.request.members[0],))
         other = replace(self.request, members=(cc.Member(17, "f" * 40, self.github),))
