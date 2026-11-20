@@ -1153,11 +1153,6 @@ jobs:
           SCOPE_REPO: pr
           TESTED_BASE: ${{ steps.pr.outputs.base_sha }}
           TESTED_HEAD: ${{ steps.integration.outputs.tested_sha }}
-          CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
-          CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
-          CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
-          CI_SOURCE_HARNESS_REF: ${{ job.workflow_ref }}
-          CI_SOURCE_HARNESS_FILE: ${{ job.workflow_file_path }}
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/lint-scope"
