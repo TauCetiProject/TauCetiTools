@@ -179,6 +179,28 @@ end AxiomAudit
 
 namespace DuplicateDeclarations
 
+/-- Matchers and their alternative counts, read from each module's own entries. The audit imports
+with `loadExts := false`, which skips extension import hooks, so `isMatcherCore`, and with it
+Lean's reserved-name predicate for `<matcher>.congr_eq_<i>`, sees no imported matcher. -/
+def importedMatchers (env : Environment) : NameMap Nat := Id.run do
+  let mut matchers : NameMap Nat := {}
+  for i in [:env.header.moduleData.size] do
+    for entry in PersistentEnvExtension.getModuleEntries
+        (σ := List Meta.Match.Extension.Entry × Meta.Match.Extension.State)
+        Meta.Match.Extension.extension env i do
+      matchers := matchers.insert entry.name entry.info.numAlts
+  return matchers
+
+/-- Lean's `isMatchCongrEqName?` with its realization bound: `<matcher>.congr_eq_<i>` for
+`1 ≤ i ≤ numAlts`. Lean realizes these on demand in every module that needs one, so two modules
+can each own a copy. -/
+def isMatchCongrEqn (matchers : NameMap Nat) (name : Name) : Bool := Id.run do
+  let .str parent suffix := name | return false
+  let some idx := suffix.dropPrefix? Meta.Match.congrEqnThmSuffixBasePrefix | return false
+  let some idx := idx.toString.toNat? | return false
+  let some numAlts := matchers.find? parent | return false
+  return 0 < idx && idx ≤ numAlts
+
 /-- Inspect the per-module data, not `env.constants`, which has already merged equal theorems.
 All mmap-backed names stay inside `withImportModules`' callback. -/
 def check (env : Environment) (localModules : NameSet) : IO UInt32 := do
@@ -212,9 +234,11 @@ def check (env : Environment) (localModules : NameSet) : IO UInt32 := do
     for (name, _) in declRangeExt.getModuleEntries env i do
       if collisionNames.contains name then
         explicitNames := explicitNames.insert name
+  let matchers := if collisions.isEmpty then {} else importedMatchers env
   let mut bad := 0
   for (name, previous, mod) in collisions do
-    if !explicitNames.contains name && isReservedName env name then continue
+    if !explicitNames.contains name &&
+        (isReservedName env name || isMatchCongrEqn matchers name) then continue
     IO.eprintln s!"duplicate-declarations: {name} is declared in both {previous} and {mod}"
     bad := bad + 1
   if bad != 0 then
@@ -249,6 +273,8 @@ structure NameScan where
   owners : Std.HashMap Name Owner := {}
   explicitNames : Std.HashSet Name := {}
   parents : Std.HashSet Name := {}
+  /-- Alternative counts of matchers that are local or the parent of a local name. -/
+  matchers : NameMap Nat := {}
   /-- Each colliding name with its earlier and later owner. -/
   collisions : Array (Name × Name × Name) := #[]
 
@@ -298,6 +324,12 @@ def scanModule (mod : Name) (localModule : Bool) (parts : Array (ModuleData × C
     scan := { scan with owners := scan.owners.insert name {
       module := mod, localModule,
       safeDefinition := data.constants[i]! matches .defnInfo { safety := .safe, .. } } }
+  for entry in moduleEntries (σ := List Meta.Match.Extension.Entry × Meta.Match.Extension.State)
+      Meta.Match.Extension.extension data do
+    if !localModule && !scan.parents.contains entry.name then continue
+    let (name, names) := (ownName entry.name).run scan.ownedNames
+    scan := { scan with ownedNames := names,
+                        matchers := scan.matchers.insert name entry.info.numAlts }
   for (name, _) in moduleEntries declRangeExt.toPersistentEnvExtension data do
     if !localModule && !scan.owners.contains name then continue
     let (name, names) := (ownName name).run scan.ownedNames
@@ -319,10 +351,11 @@ are destroyed before returning only owned metadata and region handles to the cal
 
 /-- Common reserved-name predicates whose answers depend only on the scanned metadata.
 Use Lean's suffix predicates. Other generated-name cases go through the existing checker.
-For equations we require the exact parent to be a safe definition and exclude matcher names:
+A matcher congruence equation is recognised from the scanned matcher entries. For equations we require the exact parent to be a safe definition and exclude matcher names:
 Lean.Meta.declFromEqLikeName then succeeds, and its body is exposed in the non-module audit
 so mkEqLikeNameFor returns this exact name. No dependency axiom summaries are involved. -/
 def commonReservedName (scan : NameScan) (name : Name) : Bool := Id.run do
+  if isMatchCongrEqn scan.matchers name then return true
   let .str parent suffix := name | return false
   let some info := scan.owners[parent]? | return false
   if Meta.isHCongrReservedNameSuffix suffix || suffix == Meta.congrSimpSuffix then return true
