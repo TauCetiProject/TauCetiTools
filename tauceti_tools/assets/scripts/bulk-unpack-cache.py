@@ -190,9 +190,9 @@ def expanded_artifacts(record, module, files):
     Lake's writable artifact cache first resolves a module's trace outputs against
     `.lake/cache/artifacts`. When they are absent, Lake reads, hashes and caches
     every output of every restored module itself, which dominates a fully cached
-    build. Return `(build-relative path, artifact name)` pairs, or nothing when the
-    trace and the outputs do not correspond one to one; Lake then caches that
-    module itself, exactly as before.
+    build. Return `(extracted file, build-relative path, artifact name)` triples, or
+    nothing when the trace and the outputs do not correspond one to one in the
+    shape Lake writes for the trace's module mode.
     """
     parts = module.split(".")
     stem = Path(*parts[:-1], parts[-1])
@@ -205,8 +205,14 @@ def expanded_artifacts(record, module, files):
     outputs = trace.get("outputs") if isinstance(trace, dict) else None
     if (not isinstance(outputs, dict) or trace.get("depHash") != record["hash"]
             or not set(outputs) <= set(DESCRIPTORS) | {"m", "l"}
-            or outputs.get("l", record["archive"]) != record["archive"]
-            or not isinstance(outputs.get("m", False), bool)):
+            or outputs.get("l", record["archive"]) != record["archive"]):
+        return []
+    # Lake reads the module mode from "m". Module-system builds write three olean
+    # parts; other builds write one olean and no IR signature or IR.
+    olean_parts = 3 if outputs.get("m") is True else 1
+    if (not isinstance(outputs.get("m"), bool) or not isinstance(outputs.get("o"), list)
+            or len(outputs["o"]) != olean_parts
+            or (olean_parts == 1 and ("rs" in outputs or "r" in outputs))):
         return []
     named = {}
     for key, extensions in DESCRIPTORS.items():
@@ -220,29 +226,28 @@ def expanded_artifacts(record, module, files):
                 return []
             directory = "ir" if extension in ("c", "bc") else "lib/lean"
             named[str(Path(directory, stem)) + "." + extension] = name
-    if not outputs.get("o") or "i" not in outputs or set(named) != set(by_relative) - {trace_relative}:
+    if "i" not in outputs or set(named) != set(by_relative) - {trace_relative}:
         return []
-    return sorted(named.items())
+    return [(by_relative[relative], relative, name) for relative, name in sorted(named.items())]
 
 
-def verified(combined, groups, staging):
-    """Keep the modules whose every output hashes, by the toolchain's own Lake, to its name.
+def verified(groups, staging):
+    """Return the indices of the modules whose every output hashes to its name.
 
     Stock Lake names cached outputs by hashing them. Hash the same bytes with the
-    same function, one helper per CPU, so a cache entry never names other bytes.
-    Any helper failure installs nothing, leaving every module to stock Lake.
+    toolchain's own Lake hash (CacheHash.lean, as TauCetiWorker does) so a cache
+    entry never names other bytes. Return None when the helper fails.
     """
-    paths = [str(combined / relative) for group in groups for relative, _ in group]
+    paths = [str(source) for group in groups for source, _, _ in group]
     if not paths:
-        return []
+        return set()
     helpers = []
     try:
         lean = Path(subprocess.check_output(["lean", "--print-prefix"], text=True).strip()) / "bin/lean"
         cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
-        chunks = [paths[index::cpus] for index in range(min(cpus, len(paths)))]
-        for index, chunk in enumerate(chunks):
+        for index in range(min(16, cpus, len(paths))):
             request = staging / f"hash-request-{index}.json"
-            request.write_text(json.dumps(chunk))
+            request.write_text(json.dumps(paths[index::min(16, cpus, len(paths))]))
             helpers.append(subprocess.Popen([str(lean), "--run", str(HASHER), str(request)],
                                             stdout=subprocess.PIPE, text=True))
         hashes = {}
@@ -261,10 +266,9 @@ def verified(combined, groups, staging):
             helper.wait()
         print(f"::warning::bulk-unpack-cache: cannot verify expanded artifacts ({error}); "
               "Lake will cache every module itself", flush=True)
-        return []
-    return [pair for group in groups
-            if all(hashes[str(combined / relative)] == name.split(".", 1)[0] for relative, name in group)
-            for pair in group]
+        return None
+    return {index for index, group in enumerate(groups)
+            if group and all(hashes[str(source)] == name.split(".", 1)[0] for source, _, name in group)}
 
 
 def install(project, expanded):
@@ -275,12 +279,11 @@ def install(project, expanded):
     """
     build, artifacts = project / ".lake/build", project / ".lake/cache/artifacts"
     for relative, name in expanded:
-        source = build / relative
-        os.chmod(source, 0o444)
+        os.chmod(build / relative, 0o444)
         try:
-            os.link(source, artifacts / name)
+            os.link(build / relative, artifacts / name)
         except FileExistsError:
-            pass
+            os.chmod(artifacts / name, 0o444)
 
 
 def assemble(project, records, staging):
@@ -288,8 +291,7 @@ def assemble(project, records, staging):
     extracted = extract_records(records, staging / "unpacked")
     combined = staging / "build"
     combined.mkdir()
-    modules, targets, satisfied = set(), set(), []
-    archives, plans, expanded = [], [], []
+    modules, candidates = set(), []
     for record, module, files in extracted:
         # Prepare one version, retaining every alternative mapping. A different
         # current input still hits its original record and Lake restores that
@@ -297,7 +299,16 @@ def assemble(project, records, staging):
         if module in modules:
             continue
         modules.add(module)
-        if not source_present(project, module):
+        if source_present(project, module):
+            candidates.append((record, module, files, expanded_artifacts(record, module, files)))
+    # None installs nothing and keeps every module, exactly as before expansion.
+    accepted = verified([group for *_, group in candidates], staging) or None
+    targets, satisfied, archives, plans, expanded = set(), [], [], [], []
+    for index, (record, module, files, group) in enumerate(candidates):
+        # Once any module's names are installed, a module that failed verification
+        # could resolve through them; leave its mapping to stock Lake's restoration,
+        # which hashes what it extracts.
+        if accepted is not None and index not in accepted:
             continue
         for source, relative in files:
             if relative in targets:
@@ -307,7 +318,8 @@ def assemble(project, records, staging):
         archive_target = combined / "lib/lean" / Path(*module.split(".")).with_suffix(".ltar")
         archives.append((Path(record["file"]), archive_target))
         satisfied.append(record)
-        expanded.append(expanded_artifacts(record, module, files))
+        if accepted is not None:
+            expanded.extend((relative, name) for _, relative, name in group)
     # Validate all modules before publishing or changing any selected mappings.
     for source, target in plans:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -315,10 +327,12 @@ def assemble(project, records, staging):
     for source, target in archives:
         target.parent.mkdir(parents=True, exist_ok=True)
         os.link(source, target)
-    expanded = verified(combined, [group for group in expanded if group], staging)
+        if accepted is not None:
+            os.chmod(target, 0o444)  # Lake's own caching makes the archive read-only too.
     return combined, satisfied, expanded, dict(
         bulk_archives=len(records), satisfied_records=len(satisfied),
-        historical_archives=len(extracted) - len(modules), expanded_artifacts=len(expanded))
+        historical_archives=len(extracted) - len(modules), expanded_artifacts=len(expanded),
+        unverified_modules=0 if accepted is None else len(candidates) - len(accepted))
 
 
 def publish(project, combined, satisfied, expanded=()):
