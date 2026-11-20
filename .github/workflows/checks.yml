@@ -1,5 +1,14 @@
 name: checks
-on: [push, pull_request]
+on:
+  # Branch pushes would duplicate each pull_request run on GitHub-hosted runners, which the
+  # whole organisation shares; only main is checked on push.
+  push:
+    branches: [main]
+  pull_request:
+# A new push to a PR cancels that PR's older run; main runs never cancel each other.
+concurrency:
+  group: checks-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 permissions:
   contents: read
 jobs:

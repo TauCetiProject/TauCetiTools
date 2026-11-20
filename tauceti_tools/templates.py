@@ -427,7 +427,6 @@ def write_project(project: Project, checkout: Path, role: str = "content") -> li
             "api-docs.yml": "docs",
             "pages.yml": "docs",
             "prepare_docs.py": "docs",
-            "stuck-alerts.yml": "zulip",
             "toolchain-tags.yml": "security_audit",
             "nightly-verify.yml": "security_audit",
             "roadmap-label.yml": "progress",
@@ -485,7 +484,7 @@ def write_project(project: Project, checkout: Path, role: str = "content") -> li
         if relative.suffix in (".yml", ".yaml"):
             if relative.name not in ("pr-build.yml", "retry-ci-status.yml"):
                 runner = (MAINTENANCE_CONTROL_RUNNER
-                          if project.legacy and relative.name in ("update.yml", "stuck-alerts.yml", "pr-status.yml")
+                          if project.legacy and relative.name in ("update.yml", "pr-status.yml")
                           else "ubuntu-latest")
                 text = guard_app_jobs(text, runner=runner)
             text = pin_actions(text)

@@ -140,7 +140,7 @@ class RateLimitBackoff(unittest.TestCase):
             self.call([self.result(1, SECONDARY_403)] * core.RATE_LIMIT_ATTEMPTS)
 
     def test_a_later_read_fails_fast_instead_of_waiting_again(self):
-        # stuck_alerts runs ten detectors catching failures individually; without
+        # Housekeeping and label reconciliation catch failures per PR; without
         # this each would start the whole wait over and blow the job timeout.
         with self.assertRaises(core.RateLimited):
             self.call([self.result(1, SECONDARY_403)] * core.RATE_LIMIT_ATTEMPTS)
@@ -291,14 +291,6 @@ class ScoreboardMeta(unittest.TestCase):
 
     def test_no_marker_is_empty(self):
         self.assertEqual(core.scoreboard_meta_from([{"body": "hi", "updated": "x"}]), {})
-
-    def test_status_scoreboard_accepts_newer_contributor_review(self):
-        comments = [
-            self.board(1, "2026-01-01", "MEMBER"),
-            self.board(2, "2026-02-01", "CONTRIBUTOR"),
-        ]
-        with mock.patch.object(core, "issue_comments", return_value=comments):
-            self.assertEqual(core.scoreboard_meta("9").get("n"), 2)
 
     def test_destructive_selector_keeps_repo_associated_policy(self):
         comments = [

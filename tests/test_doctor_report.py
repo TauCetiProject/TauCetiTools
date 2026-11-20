@@ -159,6 +159,17 @@ class DoctorReportTests(unittest.TestCase):
             self.assertIn("gh auth login", errors.getvalue())
             self.assertNotIn("Unknown check", errors.getvalue())
 
+    def test_zulip_without_progress_is_reported_inactive(self):
+        class GitHub:
+            def read(self, path, **kwargs):
+                return {"id": 123}, ""
+
+        project = parse(initial_configuration("one/Project", "human").encode(), "/tmp/tauceti.toml")
+        project.raw["features"].update(zulip=True, progress=False)
+        rows = {f.id: f for f in extra_findings(project, GitHub(), "doctor")}
+        self.assertEqual(rows["features.zulip"].status, "disabled")
+        self.assertIn("progress", rows["features.zulip"].summary)
+
     def test_check_only_filters_and_keeps_operator_procedure(self):
         class GitHub:
             def read(self, path, **kwargs):
