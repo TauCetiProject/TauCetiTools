@@ -125,6 +125,7 @@ jobs:
       build-description: ${{ steps.report.outputs.build-description }}
       publication-required: ${{ steps.report.outputs.publication-required }}
       reported-toolchain: ${{ steps.cache_stage.outputs.toolchain }}
+      cache-staged: ${{ steps.cache_stage.outputs.staged }}
       source-scope: ${{ steps.report.outputs.scope-state }}
       source-bump-guard: ${{ steps.report.outputs.bump-guard-state }}
       source-scope-complete: ${{ steps.report.outputs.source-scope-complete }}
@@ -1173,8 +1174,12 @@ jobs:
           key: dot-notation-context-v1-${{ hashFiles('gate/scripts/lean_source.py') }}-${{ steps.pr.outputs.base_sha }}
           restore-keys: dot-notation-context-v1-${{ hashFiles('gate/scripts/lean_source.py') }}-
 
+      # Queue batches keep going after a rejected source, so one run reports every failing check
+      # and its repair sees them all; SOURCE_REJECTED still fails the build status below.
       - name: Dot-notation namespace lint (Mathlib type namespaces stay at root)
+        id: dot_notation
         if: ${{ env.INFRA != '1' }}
+        continue-on-error: ${{ env.IS_BATCH == 'true' }}
         run: |
           rc=0
           python3 gate/scripts/lint-dot-notation.py \
@@ -1310,8 +1315,9 @@ jobs:
       # each, so a run's current step names the phase it is in. Every phase step runs the first
       # step's `run` (the YAML alias *sandboxed-phase): the same bwrap invocation, mounts and
       # environment, differing only in SANDBOX_PHASE. Each phase runs only if every earlier step
-      # passed, and the `build` step below combines their outcomes into the one outcome the
-      # reporting steps read.
+      # passed, except in a queue batch, where every phase after a passing build runs whatever
+      # an earlier check found, so one run reports every failing check. The `build` step below
+      # combines their outcomes into the one outcome the reporting steps read.
       - name: Build exact candidate under bwrap, offline
         id: sandbox_build
         if: ${{ env.INFRA != '1' }}
@@ -1404,7 +1410,7 @@ jobs:
 
       - name: Audit the candidate under bwrap (duplicates, axioms)
         id: sandbox_audits
-        if: ${{ env.INFRA != '1' }}
+        if: ${{ !cancelled() && env.INFRA != '1' && (success() || (env.IS_BATCH == 'true' && steps.sandbox_build.outcome == 'success')) }}
         env:
           SANDBOX_PHASE: audits
           CI_RESOURCE_EXPERIMENT: ${{ vars.CI_RESOURCE_EXPERIMENT }}
@@ -1419,7 +1425,7 @@ jobs:
 
       - name: Check the module system under bwrap
         id: sandbox_module_system
-        if: ${{ env.INFRA != '1' }}
+        if: ${{ !cancelled() && env.INFRA != '1' && (success() || (env.IS_BATCH == 'true' && steps.sandbox_build.outcome == 'success')) }}
         env:
           SANDBOX_PHASE: module-system
           CI_RESOURCE_EXPERIMENT: ${{ vars.CI_RESOURCE_EXPERIMENT }}
@@ -1434,7 +1440,7 @@ jobs:
 
       - name: Environment lint under bwrap
         id: sandbox_lint_env
-        if: ${{ env.INFRA != '1' }}
+        if: ${{ !cancelled() && env.INFRA != '1' && (success() || (env.IS_BATCH == 'true' && steps.sandbox_build.outcome == 'success')) }}
         env:
           SANDBOX_PHASE: lint-env
           CI_RESOURCE_EXPERIMENT: ${{ vars.CI_RESOURCE_EXPERIMENT }}
@@ -1449,7 +1455,7 @@ jobs:
 
       - name: Style lint under bwrap
         id: sandbox_lint_style
-        if: ${{ env.INFRA != '1' }}
+        if: ${{ !cancelled() && env.INFRA != '1' && (success() || (env.IS_BATCH == 'true' && steps.sandbox_build.outcome == 'success')) }}
         env:
           SANDBOX_PHASE: lint-style
           CI_RESOURCE_EXPERIMENT: ${{ vars.CI_RESOURCE_EXPERIMENT }}
@@ -1464,7 +1470,7 @@ jobs:
 
       - name: Record declaration names and stage cache outputs under bwrap
         id: sandbox_finish
-        if: ${{ env.INFRA != '1' }}
+        if: ${{ !cancelled() && env.INFRA != '1' && (success() || (env.IS_BATCH == 'true' && steps.sandbox_build.outcome == 'success')) }}
         env:
           SANDBOX_PHASE: finish
           CI_RESOURCE_EXPERIMENT: ${{ vars.CI_RESOURCE_EXPERIMENT }}
@@ -1478,7 +1484,8 @@ jobs:
         run: *sandboxed-phase
 
       # The sandboxed build's single outcome, as when one step ran every phase: success when every
-      # phase passed and failure when one failed (the later phases are then skipped), even if the
+      # phase passed and failure when one failed (outside queue batches, the later phases are then
+      # skipped), even if the
       # run is cancelled afterwards. Otherwise, when the build never started or a cancellation
       # interrupted it, this step is skipped, which every reader treats as the former `cancelled`.
       - name: Combine the sandboxed phase outcomes
@@ -1496,7 +1503,7 @@ jobs:
 
       - name: Prepare merge-group cache artifact metadata
         id: cache_stage
-        if: ${{ env.IS_BATCH == 'true' && env.STAGE_LAKE_CACHE == '1' && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && env.IS_BATCH == 'true' && env.STAGE_LAKE_CACHE == '1' && steps.sandbox_build.outcome == 'success' && steps.sandbox_finish.outcome == 'success' }}
         run: |
           set -euo pipefail
           python3 gate/scripts/lake_cache_publish.py stage pr/.lake/publication-stage "$RUNNER_TEMP/lake-cache-staging"
@@ -1510,7 +1517,7 @@ jobs:
           echo 'staged=true' >> "$GITHUB_OUTPUT"
 
       - name: Hand the merge-group oleans to the isolated publisher
-        if: ${{ steps.cache_stage.outputs.staged == 'true' }}
+        if: ${{ !cancelled() && steps.cache_stage.outputs.staged == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: lake-cache-staging-${{ steps.pr.outputs.status_sha }}
@@ -1707,8 +1714,11 @@ jobs:
             state=failure; desc="build not run — tested H/B/T identity missing or invalid"
           elif [ "${{ steps.import_headers.outcome }}" = "failure" ]; then
             state=failure; desc="import header preflight failed — see importing-file/header diagnostics"
+          elif [ "${{ steps.dot_notation.outcome }}" = "failure" ] && [ "$source_check" != failure ]; then
+            # A queue batch continues past this lint (continue-on-error); its exit 2 means it could not run.
+            state=failure; desc="dot-notation lint did not complete; re-run pr-build"
           elif [ "$source_check" = failure ]; then
-            state=failure; desc="build not run: a pre-build source check failed; see the failed guard step"
+            state=failure; desc="a pre-build source check failed; see the failed guard step"
           elif [ "${{ steps.build.outcome }}" = "failure" ]; then
             state=failure; desc="sandboxed build, audit, or simp-NF lint failed"
           elif { [ -n "${{ env.SHIM_COVERAGE_RC }}" ] \
@@ -1915,13 +1925,15 @@ jobs:
         if: ${{ always() && failure() && env.TAUCETI_CI_QUOTA_UNAVAILABLE == '1' }}
         run: exit 1
 
-  # Only an already-audited merge-group commit may publish. The reusable workflow runs on a
+  # A queue batch publishes whenever its sandboxed build passed, so the next repair and staging
+  # attempt restore it even when an audit or lint failed; every consumer reruns the audits on its
+  # own candidate, and only the `build` status lets a candidate land. The reusable workflow runs on a
   # fresh runner, sparsely checks out that commit's toolchain pin and key-free confirmation
   # helper, and is the sole holder of the key. The helper runs only after the key-bearing step.
   publish-merge-group-cache:
     needs: sandboxed-build
     # The trusted audit verdict is independent of subsequent status-delivery failures.
-    if: ${{ !cancelled() && needs.sandboxed-build.outputs.build-state == 'success' && needs.sandboxed-build.outputs.publication-required == 'true' }}
+    if: ${{ !cancelled() && needs.sandboxed-build.outputs.cache-staged == 'true' && needs.sandboxed-build.outputs.publication-required == 'true' }}
     permissions:
       contents: read
     uses: ./.github/workflows/publish-lake-cache.yml

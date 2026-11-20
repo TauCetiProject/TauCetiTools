@@ -208,25 +208,30 @@ for i in "${!REVS[@]}"; do
   rm -rf "$ATTEMPT"
   mkdir -p "$ATTEMPT"
   if [ -d "$OUTPUTS" ]; then cp -a "$OUTPUTS/." "$ATTEMPT/"; fi
-  outcome=failed
-  for attempt in $(seq 1 $ATTEMPTS); do
-    LOG="${RUNNER_TEMP:-/tmp}/repair-cache-get-$i-$attempt.log"
-    rc=0
-    started=$SECONDS
-    ( cd "$PROJECT_DIR" && LAKE_CONFIG="$CFG" LAKE_CACHE_DIR="$CACHE" \
-        lake cache get --service "$REPAIR_CACHE_SERVICE" --repo TauCetiProject/TauCeti --rev="$REV" ) \
-        > "$LOG" 2>&1 || rc=$?
-    if ! python3 "$(dirname -- "${BASH_SOURCE[0]}")/ci_log_filter.py" cache "$LOG"; then
-      echo '::warning::repair cache log summary failed; showing the original output'
-      cat "$LOG" || true
-    fi
-    echo "Repair cache $REV attempt $attempt: exit=$rc, elapsed=$((SECONDS-started))s"
-    if [ "$rc" = 0 ]; then outcome=used; break; fi
-    if grep -qE "$MISS_RE" "$LOG"; then outcome=absent; break; fi
-    if [ "$attempt" != "$ATTEMPTS" ]; then
-      echo "::notice::repair cache attempt $attempt of $ATTEMPTS for $REV did not complete cleanly; retrying missing artifacts"
-      sleep 2
-    fi
+  # A staging build publishes its outputs to the public cache under the candidate's revision
+  # whenever its build passed, so a candidate revision the repair cache lacks is looked up there.
+  for SERVICE in "$REPAIR_CACHE_SERVICE" tauceti-public; do
+    outcome=failed
+    for attempt in $(seq 1 $ATTEMPTS); do
+      LOG="${RUNNER_TEMP:-/tmp}/repair-cache-get-$i-$SERVICE-$attempt.log"
+      rc=0
+      started=$SECONDS
+      ( cd "$PROJECT_DIR" && LAKE_CONFIG="$CFG" LAKE_CACHE_DIR="$CACHE" \
+          lake cache get --service "$SERVICE" --repo TauCetiProject/TauCeti --rev="$REV" ) \
+          > "$LOG" 2>&1 || rc=$?
+      if ! python3 "$(dirname -- "${BASH_SOURCE[0]}")/ci_log_filter.py" cache "$LOG"; then
+        echo '::warning::repair cache log summary failed; showing the original output'
+        cat "$LOG" || true
+      fi
+      echo "Repair cache $REV ($SERVICE) attempt $attempt: exit=$rc, elapsed=$((SECONDS-started))s"
+      if [ "$rc" = 0 ]; then outcome=used; break; fi
+      if grep -qE "$MISS_RE" "$LOG"; then outcome=absent; break; fi
+      if [ "$attempt" != "$ATTEMPTS" ]; then
+        echo "::notice::repair cache attempt $attempt of $ATTEMPTS for $REV did not complete cleanly; retrying missing artifacts"
+        sleep 2
+      fi
+    done
+    [ "$outcome" = absent ] || break
   done
   case "$outcome" in
     used) keep_placed; USED+=("$REV") ;;
