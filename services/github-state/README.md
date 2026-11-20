@@ -472,7 +472,9 @@ with two test files running concurrently. Each fixture creates and removes its
 own database schema, and the tests exercise real database connections and SQL
 requests. End-to-end time therefore depends strongly on runner-to-database latency.
 The GitHub-hosted CI job has a 60-minute limit; its earlier 20-minute budget was
-insufficient after moving from Namespace runners.
+insufficient after moving from Namespace runners. The job lives in its own
+`github-state-postgres` workflow: it runs on every `main` push, but on pull requests
+only when they change `services/github-state/` or that workflow.
 
 CI keeps the normal console reporter and also uploads per-test durations in the
 `postgres-test-results-<run>-<attempt>` JUnit artifact, retained for seven days.
