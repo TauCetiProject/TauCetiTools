@@ -43,13 +43,21 @@ if [ ! -x "$lean_command" ]; then
   exit 127
 fi
 
+started=$(date +%s.%N)
 timeout --signal=TERM --kill-after="$grace" "$deadline" "$lean_command" "$@"
 status=$?
+elapsed=$(awk -v s="$started" -v e="$(date +%s.%N)" 'BEGIN { printf "%.0f", e - s }')
 if [ "$status" = 124 ] || [ "$status" = 137 ]; then
   source='<unknown module>'
   for argument in "$@"; do
     case "$argument" in *.lean) source="$argument" ;; esac
   done
-  echo "error: Lean process for $source exceeded the ${deadline}s wall-clock limit (TERM, then KILL after ${grace}s)" >&2
+  # `timeout` reports 124 for its own TERM and 137 once it escalates to KILL, which is only after the
+  # deadline. A KILL before the deadline came from elsewhere, usually the kernel's out-of-memory killer.
+  if [ "$status" = 124 ] || awk -v s="$started" -v e="$(date +%s.%N)" -v d="$deadline" 'BEGIN { exit !(e - s >= d) }'; then
+    echo "error: Lean process for $source exceeded the ${deadline}s wall-clock limit (TERM, then KILL after ${grace}s)" >&2
+  else
+    echo "error: Lean process for $source was killed by signal 9 after ${elapsed}s, likely out of memory" >&2
+  fi
 fi
 exit "$status"
