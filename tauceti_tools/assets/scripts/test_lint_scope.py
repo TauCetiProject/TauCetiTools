@@ -292,12 +292,24 @@ class LintScopeTest(unittest.TestCase):
                     self.PR_ENV, dict(files, **{"repos/o/r/pulls/12": info})))
 
     BATCH_EVENTS = ("merge_group", "repository_dispatch", "push")
+    # A main push still reads its PRs from local history; staging batches never do.
+    HISTORY_EVENTS = ("push",)
+
+    def test_every_staging_batch_lints_the_whole_library(self):
+        compare = {"total_commits": 1, "commits": [{"commit": {"message": "feat: x (#7)"}}],
+                   "files": [f("modified", "TauCeti/X.lean")]}
+        for event in ("merge_group", "repository_dispatch"):
+            with self.subTest(event=event):
+                self.assertIsNone(self.run_scope(
+                    {"EVENT": event, "BASE": SHA_A, "HEAD": SHA_B},
+                    {f"repos/o/r/compare/{SHA_A}...{SHA_B}": compare, "repos/o/r/pulls/7": pr()}))
+                self.assertEqual(self.last_calls, [])
 
     def test_native_mirror_without_trailer_never_queries_a_github_pr(self):
         compare = {"total_commits": 1, "commits": [{"commit": {
             "message": "feat: native default squash title (#7)"}}],
             "files": [f("modified", "TauCeti/X.lean")]}
-        for event in (*self.BATCH_EVENTS, "workflow_dispatch", "schedule"):
+        for event in (*self.HISTORY_EVENTS, "workflow_dispatch", "schedule"):
             with self.subTest(event=event):
                 result = self.run_scope({"EVENT": event, "BASE": SHA_A, "HEAD": SHA_B,
                                          "NUM": "7", "TAUCETI_SOURCE_MIRROR": "true"}, {
@@ -311,7 +323,7 @@ class LintScopeTest(unittest.TestCase):
             compare = {"total_commits": 1, "commits": [{"commit": {
                 "message": "feat: native contribution (#7)\n\nSource-PR: " + citation}}],
                 "files": [f("modified", "TauCeti/X.lean")]}
-            for event in self.BATCH_EVENTS:
+            for event in self.HISTORY_EVENTS:
                 with self.subTest(citation=citation,event=event):
                     result = self.run_scope({"EVENT":event,"BASE":SHA_A,"HEAD":SHA_B}, {
                         f"repos/o/r/compare/{SHA_A}...{SHA_B}":compare,"repos/o/r/pulls/7":pr()})
@@ -331,7 +343,7 @@ class LintScopeTest(unittest.TestCase):
         compare = {"total_commits": 2, "commits": [{"commit": {"message": "feat: x (#7)\n\nbody"}},
                                {"commit": {"message": "fix: y (#8)"}}],
                    "files": [f("modified", "TauCeti/X.lean")]}
-        for event in self.BATCH_EVENTS:
+        for event in self.HISTORY_EVENTS:
             for info in (pr(), pr(labels=["full-lint"]), pr(head_ref="lint-repair/main")):
                 with self.subTest(event=event, info=info):
                     responses = {f"repos/o/r/compare/{SHA_A}...{SHA_B}": compare,
@@ -341,7 +353,7 @@ class LintScopeTest(unittest.TestCase):
                     self.assertEqual(modules, ["TauCeti.X"] if info == pr() else None)
 
     def test_unattributable_or_duplicate_batch_commits_lint_everything(self):
-        for event in self.BATCH_EVENTS:
+        for event in self.HISTORY_EVENTS:
             for message in ("Merge branch main", "another commit (#7)"):
                 with self.subTest(event=event, message=message):
                     compare = {"total_commits": 2, "commits": [{"commit": {"message": "feat: x (#7)"}},
@@ -352,7 +364,7 @@ class LintScopeTest(unittest.TestCase):
                         {f"repos/o/r/compare/{SHA_A}...{SHA_B}": compare}))
 
     def test_stale_rest_batch_metadata_cannot_override_local_history(self):
-        for event in self.BATCH_EVENTS:
+        for event in self.HISTORY_EVENTS:
             for count in (None, 251):
                 with self.subTest(event=event, count=count):
                     compare = {"total_commits": count,
@@ -366,7 +378,7 @@ class LintScopeTest(unittest.TestCase):
     def test_batch_compare_cap_does_not_limit_local_files(self):
         compare = {"total_commits": 1, "commits": [{"commit": {"message": "feat: x (#7)"}}],
                    "files": [f("modified", f"TauCeti/M{i}.lean") for i in range(300)]}
-        for event in self.BATCH_EVENTS:
+        for event in self.HISTORY_EVENTS:
             with self.subTest(event=event):
                 self.assertEqual(self.run_scope(
                     {"EVENT": event, "BASE": SHA_A, "HEAD": SHA_B},
@@ -380,10 +392,10 @@ class LintScopeTest(unittest.TestCase):
         # exhaustion, despite already having both exact commits locally.
         error = {"_error": "gh: API rate limit exceeded (HTTP 403)",
                  "commits": [{"commit": {"message": "change (#12)"}}]}
-        for event in ("pull_request_target", "workflow_dispatch", *self.BATCH_EVENTS):
+        for event in ("pull_request_target", "workflow_dispatch", *self.HISTORY_EVENTS):
             with self.subTest(event=event):
                 env = dict(self.PR_ENV, EVENT=event)
-                endpoint = (self.PR_COMPARE if event not in self.BATCH_EVENTS else
+                endpoint = (self.PR_COMPARE if event not in self.HISTORY_EVENTS else
                             f"repos/o/r/compare/{SHA_A}...{SHA_B}")
                 self.assertEqual(self.run_scope(
                     env, {endpoint: error, "repos/o/r/pulls/12": pr()},
@@ -394,10 +406,10 @@ class LintScopeTest(unittest.TestCase):
         # Without label/branch metadata we cannot rule out a full-lint request.
         compare = {"total_commits": 1,
                    "commits": [{"commit": {"message": "feat: x (#12)"}}]}
-        for event in ("pull_request_target", "workflow_dispatch", *self.BATCH_EVENTS):
+        for event in ("pull_request_target", "workflow_dispatch", *self.HISTORY_EVENTS):
             with self.subTest(event=event):
                 env = dict(self.PR_ENV, EVENT=event)
-                endpoint = (self.PR_COMPARE if event not in self.BATCH_EVENTS else
+                endpoint = (self.PR_COMPARE if event not in self.HISTORY_EVENTS else
                             f"repos/o/r/compare/{SHA_A}...{SHA_B}")
                 self.assertIsNone(self.run_scope(
                     env, {endpoint: compare, "repos/o/r/pulls/12": {"_error": "HTTP 503"}},
@@ -411,7 +423,7 @@ class LintScopeTest(unittest.TestCase):
             responses = {f"repos/o/r/compare/{SHA_A}...{SHA_B}": compare}
             responses.update({f"repos/o/r/pulls/{n}": pr() for n in range(1, count + 1)})
             self.assertEqual(self.run_scope(
-                {"EVENT": "repository_dispatch", "BASE": SHA_A, "HEAD": SHA_B},
+                {"EVENT": "push", "BASE": SHA_A, "HEAD": SHA_B},
                 responses, files=[f("added", "TauCeti/X.lean")]), ["TauCeti.X"])
             calls = [call for call in self.last_calls if call[1] == "graphql"]
             self.assertEqual(len(calls), (count + 31) // 32)
@@ -430,7 +442,7 @@ class LintScopeTest(unittest.TestCase):
             if last is not None:
                 responses["repos/o/r/pulls/9"] = last
             self.assertIsNone(self.run_scope(
-                {"EVENT": "repository_dispatch", "BASE": SHA_A, "HEAD": SHA_B},
+                {"EVENT": "push", "BASE": SHA_A, "HEAD": SHA_B},
                 responses, files=[f("added", "TauCeti/X.lean")]))
             self.assertIn("requests=5 elapsed_seconds=", self.last_stderr)
 

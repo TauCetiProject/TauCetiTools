@@ -1447,9 +1447,8 @@ when the selected modules have no documented declarations. Findings use defining
 ownership, so imported declarations remain outside the preflight scope.
 
 Staging and merge-queue builds, `full-lint` PRs, dependency changes and uncertain module
-scope disable changed-only preflight. Environment lint retains its existing changed-module
-scope plus downstream `unusedArguments`; `full-lint`, repair PRs and unknown scope select every
-module. Global docstring and source-style checks retain coverage floors and sentinels,
+scope disable changed-only preflight. Every staging batch, `full-lint` and repair PRs, and
+unknown scope lint every module; other builds lint the changed modules. Global docstring and source-style checks retain coverage floors and sentinels,
 baseline visibility and complete suppression inventories. Nightly verification and the
 full-lint repair workflow remain in place.
 Ordinary PRs do not report out-of-scope baseline or suppression entries as fixed.

@@ -539,17 +539,15 @@ the candidate's merge base. It rechecks the native repository ID before and afte
 source transfers. Complete histories and sandbox materialization use the existing
 qualified Git helpers. The native read token is provided only to explicit host
 read steps before dependency executables run; it is never a candidate sandbox
-variable or merge credential. Native branch/label policy is saved with the
-request digest in runner temporary storage. The later lint step reads that
-observation and local Git objects without native credentials or network access.
+variable or merge credential. Every source candidate lints the whole library, so
+lint needs no native branch or label policy.
 
 CI attests retained bytes and enrolled member identities. It grants no review or
 merge authority on any originating forge. Immediately before landing, the queue
 must independently recheck each original repository ID, PR head, target and
 current review authority, then perform the expected-old main update.
-Mixed requests force full lint if any member originates outside the native
-retention repository; those members never cause cross-origin API requests using
-the native read credential.
+Members that originate outside the native retention repository never cause
+cross-origin API requests using the native read credential.
 
 A request may carry `"lane":"pr"` to mark a per-PR build rather than a staging
 candidate. Staging requests omit the key, so their records and digests are
@@ -601,8 +599,7 @@ It must never retry the same broken preparation indefinitely or replace its
 manifest silently.
 
 Source bootstrap materializes portable build scripts without exporting legacy
-unqualified source bindings. Native PR branch/label reads select lint scope;
-unavailable, changed-head or full-lint observations select full-library lint.
+unqualified source bindings. Every source candidate lints the whole library.
 The GitHub helper permits only configured execution/dependency reads and refuses
 source metadata or status writes before credential selection. Candidate audits,
 scope and pin guards continue to run. Exact retained members receive the same

@@ -18,7 +18,6 @@ from .assets.scripts import ci_checkout, ci_git
 from .assets.scripts.github_api import APIError, Deferred, GitHub
 from .ci_candidate import (
     MAX_MEMBER_MANIFEST_BYTES,
-    MAX_MEMBERS,
     MEMBER_MANIFEST_FILE,
     PR_LANE,
     CandidateRequest,
@@ -254,7 +253,6 @@ def resolve(request, policy, context, store, *, token=None, client=None):
         "mergebase": request.base,
         "tree": request.tree,
     }
-    result["lint_scoped"] = native_lint_policy(request, policy, context, client=client)
     return result
 
 
@@ -503,93 +501,6 @@ def toolchain_pin(request, policy, context, store, *, token=None, client=None):
         raise ValueError("candidate toolchain is not an official Lean channel")
     check_source_repository(policy, client)
     return raw
-
-
-def native_lint_policy(request, policy, context, *, client):
-    """Collect native metadata before any dependency executable runs on the job."""
-    check_workflow_context(request, policy, context)
-    if request.lane == PR_LANE:
-        # Per-PR evidence is shared by every PR at the same head, so it must
-        # not depend on any one PR's branch name or labels.
-        return False
-    if len(request.accepted_members) > MAX_MEMBERS or any(
-        member.source is not None and member.source != policy.source for member in request.accepted_members
-    ):
-        # Full lint is the safe default when a batch includes another source.
-        # Never ask Forgejo for the same-numbered GitHub PR or share credentials.
-        return False
-    started = time.monotonic()
-    try:
-        check_source_repository(policy, client)
-        for member in request.accepted_members:
-            if time.monotonic() - started > 45:
-                raise ValueError("native lint policy time bound reached")
-            pull = client.request("GET", f"repos/{policy.source.repository.name}/pulls/{member.pr}")
-            if not isinstance(pull, dict) or type(pull.get("number")) is not int or pull["number"] != member.pr:
-                raise ValueError("native lint policy PR unavailable")
-            head, labels = pull.get("head"), pull.get("labels")
-            if (
-                not isinstance(head, dict)
-                or head.get("sha") != member.head
-                or not isinstance(head.get("ref"), str)
-                or not head["ref"]
-            ):
-                raise ValueError("native lint policy head changed or unavailable")
-            if head["ref"].startswith("lint-repair/"):
-                raise ValueError("native lint repair requires full lint")
-            if (
-                not isinstance(labels, list)
-                or len(labels) > 100
-                or any(
-                    not isinstance(label, dict) or not isinstance(label.get("name"), str) or not label["name"]
-                    for label in labels
-                )
-            ):
-                raise ValueError("native lint labels unavailable")
-            if any("full-lint" in label["name"].split(",") for label in labels):
-                raise ValueError("native full-lint label is present")
-        check_source_repository(policy, client)
-    except (ForgeError, ValueError, OSError):
-        return False
-    return True
-
-
-def lint_scope(request, policy, context, checkout, destination, configuration_path, *, observation):
-    """Only saved trusted native policy and local objects; no credential/network use."""
-    check_workflow_context(request, policy, context)
-    destination = Path(destination)
-    destination.mkdir(parents=True, exist_ok=True)
-    if (
-        not isinstance(observation, dict)
-        or observation.get("request_digest") != request.digest
-        or observation.get("lint_scoped") is not True
-    ):
-        return {"LINT_ONLY_MODULES": "", "LINT_SCOPE_DIR": str(destination)}
-    from .assets.scripts import lint_scope_files
-
-    try:
-        files = [
-            name.decode("utf-8")
-            for name in lint_scope_files.changed_files(str(checkout), request.base, request.head).split(b"\0")
-            if name
-        ]
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return {"LINT_ONLY_MODULES": "", "LINT_SCOPE_DIR": str(destination)}
-    # The renderer gives the shared shell script its project-specific root, but
-    # this module obtains it from the independently pinned project configuration.
-    project = load(str(configuration_path))
-    prefix = project.roots[0].replace(".", "/") + "/"
-    modules, unmatched = [], []
-    for name in files:
-        if name.startswith(prefix) and re.fullmatch(
-            re.escape(prefix[:-1]) + r"(/[A-Za-z_][A-Za-z0-9_']*)+\.lean", name
-        ):
-            modules.append(name[:-5].replace("/", "."))
-        elif name.endswith(".lean"):
-            unmatched.append(name)
-    (destination / "modules.txt").write_text("".join(m + "\n" for m in sorted(set(modules))))
-    (destination / "unmatched.txt").write_text("".join(name + "\n" for name in unmatched))
-    return {"LINT_ONLY_MODULES": str(destination / "modules.txt"), "LINT_SCOPE_DIR": str(destination)}
 
 
 class PublicationPending(EvidenceUnavailable):
@@ -889,7 +800,6 @@ def main(argv=None):
             "resolve",
             "fetch",
             "toolchain",
-            "lint-scope",
             "member-policy",
             "bump-policy",
             "finalize",
@@ -907,9 +817,7 @@ def main(argv=None):
     parser.add_argument("--policy-dir")
     parser.add_argument("--toolchain-output")
     parser.add_argument("--checkout")
-    parser.add_argument("--destination")
     parser.add_argument("--evidence")
-    parser.add_argument("--observation")
     parser.add_argument("--revision")
     parser.add_argument("--artifact-name")
     parser.add_argument("--lean-root")
@@ -976,13 +884,6 @@ def main(argv=None):
         raw = toolchain_pin(request, policy, context, args.store, token=token)
         Path(args.toolchain_output).write_bytes(raw)
         result = {"head": request.head, "tree": request.tree, "toolchain": raw.decode().strip()}
-    elif args.command == "lint-scope":
-        if not args.checkout or not args.destination:
-            parser.error("lint-scope requires --checkout and --destination")
-        observation = read_json(Path(args.observation).read_bytes()) if args.observation else None
-        result = lint_scope(
-            request, policy, context, args.checkout, args.destination, args.configuration, observation=observation
-        )
     elif args.command == "member-policy":
         if not args.workspace:
             parser.error("member-policy requires --workspace")
@@ -1025,7 +926,7 @@ def main(argv=None):
             )
     if args.github_env:
         with open(args.github_env, "a") as output:
-            if args.command in {"bootstrap", "lint-scope", "member-policy", "bump-policy"}:
+            if args.command in {"bootstrap", "member-policy", "bump-policy"}:
                 for key, value in result.items():
                     if args.command == "member-policy" and key == "rejected_members":
                         continue  # machine-readable evidence stays in the output file and log lines
