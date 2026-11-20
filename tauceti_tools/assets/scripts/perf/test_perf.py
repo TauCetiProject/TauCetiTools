@@ -62,6 +62,18 @@ class WatchdogTests(unittest.TestCase):
             self.assertIn(result.returncode, (124, 137))
             self.assertIn("exceeded the 0.1s wall-clock limit", result.stderr)
 
+    def test_reports_a_kill_before_the_deadline_as_out_of_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_toolchain(directory)
+            env = dict(os.environ, TAUCETI_LEAN_TIMEOUT_SECONDS="60")
+            result = subprocess.run(
+                [root / "bin" / "lean", "-c", "kill -KILL $$"],
+                env=env, text=True, capture_output=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 137)
+            self.assertIn("was killed by signal 9 after 0s, likely out of memory", result.stderr)
+            self.assertNotIn("wall-clock limit", result.stderr)
+
 
 class ReportTests(unittest.TestCase):
     def run_report(self, base_value: int, head_value: int) -> int:
