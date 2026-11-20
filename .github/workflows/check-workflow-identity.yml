@@ -7,7 +7,8 @@ on:
 permissions: {}
 jobs:
   identity:
-    runs-on: ubuntu-24.04
+    # Same placement as the calling checks workflow (FLEET_INFRA_CI).
+    runs-on: ${{ vars.FLEET_INFRA_CI == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('{"group":"TauCetiInfra","labels":["self-hosted","linux","x64","tauceti-fleet-infra"]}') || 'ubuntu-24.04' }}
     steps:
       - name: Verify GitHub supplies the reusable workflow identity
         env:
