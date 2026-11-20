@@ -151,6 +151,10 @@ class Wrap(unittest.TestCase):
         self.assertEqual([begins for _, _, begins in lexes], [True, False, True, False, True, True, False])
         self.assertEqual(lexes[1][0], ["s"] * 4 + ["c"] * 5)
 
+    def test_statement_sequences_are_not_wrapped(self):
+        line = "  let " + "n" * 86 + " := x.val; return " + "n" * 86
+        self.assertIsNone(tool["wrap"](line))
+
     def test_interpolated_strings_are_not_wrapped(self):
         line = '  s!"{x.val} {"' + " ".join(["word"] * 25) + '"}"'
         self.assertIsNone(tool["wrap"](line))
@@ -297,6 +301,21 @@ class Scanner(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(found, {(4, lines[3].index("x.1") + 2, "val", None)})
         self.assertEqual(declined, [f"{source}:3:{lines[2].index('x.1') + 3}"])
+
+    def test_declines_synonym_fields_lean_would_find(self):
+        cases = [
+            # a private method
+            "def T := {n : Nat // True}\nprivate def T.val (_ : T) : Nat := 42\ndef a (x : T) : Nat := x.1\n",
+            # only one of a macro's elaborations has the synonym type
+            "def T := {n : Nat // True}\ndef T.val (_ : T) : Nat := 42\n"
+            'macro "both " t:term : term => `(Prod.mk (($t) : {n : Nat // True} → Nat) (($t) : T → Nat))\n'
+            "def a := both (·.1)\n",
+        ]
+        for text in cases:
+            with self.subTest(text=text):
+                result, found, declined, source = self.scan(text)
+                self.assertEqual((result.returncode, found), (0, set()), result.stderr)
+                self.assertEqual(len(declined), 1)
 
     def test_reports_elaboration_errors_as_incomplete(self):
         result, found, _, _ = self.scan(

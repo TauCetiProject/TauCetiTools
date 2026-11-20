@@ -122,8 +122,8 @@ def receiverSpan (ctxs : Array ContextInfo) (line : Array Char) (ln col : Nat)
 def isProjApp (fn : Name) (nparams : Nat) (e : Expr) : Bool :=
   e.isAppOf fn && e.getAppNumArgs > nparams
 
-/-- Whether the named field `field` could resolve to a declaration `C.field` of a type synonym
-`C` for some receiver `x` of an application `fn ps x` in `e` (all are checked, since `e` may
+/-- Whether the named field `field` could resolve to a declaration `C.field` (as Lean's method
+lookup resolves it) of a type synonym `C` for some receiver `x` of an application `fn ps x` in `e` (all are checked, since `e` may
 contain several). Field notation looks for `C.field` on the head `C` of the receiver's type and
 unfolds `C` only when that fails, while `.1` always reaches the structure. Returns what could
 capture it (conservatively also when a receiver's type cannot be computed), or `none`. -/
@@ -147,8 +147,15 @@ def synonymCapture (ctx : ContextInfo) (lctx : LocalContext) (e : Expr) (fn : Na
         for _ in [0:64] do
           let some C := ty.getAppFn.constName? | return
           if isStructure (← getEnv) C then return
-          if (← getEnv).contains (C ++ field) then
-            found.set (some s!"`{C ++ field}`")
+          -- As Lean's `findMethod?`: `C.field` (for a private `C`, its user name), resolved
+          -- without the current namespace but with the open ones; private names, aliases and
+          -- `open`ed namespaces included.
+          let resolved ← try
+              withTheReader Core.Context ({ · with currNamespace := .anonymous }) do
+                resolveGlobalName (privateToUserName C ++ field)
+            catch _ => pure [(.anonymous, [])]
+          if let some (n, _) := resolved.find? (·.2.isEmpty) then
+            found.set (some s!"`{n}`")
             return
           let some ty' ← Meta.unfoldDefinition? ty | return
           ty ← Meta.whnfCore ty'
@@ -224,17 +231,22 @@ def scanFile (opts : Options) (path : String) : IO Bool := do
       byPos := byPos.alter pos fun fs => some ((fs.getD #[]).push field)
       ctxs := ctxs.alter pos fun cs => some ((cs.getD #[]).push ctx)
       if let some f := field then
-        -- The innermost term around the digits that applies `fn`; without one, decline.
+        -- The innermost terms around the digits that apply `fn`; without one, decline. All of
+        -- that size are checked: a macro can elaborate the same syntax more than once, and
+        -- nothing here ties a term to this hit's elaboration.
         let nparams := (ctx.env.getProjectionFnInfo? fn).map (·.numParams) |>.getD 0
-        let mut best : Option (Nat × ContextInfo × LocalContext × Expr) := none
+        let mut inner : Array (ContextInfo × LocalContext × Expr) := #[]
+        let mut innerSize := 0
         for ((a, b), actx, lctx, e) in apps do
           if a.byteIdx ≤ r.start.byteIdx && r.stop.byteIdx ≤ b.byteIdx then
             let size := b.byteIdx - a.byteIdx
-            if best.all (·.1 > size) && (e.find? (isProjApp fn nparams)).isSome then
-              best := some (size, actx, lctx, e)
-        let captured ← match best with
-          | some (_, actx, lctx, e) => synonymCapture actx lctx e fn nparams f
-          | none => pure (some "no elaborated receiver")
+            if (inner.isEmpty || size ≤ innerSize) && (e.find? (isProjApp fn nparams)).isSome then
+              if !inner.isEmpty && size < innerSize then inner := #[]
+              inner := inner.push (actx, lctx, e)
+              innerSize := size
+        let mut captured := if inner.isEmpty then some "no elaborated receiver" else none
+        for (actx, lctx, e) in inner do
+          if captured.isNone then captured ← synonymCapture actx lctx e fn nparams f
         if let some why := captured then synonym := synonym.insert pos why
   -- The field each position is rewritten to, keyed by (line, column).
   let mut agreed : Std.HashMap (Nat × Nat) Name := {}

@@ -173,6 +173,12 @@ def wrap(line, next_indent=None):
     if any(kind == STRING and ch == "{" for kind, ch in zip(kinds, line, strict=True)):
         # An interpolated string (`s!"{x.1} {"a b"}"`) may nest literals the lexer cannot see.
         return None
+    semis = [i for i, (kind, ch) in enumerate(zip(kinds, line, strict=True)) if kind == CODE and ch == ";"]
+    by = [m.start() for m in re.finditer(r"(?<![\w.])by(?![\w.'])", line) if kinds[m.start()] == CODE]
+    if semis and not (by and by[0] < semis[0]):
+        # `stmt; stmt` outside an inline `by` (which is never split): in a `do` block, a split could
+        # move a statement's end into a new statement.
+        return None
     out, rest = [], line
     while len(rest) > LIMIT:
         floor = len(rest) - len(rest.lstrip(" ")) + 8
