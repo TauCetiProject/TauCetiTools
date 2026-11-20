@@ -163,7 +163,14 @@ COMBINATOR = (
     r"(try|all_goals|any_goals|focus|repeat|repeat'|repeat1'|iterate|first|case|case'|next|on_goal"
     r"|pick_goal|classical|with_reducible|with_reducible_and_instances|with_unfolding_all"
     r"|with_unfolding_none|with_implicit|show_term|unhygienic|solve|fail_if_success|guard_target"
-    r"|refine_lift|set_option|open|nofun|nomatch|conv|calc|match|induction|cases|rcases|obtain)(?![\w'])"
+    r"|refine_lift|set_option|open|nofun|nomatch|conv|calc|match|induction|cases|rcases|obtain"
+    r"|as_aux_lemma"
+    # a parenthesized tactic sequence `(tac ...)`
+    r"|\(\s*(try|exact|refine|refine'|apply|simp|simpa|rw|rwa|intro|intros|constructor|omega|linarith"
+    r"|nlinarith|positivity|norm_num|ring|field_simp|aesop|grind|decide|rfl|use|exists|ext|funext"
+    r"|congr|gcongr|show|have|let|unfold|dsimp|split|by_cases|by_contra|contradiction|exfalso|left"
+    r"|right|trivial|assumption|specialize|subst|change|convert|apply_fun|all_goals|any_goals|first))"
+    r"(?![\w'])"
 )
 
 

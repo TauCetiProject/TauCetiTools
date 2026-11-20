@@ -160,7 +160,13 @@ class Wrap(unittest.TestCase):
         for head in ("try exact F", "all_goals exact F", "case _ => exact F", "· try exact F", "exact F <;> simp"):
             with self.subTest(head=head):
                 self.assertIsNone(tool["wrap"](f"  {head} {args}"))
-        for head in ("show_term exact F", "set_option maxHeartbeats 400 in exact F", "· /- c -/ try exact F"):
+        for head in (
+            "show_term exact F",
+            "set_option maxHeartbeats 400 in exact F",
+            "· /- c -/ try exact F",
+            "(try exact F",
+            "as_aux_lemma => exact F",
+        ):
             with self.subTest(head=head):
                 self.assertIsNone(tool["wrap"](f"  {head} {args}"))
         self.assertIsNotNone(tool["wrap"](f"  · exact F {args}"))
