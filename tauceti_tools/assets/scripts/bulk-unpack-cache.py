@@ -207,12 +207,15 @@ def expanded_artifacts(record, module, files):
             or not set(outputs) <= set(DESCRIPTORS) | {"m", "l"}
             or outputs.get("l", record["archive"]) != record["archive"]):
         return []
-    # Lake reads the module mode from "m". Module-system builds write three olean
-    # parts; other builds write one olean and no IR signature or IR.
-    olean_parts = 3 if outputs.get("m") is True else 1
-    if (not isinstance(outputs.get("m"), bool) or not isinstance(outputs.get("o"), list)
-            or len(outputs["o"]) != olean_parts
-            or (olean_parts == 1 and ("rs" in outputs or "r" in outputs))):
+    # Lake reads the module mode from "m" and the IR from "c" alone. Accept only the
+    # complete shapes it caches for compiled modules: a module-system build has
+    # three olean parts, the IR signature, IR and C; any other has one olean and C.
+    # Postponed compilation and anything else stays with stock Lake.
+    module_system = outputs.get("m")
+    if (not isinstance(module_system, bool) or not isinstance(outputs.get("o"), list)
+            or len(outputs["o"]) != (3 if module_system else 1)
+            or set(outputs) - {"b", "l"} != ({"m", "o", "i", "rs", "r", "c"} if module_system
+                                             else {"m", "o", "i", "c"})):
         return []
     named = {}
     for key, extensions in DESCRIPTORS.items():
@@ -226,7 +229,7 @@ def expanded_artifacts(record, module, files):
                 return []
             directory = "ir" if extension in ("c", "bc") else "lib/lean"
             named[str(Path(directory, stem)) + "." + extension] = name
-    if "i" not in outputs or set(named) != set(by_relative) - {trace_relative}:
+    if set(named) != set(by_relative) - {trace_relative}:
         return []
     return [(by_relative[relative], relative, name) for relative, name in sorted(named.items())]
 

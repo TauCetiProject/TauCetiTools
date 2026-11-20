@@ -271,7 +271,7 @@ class BulkUnpackTests(unittest.TestCase):
         return {"m": True, "o": [names["olean"], names["olean.server"], names["olean.private"]],
                 "i": names["ilean"], "rs": names["ir.sig"], "r": names["ir"], "c": names["c"]}
 
-    def native_fixture(self, records, staging, outputs=None, extra=()):
+    def native_fixture(self, records, staging, outputs=None, extra=(), omit=()):
         """Extract each record as a module whose trace names its outputs as Lake packs them."""
         result = []
         for index, record in enumerate(records):
@@ -282,6 +282,8 @@ class BulkUnpackTests(unittest.TestCase):
             base.mkdir(parents=True, exist_ok=True)
             files = []
             for extension in (*self.EXTENSIONS, *extra):
+                if extension in omit:
+                    continue
                 directory = "ir" if extension == "c" else "lib/lean"
                 source = base / (module + "." + extension)
                 source.write_bytes(f"{index} {extension}".encode())
@@ -385,6 +387,13 @@ class BulkUnpackTests(unittest.TestCase):
             "wrong extension": dict(outputs={**complete, "i": names["ilean"].replace("ilean", "ir")}),
             "module mode contradicts the oleans": dict(outputs={**complete, "m": False}),
             "missing module mode": dict(outputs={k: v for k, v in complete.items() if k != "m"}),
+            # The outputs below are absent from the archive as well as from the trace.
+            "IR without its signature": dict(outputs={k: v for k, v in complete.items() if k != "rs"},
+                                             omit=("ir.sig",)),
+            "postponed compilation": dict(outputs={k: v for k, v in complete.items() if k not in ("rs", "r", "c")},
+                                          omit=("ir.sig", "ir", "c")),
+            "module without IR": dict(outputs={k: v for k, v in complete.items() if k not in ("rs", "r")},
+                                      omit=("ir.sig", "ir")),
             "other archive": dict(outputs={**complete, "l": "0000000000000000.ltar"}),
             "unknown key": dict(outputs={**complete, "x": 1}),
             "not an object": dict(outputs=[names["olean"]]),
@@ -398,6 +407,11 @@ class BulkUnpackTests(unittest.TestCase):
             ((record, module, files),) = self.native_fixture(
                 [record], Path(tmp), outputs={**complete, "l": self.archive.name})
             self.assertEqual(len(bulk.expanded_artifacts(record, module, files)), 7)
+        with tempfile.TemporaryDirectory() as tmp:
+            plain = {"m": False, "o": [names["olean"]], "i": names["ilean"], "c": names["c"]}
+            ((record, module, files),) = self.native_fixture(
+                [record], Path(tmp), outputs=plain, omit=("olean.server", "olean.private", "ir.sig", "ir"))
+            self.assertEqual(len(bulk.expanded_artifacts(record, module, files)), 3)
             self.assertEqual(bulk.expanded_artifacts(dict(record, hash="ffffffffffffffff"), module, files), [])
 
 @unittest.skipUnless(INTEGRATION, "pass --integration with the pinned Lake installed")
