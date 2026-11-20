@@ -79,16 +79,21 @@ def raise_error(error):
     raise error
 
 
-def ordinary_tree(root):
-    """Only usable directories and readable regular files, checked without following links.
+# Outputs Lake itself makes read-only and replaces by unlinking. Lake rewrites every other
+# file it keeps (traces, hashes, setup and output mappings) in place.
+READ_ONLY_OUTPUTS = (".olean", ".olean.server", ".olean.private", ".ilean", ".ir", ".c", ".bc", ".ltar",
+                     ".o", ".so", ".a")
 
-    A previous sandbox can also leave modes Lake cannot use, so those are refused too. Lake
-    makes its own artifacts read-only, but rewrites traces, hashes and output mappings in place.
+
+def ordinary_tree(root):
+    """Only usable directories and regular files, checked without following links.
+
+    A previous sandbox can also leave modes Lake cannot use, so those are refused too.
     """
     if not stat.S_ISDIR(os.lstat(root).st_mode) or not os.access(root, os.R_OK | os.W_OK | os.X_OK):
         return False
     for directory, names, files in os.walk(root, onerror=raise_error):
-        mapping = os.sep + "outputs" in directory[len(str(root)):]
+        artifacts = (os.sep + "artifacts") in directory[len(str(root)):]
         for name in names + files:
             path = os.path.join(directory, name)
             mode = os.lstat(path).st_mode
@@ -97,7 +102,7 @@ def ordinary_tree(root):
                     return False
             elif not stat.S_ISREG(mode) or not os.access(path, os.R_OK):
                 return False
-            elif (mapping or name.endswith((".trace", ".hash"))) and not os.access(path, os.W_OK):
+            elif not (artifacts or name.endswith(READ_ONLY_OUTPUTS)) and not os.access(path, os.W_OK):
                 return False
     return True
 

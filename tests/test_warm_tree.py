@@ -80,12 +80,16 @@ class WarmTreeCleanup(unittest.TestCase):
 
     def test_unusable_modes_refuse_the_tree(self):
         (self.lake / "build/lib/lean/TauCeti/A.trace").write_text("{}")
+        (self.lake / "build/lib/lean/TauCeti/A.setup.json").write_text("{}")
+        (self.lake / "build/lib/lean/TauCeti/A.irsetup.json").write_text("{}")
         (self.lake / "cache/outputs/TauCeti").mkdir(parents=True)
         (self.lake / "cache/outputs/TauCeti/0123.json").write_text("{}")
         for path, mode in ((self.lake / "build/lib", 0o000), (self.lake / "cache/artifacts", 0o500),
                            (self.lake / "build/lib/lean/TauCeti/A.olean", 0o000),
                            (self.lake / "build/lib/lean/TauCeti/A.trace", 0o444),
-                           (self.lake / "cache/outputs/TauCeti/0123.json", 0o444)):
+                           (self.lake / "cache/outputs/TauCeti/0123.json", 0o444),
+                           (self.lake / "build/lib/lean/TauCeti/A.setup.json", 0o444),
+                           (self.lake / "build/lib/lean/TauCeti/A.irsetup.json", 0o444)):
             with self.subTest(path=path.name):
                 path.chmod(mode)
                 try:
