@@ -196,6 +196,15 @@ class PersistentRouteTests(unittest.TestCase):
         self.assertFalse(self.decide())  # The expired admission entry is not revived.
         self.assertEqual(self.lookups(), 3)
 
+    def test_a_run_ignores_a_fresh_admission_entry(self):
+        self.assertTrue(self.decide())
+        before = dict(policy._MEMBERS)
+        with policy.membership_run(policy.RunMembership()):
+            self.api.member = False
+            self.assertFalse(self.decide())
+        self.assertEqual(self.lookups(), 2)
+        self.assertEqual(policy._MEMBERS, before)
+
     def test_a_run_does_not_cache_an_unknown_answer(self):
         run = policy.RunMembership()
         calls = []
@@ -221,13 +230,12 @@ class PersistentRouteTests(unittest.TestCase):
 
         def ask():
             start.wait()
-            self.assertTrue(run.answer(("team", "author"), lookup))
+            return run.answer(("team", "author"), lookup)
 
-        threads = [threading.Thread(target=ask) for _ in range(4)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            answers = [future.result() for future in [pool.submit(ask) for _ in range(4)]]
+        self.assertEqual(answers, [True] * 4)
         self.assertEqual(len(calls), 1)
 
     def test_observe_uses_live_label_and_scope_not_a_status(self):
