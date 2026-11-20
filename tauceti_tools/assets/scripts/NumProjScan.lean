@@ -106,14 +106,21 @@ def receiverSpan (ctxs : Array (ContextInfo × LocalContext)) (line : Array Char
   if start > 0 && line[start - 1]! == '$' then return some (some (start - 1, comps[r0]!.col - 1))
   let candidate := (comps.extract 0 segEnd).foldl (init := Name.anonymous) fun n c =>
     if c.numeric then n ++ (agreed.getD (ln, c.col) .anonymous) else Name.str n c.text
-  -- Notation tokens: a receiver token (`local notation "s" => t`) stops being one inside the
-  -- longer identifier `s.val`, and a token covering a rewritten component (`"s.val"`) would win.
+  -- Notation tokens. The lexer takes the longest of an identifier and a token, so a token that
+  -- matches the rewritten text from the receiver's start and reaches past the receiver's own
+  -- text (`"s.val"`, or `"s.val+0"` with what follows) would capture the rewrite; a receiver
+  -- that is a token itself (`local notation "s" => t`) stops being one inside `s.val`.
   let texts := (comps.extract 0 segEnd).map fun c =>
     if c.numeric then (agreed.getD (ln, c.col) .anonymous).toString else c.text
+  let receiverLen := ((comps.extract 0 r0).map (·.text.length)).foldl (· + ·) (r0 - 1)
+  let last := comps[segEnd - 1]!
+  let rest := (line.extract (last.col + last.text.length) line.size).foldl String.push ""
+  let rewritten := ".".intercalate texts.toList ++ rest
   for (ctx, _) in ctxs do
     let table := Parser.getTokenTable ctx.env
-    for j in [1:texts.size + 1] do
-      if (table.find? (".".intercalate (texts.extract 0 j).toList)).isSome then return some span
+    if (table.find? comps[0]!.text).isSome then return some span
+    if let some tk := table.matchPrefix rewritten 0 then
+      if tk.length > receiverLen then return some span
   -- A local whose name covers a rewritten component (`let x.val := 42`) would win as well.
   let comps' := candidate.components
   for (_, lctx) in ctxs do

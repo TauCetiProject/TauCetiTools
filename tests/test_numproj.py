@@ -301,6 +301,11 @@ class Scanner(unittest.TestCase):
                 'local notation "s.val" => (42 : Nat)\ndef a : Nat := s.1\n',
                 "def a : Nat := (s).val",
             ),
+            # a notation token reaching into what follows the rewritten name
+            (
+                'local notation "s.val+0" => (42 : Nat)\ndef a : Nat := s.1+0\n',
+                "def a : Nat := (s).val+0",
+            ),
             # a non-ASCII identifier
             ("def ℘s := s\ndef ℘s.val : Nat := 42\ndef a : Nat := ℘s.1\n", "def a : Nat := (℘s).val"),
             # an escaped identifier containing `.1`
