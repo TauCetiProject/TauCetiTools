@@ -337,10 +337,15 @@ class Scanner(unittest.TestCase):
             "def a : Nat := ~s.1\n",
             'local notation "s.val" => (42 : Nat)\ndef a : Nat := s.1\n',
             'local notation "s.val+0" => (42 : Nat)\ndef a : Nat := s.1+0\n',
+            # a token that only the two rewrites together form
+            "def s₂ : {x : {n : Nat // True} // True} := ⟨⟨7, trivial⟩, trivial⟩\n"
+            'local postfix:max ".val.val" => (fun (_ : {x : {n : Nat // True} // True}) => (42 : Nat))\n'
+            "def a : Nat := (s₂).1.1\n",
         ):
             with self.subTest(body=body):
                 result, found, declined, _ = self.scan(prelude + body)
-                self.assertEqual((result.returncode, found, len(declined)), (0, set(), 1), result.stderr)
+                self.assertEqual((result.returncode, found), (0, set()), result.stderr)
+                self.assertTrue(declined)
 
     def test_declines_an_escaped_identifier_containing_an_opening_guillemet(self):
         text = "def «a «b» : {n : Nat // True} := ⟨7, trivial⟩\ndef «a «b».val : Nat := 42\ndef f : Nat := «a «b».1\n"

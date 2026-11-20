@@ -79,20 +79,29 @@ def chainAt (line : Array Char) (col : Nat) : Option (Nat × Array Comp) := Id.r
   return some (start, comps)
 
 /-- Whether some notation token containing a `.` followed by an identifier character (`"N.s"`,
-`".val"`, `"~s.val"`) occurs in the line once the projection whose digits start at `col` is
-rewritten to `field`. Such a token can be lexed differently around the new `.field` than around
-the digits, so the rewrite is declined. Lean and Mathlib define almost no such tokens. -/
+`".val"`, `"~s.val"`, `".val.val"`) could be lexed differently once this line's projections are
+rewritten: it occurs in the line with every rewrite on it applied, or it contains `.field` (so
+inserted parentheses could expose it, as in `(s).val`). The rewrite is then declined. Lean and
+Mathlib define almost no such tokens. -/
 def dottedTokenCaptures (ctxs : Array (ContextInfo × LocalContext)) (line : Array Char)
-    (col : Nat) (field : Name) : Bool := Id.run do
-  let mut j := col
-  while j < line.size && line[j]!.isDigit do j := j + 1
-  let rewritten := (line.extract 0 col).foldl String.push "" ++ field.toString ++
-    (line.extract j line.size).foldl String.push ""
+    (ln : Nat) (field : Name) (agreed : Std.HashMap (Nat × Nat) Name) : Bool := Id.run do
+  let mut rewritten := ""
+  let mut i := 0
+  while i < line.size do
+    if let some f := agreed[(ln, i)]? then
+      rewritten := rewritten ++ f.toString
+      i := i + 1
+      while i < line.size && line[i]!.isDigit do i := i + 1
+    else
+      rewritten := rewritten.push line[i]!
+      i := i + 1
+  let dotField := "." ++ field.toString
   for (ctx, _) in ctxs do
     for tk in (Parser.getTokenTable ctx.env).values do
       let cs := tk.toList
       let dotted := (cs.zip (cs.drop 1)).any fun (a, b) => a == '.' && isIdRest b
-      if dotted && (rewritten.splitOn tk).length > 1 then return true
+      if dotted && ((rewritten.splitOn tk).length > 1 || (tk.splitOn dotField).length > 1) then
+        return true
   return false
 
 /-- The receiver span to parenthesize for the projection whose digits start at `col` of line
@@ -295,7 +304,7 @@ def scanFile (opts : Options) (path : String) : IO Bool := do
     match agreed[(p.line, p.column)]? with
     | some field =>
       let line := lines[p.line - 1]?.getD #[]
-      if dottedTokenCaptures (ctxs.getD pos #[]) line p.column field then
+      if dottedTokenCaptures (ctxs.getD pos #[]) line p.line field agreed then
         IO.println s!"{row}?"
         continue
       match ← receiverSpan (ctxs.getD pos #[]) line p.line p.column agreed with
