@@ -180,6 +180,7 @@ class ReadEvidence(unittest.TestCase):
              patch.object(readiness.core, 'gh_api', side_effect=AssertionError('no direct API reads')), \
              patch('tauceti_tools.git_inputs.merge_base', return_value=MERGE_BASE), \
              patch.object(readiness, 'diff_engine', return_value=SimpleNamespace(git_diff=Mock(return_value=PATHS))) as diff, \
+             patch.object(readiness, 'diff_guards', return_value=([], '')), \
              patch.object(self_tested, 'decide', return_value=True) as eligibility:
             first = readiness.assess(1, repo='owner/repo')
             saved_until = api.decisions['1']['valid_until']
@@ -263,6 +264,7 @@ class ReadEvidence(unittest.TestCase):
              patch.object(readiness.core, 'gh_api', return_value=MERGE_BASE), \
              patch.object(readiness, 'diff_engine', return_value=fake), \
              patch.dict('os.environ', SELF_TESTED_WRITE_TOKEN='workflow-token'), \
+             patch.object(readiness, 'diff_guards', return_value=([], '')), \
              patch.object(self_tested, 'reconcile', return_value=True) as assess:
             result = readiness.assess(1, repo='owner/repo', now=NOW)
         self.assertTrue(result['eligible'], result)
@@ -279,6 +281,7 @@ class ReadEvidence(unittest.TestCase):
         with patch.object(readiness, 'evidence', return_value=(current, [board()], statuses)), \
              patch.object(readiness.core, 'gh_api', return_value=MERGE_BASE), \
              patch.object(readiness, 'diff_engine', return_value=fake), \
+             patch.object(readiness, 'diff_guards', return_value=([], '')), \
              patch.object(self_tested, 'reconcile', return_value=True) as assess:
             result = readiness.assess(1, repo='owner/repo', now=NOW)
         self.assertTrue(result['eligible'], result)
@@ -335,6 +338,142 @@ class ReadEvidence(unittest.TestCase):
         self.assertFalse(result["queue"]["known"])
         self.assertEqual(result["prs"], {})
         self.assertEqual(result["error"], "missing policy")
+
+
+def guard_repository(tmp, files):
+    """A served repository with a base commit and a head adding `files` ({path: line count})."""
+    import os
+    import subprocess
+    from pathlib import Path
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    directory = Path(tmp) / "remote"
+    directory.mkdir()
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(directory), *args], check=True, env=env,
+                              capture_output=True, text=True).stdout.strip()
+    git("init", "-q")
+    git("config", "uploadpack.allowFilter", "true")
+    git("config", "uploadpack.allowAnySHA1InWant", "true")
+    (directory / "TauCeti").mkdir()
+    (directory / "TauCeti/Basic.lean").write_text("theorem t : True := trivial\n")
+    git("add", "-A")
+    git("commit", "-qm", "base")
+    base = git("rev-parse", "HEAD")
+    for path, lines in files.items():
+        (directory / path).write_text("".join(f"-- line {i}\n" for i in range(lines)))
+    git("add", "-A")
+    git("commit", "-qm", "head")
+    return directory.as_uri(), base, git("rev-parse", "HEAD")
+
+
+class SelfTestedDiffGuards(unittest.TestCase):
+    """A self-tested PR skips PR CI; its diff guards are applied and labelled as PR CI's."""
+
+    def test_measure_is_the_shared_pr_guards_on_fetched_objects(self):
+        import tempfile
+        cases = (({f"TauCeti/Part{i}.lean": 700 for i in range(5)}, readiness.SCOPE_TOO_LARGE,
+                  "too large to review: +3500 / -0 lines across 5 files"),
+                 ({"TauCeti/Long.lean": 1251}, readiness.SCOPE_NEW_FILE,
+                  "TauCeti/Long.lean: new Lean files must be at most 1250 lines (found 1251)"),
+                 ({"TauCeti/Short.lean": 1250}, "", None))
+        for files, scope, sentence in cases:
+            with tempfile.TemporaryDirectory() as tmp:
+                remote, base, head = guard_repository(tmp, files)
+                violations, found = readiness.diff_guards("owner/repo", base, head, remote=remote)
+            self.assertEqual(found, scope)
+            if sentence is None:
+                self.assertEqual(violations, [])
+            else:
+                self.assertEqual(len(violations), 1, violations)
+                self.assertTrue(violations[0].startswith(sentence), violations)
+
+    def test_unreadable_statistics_fail_closed(self):
+        import tempfile
+        import ci_git
+        with tempfile.TemporaryDirectory() as tmp:
+            remote, base, head = guard_repository(tmp, {"TauCeti/Short.lean": 1})
+            with patch.object(ci_git, "pr_guards", side_effect=ValueError("unreadable")):
+                self.assertEqual(readiness.diff_guards("owner/repo", base, head, remote=remote),
+                                 ([readiness.UNMEASURABLE], readiness.SCOPE_UNMEASURED))
+
+    def test_descriptions_are_pr_ci_word_for_word(self):
+        from pathlib import Path
+        # TauCetiTools' own workflow here; TauCeti's when the scripts are materialized there.
+        workflow = next(directory / ".github/workflows/pr-build.yml"
+                        for directory in Path(readiness.__file__).resolve().parents
+                        if (directory / ".github/workflows/pr-build.yml").is_file())
+        text = workflow.read_text()
+        for description, variable in ((readiness.SCOPE_TOO_LARGE, "TOO_LARGE"),
+                                      (readiness.SCOPE_UNMEASURED, "DIFF_UNKNOWN"),
+                                      (readiness.SCOPE_NEW_FILE, "NEWFILE_TOO_LONG")):
+            self.assertIn(f'"${{{{ env.{variable} }}}}" = "1" ]; then\n'
+                          f'            sc_state=failure; sc_desc="{description}"', text)
+
+    def assess(self, guards, statuses=None, labels=("self-tested",), comments=None):
+        current = copy.deepcopy(PR)
+        current["labels"] = [{"name": name} for name in labels]
+        current["head"]["ref"] = "math"
+        fake = MagicMock()
+        fake.git_diff.return_value = PATHS
+        import self_tested
+        with patch.object(readiness, "evidence", return_value=(
+                    current, [board()] if comments is None else comments,
+                    {"scope": "success"} if statuses is None else statuses)), \
+             patch.object(readiness.core, "gh_api", return_value=MERGE_BASE), \
+             patch.object(readiness, "diff_engine", return_value=fake), \
+             patch.object(readiness, "diff_guards", return_value=guards) as measure, \
+             patch.object(self_tested, "reconcile", return_value=True):
+            return readiness.assess(1, repo="owner/repo", now=NOW), measure
+
+    def test_oversized_self_tested_head_is_a_failed_build_with_a_failed_scope(self):
+        sentence = "too large to review: +3992 / -0 lines across 5 files"
+        for comments in ([board()], []):
+            result, measure = self.assess(([sentence], readiness.SCOPE_TOO_LARGE), comments=comments)
+            measure.assert_called_once_with("owner/repo", MERGE_BASE, HEAD)
+            self.assertFalse(result["eligible"])
+            self.assertEqual(result["category"], "ci-failed")
+            self.assertEqual(result["reason"], "PR-level diff guards failed: " + sentence)
+            self.assertEqual(result["scope_failure"], readiness.SCOPE_TOO_LARGE)
+
+    def test_a_head_that_moves_during_assessment_gets_no_status(self):
+        current = copy.deepcopy(PR)
+        current["labels"] = [{"name": "self-tested"}]
+        current["head"]["ref"] = "math"
+        moved = copy.deepcopy(current)
+        moved["head"]["sha"] = "moved"
+        fake = MagicMock()
+        fake.git_diff.return_value = PATHS
+        import self_tested
+        with patch.object(readiness, "evidence", side_effect=[(current, [board()], {}), (moved, [], {})]), \
+             patch.object(readiness.core, "gh_api", return_value=MERGE_BASE), \
+             patch.object(readiness, "diff_engine", return_value=fake), \
+             patch.object(readiness, "diff_guards", return_value=(["too large"], readiness.SCOPE_TOO_LARGE)), \
+             patch.object(self_tested, "reconcile", return_value=True):
+            result = readiness.assess(1, repo="owner/repo", now=NOW)
+        self.assertEqual((result["head"], result["category"]), ("moved", "awaiting-CI"))
+        self.assertNotIn("scope_failure", result)
+
+    def test_long_new_file_is_a_failed_merge_check(self):
+        result, _ = self.assess((["TauCeti/Long.lean: new Lean files ..."], readiness.SCOPE_NEW_FILE))
+        self.assertEqual(result["category"], "merge-check-failed")
+        self.assertEqual(result["scope_failure"], readiness.SCOPE_NEW_FILE)
+
+    def test_posted_failure_is_not_reposted_and_passing_heads_are_untouched(self):
+        result, _ = self.assess((["too large"], readiness.SCOPE_TOO_LARGE), statuses={"scope": "failure"})
+        self.assertEqual(result["category"], "ci-failed")
+        self.assertNotIn("scope_failure", result)
+        result, _ = self.assess(([], ""))
+        self.assertTrue(result["eligible"], result)
+        self.assertNotIn("scope_failure", result)
+
+    def test_prs_that_ran_pr_ci_are_not_measured(self):
+        for labels in ((), ("self-tested", "full-lint")):
+            result, measure = self.assess((["too large"], readiness.SCOPE_TOO_LARGE),
+                                          statuses=STATUSES, labels=labels)
+            measure.assert_not_called()
+            self.assertTrue(result["eligible"], (labels, result))
 
 
 if __name__ == "__main__":

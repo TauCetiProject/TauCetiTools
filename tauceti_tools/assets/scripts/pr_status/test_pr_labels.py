@@ -5,8 +5,10 @@ Pure logic only: the GitHub-reading helpers in core and the label writes in labe
 these run with no network and no `gh`. Run with:  python3 -m unittest test_pr_labels
 """
 
+import io
 import json
 import os
+import subprocess
 import sys
 import unittest
 from types import SimpleNamespace
@@ -426,6 +428,43 @@ class EnsureLabel(unittest.TestCase):
             or SimpleNamespace(returncode=0, stdout="not json", stderr="")
         )
         labels.ensure_label("ci-failed")   # must not raise; presentation is cosmetic
+
+
+class ScopeFailure(unittest.TestCase):
+    """A self-tested head failing PR CI's diff guards gets PR CI's failed `scope` status."""
+
+    def reconcile(self, status, env):
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs["env"]))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        with mock.patch.object(labels.readiness, "assess", return_value=status), \
+             mock.patch.object(labels, "add_label"), mock.patch.object(labels, "remove_label"), \
+             mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch.object(labels.subprocess, "run", side_effect=fake_run), \
+             mock.patch("sys.stdout", new_callable=io.StringIO):
+            labels.reconcile("7")
+        return calls
+
+    STATUS = {"category": "ci-failed", "head": "a" * 40, "reason": "PR-level diff guards failed: x",
+              "labels": [], "scope_failure": "diff exceeds 3000 added lines, 2000 removed lines or 2000 files"}
+
+    def test_posts_with_the_workflow_status_credential(self):
+        calls = self.reconcile(self.STATUS, {"SELF_TESTED_WRITE_TOKEN": "workflow", "GITHUB_TOKEN": "app",
+                                             "GH_TOKEN": "app"})
+        (cmd, env), = calls
+        self.assertEqual(cmd[:5], ["gh", "api", "--method", "POST", f"/repos/{labels.REPO}/statuses/{'a' * 40}"])
+        self.assertIn("state=failure", cmd)
+        self.assertIn("context=scope", cmd)
+        self.assertIn("description=" + self.STATUS["scope_failure"], cmd)
+        self.assertEqual(env["GH_TOKEN"], "workflow")
+        self.assertNotIn("GITHUB_TOKEN", env)
+
+    def test_no_credential_or_no_failure_posts_nothing(self):
+        self.assertEqual(self.reconcile(self.STATUS, {}), [])
+        passing = {k: v for k, v in self.STATUS.items() if k != "scope_failure"}
+        self.assertEqual(self.reconcile(passing, {"SELF_TESTED_WRITE_TOKEN": "workflow"}), [])
 
 
 if __name__ == "__main__":

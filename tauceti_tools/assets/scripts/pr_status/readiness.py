@@ -37,6 +37,44 @@ def diff_engine():
     return importlib.import_module("pr_diff")
 
 
+# PR CI's `scope` descriptions for the PR-level diff guards (.github/workflows/pr-build.yml), in
+# its order. A self-tested PR skips PR CI, so these are posted for it here, word for word.
+SCOPE_TOO_LARGE = ("diff exceeds 3000 added lines, 2000 removed lines or 2000 files \u2014 split into smaller "
+                   "PRs to keep review manageable")
+SCOPE_UNMEASURED = "could not measure the PR diff from local Git objects \u2014 re-run pr-build"
+SCOPE_NEW_FILE = "a newly added .lean file exceeds 1250 lines \u2014 split it (existing files may grow to 1500)"
+# The queue's sentence for an unmeasurable diff (TauCetiWorker tauceti_queue/diff_guard.py).
+UNMEASURABLE = "could not measure the PR's diff from local Git objects"
+
+
+def diff_guards(repo, merge_base, head, remote=None):
+    """The PR-level diff guards PR CI would have applied: (violations, `scope` description).
+
+    The measure is `ci_git.pr_guards` without path scope on the exact merge base and head, the
+    one queue admission and the review engine apply to a PR that skipped PR CI, so all three
+    agree. Only the two endpoint trees and the changed blobs are fetched. Unreadable statistics
+    fail closed, as there; a Git or host failure defers the assessment.
+    """
+    import ci_git
+    from tauceti_tools import git_inputs
+    try:
+        with git_inputs.snapshot(remote or 'https://github.com/' + repo, merge_base, head) as (directory, env):
+            git_inputs.fetch_changed_blobs(directory, merge_base, head, env)
+            with ci_git.repository_reader(directory) as git:
+                try:
+                    result = ci_git.pr_guards(git, merge_base, head, scope=False)
+                except ValueError:
+                    return [UNMEASURABLE], SCOPE_UNMEASURED
+    except subprocess.SubprocessError as error:
+        raise git_inputs.PreparationUnavailable(
+            f'PR-level diff guards unavailable ({type(error).__name__})') from error
+    if result["too_large"]:
+        return result["violations"], SCOPE_TOO_LARGE
+    if result["new_files_too_long"]:
+        return result["violations"], SCOPE_NEW_FILE
+    return [], ""
+
+
 def routing_state(pr):
     labels = {label["name"].lower() for label in pr.get("labels", [])}
     return (pr["head"]["sha"], pr["base"]["ref"], pr["base"].get("sha"), pr["state"], pr.get("draft"),
@@ -260,8 +298,19 @@ def assess(pr, repo=None, now=None):
         if paths is None and result["category"] in {"needs-human-review", "merge-check-failed"}:
             paths = changed_paths()
             result = classify(current, comments, statuses, paths, merge_base, now=now, self_tested=local)
+        if cheap is None and requested(current.get("labels"), current["head"].get("ref", "")):
+            # The label alone skips PR CI (pr-build.yml), so apply its diff guards here, labelled
+            # as PR CI's would be: an oversized diff is a failed build, a long new file a failed
+            # merge check. Admission refuses the same heads with the same sentences.
+            violations, scope = diff_guards(repo, merge_base, head)
+            if violations:
+                result.update(eligible=False, category="merge-check-failed" if scope == SCOPE_NEW_FILE
+                              else "ci-failed", reason="PR-level diff guards failed: " + "; ".join(violations))
+                if statuses.get("scope") not in {"failure", "error"}:
+                    result["scope_failure"] = scope
     after, _, _ = evidence(number, repo, comments=False)
     if routing_state(after) != routing_state(current):
+        result.pop("scope_failure", None)  # Measured for the old head; never post it on the new one.
         result.update(eligible=False, category="awaiting-CI" if after["state"] == "open" else None,
                       reason="PR changed while collecting merge evidence; awaiting reconciliation",
                       head=after["head"]["sha"])
