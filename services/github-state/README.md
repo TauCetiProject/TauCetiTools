@@ -468,13 +468,20 @@ survey grace entries without decoding unrelated histories.
 ## PostgreSQL CI budget and timings
 
 `npm run test:postgres` runs the contract suite against isolated test credentials,
-with two test files running concurrently. Each fixture creates and removes its
-own database schema, and the tests exercise real database connections and SQL
-requests. End-to-end time therefore depends strongly on runner-to-database latency.
-The GitHub-hosted CI job has a 60-minute limit; its earlier 20-minute budget was
-insufficient after moving from Namespace runners. The job lives in its own
-`github-state-postgres` workflow: it runs on every `main` push, but on pull requests
-only when they change `services/github-state/` or that workflow.
+with `POSTGRES_TEST_CONCURRENCY` test files (default two) running concurrently. Each
+fixture creates and removes its own database schema, and the tests exercise real
+database connections and SQL requests, so end-to-end time against Neon depends
+strongly on runner-to-database latency. The `github-state-postgres` workflow runs
+it in two places:
+
+- Pull requests that change `services/github-state/` (or the workflow) run it
+  against a disposable PostgreSQL 18 behind Neon's own proxy, started by
+  `scripts/local-neon.sh` with the roles in `scripts/local-neon.sql`. The driver
+  and connection code are unchanged: the proxy answers for a `*.neon.tech` test
+  hostname on the runner. This needs no secrets, so fork pull requests run it too.
+- Every `main` push runs it against the isolated Neon test branch, with a 60-minute
+  limit. Only this run checks Neon itself: its compute and connection limits, its
+  real role grants and settings, and the network between GitHub and Neon.
 
 CI keeps the normal console reporter and also uploads per-test durations in the
 `postgres-test-results-<run>-<attempt>` JUnit artifact, retained for seven days.
