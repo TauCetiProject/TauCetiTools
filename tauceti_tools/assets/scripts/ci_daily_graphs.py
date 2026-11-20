@@ -35,6 +35,8 @@ from chart_style import MUTED, PALETTE, TEXT, base_css, card_rect, css_px, svg_u
 UTC = dt.timezone.utc
 BUILD = "sandboxed-build"
 PR_BUILD = ".github/workflows/pr-build.yml"
+# A job's own name: a called workflow's jobs are recorded as `<caller job> / <job>`.
+JOB_NAME = "CASE WHEN instr(j.name, ' / ') > 0 THEN substr(j.name, instr(j.name, ' / ') + 3) ELSE j.name END"
 MERGE_TRIGGERS = {"merge_queue", "bors_staging"}
 
 ASSET_NAMES = [
@@ -112,7 +114,7 @@ def metrics(db: sqlite3.Connection, first: str, last: str, other_jobs_until=None
         SELECT substr(j.created_at, 1, 10), r.trigger, j.runner_kind, j.conclusion, CASE WHEN {assigned_fleet_sql(db)} THEN j.wait_s END, j.run_s,
                j.failure_class, j.job_id, r.run_id, j.labels, {runner_name_sql(db)}
         FROM jobs j JOIN runs r USING (repo, run_id)
-        WHERE r.repo = 'TauCeti' AND r.workflow = '{PR_BUILD}' AND j.name = '{BUILD}'
+        WHERE r.repo = 'TauCeti' AND r.workflow = '{PR_BUILD}' AND {JOB_NAME} = '{BUILD}'
           AND r.trigger IN ('pr', 'merge_queue', 'bors_staging') AND j.runner_kind IN ('github', 'namespace', 'self-hosted', 'eastanglia', 'leanfro')
           AND j.created_at BETWEEN ? AND ?""", (lo, hi)).fetchall()
 
@@ -147,9 +149,9 @@ def metrics(db: sqlite3.Connection, first: str, last: str, other_jobs_until=None
     if other_jobs_until is not None:
         other_last = (dt.datetime.fromtimestamp(other_jobs_until, UTC)-dt.timedelta(days=1)).date()
         other_hi = min(hi, f'{other_last}T23:59:59Z')
-    for day, wait_s in db.execute("""
+    for day, wait_s in db.execute(f"""
             SELECT substr(j.created_at, 1, 10), j.wait_s FROM jobs j JOIN runs r USING (repo, run_id)
-            WHERE j.runner_kind = 'github' AND j.name NOT IN ('sandboxed-build', 'verify', 'build')
+            WHERE j.runner_kind = 'github' AND {JOB_NAME} NOT IN ('sandboxed-build', 'verify', 'build')
               AND j.wait_s IS NOT NULL AND j.created_at BETWEEN ? AND ?""", (lo, other_hi)):
         wait[(day, "other GitHub jobs")].append(wait_s / 60)
 
@@ -203,7 +205,7 @@ def metrics(db: sqlite3.Connection, first: str, last: str, other_jobs_until=None
     for day, kind, trigger, concl, run_s, labels, runner_name in db.execute(f"""
             SELECT substr(j.started_at, 1, 10), j.runner_kind, r.trigger, j.conclusion, j.run_s, j.labels, {runner_name_sql(db)}
             FROM jobs j JOIN runs r USING (repo, run_id)
-            WHERE r.repo = 'TauCeti' AND j.name IN ('sandboxed-build', 'verify', 'build', 'performance-gate')
+            WHERE r.repo = 'TauCeti' AND {JOB_NAME} IN ('sandboxed-build', 'verify', 'build', 'performance-gate')
               AND j.run_s IS NOT NULL AND {assigned_fleet_sql(db)} AND j.started_at BETWEEN ? AND ?""", (lo, hi)):
         kind = reporting_kind(kind, labels, runner_name)
         if kind in RUNNERS:
