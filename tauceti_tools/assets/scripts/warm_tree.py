@@ -81,7 +81,7 @@ def raise_error(error):
 
 # Outputs Lake itself makes read-only and replaces by unlinking. Lake rewrites every other
 # file it keeps (traces, hashes, setup and output mappings) in place.
-READ_ONLY_OUTPUTS = (".olean", ".olean.server", ".olean.private", ".ilean", ".ir", ".c", ".bc", ".ltar",
+READ_ONLY_OUTPUTS = (".olean", ".olean.server", ".olean.private", ".ilean", ".ir", ".ir.sig", ".c", ".bc", ".ltar",
                      ".o", ".so", ".a")
 
 

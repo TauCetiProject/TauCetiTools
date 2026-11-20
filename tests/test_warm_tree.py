@@ -103,6 +103,8 @@ class WarmTreeCleanup(unittest.TestCase):
         self.assertFalse(warm.keep_only_outputs(self.lake))
         (lookalike / "A.trace").chmod(0o644)
         # Lake's own read-only artifacts are fine.
+        (self.lake / "build/lib/lean/TauCeti/A.ir.sig").write_text("sig")
+        (self.lake / "build/lib/lean/TauCeti/A.ir.sig").chmod(0o444)
         (self.lake / "build/lib/lean/TauCeti/A.olean").chmod(0o444)
         (self.lake / "cache/artifacts/0123.art").chmod(0o444)
         self.assertTrue(warm.keep_only_outputs(self.lake))
