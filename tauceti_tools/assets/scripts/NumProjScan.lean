@@ -39,8 +39,8 @@ structure Comp where
   deriving Inhabited
 
 /-- The components of the identifier chain (`a.b.1.c`) that contains column `col` of `line`,
-following Lean's identifier lexing (escaped `«...»` components included), with the column where
-the chain starts. `none` if it cannot be parsed. -/
+following Lean's identifier lexing, with the column where the chain starts. `none` if it cannot
+be parsed or has an escaped `«...»` component. -/
 def chainAt (line : Array Char) (col : Nat) : Option (Nat × Array Comp) := Id.run do
   -- Back to the chain's start.
   let mut start := col
@@ -51,17 +51,9 @@ def chainAt (line : Array Char) (col : Nat) : Option (Nat × Array Comp) := Id.r
     if isIdRest c || c == '.' then
       start := start - 1
     else if c == '»' then
-      let mut k := start - 1
-      while k > 0 && line[k]! != '«' do k := k - 1
-      if line[k]! != '«' then return none
-      -- `«` may occur inside an escaped identifier (`«a «b»`); decline if an earlier `«` is still
-      -- open here, since the escape might then start there.
-      let mut open_ := false
-      for i in [0:k] do
-        if line[i]! == '«' then open_ := true
-        else if line[i]! == '»' then open_ := false
-      if open_ then return none
-      start := k
+      -- An escaped component: its start cannot be found reliably from here (`«` may occur
+      -- inside one, which may also span lines), so decline.
+      return none
     else
       break
   -- A chain starting with `.` follows `)` or the like: its first component is the projection.
@@ -70,19 +62,14 @@ def chainAt (line : Array Char) (col : Nat) : Option (Nat × Array Comp) := Id.r
   let mut comps : Array Comp := #[]
   let mut i := start
   repeat
-    if i < line.size && line[i]! == '«' then
-      let mut j := i + 1
-      while j < line.size && line[j]! != '»' do j := j + 1
-      if j ≥ line.size then return none
-      comps := comps.push ⟨i, (line.extract (i + 1) j).foldl String.push "", false⟩
-      i := j + 1
-    else
-      let mut j := i
-      while j < line.size && isIdRest line[j]! do j := j + 1
-      if j == i then return none
-      let text := (line.extract i j).foldl String.push ""
-      comps := comps.push ⟨i, text, text.all Char.isDigit⟩
-      i := j
+    -- Escaped components are declined (see above).
+    if i < line.size && line[i]! == '«' then return none
+    let mut j := i
+    while j < line.size && isIdRest line[j]! do j := j + 1
+    if j == i then return none
+    let text := (line.extract i j).foldl String.push ""
+    comps := comps.push ⟨i, text, text.all Char.isDigit⟩
+    i := j
     -- Continue only into a further component.
     if i + 1 < line.size && line[i]! == '.' && (isIdRest line[i + 1]! || line[i + 1]! == '«') then
       i := i + 1

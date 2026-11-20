@@ -294,7 +294,6 @@ class Scanner(unittest.TestCase):
             # a non-ASCII identifier
             ("def ℘s := s\ndef ℘s.val : Nat := 42\ndef a : Nat := ℘s.1\n", "def a : Nat := (℘s).val"),
             # an escaped identifier containing `.1`
-            ("def «s.1» := s\ndef «s.1».val : Nat := 42\ndef a : Nat := «s.1».1\n", "def a : Nat := («s.1»).val"),
             # only one of a macro's elaborations sees the capturing global
             (
                 "namespace N\ndef s.val : Nat := 42\nend N\n"
@@ -314,6 +313,15 @@ class Scanner(unittest.TestCase):
         text = "def s : {n : Nat // True} := ⟨7, trivial⟩\ndef s.val.succ : Nat := 42\ndef a : Nat := s.1.succ\n"
         rewritten = self.rewrite(text + "example : a = 8 := rfl\n")
         self.assertIn("(s).val.succ", rewritten)
+
+    def test_declines_receivers_with_escaped_components(self):
+        for text in (
+            "def «s.1» : {n : Nat // True} := ⟨7, trivial⟩\ndef f : Nat := «s.1».1\n",
+            "def «a\n«b» : {n : Nat // True} := ⟨7, trivial⟩\ndef «a\n«b».val : Nat := 42\ndef f : Nat := «a\n«b».1\n",
+        ):
+            with self.subTest(text=text):
+                result, found, declined, _ = self.scan(text)
+                self.assertEqual((result.returncode, found, len(declined)), (0, set(), 1), result.stderr)
 
     def test_declines_an_escaped_identifier_containing_an_opening_guillemet(self):
         text = "def «a «b» : {n : Nat // True} := ⟨7, trivial⟩\ndef «a «b».val : Nat := 42\ndef f : Nat := «a «b».1\n"
