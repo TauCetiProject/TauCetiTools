@@ -150,6 +150,30 @@ class PersistentRouteTests(unittest.TestCase):
         self.assertFalse(self.decide())
         self.assertEqual(sum(p.startswith("orgs/") for _, p in self.api.calls), 2)
 
+    def test_a_404_is_cached_like_any_other_answer(self):
+        original = self.api.request
+
+        def missing(method, path):
+            if path.startswith("orgs/"):
+                self.api.calls.append((method, path))
+                error = RuntimeError("not found")
+                error.status = 404
+                raise error
+            return original(method, path)
+
+        with patch.object(self.api, "request", side_effect=missing):
+            self.assertFalse(self.decide())
+            self.assertFalse(self.decide())
+        self.assertEqual(sum(p.startswith("orgs/") for _, p in self.api.calls), 1)
+
+    def test_a_report_can_extend_the_cache_to_its_whole_run(self):
+        self.assertTrue(self.decide())
+        for key, (at, value) in policy._MEMBERS.copy().items():
+            policy._MEMBERS[key] = (at - 3600, value)
+        with patch.object(policy, "MEMBERSHIP_CACHE_SECONDS", float("inf")):
+            self.assertTrue(self.decide())
+        self.assertEqual(sum(p.startswith("orgs/") for _, p in self.api.calls), 1)
+
     def test_observe_uses_live_label_and_scope_not_a_status(self):
         self.assertTrue(policy.observe(REPO, 7, HEAD, lambda p: self.api.request("GET", p)))
         self.assertFalse(policy.observe(REPO, 7, "b" * 40, lambda p: self.api.request("GET", p)))

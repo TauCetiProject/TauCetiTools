@@ -83,6 +83,10 @@ def gh_read(path, *, token=None):
 
 
 _MEMBERS = {}
+# How long a cached answer serves callers that pass cache=True. Admission keeps this short so a
+# removal from the team takes effect quickly; a one-off report (the readiness audit) extends it to
+# its whole run, because it asks about the same few authors for thousands of pull requests.
+MEMBERSHIP_CACHE_SECONDS = 60.0
 
 
 def membership(repo, author, read=gh_read, *, strict=False, cache=False):
@@ -90,7 +94,7 @@ def membership(repo, author, read=gh_read, *, strict=False, cache=False):
     if not configured or not author:
         return False
     key = configured, author
-    if cache and key in _MEMBERS and time.monotonic() - _MEMBERS[key][0] < 60:
+    if cache and key in _MEMBERS and time.monotonic() - _MEMBERS[key][0] < MEMBERSHIP_CACHE_SECONDS:
         return _MEMBERS[key][1]
     try:
         org, slug = configured.split("/", 1)
@@ -110,6 +114,9 @@ def membership(repo, author, read=gh_read, *, strict=False, cache=False):
         subprocess.SubprocessError,
     ) as error:
         if getattr(error, "status", None) == 404:
+            # A definite answer (not a member, or not visible to this token), so cache it too.
+            if cache:
+                _MEMBERS[key] = time.monotonic(), False
             return False
         if strict:
             raise
