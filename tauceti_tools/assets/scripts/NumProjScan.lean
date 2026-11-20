@@ -140,9 +140,9 @@ def synonymCapture (ctx : ContextInfo) (lctx : LocalContext) (e : Expr) (fn : Na
       let found ← IO.mkRef none
       let checked ← IO.mkRef false
       let e ← instantiateMVars e
-      -- Usually `e` is the projection itself; otherwise check every application of `fn` in it.
+      -- Every application of `fn` in `e`, nested ones included (`x.1.1` on a synonym).
       let visit (k : Expr → MetaM Unit) : MetaM Unit :=
-        if isProjApp fn nparams e then k e else e.forEach fun sub => do
+        e.forEach fun sub => do
           if isProjApp fn nparams sub then k sub
       visit fun sub => do
         let recv := sub.getAppArgs[nparams]!

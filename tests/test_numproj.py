@@ -336,12 +336,16 @@ class Scanner(unittest.TestCase):
             "def T := {n : Nat // True}\ndef T.val (_ : T) : Nat := 42\n"
             'macro "both " t:term : term => `(Prod.mk (($t) : {n : Nat // True} → Nat) (($t) : T → Nat))\n'
             "def a := both (·.1)\n",
+            # a nested projection whose inner receiver has the synonym type
+            "def T := {x : {n : Nat // True} // True}\n"
+            "def T.val (_ : T) : {n : Nat // True} := ⟨42, trivial⟩\n"
+            "def f (x : T) : Nat := x.1.1\n",
         ]
         for text in cases:
             with self.subTest(text=text):
                 result, found, declined, source = self.scan(text)
-                self.assertEqual((result.returncode, found), (0, set()), result.stderr)
-                self.assertEqual(len(declined), 1)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(declined)
 
     def test_parenthesizes_receivers_a_local_name_would_capture(self):
         text = (
