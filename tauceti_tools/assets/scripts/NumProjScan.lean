@@ -54,6 +54,13 @@ def chainAt (line : Array Char) (col : Nat) : Option (Nat × Array Comp) := Id.r
       let mut k := start - 1
       while k > 0 && line[k]! != '«' do k := k - 1
       if line[k]! != '«' then return none
+      -- `«` may occur inside an escaped identifier (`«a «b»`); decline if an earlier `«` is still
+      -- open here, since the escape might then start there.
+      let mut open_ := false
+      for i in [0:k] do
+        if line[i]! == '«' then open_ := true
+        else if line[i]! == '»' then open_ := false
+      if open_ then return none
       start := k
     else
       break

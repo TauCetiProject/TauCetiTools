@@ -315,6 +315,11 @@ class Scanner(unittest.TestCase):
         rewritten = self.rewrite(text + "example : a = 8 := rfl\n")
         self.assertIn("(s).val.succ", rewritten)
 
+    def test_declines_an_escaped_identifier_containing_an_opening_guillemet(self):
+        text = "def «a «b» : {n : Nat // True} := ⟨7, trivial⟩\ndef «a «b».val : Nat := 42\ndef f : Nat := «a «b».1\n"
+        result, found, declined, _ = self.scan(text)
+        self.assertEqual((result.returncode, found, len(declined)), (0, set(), 1), result.stderr)
+
     def test_declines_a_field_a_type_synonym_redefines(self):
         text = (
             "def T := {n : Nat // True}\n"
