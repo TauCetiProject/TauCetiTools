@@ -499,6 +499,7 @@ Store private source files under `~/.config/tauceti/projects/exampleorg__example
 | `LAKE_CACHE_KEY` | Cache provider's project-scoped write credential | Trusted cache publication workflow only |
 | `ZULIP_EMAIL`, `ZULIP_API_KEY` | Chosen bot's credentials | Notification workflow secrets |
 | `FLEET_READ_TOKEN` | Downstream fleet's read credential | Runner selection when enabled |
+| `FLEET_INVENTORY_APP_PRIVATE_KEY` | Read-only runner inventory App PEM; App ID in variable `FLEET_INVENTORY_APP_ID` | Runner selection when enabled, in place of `FLEET_READ_TOKEN` |
 | `DATABASE_URL` | Hosted grant or custom PostgreSQL | Bors runtime secret, never public configuration |
 | `GITHUB_INTEGRATION_ID`, `GITHUB_INTEGRATION_PEM` | Bors App ID, base64 PEM | Bors runtime |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | Bors App OAuth credentials | Bors runtime |
@@ -752,8 +753,11 @@ the appropriate `tauceti-fleet-pr` or `tauceti-fleet-staging` class. PR-only hos
 remain ineligible for staging. Staging retries exclude previously failed machine IDs.
 
 Enable fleet routing explicitly with the existing `FLEET_CI_ENABLED`,
-`FLEET_READ_TOKEN`, and `FLEET_RUNNER_GROUP_ID` settings. Inventory is read only
-from that group; labels on runners outside the group grant no eligibility.
+`FLEET_READ_TOKEN`, and `FLEET_RUNNER_GROUP_ID` settings. The shared
+`pr-build.yml` picker can instead read the inventory with a token minted from a
+read-only App (organization self-hosted runners: read): set the variable
+`FLEET_INVENTORY_APP_ID` and pass the secret `FLEET_INVENTORY_APP_PRIVATE_KEY`.
+Inventory is read only from that group; labels on runners outside the group grant no eligibility.
 Partial or ambiguous inventories retain the existing cloud fallback. The picker
 uses this inventory to choose a destination; it does not reserve a runner.
 
