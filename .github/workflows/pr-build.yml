@@ -74,6 +74,7 @@ on:
       APP_ID: {required: false}
       APP_PRIVATE_KEY: {required: false}
       FLEET_READ_TOKEN: {required: false}
+      FLEET_INVENTORY_APP_PRIVATE_KEY: {required: false}
       LAKE_CACHE_KEY: {required: false}
       CI_READ_APP_ID: {required: false}
       CI_READ_APP_PRIVATE_KEY: {required: false}
@@ -126,8 +127,9 @@ jobs:
   # Every picker must reach the fleet without first waiting for a GitHub build slot:
   # staging and Fleet PR pickers use the caller's control runner, other pickers its Fleet PR
   # pool when Fleet CI is enabled. Set vars.PICKER_GITHUB_FALLBACK='true' to fall back to
-  # ubuntu-24.04. No App private key enters this job. The job is defined here, not in a
-  # separate reusable workflow, because Fleet runner groups admit only listed workflow files.
+  # ubuntu-24.04. The only App private key in this job is the read-only runner inventory
+  # App's. The job is defined here, not in a separate reusable workflow, because Fleet runner
+  # groups admit only listed workflow files.
   pick-runner:
     if: >-
       inputs.fleet_routing &&
@@ -195,6 +197,20 @@ jobs:
           python3 -m tauceti_tools materialize "$RUNNER_TEMP/tauceti-shared-scripts" --conf ./tauceti.toml --policy-dir ./scripts
           cp -a "$RUNNER_TEMP/tauceti-shared-scripts/." ./scripts/
           echo "PYTHONPATH=$PYTHONPATH" >> "$GITHUB_ENV"
+      # The runner inventory read uses a read-only App (organization self-hosted runners:
+      # read) when the caller's vars.FLEET_INVENTORY_APP_ID is set. Until then, or if minting
+      # fails, the FLEET_READ_TOKEN secret is used; with neither, the picker keeps GitHub-hosted
+      # capacity.
+      - name: Mint the read-only runner inventory token
+        id: inventory
+        if: ${{ vars.FLEET_INVENTORY_APP_ID != '' }}
+        continue-on-error: true
+        uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf # v2.2.1; v1 ignores permission-* inputs
+        with:
+          app-id: ${{ vars.FLEET_INVENTORY_APP_ID }}
+          private-key: ${{ secrets.FLEET_INVENTORY_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-organization-self-hosted-runners: read
       - name: Select destination in configured preference order
         id: pick
         env:
@@ -208,7 +224,7 @@ jobs:
           PR_HEAD: ${{ github.event.pull_request.head.sha || github.event.client_payload.head_sha || inputs.label_head || '' }}
           FLEET_CI_ENABLED: ${{ vars.FLEET_CI_ENABLED }}
           FLEET_RUNNER_GROUP_ID: ${{ vars.FLEET_RUNNER_GROUP_ID }}
-          FLEET_READ_TOKEN: ${{ secrets.FLEET_READ_TOKEN }}
+          FLEET_READ_TOKEN: ${{ steps.inventory.outputs.token || secrets.FLEET_READ_TOKEN }}
         run: python3 scripts/fleet_runner.py --route
 
   # Name kept distinct from `build` on purpose — see the header note. The required merge check is the
