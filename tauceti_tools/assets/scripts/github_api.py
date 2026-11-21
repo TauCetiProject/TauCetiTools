@@ -173,6 +173,14 @@ class GitHub:
             env.pop("GITHUB_TOKEN", None)
         return os.environ.get("TAUCETI_GITHUB_WRITE_ROLE", "app-write" if token else "gh-default"), env
 
+    def _reserve_wait(self, delay):
+        """Claim `delay` seconds of the retry budget, atomically across threads."""
+        with self.stats_lock:
+            if self.waited + delay > self.max_wait:
+                return False
+            self.waited += delay
+            return True
+
     def _record(self, credential, method, path, status, headers, read):
         with self.stats_lock:
             self._record_locked(credential, method, path, status, headers, read)
@@ -371,21 +379,19 @@ class GitHub:
                     delay = 60 * 2 ** attempt
                 delay = math.ceil(delay + random.uniform(0, self.jitter))
                 until = now + delay
-                if attempt == 2 or self.waited + delay > self.max_wait:
+                if attempt == 2 or not self._reserve_wait(delay):
                     with self.quota_state.lock:
                         self.blocked[quota_key] = max(self.blocked.get(quota_key, 0), until)
                     raise Deferred(credential, until, resource)
                 print(f"github-api: {credential} waiting {delay}s before retry", file=sys.stderr)
                 time.sleep(delay)
-                self.waited += delay
                 continue
             # Retry reads and idempotent updates after server errors. Comment and label
             # creation POSTs are ambiguous after a server error, so reconciliation rereads state.
             if (status == 0 or status >= 500) and (read or idempotent or (status != 0 and method in {"PATCH", "PUT", "DELETE"})) and attempt < 2:
                 delay = 2 ** (attempt + 1)
-                if self.waited + delay <= self.max_wait:
+                if self._reserve_wait(delay):
                     time.sleep(delay)
-                    self.waited += delay
                     continue
             raise error
         raise AssertionError("unreachable")

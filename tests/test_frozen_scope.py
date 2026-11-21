@@ -173,28 +173,72 @@ class FrozenTests(unittest.TestCase):
         self.data['requested_batch']['members'][-1]['head_sha'] = 'invalid'
         self.assertFalse(self.verify(paths=['TauCeti/x']))
 
-    def test_member_reads_overlap_and_a_failed_prefetch_read_is_repeated(self):
-        self.data['requested_batch']['members'] = [dict(pr=n, head_sha=HEAD) for n in range(1, 41)]
-        self.files(BASE, {}); self.files(HEAD, {'TauCeti/x': ('x', '100644')})
+    def distinct_members(self, count):
+        self.files(BASE, {})
+        heads = []
+        for n in range(1, count + 1):
+            head = oid(f'member-{n}')
+            self.files(head, {f'TauCeti/M{n}.lean': ('x', '100644')})
+            heads.append(head)
+        self.data['requested_batch']['members'] = [dict(pr=n, head_sha=h) for n, h in enumerate(heads, 1)]
         self.data['scope_approvals'] = []
-        lock, active, peak, failed = threading.Lock(), [0], [0], set()
+        return heads
+
+    def test_member_reads_overlap_and_every_object_is_read_once(self):
+        self.distinct_members(40)
+        lock, active, peak = threading.Lock(), [0], [0]
         def slow(path):
             with lock:
                 active[0] += 1; peak[0] = max(peak[0], active[0])
-                first = path not in failed and path.startswith('git/commits/')
-                failed.add(path)
             try:
                 time.sleep(0.01)
-                if first:
-                    raise APIError('GET', path, 502, {})
                 return self.api(path)
             finally:
                 with lock:
                     active[0] -= 1
-        self.assertTrue(self.verify(paths=['TauCeti/x'], api=slow))
+        self.assertTrue(self.verify(paths=['TauCeti/M1.lean'], api=slow))
         self.assertGreater(peak[0], 1)
         self.assertEqual(sum(p.startswith('compare/') for p in self.calls), 40)
+        self.assertEqual(len(self.calls), len(set(self.calls)))
 
+    def test_prefetched_outcomes_replay_exactly_as_serial_reads(self):
+        heads = self.distinct_members(20)
+        bad = f'git/commits/{heads[5]}'
+        for failure, expected in [(APIError('GET', bad, 404, {}), ValueError),
+                                  (APIError('GET', bad, 403, {}), APIError)]:
+            served = set()
+            def once(path, failure=failure):
+                # The object would be readable on a second request; the proof must not retry it.
+                if path == bad and path not in served:
+                    served.add(path)
+                    raise failure
+                return self.api(path)
+            self.calls.clear()
+            with self.assertRaises(expected):
+                self.verify(paths=['TauCeti/M1.lean'], api=once)
+        for comparison in [None, dict(merge_base_commit=['invalid']), dict(merge_base_commit=None)]:
+            def odd(path, comparison=comparison):
+                if path == f'compare/{BASE}...{heads[3]}?per_page=1':
+                    return comparison
+                return self.api(path)
+            with self.assertRaises(ValueError):
+                self.verify(paths=['TauCeti/M1.lean'], api=odd)
+
+    def test_no_speculative_reads_after_a_failure_or_for_a_malformed_batch(self):
+        heads = self.distinct_members(200)
+        def failing(path):
+            self.calls.append(path)
+            if path == f'compare/{BASE}...{heads[0]}?per_page=1':
+                raise APIError('GET', path, 429, {})
+            time.sleep(0.002)
+            return self.api(path)
+        with self.assertRaises(APIError):
+            self.verify(paths=['TauCeti/M1.lean'], api=failing)
+        self.assertLess(sum(p.startswith('compare/') for p in self.calls), 100)
+        self.calls.clear()
+        self.data['requested_batch']['members'][0]['head_sha'] = 'invalid'
+        self.assertFalse(self.verify(paths=['TauCeti/M1.lean']))
+        self.assertEqual(self.calls, [])
 
 class AuthorityTests(unittest.TestCase):
     def test_header_only_capability_redirect_and_duplicates(self):
