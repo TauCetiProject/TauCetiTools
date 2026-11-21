@@ -22,6 +22,14 @@ def reply(status=200, data=None, headers=None):
 
 
 class CIAPI(unittest.TestCase):
+    def test_retry_budget_is_claimed_atomically_across_threads(self):
+        from concurrent.futures import ThreadPoolExecutor
+        client = api.GitHub(max_wait=5)
+        with ThreadPoolExecutor(16) as pool:
+            granted = list(pool.map(lambda _: client._reserve_wait(1), range(64)))
+        self.assertEqual(sum(granted), 5)
+        self.assertEqual(client.waited, 5)
+
     def test_last_successful_read_closes_only_its_exhausted_bucket(self):
         client = api.GitHub(max_wait=0)
         replies = [reply(data={'data': {'ok': True}}, headers={'X-RateLimit-Resource': 'graphql',

@@ -6,13 +6,17 @@ No candidate code is executed. Missing/incomplete observations fail closed.
 """
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import pathlib
 import re
 import subprocess
+import threading
 
 from bors_observation import (FROZEN_ADMISSION, REPO, observation_with_admission,
                               requested_batch, sha, valid_observation)
+# Concurrent reads when warming the frozen proof; each read is one `gh api` process.
+PREFETCH_WORKERS = 8
 ALLOWED_ROOT = {"TauCeti.lean", "lake-manifest.json", "lean-toolchain",
                 "docbuild/docs/references.bib"}
 
@@ -107,6 +111,7 @@ class ImmutablePaths:
         self.api = api
         self.commits = {}
         self.trees = {}
+        self.failed = {}  # (kind, key) -> error a prefetched read raised
 
     def read(self, path):
         try:
@@ -119,6 +124,8 @@ class ImmutablePaths:
             raise
 
     def root(self, commit):
+        if ("commit", commit) in self.failed:
+            raise self.failed.pop(("commit", commit))
         if commit not in self.commits:
             data = self.read(f"git/commits/{commit}")
             if not isinstance(data, dict) or not isinstance(data.get("tree"), dict):
@@ -132,6 +139,8 @@ class ImmutablePaths:
     def tree(self, tree):
         if tree is None:
             return {}
+        if ("tree", tree) in self.failed:
+            raise self.failed.pop(("tree", tree))
         if tree not in self.trees:
             data = self.read(f"git/trees/{tree}")
             if (not isinstance(data, dict) or data.get("sha") != tree or data.get("truncated") is not False
@@ -179,19 +188,73 @@ class ImmutablePaths:
         return paths
 
 
+def prefetch(immutable, base_sha, members):
+    """Warm the per-member reads of `frozen_batch` concurrently.
+
+    Done one at a time they cost about 1.6 s per member, over ten minutes for a
+    large batch. Each read's outcome, a response or the error it raised, is kept
+    and replayed when the serial proof reaches that read, so the proof sees what
+    it would have read itself. After the first failed read no further reads are
+    started, and the proof makes the remaining ones itself. Returns one
+    `(ok, value)` outcome per member's comparison, or None where none was read.
+    """
+    if not all(isinstance(member, dict) and sha(member.get("head_sha")) for member in members):
+        return [None] * len(members)  # the serial proof rejects the batch before any read
+    stop = threading.Event()
+
+    def outcome(read, key):
+        if stop.is_set():
+            return None
+        try:
+            return True, read(key)
+        except Exception as error:  # noqa: BLE001 - replayed to the serial proof
+            stop.set()
+            return False, error
+
+    def warm(kind, read, key):
+        result = outcome(read, key)
+        if result is not None and not result[0]:
+            immutable.failed[(kind, key)] = result[1]
+
+    def merge_base(result):
+        value = result[1] if result is not None and result[0] else None
+        base = value.get("merge_base_commit") if isinstance(value, dict) else None
+        return base.get("sha") if isinstance(base, dict) else None
+
+    heads = [member["head_sha"] for member in members]
+    with ThreadPoolExecutor(PREFETCH_WORKERS) as pool:
+        comparisons = list(pool.map(
+            lambda head: outcome(immutable.read, f"compare/{base_sha}...{head}?per_page=1"), heads))
+        commits = sorted({commit for commit in heads + [merge_base(c) for c in comparisons] if sha(commit)})
+        list(pool.map(lambda commit: warm("commit", immutable.root, commit), commits))
+        # The proof reads both root trees of a member only when they differ.
+        pairs = [(immutable.commits.get(merge_base(c)), immutable.commits.get(head))
+                 for c, head in zip(comparisons, heads)]
+        roots = sorted({tree for pair in pairs if None not in pair and pair[0] != pair[1] for tree in pair})
+        list(pool.map(lambda tree: warm("tree", immutable.tree, tree), roots))
+    return comparisons
+
+
 def frozen_batch(data, batch, combined_paths, api, refresh):
     if not callable(refresh):
         return False
     immutable = ImmutablePaths(api)
+    comparisons = prefetch(immutable, batch["base_sha"], batch["members"])
     covered, seen, used = set(), set(), []
-    for member in batch["members"]:
+    for position, member in enumerate(batch["members"]):
         if not isinstance(member, dict):
             return False
         number, head = member.get("pr"), member.get("head_sha")
         if type(number) is not int or number <= 0 or number in seen or not sha(head):
             return False
         seen.add(number)
-        comparison = immutable.read(f"compare/{batch['base_sha']}...{head}?per_page=1")
+        prefetched = comparisons[position]
+        if prefetched is None:
+            comparison = immutable.read(f"compare/{batch['base_sha']}...{head}?per_page=1")
+        elif prefetched[0]:
+            comparison = prefetched[1]
+        else:
+            raise prefetched[1]
         if not isinstance(comparison, dict) or not isinstance(comparison.get("merge_base_commit"), dict):
             raise ValueError("immutable merge base unavailable")
         base = comparison["merge_base_commit"].get("sha")
