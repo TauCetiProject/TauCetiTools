@@ -145,12 +145,10 @@ def summarize(state):
 
 def history(repo, ref, today):
     # Sampled by landing day, as for the library chart, so a commit that reaches the mainline
-    # after newer ones cannot rewrite a finished day.
-    day_commit = {}
-    for date, commit in loc_graph.landing_days(repo, ref, ["TauCetiRoadmap", "Completed"]).items():
-        day = dt.date.fromisoformat(date)
-        if day < today:
-            day_commit[day] = commit
+    # after newer ones is not counted on the earlier day its timestamp names.
+    day_commit = {dt.date.fromisoformat(date): commit for date, commit in
+                  loc_graph.landing_days(repo, ref, ["TauCetiRoadmap", "Completed"],
+                                         today).items()}
     if not day_commit:
         raise ValueError("no roadmap history on a finished UTC day")
     trees = Trees(repo)

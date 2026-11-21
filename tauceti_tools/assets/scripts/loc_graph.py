@@ -67,19 +67,27 @@ def carry_to(points, last_day):
     return carry_quiet_days(points + [(last_day.isoformat(), points[-1][1])])
 
 
-def landing_days(repo, ref, pathspecs):
-    """Map each UTC day to the last first-parent commit on `ref` that had landed by its end.
+def landing_days(repo, ref, pathspecs, today, now=None):
+    """Map each UTC day before `today` to the last first-parent commit on `ref`, among those
+    touching `pathspecs`, that had landed by the end of that day.
 
-    A commit is dated by the newest committer timestamp among itself and its first-parent
+    A commit is dated by the newest committer timestamp among itself and all its first-parent
     ancestors, which is a lower bound on when it reached the mainline. Its own committer
     timestamp is not: the merge queue fast-forwards the mainline to commits it created
     earlier, so a batch held back for days lands carrying the dates of the days it waited
     through. On 2026-11-21 a batch committed on 2026-11-19 landed after commits from
     2026-11-21, and keying on raw committer dates made the 2026-11-19 point count the newest
     tree in the repository: that day jumped by 481k lines, above the headline value the
-    chart reports for the following day. Because the bound never decreases along the
-    mainline, a day's sample cannot change after that day is over, and every day's tree
-    contains everything sampled before it.
+    chart reports for the following day. The bound never decreases along the mainline, so
+    every day's tree contains everything sampled before it. It is still a lower bound: a
+    batch landing after a stretch with no commits at all is dated to the last commit before
+    that stretch.
+
+    The bound runs over every mainline commit, not only those touching the pathspecs, since
+    a newer unrelated commit still proves the later ones landed after it. A timestamp later
+    than `now` (by default the end of `today`) cannot be a landing time and does not move the
+    bound, so a single future-dated commit cannot hide every descendant; it is dated like
+    a commit carrying its parent's timestamp.
 
     Convert each timestamp to a UTC day explicitly; Git's short date otherwise uses each
     commit's recorded timezone, which can make consecutive calendar dates decrease across
@@ -91,15 +99,22 @@ def landing_days(repo, ref, pathspecs):
     on the day it was written that vanishes the next day and only truly lands when the
     branch merges.
     """
+    cutoff = int(dt.datetime.combine(today, dt.time(), dt.timezone.utc).timestamp())
+    if now is None:
+        now = cutoff + 24 * 60 * 60
+    touching = set(git(repo, "log", "--first-parent", "--format=%H", ref,
+                       "--", *pathspecs).split())
     day_commit = {}
     landed = None
     # --reverse walks oldest-first, so the last write for a UTC day wins.
     for line in git(repo, "log", "--first-parent", "--reverse",
-                    "--format=%ct %H", ref, "--", *pathspecs).splitlines():
+                    "--format=%ct %H", ref).splitlines():
         timestamp, commit = line.split()
-        landed = int(timestamp) if landed is None else max(landed, int(timestamp))
-        day = dt.datetime.fromtimestamp(landed, dt.timezone.utc).date().isoformat()
-        day_commit[day] = commit
+        if int(timestamp) <= now:
+            landed = int(timestamp) if landed is None else max(landed, int(timestamp))
+        if commit in touching and landed is not None and landed < cutoff:
+            day = dt.datetime.fromtimestamp(landed, dt.timezone.utc).date().isoformat()
+            day_commit[day] = commit
     return day_commit
 
 
@@ -107,9 +122,11 @@ def series(repo, pathspecs, ref, today=None):
     # The last commit to have landed by the end of each day that touched the files; see
     # landing_days. Keying on landing time also keeps the newest point at HEAD, so the
     # "as of" label reflects the current repo.
-    day_commit = landing_days(repo, ref, pathspecs)
+    now = None
     if today is None:
-        today = dt.datetime.now(dt.timezone.utc).date()
+        clock = dt.datetime.now(dt.timezone.utc)
+        today, now = clock.date(), int(clock.timestamp())
+    day_commit = landing_days(repo, ref, pathspecs, today, now)
     # Trimmed before counting, not after: count_lines shells out to `git grep` over the whole
     # tree for each day kept, so there is no reason to price a day that will be discarded.
     kept = completed_days(sorted(day_commit.items()), today)

@@ -108,6 +108,39 @@ class SeriesTest(unittest.TestCase):
         self.assertEqual(data, [("2026-11-19", 2), ("2026-11-20", 2),
                                 ("2026-11-21", 9)])
 
+    def test_an_unrelated_newer_commit_still_bounds_a_late_landing(self):
+        self.commit("2026-11-18T10:00:00+0000",
+                    "2026-11-18T10:00:00+0000", 2)
+        (self.repo / "Other.md").write_text("unrelated\n")
+        git(self.repo, "add", "Other.md", env=self.env)
+        env = self.env.copy()
+        env["GIT_AUTHOR_DATE"] = env["GIT_COMMITTER_DATE"] = "2026-11-20T10:00:00+0000"
+        git(self.repo, "commit", "--quiet", "--no-verify", "-m", "unrelated", env=env)
+        self.commit("2026-11-19T10:00:00+0000",
+                    "2026-11-19T10:00:00+0000", 7)
+
+        data = loc_graph.series(str(self.repo), ["Tracked.lean"], "HEAD",
+                                today=dt.date(2026, 11, 21))
+
+        self.assertEqual(data, [("2026-11-18", 2), ("2026-11-19", 2),
+                                ("2026-11-20", 7)])
+
+    def test_a_future_timestamp_does_not_hide_its_descendants(self):
+        self.commit("2026-07-01T10:00:00+0000",
+                    "2026-07-01T10:00:00+0000", 1)
+        self.commit("2099-01-01T10:00:00+0000",
+                    "2099-01-01T10:00:00+0000", 4)
+        self.commit("2026-07-03T10:00:00+0000",
+                    "2026-07-03T10:00:00+0000", 6)
+
+        data = loc_graph.series(str(self.repo), ["Tracked.lean"], "HEAD",
+                                today=dt.date(2026, 7, 4))
+
+        # The 2099 commit can only be bounded by its parent, so it counts from July 1; the
+        # descendant keeps its own date instead of inheriting 2099.
+        self.assertEqual(data, [("2026-07-01", 4), ("2026-07-02", 4),
+                                ("2026-07-03", 6)])
+
     def test_days_without_commits_carry_the_previous_count(self):
         self.commit("2026-07-11T10:00:00+0000",
                     "2026-07-11T10:00:00+0000", 4)
