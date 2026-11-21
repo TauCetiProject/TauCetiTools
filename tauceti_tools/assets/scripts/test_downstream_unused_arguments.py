@@ -81,6 +81,11 @@ def localEqn (n : Nat) : Nat := n + 1
 /-- Its equation lemma is generated downstream. -/
 def remoteEqn (n : Nat) : Nat := n + 2
 theorem localEqn_eq (n : Nat) : localEqn n = n + 1 := by rw [localEqn]
+-- Hand-written theorems with equation-lemma names, which Lean accepts before the definition.
+theorem handEqn.eq_2 : True := trivial
+private theorem handEqn.eq_def : True := trivial
+/-- Only gives the hand-written theorems above their names. -/
+def handEqn (n : Nat) : Nat := n + 3
 end TauCeti
 """,
             "EquationUser": """module
@@ -167,7 +172,8 @@ end TauCeti
                     ["--shard", "0/2", "--only-listed"]):
             result = run(*bad, module_file="all")
             assert result.returncode == 2 and "DOWNSTREAM-TEST-COMPLETE" not in result.stdout, result
-        # checkType skips exactly the equation lemmas Lean generated, wherever it generated them.
+        # checkType skips exactly the equation lemmas Lean generated, wherever it generated them,
+        # and never a hand-written theorem with such a name.
         eqns = run(module_file="all", linters=("checkType",))
         assert "lint-env: checkType skips 2 generated equation lemmas" in eqns.stdout, eqns.stdout
         # Bad/incomplete inventory fails without a success marker.
