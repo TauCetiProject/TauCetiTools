@@ -84,10 +84,12 @@ def landing_days(repo, ref, pathspecs, today, now=None):
     that stretch.
 
     The bound runs over every mainline commit, not only those touching the pathspecs, since
-    a newer unrelated commit still proves the later ones landed after it. A timestamp later
-    than `now` (by default the end of `today`) cannot be a landing time and does not move the
-    bound, so a single future-dated commit cannot hide every descendant; it is dated like
-    a commit carrying its parent's timestamp.
+    a newer unrelated commit still proves the later ones landed after it. A timestamp on a
+    UTC day after that of `now` (the wall clock, not `today`, which may be a historical
+    cutoff) cannot be a landing time and does not move the bound, so a single future-dated
+    commit cannot hide every descendant; it is dated like a commit carrying its parent's
+    timestamp. Validating whole days keeps a few minutes of clock skew on today's commits
+    from dating them to an earlier day.
 
     Convert each timestamp to a UTC day explicitly; Git's short date otherwise uses each
     commit's recorded timezone, which can make consecutive calendar dates decrease across
@@ -99,9 +101,13 @@ def landing_days(repo, ref, pathspecs, today, now=None):
     on the day it was written that vanishes the next day and only truly lands when the
     branch merges.
     """
-    cutoff = int(dt.datetime.combine(today, dt.time(), dt.timezone.utc).timestamp())
-    if now is None:
-        now = cutoff + 24 * 60 * 60
+    def midnight(day):
+        return int(dt.datetime.combine(day, dt.time(), dt.timezone.utc).timestamp())
+
+    cutoff = midnight(today)
+    clock = (dt.datetime.now(dt.timezone.utc) if now is None
+             else dt.datetime.fromtimestamp(now, dt.timezone.utc))
+    horizon = midnight(clock.date() + dt.timedelta(days=1))
     touching = set(git(repo, "log", "--first-parent", "--format=%H", ref,
                        "--", *pathspecs).split())
     day_commit = {}
@@ -110,7 +116,7 @@ def landing_days(repo, ref, pathspecs, today, now=None):
     for line in git(repo, "log", "--first-parent", "--reverse",
                     "--format=%ct %H", ref).splitlines():
         timestamp, commit = line.split()
-        if int(timestamp) <= now:
+        if int(timestamp) < horizon:
             landed = int(timestamp) if landed is None else max(landed, int(timestamp))
         if commit in touching and landed is not None and landed < cutoff:
             day = dt.datetime.fromtimestamp(landed, dt.timezone.utc).date().isoformat()
@@ -122,11 +128,9 @@ def series(repo, pathspecs, ref, today=None):
     # The last commit to have landed by the end of each day that touched the files; see
     # landing_days. Keying on landing time also keeps the newest point at HEAD, so the
     # "as of" label reflects the current repo.
-    now = None
     if today is None:
-        clock = dt.datetime.now(dt.timezone.utc)
-        today, now = clock.date(), int(clock.timestamp())
-    day_commit = landing_days(repo, ref, pathspecs, today, now)
+        today = dt.datetime.now(dt.timezone.utc).date()
+    day_commit = landing_days(repo, ref, pathspecs, today)
     # Trimmed before counting, not after: count_lines shells out to `git grep` over the whole
     # tree for each day kept, so there is no reason to price a day that will be discarded.
     kept = completed_days(sorted(day_commit.items()), today)

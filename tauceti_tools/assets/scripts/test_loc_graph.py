@@ -141,6 +141,31 @@ class SeriesTest(unittest.TestCase):
         self.assertEqual(data, [("2026-07-01", 4), ("2026-07-02", 4),
                                 ("2026-07-03", 6)])
 
+    def test_a_historical_cutoff_keeps_later_commits_out(self):
+        self.commit("2026-07-01T10:00:00+0000",
+                    "2026-07-01T10:00:00+0000", 1)
+        self.commit("2026-07-05T10:00:00+0000",
+                    "2026-07-05T10:00:00+0000", 8)
+
+        data = loc_graph.series(str(self.repo), ["Tracked.lean"], "HEAD",
+                                today=dt.date(2026, 7, 3))
+
+        self.assertEqual(data, [("2026-07-01", 1), ("2026-07-02", 1)])
+
+    def test_clock_skew_today_does_not_date_a_commit_to_yesterday(self):
+        self.commit("2026-07-03T10:00:00+0000",
+                    "2026-07-03T10:00:00+0000", 1)
+        self.commit("2026-07-04T10:01:00+0000",
+                    "2026-07-04T10:01:00+0000", 5)
+        now = int(dt.datetime(2026, 7, 4, 10, 0, tzinfo=dt.timezone.utc).timestamp())
+
+        days = loc_graph.landing_days(str(self.repo), "HEAD", ["Tracked.lean"],
+                                      dt.date(2026, 7, 4), now)
+
+        # The commit stamped a minute ahead of the clock is today's, not part of July 3.
+        parent = loc_graph.git(str(self.repo), "rev-parse", "HEAD~1").strip()
+        self.assertEqual(days, {"2026-07-03": parent})
+
     def test_days_without_commits_carry_the_previous_count(self):
         self.commit("2026-07-11T10:00:00+0000",
                     "2026-07-11T10:00:00+0000", 4)
