@@ -38,7 +38,9 @@ is explicit), so crossing midnight between generators does not change the window
   Archived specification-size estimates remain in JSON but are not displayed.
 
 Histories sample the final first-parent snapshot of each complete UTC day;
-unchanged days carry forward. They do not read feature branches, untracked files,
+unchanged days carry forward. A commit's day is the newest committer date among it
+and its first-parent ancestors, because the merge queue can land commits that it
+created days earlier. They do not read feature branches, untracked files,
 or the current partial day. Old reports are applied to the specification that
 existed at that observation date. Edited specifications retaining the same layer
 IDs keep their old assessments with a stale flag, as on the Progress page;

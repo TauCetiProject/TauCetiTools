@@ -88,6 +88,26 @@ class SeriesTest(unittest.TestCase):
 
         self.assertEqual(data, [("2026-06-02", 1), ("2026-06-03", 3)])
 
+    def test_a_late_landing_cannot_rewrite_a_finished_day(self):
+        # The merge queue fast-forwards the mainline to commits it created earlier, so a
+        # held-back batch lands after newer commits but carries its older committer dates.
+        self.commit("2026-11-19T10:00:00+0000",
+                    "2026-11-19T10:00:00+0000", 2)
+        self.commit("2026-11-21T00:04:00+0000",
+                    "2026-11-21T00:04:00+0000", 5)
+        self.commit("2026-11-19T07:30:00+0000",
+                    "2026-11-19T07:30:00+0000", 8)
+        self.commit("2026-11-21T03:00:00+0000",
+                    "2026-11-21T03:00:00+0000", 9)
+
+        data = loc_graph.series(str(self.repo), ["Tracked.lean"], "HEAD",
+                                today=dt.date(2026, 11, 22))
+
+        # Under raw committer dates the 19th would count the 8-line tree that landed on the
+        # 21st, rising above the next day's value; it keeps the tree that had landed by then.
+        self.assertEqual(data, [("2026-11-19", 2), ("2026-11-20", 2),
+                                ("2026-11-21", 9)])
+
     def test_days_without_commits_carry_the_previous_count(self):
         self.commit("2026-07-11T10:00:00+0000",
                     "2026-07-11T10:00:00+0000", 4)

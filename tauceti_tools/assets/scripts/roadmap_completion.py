@@ -144,11 +144,11 @@ def summarize(state):
 
 
 def history(repo, ref, today):
+    # Sampled by landing day, as for the library chart, so a commit that reaches the mainline
+    # after newer ones cannot rewrite a finished day.
     day_commit = {}
-    for line in git(repo, "log", "--first-parent", "--reverse", "--format=%ct %H", ref,
-                    "--", "TauCetiRoadmap", "Completed").splitlines():
-        timestamp, commit = line.split()
-        day = dt.datetime.fromtimestamp(int(timestamp), dt.timezone.utc).date()
+    for date, commit in loc_graph.landing_days(repo, ref, ["TauCetiRoadmap", "Completed"]).items():
+        day = dt.date.fromisoformat(date)
         if day < today:
             day_commit[day] = commit
     if not day_commit:

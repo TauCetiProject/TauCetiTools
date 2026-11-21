@@ -67,28 +67,47 @@ def carry_to(points, last_day):
     return carry_quiet_days(points + [(last_day.isoformat(), points[-1][1])])
 
 
-def series(repo, pathspecs, ref, today=None):
-    # The last commit to land on each day that touched the files, keyed by
-    # committer timestamp: that records when the code actually entered the repo,
-    # whereas author dates can predate their parents. Convert the timestamp to a
-    # UTC day explicitly; Git's short date otherwise uses each commit's recorded
-    # timezone, which can make consecutive calendar dates decrease across timezone
-    # offsets. Keying on committer time also keeps the newest point at HEAD, so the
-    # "as of" label reflects the current repo. The sort is insurance against
-    # history rewrites that leave committer timestamps out of order.
-    #
-    # --first-parent walks the mainline only, so the chart tracks the size of
-    # the branch itself. Without it, a commit on a feature branch is sampled on
-    # its own (earlier) date, and count_lines there sees the whole branch tree,
-    # so a large branch shows up as a spike on the day it was written that
-    # vanishes the next day and only truly lands when the branch merges.
+def landing_days(repo, ref, pathspecs):
+    """Map each UTC day to the last first-parent commit on `ref` that had landed by its end.
+
+    A commit is dated by the newest committer timestamp among itself and its first-parent
+    ancestors, which is a lower bound on when it reached the mainline. Its own committer
+    timestamp is not: the merge queue fast-forwards the mainline to commits it created
+    earlier, so a batch held back for days lands carrying the dates of the days it waited
+    through. On 2026-11-21 a batch committed on 2026-11-19 landed after commits from
+    2026-11-21, and keying on raw committer dates made the 2026-11-19 point count the newest
+    tree in the repository: that day jumped by 481k lines, above the headline value the
+    chart reports for the following day. Because the bound never decreases along the
+    mainline, a day's sample cannot change after that day is over, and every day's tree
+    contains everything sampled before it.
+
+    Convert each timestamp to a UTC day explicitly; Git's short date otherwise uses each
+    commit's recorded timezone, which can make consecutive calendar dates decrease across
+    timezone offsets.
+
+    --first-parent walks the mainline only, so the chart tracks the size of the branch
+    itself. Without it, a commit on a feature branch is sampled on its own (earlier) date,
+    and count_lines there sees the whole branch tree, so a large branch shows up as a spike
+    on the day it was written that vanishes the next day and only truly lands when the
+    branch merges.
+    """
     day_commit = {}
+    landed = None
     # --reverse walks oldest-first, so the last write for a UTC day wins.
     for line in git(repo, "log", "--first-parent", "--reverse",
                     "--format=%ct %H", ref, "--", *pathspecs).splitlines():
         timestamp, commit = line.split()
-        day = dt.datetime.fromtimestamp(int(timestamp), dt.timezone.utc).date().isoformat()
+        landed = int(timestamp) if landed is None else max(landed, int(timestamp))
+        day = dt.datetime.fromtimestamp(landed, dt.timezone.utc).date().isoformat()
         day_commit[day] = commit
+    return day_commit
+
+
+def series(repo, pathspecs, ref, today=None):
+    # The last commit to have landed by the end of each day that touched the files; see
+    # landing_days. Keying on landing time also keeps the newest point at HEAD, so the
+    # "as of" label reflects the current repo.
+    day_commit = landing_days(repo, ref, pathspecs)
     if today is None:
         today = dt.datetime.now(dt.timezone.utc).date()
     # Trimmed before counting, not after: count_lines shells out to `git grep` over the whole
