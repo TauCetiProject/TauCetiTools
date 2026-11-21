@@ -25,7 +25,8 @@ def main():
             f'path = "{project / ".lake/packages/mathlib"}"\n'
             '[[lean_lib]]\nname = "TauCeti"\n')
         (root / "TauCeti").mkdir()
-        modules = ["Upstream", "Changed", "Bridge", "Leaf", "Sibling", "Unrelated"]
+        modules = ["Upstream", "Changed", "Bridge", "Leaf", "Sibling", "Unrelated", "Equations",
+                   "EquationUser"]
         sources = {
             "Upstream": """module
 public import Mathlib.Algebra.Module.Torsion.Basic
@@ -67,6 +68,27 @@ public section
 namespace TauCeti
 /-- Existing unrelated lint debt, outside the change. -/
 def unrelatedUnused (n m : Nat) : Nat := n
+end TauCeti
+""",
+            # Definitions whose bodies are not exposed, so Lean gives the equation lemmas it
+            # generates for them private names in the module that first needs each lemma.
+            "Equations": """module
+public import Mathlib.Algebra.Module.Torsion.Basic
+public section
+namespace TauCeti
+/-- Its equation lemma is generated in this module. -/
+def localEqn (n : Nat) : Nat := n + 1
+/-- Its equation lemma is generated downstream. -/
+def remoteEqn (n : Nat) : Nat := n + 2
+theorem localEqn_eq (n : Nat) : localEqn n = n + 1 := by rw [localEqn]
+end TauCeti
+""",
+            "EquationUser": """module
+public import TauCeti.Equations
+import all TauCeti.Equations
+public section
+namespace TauCeti
+theorem remoteEqn_eq (n : Nat) : remoteEqn n = n + 2 := by rw [remoteEqn]
 end TauCeti
 """,
         }
@@ -122,6 +144,32 @@ end TauCeti
         # A full run still uses the existing whole-library behavior.
         full = findings(run(module_file="all"), 5)
         assert {r["linter"] for r in full} == {"unusedArguments", "simpNF"}, full
+        # Shards lint every declaration exactly once between them, with the same verdicts.
+        def declarations(result):
+            found = re.search(r"-- Found \d+ errors? in (\d+) declarations "
+                              r"\(plus (\d+) automatically generated ones\)", result.stdout)
+            return int(found[1]) + int(found[2])
+
+        def origins(result):
+            origin = json.loads(next(line[len(ORIGINS):] for line in result.stdout.splitlines()
+                                     if line.startswith(ORIGINS)))
+            return sorted((r["linter"], r["declaration"]) for r in origin["records"])
+
+        whole = run(module_file="all")
+        for n in (2, 3):
+            shards = [run("--shard", f"{i}/{n}", module_file="all") for i in range(n)]
+            assert sum(map(declarations, shards)) == declarations(whole), [s.stdout for s in shards]
+            for i, shard in enumerate(shards):
+                assert re.findall(r"^LINT-SHARD (\d+)/(\d+) declarations=(\d+)$", shard.stdout,
+                                  re.M) == [(str(i), str(n), str(declarations(whole)))], shard.stdout
+            assert sorted(sum(map(origins, shards), [])) == origins(whole), [s.stdout for s in shards]
+        for bad in (["--shard", "2/2"], ["--shard", "0/0"], ["--shard", "1"],
+                    ["--shard", "0/2", "--only-listed"]):
+            result = run(*bad, module_file="all")
+            assert result.returncode == 2 and "DOWNSTREAM-TEST-COMPLETE" not in result.stdout, result
+        # checkType skips exactly the equation lemmas Lean generated, wherever it generated them.
+        eqns = run(module_file="all", linters=("checkType",))
+        assert "lint-env: checkType skips 2 generated equation lemmas" in eqns.stdout, eqns.stdout
         # Bad/incomplete inventory fails without a success marker.
         (root / "incomplete").write_text("TauCeti.Leaf\n")
         bad = run("--only-listed", "--downstream-unused-arguments", str(root / "incomplete"))
@@ -175,6 +223,20 @@ def TauCeti.changedUnused (n m : Nat) : Nat := n
         (trusted / "lint-baseline.txt").write_text("\n".join(baseline) + "\n")
         passed = shell()
         assert passed.returncode == 0 and "LINT-ENV: PASS" in passed.stdout, passed.stdout + passed.stderr
+        # Whole-library runs, sharded or not, report the same violations.
+        lint_env.pop("LINT_ONLY_MODULES")
+        unsharded = shell()
+        lint_env["LINT_SHARDS"] = "3"
+        sharded = shell()
+        lint_env.pop("LINT_SHARDS")
+        assert "lint-env: 3 shards linted" in sharded.stdout, sharded.stdout + sharded.stderr
+        assert sharded.returncode == unsharded.returncode == 1, sharded.stdout + unsharded.stdout
+        new = re.compile(r"^LINT-ENV: FAIL — .*$", re.M)
+        assert new.findall(sharded.stdout) == new.findall(unsharded.stdout), sharded.stdout
+        locs = [json.loads(next(line[len(LOCATIONS):] for line in r.stdout.splitlines()
+                                if line.startswith(LOCATIONS))) for r in (sharded, unsharded)]
+        assert locs[0] == locs[1] and locs[0]["complete"], locs
+        lint_env["LINT_ONLY_MODULES"] = str(root / "changed")
         # An undocumented declaration outside the selected module is deferred to staging.
         unrelated = root / "TauCeti/Unrelated.lean"
         unrelated.write_text(unrelated.read_text() + "\ndef TauCeti.undocumentedOutside : Nat := 1\n")
