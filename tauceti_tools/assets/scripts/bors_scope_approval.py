@@ -227,7 +227,10 @@ def prefetch(immutable, base_sha, members):
             lambda head: outcome(immutable.read, f"compare/{base_sha}...{head}?per_page=1"), heads))
         commits = sorted({commit for commit in heads + [merge_base(c) for c in comparisons] if sha(commit)})
         list(pool.map(lambda commit: warm("commit", immutable.root, commit), commits))
-        roots = sorted({immutable.commits[commit] for commit in commits if commit in immutable.commits})
+        # The proof reads both root trees of a member only when they differ.
+        pairs = [(immutable.commits.get(merge_base(c)), immutable.commits.get(head))
+                 for c, head in zip(comparisons, heads)]
+        roots = sorted({tree for pair in pairs if None not in pair and pair[0] != pair[1] for tree in pair})
         list(pool.map(lambda tree: warm("tree", immutable.tree, tree), roots))
     return comparisons
 

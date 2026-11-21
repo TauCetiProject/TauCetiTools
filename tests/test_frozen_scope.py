@@ -201,6 +201,12 @@ class FrozenTests(unittest.TestCase):
         self.assertEqual(sum(p.startswith('compare/') for p in self.calls), 40)
         self.assertEqual(len(self.calls), len(set(self.calls)))
 
+    def test_unchanged_member_trees_are_not_prefetched(self):
+        self.files(BASE, {'TauCeti/X.lean': ('same', '100644')})
+        self.files(HEAD, {'TauCeti/X.lean': ('same', '100644')})
+        self.assertTrue(self.verify(paths=['TauCeti/X.lean']))
+        self.assertFalse(any(p.startswith('git/trees/') for p in self.calls))
+
     def test_prefetched_outcomes_replay_exactly_as_serial_reads(self):
         heads = self.distinct_members(20)
         bad = f'git/commits/{heads[5]}'
