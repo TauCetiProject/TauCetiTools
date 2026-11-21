@@ -225,8 +225,15 @@ unsafe def main (args : List String) : IO UInt32 := do
   enableInitializersExecution
   let lintImports := #[`Mathlib.Init, `Mathlib.Tactic.SetNotationForOrder] ++ importModulesList
   let importStarted ← IO.monoMsNow
+  -- Every linter task shares this one environment, so leak it and mark it persistent before any
+  -- task sees it: otherwise each `getEnv` in every worker updates the same atomic reference count.
+  -- `importModules` marks the environment it builds persistent only when `leakEnv` is set, and
+  -- then wraps it in a new, non-persistent `Environment`, hence the second mark. On the whole
+  -- library this took `checkType` and `simpNF` from 1,057 s to 373 s at 16 threads, with the same
+  -- verdicts (2026-11). The process exits after the report, so the leak costs nothing.
   let env ← importModules (lintImports.map ({ module := · })) {} (trustLevel := 1024)
-    (loadExts := true)
+    (loadExts := true) (leakEnv := true)
+  let env ← Runtime.markPersistent env
   IO.println s!"LINT-TIMING phase=import milliseconds={(← IO.monoMsNow) - importStarted}"
   let lintStarted ← IO.monoMsNow
   let opts : Options := ({} : Options).setBool `trace.Batteries.Lint true
