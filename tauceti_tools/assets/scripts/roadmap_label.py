@@ -18,8 +18,12 @@ A PR gets exactly one label, decided in this order:
 5. One canonical roadmap-file citation, for compatibility with older PR bodies.
 6. `roadmap/Unknown` -- attribution is absent, invalid, or conflicting.
 
-Evidence from steps 3--5 must agree. Area names are read at runtime from active
-and completed roadmaps, and labels are created only when missing (`ensure_label`).
+Evidence from steps 3--5 must agree. Supplier work done for another roadmap
+declares its own area and names the roadmap it unblocks on a standalone
+``Consumer roadmap: <Area>`` line; beside a valid area declaration, markers and
+citations of that consumer do not conflict with it. Area names are read at
+runtime from active and completed roadmaps, and labels are created only when
+missing (`ensure_label`).
 File paths and conventional-commit titles are deliberately not used as roadmap
 evidence.
 
@@ -144,6 +148,20 @@ def parse_declared_area(body: str, areas: set[str]) -> tuple[bool, str | None]:
     return present, next(iter(values))
 
 
+def parse_consumer_areas(body: str, areas: set[str]) -> set[str]:
+    """Canonical areas named on standalone ``Consumer roadmap: <Area>`` lines.
+
+    Malformed lines, non-canonical names, and examples in fenced code and
+    blockquotes name nothing.
+    """
+    found = set()
+    for line in _body_lines_outside_quotes_and_fences(body):
+        match = re.fullmatch(r"Consumer roadmap:\s*(\S+)\s*", line)
+        if match and match.group(1) in areas:
+            found.add(match.group(1))
+    return found
+
+
 def parse_target_areas(body: str, areas: set[str]) -> set[str]:
     """Canonical roadmap focuses from valid ``tauceti-target:v1`` markers."""
     found = set()
@@ -195,6 +213,7 @@ def classify(title: str, body: str, files: list[str], areas: set[str]) -> str:
     if declared is not None:
         if declared == "none":
             return NONE_LABEL if not indirect else UNKNOWN_LABEL
+        indirect -= parse_consumer_areas(body, areas)
         return area_label(declared) if indirect <= {declared} else UNKNOWN_LABEL
 
     return area_label(next(iter(indirect))) if len(indirect) == 1 else UNKNOWN_LABEL
