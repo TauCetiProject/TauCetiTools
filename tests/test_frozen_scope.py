@@ -5,6 +5,8 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -170,6 +172,28 @@ class FrozenTests(unittest.TestCase):
         self.assertLess(len(self.calls), 1210)
         self.data['requested_batch']['members'][-1]['head_sha'] = 'invalid'
         self.assertFalse(self.verify(paths=['TauCeti/x']))
+
+    def test_member_reads_overlap_and_a_failed_prefetch_read_is_repeated(self):
+        self.data['requested_batch']['members'] = [dict(pr=n, head_sha=HEAD) for n in range(1, 41)]
+        self.files(BASE, {}); self.files(HEAD, {'TauCeti/x': ('x', '100644')})
+        self.data['scope_approvals'] = []
+        lock, active, peak, failed = threading.Lock(), [0], [0], set()
+        def slow(path):
+            with lock:
+                active[0] += 1; peak[0] = max(peak[0], active[0])
+                first = path not in failed and path.startswith('git/commits/')
+                failed.add(path)
+            try:
+                time.sleep(0.01)
+                if first:
+                    raise APIError('GET', path, 502, {})
+                return self.api(path)
+            finally:
+                with lock:
+                    active[0] -= 1
+        self.assertTrue(self.verify(paths=['TauCeti/x'], api=slow))
+        self.assertGreater(peak[0], 1)
+        self.assertEqual(sum(p.startswith('compare/') for p in self.calls), 40)
 
 
 class AuthorityTests(unittest.TestCase):

@@ -6,6 +6,7 @@ No candidate code is executed. Missing/incomplete observations fail closed.
 """
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import pathlib
 import re
@@ -13,6 +14,8 @@ import subprocess
 
 from bors_observation import (FROZEN_ADMISSION, REPO, observation_with_admission,
                               requested_batch, sha, valid_observation)
+# Concurrent reads when warming the frozen proof; each read is one `gh api` process.
+PREFETCH_WORKERS = 8
 ALLOWED_ROOT = {"TauCeti.lean", "lake-manifest.json", "lean-toolchain",
                 "docbuild/docs/references.bib"}
 
@@ -179,19 +182,50 @@ class ImmutablePaths:
         return paths
 
 
+def prefetch(immutable, base_sha, members):
+    """Warm the per-member reads of `frozen_batch` concurrently.
+
+    Done one at a time they cost about 1.6 s per member, over ten minutes for a
+    large batch. Best effort only: a failed read is dropped and the serial proof
+    reads it again, so its results, errors and fences are unchanged. Returns the
+    comparison payload for each member position, or None where none was read.
+    """
+    def quietly(read, key):
+        try:
+            return read(key)
+        except Exception:  # noqa: BLE001 - the serial proof repeats and reports it
+            return None
+
+    heads = [member.get("head_sha") if isinstance(member, dict) else None for member in members]
+    with ThreadPoolExecutor(PREFETCH_WORKERS) as pool:
+        comparisons = list(pool.map(
+            lambda head: quietly(immutable.read, f"compare/{base_sha}...{head}?per_page=1") if sha(head) else None,
+            heads))
+        bases = [(c.get("merge_base_commit") or {}).get("sha") if isinstance(c, dict) else None
+                 for c in comparisons]
+        commits = {commit for commit in heads + bases if sha(commit)}
+        list(pool.map(lambda commit: quietly(immutable.root, commit), sorted(commits)))
+        roots = {immutable.commits[commit] for commit in commits if commit in immutable.commits}
+        list(pool.map(lambda tree: quietly(immutable.tree, tree), sorted(roots)))
+    return comparisons
+
+
 def frozen_batch(data, batch, combined_paths, api, refresh):
     if not callable(refresh):
         return False
     immutable = ImmutablePaths(api)
+    comparisons = prefetch(immutable, batch["base_sha"], batch["members"])
     covered, seen, used = set(), set(), []
-    for member in batch["members"]:
+    for position, member in enumerate(batch["members"]):
         if not isinstance(member, dict):
             return False
         number, head = member.get("pr"), member.get("head_sha")
         if type(number) is not int or number <= 0 or number in seen or not sha(head):
             return False
         seen.add(number)
-        comparison = immutable.read(f"compare/{batch['base_sha']}...{head}?per_page=1")
+        comparison = comparisons[position]
+        if comparison is None:
+            comparison = immutable.read(f"compare/{batch['base_sha']}...{head}?per_page=1")
         if not isinstance(comparison, dict) or not isinstance(comparison.get("merge_base_commit"), dict):
             raise ValueError("immutable merge base unavailable")
         base = comparison["merge_base_commit"].get("sha")

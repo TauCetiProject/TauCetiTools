@@ -156,6 +156,8 @@ class GitHub:
         self.known_labels = set()
         self.last_write = None
         self.renewed_status_token = None
+        # Concurrent read-only callers (the frozen scope proof) share these counters.
+        self.stats_lock = threading.Lock()
 
     def _credential(self, read):
         env = dict(os.environ)
@@ -172,6 +174,10 @@ class GitHub:
         return os.environ.get("TAUCETI_GITHUB_WRITE_ROLE", "app-write" if token else "gh-default"), env
 
     def _record(self, credential, method, path, status, headers, read):
+        with self.stats_lock:
+            self._record_locked(credential, method, path, status, headers, read)
+
+    def _record_locked(self, credential, method, path, status, headers, read):
         stat = self.stats.setdefault(credential, {"requests": 0, "reads": 0, "writes": 0, "buckets": {}})
         stat["requests"] += 1
         stat["reads" if read else "writes"] += 1
