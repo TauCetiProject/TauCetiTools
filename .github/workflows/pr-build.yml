@@ -109,6 +109,9 @@ env:
   MERGE_BACKEND: ${{ vars.MERGE_BACKEND || 'queue' }}
   CI_STATUS_MERGE_BACKEND: ${{ vars.MERGE_BACKEND || 'queue' }}
   IS_BATCH: ${{ github.event_name == 'merge_group' || (github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-source-candidate-v2')) }}
+  # Staging lints the whole library: split that across 4 driver processes, which scale almost
+  # linearly where more threads in one process do not. Only lint-env.sh reads it.
+  LINT_SHARDS: ${{ (github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging') && '4' || '1' }}
   # Temporary escape hatch for `lake exe cache get`, kept only for an easy rollback
   # during the transition to the cache tool's new default read endpoint. Set the
   # variable to `1` to send cache reads back to the legacy storage endpoint. Clear it to
@@ -1627,6 +1630,7 @@ jobs:
             --setenv LINT_DRIVER_EXE "$LINT_DRIVER_DIR/lint-env-driver" \
             --setenv LINT_CHANGED_ONLY "${LINT_CHANGED_ONLY:-0}" \
             --setenv LINT_ONLY_MODULES "${LINT_ONLY_MODULES:-}" \
+            --setenv LINT_SHARDS "${LINT_SHARDS:-1}" \
             --setenv AXIOMS_ONLY_MODULES "${AXIOMS_ONLY_MODULES:-}" \
             --setenv STAGE_LAKE_CACHE "${STAGE_LAKE_CACHE:-}" \
             --setenv IS_BATCH "${IS_BATCH:-}" \
