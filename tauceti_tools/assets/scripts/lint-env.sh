@@ -593,17 +593,30 @@ else
       driver_flags+=(--downstream-unused-arguments "$MODULE_IMPORT_LIST")
     fi
   fi
-  pids=()
-  for ((shard = 0; shard < SHARDS; shard++)); do
-    [ "$SHARDS" -eq 1 ] || driver_flags=(--shard "$shard/$SHARDS")
-    run_driver "$DRIVER_EXE" "${driver_flags[@]}" "$DRIVER" "$TMP/marker.txt" "$LINT_LIST" \
-      $LINTERS > "$TMP/out-$shard.txt" 2>&1 &
-    pids+=($!)
-  done
-  statuses=()
-  for pid in "${pids[@]}"; do
-    if wait "$pid"; then statuses+=(0); else statuses+=($?); fi
-  done
+  if [ "$SHARDS" -eq 1 ]; then
+    if run_driver "$DRIVER_EXE" "${driver_flags[@]}" "$DRIVER" "$TMP/marker.txt" "$LINT_LIST" \
+        $LINTERS > "$TMP/out-0.txt" 2>&1; then
+      statuses=(0)
+    else
+      statuses=($?)
+    fi
+  else
+    # Each shard runs in its own process group (set -m), so an interrupt can stop all of it.
+    pids=()
+    trap 'for pid in "${pids[@]}"; do kill -TERM -- "-$pid" 2>/dev/null || true; done; exit 130' INT TERM
+    set -m
+    for ((shard = 0; shard < SHARDS; shard++)); do
+      run_driver "$DRIVER_EXE" --shard "$shard/$SHARDS" "$DRIVER" "$TMP/marker.txt" "$LINT_LIST" \
+        $LINTERS > "$TMP/out-$shard.txt" 2>&1 &
+      pids+=($!)
+    done
+    set +m
+    statuses=()
+    for pid in "${pids[@]}"; do
+      if wait "$pid"; then statuses+=(0); else statuses+=($?); fi
+    done
+    trap - INT TERM
+  fi
 fi
 for ((shard = 0; shard < ${#statuses[@]}; shard++)); do
   grep -E '^LINT-TIMING ' "$TMP/out-$shard.txt" || true
@@ -748,7 +761,8 @@ parse_report() {
 
 # A sharded run must also print exactly one `LINT-SHARD i/n declarations=<package size>` line in
 # each report region, all with the same package size, and the shards' headers must count exactly
-# that many declarations between them: a shard that linted the wrong set fails here.
+# that many declarations between them. This is a consistency check on the declaration counts; that
+# the shards are disjoint and cover the package comes from `--shard` in scripts/LintEnvDriver.lean.
 lint_counts=
 package_size=
 covered=0
