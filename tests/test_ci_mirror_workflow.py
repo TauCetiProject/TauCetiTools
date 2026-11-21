@@ -233,7 +233,7 @@ class MirrorWorkflow(unittest.TestCase):
         from tauceti_tools.templates import ASSETS
 
         action = yaml.safe_load((ASSETS.parent.parent / ".github/actions/setup/action.yml").read_text())
-        step = next(item for item in action["runs"]["steps"] if item.get("shell") == "bash")
+        step = next(item for item in action["runs"]["steps"] if "ACTION_PATH" in item.get("env", {}))
         self.assertEqual(
             set(step["env"]), {"ACTION_PATH", "PROJECT_DIRECTORY", "SOURCE_MIRROR_ENABLED", "TOOLS_REPOSITORY"}
         )
@@ -242,6 +242,63 @@ class MirrorWorkflow(unittest.TestCase):
         self.assertFalse(any("actions/checkout" in item.get("uses", "") for item in action["runs"]["steps"]))
         self.assertEqual(action["inputs"]["source-mirror-enabled"]["default"], "false")
         subprocess.run(["bash", "-n"], input=step["run"], text=True, check=True)
+        compiler = next(item for item in action["runs"]["steps"] if item.get("name") == "Ensure a system C compiler")
+        self.assertIs(action["runs"]["steps"][0], compiler)
+        self.assertIn("command -v cc", compiler["run"])
+        self.assertIn("sudo -n true", compiler["run"])
+        subprocess.run(["bash", "-n"], input=compiler["run"], text=True, check=True)
+
+    def test_composite_action_installs_a_c_compiler_only_when_missing(self):
+        from tauceti_tools.templates import ASSETS
+
+        action = yaml.safe_load((ASSETS.parent.parent / ".github/actions/setup/action.yml").read_text())
+        script = next(item for item in action["runs"]["steps"] if item.get("name") == "Ensure a system C compiler")["run"]
+        bash = subprocess.run(["sh", "-c", "command -v bash"], capture_output=True, text=True, check=True).stdout.strip()
+
+        def run(directory, system="Linux", compiler=False, apt=True, sudo=True):
+            tools = Path(directory) / "bin"
+            tools.mkdir()
+            log = Path(directory) / "sudo.log"
+            for name in ("sed", "chmod"):
+                found = subprocess.run(["sh", "-c", f"command -v {name}"], capture_output=True, text=True, check=True)
+                (tools / name).symlink_to(found.stdout.strip())
+
+            def tool(name, body):
+                (tools / name).write_text(f"#!{bash}\n{body}\n")
+                (tools / name).chmod(0o755)
+
+            tool("uname", f"echo {system}")
+            if compiler:
+                tool("cc", "echo 'cc 1.0'; echo detail")
+            if apt:
+                tool("apt-get", "true")
+            if sudo:
+                # The fake install provides `cc`, as the real one would.
+                tool("sudo", f'echo "$*" >> {log}\n[ "$2" = true ] && exit 0\n'
+                     f'case "$*" in *install*) printf \'#!{bash}\\necho installed cc\\n\' > {tools}/cc; chmod +x {tools}/cc;; esac')
+            result = subprocess.run([bash, "-c", script], env={"PATH": str(tools)}, capture_output=True, text=True)
+            return result, log.read_text() if log.exists() else ""
+
+        with tempfile.TemporaryDirectory() as directory:
+            result, log = run(directory, compiler=True)
+            self.assertEqual((result.returncode, result.stdout, log), (0, "cc 1.0\n", ""))
+        with tempfile.TemporaryDirectory() as directory:
+            result, log = run(directory)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("installed cc", result.stdout)
+            self.assertIn("apt-get install -y -qq gcc libc6-dev", log)
+        with tempfile.TemporaryDirectory() as directory:
+            result, _ = run(directory, sudo=False)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("::error::", result.stdout)
+            self.assertIn("passwordless sudo", result.stdout)
+        with tempfile.TemporaryDirectory() as directory:
+            result, log = run(directory, system="Darwin", apt=False)
+            self.assertEqual((result.returncode, log), (1, ""))
+            self.assertIn("xcode-select", result.stdout)
+        with tempfile.TemporaryDirectory() as directory:
+            result, log = run(directory, system="Darwin", compiler=True, apt=False)
+            self.assertEqual((result.returncode, log), (0, ""))
 
     def test_docs_analysis_policy_invalidates_old_build_state_but_keeps_pages_cache(self):
         with tempfile.TemporaryDirectory() as directory:
