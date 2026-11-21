@@ -14,6 +14,29 @@ inputs:
 runs:
   using: composite
   steps:
+    # Lake compiles C sources (doc-gen4's leansqlite, MD4Lean and UnicodeBasic, for instance)
+    # with the system `cc`, not the toolchain's bundled clang. GitHub's images and current Fleet
+    # images have one; a Fleet VM from an older base image does not, so install it there.
+    - name: Ensure a system C compiler
+      shell: bash
+      run: |
+        set -euo pipefail
+        if command -v cc >/dev/null 2>&1; then
+          cc --version | sed -n 1p
+          exit 0
+        fi
+        if [ "$(uname -s)" != Linux ] || ! command -v apt-get >/dev/null 2>&1; then
+          echo "::error::no system cc on this $(uname -s) runner, and no apt-get to install one; provide a C compiler in the runner image (on macOS: xcode-select --install)"
+          exit 1
+        fi
+        if ! command -v sudo >/dev/null 2>&1 || ! sudo -n true 2>/dev/null; then
+          echo "::error::no system cc on this runner, and passwordless sudo is unavailable to install gcc; provide a C compiler in the runner image"
+          exit 1
+        fi
+        echo "::notice::no system cc on this runner; installing gcc"
+        sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update -qq
+        sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev
+        cc --version | sed -n 1p
     - shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
