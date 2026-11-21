@@ -88,6 +88,84 @@ class SeriesTest(unittest.TestCase):
 
         self.assertEqual(data, [("2026-06-02", 1), ("2026-06-03", 3)])
 
+    def test_a_late_landing_cannot_rewrite_a_finished_day(self):
+        # The merge queue fast-forwards the mainline to commits it created earlier, so a
+        # held-back batch lands after newer commits but carries its older committer dates.
+        self.commit("2026-11-19T10:00:00+0000",
+                    "2026-11-19T10:00:00+0000", 2)
+        self.commit("2026-11-21T00:04:00+0000",
+                    "2026-11-21T00:04:00+0000", 5)
+        self.commit("2026-11-19T07:30:00+0000",
+                    "2026-11-19T07:30:00+0000", 8)
+        self.commit("2026-11-21T03:00:00+0000",
+                    "2026-11-21T03:00:00+0000", 9)
+
+        data = loc_graph.series(str(self.repo), ["Tracked.lean"], "HEAD",
+                                today=dt.date(2026, 11, 22))
+
+        # Under raw committer dates the 19th would count the 8-line tree that landed on the
+        # 21st, rising above the next day's value; it keeps the tree that had landed by then.
+        self.assertEqual(data, [("2026-11-19", 2), ("2026-11-20", 2),
+                                ("2026-11-21", 9)])
+
+    def test_an_unrelated_newer_commit_still_bounds_a_late_landing(self):
+        self.commit("2026-11-18T10:00:00+0000",
+                    "2026-11-18T10:00:00+0000", 2)
+        (self.repo / "Other.md").write_text("unrelated\n")
+        git(self.repo, "add", "Other.md", env=self.env)
+        env = self.env.copy()
+        env["GIT_AUTHOR_DATE"] = env["GIT_COMMITTER_DATE"] = "2026-11-20T10:00:00+0000"
+        git(self.repo, "commit", "--quiet", "--no-verify", "-m", "unrelated", env=env)
+        self.commit("2026-11-19T10:00:00+0000",
+                    "2026-11-19T10:00:00+0000", 7)
+
+        data = loc_graph.series(str(self.repo), ["Tracked.lean"], "HEAD",
+                                today=dt.date(2026, 11, 21))
+
+        self.assertEqual(data, [("2026-11-18", 2), ("2026-11-19", 2),
+                                ("2026-11-20", 7)])
+
+    def test_a_future_timestamp_does_not_hide_its_descendants(self):
+        self.commit("2026-07-01T10:00:00+0000",
+                    "2026-07-01T10:00:00+0000", 1)
+        self.commit("2099-01-01T10:00:00+0000",
+                    "2099-01-01T10:00:00+0000", 4)
+        self.commit("2026-07-03T10:00:00+0000",
+                    "2026-07-03T10:00:00+0000", 6)
+
+        data = loc_graph.series(str(self.repo), ["Tracked.lean"], "HEAD",
+                                today=dt.date(2026, 7, 4))
+
+        # The 2099 commit can only be bounded by its parent, so it counts from July 1; the
+        # descendant keeps its own date instead of inheriting 2099.
+        self.assertEqual(data, [("2026-07-01", 4), ("2026-07-02", 4),
+                                ("2026-07-03", 6)])
+
+    def test_a_historical_cutoff_keeps_later_commits_out(self):
+        self.commit("2026-07-01T10:00:00+0000",
+                    "2026-07-01T10:00:00+0000", 1)
+        self.commit("2026-07-05T10:00:00+0000",
+                    "2026-07-05T10:00:00+0000", 8)
+
+        data = loc_graph.series(str(self.repo), ["Tracked.lean"], "HEAD",
+                                today=dt.date(2026, 7, 3))
+
+        self.assertEqual(data, [("2026-07-01", 1), ("2026-07-02", 1)])
+
+    def test_clock_skew_today_does_not_date_a_commit_to_yesterday(self):
+        self.commit("2026-07-03T10:00:00+0000",
+                    "2026-07-03T10:00:00+0000", 1)
+        self.commit("2026-07-04T10:01:00+0000",
+                    "2026-07-04T10:01:00+0000", 5)
+        now = int(dt.datetime(2026, 7, 4, 10, 0, tzinfo=dt.timezone.utc).timestamp())
+
+        days = loc_graph.landing_days(str(self.repo), "HEAD", ["Tracked.lean"],
+                                      dt.date(2026, 7, 4), now)
+
+        # The commit stamped a minute ahead of the clock is today's, not part of July 3.
+        parent = loc_graph.git(str(self.repo), "rev-parse", "HEAD~1").strip()
+        self.assertEqual(days, {"2026-07-03": parent})
+
     def test_days_without_commits_carry_the_previous_count(self):
         self.commit("2026-07-11T10:00:00+0000",
                     "2026-07-11T10:00:00+0000", 4)
