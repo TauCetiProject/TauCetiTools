@@ -601,7 +601,9 @@ else
       statuses=($?)
     fi
   else
-    # Each shard runs in its own process group (set -m), so an interrupt can stop all of it.
+    # Each shard runs in its own process group (set -m), so an interrupt can stop all of it. The
+    # watchdog's `timeout` makes a group of its own, which this misses, but it only runs inside
+    # pr-build's bwrap sandbox (--unshare-pid --die-with-parent), whose end kills every process.
     pids=()
     trap 'for pid in "${pids[@]}"; do kill -TERM -- "-$pid" 2>/dev/null || true; done; exit 130' INT TERM
     set -m
