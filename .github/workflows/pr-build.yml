@@ -717,7 +717,9 @@ jobs:
           echo "SCOPE_OK=1" >> "$GITHUB_ENV"
 
       - name: Validate exact source member review sizes
-        timeout-minutes: 5
+        # About 0.3 s per member: batch 465 (1,014 members) took 294 to 311 s. 15 minutes covers about
+        # 3,000 members, three times the largest batch so far.
+        timeout-minutes: 15
         if: ${{ env.SOURCE_CANDIDATE == 'true' && env.INFRA != '1' }}
         env:
           CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
