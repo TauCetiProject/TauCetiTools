@@ -74,19 +74,27 @@ def locations(output, new, modules, root, expected):
     pairs = [line.split(" ", 1) for line in new.splitlines()]
     if len(pairs) > MAX_RECORDS:
         return {"version": 1, "complete": False, "findings": [], "unknown": "record_limit"}
+    # A sharded lint concatenates its shards' outputs; `expected` then lists each shard's count,
+    # and each shard must have printed exactly one envelope, in order.
+    counts = expected if isinstance(expected, list) else [expected]
     records = None
     try:
         envelopes = [line[len(ORIGINS):] for line in output.splitlines()
                      if line.startswith(ORIGINS)]
-        if len(envelopes) != 1 or len(envelopes[0].encode()) > MAX_LINE:
+        if len(envelopes) != len(counts) or any(len(e.encode()) > MAX_LINE for e in envelopes):
             raise ValueError("ambiguous_or_large")
-        envelope = json.loads(envelopes[0], object_pairs_hook=unique_object)
-        records = envelope["records"]
-        if (type(envelope.get("version")) is not int or envelope["version"] != 1
-                or envelope.get("truncated") is not False
-                or type(envelope.get("total")) is not int or envelope["total"] != expected
-                or not isinstance(records, list) or len(records) != expected
-                or len(records) > MAX_RECORDS or not all(isinstance(r, dict) for r in records)):
+        records = []
+        for text, count in zip(envelopes, counts):
+            envelope = json.loads(text, object_pairs_hook=unique_object)
+            part = envelope["records"]
+            if (type(envelope.get("version")) is not int or envelope["version"] != 1
+                    or envelope.get("truncated") is not False
+                    or type(envelope.get("total")) is not int or envelope["total"] != count
+                    or not isinstance(part, list) or len(part) != count
+                    or not all(isinstance(r, dict) for r in part)):
+                raise ValueError("invalid_envelope")
+            records += part
+        if len(records) > MAX_RECORDS:
             records = None
     except (ValueError, KeyError, TypeError):
         records = None
@@ -113,7 +121,8 @@ def main():
     output, new, modules, root, expected = sys.argv[1:]
     try:
         result = locations(Path(output).read_text(), Path(new).read_text(),
-                           Path(modules).read_text(), Path(root), int(expected))
+                           Path(modules).read_text(), Path(root),
+                           [int(count) for count in expected.split(",")])
     except (OSError, UnicodeError, ValueError, TypeError):
         result = {"version": 1, "complete": False, "findings": [], "unknown": "unavailable"}
     print(LOCATIONS + json.dumps(result, ensure_ascii=True, separators=(",", ":")))
