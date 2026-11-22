@@ -115,7 +115,7 @@ test('large inventory filters before statuses and serves compact facts in one pa
   const hydrated=db.prepare('INSERT INTO survey_hydrated VALUES(?,?)');
   for(let i=1;i<=5000;i++) {
    const row={number:i,state:'OPEN',headRefOid:'a'.repeat(40),labels:[{name:'roadmap/'+(i<=20?'PDE':'Topology')}],target_focuses:[]},data=JSON.stringify(row);
-   await resource.run('pr',String(i),'',data,'',Date.now(),0,0);await inventory.run(String(i),data);await member.run('open_prs:{}',String(i));await hydrated.run(String(i),'tauceti-survey-facts/v1:completed-scoreboards');
+   await resource.run('pr',String(i),'',data,'',Date.now(),0,0);await inventory.run(String(i),data);await member.run('open_prs:{}',String(i));await hydrated.run(String(i),'tauceti-survey-facts/v1:completed-scoreboards:queue-recovery');
   }
   let statusReads=0;const rows=state.statusRows.bind(state);state.statusRows=async(...args)=>{statusReads++;return rows(...args);};
   const result=await state.query({repository:'org/repo',operation:'survey',args:{roadmap:'PDE'}});
@@ -583,7 +583,7 @@ test('existing init fragments are rebuilt from cached comments without GitHub re
   await state.maintenance();
   assert.equal(JSON.parse(await state.projectedSurvey('7')).meta.head_sha,'old');
   const marker=(await db.prepare('SELECT contract FROM survey_hydrated WHERE number=?').get('7')).contract;
-  assert.equal(marker,'tauceti-survey-facts/v1:completed-scoreboards');
+  assert.equal(marker,'tauceti-survey-facts/v1:completed-scoreboards:queue-recovery');
   assert.equal((await state.surveyHealth()).contract,'tauceti-survey-facts/v1','public contract remains compatible');
   await state.prepareDiagnostics();
   assert.equal(state.diagnostics.survey.hydrated,1,'prepared health uses the internal index marker');
@@ -832,4 +832,28 @@ test('header priorities progress ahead of active backfills while oldest work ret
   assert.ok(choices.some(key=>key==='open_prs:{}'),'cheap current headers cannot starve behind older active histories');
   assert.ok(choices.some(key=>key.startsWith('issue_comments:')),'continuous priority work cannot starve older histories');
  }finally{await db.close();}
+});
+
+test('cached merge-queue recovery requests are reprojected when the queue becomes a trusted author',async()=>{
+ const {state,db}=await fixture(),oldFetch=globalThis.fetch;
+ globalThis.fetch=async(...args)=>{
+  const url=String(args[0]?.url ?? args[0]);
+  if(new URL(url).hostname==='api.github.com')throw Error('projection migration must not read GitHub');
+  return oldFetch(...args);
+ };
+ try {
+  const head='c'.repeat(40);
+  await state.setMeta('repository',{id:'100',name:'org/repo',installation:'200'});
+  await state.put('pr','8',{number:8,state:'OPEN',headRefOid:head,labels:[{name:'needs-rebase'}]});
+  await state.membership('open_prs:{}','8',true);
+  const body='Merge-queue recovery for head `ccccccc`: this PR conflicts with `main`.\n\n<!--tauceti-rebase:v1 '+head+'-->';
+  await state.put('issue_comments','300',{id:'300',updated_at:'300',user:{login:'tauceti-queue[bot]'},body},Date.now(),false,'8');
+  await state.membership('issue_comments:{"number":8}','300',true);
+  // The previous index discarded the queue's comment as irrelevant and marked the PR hydrated.
+  await db.prepare('DELETE FROM survey_fragments WHERE kind=? AND id=?').run('issue_comments','300');
+  await db.prepare('INSERT INTO survey_hydrated VALUES(?,?) ON CONFLICT(number) DO UPDATE SET contract=excluded.contract').run('8','tauceti-survey-facts/v1:completed-scoreboards');
+  assert.deepEqual(JSON.parse(await state.projectedSurvey('8')).rebase_heads,[]);
+  await state.maintenance();
+  assert.deepEqual(JSON.parse(await state.projectedSurvey('8')).rebase_heads,[head]);
+ }finally{globalThis.fetch=oldFetch;await db.close();}
 });
