@@ -49,6 +49,21 @@ class GateContract(unittest.TestCase):
     def test_complete_current_review_and_all_guards_are_ready(self):
         self.check("ready-to-merge")
 
+    def test_queue_refusal_of_this_head_needs_the_author(self):
+        def request(head=HEAD, login="tauceti-queue[bot]"):
+            return {"user": {"login": login}, "body": f"Merge-queue recovery for head `{head[:7]}`: "
+                    f"this PR conflicts with `main`.\n\n<!--tauceti-rebase:v1 {head}-->\n"}
+        head = "a" * 40
+        pr = dict(PR, head={"sha": head})
+        current = board(head=head)
+        result = readiness.classify(pr, [current, request(head)], STATUSES, PATHS, MERGE_BASE, NOW)
+        self.assertEqual((result["category"], result["eligible"]), ("awaiting-author", False))
+        for others in ([request("b" * 40)], [request(head, login="someone")], [request(head, login="tauceti-queue")]):
+            result = readiness.classify(pr, [current, *others], STATUSES, PATHS, MERGE_BASE, NOW)
+            self.assertEqual(result["category"], "ready-to-merge", others)
+        self.assertEqual(readiness._rest_login({"login": "tauceti-queue", "__typename": "Bot"}), "tauceti-queue[bot]")
+        self.assertEqual(readiness._rest_login({"login": "kim", "__typename": "User"}), "kim")
+
     def test_scope_failure_for_human_files_is_not_ready(self):
         self.check("needs-human-review", statuses=dict(STATUSES, scope="failure"),
                    paths=["web/examples/Examples.lean"])

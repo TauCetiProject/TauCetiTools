@@ -115,6 +115,25 @@ def preliminary(pr):
     return result
 
 
+# The merge queue's GitHub App. Its head-bound recovery requests say it refused this exact head.
+QUEUE_LOGINS = frozenset({"tauceti-queue[bot]"})
+RECOVERY_PREFIX = "Merge-queue recovery for head `"
+
+
+def queue_recovery_requested(comments, head):
+    """Whether the merge queue refused `head` and handed it back for repair.
+
+    Only the queue's own comments count, and only for the current head: a push makes the
+    request stale, and the PR returns to ordinary CI and review."""
+    marker = f"<!--tauceti-rebase:v1 {head}-->"
+    for comment in comments or []:
+        body = comment.get("body") or ""
+        if ((comment.get("user") or {}).get("login") in QUEUE_LOGINS and body.startswith(RECOVERY_PREFIX)
+                and marker in body.splitlines()):
+            return True
+    return False
+
+
 def classify(pr, comments, statuses, paths, merge_base_sha, now=None, self_tested=False, repo=None):
     """Pure evaluation of a fetched PR. Reservations and queue capacity are separate.
 
@@ -135,7 +154,12 @@ def classify(pr, comments, statuses, paths, merge_base_sha, now=None, self_teste
         **({"self_tested": True} if self_tested else {}))
     result["gate"] = verdict
     result["reason"] = verdict["reason"]
-    if verdict["merge"]:
+    if verdict["merge"] and queue_recovery_requested(comments, head):
+        # Every per-PR prerequisite passes, but the queue already refused this head (a conflict
+        # with main, an emptied contribution, a missing source): the author must push a new one.
+        result.update(category="awaiting-author",
+                      reason="The merge queue refused this head and requested a repair; push a new head")
+    elif verdict["merge"]:
         result.update(category="ready-to-merge", eligible=True)
     elif statuses.get("build", "").lower() != "success" and not self_tested:
         result["category"] = ("ci-failed" if statuses.get("build", "").lower()
@@ -205,13 +229,20 @@ def graphql(query, **variables):
     return payload["data"]["repository"]["pullRequest"]
 
 
+def _rest_login(author):
+    """GraphQL names an App `tauceti-queue`; REST and the shared evidence call it `tauceti-queue[bot]`."""
+    author = author or {}
+    login = author.get("login")
+    return login + "[bot]" if login and author.get("__typename") == "Bot" else login
+
+
 def evidence(number, repo, comments=True):
     if core.transport is not None and core.transport.shared_evidence is not None:
         if core.transport.shared_evidence.state.repository != repo:
             raise RuntimeError('Shared evidence repository identity mismatch')
         return core.transport.shared_evidence.read(number, comments=comments, preliminary=preliminary)
     owner, name = repo.split("/", 1)
-    comment_fields = ("comments(first:100, after:$cursor) { nodes { body updatedAt createdAt author { login } } "
+    comment_fields = ("comments(first:100, after:$cursor) { nodes { body updatedAt createdAt author { login __typename } } "
                       "pageInfo { hasNextPage endCursor } }" if comments else "")
     declaration = ", $cursor:String" if comments else ""
     query = ("query($owner:String!, $name:String!, $number:Int!" + declaration + ") { "
@@ -230,7 +261,7 @@ def evidence(number, repo, comments=True):
             raise RuntimeError("PR head moved during comment pagination")
         if not comments:
             break
-        rows.extend({"body": c["body"], "user": {"login": (c.get("author") or {}).get("login")}, "updated_at": c["updatedAt"],
+        rows.extend({"body": c["body"], "user": {"login": _rest_login(c.get("author"))}, "updated_at": c["updatedAt"],
                      "created_at": c["createdAt"]} for c in node["comments"]["nodes"])
         page = node["comments"]["pageInfo"]
         if not page["hasNextPage"]:
