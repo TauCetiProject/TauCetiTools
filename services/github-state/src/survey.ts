@@ -2,7 +2,8 @@ import spec from '../../../tauceti_tools/survey_contract.json';
 
 export const SURVEY_CONTRACT=spec.id;
 // Rebuild derived fragments from cached comments; keep the public wire contract unchanged.
-export const SURVEY_INDEX_VERSION=spec.id+':completed-scoreboards';
+// queue-recovery: rebase_authors gained tauceti-queue[bot], so cached queue comments are reprojected.
+export const SURVEY_INDEX_VERSION=spec.id+':completed-scoreboards:queue-recovery';
 const object=(v:any)=>v!==null && typeof v==='object' && !Array.isArray(v);
 const parse=(text:string)=>{try{return JSON.parse(text);}catch{return null;}};
 const matches=(pattern:string,body:string)=>[...body.matchAll(new RegExp(pattern,'g'))];

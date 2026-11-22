@@ -46,7 +46,7 @@ test('reporting sums cumulative counters from complete cached scoreboard fragmen
   const head='a'.repeat(40),key='issue_comments:{"number":7}';
   await db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?,0)').run('pr','7','',JSON.stringify({number:7,state:'CLOSED',headRefOid:head}),'',123,1);
   await db.prepare('INSERT INTO collections VALUES (?,?,?,?,?,?,?)').run(key,'issue_comments','{"number":7}',1,120,1,null);
-  await db.prepare('INSERT INTO survey_hydrated VALUES (?,?)').run('7','tauceti-survey-facts/v1:completed-scoreboards');
+  await db.prepare('INSERT INTO survey_hydrated VALUES (?,?)').run('7','tauceti-survey-facts/v1:completed-scoreboards:queue-recovery');
   for(const [id,round,sha] of [['101',3,head],['102',2,'old-head']]) {
    await db.prepare('INSERT INTO survey_fragments VALUES (?,?,?,?)').run('issue_comments',id,'7',JSON.stringify({meta:{round,head_sha:sha}}));
    await db.prepare('INSERT INTO members VALUES (?,?)').run(key,id);
@@ -67,7 +67,7 @@ test('cached review counters require a current-head board and valid counters',as
   const key='issue_comments:{"number":7}';
   await db.prepare('INSERT INTO resources VALUES (?,?,?,?,?,?,?,0)').run('pr','7','',JSON.stringify({number:7,state:'OPEN',headRefOid:'new-head'}),'',123,1);
   await db.prepare('INSERT INTO collections VALUES (?,?,?,?,?,?,?)').run(key,'issue_comments','{"number":7}',1,120,1,null);
-  await db.prepare('INSERT INTO survey_hydrated VALUES (?,?)').run('7','tauceti-survey-facts/v1:completed-scoreboards');
+  await db.prepare('INSERT INTO survey_hydrated VALUES (?,?)').run('7','tauceti-survey-facts/v1:completed-scoreboards:queue-recovery');
   await db.prepare('INSERT INTO survey_fragments VALUES (?,?,?,?)').run('issue_comments','101','7',JSON.stringify({meta:{round:3,head_sha:'old-head'}}));
   await db.prepare('INSERT INTO members VALUES (?,?)').run(key,'101');
   assert.equal((await (await query(state,[7])).json()).prs[0].review_passes,null);
