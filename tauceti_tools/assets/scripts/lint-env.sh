@@ -208,6 +208,15 @@ if [ "$CHANGED_ONLY" = 1 ] && [ -z "$ONLY_MODULES" ]; then
   echo 'LINT_CHANGED_ONLY requires LINT_ONLY_MODULES' >&2
   exit 1
 fi
+# LINT_SHARDS=n (opt-in, default 1) splits a whole-library #lint across n driver processes run in
+# parallel. Each imports everything and lints every n-th declaration (`--shard` in
+# scripts/LintEnvDriver.lean), so the verdicts are those of one process. Threads in one process
+# stop helping beyond about 16, but separate processes scale almost linearly. Every shard's report
+# must pass the parser in step 4 on its own, and the shards' declaration counts must add up to the
+# package's. A scoped run is small and ignores LINT_SHARDS.
+SHARDS="${LINT_SHARDS:-1}"
+case "$SHARDS" in [1-9]|[1-9][0-9]) ;; *) echo 'invalid LINT_SHARDS' >&2; exit 1 ;; esac
+[ -z "$ONLY_MODULES" ] || SHARDS=1
 
 # In the required sandboxed build, route this script's two direct `lean`
 # invocations through the same trusted watchdog as `lake build`; they do not go
@@ -231,9 +240,11 @@ TIMEOUT_BIN="$(command -v timeout)" || { echo "lint-env: timeout not found" >&2;
 # The driver's task pool defaults to one thread per core. Beyond about 16 the linter tasks mostly
 # contend in Lean's task manager (16 cores lint the whole library in under three minutes, see
 # scripts/LintEnvDriver.lean, and 80 cores are barely faster), and on a shared many-core host the
-# extra threads starve everything else. So use at most 16; LEAN_NUM_THREADS overrides.
+# extra threads starve everything else. So give each driver process its share of the cores
+# (all of them unless sharded), at most 16; LEAN_NUM_THREADS overrides, per process.
 LINT_CORES="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 16)"
-LINT_THREADS="${LEAN_NUM_THREADS:-$(( LINT_CORES < 16 ? LINT_CORES : 16 ))}"
+SHARD_CORES=$(( LINT_CORES / SHARDS > 1 ? LINT_CORES / SHARDS : 1 ))
+LINT_THREADS="${LEAN_NUM_THREADS:-$(( SHARD_CORES < 16 ? SHARD_CORES : 16 ))}"
 run_driver() {
   if [ -n "${WATCHDOG_TOOLCHAIN:-}" ]; then
     LEAN_NUM_THREADS="$LINT_THREADS" lake env "$TIMEOUT_BIN" --signal=TERM --kill-after=30 3000 "$@"
@@ -572,8 +583,8 @@ if [ "$lint_mods" -eq 0 ]; then
   # below runs unchanged.
   echo "lint-env: no TauCeti module changed; skipping the #lint driver."
   printf -- '-- Found 0 errors in 0 declarations (plus 0 automatically generated ones) in TauCeti with %s linters\n\n\n-- All linting checks passed!\n%s\n' \
-    "$(echo "$LINTERS" | wc -w)" "$MARKER" > "$TMP/out.txt"
-  status=0
+    "$(echo "$LINTERS" | wc -w)" "$MARKER" > "$TMP/out-0.txt"
+  statuses=(0)
 else
   driver_flags=()
   if [ -n "$ONLY_MODULES" ]; then
@@ -582,141 +593,208 @@ else
       driver_flags+=(--downstream-unused-arguments "$MODULE_IMPORT_LIST")
     fi
   fi
-  if run_driver "$DRIVER_EXE" "${driver_flags[@]}" "$DRIVER" "$TMP/marker.txt" "$LINT_LIST" \
-      $LINTERS > "$TMP/out.txt" 2>&1; then
-    status=0
+  if [ "$SHARDS" -eq 1 ]; then
+    if run_driver "$DRIVER_EXE" "${driver_flags[@]}" "$DRIVER" "$TMP/marker.txt" "$LINT_LIST" \
+        $LINTERS > "$TMP/out-0.txt" 2>&1; then
+      statuses=(0)
+    else
+      statuses=($?)
+    fi
   else
-    status=$?
+    # Each shard runs in its own process group (set -m), so an interrupt can stop all of it. The
+    # watchdog's `timeout` makes a group of its own, which this misses, but it only runs inside
+    # pr-build's bwrap sandbox (--unshare-pid --die-with-parent), whose end kills every process.
+    pids=()
+    trap 'for pid in "${pids[@]}"; do kill -TERM -- "-$pid" 2>/dev/null || true; done; exit 130' INT TERM
+    set -m
+    for ((shard = 0; shard < SHARDS; shard++)); do
+      run_driver "$DRIVER_EXE" --shard "$shard/$SHARDS" "$DRIVER" "$TMP/marker.txt" "$LINT_LIST" \
+        $LINTERS > "$TMP/out-$shard.txt" 2>&1 &
+      pids+=($!)
+    done
+    set +m
+    statuses=()
+    for pid in "${pids[@]}"; do
+      if wait "$pid"; then statuses+=(0); else statuses+=($?); fi
+    done
+    trap - INT TERM
   fi
 fi
-grep -E '^LINT-TIMING ' "$TMP/out.txt" || true
-# Echo each linter's completion trace line into the log. Informational only: nothing below reads
-# these lines, and PR code could print look-alikes. Once Batteries reports per-linter cost on them,
-# this is how the CI logs record what each linter costs.
-grep -E '^- [A-Za-z0-9_]+: \(2/2\) ' "$TMP/out.txt" | sed 's/^/lint-env: trace /' || true
+for ((shard = 0; shard < ${#statuses[@]}; shard++)); do
+  grep -E '^LINT-TIMING ' "$TMP/out-$shard.txt" || true
+  # Echo each linter's completion trace line into the log. Informational only: nothing below
+  # reads these lines, and PR code could print look-alikes. Once Batteries reports per-linter
+  # cost on them, this is how the CI logs record what each linter costs.
+  grep -E '^- [A-Za-z0-9_]+: \(2/2\) ' "$TMP/out-$shard.txt" | sed 's/^/lint-env: trace /' || true
+done
 
-# --- 4. locate the linter report and parse it fail-closed -------------------------
-# Two genuine header shapes (see SECURITY MODEL): N > 0 comes as an error diagnostic
-# prefixed with our driver's path; N = 0 comes as a bare info line. Collect both.
-awk -v pfx="$DRIVER:" -v root="$ROOT" '
-  BEGIN { gsub(/[.]/, "[.]", root); hdr = "-- Found [0-9]+ errors? in [0-9]+ declarations \\(plus [0-9]+ automatically generated ones\\) in " root " with [0-9]+ linters$" }
-  {
-    if (index($0, pfx) == 1) {
-      rest = substr($0, length(pfx) + 1)
-      if (rest ~ ("^[0-9]+:[0-9]+: error: " hdr)) { print NR " error " rest; next }
-    }
-    if ($0 ~ ("^" hdr)) print NR " bare " $0
-  }' "$TMP/out.txt" > "$TMP/headers.txt"
+# --- 4. locate each linter report and parse it fail-closed ----------------------
+# parse_report <shard> checks out-<shard>.txt, the output of one driver process, and leaves its
+# violations in violations-lint-<shard>.txt, its report region in report-<shard>.txt and its
+# header counts in hdr_count and hdr_decls.
+parse_report() {
+  local out="$TMP/out-$1.txt" status="${statuses[$1]}" headers="$TMP/headers-$1.txt"
+  local report="$TMP/report-$1.txt" violations="$TMP/violations-lint-$1.txt"
+  # Two genuine header shapes (see SECURITY MODEL): N > 0 comes as an error diagnostic
+  # prefixed with our driver's path; N = 0 comes as a bare info line. Collect both.
+  awk -v pfx="$DRIVER:" -v root="$ROOT" '
+    BEGIN { gsub(/[.]/, "[.]", root); hdr = "-- Found [0-9]+ errors? in [0-9]+ declarations \\(plus [0-9]+ automatically generated ones\\) in " root " with [0-9]+ linters$" }
+    {
+      if (index($0, pfx) == 1) {
+        rest = substr($0, length(pfx) + 1)
+        if (rest ~ ("^[0-9]+:[0-9]+: error: " hdr)) { print NR " error " rest; next }
+      }
+      if ($0 ~ ("^" hdr)) print NR " bare " $0
+    }' "$out" > "$headers"
 
-nheaders=$(wc -l < "$TMP/headers.txt")
-if [ "$nheaders" -ne 1 ]; then
-  cat "$TMP/out.txt"
-  if [ "$nheaders" -eq 0 ]; then
-    fail "driver/linter failure: no lint report header found (lean exit $status) — see output above"
+  nheaders=$(wc -l < "$headers")
+  if [ "$nheaders" -ne 1 ]; then
+    cat "$out"
+    if [ "$nheaders" -eq 0 ]; then
+      fail "driver/linter failure: no lint report header found (lean exit $status) — see output above"
+    fi
+    fail "driver/linter failure: $nheaders report headers found (possible forged report) — see output above"
   fi
-  fail "driver/linter failure: $nheaders report headers found (possible forged report) — see output above"
-fi
 
-hdr_lineno=$(awk '{print $1}' "$TMP/headers.txt")
-hdr_kind=$(awk '{print $2}' "$TMP/headers.txt")
-hdr_count=$(sed -n 's/^.*-- Found \([0-9]*\) errors\{0,1\} in .*/\1/p' "$TMP/headers.txt")
-hdr_nlinters=$(sed -n 's/^.* in [^ ]* with \([0-9]*\) linters$/\1/p' "$TMP/headers.txt")
-[ -n "$hdr_kind" ] && [ -n "$hdr_count" ] && [ -n "$hdr_nlinters" ] \
-  || fail "internal error: could not re-parse the report header"
+  hdr_lineno=$(awk '{print $1}' "$headers")
+  hdr_kind=$(awk '{print $2}' "$headers")
+  hdr_count=$(sed -n 's/^.*-- Found \([0-9]*\) errors\{0,1\} in .*/\1/p' "$headers")
+  hdr_nlinters=$(sed -n 's/^.* in [^ ]* with \([0-9]*\) linters$/\1/p' "$headers")
+  [ -n "$hdr_kind" ] && [ -n "$hdr_count" ] && [ -n "$hdr_nlinters" ] \
+    || fail "internal error: could not re-parse the report header"
 
-# The header's "with K linters" must match the list we asked `#lint only` to run: a
-# report produced by a different linter set (however it arose) is not our report.
-nlinters=$(echo "$LINTERS" | wc -w)
-if [ "$hdr_nlinters" -ne "$nlinters" ]; then
-  cat "$TMP/out.txt"
-  fail "driver/linter failure: report header claims $hdr_nlinters linter(s) but $nlinters were requested"
-fi
+  # The header's "with K linters" must match the list we asked `#lint only` to run: a
+  # report produced by a different linter set (however it arose) is not our report.
+  nlinters=$(echo "$LINTERS" | wc -w)
+  if [ "$hdr_nlinters" -ne "$nlinters" ]; then
+    cat "$out"
+    fail "driver/linter failure: report header claims $hdr_nlinters linter(s) but $nlinters were requested"
+  fi
 
-# The report region: everything after the header. The completion marker must appear
-# there — it is only printed once elaboration gets PAST the `#lint` command.
-tail -n +"$((hdr_lineno + 1))" "$TMP/out.txt" > "$TMP/report.txt"
-if ! grep -qF "$MARKER" "$TMP/report.txt"; then
-  cat "$TMP/out.txt"
-  fail "driver/linter failure: driver did not run to completion (missing nonce marker) — see output above"
-fi
+  # The report region: everything after the header. The completion marker must appear
+  # there — it is only printed once elaboration gets PAST the `#lint` command.
+  tail -n +"$((hdr_lineno + 1))" "$out" > "$report"
+  if ! grep -qF "$MARKER" "$report"; then
+    cat "$out"
+    fail "driver/linter failure: driver did not run to completion (missing nonce marker) — see output above"
+  fi
 
-# Exit code, header kind, and count must agree: violations mean an anchored error
-# header AND a nonzero exit; a clean lint means a bare header with N = 0 AND exit 0.
-case "$hdr_kind:$status" in
-  error:0) cat "$TMP/out.txt"; fail "driver/linter failure: lint reported errors but lean exited 0" ;;
-  bare:0)  if [ "$hdr_count" -ne 0 ]; then
-             cat "$TMP/out.txt"
-             fail "driver/linter failure: unprefixed report claims $hdr_count violation(s)"
-           fi ;;
-  error:*) [ "$hdr_count" -gt 0 ] || { cat "$TMP/out.txt"; fail "driver/linter failure: error report with count 0"; } ;;
-  bare:*)  cat "$TMP/out.txt"
-           fail "driver/linter failure: lean exited $status but the lint itself reported no violations — some other error occurred; see output above" ;;
-esac
-
-# One `#check <decl> /- <reason> -/` block per violation (with or without a leading
-# `@`, depending on the declaration's binders), grouped into per-linter sections that
-# open with a "/- The `<linter>` linter reports:" line — parsed ONLY from the report
-# region, by a block-aware state machine. A `#check` block starts at `^#check ` and
-# runs to the first line ending in `-/` (possibly the same line); everything inside a
-# block is comment CONTENT, never structure, so a violation message that happens to
-# contain a section-opener-shaped or `#check`-shaped line (linter messages embed
-# attacker-chosen declaration names and types) cannot open a section or a block.
-# Section openers are accepted only OUTSIDE blocks, must name a linter from the
-# expected `$LINTERS` set (docBlame does not run — see the header comment — so a
-# docBlame opener, like any other unexpected name, is structural forgery), and each
-# section may open at most once, so real violations cannot be re-attributed to a
-# section opened by forged content (a declaration may legitimately sit under TWO
-# linters in the baseline, so re-attribution could otherwise dodge it). Every block
-# must close before the next one opens, must fall inside a section, and the block
-# count must equal N from the header. Any violation of this grammar is a distinct
-# driver failure, never a pass.
-set +e
-LC_ALL=C awk -v expected="$LINTERS" '
-  BEGIN {
-    n = split(expected, a, " ")
-    for (i = 1; i <= n; i++) ok[a[i]] = 1
-  }
-  inblock {
-    if ($0 ~ /^#check /) { code = 4; exit code }  # block did not close before the next #check
-    if ($0 ~ /-\/[[:space:]]*$/) inblock = 0      # closing -/ ends the block
-    next                                          # inside a block, everything is content
-  }
-  /^\/- The `.*` linter reports:/ {
-    l = $0; sub(/^\/- The `/, "", l); sub(/` linter reports:.*$/, "", l)
-    if (!(l in ok)) { code = 5; exit code }       # section name outside the expected set
-    if (l in seen)  { code = 6; exit code }       # duplicate section opening
-    seen[l] = 1; linter = l
-    next
-  }
-  /^#check / {
-    if (linter == "") { code = 3; exit code }     # a violation before any section opener
-    name = $2; sub(/^@/, "", name)
-    print linter " " name
-    if ($0 !~ /-\/[[:space:]]*$/) inblock = 1
-    next
-  }
-  END {
-    if (code) exit code
-    if (inblock) exit 7                           # unterminated #check block at end of report
-  }
-' "$TMP/report.txt" > "$TMP/violations-lint.txt"
-parse_rc=$?
-set -e
-if [ "$parse_rc" -ne 0 ]; then
-  cat "$TMP/out.txt"
-  case "$parse_rc" in
-    3) fail "driver/linter failure: a #check block appeared before any linter section" ;;
-    4) fail "driver/linter failure: a #check block opened before the previous one closed" ;;
-    5) fail "driver/linter failure: a report section names a linter outside the expected set (possible forged section opener)" ;;
-    6) fail "driver/linter failure: a linter section was opened twice (possible forged section opener)" ;;
-    7) fail "driver/linter failure: unterminated #check block at the end of the report" ;;
-    *) fail "driver/linter failure: report parsing failed (awk exit $parse_rc)" ;;
+  # Exit code, header kind, and count must agree: violations mean an anchored error
+  # header AND a nonzero exit; a clean lint means a bare header with N = 0 AND exit 0.
+  case "$hdr_kind:$status" in
+    error:0) cat "$out"; fail "driver/linter failure: lint reported errors but lean exited 0" ;;
+    bare:0)  if [ "$hdr_count" -ne 0 ]; then
+               cat "$out"
+               fail "driver/linter failure: unprefixed report claims $hdr_count violation(s)"
+             fi ;;
+    error:*) [ "$hdr_count" -gt 0 ] || { cat "$out"; fail "driver/linter failure: error report with count 0"; } ;;
+    bare:*)  cat "$out"
+             fail "driver/linter failure: lean exited $status but the lint itself reported no violations — some other error occurred; see output above" ;;
   esac
-fi
-nchecks=$(wc -l < "$TMP/violations-lint.txt")
-if [ "${nchecks:-0}" -ne "$hdr_count" ]; then
-  cat "$TMP/out.txt"
-  fail "driver/linter failure: header claims $hdr_count violation(s) but $nchecks #check block(s) parsed"
+
+  # One `#check <decl> /- <reason> -/` block per violation (with or without a leading
+  # `@`, depending on the declaration's binders), grouped into per-linter sections that
+  # open with a "/- The `<linter>` linter reports:" line — parsed ONLY from the report
+  # region, by a block-aware state machine. A `#check` block starts at `^#check ` and
+  # runs to the first line ending in `-/` (possibly the same line); everything inside a
+  # block is comment CONTENT, never structure, so a violation message that happens to
+  # contain a section-opener-shaped or `#check`-shaped line (linter messages embed
+  # attacker-chosen declaration names and types) cannot open a section or a block.
+  # Section openers are accepted only OUTSIDE blocks, must name a linter from the
+  # expected `$LINTERS` set (docBlame does not run — see the header comment — so a
+  # docBlame opener, like any other unexpected name, is structural forgery), and each
+  # section may open at most once, so real violations cannot be re-attributed to a
+  # section opened by forged content (a declaration may legitimately sit under TWO
+  # linters in the baseline, so re-attribution could otherwise dodge it). Every block
+  # must close before the next one opens, must fall inside a section, and the block
+  # count must equal N from the header. Any violation of this grammar is a distinct
+  # driver failure, never a pass.
+  set +e
+  LC_ALL=C awk -v expected="$LINTERS" '
+    BEGIN {
+      n = split(expected, a, " ")
+      for (i = 1; i <= n; i++) ok[a[i]] = 1
+    }
+    inblock {
+      if ($0 ~ /^#check /) { code = 4; exit code }  # block did not close before the next #check
+      if ($0 ~ /-\/[[:space:]]*$/) inblock = 0      # closing -/ ends the block
+      next                                          # inside a block, everything is content
+    }
+    /^\/- The `.*` linter reports:/ {
+      l = $0; sub(/^\/- The `/, "", l); sub(/` linter reports:.*$/, "", l)
+      if (!(l in ok)) { code = 5; exit code }       # section name outside the expected set
+      if (l in seen)  { code = 6; exit code }       # duplicate section opening
+      seen[l] = 1; linter = l
+      next
+    }
+    /^#check / {
+      if (linter == "") { code = 3; exit code }     # a violation before any section opener
+      name = $2; sub(/^@/, "", name)
+      print linter " " name
+      if ($0 !~ /-\/[[:space:]]*$/) inblock = 1
+      next
+    }
+    END {
+      if (code) exit code
+      if (inblock) exit 7                           # unterminated #check block at end of report
+    }
+  ' "$report" > "$violations"
+  parse_rc=$?
+  set -e
+  if [ "$parse_rc" -ne 0 ]; then
+    cat "$out"
+    case "$parse_rc" in
+      3) fail "driver/linter failure: a #check block appeared before any linter section" ;;
+      4) fail "driver/linter failure: a #check block opened before the previous one closed" ;;
+      5) fail "driver/linter failure: a report section names a linter outside the expected set (possible forged section opener)" ;;
+      6) fail "driver/linter failure: a linter section was opened twice (possible forged section opener)" ;;
+      7) fail "driver/linter failure: unterminated #check block at the end of the report" ;;
+      *) fail "driver/linter failure: report parsing failed (awk exit $parse_rc)" ;;
+    esac
+  fi
+  nchecks=$(wc -l < "$violations")
+  if [ "${nchecks:-0}" -ne "$hdr_count" ]; then
+    cat "$out"
+    fail "driver/linter failure: header claims $hdr_count violation(s) but $nchecks #check block(s) parsed"
+  fi
+  hdr_decls=$(sed -n 's/^.* in \([0-9]*\) declarations (plus \([0-9]*\) automatically .*/\1 \2/p' "$headers")
+  hdr_decls=$(( 10#${hdr_decls% *} + 10#${hdr_decls#* } ))
+}
+
+# A sharded run must also print exactly one `LINT-SHARD i/n declarations=<package size>` line in
+# each report region, all with the same package size, and the shards' headers must count exactly
+# that many declarations between them. This is a consistency check on the declaration counts; that
+# the shards are disjoint and cover the package comes from `--shard` in scripts/LintEnvDriver.lean.
+lint_counts=
+package_size=
+covered=0
+: > "$TMP/violations-lint.txt"
+: > "$TMP/report.txt"
+: > "$TMP/out.txt"
+for ((shard = 0; shard < ${#statuses[@]}; shard++)); do
+  parse_report "$shard"
+  if [ "$SHARDS" -gt 1 ]; then
+    coverage="^LINT-SHARD $shard/$SHARDS declarations=[0-9]+\$"
+    nlines=$(grep -cE "$coverage" "$TMP/report-$shard.txt" || true)
+    if [ "${nlines:-0}" -ne 1 ]; then
+      cat "$TMP/out-$shard.txt"
+      fail "driver/linter failure: shard $shard/$SHARDS printed ${nlines:-0} coverage lines, not 1"
+    fi
+    size=$(grep -E "$coverage" "$TMP/report-$shard.txt" | sed 's/.*=//')
+    [ -n "$package_size" ] || package_size=$size
+    [ "$size" = "$package_size" ] \
+      || fail "driver/linter failure: shards disagree on the package size ($size, $package_size)"
+    covered=$((covered + hdr_decls))
+  fi
+  lint_counts="${lint_counts:+$lint_counts,}$hdr_count"
+  cat "$TMP/violations-lint-$shard.txt" >> "$TMP/violations-lint.txt"
+  cat "$TMP/report-$shard.txt" >> "$TMP/report.txt"
+  cat "$TMP/out-$shard.txt" >> "$TMP/out.txt"
+done
+if [ "$SHARDS" -gt 1 ]; then
+  [ "$covered" -eq "$(( 10#$package_size ))" ] \
+    || fail "driver/linter failure: the $SHARDS shards linted $covered declarations, not the package's $package_size"
+  echo "lint-env: $SHARDS shards linted $covered declarations between them."
 fi
 
 # --- 5. combine, then --update or compare against the grandfathered baseline ------
@@ -758,7 +836,7 @@ if [ -s "$TMP/new.txt" ]; then
   # Retry hints only, emitted after all existing report/nonce/ratchet validation.
   # Optional metadata never changes the audit's verdict. Unknowns retain fallback.
   python3 "$TRUSTED_SCRIPTS/lint_env_locations.py" "$TMP/out.txt" "$TMP/new.txt" \
-    "$MODULE_IMPORT_LIST" "$PROJECT_ROOT" "$hdr_count" || true
+    "$MODULE_IMPORT_LIST" "$PROJECT_ROOT" "$lint_counts" || true
   echo
   echo "lint-env: NEW violation(s) not in the grandfathered baseline (as '<linter> <declaration>'):"
   awk 'NR==FNR { want[$0]=1; next }

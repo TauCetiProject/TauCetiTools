@@ -237,6 +237,16 @@ class GitHistory(unittest.TestCase):
         self.assertEqual(rows[-1]["date"], "2026-07-04")
         self.assertEqual(rows[-1]["completed_layers"], 2)
 
+    def test_a_late_landing_report_counts_from_its_landing_day(self):
+        self.commit(1)
+        (self.area / "NOTES.md").write_text("Reference notes.\n")
+        self.commit(4)
+        # Committed on day 2 but landed after the day-4 commit, as a held-back queue batch does.
+        (self.area / "STATUS.md").write_text(report(states=("done", "done")))
+        self.commit(2)
+        rows, _ = completion.history(self.repo, "HEAD", dt.date(2026, 7, 6))
+        self.assertEqual([r["completed_layers"] for r in rows], [0, 0, 0, 2, 2])
+
     def test_generated_assets_are_valid_xml_and_machine_readable(self):
         self.commit(1)
         (self.area / "STATUS.md").write_text(report())
