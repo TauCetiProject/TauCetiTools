@@ -695,6 +695,79 @@ class InterruptedBuildTests(unittest.TestCase):
             self.assertEqual(json.loads(report.read_text())["heads"], [])
 
 
+class OldCutOffBuildTests(unittest.TestCase):
+    """A build cut off before the listing window (a label event's skip dispatch cancels it) is read directly."""
+
+    def setUp(self):
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.report = Path(temporary.name) / "stuck.json"
+
+    def recover(self, api, **kwargs):
+        return recovery.recover(api, "owner/project", now=NOW, cleanup=False, stuck_report=self.report, **kwargs)
+
+    @staticmethod
+    def head(description=recovery.CUT_OFF_DESCRIPTION):
+        item = pull(state="FAILURE")
+        item["commits"]["nodes"][0]["commit"]["status"]["contexts"][0]["description"] = description
+        return item
+
+    def test_an_old_cut_off_build_outside_the_listing_is_retried_once(self):
+        old = cancelled(created_at="2026-10-20T11:00:00Z", run_started_at="2026-10-20T11:00:00Z")
+        api = Interrupted([self.head()], jobs={30: [TIMED_OUT]})
+        api.request = lambda method, path, data=None, original=api.request: (
+            old if path == "repos/owner/project/actions/runs/30" else original(method, path, data))
+        selected = self.recover(api, apply=True)
+        self.assertEqual([s["retry_of_interrupted"] for s in selected], [30])
+        self.assertEqual(dispatches(api), ["1"])
+        self.assertEqual(self.recover(api, apply=True), [])  # the retry is spent
+        self.assertEqual(dispatches(api), ["1"])
+
+    def test_an_old_real_failure_costs_no_run_read(self):
+        api = Interrupted([self.head("sandboxed build, audit, or simp-NF lint failed")], jobs={30: [TIMED_OUT]})
+        self.assertEqual(self.recover(api, apply=True), [])
+        self.assertFalse(any(path.endswith("/actions/runs/30") for path in api.paths))
+
+    def old_api(self, **changes):
+        old = cancelled(created_at="2026-10-20T11:00:00Z", run_started_at="2026-10-20T11:00:00Z", **changes)
+        api = Interrupted([self.head()], jobs={30: [dict(TIMED_OUT, run_attempt=changes.get("run_attempt", 1))]})
+        original = api.request
+
+        def request(method, path, data=None):
+            if path == "repos/owner/project/actions/runs/30":
+                api.paths.append(path)
+                return old
+            return original(method, path, data)
+
+        api.request = request
+        return api
+
+    def test_an_old_dispatched_or_rerun_cut_off_build_is_reported_not_retried(self):
+        for changes in (dict(event="workflow_dispatch"), dict(run_attempt=2), dict(id=31)):
+            with self.subTest(changes=changes):
+                api = self.old_api(**changes)
+                self.assertEqual(self.recover(api, apply=True), [])
+                self.assertEqual(api.writes, [])
+
+    def test_the_run_read_spending_the_budget_leaves_the_jobs_read_for_the_next_pass(self):
+        api = self.old_api()
+        calls = []
+        def reserved(*args):
+            calls.append(1)
+            return bool(api.paths) and api.paths[-1] == "repos/owner/project/actions/runs/30"
+        with patch.object(recovery, "quota_reserved", side_effect=reserved):
+            retry, exhausted, complete = recovery.interrupted_heads(api, "owner/project", api.pulls, NOW, {})
+        self.assertEqual((retry, exhausted, complete), ([], {}, False))
+        self.assertFalse(any("/jobs?" in path for path in api.paths))
+
+    def test_an_old_cut_off_run_that_never_acquired_a_build_is_not_retried(self):
+        old = cancelled(created_at="2026-10-20T11:00:00Z")
+        api = Interrupted([self.head()], jobs={30: []})
+        api.request = lambda method, path, data=None, original=api.request: (
+            old if path == "repos/owner/project/actions/runs/30" else original(method, path, data))
+        self.assertEqual(self.recover(api, apply=True), [])
+
+
 class StuckHeadTests(unittest.TestCase):
     def stuck(self, pulls, live=()):
         return recovery.stuck_heads(pulls, list(live), {}, NOW)

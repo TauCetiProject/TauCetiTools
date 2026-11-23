@@ -26,7 +26,7 @@ query($owner: String!, $name: String!, $after: String) {
       nodes {
         number headRefOid headRefName isDraft updatedAt createdAt author { login } headRepository { nameWithOwner }
         labels(first: 100) { nodes { name } }
-        commits(last: 1) { nodes { commit { oid committedDate status { contexts { context state targetUrl createdAt } } } } }
+        commits(last: 1) { nodes { commit { oid committedDate status { contexts { context state targetUrl createdAt description } } } } }
       }
       pageInfo { hasNextPage endCursor }
     }
@@ -278,6 +278,10 @@ def cancelled_before_build(api, repo, run):
     )
 
 
+# The `build` description PR CI's report step posts when its build was cut off before the tested
+# head was recorded (pr-build.yml). A label event's `skip_build` dispatch cancels an in-flight build
+# through the per-PR concurrency group this way, so such a head can wait any length of time.
+CUT_OFF_DESCRIPTION = "build not run — tested H/B/T identity missing or invalid"
 # How far back the hourly pass lists cancelled runs. Every interruption is seen by many passes
 # within it; the report's memory keeps what an earlier pass learned about a head after that.
 INTERRUPTED_WINDOW = 2 * 86400
@@ -336,27 +340,55 @@ def interrupted_heads(api, repo, observed, now, memory, api_reserve=0, api_budge
     if quota_reserved(api, api_reserve, api_budget):
         return [], exhausted, False
     since = dt.datetime.fromtimestamp(now - INTERRUPTED_WINDOW, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    retry, complete = [], True
-    # Lazily paginated: the budget is checked before each further page or jobs read.
-    for run in runs(api, repo, f"status=cancelled&created=%3E%3D{since}", include_ignored=True):
-        if quota_reserved(api, api_reserve, api_budget):
-            complete = False
-            break
-        if run["id"] not in candidates:
-            continue
+    retry, complete, listed = [], True, set()
+
+    def classify(run):
+        nonlocal complete
         try:
             if not interrupted(api, repo, run):
-                continue
+                return
         except APIError as error:
             print(f"ci-recovery: run {run['id']}: {error}", file=sys.stderr)
             complete = False
-            continue
+            return
         for pull in candidates[run["id"]]:
             if retried(run):
                 exhausted[pull["number"]] = run["id"]
             else:
                 retry.append(dict(pull, interrupted=run))
+
+    # Lazily paginated: the budget is checked before each further page or jobs read.
+    for run in runs(api, repo, f"status=cancelled&created=%3E%3D{since}", include_ignored=True):
+        if quota_reserved(api, api_reserve, api_budget):
+            return retry, exhausted, False
+        listed.add(run["id"])
+        if run["id"] in candidates:
+            classify(run)
+    # A head whose build was cut off before the listing window still owes its one retry: read its
+    # run directly. Only the cut-off description qualifies, so real failures cost nothing here.
+    for run_id, pulls in candidates.items():
+        if run_id in listed or not any(cut_off_build(p) for p in pulls):
+            continue
+        if quota_reserved(api, api_reserve, api_budget):
+            return retry, exhausted, False
+        try:
+            run = api.request("GET", f"repos/{repo}/actions/runs/{run_id}")
+        except APIError as error:
+            print(f"ci-recovery: run {run_id}: {error}", file=sys.stderr)
+            complete = False
+            continue
+        if not isinstance(run, dict) or run.get("id") != run_id:
+            continue
+        if quota_reserved(api, api_reserve, api_budget):
+            return retry, exhausted, False  # Its jobs read waits for the next pass.
+        classify(run)
     return retry, exhausted, complete
+
+
+def cut_off_build(pull):
+    """Whether the head's failing `build` status is PR CI's report of a build cut off mid-run."""
+    row = build_status(pull["commits"]["nodes"][-1]["commit"]) or {}
+    return row.get("state", "").lower() == "failure" and (row.get("description") or "").startswith(CUT_OFF_DESCRIPTION)
 
 
 def last_push(pull):
