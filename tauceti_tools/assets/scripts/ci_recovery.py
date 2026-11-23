@@ -13,6 +13,7 @@ from pathlib import Path
 
 from github_api import APIError, Deferred, GitHub
 from pr_ci_lifecycle import ACTIVE, ordinary, pr_numbers, reconcile, reserved, runs
+from tauceti_tools.self_tested import BUMP_BRANCH, team
 
 INVENTORY = """
 query($owner: String!, $name: String!, $after: String) {
@@ -22,7 +23,7 @@ query($owner: String!, $name: String!, $after: String) {
     pullRequests(states: OPEN, first: 100, after: $after,
                  orderBy: {field: CREATED_AT, direction: ASC}) {
       nodes {
-        number headRefOid isDraft updatedAt createdAt
+        number headRefOid headRefName isDraft updatedAt createdAt author { login }
         labels(first: 100) { nodes { name } }
         commits(last: 1) { nodes { commit { oid committedDate status { contexts { context state targetUrl createdAt } } } } }
       }
@@ -36,7 +37,7 @@ CURRENT = """
 query($owner: String!, $name: String!, $pr: Int!, $head: GitObjectID!) {
   rateLimit { cost }
   repository(owner: $owner, name: $name) {
-    pullRequest(number: $pr) { state isDraft headRefOid labels(first: 100) { nodes { name } } }
+    pullRequest(number: $pr) { state isDraft headRefOid headRefName author { login } labels(first: 100) { nodes { name } } }
     object(oid: $head) { ... on Commit { status { contexts { context state targetUrl } } } }
   }
 }
@@ -51,11 +52,51 @@ def labels(pull):
     return {label["name"].lower() for label in (pull.get("labels") or {}).get("nodes", [])}
 
 
-def self_tested(pull):
-    # The existing PR assessment owns the routing label. Do not cancel a
-    # label-event run or dispatch a build while it makes that decision.
+def self_tested(pull, members=None):
+    """Whether the `self-tested` label routes this PR around PR CI.
+
+    The existing PR assessment owns the routing label. Do not cancel a
+    label-event run or dispatch a build while it makes that decision.
+    The label alone skips PR CI, but readiness and admission honour it only from
+    a member of the self-tested team. With `members` known, a non-member's
+    labelled PR is an ordinary PR here, so its head gets a build instead of
+    waiting at awaiting-CI forever. Automatic bumps are judged by their
+    labeller, not their author, and keep the label's route.
+    """
     names = labels(pull)
-    return "self-tested" in names and not names & {"full-lint", "lint-repair"}
+    if "self-tested" not in names or names & {"full-lint", "lint-repair"}:
+        return False
+    if members is None or str(pull.get("headRefName") or "").startswith(BUMP_BRANCH):
+        return True
+    return str((pull.get("author") or {}).get("login") or "").lower() in members
+
+
+def team_members(api, repo):
+    """The self-tested team's logins (lowercase), or None when this credential cannot list them.
+
+    Only a complete listing counts. The workflow token cannot read teams; then every labelled
+    PR keeps the label's route, as before.
+    """
+    configured = team(repo)
+    if not configured or "/" not in configured:
+        return None
+    org, slug = configured.split("/", 1)
+    members, page = set(), 1
+    try:
+        while True:
+            rows = api.request("GET", f"orgs/{org}/teams/{slug}/members?per_page=100&page={page}")
+            if not isinstance(rows, list):
+                raise ValueError("team member listing is not a list")
+            members.update(str((row or {}).get("login") or "").lower() for row in rows)
+            if len(rows) < 100:
+                break
+            page += 1
+    except (APIError, RuntimeError, ValueError, TypeError, AttributeError) as error:
+        print(f"ci-recovery: {configured} members unavailable ({type(error).__name__}); "
+              "every self-tested label keeps its route", file=sys.stderr)
+        return None
+    members.discard("")
+    return members or None
 
 
 def build_status(commit):
@@ -68,8 +109,8 @@ def build_status(commit):
     )
 
 
-def has_preflight(pull, commit):
-    return build_status(commit) is not None or self_tested(pull)
+def has_preflight(pull, commit, members=None):
+    return build_status(commit) is not None or self_tested(pull, members)
 
 
 def status_run(row):
@@ -92,7 +133,7 @@ def verdict(pull):
     return None if run_id is None else dict(head=pull["headRefOid"], run=run_id, posted=build_status(commit).get("createdAt"))
 
 
-def inventory(api, repo, observed=None):
+def inventory(api, repo, observed=None, members=None):
     """Non-draft PRs needing a build; `observed` also collects every consistent non-draft head."""
     owner, name = repo.split("/")
     after, pulls = None, []
@@ -103,7 +144,7 @@ def inventory(api, repo, observed=None):
             commit = pull["commits"]["nodes"][-1]["commit"]
             if pull["isDraft"]:
                 continue
-            if commit["oid"] != pull["headRefOid"] or not has_preflight(pull, commit):
+            if commit["oid"] != pull["headRefOid"] or not has_preflight(pull, commit, members):
                 pulls.append(pull)
             if observed is not None and commit["oid"] == pull["headRefOid"]:
                 observed.append(pull)
@@ -123,7 +164,7 @@ def matches(run, number, head):
     return number in pr_numbers(run) or run["head_sha"] == head
 
 
-def still_missing(api, repo, number, head, interrupted=None):
+def still_missing(api, repo, number, head, interrupted=None, members=None):
     """The head still lacks a build, or (`interrupted`: a run id) its verdict is still that run's failure."""
     owner, name = repo.split("/")
     data = api.graphql(CURRENT, dict(owner=owner, name=name, pr=number, head=head))["repository"]
@@ -131,8 +172,8 @@ def still_missing(api, repo, number, head, interrupted=None):
     if not (pull and commit and pull["state"] == "OPEN" and not pull["isDraft"] and pull["headRefOid"] == head):
         return False
     if interrupted is not None:
-        return not self_tested({**pull, "number": number}) and failed_run(commit) == interrupted
-    return not has_preflight({**pull, "number": number}, commit)
+        return not self_tested({**pull, "number": number}, members) and failed_run(commit) == interrupted
+    return not has_preflight({**pull, "number": number}, commit, members)
 
 
 def quota_reserved(api, reserve, budget=0):
@@ -254,7 +295,7 @@ def retried(run):
     return run.get("event") != "pull_request_target" or (run.get("run_attempt") or 1) > 1
 
 
-def interrupted_heads(api, repo, observed, now, memory, api_reserve=0, api_budget=0):
+def interrupted_heads(api, repo, observed, now, memory, api_reserve=0, api_budget=0, members=None):
     """Split the open heads whose current `build` failure is an interrupted run into those owed one
     automatic retry and those whose retry is spent. Also report whether every candidate was
     classified before the pass budget ran out.
@@ -267,7 +308,7 @@ def interrupted_heads(api, repo, observed, now, memory, api_reserve=0, api_budge
     candidates, exhausted = {}, {}
     for pull in observed:
         run_id = failed_run(pull["commits"]["nodes"][-1]["commit"])
-        if run_id is None or self_tested(pull):
+        if run_id is None or self_tested(pull, members):
             continue
         key, current = str(pull["number"]), verdict(pull)
         known = [memory.get(kind, {}).get(key) or {} for kind in ("retried", "exhausted")]
@@ -316,14 +357,14 @@ def last_push(pull):
     return max(times, default=None)
 
 
-def stuck_heads(observed, active, exhausted, now):
+def stuck_heads(observed, active, exhausted, now, members=None):
     """Open heads that, three hours after their last push, have neither CI nor a final state: no live
     pr-build, and no `build` status or an interrupted build whose one retry is spent."""
     heads = []
     for pull in observed:
         number, head = pull["number"], pull["headRefOid"]
         pushed = last_push(pull)
-        if self_tested(pull) or labels(pull) & FINAL_LABELS or pushed is None or now - pushed < STUCK_AFTER:
+        if self_tested(pull, members) or labels(pull) & FINAL_LABELS or pushed is None or now - pushed < STUCK_AFTER:
             continue
         if any(run.get("status") in ACTIVE and matches(run, number, head) for run in active):
             continue
@@ -417,7 +458,8 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
             stuck_report=None):
     now = dt.datetime.now(dt.timezone.utc).timestamp() if now is None else now
     observed = []
-    branch, pulls = inventory(api, repo, observed)
+    members = team_members(api, repo)
+    branch, pulls = inventory(api, repo, observed, members)
 
     abandoned, attempted = {}, set()
 
@@ -482,9 +524,9 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
     # has had no CI for three hours, is reported (before any dispatch can fail the pass).
     previous = read_stuck_report(stuck_report, repo) if stuck_report else {}
     retry, exhausted, complete = interrupted_heads(
-        api, repo, observed, now, previous.get("memory") or {}, api_reserve, api_budget
+        api, repo, observed, now, previous.get("memory") or {}, api_reserve, api_budget, members
     )
-    heads = stuck_heads(observed, active, exhausted, now)
+    heads = stuck_heads(observed, active, exhausted, now, members)
     report_stuck(heads, now)
     retries = []
     if stuck_report:
@@ -523,7 +565,7 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
                     continue
             # Recheck immediately before dispatch. Closed PRs, moved heads and
             # results arriving during the inventory must never trigger a retry.
-            if not still_missing(api, repo, number, head, cut_off):
+            if not still_missing(api, repo, number, head, cut_off, members):
                 continue
             if apply:
                 # Refresh this immutable head, and known manual attempts that
@@ -539,7 +581,7 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
                 if any(run.get("status") in ACTIVE and matches(run, number, head) and blocking(run, fresh=True)
                        for run in fresh):
                     continue
-            if apply and not still_missing(api, repo, number, head, cut_off):
+            if apply and not still_missing(api, repo, number, head, cut_off, members):
                 continue
         except APIError as error:
             # One inaccessible/deleted PR must not strand the other candidates.
