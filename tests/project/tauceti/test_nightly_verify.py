@@ -20,6 +20,8 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = yaml.safe_load((ROOT / '.github/workflows/nightly-verify.yml').read_text())
 JOBS = WORKFLOW['jobs']
+# The triggers, the main-only admission and the concurrency group live in the caller.
+SCHEDULE = yaml.safe_load((ROOT / '.github/workflows/nightly-verify-schedule.yml').read_text())
 
 
 def step(job, name):
@@ -68,12 +70,16 @@ class NightlyVerification(unittest.TestCase):
         })
         self.assertGreater(JOBS['verify']['timeout-minutes'], 360)
         self.assertNotIn('needs', JOBS['verify'])
-        self.assertFalse(WORKFLOW['concurrency']['cancel-in-progress'])
+        caller = SCHEDULE['jobs']['run']
+        self.assertEqual(caller['uses'], './.github/workflows/nightly-verify.yml')
+        self.assertIn("'nightly-verify'", caller['concurrency']['group'])
+        self.assertFalse(caller['concurrency']['cancel-in-progress'])
+        self.assertNotIn('concurrency', WORKFLOW)
         self.assertEqual(JOBS['reference']['timeout-minutes'], 240)
         self.assertIn('verify', JOBS['reference']['needs'])
         for s in JOBS['reference']['steps']:
             if s.get('uses', '').startswith('actions/checkout@'):
-                self.assertEqual(s['with']['ref'], '${{ needs.verify.outputs.sha }}')
+                self.assertEqual(s['with']['ref'], '${{ github.sha }}')
                 self.assertFalse(s['with']['persist-credentials'])
         steps = JOBS['verify']['steps']
         snapshot = step('verify', 'Record what the clean build produced')
