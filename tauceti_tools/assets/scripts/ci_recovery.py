@@ -377,8 +377,11 @@ def interrupted_heads(api, repo, observed, now, memory, api_reserve=0, api_budge
             print(f"ci-recovery: run {run_id}: {error}", file=sys.stderr)
             complete = False
             continue
-        if isinstance(run, dict) and run.get("id") == run_id:
-            classify(run)
+        if not isinstance(run, dict) or run.get("id") != run_id:
+            continue
+        if quota_reserved(api, api_reserve, api_budget):
+            return retry, exhausted, False  # Its jobs read waits for the next pass.
+        classify(run)
     return retry, exhausted, complete
 
 

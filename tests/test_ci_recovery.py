@@ -728,6 +728,38 @@ class OldCutOffBuildTests(unittest.TestCase):
         self.assertEqual(self.recover(api, apply=True), [])
         self.assertFalse(any(path.endswith("/actions/runs/30") for path in api.paths))
 
+    def old_api(self, **changes):
+        old = cancelled(created_at="2026-10-20T11:00:00Z", run_started_at="2026-10-20T11:00:00Z", **changes)
+        api = Interrupted([self.head()], jobs={30: [dict(TIMED_OUT, run_attempt=changes.get("run_attempt", 1))]})
+        original = api.request
+
+        def request(method, path, data=None):
+            if path == "repos/owner/project/actions/runs/30":
+                api.paths.append(path)
+                return old
+            return original(method, path, data)
+
+        api.request = request
+        return api
+
+    def test_an_old_dispatched_or_rerun_cut_off_build_is_reported_not_retried(self):
+        for changes in (dict(event="workflow_dispatch"), dict(run_attempt=2), dict(id=31)):
+            with self.subTest(changes=changes):
+                api = self.old_api(**changes)
+                self.assertEqual(self.recover(api, apply=True), [])
+                self.assertEqual(api.writes, [])
+
+    def test_the_run_read_spending_the_budget_leaves_the_jobs_read_for_the_next_pass(self):
+        api = self.old_api()
+        calls = []
+        def reserved(*args):
+            calls.append(1)
+            return bool(api.paths) and api.paths[-1] == "repos/owner/project/actions/runs/30"
+        with patch.object(recovery, "quota_reserved", side_effect=reserved):
+            retry, exhausted, complete = recovery.interrupted_heads(api, "owner/project", api.pulls, NOW, {})
+        self.assertEqual((retry, exhausted, complete), ([], {}, False))
+        self.assertFalse(any("/jobs?" in path for path in api.paths))
+
     def test_an_old_cut_off_run_that_never_acquired_a_build_is_not_retried(self):
         old = cancelled(created_at="2026-10-20T11:00:00Z")
         api = Interrupted([self.head()], jobs={30: []})
