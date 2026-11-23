@@ -21,7 +21,7 @@ from bors_train_identity import candidate_ref
 PUBLISHER = "publish-merge-group-cache / publish"
 CONFIRM = "Confirm the exact revision map on the public endpoint"
 ACQUISITION_SECONDS = 300
-PUBLICATION_SECONDS = 1200
+PUBLICATION_SECONDS = 2700
 POST_RETRY_SECONDS = 600
 MACHINE_LABEL = "ubuntu-24.04"
 API_ROOT = "https://api.github.com/repos/" + REPO
@@ -134,7 +134,7 @@ def wait_publication(run_id, attempt, *, fetch=api, clock=time.monotonic, sleep=
         if not acquired and elapsed >= ACQUISITION_SECONDS:
             return "failure", "publisher not acquired/observable in 5m; inspect run jobs and publisher routing"
         if elapsed >= PUBLICATION_SECONDS:
-            return "failure", "isolated publication exceeded 20m; inspect run jobs and publisher capacity"
+            return "failure", "isolated publication exceeded 45m; inspect run jobs and publisher capacity"
         sleep(30)
 
 
