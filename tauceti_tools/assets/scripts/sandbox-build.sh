@@ -73,12 +73,17 @@ phase() { printf '%s\t%s\n' "$1" "$(date +%s.%N)" >> "$TELEMETRY/phases.tsv" 2>/
 # #check/#eval, a `simp?`/`ring_nf?`-style "Try this: …" suggestion, a linter note. A clean elaboration
 # logs nothing above trace, so this is exit-code enforcement, not output scraping.
 #
-# Every build, staging (IS_BATCH=true: merge-group or bors staging) and ordinary PR alike, runs to
-# completion after a failure, so the log reports every independently broken module. Staging used to
-# add --fail-fast so a doomed batch freed the runner sooner, but a batch failure costs a whole serial
-# staging round, and a round that exposes only the first broken module leaves the next culprit for
-# another round: measured on 2026-11-03, about 3.3 failed rounds per landed large batch. The extra
-# runner minutes of a complete build buy the controller every attributable culprit at once.
+# An ordinary PR build runs to completion after a failure, so its log reports every independently
+# broken module to the author. A queue staging build (IS_BATCH=true with STAGE_LAKE_CACHE=1: a
+# landing candidate) adds --fail-fast: Lake stops scheduling new jobs after the first failure, lets
+# the running ones finish, and the run ends with that failure. The staging verdict is only ever
+# pass or fail, and on a failure the queue's repair worker builds the whole library itself
+# (TauCetiWorker repair_stream) and then runs the audits and lints, so it finds every broken module
+# however few the staging log names. Staging once ran without --fail-fast because a round exposing
+# one culprit left the next for another round (about 3.3 failed rounds per large batch on
+# 2026-11-03), but that predates the repair worker's own build; since then the complete build only
+# delayed the repair. Measured on 23 Nov 2026, the first error came 0.1 to 25 minutes into builds
+# that ran 21 to 50 minutes (7.5 to 25 minutes after it).
 #
 # These exports also reach the later phases' `lake env` and `lake cache stage`, so every phase
 # sets them, whichever it runs.
@@ -87,6 +92,9 @@ if [ "${STAGE_LAKE_CACHE:-}" = "1" ]; then
   export LAKE_ARTIFACT_CACHE=true LAKE_RESTORE_ARTIFACTS=true
   # Generate the native map in the final build, rather than walking the graph again.
   LAKE_BUILD_FLAGS+=(--rehash -o .lake/outputs.jsonl)
+  if [ "${IS_BATCH:-}" = "true" ]; then
+    LAKE_BUILD_FLAGS+=(--fail-fast)
+  fi
 fi
 
 build_phase() {
