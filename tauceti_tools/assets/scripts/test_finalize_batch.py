@@ -76,10 +76,10 @@ class FinalizerTests(unittest.TestCase):
                 self.assertEqual(elapsed, 300)
 
     def test_running_publication_has_a_separate_bounded_completion_budget(self):
-        result, elapsed = self.wait([jobs(job("in_progress", None))] * 41)
+        result, elapsed = self.wait([jobs(job("in_progress", None))] * 91)
         self.assertEqual(result[0], "failure")
-        self.assertIn("20m", result[1])
-        self.assertEqual(elapsed, 1200)
+        self.assertIn("45m", result[1])
+        self.assertEqual(elapsed, 2700)
 
     def test_transient_jobs_api_error_after_acquisition_does_not_reset_queue_deadline(self):
         responses = [jobs(job("in_progress", None))] * 11 + [OSError("transient"), jobs(job())]
