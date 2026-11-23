@@ -62,6 +62,33 @@ class NightlyVerification(unittest.TestCase):
         output = Path(self.env['GITHUB_OUTPUT'])
         return dict(line.split('=', 1) for line in output.read_text().splitlines())
 
+    def assertNightlyRunsOneAtATimeOnlyOnMain(self):
+        # The callee has no trigger of its own, so every run goes through the caller's admission.
+        self.assertEqual(list(WORKFLOW[True]), ['workflow_call'])
+        self.assertNotIn('concurrency', WORKFLOW)
+        # No workflow-level group in the caller, which could cancel or displace a running check.
+        self.assertNotIn('concurrency', SCHEDULE)
+        caller = SCHEDULE['jobs']['run']
+        self.assertEqual(caller['uses'], './.github/workflows/nightly-verify.yml')
+        self.assertEqual(caller['needs'], 'admit')
+        self.assertEqual(caller['if'], "needs.admit.outputs.main == 'true'")
+        self.assertFalse(caller['concurrency']['cancel-in-progress'])
+        # Admitted runs share one group; any other run gets a group of its own.
+        group = caller['concurrency']['group']
+        self.assertEqual(group, "${{ needs.admit.outputs.main == 'true' && 'nightly-verify' || "
+                                "format('nightly-verify-not-admitted-{0}', github.run_id) }}")
+        admit = SCHEDULE['jobs']['admit']
+        self.assertEqual(admit['outputs']['main'], '${{ steps.ref.outputs.main }}')
+        script = next(s for s in admit['steps'] if s.get('id') == 'ref')['run']
+        for ref, admitted in (('refs/heads/main', 'true'), ('refs/heads/Main', 'false'),
+                              ('refs/heads/feature', 'false'), ('refs/tags/main', 'false')):
+            with tempfile.TemporaryDirectory() as folder:
+                output = Path(folder) / 'output'
+                subprocess.run(['bash', '-euo', 'pipefail', '-c', script], check=True,
+                               capture_output=True, text=True,
+                               env={**os.environ, 'GITHUB_REF': ref, 'GITHUB_OUTPUT': str(output)})
+                self.assertEqual(output.read_text(), f'main={admitted}\n', ref)
+
     def test_jobs_have_separate_budgets_and_transfer_only_the_clean_manifest(self):
         # Full source builds retain their budget on general CI capacity.
         self.assertEqual(JOBS['verify']['runs-on'], {
@@ -70,11 +97,7 @@ class NightlyVerification(unittest.TestCase):
         })
         self.assertGreater(JOBS['verify']['timeout-minutes'], 360)
         self.assertNotIn('needs', JOBS['verify'])
-        caller = SCHEDULE['jobs']['run']
-        self.assertEqual(caller['uses'], './.github/workflows/nightly-verify.yml')
-        self.assertIn("'nightly-verify'", caller['concurrency']['group'])
-        self.assertFalse(caller['concurrency']['cancel-in-progress'])
-        self.assertNotIn('concurrency', WORKFLOW)
+        self.assertNightlyRunsOneAtATimeOnlyOnMain()
         self.assertEqual(JOBS['reference']['timeout-minutes'], 240)
         self.assertIn('verify', JOBS['reference']['needs'])
         for s in JOBS['reference']['steps']:
