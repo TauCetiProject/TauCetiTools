@@ -4,6 +4,13 @@
 Lake owns cache validity and uploads. This helper only accepts a complete flat
 archive staging directory and copies ordinary files into a fresh trusted directory.
 It performs no network requests, digest bookkeeping or incremental publication.
+
+`split` divides such a trusted copy into a fixed number of part directories, so the
+build job can hand it to the publisher as several GitHub artifacts. The publisher
+downloads up to five artifacts at once (actions/download-artifact), and one
+artifact of a whole-library map (about 1.3 GB) took 7 to 15 minutes to download
+as a single stream. The publisher merges the parts into one directory and `prepare`
+checks it exactly as before: every file named by the map and nothing else.
 """
 
 from __future__ import annotations
@@ -86,14 +93,45 @@ def stage(source: Path, destination: Path) -> dict:
     return stats
 
 
+def split(staged: Path, parts: Path, count: int) -> list[int]:
+    """Move a trusted staged copy's files into ``part-0`` .. ``part-<count-1>`` under ``parts``.
+
+    The map goes to ``part-0``; the archives are dealt out in name order, so the parts differ in
+    size by at most one archive. Returns the number of files in each part. ``staged`` is left empty.
+    """
+    if not 1 <= count <= 16:
+        raise ValueError("part count must be between 1 and 16")
+    names = sorted(os.listdir(staged))
+    if "outputs.jsonl" not in names:
+        raise ValueError("staged copy has no Lake map")
+    names.remove("outputs.jsonl")
+    parts.mkdir(parents=True, exist_ok=False)
+    directories = [parts / f"part-{index}" for index in range(count)]
+    for directory in directories:
+        directory.mkdir()
+    os.rename(staged / "outputs.jsonl", directories[0] / "outputs.jsonl")
+    sizes = [1] + [0] * (count - 1)
+    for index, name in enumerate(names):
+        if not ARCHIVE.fullmatch(name):
+            raise ValueError("unsafe archive name")
+        os.rename(staged / name, directories[index % count] / name)
+        sizes[index % count] += 1
+    return sizes
+
+
 def main():
     if any(os.environ.get(key) for key in ("LAKE_CACHE_KEY", "LAKE_CACHE_KEY_RAW")):
         raise ValueError("staging helper must never receive upload credentials")
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("stage", "prepare"))
+    parser.add_argument("action", choices=("stage", "prepare", "split"))
     parser.add_argument("source", type=Path)
     parser.add_argument("destination", type=Path)
+    parser.add_argument("--parts", type=int, default=5, help="split: the number of part directories")
     args = parser.parse_args()
+    if args.action == "split":
+        sizes = split(args.source, args.destination, args.parts)
+        print("Lake staging parts (files): " + json.dumps(sizes), flush=True)
+        return
     stats = stage(args.source, args.destination)
     if args.action == "prepare":
         # Observation metadata is host-generated and is not part of the cache protocol.

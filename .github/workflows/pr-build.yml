@@ -1746,6 +1746,9 @@ jobs:
           set -euo pipefail
           python3 gate/scripts/lake_cache_publish.py stage pr/.lake/publication-stage "$RUNNER_TEMP/lake-cache-staging"
           test -s "$RUNNER_TEMP/lake-cache-staging/outputs.jsonl"
+          # Five artifacts, which the publisher downloads at once (see lake_cache_publish.py split).
+          python3 gate/scripts/lake_cache_publish.py split "$RUNNER_TEMP/lake-cache-staging" \
+            "$RUNNER_TEMP/lake-cache-staging-parts" --parts 5
           TOOLCHAIN="$(cat pr/lean-toolchain)"
           case "$TOOLCHAIN" in
             leanprover/lean4:[A-Za-z0-9]*) ;;
@@ -1754,13 +1757,56 @@ jobs:
           printf 'toolchain=%s\n' "$TOOLCHAIN" >> "$GITHUB_OUTPUT"
           echo 'staged=true' >> "$GITHUB_OUTPUT"
 
-      - name: Hand the merge-group oleans to the isolated publisher
+      # The publisher merges the parts and checks the merged files against the map exactly
+      # (publish-lake-cache.yml, `artifact-parts`): a missing or extra file fails publication.
+      # Only these trusted steps can upload artifacts to this run; candidate code has no token.
+      - name: Hand the merge-group oleans to the isolated publisher (part 1 of 5)
         if: ${{ !cancelled() && steps.cache_stage.outputs.staged == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: lake-cache-staging-${{ steps.pr.outputs.status_sha }}
-          path: ${{ runner.temp }}/lake-cache-staging
+          name: lake-cache-staging-${{ steps.pr.outputs.status_sha }}-part-0
+          path: ${{ runner.temp }}/lake-cache-staging-parts/part-0
           if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Hand the merge-group oleans to the isolated publisher (part 2 of 5)
+        if: ${{ !cancelled() && steps.cache_stage.outputs.staged == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: lake-cache-staging-${{ steps.pr.outputs.status_sha }}-part-1
+          path: ${{ runner.temp }}/lake-cache-staging-parts/part-1
+          if-no-files-found: ignore
+          retention-days: 1
+          compression-level: 0
+
+      - name: Hand the merge-group oleans to the isolated publisher (part 3 of 5)
+        if: ${{ !cancelled() && steps.cache_stage.outputs.staged == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: lake-cache-staging-${{ steps.pr.outputs.status_sha }}-part-2
+          path: ${{ runner.temp }}/lake-cache-staging-parts/part-2
+          if-no-files-found: ignore
+          retention-days: 1
+          compression-level: 0
+
+      - name: Hand the merge-group oleans to the isolated publisher (part 4 of 5)
+        if: ${{ !cancelled() && steps.cache_stage.outputs.staged == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: lake-cache-staging-${{ steps.pr.outputs.status_sha }}-part-3
+          path: ${{ runner.temp }}/lake-cache-staging-parts/part-3
+          if-no-files-found: ignore
+          retention-days: 1
+          compression-level: 0
+
+      - name: Hand the merge-group oleans to the isolated publisher (part 5 of 5)
+        if: ${{ !cancelled() && steps.cache_stage.outputs.staged == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: lake-cache-staging-${{ steps.pr.outputs.status_sha }}-part-4
+          path: ${{ runner.temp }}/lake-cache-staging-parts/part-4
+          if-no-files-found: ignore
           retention-days: 1
           compression-level: 0
 
@@ -2211,6 +2257,7 @@ jobs:
       tools_repository: ${{ inputs.tools_repository }}
       revision: ${{ needs.sandboxed-build.outputs.status-sha }}
       artifact-name: lake-cache-staging-${{ needs.sandboxed-build.outputs.status-sha }}
+      artifact-parts: 5
       reported-toolchain: ${{ needs.sandboxed-build.outputs.reported-toolchain }}
       publication-required: true
       project_ref: ${{ inputs.project_ref }}

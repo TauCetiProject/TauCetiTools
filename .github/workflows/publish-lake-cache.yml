@@ -33,6 +33,13 @@ on:
         description: Name of the staging artifact produced by the caller
         required: true
         type: string
+      artifact-parts:
+        description: >-
+          0 when the caller uploaded one artifact named artifact-name; otherwise the caller split
+          it into artifacts named artifact-name-part-0 and so on, downloaded together and merged
+        required: false
+        default: 0
+        type: number
       reported-toolchain:
         description: Toolchain used by the staging build (cross-checked against the revision)
         required: true
@@ -153,9 +160,21 @@ jobs:
           test "$PUBLIC_REVISION_ENDPOINT" = "$TAUCETI_CACHE_REVISION_URL"
 
       - name: Download the staged oleans
+        if: ${{ inputs.artifact-parts == 0 }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: ${{ inputs.artifact-name }}
+          path: ${{ runner.temp }}/lake-cache-staging
+      # The parts download five at a time into one flat directory (same-named files: last writer
+      # wins). Like the single artifact, the merged directory is hostile data: the next step accepts
+      # it only if it holds exactly the files its map names. The part count is not enforced here;
+      # only the build job's trusted steps can upload artifacts to the run.
+      - name: Download the staged oleans (parts)
+        if: ${{ inputs.artifact-parts != 0 }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: ${{ inputs.artifact-name }}-part-*
+          merge-multiple: true
           path: ${{ runner.temp }}/lake-cache-staging
 
       - name: Install elan (pinned + checksum) and the pinned toolchain

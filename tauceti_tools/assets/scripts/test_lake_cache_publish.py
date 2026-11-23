@@ -82,6 +82,35 @@ class PublicationTests(unittest.TestCase):
         (self.source / "outputs.jsonl").write_bytes(self.raw + (json.dumps(["2" * 16, NAME]) + "\n").encode())
         self.assertEqual(self.copy()["objects"], 1)
 
+    def test_split_parts_merge_back_to_the_staged_copy(self):
+        names = [f"{index:016x}.ltar" for index in range(7)]
+        raw = '"2026-03-17"\n' + "".join(json.dumps([f"{index + 1:016x}", name]) + "\n" for index, name in enumerate(names))
+        (self.source / NAME).unlink()
+        (self.source / "outputs.jsonl").write_text(raw)
+        for name in names:
+            (self.source / name).write_bytes(name.encode())
+        self.copy()
+        sizes = publish.split(self.root / "copied", self.root / "parts", 3)
+        self.assertEqual(sizes, [4, 2, 2])
+        self.assertEqual(os.listdir(self.root / "copied"), [])
+        self.assertTrue((self.root / "parts/part-0/outputs.jsonl").is_file())
+        merged = self.root / "merged"
+        merged.mkdir()
+        for part in (self.root / "parts").iterdir():
+            for path in part.iterdir():
+                os.rename(path, merged / path.name)
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = publish.stage(merged, self.root / "again")
+        self.assertEqual(result["objects"], len(names))
+
+    def test_split_rejects_a_copy_without_its_map_or_a_bad_count(self):
+        self.copy()
+        with self.assertRaises(ValueError):
+            publish.split(self.root / "copied", self.root / "parts", 0)
+        (self.root / "copied" / "outputs.jsonl").unlink()
+        with self.assertRaises(ValueError):
+            publish.split(self.root / "copied", self.root / "parts", 2)
+
 
 @unittest.skipUnless(INTEGRATION, "pass --integration with stock Lake installed")
 class StockLakePublication(unittest.TestCase):
