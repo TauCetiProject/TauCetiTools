@@ -44,7 +44,7 @@ def phases():
 
 
 class SandboxPhases(unittest.TestCase):
-    def run_sandbox(self, invocations, *, scoped=True, staging=False, cache=False, **statuses):
+    def run_sandbox(self, invocations, *, scoped=True, staging=False, cache=False, batch=False, **statuses):
         """Run sandbox-build.sh once per argument list, stopping at the first failure as the
         workflow's consecutive steps do. Returns the last status, the calls and the phase names."""
         with tempfile.TemporaryDirectory() as temporary:
@@ -75,6 +75,7 @@ class SandboxPhases(unittest.TestCase):
                        LINT_DRIVER_EXE=str(root / 'drivers/lint-env-driver'),
                        AXIOMS_ONLY_MODULES=str(scope) if scoped else '',
                        STAGE_LAKE_CACHE='1' if staging else '',
+                       IS_BATCH='true' if batch else '',
                        LAKE_ARTIFACT_CACHE='true' if cache else '',
                        LAKE_RESTORE_ARTIFACTS='true' if cache else '',
                        **{key: str(value) for key, value in statuses.items()})
@@ -107,6 +108,20 @@ class SandboxPhases(unittest.TestCase):
                 if not any(key.endswith('_STATUS') for key in scenario):
                     self.assertEqual(whole[0], 0)
                     self.assertEqual(whole[2][-1], 'end')
+
+    def test_only_a_staged_batch_build_fails_fast(self):
+        # A landing candidate stops at its first failure: the queue's repair worker builds the
+        # whole library itself. Every other build reports every broken module.
+        for scenario, expected in (
+            ({}, False), ({'staging': True}, False), ({'batch': True}, False),
+            ({'staging': True, 'batch': True}, True),
+        ):
+            with self.subTest(**scenario):
+                _, calls, _ = self.run_sandbox([['build']], **scenario)
+                builds = [call for call in calls if call[:2] == ['lake', 'build']]
+                self.assertEqual(len(builds), 1)
+                self.assertEqual('--fail-fast' in builds[0], expected)
+                self.assertIn('--iofail', builds[0])
 
     def test_each_phase_runs_only_its_own_work(self):
         _, calls, names = self.run_sandbox([['lint-style']])
