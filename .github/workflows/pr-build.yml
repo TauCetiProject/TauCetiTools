@@ -1757,8 +1757,9 @@ jobs:
           printf 'toolchain=%s\n' "$TOOLCHAIN" >> "$GITHUB_OUTPUT"
           echo 'staged=true' >> "$GITHUB_OUTPUT"
 
-      # The publisher merges the parts and checks the result against the map exactly
-      # (publish-lake-cache.yml, `artifact-parts`), so a missing or extra part fails publication.
+      # The publisher merges the parts and checks the merged files against the map exactly
+      # (publish-lake-cache.yml, `artifact-parts`): a missing or extra file fails publication.
+      # Only these trusted steps can upload artifacts to this run; candidate code has no token.
       - name: Hand the merge-group oleans to the isolated publisher (part 1 of 5)
         if: ${{ !cancelled() && steps.cache_stage.outputs.staged == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

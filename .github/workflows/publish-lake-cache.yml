@@ -165,9 +165,10 @@ jobs:
         with:
           name: ${{ inputs.artifact-name }}
           path: ${{ runner.temp }}/lake-cache-staging
-      # The parts download five at a time into one flat directory. Like the single artifact, the
-      # merged directory is hostile data: the next step accepts it only if it holds exactly the
-      # files its map names.
+      # The parts download five at a time into one flat directory (same-named files: last writer
+      # wins). Like the single artifact, the merged directory is hostile data: the next step accepts
+      # it only if it holds exactly the files its map names. The part count is not enforced here;
+      # only the build job's trusted steps can upload artifacts to the run.
       - name: Download the staged oleans (parts)
         if: ${{ inputs.artifact-parts != 0 }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
