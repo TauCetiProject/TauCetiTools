@@ -814,6 +814,9 @@ class UndeclaredSelfTestTests(unittest.TestCase):
             self.assertEqual(recovery.team_members(api, self.REPO), {"member"})
         self.assertEqual(read.call_args.kwargs["token"], "test-only")
         self.assertEqual(api.paths, [])
+        with patch.dict("os.environ", {"SELF_TESTED_TEAM_TOKEN": "test-only"}), \
+                patch.object(recovery, "gh_read", side_effect=recovery.subprocess.TimeoutExpired("gh", 30)):
+            self.assertIsNone(recovery.team_members(api, self.REPO))
 
     def test_an_unreadable_team_keeps_every_self_tested_route(self):
         old = "2026-10-21T05:00:00Z"

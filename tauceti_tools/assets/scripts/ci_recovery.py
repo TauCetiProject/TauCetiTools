@@ -8,6 +8,7 @@ import datetime as dt
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -104,7 +105,8 @@ def team_members(api, repo):
             if len(rows) < 100:
                 break
             page += 1
-    except (APIError, RuntimeError, ValueError, TypeError, AttributeError) as error:
+    except (APIError, RuntimeError, ValueError, TypeError, AttributeError, OSError,
+            subprocess.SubprocessError) as error:
         print(f"ci-recovery: {configured} members unavailable ({type(error).__name__}); "
               "every self-tested label keeps its route", file=sys.stderr)
         return None
