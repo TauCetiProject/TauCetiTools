@@ -13,7 +13,7 @@ from pathlib import Path
 
 from github_api import APIError, Deferred, GitHub
 from pr_ci_lifecycle import ACTIVE, ordinary, pr_numbers, reconcile, reserved, runs
-from tauceti_tools.self_tested import BUMP_BRANCH, team
+from tauceti_tools.self_tested import BUMP_AUTHOR, BUMP_BRANCH, gh_read, team
 
 INVENTORY = """
 query($owner: String!, $name: String!, $after: String) {
@@ -23,7 +23,7 @@ query($owner: String!, $name: String!, $after: String) {
     pullRequests(states: OPEN, first: 100, after: $after,
                  orderBy: {field: CREATED_AT, direction: ASC}) {
       nodes {
-        number headRefOid headRefName isDraft updatedAt createdAt author { login }
+        number headRefOid headRefName isDraft updatedAt createdAt author { login } headRepository { nameWithOwner }
         labels(first: 100) { nodes { name } }
         commits(last: 1) { nodes { commit { oid committedDate status { contexts { context state targetUrl createdAt } } } } }
       }
@@ -37,7 +37,7 @@ CURRENT = """
 query($owner: String!, $name: String!, $pr: Int!, $head: GitObjectID!) {
   rateLimit { cost }
   repository(owner: $owner, name: $name) {
-    pullRequest(number: $pr) { state isDraft headRefOid headRefName author { login } labels(first: 100) { nodes { name } } }
+    pullRequest(number: $pr) { state isDraft headRefOid headRefName author { login } headRepository { nameWithOwner } labels(first: 100) { nodes { name } } }
     object(oid: $head) { ... on Commit { status { contexts { context state targetUrl } } } }
   }
 }
@@ -52,7 +52,17 @@ def labels(pull):
     return {label["name"].lower() for label in (pull.get("labels") or {}).get("nodes", [])}
 
 
-def self_tested(pull, members=None):
+def automatic_bump(pull, repo):
+    """The review bot's own Mathlib bump, as `tauceti_tools.self_tested.automatic_bump` checks it."""
+    return bool(
+        str(pull.get("headRefName") or "").startswith(BUMP_BRANCH)
+        and repo
+        and (pull.get("headRepository") or {}).get("nameWithOwner") == repo
+        and str((pull.get("author") or {}).get("login") or "") + "[bot]" == BUMP_AUTHOR
+    )
+
+
+def self_tested(pull, members=None, repo=""):
     """Whether the `self-tested` label routes this PR around PR CI.
 
     The existing PR assessment owns the routing label. Do not cancel a
@@ -66,7 +76,7 @@ def self_tested(pull, members=None):
     names = labels(pull)
     if "self-tested" not in names or names & {"full-lint", "lint-repair"}:
         return False
-    if members is None or str(pull.get("headRefName") or "").startswith(BUMP_BRANCH):
+    if members is None or automatic_bump(pull, repo):
         return True
     return str((pull.get("author") or {}).get("login") or "").lower() in members
 
@@ -81,10 +91,13 @@ def team_members(api, repo):
     if not configured or "/" not in configured:
         return None
     org, slug = configured.split("/", 1)
+    # The same credential precedence as `tauceti_tools.self_tested.membership`.
+    token = os.environ.get("SELF_TESTED_TEAM_TOKEN") or os.environ.get("TAUCETI_TEAM_TOKEN")
     members, page = set(), 1
     try:
         while True:
-            rows = api.request("GET", f"orgs/{org}/teams/{slug}/members?per_page=100&page={page}")
+            path = f"orgs/{org}/teams/{slug}/members?per_page=100&page={page}"
+            rows = gh_read(path, token=token) if token else api.request("GET", path)
             if not isinstance(rows, list):
                 raise ValueError("team member listing is not a list")
             members.update(str((row or {}).get("login") or "").lower() for row in rows)
@@ -109,8 +122,8 @@ def build_status(commit):
     )
 
 
-def has_preflight(pull, commit, members=None):
-    return build_status(commit) is not None or self_tested(pull, members)
+def has_preflight(pull, commit, members=None, repo=""):
+    return build_status(commit) is not None or self_tested(pull, members, repo)
 
 
 def status_run(row):
@@ -144,7 +157,7 @@ def inventory(api, repo, observed=None, members=None):
             commit = pull["commits"]["nodes"][-1]["commit"]
             if pull["isDraft"]:
                 continue
-            if commit["oid"] != pull["headRefOid"] or not has_preflight(pull, commit, members):
+            if commit["oid"] != pull["headRefOid"] or not has_preflight(pull, commit, members, repo):
                 pulls.append(pull)
             if observed is not None and commit["oid"] == pull["headRefOid"]:
                 observed.append(pull)
@@ -172,8 +185,8 @@ def still_missing(api, repo, number, head, interrupted=None, members=None):
     if not (pull and commit and pull["state"] == "OPEN" and not pull["isDraft"] and pull["headRefOid"] == head):
         return False
     if interrupted is not None:
-        return not self_tested({**pull, "number": number}, members) and failed_run(commit) == interrupted
-    return not has_preflight({**pull, "number": number}, commit, members)
+        return not self_tested({**pull, "number": number}, members, repo) and failed_run(commit) == interrupted
+    return not has_preflight({**pull, "number": number}, commit, members, repo)
 
 
 def quota_reserved(api, reserve, budget=0):
@@ -308,7 +321,7 @@ def interrupted_heads(api, repo, observed, now, memory, api_reserve=0, api_budge
     candidates, exhausted = {}, {}
     for pull in observed:
         run_id = failed_run(pull["commits"]["nodes"][-1]["commit"])
-        if run_id is None or self_tested(pull, members):
+        if run_id is None or self_tested(pull, members, repo):
             continue
         key, current = str(pull["number"]), verdict(pull)
         known = [memory.get(kind, {}).get(key) or {} for kind in ("retried", "exhausted")]
@@ -357,14 +370,14 @@ def last_push(pull):
     return max(times, default=None)
 
 
-def stuck_heads(observed, active, exhausted, now, members=None):
+def stuck_heads(observed, active, exhausted, now, members=None, repo=""):
     """Open heads that, three hours after their last push, have neither CI nor a final state: no live
     pr-build, and no `build` status or an interrupted build whose one retry is spent."""
     heads = []
     for pull in observed:
         number, head = pull["number"], pull["headRefOid"]
         pushed = last_push(pull)
-        if self_tested(pull, members) or labels(pull) & FINAL_LABELS or pushed is None or now - pushed < STUCK_AFTER:
+        if self_tested(pull, members, repo) or labels(pull) & FINAL_LABELS or pushed is None or now - pushed < STUCK_AFTER:
             continue
         if any(run.get("status") in ACTIVE and matches(run, number, head) for run in active):
             continue
@@ -526,7 +539,7 @@ def recover(api, repo, *, apply=False, limit=0, min_age=5400, now=None, api_rese
     retry, exhausted, complete = interrupted_heads(
         api, repo, observed, now, previous.get("memory") or {}, api_reserve, api_budget, members
     )
-    heads = stuck_heads(observed, active, exhausted, now, members)
+    heads = stuck_heads(observed, active, exhausted, now, members, repo)
     report_stuck(heads, now)
     retries = []
     if stuck_report:

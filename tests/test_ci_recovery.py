@@ -799,9 +799,21 @@ class UndeclaredSelfTestTests(unittest.TestCase):
         self.assertFalse(recovery.self_tested(item, {"other"}))
         self.assertTrue(recovery.self_tested(item))  # unknown team: the label keeps its route
 
-    def test_automatic_bumps_keep_the_labels_route(self):
-        item = dict(pull(labels=["self-tested"]), author=dict(login="tauceti-review-bot"), headRefName="bump-mathlib/x")
-        self.assertTrue(recovery.self_tested(item, {"member"}))
+    def test_only_the_bots_own_bumps_keep_the_labels_route(self):
+        item = dict(pull(labels=["self-tested"]), author=dict(login="tauceti-review-bot"), headRefName="bump-mathlib/x",
+                    headRepository=dict(nameWithOwner=self.REPO))
+        self.assertTrue(recovery.self_tested(item, {"member"}, self.REPO))
+        for changes in (dict(author=dict(login="outsider")), dict(headRepository=dict(nameWithOwner="outsider/fork"))):
+            with self.subTest(changes=changes):
+                self.assertFalse(recovery.self_tested(dict(item, **changes), {"member"}, self.REPO))
+
+    def test_the_team_token_override_lists_the_team(self):
+        api = Team([], members=recovery.APIError("GET", "orgs", 403, {"message": "Resource not accessible"}))
+        with patch.dict("os.environ", {"SELF_TESTED_TEAM_TOKEN": "test-only"}), \
+                patch.object(recovery, "gh_read", return_value=[dict(login="Member")]) as read:
+            self.assertEqual(recovery.team_members(api, self.REPO), {"member"})
+        self.assertEqual(read.call_args.kwargs["token"], "test-only")
+        self.assertEqual(api.paths, [])
 
     def test_an_unreadable_team_keeps_every_self_tested_route(self):
         old = "2026-10-21T05:00:00Z"
