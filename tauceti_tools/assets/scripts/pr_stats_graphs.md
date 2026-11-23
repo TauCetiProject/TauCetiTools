@@ -66,21 +66,26 @@ It requires an authenticated `gh` CLI. In GitHub Actions, set `GH_TOKEN` to
   Scoreboards are read by the cursor walk described under Scaling below, which reaches the
   whole history, and their verdicts are derived every run, so a contributor whose merge a
   receipt reveals is trusted without a rescan.
-- **Forgejo pull requests** count too where the project has a Forgejo repository:
-  `--forgejo-repo https://HOST/OWNER/REPO`, by default the one `FORGEJO_REPOS` pairs with
-  `--repo` (TauCeti's is `https://git.taucetiproject.org/TauCetiProject/TauCeti`); pass
-  `--forgejo-repo ''` to leave it out. They join the seven-day series (merges, active
-  authors, merge latency) and the contributor merge totals and line, under the author's
-  Forgejo login; the queue-age, review-cycle, review and category charts, and every other
-  reader of the snapshot, still describe the GitHub repository alone, because Forgejo numbers
-  overlap GitHub's. A Forgejo pull request has landed when Forgejo records a merge, or when it
-  is closed with the queue's `[Merged by Bors] - …` title, dated by its close (seconds to
-  minutes after the landing). Unlike on GitHub, the title is taken without reading who renamed
-  it, which would cost a request per pull request; the instance's accounts are the project's
-  own, and on 2026-11-23 those pull requests were exactly the ones the queue's database records
-  as landed. They come from Forgejo's issue listing (`type=pulls`), which the snapshot keeps
-  under `forgejo`: a later run asks only for pull requests updated since ten minutes before the
-  previous walk began, a few pages, and a cold start reads every page once.
+- **Forgejo pull requests** count in the seven-day series (merges, active authors, merge
+  latency) where the project has a Forgejo repository: `--forgejo-repo https://HOST/OWNER/REPO`
+  with `--forgejo-merge-login` for each login the queue posts as there, by default the entry
+  `FORGEJO_REPOS` pairs with `--repo` (TauCeti's is
+  `https://git.taucetiproject.org/TauCetiProject/TauCeti`, whose queue posts as `kim-em`);
+  `--forgejo-repo ''` leaves it out. An author is the same contributor on both forges under the
+  same login. Every other chart and figure, and every other reader of the snapshot, still
+  describes the GitHub repository alone, because Forgejo numbers overlap GitHub's and Forgejo
+  logins need not name GitHub accounts. A Forgejo pull request has landed when one of those
+  logins posted the queue's "Pull request successfully merged into main." receipt on it, at the
+  first such receipt, or when Forgejo records its own merge; the `[Merged by Bors] - …` title is
+  only a hint, because its author can edit it. On 2026-11-23 the receipts named exactly the
+  2,525 pull requests the queue's database records as landed. A landing, once found, is kept.
+  Pull requests come from Forgejo's issue listing (`type=pulls`) and receipts from the
+  repository's comment listing, both kept in the snapshot under `forgejo`. A later run asks each
+  listing only for what was updated since ten minutes before the previous walk began, a few
+  pages; a closed pull request with the merged title and no known receipt has its own comments
+  read once per `updated_at`. Both listings page by offset, so a deletion mid-walk can shift a row
+  past the reader; a cold start, and a run a week after the last full walk, therefore read both
+  whole (about 75 and 190 pages in 2026-11).
 - Seven-day metrics use complete UTC calendar days. Merge latency is PR creation to
   merge time among PRs merged in that trailing window. Every chart is PLOTTED through the
   last complete UTC day: regenerated every three hours, a final point holding only part of

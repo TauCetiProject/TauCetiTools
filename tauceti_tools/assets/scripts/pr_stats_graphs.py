@@ -6,8 +6,8 @@ timeline, plus the repository issue-comments REST endpoint for posted Tau Ceti
 scoreboards, keeping only those posted on a fetched pull request and carrying the review
 engine's meta block for it.  A normalized snapshot can be written with ``--dump-data``
 and replayed with ``--data``; tests and local chart work therefore need no network.
-The seven-day series and contributor merge totals also count the pull requests of the
-project's Forgejo repository (``--forgejo-repo``), read from its issue listing.
+The seven-day series also counts the pull requests of the project's Forgejo repository
+(``--forgejo-repo``), read from its issue and comment listings.
 
 Generated files:
 
@@ -848,7 +848,7 @@ def apply_app_merges(repo: str, prs: list[dict], previous: dict | None = None,
 def fetch_snapshot(repo: str, previous: dict | None = None,
                    receipt_checks: int | None = None,
                    scoreboard_pages: int | None = SCOREBOARD_PAGES_PER_RUN,
-                   forgejo_repo: str | None = None) -> dict:
+                   forgejo_repo: dict | None = None) -> dict:
     # First, so a Forgejo outage fails the run before the GitHub walk spends its budget.
     forgejo = (fetch_forgejo_prs(forgejo_repo, (previous or {}).get("forgejo"))
                if forgejo_repo else None)
@@ -880,20 +880,31 @@ def fetch_snapshot(repo: str, previous: dict | None = None,
 
 
 # Since 2026-11 most of the project's pull requests are on its Forgejo instance, and the TauCeti
-# queue lands them as it lands GitHub's. The seven-day series and the contributor merge totals
-# count both forges; everything else on this page still describes the GitHub repository alone.
-# Forgejo pull-request numbers are a separate sequence that overlaps GitHub's, so its pull
-# requests stay in their own part of the snapshot and never meet a GitHub number.
+# queue lands them as it lands GitHub's. Only the seven-day series counts both forges; every other
+# figure still describes the GitHub repository alone. Forgejo pull-request numbers are a separate
+# sequence that overlaps GitHub's, so its pull requests stay in their own part of the snapshot and
+# never meet a GitHub number.
+#
+# Each Forgejo repository is paired with the logins its queue posts as. The queue posts the same
+# "Pull request successfully merged into main." receipt there as on GitHub, and that receipt, by
+# one of these logins, is the evidence of a landing: the "[Merged by Bors]" title that comes with
+# it is only a hint, since its author can edit it.
 FORGEJO_REPOS = {
-    "TauCetiProject/TauCeti": "https://git.taucetiproject.org/TauCetiProject/TauCeti",
+    "TauCetiProject/TauCeti": {
+        "url": "https://git.taucetiproject.org/TauCetiProject/TauCeti",
+        "merge_logins": ["kim-em"],
+    },
 }
 # Forgejo's largest page (its `max_response_items`). A smaller server cap only costs requests: the
-# walk stops at an empty page, never at a short one.
+# walks stop at an empty page, never at a short one.
 FORGEJO_PAGE_SIZE = 50
-# A pull request edited while the walk runs can move between pages. The next run therefore asks for
-# everything updated since a little before this walk started, which every such move postdates.
+# Anything edited while a walk runs is read again by the next one, which asks for everything
+# updated since a little before this walk began.
 FORGEJO_WALK_OVERLAP = timedelta(minutes=10)
-FORGEJO_EVIDENCE = "closed with a [Merged by Bors] title, or Forgejo merged_at"
+# Both listings page by offset, so a pull request or comment deleted mid-walk can shift another
+# past the reader for good. Every so often a walk therefore starts over, replacing what it knew.
+FORGEJO_FULL_WALK_EVERY = timedelta(days=7)
+FORGEJO_EVIDENCE = "merge app receipt by a merge login, else Forgejo merged_at"
 
 
 def split_forgejo_repo(url: str) -> tuple[str, str]:
@@ -923,75 +934,126 @@ def forgejo_get(url: str, attempts: int = 3) -> list[dict]:
     raise RuntimeError(f"Forgejo request failed after {attempts} attempts: {url}: {last_error}")
 
 
-def forgejo_pull(row: dict) -> dict:
-    """The normalized record of one row of Forgejo's issue listing, which is a pull request.
+def forgejo_walk(api: str, path: str, query: dict) -> list[dict]:
+    """Every row of one Forgejo listing, page by page until an empty one."""
+    rows, page = [], 1
+    while True:
+        batch = forgejo_get(f"{api}/{path}?"
+                            + urllib.parse.urlencode({**query, "limit": FORGEJO_PAGE_SIZE,
+                                                      "page": page}))
+        if not batch:
+            return rows
+        rows.extend(batch)
+        page += 1
 
-    The queue lands a Forgejo pull request by closing it after renaming it to the merged title, as
-    it does on GitHub; Forgejo's own merge is unused but counted if it ever happens. Unlike the
-    GitHub path this takes the title on trust rather than reading who renamed it, which would cost
-    a timeline request per pull request; the instance's accounts are the project's own. On
-    2026-11-23 the closed pull requests with that title were exactly the 2,525 the queue's
-    database records as landed. A landing is dated by the close, which follows the queue's landing
-    by seconds to minutes (a median of 17 minutes then).
-    """
+
+def forgejo_pull(row: dict) -> dict:
+    """The normalized record of one row of Forgejo's issue listing, which is a pull request."""
     pull = row.get("pull_request") or {}
     closed_at = row.get("closed_at")
-    merged_at = pull.get("merged_at") if pull.get("merged") else None
-    if (merged_at is None and row.get("state") == "closed" and closed_at
-            and (row.get("title") or "").startswith(MERGED_TITLE_PREFIX)):
-        merged_at = closed_at
     return {
         "number": row["number"],
         "title": row.get("title") or "",
         "created_at": iso_z(parse_dt(row["created_at"])),
         "updated_at": row.get("updated_at"),
         "closed_at": iso_z(parse_dt(closed_at)) if closed_at else None,
-        "merged_at": iso_z(parse_dt(merged_at)) if merged_at else None,
-        "state": "MERGED" if merged_at else ("OPEN" if row.get("state") == "open" else "CLOSED"),
+        "native_merged_at": (iso_z(parse_dt(pull["merged_at"]))
+                             if pull.get("merged") and pull.get("merged_at") else None),
+        "state": "OPEN" if row.get("state") == "open" else "CLOSED",
         "author": (row.get("user") or {}).get("login") or "unknown",
         "labels": [label.get("name") for label in row.get("labels") or [] if label.get("name")],
     }
 
 
-def fetch_forgejo_prs(url: str, previous: dict | None = None) -> dict:
-    """Every pull request of a Forgejo repository, reading only what changed since `previous`.
+FORGEJO_PULL_NUMBER = re.compile(r"/(?:issues|pulls)/(\d+)$")
 
-    The issue listing carries each pull request's title, state and close time, so a run costs a
-    page per fifty pull requests updated since the last walk began, plus one empty page; a cold
-    start reads every page once.
+
+def forgejo_receipt(comment: dict, logins: set[str]) -> tuple[int, str] | None:
+    """(pull request number, landing time) if this comment is a merge login's success receipt."""
+    if ((comment.get("user") or {}).get("login") not in logins
+            or not (comment.get("body") or "").startswith(MERGE_RECEIPT)):
+        return None
+    match = FORGEJO_PULL_NUMBER.search(comment.get("pull_request_url") or comment.get("issue_url") or "")
+    return (int(match.group(1)), iso_z(parse_dt(comment["created_at"]))) if match else None
+
+
+def record_receipt(receipts: dict[str, str], number: int, merged_at: str) -> None:
+    # Repeated receipts describe one landing, at its first.
+    key = str(number)
+    if key not in receipts or parse_dt(merged_at) < parse_dt(receipts[key]):
+        receipts[key] = merged_at
+
+
+def fetch_forgejo_prs(source: dict, previous: dict | None = None) -> dict:
+    """Every pull request of a Forgejo repository and the landings its queue recorded.
+
+    `source` is a FORGEJO_REPOS entry. Two listings are read, each only for what changed since
+    `previous` began its walk: the issue listing for the pull requests, and the repository's
+    comments for the queue's receipts, about a page per fifty changes plus one empty page each. A
+    landing, once its receipt is found, is kept, as on GitHub. A closed pull request carrying the
+    merged title without a known receipt has its own comments read, in case its receipt was
+    shifted past the walk; normally there is none. A cold start, and a walk a week after the last
+    full one, read both listings whole: about 75 and 190 pages in 2026-11.
     """
+    url, logins = source["url"], set(source["merge_logins"])
     api, repo = split_forgejo_repo(url)
     started = datetime.now(timezone.utc)
+    previous = previous or {}
+    same_rule = (previous.get("repo") == url and previous.get("merge_evidence") == FORGEJO_EVIDENCE
+                 and sorted(previous.get("merge_logins") or []) == sorted(logins))
+    resumable = (same_rule and previous.get("walk_started_at") and previous.get("full_walk_at")
+                 and started - parse_dt(previous["full_walk_at"]) < FORGEJO_FULL_WALK_EVERY)
+    # Receipts outlive a full walk too: one deleted since cannot undo its landing.
+    receipts: dict[str, str] = dict(previous.get("receipts") or {}) if same_rule else {}
     known: dict[int, dict] = {}
-    since = None
-    if (previous and previous.get("repo") == url and previous.get("walk_started_at")
-            and previous.get("merge_evidence") == FORGEJO_EVIDENCE):
+    query: dict = {}
+    if resumable:
         known = {entry["number"]: entry for entry in previous.get("prs") or []}
-        since = parse_dt(previous["walk_started_at"]) - FORGEJO_WALK_OVERLAP
-    query = {"type": "pulls", "state": "all", "limit": FORGEJO_PAGE_SIZE}
-    if since is not None:
-        query["since"] = iso_z(since)
-    page, read = 1, 0
-    while True:
-        rows = forgejo_get(f"{api}/repos/{repo}/issues?"
-                           + urllib.parse.urlencode({**query, "page": page}))
-        if not rows:
-            break
-        for row in rows:
-            if row.get("pull_request") is None:
-                continue
+        query["since"] = iso_z(parse_dt(previous["walk_started_at"]) - FORGEJO_WALK_OVERLAP)
+    rows = forgejo_walk(api, f"repos/{repo}/issues", {"type": "pulls", "state": "all", **query})
+    for row in rows:
+        if row.get("pull_request") is not None:
             record = forgejo_pull(row)
             known[record["number"]] = record
-            read += 1
-        page += 1
-    print(f"forgejo: read {read:,} pull requests in {page - 1:,} pages "
-          f"({'since ' + iso_z(since) if since else 'full walk'}); {len(known):,} known, "
-          f"{sum(1 for pr in known.values() if pr['merged_at']):,} landed", file=sys.stderr)
+    comments = forgejo_walk(api, f"repos/{repo}/issues/comments", query)
+    for comment in comments:
+        receipt = forgejo_receipt(comment, logins)
+        if receipt:
+            record_receipt(receipts, *receipt)
+    # A verdict of none is kept while the pull request's `updatedAt`, which a comment moves, is.
+    hinted = [pr for pr in known.values()
+              if pr["state"] == "CLOSED" and str(pr["number"]) not in receipts
+              and pr["title"].startswith(MERGED_TITLE_PREFIX)
+              and pr.get("receipt_checked") != pr["updated_at"]]
+    for pr in hinted:
+        pr["receipt_checked"] = pr["updated_at"]
+        for comment in forgejo_walk(api, f"repos/{repo}/issues/{pr['number']}/comments", {}):
+            receipt = forgejo_receipt(comment, logins)
+            if receipt and receipt[0] == pr["number"]:
+                record_receipt(receipts, *receipt)
+    prs = []
+    for number in sorted(known):
+        pr = dict(known[number])
+        landing = receipts.get(str(number)) or pr.get("native_merged_at")
+        created = parse_dt(pr["created_at"])
+        if landing and parse_dt(landing) < created:
+            raise ValueError(f"Forgejo landing predates creation of pull request #{number}")
+        pr["merged_at"] = landing
+        if landing:
+            pr["state"] = "MERGED"
+        prs.append(pr)
+    print(f"forgejo: read {len(rows):,} pull requests, {len(comments):,} comments and "
+          f"{len(hinted):,} pull requests' comments "
+          f"({'since ' + query['since'] if query else 'full walk'}); {len(prs):,} pull requests, "
+          f"{sum(1 for pr in prs if pr['merged_at']):,} landed", file=sys.stderr)
     return {
         "repo": url,
+        "merge_logins": sorted(logins),
         "merge_evidence": FORGEJO_EVIDENCE,
         "walk_started_at": iso_z(started),
-        "prs": sorted(known.values(), key=lambda pr: pr["number"]),
+        "full_walk_at": previous["full_walk_at"] if resumable else iso_z(started),
+        "receipts": dict(sorted(receipts.items(), key=lambda item: int(item[0]))),
+        "prs": prs,
     }
 
 
@@ -1862,14 +1924,12 @@ def generate(
             f"{queue['missing_transition_fallbacks']} of {state_clock_count}"
         )
     cycles = review_cycle_metrics(prs)
-    # Forgejo's pull requests join only the throughput series and the contributor merge totals;
-    # see FORGEJO_REPOS.
+    # Forgejo's pull requests join only the seven-day series; see FORGEJO_REPOS.
     forgejo = data.get("forgejo") or {}
-    forgejo_prs = forgejo.get("prs") or []
-    rolling = rolling_metrics(prs + forgejo_prs, last_full_day, history_days)
+    rolling = rolling_metrics(prs + (forgejo.get("prs") or []), last_full_day, history_days)
     merge_events = [
         (parse_dt(pr["merged_at"]), pr["author"])
-        for pr in prs + forgejo_prs if pr.get("merged_at")
+        for pr in prs if pr.get("merged_at")
     ]
     review_events = [
         (parse_dt(item["created_at"]), item["user"])
@@ -1908,8 +1968,8 @@ def generate(
             "review_cycle": cycles["definition"],
             "review": "one canonical <!--tauceti-scoreboard--> comment on a pull request of this repository, identified by the tauceti-meta:v1 block naming that PR, whose posting login also authors a merged PR in the fetched snapshot",
             "active_author": "distinct PR author login opening a PR in the trailing seven-day window, on GitHub or on forgejo_repo",
-            "merge": "GitHub mergedAt; for a closed PR, the installed bors or TauCeti queue app renaming it to a [Merged by Bors] title, or else that app's success receipt on it; on forgejo_repo, Forgejo merged_at, or else closed_at for a closed PR with a [Merged by Bors] title",
-            "merge_scope": "rolling_seven_day, cumulative_merges_plotted and merge_totals_by_contributor count pull requests on GitHub and on forgejo_repo; every other figure counts GitHub's alone",
+            "merge": "GitHub mergedAt; for a closed PR, the installed bors or TauCeti queue app renaming it to a [Merged by Bors] title, or else that app's success receipt on it; on forgejo_repo, that app's success receipt posted by one of its merge logins, else Forgejo merged_at",
+            "merge_scope": "rolling_seven_day counts pull requests on GitHub and on forgejo_repo, an author being the same contributor on both under the same login; every other figure counts GitHub's alone",
             "merge_latency": "PR creation timestamp to merge timestamp",
         },
         "queue": queue,
@@ -1963,6 +2023,19 @@ def generate(
     return metrics
 
 
+def forgejo_source(args) -> dict | None:
+    """The FORGEJO_REPOS-shaped entry the command line selects, or None."""
+    paired = FORGEJO_REPOS.get(args.repo)
+    url = args.forgejo_repo if args.forgejo_repo is not None else (paired or {}).get("url")
+    if not url:
+        return None
+    logins = args.forgejo_merge_login or (
+        paired["merge_logins"] if paired and paired["url"] == url else None)
+    if not logins:
+        raise SystemExit(f"--forgejo-merge-login is required for {url}")
+    return {"url": url, "merge_logins": logins}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default="TauCetiProject/TauCeti")
@@ -1976,8 +2049,11 @@ def main() -> int:
                              "works -- it is a cost optimisation, never a source of truth.")
     parser.add_argument("--forgejo-repo",
                         help="a Forgejo repository (https://HOST/OWNER/REPO) whose pull requests the "
-                             "seven-day series and contributor merge totals also count; defaults to "
-                             "the one FORGEJO_REPOS pairs with --repo, and '' disables it")
+                             "seven-day series also counts; defaults to the one FORGEJO_REPOS pairs "
+                             "with --repo, and '' disables it")
+    parser.add_argument("--forgejo-merge-login", action="append",
+                        help="a login the queue posts its Forgejo receipts as (repeatable); "
+                             "defaults to FORGEJO_REPOS's for that repository")
     parser.add_argument("--as-of", help="override snapshot time (ISO 8601)")
     parser.add_argument("--contributor-limit", type=int, default=24)
     parser.add_argument("--history-days", type=int, default=90)
@@ -2000,8 +2076,7 @@ def main() -> int:
             args.repo, load_previous(args.since_data, args.repo),
             receipt_checks=MERGE_RECEIPT_CHECKS_PER_RUN if resumable else None,
             scoreboard_pages=SCOREBOARD_PAGES_PER_RUN if resumable else None,
-            forgejo_repo=(FORGEJO_REPOS.get(args.repo) if args.forgejo_repo is None
-                          else args.forgejo_repo or None))
+            forgejo_repo=forgejo_source(args))
         if args.dump_data:
             atomic_write(args.dump_data, json.dumps(data, indent=2) + "\n")
     if scoreboard_history_unfinished(data):
