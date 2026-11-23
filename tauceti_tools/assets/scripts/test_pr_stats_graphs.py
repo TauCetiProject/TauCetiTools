@@ -941,6 +941,118 @@ class MergeAppLandingsTest(unittest.TestCase):
         self.assertTrue(snapshot["merge_evidence_complete"])
 
 
+def forgejo_row(number, created_day, *, closed_day=None, title="feat: x", state=None,
+                author="fj", merged=False):
+    return {
+        "number": number, "title": title,
+        "state": state or ("closed" if closed_day else "open"),
+        "created_at": timestamp(created_day), "updated_at": timestamp(closed_day or created_day, 13),
+        "closed_at": timestamp(closed_day, 12) if closed_day else None,
+        "user": {"login": author}, "labels": [{"name": "self-tested"}],
+        "pull_request": {"merged": merged,
+                         "merged_at": timestamp(closed_day, 11) if merged else None},
+    }
+
+
+FORGEJO = "https://forge.example/o/r"
+
+
+class ForgejoLandingsTest(unittest.TestCase):
+    def test_only_a_closed_pull_request_with_the_merged_title_is_a_landing(self):
+        landed = stats.forgejo_pull(forgejo_row(
+            1, 2, closed_day=5, title=stats.MERGED_TITLE_PREFIX + "feat: x"))
+        self.assertEqual((landed["merged_at"], landed["state"]), (timestamp(5, 12), "MERGED"))
+        rejected = stats.forgejo_pull(forgejo_row(2, 2, closed_day=5))
+        self.assertEqual((rejected["merged_at"], rejected["state"]), (None, "CLOSED"))
+        still_open = stats.forgejo_pull(forgejo_row(
+            3, 2, title=stats.MERGED_TITLE_PREFIX + "feat: x"))
+        self.assertEqual((still_open["merged_at"], still_open["state"]), (None, "OPEN"))
+        native = stats.forgejo_pull(forgejo_row(4, 2, closed_day=5, merged=True))
+        self.assertEqual(native["merged_at"], timestamp(5, 11))
+        self.assertEqual(landed["labels"], ["self-tested"])
+
+    def test_the_walk_reads_to_an_empty_page_and_skips_issues(self):
+        pages = [[forgejo_row(1, 2), {**forgejo_row(2, 2), "pull_request": None}],
+                 [forgejo_row(3, 2)], []]
+        with patch.object(stats, "forgejo_get", side_effect=pages) as get:
+            walk = stats.fetch_forgejo_prs(FORGEJO)
+        self.assertEqual([pr["number"] for pr in walk["prs"]], [1, 3])
+        urls = [call.args[0] for call in get.call_args_list]
+        self.assertTrue(all(url.startswith("https://forge.example/api/v1/repos/o/r/issues?")
+                            for url in urls))
+        self.assertTrue(all("type=pulls" in url and "state=all" in url for url in urls))
+        self.assertNotIn("since=", urls[0])
+        self.assertEqual([re.search(r"page=(\d+)", url).group(1) for url in urls], ["1", "2", "3"])
+
+    def test_a_later_walk_reads_only_what_changed_since_the_last_one_began(self):
+        previous = {"repo": FORGEJO, "merge_evidence": stats.FORGEJO_EVIDENCE,
+                    "walk_started_at": timestamp(5, 12),
+                    "prs": [stats.forgejo_pull(forgejo_row(1, 2)),
+                            stats.forgejo_pull(forgejo_row(2, 2))]}
+        update = forgejo_row(2, 2, closed_day=6, title=stats.MERGED_TITLE_PREFIX + "feat: x")
+        with patch.object(stats, "forgejo_get", side_effect=[[update], []]) as get:
+            walk = stats.fetch_forgejo_prs(FORGEJO, previous)
+        self.assertIn("since=2026-01-05T11%3A50%3A00Z", get.call_args_list[0].args[0])
+        self.assertEqual([(pr["number"], pr["merged_at"]) for pr in walk["prs"]],
+                         [(1, None), (2, timestamp(6, 12))])
+
+    def test_a_walk_of_another_repository_or_rule_starts_over(self):
+        for previous in ({"repo": "https://forge.example/o/other", "walk_started_at": timestamp(5),
+                          "merge_evidence": stats.FORGEJO_EVIDENCE, "prs": []},
+                         {"repo": FORGEJO, "walk_started_at": timestamp(5),
+                          "merge_evidence": "older rule", "prs": []}):
+            with patch.object(stats, "forgejo_get", side_effect=[[]]) as get:
+                stats.fetch_forgejo_prs(FORGEJO, previous)
+            self.assertNotIn("since=", get.call_args_list[0].args[0])
+
+    def test_the_snapshot_carries_forgejo_and_the_next_run_resumes_from_it(self):
+        previous = {"repo": "o/r", "forgejo": {"repo": FORGEJO}}
+        with (patch.object(stats, "fetch_forgejo_prs", return_value={"repo": FORGEJO}) as walk,
+              patch.object(stats, "fetch_prs", return_value=[]),
+              patch.object(stats, "fetch_scoreboards", return_value=([], {}, {}))):
+            snapshot = stats.fetch_snapshot("o/r", previous, forgejo_repo=FORGEJO)
+            walk.assert_called_once_with(FORGEJO, {"repo": FORGEJO})
+            self.assertEqual(snapshot["forgejo"], {"repo": FORGEJO})
+            self.assertNotIn("forgejo", stats.fetch_snapshot("o/r", previous))
+
+    def test_forgejo_landings_and_authors_join_the_seven_day_series_only(self):
+        github = [pr(1, 1, merged_day=8), pr(2, 4, state="OPEN", author="bob")]
+        # Forgejo numbers overlap GitHub's; number 1 here is a different pull request.
+        forgejo = [stats.forgejo_pull(forgejo_row(
+                       1, 3, closed_day=9, title=stats.MERGED_TITLE_PREFIX + "feat: x")),
+                   stats.forgejo_pull(forgejo_row(2, 4, author="carol"))]
+        data = {"repo": "o/r", "prs": github, "fetched_at": timestamp(10), "scoreboards": [],
+                "forgejo": {"repo": FORGEJO, "prs": forgejo}}
+        with tempfile.TemporaryDirectory() as folder:
+            metrics = stats.generate(data, Path(folder))
+            without = stats.generate({**data, "forgejo": None}, Path(folder))
+        last = metrics["rolling_seven_day"][-1]
+        self.assertEqual((last["merges"], last["active_authors"]), (2, 3))
+        self.assertEqual(last["median_merge_hours"], (180 + 156) / 2)
+        self.assertEqual(metrics["merge_totals_by_contributor"], {"alice": 1, "fj": 1})
+        self.assertEqual(metrics["forgejo_repo"], FORGEJO)
+        self.assertEqual(metrics["queue"], without["queue"])
+        self.assertEqual(metrics["review_cycles"], without["review_cycles"])
+        self.assertEqual(metrics["by_roadmap_and_contributor"], without["by_roadmap_and_contributor"])
+        self.assertEqual(without["rolling_seven_day"][-1]["merges"], 1)
+
+    def test_the_command_line_pairs_the_project_with_its_forgejo_repository(self):
+        seen = []
+
+        def snapshot(repo, previous, **options):
+            seen.append(options["forgejo_repo"])
+            return {"repo": repo, "prs": [pr(1, 1, merged_day=8)], "fetched_at": timestamp(10),
+                    "scoreboards": []}
+
+        with tempfile.TemporaryDirectory() as folder, patch.object(stats, "fetch_snapshot", snapshot):
+            for extra in ([], ["--forgejo-repo", ""], ["--forgejo-repo", FORGEJO]):
+                with patch("sys.argv", ["pr_stats_graphs.py", "--out-dir", folder, *extra]):
+                    self.assertEqual(stats.main(), 0)
+            with patch("sys.argv", ["pr_stats_graphs.py", "--repo", "o/r", "--out-dir", folder]):
+                self.assertEqual(stats.main(), 0)
+        self.assertEqual(seen, [stats.FORGEJO_REPOS["TauCetiProject/TauCeti"], None, FORGEJO, None])
+
+
 class RoadmapMatrixTest(unittest.TestCase):
     """Who merged and who reviewed, per roadmap, over the trailing window."""
 
