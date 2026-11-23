@@ -1003,17 +1003,22 @@ def fetch_forgejo_prs(source: dict, previous: dict | None = None) -> dict:
                  and sorted(previous.get("merge_logins") or []) == sorted(logins))
     resumable = (same_rule and previous.get("walk_started_at") and previous.get("full_walk_at")
                  and started - parse_dt(previous["full_walk_at"]) < FORGEJO_FULL_WALK_EVERY)
+    known: dict[int, dict] = {}
     # Receipts outlive a full walk too: one deleted since cannot undo its landing.
     receipts: dict[str, str] = dict(previous.get("receipts") or {}) if same_rule else {}
-    known: dict[int, dict] = {}
     query: dict = {}
     if resumable:
         known = {entry["number"]: entry for entry in previous.get("prs") or []}
         query["since"] = iso_z(parse_dt(previous["walk_started_at"]) - FORGEJO_WALK_OVERLAP)
+    # A full walk replaces the set, but an unchanged pull request keeps its verdict of no receipt.
+    checked = ({entry["number"]: entry.get("receipt_checked") for entry in previous.get("prs") or []}
+               if same_rule else {})
     rows = forgejo_walk(api, f"repos/{repo}/issues", {"type": "pulls", "state": "all", **query})
     for row in rows:
         if row.get("pull_request") is not None:
             record = forgejo_pull(row)
+            if checked.get(record["number"]) == record["updated_at"]:
+                record["receipt_checked"] = record["updated_at"]
             known[record["number"]] = record
     comments = forgejo_walk(api, f"repos/{repo}/issues/comments", query)
     for comment in comments:
@@ -1027,7 +1032,8 @@ def fetch_forgejo_prs(source: dict, previous: dict | None = None) -> dict:
               and pr.get("receipt_checked") != pr["updated_at"]]
     for pr in hinted:
         pr["receipt_checked"] = pr["updated_at"]
-        for comment in forgejo_walk(api, f"repos/{repo}/issues/{pr['number']}/comments", {}):
+        # One request: this endpoint ignores `page` and returns the whole history every time.
+        for comment in forgejo_get(f"{api}/repos/{repo}/issues/{pr['number']}/comments"):
             receipt = forgejo_receipt(comment, logins)
             if receipt and receipt[0] == pr["number"]:
                 record_receipt(receipts, *receipt)

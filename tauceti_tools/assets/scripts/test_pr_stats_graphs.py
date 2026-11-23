@@ -979,12 +979,13 @@ class FakeForgejo:
     def __call__(self, url):
         self.urls.append(url)
         path, _, query = url.partition("?")
-        options = dict(item.split("=", 1) for item in query.split("&"))
-        page = int(options["page"])
+        options = dict(item.split("=", 1) for item in query.split("&") if item)
         match = re.search(r"/issues/(\d+)/comments$", path)
         if match:
-            rows = self.per_pull.get(int(match.group(1)), [])
-        elif path.endswith("/issues/comments"):
+            # Forgejo's per-issue comment endpoint is unpaginated: every request is the whole history.
+            return list(self.per_pull.get(int(match.group(1)), []))
+        page = int(options["page"])
+        if path.endswith("/issues/comments"):
             rows = self.comments
         else:
             rows = self.pulls
@@ -1030,9 +1031,13 @@ class ForgejoLandingsTest(unittest.TestCase):
         first = self.walk(unproven)
         self.assertEqual(sum("/issues/3/comments" in url for url in unproven.urls), 1)
         self.assertIsNone(first["prs"][0]["merged_at"])
-        again = FakeForgejo([])
-        self.walk(again, first)
-        self.assertFalse(any("/issues/3/comments" in url for url in again.urls))
+        for previous in (first, {**first, "full_walk_at": timestamp(1)}):
+            again = FakeForgejo([row])  # Listed again, unchanged: in the overlap, or a full walk.
+            self.walk(again, previous)
+            self.assertFalse(any("/issues/3/comments" in url for url in again.urls))
+        touched = FakeForgejo([forgejo_row(3, 2, closed_day=5, title=LANDED, updated_hour=14)])
+        self.walk(touched, first)
+        self.assertEqual(sum("/issues/3/comments" in url for url in touched.urls), 1)
 
     def test_a_later_walk_reads_only_what_changed_since_the_last_one_began(self):
         first = self.walk(FakeForgejo([forgejo_row(1, 2), forgejo_row(2, 2)]))
