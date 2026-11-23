@@ -412,7 +412,7 @@ class Workflow(unittest.TestCase):
                     reader=self.publisher_reader(**changes),
                 )
                 self.assertEqual(result["verdicts"]["publication"], "infrastructure")
-                self.assertEqual(self.elapsed, 1200 if incomplete else 0)
+                self.assertEqual(self.elapsed, 2700 if incomplete else 0)
 
     def test_publication_accepts_all_bounded_fraction_lengths_on_supported_python_versions(self):
         for digits in ("1", "12", "123", "1234", "12345", "123456", "1234567", "12345678", "123456789"):
@@ -459,7 +459,7 @@ class Workflow(unittest.TestCase):
             reader=self.publisher_reader(publisher_changes={"steps": []}),
         )
         self.assertEqual(result["verdicts"]["publication"], "infrastructure")
-        self.assertEqual(self.elapsed, 1200)
+        self.assertEqual(self.elapsed, 2700)
 
     def test_publication_observation_retries_a_transient_api_failure_within_the_deadline(self):
         reader = self.publisher_reader()

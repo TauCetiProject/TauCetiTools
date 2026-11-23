@@ -570,7 +570,7 @@ def publication_verdict(request, policy, context, reader, *, clock=time.monotoni
         return "not_required"
     start = clock()
     acquired = False
-    while clock() - start < 1200:
+    while clock() - start < 2700:  # within the finalizer job's 55 min; the publisher may run 40
         try:
             run = reader.get(f"/actions/runs/{context['run_id']}")
             value = reader.get(f"/actions/runs/{context['run_id']}/attempts/{context['attempt']}/jobs?per_page=100")
