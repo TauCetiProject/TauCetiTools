@@ -169,6 +169,12 @@ def extract_records(records, staging):
     env = dict(os.environ)
     cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
     env.setdefault("RAYON_NUM_THREADS", str(min(16, cpus)))
+    # The rlimit raised below sizes only leantar's main thread. A `-j` batch unpacks on Rust worker
+    # threads, whose stacks default to 2 MiB whatever the rlimit: on Lean v4.37.0-rc1 (leantar
+    # 0.1.21) every staging run's batch aborted with "has overflowed its stack" (23 Nov 2026), and
+    # Lake then restored the 39,000 modules one process each. RUST_MIN_STACK sizes those threads;
+    # it reserves address space, and only touched pages use memory (TauCetiWorker does the same).
+    env.setdefault("RUST_MIN_STACK", str(256 * 1024 * 1024))
     print(f"bulk-unpack-cache: restoring {len(records)} archives in one invocation", flush=True)
     subprocess.run([str(leantar), "-x", "-j", "-"], input=json.dumps(requests), text=True, check=True, env=env,
                    preexec_fn=raise_stack_limit)
