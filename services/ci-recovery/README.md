@@ -24,6 +24,13 @@ personal `gh` login is not used. The membership read needs the App's organizatio
 pass (unknown membership never cancels a build); missing-build recovery is unaffected.
 `SELF_TESTED_TEAM_TOKEN` in the unit's environment names an explicit token for that read instead.
 
+Any PR author may add the `self-tested` label, and the label alone skips PR CI, but readiness and
+admission honour it only from a member of the `self-tested` team. Each pass therefore lists the
+team once with the App token; a non-member's labelled PR is then an ordinary PR here, so a head
+without a `build` status is built (and an interrupted build retried) instead of waiting at
+`awaiting-CI` forever. Automatic Mathlib bumps keep the label's route. When the listing fails,
+every labelled PR keeps the label's route, as before.
+
 The shared sweeper first snapshots every active ordinary PR build, including
 `pending`, `waiting`, `queued`, `requested` and `in_progress` runs. Date windows
 split inventories larger than GitHub's 1,000-result cap; equal timestamps stay
