@@ -86,7 +86,11 @@ a writable report (such as the Actions fallback) reports interrupted builds but 
 A memory entry holds while the head's failing status is the same one (a rerun posts a new status),
 and for two weeks while the PR is not seen open and ready. One listing of the last two days'
 cancelled pr-build runs finds the candidates, and each costs one jobs read; the pass budget is
-checked before the listing and before each jobs read.
+checked before the listing and before each jobs read. A build cut off before that window is found
+through its `build` description instead ("build not run — tested H/B/T identity missing or
+invalid", which PR CI posts when a run is cancelled before it records the tested head; a label
+event's `skip_build` dispatch does this through the per-PR concurrency group): its run is read
+directly, at one run read and one jobs read, and judged the same way, whatever its age.
 
 Each pass also reports stuck heads: open, non-draft, non-`self-tested` heads that, three hours after
 their last push, have no `build` status and no live pr-build, or whose build and its one retry were

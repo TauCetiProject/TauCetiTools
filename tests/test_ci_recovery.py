@@ -695,6 +695,47 @@ class InterruptedBuildTests(unittest.TestCase):
             self.assertEqual(json.loads(report.read_text())["heads"], [])
 
 
+class OldCutOffBuildTests(unittest.TestCase):
+    """A build cut off before the listing window (a label event's skip dispatch cancels it) is read directly."""
+
+    def setUp(self):
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.report = Path(temporary.name) / "stuck.json"
+
+    def recover(self, api, **kwargs):
+        return recovery.recover(api, "owner/project", now=NOW, cleanup=False, stuck_report=self.report, **kwargs)
+
+    @staticmethod
+    def head(description=recovery.CUT_OFF_DESCRIPTION):
+        item = pull(state="FAILURE")
+        item["commits"]["nodes"][0]["commit"]["status"]["contexts"][0]["description"] = description
+        return item
+
+    def test_an_old_cut_off_build_outside_the_listing_is_retried_once(self):
+        old = cancelled(created_at="2026-10-20T11:00:00Z", run_started_at="2026-10-20T11:00:00Z")
+        api = Interrupted([self.head()], jobs={30: [TIMED_OUT]})
+        api.request = lambda method, path, data=None, original=api.request: (
+            old if path == "repos/owner/project/actions/runs/30" else original(method, path, data))
+        selected = self.recover(api, apply=True)
+        self.assertEqual([s["retry_of_interrupted"] for s in selected], [30])
+        self.assertEqual(dispatches(api), ["1"])
+        self.assertEqual(self.recover(api, apply=True), [])  # the retry is spent
+        self.assertEqual(dispatches(api), ["1"])
+
+    def test_an_old_real_failure_costs_no_run_read(self):
+        api = Interrupted([self.head("sandboxed build, audit, or simp-NF lint failed")], jobs={30: [TIMED_OUT]})
+        self.assertEqual(self.recover(api, apply=True), [])
+        self.assertFalse(any(path.endswith("/actions/runs/30") for path in api.paths))
+
+    def test_an_old_cut_off_run_that_never_acquired_a_build_is_not_retried(self):
+        old = cancelled(created_at="2026-10-20T11:00:00Z")
+        api = Interrupted([self.head()], jobs={30: []})
+        api.request = lambda method, path, data=None, original=api.request: (
+            old if path == "repos/owner/project/actions/runs/30" else original(method, path, data))
+        self.assertEqual(self.recover(api, apply=True), [])
+
+
 class StuckHeadTests(unittest.TestCase):
     def stuck(self, pulls, live=()):
         return recovery.stuck_heads(pulls, list(live), {}, NOW)
