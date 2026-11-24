@@ -67,7 +67,7 @@ jobs:
     # Direct labels request no privileged container, cache volume, git mirror or tool cache.
     # Staging uses the caller's reserved disposable control capacity when fleet_routing is on;
     # other publishers retain their cloud route.
-    runs-on: ${{ inputs.source_candidate_enabled && fromJSON(inputs.source_candidate_control_runner) || inputs.fleet_routing && (github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging') && fromJSON(inputs.control_runner) || 'ubuntu-24.04' }}
+    runs-on: ${{ inputs.source_candidate_enabled && fromJSON(inputs.source_candidate_control_runner) || inputs.fleet_routing && (github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-bors-attested')) && fromJSON(inputs.control_runner) || 'ubuntu-24.04' }}
     timeout-minutes: 40
     outputs:
       published: ${{ steps.result.outputs.published }}

@@ -198,6 +198,30 @@ class SandboxPhases(unittest.TestCase):
         self.assertEqual([call[0] for call in calls], ['lint-style.sh'])
         self.assertEqual(names, ['lint-style'])
 
+    def test_an_attested_build_restores_without_building_and_stages_the_outputs(self):
+        status, calls, names = self.run_sandbox([['build'], ['finish']], scoped=False, staging=True, cache=True,
+                                                batch=True, ATTESTED_BUILD='1')
+        self.assertEqual(status, 0)
+        [build] = [call for call in calls if call[:2] == ['lake', 'build']]
+        self.assertIn('--no-build', build)
+        self.assertEqual(build[build.index('-o') + 1], '.lake/outputs.jsonl')
+        self.assertIn(['lake', 'cache', 'stage', '.lake/outputs.jsonl', '.lake/publication-stage',
+                       'cache=true', 'rayon='], calls)
+
+    def test_an_attested_build_fails_when_anything_needs_building(self):
+        status, calls, _ = self.run_sandbox([['build']], scoped=False, staging=True, cache=True, batch=True,
+                                            ATTESTED_BUILD='1', BUILD_STATUS=3)
+        self.assertEqual(status, 3)
+
+    def test_an_attested_build_needs_the_staged_cache_and_runs_no_check(self):
+        status, calls, _ = self.run_sandbox([['build']], scoped=False, ATTESTED_BUILD='1')
+        self.assertEqual((status, calls), (1, []))
+        for phase in ('audits', 'module-system', 'lint-env', 'lint-style'):
+            with self.subTest(phase=phase):
+                status, calls, _ = self.run_sandbox([[phase]], scoped=False, staging=True, batch=True,
+                                                    ATTESTED_BUILD='1')
+                self.assertEqual((status, calls), (2, []))
+
     def test_unknown_phases_run_nothing(self):
         for arguments in (['lint'], ['build', 'audits'], ['']):
             with self.subTest(arguments=arguments):
@@ -225,8 +249,10 @@ class WorkflowPhaseSteps(unittest.TestCase):
         for step in self.phase_steps:
             with self.subTest(step=step['name']):
                 self.assertEqual(step['run'], first['run'])
+                # An attested landing (ATTESTED) runs only the build and finish phases.
+                skipped = "env.ATTESTED != 'true' && " if step['env']['SANDBOX_PHASE'] not in ('build', 'finish') else ''
                 expected = ("${{ env.INFRA != '1' }}" if step is first else
-                            "${{ !cancelled() && env.INFRA != '1' && (success() || "
+                            f"${{{{ !cancelled() && env.INFRA != '1' && {skipped}(success() || "
                             "(env.IS_BATCH == 'true' && steps.sandbox_build.outcome == 'success')) }}")
                 self.assertEqual(step['if'], expected)
                 self.assertEqual({k: v for k, v in step['env'].items() if k != 'SANDBOX_PHASE'},
@@ -243,19 +269,21 @@ class WorkflowPhaseSteps(unittest.TestCase):
         self.assertTrue(condition.startswith('${{ always() && ') and condition.endswith('}}'))
         self.assertEqual(sorted(set(re.findall(r'steps\.(\w+)\.outcome', condition))), sorted(ids))
 
-        def runs(outcomes):
+        def runs(outcomes, attested=False):
             """Evaluate the step's `if` (GitHub's && || format contains) for the given outcomes."""
             expression = condition[3:-2].replace('&&', ' and ').replace('||', ' or ').replace('always()', 'True')
             expression = re.sub(r'steps\.(\w+)\.outcome', lambda m: repr(outcomes[m[1]]), expression)
+            expression = expression.replace('env.ATTESTED', repr('true' if attested else 'false'))
             return eval(expression, {'contains': lambda text, item: item in text,  # noqa: S307
                                      'format': lambda text, *values: text.format(*values)})
 
-        def combined(outcomes):
+        def combined(outcomes, attested=False):
             """The `build` step's outcome: skipped, or its script's result."""
-            if not runs(dict(zip(ids, outcomes, strict=True))):
+            if not runs(dict(zip(ids, outcomes, strict=True)), attested):
                 return 'skipped'
             result = subprocess.run(['bash', '-e', '-c', build['run']], capture_output=True, text=True,
-                                    env=dict(os.environ, OUTCOMES=' '.join(outcomes)))
+                                    env=dict(os.environ, OUTCOMES=' '.join(outcomes),
+                                             ATTESTED='true' if attested else 'false'))
             return 'success' if result.returncode == 0 else 'failure'
 
         for outcomes, expected in (
@@ -271,6 +299,17 @@ class WorkflowPhaseSteps(unittest.TestCase):
         ):
             with self.subTest(outcomes=outcomes):
                 self.assertEqual(combined(outcomes), expected)
+        # An attested landing: only the build and the finish run, and both must pass.
+        restore_only = ['success'] + ['skipped'] * 4 + ['success']
+        for outcomes, expected in (
+            (restore_only, 'success'),
+            (['failure'] + ['skipped'] * 5, 'failure'),
+            (['success'] + ['skipped'] * 4 + ['failure'], 'failure'),
+            (['success'] + ['skipped'] * 5, 'skipped'),
+        ):
+            with self.subTest(attested=outcomes):
+                self.assertEqual(combined(outcomes, attested=True), expected)
+        self.assertEqual(combined(restore_only), 'skipped', 'an ordinary run never passes on two phases')
 
     def test_reporting_attributes_each_phase_step(self):
         import importlib.util

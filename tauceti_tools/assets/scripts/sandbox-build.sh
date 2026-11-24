@@ -52,9 +52,22 @@ test -x "$WATCHDOG_TOOLCHAIN/bin/lean"
 export LAKE_OVERRIDE_LEAN=true
 export LEAN="$WATCHDOG_TOOLCHAIN/bin/lean"
 
+# An attested landing (ATTESTED_BUILD=1, pr-build.yml's `tauceti-bors-attested`, decision 200): a trusted
+# repair worker already built, audited and linted exactly this commit with main's tools and policy, and
+# the queue says so. This run then elaborates nothing: the build phase restores the outputs from the
+# artifact cache with `--no-build`, which fails if any module would need building, and the finish phase
+# stages them for the isolated publisher. No audit or lint phase runs, so no lint driver is needed.
+ATTESTED_BUILD="${ATTESTED_BUILD:-}"
+if [ "$ATTESTED_BUILD" = "1" ] && [ "${STAGE_LAKE_CACHE:-}" != "1" ]; then
+  echo "::error::an attested landing needs the staged artifact cache (STAGE_LAKE_CACHE=1)" >&2
+  exit 1
+fi
+
 # The environment lint's compiled driver was built by pr-build.yml on the host before any candidate
 # code ran, and is mounted read-only; lint-env.sh will not compile one inside the sandbox.
-test -x "${LINT_DRIVER_EXE:?the prebuilt environment-lint driver is required}"
+if [ "$ATTESTED_BUILD" != "1" ]; then
+  test -x "${LINT_DRIVER_EXE:?the prebuilt environment-lint driver is required}"
+fi
 
 # CI telemetry: when each phase below starts, and the build's own per-module log, for the host's
 # telemetry step to summarise (pr-build.yml, scripts/ci_telemetry.py). Written under .lake because
@@ -94,6 +107,10 @@ if [ "${STAGE_LAKE_CACHE:-}" = "1" ]; then
   LAKE_BUILD_FLAGS+=(--rehash -o .lake/outputs.jsonl)
   if [ "${IS_BATCH:-}" = "true" ]; then
     LAKE_BUILD_FLAGS+=(--fail-fast)
+  fi
+  if [ "$ATTESTED_BUILD" = "1" ]; then
+    # Restore and map every output, and fail (Lake exits 3) instead of elaborating anything.
+    LAKE_BUILD_FLAGS+=(--no-build)
   fi
 fi
 
@@ -255,6 +272,10 @@ finish_phase() {
 }
 
 for selected_phase in "${selected[@]}"; do
+  if [ "$ATTESTED_BUILD" = "1" ] && [[ " audits module-system lint-env lint-style " == *" $selected_phase "* ]]; then
+    echo "::error::an attested landing runs no $selected_phase phase" >&2
+    exit 2
+  fi
   case "$selected_phase" in
     build) build_phase ;;
     audits) audits_phase ;;

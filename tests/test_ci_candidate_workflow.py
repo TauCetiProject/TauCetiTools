@@ -1090,7 +1090,8 @@ class ShippedWorkflow(unittest.TestCase):
     def test_source_publication_and_finalizer_use_separate_trusted_control_capacity(self):
         control = ("${{ inputs.source_candidate_enabled && fromJSON(inputs.source_candidate_control_runner) || "
                    "inputs.fleet_routing && (github.event_name == 'repository_dispatch' && "
-                   "github.event.action == 'tauceti-bors-staging') && fromJSON(inputs.control_runner) || 'ubuntu-24.04' }}")
+                   "(github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-bors-attested')) "
+                   "&& fromJSON(inputs.control_runner) || 'ubuntu-24.04' }}")
         jobs = self.value["jobs"]
         self.assertEqual(jobs["finalize-merge-group-build"]["runs-on"], control)
         publisher = jobs["publish-merge-group-cache"]
