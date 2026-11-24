@@ -6,7 +6,6 @@ checkout's runner directory (the workflows provision it without credentials).
 """
 
 from concurrent.futures import ThreadPoolExecutor
-import contextvars
 import functools
 from datetime import datetime, timezone
 import importlib
@@ -402,12 +401,8 @@ def audit(snapshot):
                 "queue": {"known": False, "reason": str(exc)}, "error": str(exc)}
     repo = snapshot["repo"]
     numbers = [pr["number"] for pr in snapshot["prs"] if pr["state"] == "OPEN" and not pr["is_draft"]]
-    # One report, so one membership answer per author is enough for the whole audit. The answers
-    # belong to this audit alone; each worker runs in a copy of a context that carries them.
-    from tauceti_tools.self_tested import RunMembership, membership_run
-    with membership_run(RunMembership()), ThreadPoolExecutor(max_workers=AUDIT_WORKERS) as pool:
-        futures = [pool.submit(contextvars.copy_context().run, _audit_one, number, repo)
-                   for number in numbers]
+    with ThreadPoolExecutor(max_workers=AUDIT_WORKERS) as pool:
+        futures = [pool.submit(_audit_one, number, repo) for number in numbers]
         assessed = [future.result() for future in futures]
     results = {str(number): result for number, result in zip(numbers, assessed)}
     try:

@@ -57,7 +57,7 @@ recovery trigger and manual dispatch can resume work without a new PR event.
 
 With `--prioritize-self-tested`, a paginated GraphQL inventory finds labelled heads
 whose PR-specific acceptance status is missing before any workflow-history scan.
-The normal pinned assessment still checks the live label, author membership,
+The normal pinned assessment still checks the live label,
 changed paths and current head. Each batch assesses at most 100 priority requests;
 untouched requests precede retries so a failing PR cannot monopolize the queue.
 Unfinished assertions are checkpointed with their head, first observation and last

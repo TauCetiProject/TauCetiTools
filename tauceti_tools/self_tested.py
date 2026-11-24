@@ -1,9 +1,9 @@
 """The manual self-tested PR route. Staging still builds and audits every candidate.
 
-Ordinary PRs qualify with mathematics-only diffs from a team member. Automatic
-Mathlib bumps (the review bot's `bump-mathlib/` branches in the base repository)
-qualify when a team member applied the label, the diff touches only the library
-and the Lake pins, and the packaged check-bump.sh accepts the pins.
+Any author may declare a PR self-tested. Ordinary PRs qualify with mathematics-only
+diffs. Automatic Mathlib bumps (the review bot's `bump-mathlib/` branches in the base
+repository) qualify when the diff touches only the library and the Lake pins, and the
+packaged check-bump.sh accepts the pins.
 """
 
 from __future__ import annotations
@@ -11,16 +11,12 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import threading
-import time
-from contextlib import contextmanager
-from contextvars import ContextVar
 from functools import lru_cache
 
 LABEL = "self-tested"
 CONTEXT = "self-tested"
 DESCRIPTION = "PR CI skipped: self-tested."
-DEFAULT_TEAM = "TauCetiProject/self-tested"
+DEFAULT_REPO = "TauCetiProject/TauCeti"
 EXCLUDED_LABELS = {"full-lint", "lint-repair"}
 BUMP_BRANCH = "bump-mathlib/"
 BUMP_AUTHOR = "tauceti-review-bot[bot]"  # bump_latest.BOT opens every automatic bump.
@@ -32,8 +28,9 @@ def context(number):
     return f"{CONTEXT}/{int(number)}"
 
 
-def team(repo):
-    return os.environ.get("TAUCETI_SELF_TESTED_TEAM", DEFAULT_TEAM if repo == "TauCetiProject/TauCeti" else "")
+def enabled(repo):
+    """Whether `repo` honours the label: TauCeti, or the repository `TAUCETI_SELF_TESTED_REPO` names."""
+    return bool(repo) and repo == os.environ.get("TAUCETI_SELF_TESTED_REPO", DEFAULT_REPO)
 
 
 def label_names(labels):
@@ -62,13 +59,14 @@ def latest_status(rows, context=CONTEXT):
     return max(rows, key=lambda r: r.get("id") or 0, default={})
 
 
-def accepted(labels, status=None, *, member=False, branch=""):
+def accepted(labels, status=None, *, member=None, branch=""):
     """The persistent author declaration is sufficient; old receipt statuses are ignored.
 
-    Callers that grant admission must also validate membership and source scope.
+    Callers that grant admission must also validate source scope.
     Review scheduling can use this signal without granting merge authority.
+    `member` is ignored: the label counts from any author.
     """
-    return bool(member and requested(labels, branch))
+    return requested(labels, branch)
 
 
 def gh_read(path, *, token=None):
@@ -83,98 +81,6 @@ def gh_read(path, *, token=None):
             error.status = 404
         raise error
     return json.loads(result.stdout)
-
-
-_MEMBERS = {}
-
-
-class RunMembership:
-    """Membership answers for one report run, shared by its worker threads.
-
-    A report such as the readiness audit asks about the same few authors for thousands of pull
-    requests with one credential, so within the run one answer per author is enough, a 404
-    included. Admission never sees these answers: they live only in this object, which the run
-    installs with `membership_run` and drops when it ends.
-    """
-
-    def __init__(self):
-        self._answers = {}
-        self._locks = {}
-        self._lock = threading.Lock()
-
-    def answer(self, key, lookup):
-        with self._lock:
-            if key in self._answers:
-                return self._answers[key]
-            key_lock = self._locks.setdefault(key, threading.Lock())
-        with key_lock:  # One request per author, however many workers ask at once.
-            with self._lock:
-                if key in self._answers:
-                    return self._answers[key]
-            value = lookup()
-            with self._lock:
-                self._answers[key] = value
-            return value
-
-
-_RUN = ContextVar("self_tested_membership_run", default=None)
-
-
-@contextmanager
-def membership_run(run):
-    """Answer cached membership lookups in this context (and copies of it) from `run`."""
-    token = _RUN.set(run)
-    try:
-        yield run
-    finally:
-        _RUN.reset(token)
-
-
-_LOOKUP_ERRORS = (
-    OSError,
-    ValueError,
-    TypeError,
-    AttributeError,
-    KeyError,
-    RuntimeError,
-    subprocess.SubprocessError,
-)
-
-
-def _lookup(configured, author, read):
-    """The team's answer and whether GitHub gave one: (value, True), or (False, False) for a 404,
-    which means not a member or not visible to this credential. Other failures raise."""
-    try:
-        org, slug = configured.split("/", 1)
-        path = f"orgs/{org}/teams/{slug}/memberships/{author}"
-        token = os.environ.get("SELF_TESTED_TEAM_TOKEN") or os.environ.get("TAUCETI_TEAM_TOKEN")
-        return (gh_read(path, token=token) if token else read(path)).get("state") == "active", True
-    except _LOOKUP_ERRORS as error:
-        if getattr(error, "status", None) == 404:
-            return False, False
-        raise
-
-
-def membership(repo, author, read=gh_read, *, strict=False, cache=False):
-    configured = team(repo)
-    if not configured or not author:
-        return False
-    key = configured, author
-    run = _RUN.get() if cache else None
-    try:
-        if run is not None:
-            # Within one run (one credential), a 404 is kept like any other answer.
-            return run.answer(key, lambda: _lookup(configured, author, read)[0])
-        if cache and key in _MEMBERS and time.monotonic() - _MEMBERS[key][0] < 60:
-            return _MEMBERS[key][1]
-        value, answered = _lookup(configured, author, read)
-        if cache and answered:
-            _MEMBERS[key] = time.monotonic(), value
-        return value
-    except _LOOKUP_ERRORS:
-        if strict:
-            raise
-        return False  # Unknown membership never grants admission.
 
 
 def items(read, path):
@@ -212,29 +118,20 @@ def _bump_policy():
 def eligible(pr, repo, *, paths=None, read=gh_read, member_read=None):
     """Validate the current persistent declaration inline; no statuses or writes.
 
-    Ordinary mathematics uses the author's team membership and exact diff paths.
-    The automatic-bump exception still validates its labeller and real pin guard.
-    Membership is cached for at most one minute within a consumer process.
+    Any author's label counts. Ordinary mathematics needs exact diff paths; the
+    automatic-bump exception needs its bump-only paths and the real pin guard.
+    `member_read` is ignored.
     """
     branch = (pr.get("head") or {}).get("ref", "")
     if (
-        not team(repo)
+        not enabled(repo)
         or pr.get("state") != "open"
         or (pr.get("base") or {}).get("ref") != os.environ.get("TAUCETI_BASE_BRANCH", "main")
         or not requested(pr.get("labels"), branch)
     ):
         return False
     bump = branch.startswith(BUMP_BRANCH)
-    author = (pr.get("user") or {}).get("login", "")
-    if bump:
-        if not automatic_bump(pr, repo):
-            return False
-        events = list(items(read, f"repos/{repo}/issues/{pr['number']}/events"))
-        labels = [e for e in events if e.get("event") == "labeled" and (e.get("label") or {}).get("name") == LABEL]
-        if not labels:
-            return False
-        author = (max(labels, key=lambda e: e.get("id", 0)).get("actor") or {}).get("login", "")
-    if not membership(repo, author, member_read or read, strict=True, cache=True):
+    if bump and not automatic_bump(pr, repo):
         return False
     if paths is None:
         files = list(items(read, f"repos/{repo}/pulls/{pr['number']}/files"))

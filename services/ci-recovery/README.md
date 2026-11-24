@@ -17,19 +17,12 @@ at it. Copy the service and timer to `~/.config/systemd/user/`, reload the user
 manager, and enable/start the timer. The wrapper requires the queue checkout and
 its Python environment at `~/TauCetiQueue` (override its import path with
 `TAUCETI_QUEUE_CHECKOUT`) and uses the queue host's existing GitHub App files.
-Every request, including the `self-tested` team membership read, uses an installation token of
-the queue App minted per pass; it is never written into the release or journal, and the host's
-personal `gh` login is not used. The membership read needs the App's organization permission
-**Members: Read-only**. Without it the wrapper logs that and skips self-tested cleanup for the
-pass (unknown membership never cancels a build); missing-build recovery is unaffected.
-`SELF_TESTED_TEAM_TOKEN` in the unit's environment names an explicit token for that read instead.
+Every request uses an installation token of the queue App minted per pass; it is never written
+into the release or journal, and the host's personal `gh` login is not used.
 
-Any PR author may add the `self-tested` label, and the label alone skips PR CI, but readiness and
-admission honour it only from a member of the `self-tested` team. Each pass therefore lists the
-team once with the App token; a non-member's labelled PR is then an ordinary PR here, so a head
-without a `build` status is built (and an interrupted build retried) instead of waiting at
-`awaiting-CI` forever. Automatic Mathlib bumps keep the label's route. When the listing fails,
-every labelled PR keeps the label's route, as before.
+Any PR author may add the `self-tested` label; it skips PR CI, and readiness and admission honour
+it from any author. This pass therefore never builds a labelled head that lacks a `build` status,
+and never retries its interrupted build.
 
 The shared sweeper first snapshots every active ordinary PR build, including
 `pending`, `waiting`, `queued`, `requested` and `in_progress` runs. Date windows
@@ -37,7 +30,7 @@ split inventories larger than GitHub's 1,000-result cap; equal timestamps stay
 in one window. No cancellation changes a collection while it is being paginated.
 
 An ordinary PR build is obsolete when its PR closed/merged, its explicitly tested
-head differs from the current head, or inline trusted-author/scope eligibility accepts its persistent `self-tested`
+head differs from the current head, or inline scope eligibility accepts its persistent `self-tested`
 declaration. No Actions receipt is required. Full-lint requests retain ordinary CI. Legacy dispatches without a
 tested head can be cleaned up after closure but cannot prove head supersession.
 Unknown identities and staging builds are preserved. Each cancellation rechecks
