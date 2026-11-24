@@ -26,6 +26,7 @@ if name == 'lake':
     if sys.argv[1] == 'build':
         if '-o' in sys.argv:
             Path(sys.argv[sys.argv.index('-o') + 1]).write_text('{}\\n')
+        sys.stdout.write(os.environ.get('BUILD_OUTPUT', ''))
         sys.exit(status('BUILD_STATUS'))
     if sys.argv[1:3] == ['cache', 'stage']:
         sys.exit(status('STAGE_STATUS'))
@@ -62,6 +63,8 @@ class SandboxPhases(unittest.TestCase):
                     f".write(json.dumps([\"{name}\", *sys.argv[1:]]) + \"\\n\")' \"$@\"\n"
                     + (f'exit "${{{key}:-0}}"\n' if key else 'exit 0\n'))
             (root / 'trusted/ci_log_filter.py').write_text('import sys\nsys.stdout.write(sys.stdin.read())\n')
+            (root / 'trusted/thread_exhaustion.py').write_text(
+                (SCRIPT.parent / 'thread_exhaustion.py').read_text())
             # Exits with the next of the comma-separated OUTPUT_CHECK_STATUSES (0 once they run out).
             (root / 'trusted/lake_output_check.py').write_text(
                 'import json, os, sys\nfrom pathlib import Path\n'
@@ -117,6 +120,15 @@ class SandboxPhases(unittest.TestCase):
                 if not any(key.endswith('_STATUS') for key in scenario):
                     self.assertEqual(whole[0], 0)
                     self.assertEqual(whole[2][-1], 'end')
+
+    def test_a_build_failed_by_thread_exhaustion_exits_75(self):
+        # pr-build.yml turns status 75 from the build phase into an infrastructure failure.
+        unpacking = ('✖ [2/3] Unpacking TauCeti.B\nThreadPoolBuildError { kind: IOError(Os { code: 11, '
+                     'kind: WouldBlock, message: "Resource temporarily unavailable" }) }\n')
+        for output, expected in ((unpacking, 75), (unpacking + '✖ [3/3] Building TauCeti.C\n', 1), ('', 1)):
+            with self.subTest(output=output):
+                status, _, _ = self.run_sandbox([['build']], BUILD_STATUS=1, BUILD_OUTPUT=output)
+                self.assertEqual(status, expected)
 
     def test_only_a_staged_batch_build_fails_fast(self):
         # A landing candidate stops at its first failure: the queue's repair worker builds the

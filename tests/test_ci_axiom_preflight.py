@@ -24,6 +24,7 @@ class CIAxiomPreflightTests(unittest.TestCase):
             for name in ('declaration-names.sh', 'lint-env.sh', 'lint-style.sh'):
                 (root / 'trusted' / name).write_text('exit 0\n')
             (root / 'trusted/ci_log_filter.py').write_text('import sys\nsys.stdout.write(sys.stdin.read())\n')
+            (root / 'trusted/thread_exhaustion.py').write_text((SCRIPT.parent / 'thread_exhaustion.py').read_text())
             stub = '''#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
