@@ -30,7 +30,8 @@ LEVELS = {"none": 0, "read": 1, "write": 2}
 # A permissions value is held as {scope: level}, with "*" the level of every scope not named, so
 # `read-all` and `write-all` need no list of scopes. `write-all` grants models only read.
 OTHERS = "*"
-CAPPED = {"models": 1}
+# Scopes GitHub only ever grants read, even under `write-all`.
+CAPPED = {"models": 1, "vulnerability-alerts": 1}
 REMOTE_CALL = re.compile(r"^([\w.-]+/[\w.-]+)/\.github/workflows/([\w.-]+\.ya?ml)@(.+)$")
 LOCAL_CALL = re.compile(r"^\./\.github/workflows/([\w.-]+\.ya?ml)$")
 INPUT_REF = re.compile(r"\binputs(?:\.([A-Za-z_][\w-]*)|\[\s*'([^']+)'\s*\])")
@@ -87,11 +88,60 @@ def exceeding(asked, ceiling):
     return {}
 
 
-def concurrency_group(value, env=None):
-    """A concurrency group, normalised for comparison: GitHub compares groups case-insensitively.
+QUOTED = re.compile(r"('(?:[^']|'')*')")
+WHOLE_INPUT = re.compile(r"\$\{\{\s*inputs(?:\.([A-Za-z_][\w-]*)|\[\s*'([^']+)'\s*\])\s*\}\}")
+# A reference to a context whose value the workflow text does not show.
+CONTEXT_REF = re.compile(
+    r"(?<![\w.])(?:vars|github|needs|matrix|steps|env|inputs|outer_inputs|secrets|jobs|strategy|runner)"
+    r"(?:\.[\w-]+|\[[^\]]*\])+")
+COMPARISON = r"(?:==|!=|<=|>=|<|>)"
+PREDICATES = {"contains", "startswith", "endswith"}
 
-    With `env`, the callee's `inputs.<name>` references are replaced by what its caller passed, so
-    one spelling read in two input contexts is not mistaken for one group.
+
+def in_expression(text, change):
+    """Apply `change` to the expression text of every `${{ }}` in `text`, outside quoted literals."""
+    def expression(match):
+        parts = QUOTED.split(match.group(0)[3:-2])
+        return "${{" + "".join(change(part) if i % 2 == 0 else part for i, part in enumerate(parts)) + "}}"
+    return EXPRESSION.sub(expression, text)
+
+
+def operand(value):
+    """An input's value as an expression operand: a forwarded expression keeps its structure."""
+    if match := re.fullmatch(r"\s*\$\{\{(.*)\}\}\s*", value, re.S):
+        return "(" + match.group(1).strip() + ")"
+    return "'" + value.replace("'", "''") + "'"
+
+
+def substitute(text, env):
+    """`text` with each `inputs.<name>` it reads replaced by the value its caller passed, if known.
+
+    `${{ inputs.x }}` alone becomes the value itself; inside a larger expression the value becomes
+    an operand. Inputs with no known value are renamed `outer_inputs`, so a nested workflow never
+    reads them as its own.
+    """
+    def name(match):
+        return match.group(1) or match.group(2)
+
+    def inline(part):
+        return INPUT_REF.sub(lambda m: operand(env[name(m)]) if name(m) in env
+                             else "outer_" + m.group(0), part)
+
+    def expression(match):
+        if WHOLE_INPUT.fullmatch(match.group(0)):
+            key = name(WHOLE_INPUT.fullmatch(match.group(0)))
+            return env[key] if key in env else "${{ outer_inputs." + key + " }}"
+        parts = QUOTED.split(match.group(0)[3:-2])
+        return "${{" + "".join(inline(part) if i % 2 == 0 else part for i, part in enumerate(parts)) + "}}"
+    return EXPRESSION.sub(expression, text)
+
+
+def concurrency_group(value, env=None):
+    """A concurrency group, normalised for comparison.
+
+    GitHub compares groups case-insensitively. Whitespace inside an expression is dropped except
+    within quoted literals. With `env`, the callee's inputs are replaced by what its caller passed,
+    so one spelling read in two input contexts is not mistaken for one group.
     """
     if value is None:
         return None
@@ -99,9 +149,40 @@ def concurrency_group(value, env=None):
     if not group:
         return None
     if env is not None:
-        group = INPUT_REF.sub(lambda m: env.get(m.group(1) or m.group(2), m.group(0)), group)
-    group = EXPRESSION.sub(lambda m: "${{" + "".join(m.group(0)[3:-2].split()) + "}}", group)
+        group = substitute(group, env)
+    group = in_expression(group, lambda part: "".join(part.split()))
+    if re.fullmatch(r"\$\{\{'(?:[^']|'')*'\}\}", group):
+        group = group[4:-3].replace("''", "'")  # a quoted literal alone is its value
     return group.lower()
+
+
+def unknown_supplies(text):
+    """Whether a context reference may supply the runner itself, rather than only choose one.
+
+    References compared with something, negated, followed by `&&`, or inside contains(),
+    startsWith() or endsWith() only decide between routes the text shows.
+    """
+    found = []
+
+    def scan(part):
+        for match in CONTEXT_REF.finditer(part):
+            before, after = part[: match.start()], part[match.end():]
+            if re.match(rf"\s*(?:{COMPARISON}|&&)", after) or re.search(rf"(?:{COMPARISON}|!)\s*$", before):
+                continue
+            depth, function = 0, None
+            for call in reversed(list(re.finditer(r"(\w+)?\s*\(|\)", before))):
+                if call.group(0) == ")":
+                    depth += 1
+                elif depth:
+                    depth -= 1
+                else:
+                    function = (call.group(1) or "").lower()
+                    break
+            if function not in PREDICATES:
+                found.append(match.group(0))
+        return part
+    in_expression(text, scan)
+    return found
 
 
 def runs_on_text(value):
@@ -249,7 +330,10 @@ class Checker:
             ceiling = {OTHERS: 0}
         caller_groups = {g for g in (concurrency_group(caller.get("concurrency")),
                                      concurrency_group(job.get("concurrency"))) if g}
-        inputs = {name: str(value) for name, value in (job.get("with") or {}).items()}
+        # The caller's own `inputs` (dispatch inputs) are unknown here; rename them so the callee
+        # never reads them as its own.
+        inputs = {name: re.sub(r"(?<![\w.])inputs(?=[.\[])", "outer_inputs", str(value))
+                  for name, value in (job.get("with") or {}).items()}
         self.check_interface(where, job, callee)
         # `needs.<job>.outputs.<name>` read by the caller must be declared outputs of the callee.
         outputs = (triggers(self.tools_workflow(callee))["workflow_call"] or {}).get("outputs") or {}
@@ -333,44 +417,27 @@ class Checker:
                     self.fail(where, f"calls {nested}, which does not exist")
                     continue
                 self.check_interface(where, job, nested)
-                passed = {name: self.substitute(str(value), env) for name, value in (job.get("with") or {}).items()}
+                passed = {name: substitute(str(value), env) for name, value in (job.get("with") or {}).items()}
                 held = groups | ({group} if group else set())
                 self.walk(nested, effective, passed, held, [*trail, f"{callee} job {job_id}"])
                 continue
             self.check_runner(where, callee, entry, job.get("runs-on"), env)
-
-    @staticmethod
-    def substitute(text, env):
-        """Text with each `inputs.<name>` it reads replaced by that input's value, when known."""
-        def value(match):
-            name = match.group(1) or match.group(2)
-            return env[name] if env.get(name) else match.group(0)
-        # `${{ inputs.x }}` alone is the value itself; inside a larger expression, its text.
-        whole = re.compile(r"\$\{\{\s*(" + INPUT_REF.pattern + r")\s*\}\}")
-        text = whole.sub(lambda m: value(INPUT_REF.match(m.group(1))) if env.get(
-            m.group(2) or m.group(3)) else m.group(0), text)
-        return INPUT_REF.sub(value, text)
 
     def check_runner(self, where, callee, entry, runs_on, env):
         if runs_on is None:
             self.fail(where, "has no runs-on")
             return
         if isinstance(runs_on, dict):
-            group = self.substitute(str(runs_on.get("group", "")), env)
+            group = substitute(str(runs_on.get("group", "")), env)
             runs_on = {**runs_on, "group": group}
-        text = self.substitute(runs_on_text(runs_on), env)
+        text = substitute(runs_on_text(runs_on), env)
         reachable = set(GROUP_REF.findall(text))
         for label, groups in self.labels.items():
             if re.search(rf"(?<![\w-]){re.escape(label)}(?![\w-])", text):
                 reachable.update(groups)
         # A runner chosen from data the text does not show: a picker's output, a matrix value, a
-        # variable parsed as JSON or used as a group, or an input with no known value.
-        unresolved = (
-            re.search(r"\bneeds\.[\w-]+\.outputs\b|\bneeds\[|\bmatrix\b|fromJSON\(\s*vars\b", text)
-            or INPUT_REF.search(text)
-            or isinstance(runs_on, dict) and "${{" in runs_on["group"]
-        )
-        if unresolved:
+        # variable, an event payload, or an input with no known value.
+        if unknown_supplies(text):
             declared = entry.get("runner_groups")
             if declared is None:
                 self.fail(where, f"picks its runner at run time; list the groups it may reach as "
