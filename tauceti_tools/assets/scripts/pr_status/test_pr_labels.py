@@ -382,6 +382,15 @@ class Reconcile(unittest.TestCase):
         self.assertEqual(sorted(self.removed), ["ready-to-merge", "review-in-progress"])
 
 
+    def test_a_red_build_removes_the_self_tested_label(self):
+        self.run_with(
+            {"category": "ci-failed", "head": "h", "reason": "build failed", "drop_self_tested": True},
+            present=["ready-to-merge"])
+        labels.reconcile("1")
+        self.assertEqual(self.added, ["ci-failed"])
+        self.assertEqual(sorted(self.removed), ["ready-to-merge", "self-tested"])
+
+
 class Backfill(unittest.TestCase):
     def run_backfill(self, errors):
         with mock.patch.object(labels.readiness, "engine"), \
