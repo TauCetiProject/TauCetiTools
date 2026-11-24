@@ -432,13 +432,19 @@ def remember(previous, observed, exhausted, dispatched, now):
             elif now - entry["seen"] <= MEMORY_DAYS * 86400:
                 kept[key] = entry
         memory[kind] = kept
-    threads = {str(p["number"]) for p in observed if threads_build(p)}
+    # A head whose thread-exhaustion retry is spent stays spent when a later entry for the same head
+    # (a cancelled build's retry, say) replaces the one that recorded it.
+    spent = {key: entry["head"] for kept in memory.values() for key, entry in kept.items() if entry.get("threads")}
+    spent.update((str(p["number"]), p["headRefOid"]) for p in observed if threads_build(p))
+
+    def entry(key, value):
+        return dict(value, seen=now, **({"threads": True} if spent.get(key) == value.get("head") else {}))
+
     for number in exhausted:
         if str(number) not in memory["retried"] and current.get(str(number)):
-            memory["exhausted"][str(number)] = dict(current[str(number)], seen=now,
-                                                    **({"threads": True} if str(number) in threads else {}))
+            memory["exhausted"][str(number)] = entry(str(number), current[str(number)])
     for number, pull in dispatched:
-        memory["retried"][str(number)] = dict(verdict(pull), seen=now, **({"threads": True} if threads_build(pull) else {}))
+        memory["retried"][str(number)] = entry(str(number), verdict(pull))
     return memory
 
 

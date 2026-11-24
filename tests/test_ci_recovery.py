@@ -833,6 +833,22 @@ class ThreadExhaustionTests(unittest.TestCase):
         self.assertEqual(len(recovery.recover(moved, "owner/project", now=NOW, cleanup=False,
                                               stuck_report=self.report, apply=True)), 1)
 
+    def test_a_later_cancellation_on_the_head_keeps_the_retry_spent(self):
+        threads = self.api().pulls[0]
+        cancelled_head = pull(state="FAILURE", run_id=33)
+        for kind in ("retried", "exhausted"):
+            with self.subTest(kind=kind):
+                previous = {"memory": {kind: {"1": dict(head=HEAD, run=30, posted=None, seen=NOW, threads=True)}}}
+                # A cancelled build's retry (or a cancelled rerun found exhausted) replaces the entry.
+                if kind == "retried":
+                    memory = recovery.remember(previous, [cancelled_head], {}, [(1, cancelled_head)], NOW)
+                else:
+                    memory = recovery.remember(previous, [cancelled_head], {1: 33}, [], NOW)
+                self.assertTrue(memory[kind]["1"]["threads"])
+                retry, exhausted, _ = recovery.interrupted_heads(Interrupted([threads]), "owner/project",
+                                                                 [threads], NOW, memory)
+                self.assertEqual((retry, exhausted), ([], {1: 30}))
+
     def test_a_retry_that_runs_out_of_threads_too_is_reported_not_retried(self):
         for changes in (dict(event="workflow_dispatch"), dict(run_attempt=2)):
             with self.subTest(changes=changes):
