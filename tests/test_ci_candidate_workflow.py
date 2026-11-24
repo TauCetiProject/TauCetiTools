@@ -1077,31 +1077,15 @@ class ShippedWorkflow(unittest.TestCase):
         self.assertLess(steps.index(step), next(i for i,s in enumerate(steps) if s.get("id") == "build"))
         self.assertIn('repair-cache-get.sh pr "$REPAIR_HEAD" "$REPAIR_BASE"', step["run"])
 
-    def test_warm_staging_tree_is_hidden_from_trusted_setup_and_sealed_last(self):
-        steps = self.value["jobs"]["sandboxed-build"]["steps"]
-        names = [step.get("name") for step in steps]
-        prepare = self.step("Prepare this batch's staging tree from its previous attempt")
-        join = self.step("Join this batch's previous staging tree")
-        keep = self.step("Keep this batch's staging tree for its next attempt")
-        for step in (prepare, join, keep):
-            self.assertIs(step["continue-on-error"], True)  # optional: never fails or skips the build
-            self.assertNotIn("TOKEN", str(step))
-            self.assertNotIn("secrets.", str(step))
-        self.assertIn("env.SOURCE_CANDIDATE == 'true' && env.IS_BATCH == 'true'", prepare["if"])
-        # Prepare follows the last normalisation; trusted setup then runs before the kept tree joins.
-        self.assertEqual(names.index(prepare["name"]),
-                         names.index("Prepare and record the tested integration (frozen batches unchanged)") + 1)
-        for trusted in ("Fetch Mathlib with the (bump-validated) config (network, no token; no PR code)",
-                        "Restore source candidate repair outputs",
-                        "Build the trusted environment-lint driver (before any candidate code runs)"):
-            self.assertLess(names.index(trusted), names.index(join["name"]))
-        self.assertEqual(names.index(join["name"]) + 1, names.index("Build exact candidate under bwrap, offline"))
-        self.assertEqual(steps[-1], keep)
-        self.assertIn("!cancelled()", keep["if"])
-        self.assertIn("steps.sandbox_build.outcome", keep["if"])
+    def test_staging_never_reuses_a_previous_attempts_tree(self):
+        # The kept-tree steps (Tools #311, 20 Nov 2026) never activated: renaming the kept build out
+        # of the disk's mount into the bind-mounted pr/.lake fails with EXDEV, yet the base cache fetch
+        # was skipped. Every staging attempt now restores and builds in a fresh pr/.lake.
+        text = (self.root / ".github/workflows/pr-build.yml").read_text()
+        for marker in ("warm_tree.py", "WARM_TREE", "WARM_VOLUME", "WARM_ACTIVE"):
+            self.assertNotIn(marker, text)
         fetch = self.step("Fetch ${{ inputs.lean_root }}'s own oleans from the Lake cache (network, no token; no PR code)")
-        self.assertIn("env.WARM_TREE != '1'", fetch["if"])
-        self.assertNotIn("WARM", self.step("Restore source candidate repair outputs")["if"])
+        self.assertEqual(fetch["if"], "${{ env.INFRA != '1' && env.TAUCETI_CACHE_ENABLED == '1' }}")
 
     def test_source_publication_and_finalizer_use_separate_trusted_control_capacity(self):
         control = ("${{ inputs.source_candidate_enabled && fromJSON(inputs.source_candidate_control_runner) || "

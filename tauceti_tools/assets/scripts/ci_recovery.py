@@ -13,6 +13,7 @@ from pathlib import Path
 
 from github_api import APIError, Deferred, GitHub
 from pr_ci_lifecycle import ACTIVE, ordinary, pr_numbers, reconcile, reserved, runs
+import tauceti_tools.self_tested as self_tested_route
 
 INVENTORY = """
 query($owner: String!, $name: String!, $after: String) {
@@ -228,7 +229,7 @@ def cancelled_before_build(api, repo, run):
 # The `build` description PR CI's report step posts when its build was cut off before the tested
 # head was recorded (pr-build.yml). A label event's `skip_build` dispatch cancels an in-flight build
 # through the per-PR concurrency group this way, so such a head can wait any length of time.
-CUT_OFF_DESCRIPTION = "build not run — tested H/B/T identity missing or invalid"
+CUT_OFF_DESCRIPTION = self_tested_route.CUT_OFF_DESCRIPTION
 # The `build` description PR CI posts when its build failed only because the CI host ran out of
 # threads (pr-build.yml, thread_exhaustion.py). Like a cut-off build, the head is owed one retry.
 THREADS_DESCRIPTION = "infrastructure failure: the CI host ran out of threads; CI recovery retries once"

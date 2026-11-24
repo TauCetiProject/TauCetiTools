@@ -1,0 +1,46 @@
+name: worker-contract
+# The merge queue, repair workers and fleet hosts install TauCetiTools main on their next deploy,
+# so TauCetiWorker's queue admission tests run against every change here before it reaches them.
+# Worker CI itself tests a pinned Tools commit. A deliberate change to the policy those tests
+# assert lands in two steps; see "Worker admission contract" in README.md.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      worker-ref:
+        description: TauCetiWorker branch, tag or commit whose tests to run
+        required: false
+        default: main
+concurrency:
+  group: worker-contract-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'auto' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+permissions:
+  contents: read
+jobs:
+  worker-contract:
+    # Same placement as checks.yml (FLEET_INFRA_CI); fork pull requests always run hosted.
+    runs-on: ${{ vars.FLEET_INFRA_CI == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('{"group":"TauCetiInfra","labels":["self-hosted","linux","x64","tauceti-fleet-infra"]}') || 'ubuntu-24.04' }}
+    timeout-minutes: 15
+    env:
+      UV_PYTHON: "3.14"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tools
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: TauCetiProject/TauCetiWorker
+          ref: ${{ inputs.worker-ref || 'main' }}
+          path: worker
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - name: Point the Worker at this TauCetiTools checkout
+        run: worker/.github/scripts/tools-pin.sh apply --path tools
+      - name: Run the Worker's queue admission tests
+        working-directory: worker
+        run: |
+          uv run python tests/queue_admission.py
+          uv run python tests/queue_admission_adapter.py
