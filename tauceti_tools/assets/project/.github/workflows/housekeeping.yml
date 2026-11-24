@@ -10,7 +10,7 @@ name: Queue Housekeeping
 #   stale    Close a PR labelled awaiting-author that has had
 #            no activity for STALE_DAYS (default 7).
 # The only opt-out is a `keep` (or hold/wip/human/do-not-close) label; human activity alone does not
-# spare a PR. abandon is a server-side label query (one request, independent of total open-PR count),
+# spare a PR. stale and red also skip authors whose PRs the worker fleet maintains (housekeeping.py). abandon is a server-side label query (one request, independent of total open-PR count),
 # and a failed close makes the job exit nonzero. Run it manually first with the dry-run input to preview.
 
 on:
