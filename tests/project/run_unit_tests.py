@@ -8,9 +8,10 @@ are copied into `PROJECT/scripts/` and run against PROJECT's own `.github/`.
 
 Tests that need Lean, Lake or bwrap (`test_check_imports.py`, `test_ci_checkout.py`,
 `test_lake_cache_publish.py`) run in later steps of the `project-fixtures` job, and
-`test_lint_dot_notation.py` and `test_claims_access.py` run in the `package` job. When PROJECT's
-`pr-build.yml` is a stub calling this repository's reusable pr-build, this script first puts this
-revision's copy in its place, so those later steps check it as well.
+`test_lint_dot_notation.py` and `test_claims_access.py` run in the `package` job. When one of
+PROJECT's workflows is a stub calling this repository's workflow of the same name (pr-build.yml,
+for one), this script first puts this revision's copy in its place, so those later steps check it
+as well.
 """
 
 import os
@@ -102,28 +103,36 @@ sys.exit(not unittest.TextTestRunner().run(suite).wasSuccessful())
 """
 
 
-def use_this_build_workflow(project):
-    """Test this revision's pr-build once the project's pr-build.yml only calls it.
+def stubs(project):
+    """Project workflows that only call this repository's workflow of the same name."""
+    workflows = project / ".github/workflows"
+    return sorted(path.name for path in workflows.glob("*.yml")
+                  if f"TauCetiTools/.github/workflows/{path.name}@" in path.read_text())
 
-    The workflow tests read `.github/workflows/pr-build.yml` from the project. When that file is a
-    stub calling TauCetiTools' reusable pr-build, put this revision's copy, and the actions it
-    uses, in its place, so the tests check the build the project actually runs.
+
+def use_this_revisions_workflows(project):
+    """Test this revision's workflows in place of the project's stubs that call them.
+
+    The workflow tests read `.github/workflows/<name>.yml` from the project. When that file is a
+    stub calling TauCetiTools' reusable workflow of the same name, put this revision's copy (and,
+    for pr-build, the actions it uses) in its place, so the tests check what the project runs.
     """
     workflows = project / ".github/workflows"
-    if "TauCetiTools/.github/workflows/pr-build.yml@" not in (workflows / "pr-build.yml").read_text():
-        return False
     tools = HERE.parents[1]
-    # The project's own publish-lake-cache.yml stays: its post-merge ci.yml still calls it.
-    shutil.copyfile(tools / ".github/workflows/pr-build.yml", workflows / "pr-build.yml")
-    for name in ("restore-lean-toolchain", "restore-mathlib-ltars"):
-        shutil.copytree(tools / ".github/actions" / name, project / ".github/actions" / name, dirs_exist_ok=True)
-    print("testing this revision's pr-build.yml in place of the project's stub", flush=True)
-    return True
+    replaced = stubs(project)
+    for name in replaced:
+        # The project's own publish-lake-cache.yml stays while its post-merge ci.yml calls it.
+        shutil.copyfile(tools / ".github/workflows" / name, workflows / name)
+        print(f"testing this revision's {name} in place of the project's stub", flush=True)
+    if "pr-build.yml" in replaced:
+        for name in ("restore-lean-toolchain", "restore-mathlib-ltars"):
+            shutil.copytree(tools / ".github/actions" / name, project / ".github/actions" / name, dirs_exist_ok=True)
+    return replaced
 
 
 def main(project):
     deselected = {name: list(cases) for name, cases in DESELECTED.items()}
-    if use_this_build_workflow(project):
+    if "pr-build.yml" in use_this_revisions_workflows(project):
         for name, cases in STUB_DESELECTED.items():
             deselected[name] = deselected.get(name, []) + cases
     scripts = project / "scripts"

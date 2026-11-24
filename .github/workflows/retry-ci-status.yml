@@ -5,8 +5,10 @@ name: Retry CI status publication
 on:
   workflow_call:
     inputs:
-      tools_repository: {type: string, required: true}
-      tools_ref: {type: string, required: true}
+      # Ignored and kept for existing callers: the tools are this workflow's own revision.
+      tools_repository: {type: string, required: false}
+      tools_ref: {type: string, required: false}
+      # The caller's github.workflow_sha: the default-branch revision whose tauceti.toml applies.
       project_ref: {type: string, required: true}
       source_run_id: {type: string, default: ""}
       source_attempt: {type: string, default: "1"}
@@ -62,8 +64,8 @@ jobs:
       - name: Checkout pinned shared implementation
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          repository: ${{ inputs.tools_repository }}
-          ref: ${{ inputs.tools_ref }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .tauceti-tools
           persist-credentials: false
       - name: Prepare trusted project scripts
@@ -196,8 +198,8 @@ jobs:
       - name: Check out pinned recovery tools
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          repository: ${{ inputs.tools_repository }}
-          ref: ${{ inputs.tools_ref }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           sparse-checkout: tauceti_tools
           persist-credentials: false
       - name: Recover abandoned PR builds
