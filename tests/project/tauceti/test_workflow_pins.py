@@ -35,6 +35,9 @@ POLICY_READERS = {
 # workflow on either must not load the local action from its checkout.
 TRUSTED_TRIGGERS = {
     "push", "schedule", "workflow_dispatch", "workflow_run", "pull_request_target", "issue_comment",
+    # TauCetiTools' copy of a workflow whose TauCeti file is a stub calling it: it runs under the
+    # stub's triggers, which TauCetiTools' workflow-contract.yml checks against its contract.
+    "workflow_call",
 }
 CALL_PIN = re.compile(
     r"uses:\s+TauCetiProject/TauCetiReview/\.github/workflows/[^@\s]+@([0-9a-f]{40})"
