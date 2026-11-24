@@ -85,16 +85,6 @@ jobs:
           python tauceti_tools/assets/scripts/test_duplicate_declarations.py
           python -m unittest discover -s tests -p test_local_axioms.py
           python -m unittest discover -s tests -p test_numproj.py
-      - name: Verify that the stack raise lets leantar unpack TauCeti's deepest archive
-        # TauCeti.Algebra.Lie.F4.ModularLattice's real archive, through Lake's own invocation at the
-        # default 8 MiB stack: it must fail without the raise every workflow uses, and work with it.
-        env:
-          ELAN_TOOLCHAIN: leanprover/lean4:v4.37.0-rc1
-          LEANTAR_STACK_INTEGRATION: "1"
-        run: |
-          elan toolchain install "$ELAN_TOOLCHAIN"
-          # Only the archive check: this job has no PyYAML for the workflow scan, which runs in `test`.
-          python -m unittest tests.test_leantar_stack.RealArchive -v
       - name: Verify bulk restoration and native publication with stock Lake
         # TauCeti's own toolchain, which the bulk unpack must read. Under the job's older pin this
         # passed while every TauCeti build on v4.37.0-rc1 (ilean version 6) fell back to stock Lake.
@@ -103,6 +93,16 @@ jobs:
         run: |
           elan toolchain install "$ELAN_TOOLCHAIN"
           python tauceti_tools/assets/scripts/test_bulk_unpack_cache.py --integration
+      - name: Verify that the stack raise lets leantar unpack TauCeti's deepest archive
+        # The bulk restoration step above installed this toolchain.
+        # TauCeti.Algebra.Lie.F4.ModularLattice's real archive, through Lake's own invocation at the
+        # default 8 MiB stack: it must fail without the raise every workflow uses, and work with it.
+        env:
+          ELAN_TOOLCHAIN: leanprover/lean4:v4.37.0-rc1
+          LEANTAR_STACK_INTEGRATION: "1"
+        run: |
+          # Only the archive check: this job has no PyYAML for the workflow scan, which runs in `test`.
+          python -m unittest tests.test_leantar_stack.RealArchive -v
       - name: Verify that base headers are read from a stock Lake cache
         env:
           ELAN_TOOLCHAIN: leanprover/lean4:v4.37.0-rc1
