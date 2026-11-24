@@ -33,6 +33,7 @@ either merged or closed — never stranded:
            no completed CI cycle and no state change at all, which is abandonment rather than effort.
 
 Bot dependency bumps are repaired until they land and are exempt from automatic retirement.
+PRs by INACTIVITY_EXEMPT_AUTHORS, whose open PRs the worker fleet maintains, are exempt from stale and red.
 For other PRs, the override is a `keep` label (also `hold`/`wip`/`human`/`do-not-close`): a PR with one of those
 is never auto-closed. By design these jobs do NOT spare human-touched PRs — anyone who wants a PR held
 adds `keep`. A failed close makes the job exit nonzero.
@@ -85,6 +86,13 @@ STALE_DAYS = int(os.environ.get("STALE_DAYS", "7"))
 # over the current label spell rather than `updatedAt`: see the `red` entry in the module docstring.
 CI_FAILED_DAYS = int(os.environ.get("CI_FAILED_DAYS", "7"))
 CI_FAILED_LABEL = "ci-failed"
+# Authors whose open PRs the project's worker fleet maintains on their behalf. Their PRs wait on our
+# repairs rather than on the author, so the two inactivity policies (stale and red) leave them open;
+# review-budget, empty and duplicate retirement still apply. A `keep` label is not usable for this:
+# the worker treats it as a hold and would stop tending the PR. Lower-case GitHub logins.
+INACTIVITY_EXEMPT_AUTHORS = frozenset({
+    "mo271",  # Moritz Firsching: his fleet stopped on 18 Nov 2026; ours maintains his PRs.
+})
 # How long an empty-diff roadmap PR must be QUIET before the empty job closes it — long enough that an
 # actively-pushing worker (which would bump updatedAt) is never raced into a wrong close.
 EMPTY_QUIET_MINUTES = int(os.environ.get("EMPTY_QUIET_MINUTES", "30"))
@@ -131,6 +139,12 @@ def gh_json(args):
 
 def has_keep_label(pr: dict) -> bool:
     return bool({(l.get("name") or "").lower() for l in (pr.get("labels") or [])} & KEEP_LABELS)
+
+
+def inactivity_exempt(pr: dict) -> bool:
+    """Whether the PR's author is one whose PRs the fleet maintains, so inactivity never closes them."""
+    login = ((pr.get("author") or {}).get("login") or "").lower()
+    return login in INACTIVITY_EXEMPT_AUTHORS
 
 
 def has_label(pr: dict, name: str) -> bool:
@@ -378,6 +392,9 @@ def main() -> int:
         if p.get("isDraft") is not False or has_keep_label(p) or core.automatic_bump(p):
             print(f"stale: #{n} skipped (draft, explicit hold, or automatic dependency bump)")
             continue
+        if inactivity_exempt(p):
+            print(f"stale: #{n} skipped (author's PRs are maintained by the fleet)")
+            continue
         if not has_label(p, "awaiting-author"):
             print(f"stale: #{n} skipped (not awaiting-author)")
             continue
@@ -398,7 +415,7 @@ def main() -> int:
     # isDraft must be explicitly False, matching stale above: an unknown draft state is never closed.
     red_candidates = [p for p in open_prs_with_label(CI_FAILED_LABEL)
                       if p.get("isDraft") is False and not has_keep_label(p) and not core.automatic_bump(p)
-                      and has_label(p, CI_FAILED_LABEL)]
+                      and not inactivity_exempt(p) and has_label(p, CI_FAILED_LABEL)]
     print(f"red: {len(red_candidates)} open PR(s) carrying {CI_FAILED_LABEL} to check{suffix}")
     for p in red_candidates:
         since = ci_failed_since(p["number"])
