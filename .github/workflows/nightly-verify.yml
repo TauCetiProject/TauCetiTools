@@ -176,6 +176,9 @@ jobs:
           LAKE_CACHE_DIR: ${{ github.workspace }}/fresh/.lake/cache
         run: |
           set -euo pipefail
+          # Lake packs every module into the artifact cache here; leantar 0.1.21 needs about 14 MiB
+          # of stack for TauCeti.Algebra.Lie.F4.ModularLattice (tests/test_leantar_stack.py).
+          ulimit -s unlimited 2>/dev/null || ulimit -s "$(ulimit -H -s)" 2>/dev/null || true
           cd fresh
           echo "Clean build resources: $(nproc) CPUs"
           free -h
@@ -633,6 +636,9 @@ jobs:
           LAKE_NO_CACHE: "true"
         run: |
           set -euo pipefail
+          # The restore unpacks every module with leantar, which needs about 11 MiB of stack for
+          # TauCeti.Algebra.Lie.F4.ModularLattice; bwrap and the build inherit the raised limit.
+          ulimit -s unlimited 2>/dev/null || ulimit -s "$(ulimit -H -s)" 2>/dev/null || true
           mkdir -p reference/.lake/tmp
           export PATH="$HOME/.elan/bin:$PATH"
           # `env -i` and `--remount-ro /` are both load-bearing. `--clearenv` clears the child's

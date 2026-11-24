@@ -218,7 +218,10 @@ jobs:
           cc --version | head -1
 
       - name: Verify doc-gen4 is compatible with TauCeti's toolchain
-        run: lake build doc-gen4
+        # The artifact cache is configured job-wide, so raise leantar's stack as the build step does.
+        run: |
+          ulimit -s unlimited 2>/dev/null || ulimit -s "$(ulimit -H -s)" 2>/dev/null || true
+          lake build doc-gen4
 
       - name: Save the doc-gen4 executable's build
         if: steps.docgen-exe.outputs.cache-hit != 'true'
