@@ -1739,9 +1739,13 @@ jobs:
             [ "$outcome" = success ] || exit 1
           done
 
+      # Only a batch whose every sandboxed phase passed stages outputs for publication. A failed audit
+      # or lint can mean the tree itself is bad (a truncated restored output crashes the audit driver
+      # while Lake still trusts its trace), so its outputs never reach the public cache. Batch 506's
+      # attempt 339 published two corrupt archives that way on 24 Nov 2026.
       - name: Prepare merge-group cache artifact metadata
         id: cache_stage
-        if: ${{ !cancelled() && env.IS_BATCH == 'true' && env.STAGE_LAKE_CACHE == '1' && steps.sandbox_build.outcome == 'success' && steps.sandbox_finish.outcome == 'success' }}
+        if: ${{ !cancelled() && env.IS_BATCH == 'true' && env.STAGE_LAKE_CACHE == '1' && steps.build.outcome == 'success' }}
         run: |
           set -euo pipefail
           python3 gate/scripts/lake_cache_publish.py stage pr/.lake/publication-stage "$RUNNER_TEMP/lake-cache-staging"
@@ -2241,9 +2245,9 @@ jobs:
         timeout-minutes: 5
         run: python3 gate/scripts/warm_tree.py retain --project pr --key "$WARM_TREE_KEY"
 
-  # A queue batch publishes whenever its sandboxed build passed, so the next repair and staging
-  # attempt restore it even when an audit or lint failed; every consumer reruns the audits on its
-  # own candidate, and only the `build` status lets a candidate land. The reusable workflow runs on a
+  # A queue batch publishes only when its sandboxed build, audits and lints all passed (the
+  # `cache_stage` step above stages nothing otherwise); status reporting failures do not stop it.
+  # A failed attempt's next try restores from the base and repair caches. The reusable workflow runs on a
   # fresh runner, sparsely checks out that commit's toolchain pin and key-free confirmation
   # helper, and is the sole holder of the key. The helper runs only after the key-bearing step.
   publish-merge-group-cache:
