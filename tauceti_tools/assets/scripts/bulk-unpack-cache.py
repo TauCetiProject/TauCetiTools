@@ -53,6 +53,8 @@ DESCRIPTORS = {"o": ("olean", "olean.server", "olean.private"), "i": ("ilean",),
                "rs": ("ir.sig",), "r": ("ir",), "c": ("c",), "b": ("bc",)}
 PREFERRED = "repair-revisions"
 UNRANKED = 1 << 30
+# The oldest ilean format whose "module" field this script relies on.
+ILEAN_VERSION = 5
 
 
 def preferred_inputs(project):
@@ -188,7 +190,13 @@ def extract_records(records, staging):
         info = json.loads(regular(ilean).read_text())
         module = info.get("module")
         allowed = module_paths(module)
-        if info.get("version") != 5 or ilean.name != module.split(".")[-1] + ".ilean":
+        # Only the ilean's "module" field is read. Lean bumps the ilean version when other
+        # fields change (5 through v4.36, 6 from v4.37.0-rc1) and keeps "module" the module
+        # name; an exact version check sent every rc1 build to stock Lake's per-module
+        # restore. module_paths and the file name below still validate the name itself.
+        version = info.get("version")
+        if (not isinstance(version, int) or isinstance(version, bool) or version < ILEAN_VERSION
+                or ilean.name != module.split(".")[-1] + ".ilean"):
             raise ValueError("unknown archive module layout")
         files = []
         for directory, destination, _ in OUTPUTS:

@@ -100,10 +100,17 @@ fi
 build_phase() {
   # The build is the first phase, so it starts the phase record afresh.
   : > "$TELEMETRY/phases.tsv" 2>/dev/null || true
-  if [ "${LAKE_ARTIFACT_CACHE:-}" = "true" ] && [ "${LAKE_RESTORE_ARTIFACTS:-}" = "true" ]; then
-    # Stock Lake forks once per cached module. Prepare fresh private caches in one
-    # leantar call for ordinary PRs as well as staging. Retain archives for native
-    # publication; Lake still verifies inputs before using the restored outputs.
+  # Only a build that records declaration names (declaration-names.sh: not a batch, with a
+  # changed-module list) runs the bulk unpack. It is the one step that leaves each changed module's
+  # merge-base header in .lake/build for `declaration-names.sh save`; stock Lake restores only
+  # outputs whose inputs still match, never the base version of a changed module. Everything else,
+  # staging included, restores with stock Lake, which on Lean v4.37.0-rc1 is faster: for all of
+  # TauCeti on 96 CPUs about 30s, against about 120s for the bulk unpack and the build after it,
+  # which in turn uses about 25% less CPU and a fifth of the peak tasks.
+  if [ "${LAKE_ARTIFACT_CACHE:-}" = "true" ] && [ "${LAKE_RESTORE_ARTIFACTS:-}" = "true" ] \
+     && [ "${IS_BATCH:-}" != "true" ] && [ -n "${LINT_ONLY_MODULES:-}" ] && [ -r "$LINT_ONLY_MODULES" ]; then
+    # Retain archives for native publication; Lake still verifies inputs before using the
+    # restored outputs.
     phase cache-unpack
     python3 "$TRUSTED_SCRIPTS/bulk-unpack-cache.py" .
   fi
@@ -114,9 +121,9 @@ build_phase() {
   # `--output-error=warn` keeps tee passing the build's output through even if writing the copy fails,
   # and `|| true` drops tee's own status, so `pipefail` reports exactly Lake's.
   set +e
-  # When the bulk unpack above leaves modules to stock Lake, Lake restores each one with its own
-  # leantar, about one per CPU at once, and each leantar's rayon pool defaults to one thread per
-  # CPU. On a 96-CPU native fleet guest that reached thousands of tasks per build and exhausted
+  # Without the bulk unpack above, or for modules it leaves to stock Lake, Lake restores each
+  # cached module with its own leantar, about one per CPU at once, and each leantar's rayon pool
+  # defaults to one thread per CPU. On a 96-CPU native fleet guest that reached thousands of tasks per build and exhausted
   # the host's CI task limit (24 Nov 2026). leantar parallelises across the archives it is given,
   # and Lake gives it one, so the extra workers only sit idle: on a 96-CPU host a full stock
   # restore of TauCeti (39,164 modules) peaked at 695 tasks in 37s with 4, against 5,248 tasks

@@ -73,6 +73,25 @@ class BulkUnpackTests(unittest.TestCase):
             self.assertEqual(bulk.unpack(self.root), 0)
         run.assert_not_called()
 
+    def test_later_ilean_versions_keep_the_bulk_path(self):
+        # Lean v4.37.0-rc1 writes ilean version 6 with the same "module" field.
+        for version, restored in ((4, 0), (5, 1), (6, 1), (7, 1), (6.0, 0), ("6", 0), (True, 0), (None, 0)):
+            with self.subTest(version=version):
+                shutil.rmtree(self.root / ".lake/build", ignore_errors=True)
+                self.record.write_text(json.dumps({"schemaVersion": bulk.SCHEMA, "data": self.archive.name}))
+                def extract(*args, **kwargs):
+                    lib, ir = map(Path, json.loads(kwargs["input"])[0]["base"])
+                    lib.mkdir(parents=True)
+                    ir.mkdir()
+                    (self.root / "TauCeti").mkdir(exist_ok=True)
+                    (self.root / "TauCeti/Fixture.lean").write_text("module\n")
+                    (lib / "Fixture.ilean").write_text(json.dumps({"version": version, "module": "TauCeti.Fixture"}))
+                with patch.object(bulk.subprocess, "check_output", return_value="/toolchain\n"), \
+                        patch.object(bulk.subprocess, "run", side_effect=extract):
+                    self.assertEqual(bulk.unpack(self.root), restored)
+                self.assertEqual((self.root / ".lake/build").exists(), bool(restored))
+                self.assertEqual(self.record.exists(), not restored)
+
     def test_existing_build_is_untouched(self):
         (self.root / ".lake/build").mkdir()
         self.assert_stock_fallback()
