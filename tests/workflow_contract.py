@@ -27,15 +27,13 @@ PROJECT_REPOSITORY = "TauCetiProject/TauCeti"
 CONTRACT = ".github/workflow-contract.yml"
 FLEET_POLICY = "services/ci-broker/src/github.mjs"
 LEVELS = {"none": 0, "read": 1, "write": 2}
-# Every GITHUB_TOKEN permission scope, for `read-all` and `write-all`.
-SCOPES = (
-    "actions", "attestations", "checks", "contents", "deployments", "discussions", "id-token",
-    "issues", "models", "packages", "pages", "pull-requests", "repository-projects",
-    "security-events", "statuses",
-)
+# A permissions value is held as {scope: level}, with "*" the level of every scope not named, so
+# `read-all` and `write-all` need no list of scopes. `write-all` grants models only read.
+OTHERS = "*"
+CAPPED = {"models": 1}
 REMOTE_CALL = re.compile(r"^([\w.-]+/[\w.-]+)/\.github/workflows/([\w.-]+\.ya?ml)@(.+)$")
 LOCAL_CALL = re.compile(r"^\./\.github/workflows/([\w.-]+\.ya?ml)$")
-INPUT_REF = re.compile(r"\binputs\.([A-Za-z_][\w-]*)")
+INPUT_REF = re.compile(r"\binputs(?:\.([A-Za-z_][\w-]*)|\[\s*'([^']+)'\s*\])")
 GROUP_REF = re.compile(r"""["']?group["']?\s*:\s*["']?([A-Za-z][\w-]*)""")
 EXPRESSION = re.compile(r"\$\{\{.*?\}\}", re.S)
 
@@ -55,35 +53,55 @@ def triggers(workflow):
 
 
 def permissions(value):
-    """A permissions value as {scope: level}; None when not set."""
+    """A permissions value as {scope: level, "*": others}; None when not set."""
     if value is None:
         return None
     if value == "read-all":
-        return {scope: 1 for scope in SCOPES}
+        return {OTHERS: 1}
     if value == "write-all":
-        return {scope: 2 for scope in SCOPES}
+        return {OTHERS: 2, **CAPPED}
     if value == {} or value == "":
-        return {}
+        return {OTHERS: 0}
     if not isinstance(value, dict):
         raise ValueError(f"unreadable permissions {value!r}")
-    return {scope: LEVELS[level] for scope, level in value.items()}
+    return {OTHERS: 0, **{scope: LEVELS[level] for scope, level in value.items()}}
+
+
+def level(perms, scope):
+    return perms.get(scope, perms[OTHERS])
 
 
 def show(perms):
     names = {level: name for name, level in LEVELS.items()}
-    return ", ".join(f"{scope}: {names[level]}" for scope, level in sorted(perms.items()) if level) or "none"
+    shown = [f"{scope}: {names[level]}" for scope, level in sorted(perms.items()) if level and scope != OTHERS]
+    if perms[OTHERS]:
+        shown.append(f"every other scope: {names[perms[OTHERS]]}")
+    return ", ".join(shown) or "none"
 
 
 def exceeding(asked, ceiling):
-    return {scope: level for scope, level in asked.items() if level > ceiling.get(scope, 0)}
+    extra = {scope: level(asked, scope) for scope in {*asked, *ceiling} - {OTHERS}
+             if level(asked, scope) > level(ceiling, scope)}
+    if extra or asked[OTHERS] > ceiling[OTHERS]:
+        return {OTHERS: asked[OTHERS] if asked[OTHERS] > ceiling[OTHERS] else 0, **extra}
+    return {}
 
 
-def concurrency_group(value):
+def concurrency_group(value, env=None):
+    """A concurrency group, normalised for comparison: GitHub compares groups case-insensitively.
+
+    With `env`, the callee's `inputs.<name>` references are replaced by what its caller passed, so
+    one spelling read in two input contexts is not mistaken for one group.
+    """
     if value is None:
         return None
-    if isinstance(value, str):
-        return value
-    return value.get("group")
+    group = value if isinstance(value, str) else value.get("group")
+    if not group:
+        return None
+    if env is not None:
+        group = INPUT_REF.sub(lambda m: env.get(m.group(1) or m.group(2), m.group(0)), group)
+    group = EXPRESSION.sub(lambda m: "${{" + "".join(m.group(0)[3:-2].split()) + "}}", group)
+    return group.lower()
 
 
 def runs_on_text(value):
@@ -97,17 +115,27 @@ def fleet_policy(fleet_root):
     whose selected workflows fall outside it is refused, so it bounds what GitHub can admit.
     """
     text = (Path(fleet_root) / FLEET_POLICY).read_text()
+    # Comments must not keep a deleted admission alive.
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    text = re.sub(r"(?m)(^|[^:'\\])//.*$", r"\1", text)
     start = text.index("export const CHECKS={")
     body = text[start : text.index("\n};", start)]
     prefixes = dict(re.findall(r"const (\w+)='([^']+)'", text))
     entries = re.split(r"\n\s*(?=\d+:expect\(|\[\w+\]:\{)", body)
     groups = {}
     for entry in entries[1:]:
-        if match := re.match(r"\d+:expect\('([^']+)'", entry):
+        if match := re.match(r"\d+:expect\('([^']+)',", entry):
             files = set()
-            for prefix, names in re.findall(r"main\((\w+),\[([^\]]*)\]\)", entry):
+            lists = re.compile(r"main\((\w+),\[((?:\s*'[^']+'\s*,?)*)\]\)")
+            for prefix, names in lists.findall(entry):
                 for name in re.findall(r"'([^']+)'", names):
                     files.add(prefixes[prefix] + name + "@refs/heads/main")
+            # Anything besides those lists, spreads, brackets and the repository argument is a
+            # form this reader does not understand; refuse it rather than guess.
+            rest = re.sub(r"\s+", "", lists.sub("", entry[match.end():]))
+            rest = re.sub(r"'TauCetiProject/[\w.-]+'", "", rest)
+            if re.sub(r"[\[\],.)]", "", rest):
+                raise ValueError(f"unreadable Fleet runner policy entry: {entry[:80]!r}")
             groups[match.group(1)] = files
         elif match := re.match(r"\[\w+\]:\{name:'([^']+)',workflows:false", entry):
             groups[match.group(1)] = None
@@ -218,7 +246,7 @@ class Checker:
             ceiling = permissions(caller.get("permissions"))
         if ceiling is None:
             self.fail(where, "sets no permissions; a caller must state the ceiling it grants")
-            ceiling = {}
+            ceiling = {OTHERS: 0}
         caller_groups = {g for g in (concurrency_group(caller.get("concurrency")),
                                      concurrency_group(job.get("concurrency"))) if g}
         inputs = {name: str(value) for name, value in (job.get("with") or {}).items()}
@@ -265,7 +293,7 @@ class Checker:
 
     def walk(self, callee, ceiling, inputs, outer_groups, trail):
         """Check a Tools workflow called with `ceiling` and `inputs`, and every workflow it calls."""
-        if len(trail) > 10:
+        if len(trail) >= 10:  # the caller plus nine levels of reusable workflows
             self.fail(" -> ".join(trail), "nests reusable workflows more than GitHub allows")
             return
         workflow = self.tools_workflow(callee)
@@ -273,13 +301,13 @@ class Checker:
         top = permissions(workflow.get("permissions"))
         if top is not None and (extra := exceeding(top, ceiling)):
             self.fail(here, f"asks for {show(extra)} beyond the caller's ceiling ({show(ceiling)})")
-        own = concurrency_group(workflow.get("concurrency"))
-        if own and own in outer_groups:
-            self.fail(here, "shares its workflow concurrency group with a caller; the run would wait on itself")
-        groups = outer_groups | ({own} if own else set())
         call = triggers(workflow)["workflow_call"] or {}
         defaults = {name: str(spec.get("default", "")) for name, spec in (call.get("inputs") or {}).items()}
         env = {**defaults, **inputs}
+        own = concurrency_group(workflow.get("concurrency"), env)
+        if own and own in outer_groups:
+            self.fail(here, "shares its workflow concurrency group with a caller; the run would wait on itself")
+        groups = outer_groups | ({own} if own else set())
         entry = (self.contract.get("workflows") or {}).get(callee) or {}
         for job_id, job in (workflow.get("jobs") or {}).items():
             job = job or {}
@@ -288,7 +316,7 @@ class Checker:
             effective = asked if asked is not None else (top if top is not None else ceiling)
             if asked is not None and (extra := exceeding(asked, ceiling)):
                 self.fail(where, f"asks for {show(extra)} beyond the caller's ceiling ({show(ceiling)})")
-            group = concurrency_group(job.get("concurrency"))
+            group = concurrency_group(job.get("concurrency"), env)
             if group and group in groups:
                 self.fail(where, "shares a concurrency group with a calling workflow; the run would wait on itself")
             uses = job.get("uses")
@@ -305,26 +333,44 @@ class Checker:
                     self.fail(where, f"calls {nested}, which does not exist")
                     continue
                 self.check_interface(where, job, nested)
-                passed = {name: self.resolve(str(value), env) for name, value in (job.get("with") or {}).items()}
-                self.walk(nested, effective, passed, groups, [*trail, f"{callee} job {job_id}"])
+                passed = {name: self.substitute(str(value), env) for name, value in (job.get("with") or {}).items()}
+                held = groups | ({group} if group else set())
+                self.walk(nested, effective, passed, held, [*trail, f"{callee} job {job_id}"])
                 continue
             self.check_runner(where, callee, entry, job.get("runs-on"), env)
 
     @staticmethod
-    def resolve(text, env):
-        """Text with every `inputs.<name>` it reads appended, so routing can be traced through calls."""
-        return " ".join([text, *(env.get(name, "") for name in INPUT_REF.findall(text))])
+    def substitute(text, env):
+        """Text with each `inputs.<name>` it reads replaced by that input's value, when known."""
+        def value(match):
+            name = match.group(1) or match.group(2)
+            return env[name] if env.get(name) else match.group(0)
+        # `${{ inputs.x }}` alone is the value itself; inside a larger expression, its text.
+        whole = re.compile(r"\$\{\{\s*(" + INPUT_REF.pattern + r")\s*\}\}")
+        text = whole.sub(lambda m: value(INPUT_REF.match(m.group(1))) if env.get(
+            m.group(2) or m.group(3)) else m.group(0), text)
+        return INPUT_REF.sub(value, text)
 
     def check_runner(self, where, callee, entry, runs_on, env):
         if runs_on is None:
             self.fail(where, "has no runs-on")
             return
-        text = self.resolve(runs_on_text(runs_on), env)
+        if isinstance(runs_on, dict):
+            group = self.substitute(str(runs_on.get("group", "")), env)
+            runs_on = {**runs_on, "group": group}
+        text = self.substitute(runs_on_text(runs_on), env)
         reachable = set(GROUP_REF.findall(text))
         for label, groups in self.labels.items():
             if re.search(rf"(?<![\w-]){re.escape(label)}(?![\w-])", text):
                 reachable.update(groups)
-        if re.search(r"\bneeds\.[\w-]+\.outputs\.", text):
+        # A runner chosen from data the text does not show: a picker's output, a matrix value, a
+        # variable parsed as JSON or used as a group, or an input with no known value.
+        unresolved = (
+            re.search(r"\bneeds\.[\w-]+\.outputs\b|\bneeds\[|\bmatrix\b|fromJSON\(\s*vars\b", text)
+            or INPUT_REF.search(text)
+            or isinstance(runs_on, dict) and "${{" in runs_on["group"]
+        )
+        if unresolved:
             declared = entry.get("runner_groups")
             if declared is None:
                 self.fail(where, f"picks its runner at run time; list the groups it may reach as "
