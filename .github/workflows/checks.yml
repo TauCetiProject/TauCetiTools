@@ -93,7 +93,8 @@ jobs:
           LEANTAR_STACK_INTEGRATION: "1"
         run: |
           elan toolchain install "$ELAN_TOOLCHAIN"
-          python -m unittest discover -s tests -p test_leantar_stack.py -v
+          # Only the archive check: this job has no PyYAML for the workflow scan, which runs in `test`.
+          python -m unittest tests.test_leantar_stack.RealArchive -v
       - name: Verify bulk restoration and native publication with stock Lake
         # TauCeti's own toolchain, which the bulk unpack must read. Under the job's older pin this
         # passed while every TauCeti build on v4.37.0-rc1 (ilean version 6) fell back to stock Lake.

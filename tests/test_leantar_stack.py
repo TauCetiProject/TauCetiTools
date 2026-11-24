@@ -6,6 +6,11 @@ pack, so at Linux's default 8 MiB it exits 139. A workflow step that missed the 
 API docs run for days (Nov 2026). The static checks below find any `lake build` that may restore or
 pack artifacts without the raise; the integration check (LEANTAR_STACK_INTEGRATION=1, with the
 toolchain installed) unpacks the real archive through the raise and shows it still needs one.
+
+The scan is a heuristic, not a proof: it sees the cache variables anywhere in a job's YAML (env,
+`$GITHUB_ENV` writes) or the workflow's env, and literal `lake build` in a step's script. A build
+inside a wrapper script or a composite action, or cache settings made there, needs its own check,
+as sandbox-build.sh has below.
 """
 
 import hashlib
@@ -38,14 +43,14 @@ def lake_build_steps():
         for job_name, job in (workflow.get("jobs") or {}).items():
             for step in job.get("steps") or []:
                 if LAKE_BUILD.search(step.get("run") or ""):
-                    yield path.name, job_name, job, step
+                    yield path.name, job_name, dict(job, workflow_env=workflow.get("env") or {}), step
 
 
 def may_use_artifacts(job, step):
     """Whether Lake may pack or restore artifacts with leantar in this step."""
     import yaml
 
-    env = {**(job.get("env") or {}), **(step.get("env") or {})}
+    env = {**job["workflow_env"], **(job.get("env") or {}), **(step.get("env") or {})}
     if str(env.get("LAKE_ARTIFACT_CACHE", "")).strip().lower() == "false":
         return False
     text = yaml.safe_dump(job)
@@ -74,7 +79,7 @@ class StackRaiseCoverage(unittest.TestCase):
         text = SANDBOX_BUILD.read_text()
         self.assertIn(RAISE, text)
         before = text[:text.index(RAISE)]
-        self.assertIsNone(re.search(r"^\s*[^#\n]*\blake (build|cache|env)\b", before, re.M),
+        self.assertIsNone(re.search(r"^\s*[^#\n]*\blake\b", before, re.M),
                           "sandbox-build.sh runs Lake before raising the stack")
 
 
@@ -89,15 +94,17 @@ def leantar():
 
 
 def default_stack():
-    soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
-    if hard != resource.RLIM_INFINITY and hard < DEFAULT_STACK:
-        return
-    resource.setrlimit(resource.RLIMIT_STACK, (DEFAULT_STACK, hard))
+    resource.setrlimit(resource.RLIMIT_STACK, (DEFAULT_STACK, resource.getrlimit(resource.RLIMIT_STACK)[1]))
 
 
 @unittest.skipUnless(os.environ.get("LEANTAR_STACK_INTEGRATION") == "1", "set LEANTAR_STACK_INTEGRATION=1")
 class RealArchive(unittest.TestCase):
     """Lake's own invocation (`leantar -C lib -C ir -x -j -`) on the archive that overflows."""
+
+    def setUp(self):
+        hard = resource.getrlimit(resource.RLIMIT_STACK)[1]
+        if hard != resource.RLIM_INFINITY and hard < 16 * 1024 * 1024:
+            self.fail(f"this runner's hard stack limit ({hard} bytes) is below what leantar needs; the raise cannot work here")
 
     def unpack(self, prelude):
         tool = leantar()
