@@ -18,7 +18,8 @@ import json, os, sys
 from pathlib import Path
 name = Path(sys.argv[0]).name
 with open(os.environ['CALLS'], 'a') as f:
-    f.write(json.dumps([name, *sys.argv[1:], 'cache=' + os.environ.get('LAKE_ARTIFACT_CACHE', '')]) + '\\n')
+    f.write(json.dumps([name, *sys.argv[1:], 'cache=' + os.environ.get('LAKE_ARTIFACT_CACHE', ''),
+                        'rayon=' + os.environ.get('RAYON_NUM_THREADS', '')]) + '\\n')
 def status(key):
     return int(os.environ.get(key, '0'))
 if name == 'lake':
@@ -66,13 +67,17 @@ class SandboxPhases(unittest.TestCase):
                 (SCRIPT.parent / 'thread_exhaustion.py').read_text())
             (root / 'trusted/bulk-unpack-cache.py').write_text(
                 'import json, os\nwith open(os.environ["CALLS"], "a") as f: '
-                'f.write(json.dumps(["bulk-unpack-cache"]) + "\\n")\n')
+                'f.write(json.dumps(["bulk-unpack-cache"]) + "\\n")\n'
+                'with open(os.environ["CALLS"] + ".rayon", "a") as f: '
+                'f.write(os.environ.get("RAYON_NUM_THREADS", "<unset>") + "\\n")\n')
             for name in ('bin/lake', 'drivers/audit-driver', 'drivers/local-axioms',
                          'drivers/lint-env-driver', 'watchdog/bin/lean'):
                 path = root / name
                 path.write_text(STUB)
                 path.chmod(0o755)
-            env = dict(os.environ, PATH=str(root / 'bin') + ':' + os.environ['PATH'],
+            # The sandbox starts from `env -i`, so nothing outside sets the leantar thread count.
+            inherited = {key: value for key, value in os.environ.items() if key != 'RAYON_NUM_THREADS'}
+            env = dict(inherited, PATH=str(root / 'bin') + ':' + os.environ['PATH'],
                        CALLS=str(root / 'calls.jsonl'), TAUCETI_TRUSTED_SCRIPTS=str(root / 'trusted'),
                        WATCHDOG_TOOLCHAIN=str(root / 'watchdog'),
                        LINT_DRIVER_EXE=str(root / 'drivers/lint-env-driver'),
@@ -91,6 +96,8 @@ class SandboxPhases(unittest.TestCase):
                     break
             calls_file = root / 'calls.jsonl'
             calls = [json.loads(line.replace(str(root), '<root>')) for line in calls_file.read_text().splitlines()] if calls_file.exists() else []
+            self.bulk_rayon = (root / 'calls.jsonl.rayon').read_text().split() \
+                if (root / 'calls.jsonl.rayon').exists() else []
             phases_file = root / '.lake/telemetry/phases.tsv'
             names = [line.split('\t')[0] for line in phases_file.read_text().splitlines()] \
                 if phases_file.exists() else []
@@ -134,6 +141,22 @@ class SandboxPhases(unittest.TestCase):
                 self.assertEqual(len(builds), 1)
                 self.assertEqual('--fail-fast' in builds[0], expected)
                 self.assertIn('--iofail', builds[0])
+
+    def test_only_the_build_caps_leantar_threads(self):
+        # Stock Lake runs one leantar per cached module, about one per CPU at once; each one's
+        # rayon pool is capped so a large guest does not start thousands of threads. The bulk
+        # unpack's single leantar keeps its own wider pool.
+        for scenario in ({}, {'cache': True}, {'staging': True, 'batch': True}):
+            with self.subTest(**scenario):
+                _, calls, _ = self.run_sandbox([[]], **scenario)
+                builds = [call for call in calls if call[:2] == ['lake', 'build']]
+                self.assertEqual([call[-1] for call in builds], ['rayon=4'])
+                others = [call for call in calls if call[0] in ('lake', 'audit-driver', 'local-axioms', 'lean')
+                          and call[:2] != ['lake', 'build']]
+                self.assertTrue(others)
+                self.assertTrue(all(call[-1] == 'rayon=' for call in others))
+                # The bulk unpack runs only with the cache, and keeps its own wider pool.
+                self.assertEqual(self.bulk_rayon, ['<unset>'] if scenario else [])
 
     def test_each_phase_runs_only_its_own_work(self):
         _, calls, names = self.run_sandbox([['lint-style']])
