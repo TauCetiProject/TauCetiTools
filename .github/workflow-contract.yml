@@ -47,6 +47,14 @@ workflows:
           pending: true
     jobs: [verify, pick-reference-runner, reference, report]
     runner_groups: [TauCetiFleet]
+  ci.yml:
+    callers:
+      TauCetiProject/TauCeti:
+        - file: ci.yml
+          job: ci
+          triggers: [push]
+          pending: true
+    jobs: [build, publish-lake-cache]
   publish-lake-cache.yml:
     internal: true
   retry-ci-status.yml:
