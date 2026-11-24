@@ -85,6 +85,22 @@ invalid", which PR CI posts when a run is cancelled before it records the tested
 event's `skip_build` dispatch does this through the per-PR concurrency group): its run is read
 directly, at one run read and one jobs read, and judged the same way, whatever its age.
 
+A build that failed only because the CI host ran out of threads gets the same one retry. The
+sandboxed build runs `lake build` under `thread_exhaustion.py`, which exits 75 when the build failed and was not cancelled,
+its output has Lake's "failed to create thread: Resource temporarily unavailable" abort or leantar's
+rayon `ThreadPoolBuildError` with OS error 11, and every Lake job reported with anything but `✔`
+(including `⚠` and `ℹ`, which `--iofail` fails) is an `Unpacking` (cache restore) job. PR CI then posts the `build` description "infrastructure failure: the CI host ran out
+of threads; CI recovery retries once" instead of the generic build failure. Such a run is a failure,
+not a cancellation, so the listing never finds it: the pass reads it directly (one run read, no jobs
+read) and retries the head once if the run is the head's original, completed, failed
+`pull_request_target` attempt. The retry is spent for that head: the memory keeps it while the head
+is current, so a later build on the same head that runs out of threads (a retry, a rerun, or a
+reopen's new build) is reported as stuck rather than retried again. A Lean process that aborts with
+the thread error inside a `Building` job stays an ordinary failure, since candidate code can print
+the same text from a module it compiles. Candidate code that subverts the sandbox's process tree
+(writing to Lake's output through /proc, then killing Lake) can still forge the verdict. That earns
+at most one extra build per head, so it is accepted (thread_exhaustion.py explains why).
+
 Each pass also reports stuck heads: open, non-draft, non-`self-tested` heads that, three hours after
 their last push, have no `build` status and no live pr-build, or whose build and its one retry were
 both interrupted, and that carry none of the final-state labels (`awaiting-author`,

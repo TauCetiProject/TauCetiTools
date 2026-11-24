@@ -768,6 +768,122 @@ class OldCutOffBuildTests(unittest.TestCase):
         self.assertEqual(self.recover(api, apply=True), [])
 
 
+class ThreadExhaustionTests(unittest.TestCase):
+    """A build that failed only because the CI host ran out of threads is retried once."""
+
+    def setUp(self):
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.report = Path(temporary.name) / "stuck.json"
+
+    def recover(self, api, **kwargs):
+        return recovery.recover(api, "owner/project", now=NOW, cleanup=False, stuck_report=self.report, **kwargs)
+
+    def api(self, description=recovery.THREADS_DESCRIPTION, labels=(), **changes):
+        item = pull(state="FAILURE", labels=labels)
+        item["commits"]["nodes"][0]["commit"]["status"]["contexts"][0]["description"] = description
+        run = cancelled(**{"conclusion": "failure", **changes})
+        api = Interrupted([item])
+        original = api.request
+
+        def request(method, path, data=None):
+            if path == "repos/owner/project/actions/runs/30":
+                api.paths.append(path)
+                return run
+            return original(method, path, data)
+
+        api.request = request
+        return api
+
+    def test_the_description_is_pr_ci_word_for_word(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/pr-build.yml").read_text()
+        self.assertIn(f'state=failure; desc="{recovery.THREADS_DESCRIPTION}"', workflow)
+
+    def test_a_thread_exhaustion_failure_is_retried_once_without_a_jobs_read(self):
+        api = self.api()
+        selected = self.recover(api, apply=True)
+        self.assertEqual([s["retry_of_interrupted"] for s in selected], [30])
+        self.assertEqual(dispatches(api), ["1"])
+        self.assertFalse(any("/jobs?" in path for path in api.paths))
+        self.assertEqual(self.recover(api, apply=True), [])  # the retry is spent
+        self.assertEqual(dispatches(api), ["1"])
+        self.assertEqual([h["reason"] for h in json.loads(self.report.read_text())["heads"]], ["retry-interrupted"])
+
+    def test_the_retry_is_spent_for_the_head_whatever_fails_on_it_next(self):
+        api = self.api()
+        self.recover(api, apply=True)
+        self.assertEqual(dispatches(api), ["1"])
+        # The retry passed, then a reopen's new original build ran out of threads on the same head.
+        passed = pull(state="SUCCESS", run_id=31)
+        api.pulls = [passed]
+        self.recover(api, apply=True)
+        again = self.api(id=32)
+        again.pulls[0]["commits"]["nodes"][0]["commit"]["status"]["contexts"][0].update(
+            targetUrl="https://github.com/owner/project/actions/runs/32", createdAt="2026-10-28T17:40:00Z")
+        original = again.request
+        again.request = lambda method, path, data=None: original(
+            method, path.replace("/runs/32", "/runs/30") if path.endswith("/runs/32") else path, data)
+        self.assertEqual(recovery.recover(again, "owner/project", now=NOW, cleanup=False, stuck_report=self.report,
+                                          apply=True), [])
+        self.assertEqual(again.writes, [])
+        # A new head is owed its own retry.
+        moved = self.api()
+        moved.pulls[0]["headRefOid"] = "b" * 40
+        moved.pulls[0]["commits"]["nodes"][0]["commit"]["oid"] = "b" * 40
+        self.assertEqual(len(recovery.recover(moved, "owner/project", now=NOW, cleanup=False,
+                                              stuck_report=self.report, apply=True)), 1)
+
+    def test_a_later_cancellation_on_the_head_keeps_the_retry_spent(self):
+        threads = self.api().pulls[0]
+        cancelled_head = pull(state="FAILURE", run_id=33)
+        for kind in ("retried", "exhausted"):
+            with self.subTest(kind=kind):
+                previous = {"memory": {kind: {"1": dict(head=HEAD, run=30, posted=None, seen=NOW, threads=True)}}}
+                # A cancelled build's retry (or a cancelled rerun found exhausted) replaces the entry.
+                if kind == "retried":
+                    memory = recovery.remember(previous, [cancelled_head], {}, [(1, cancelled_head)], NOW)
+                else:
+                    memory = recovery.remember(previous, [cancelled_head], {1: 33}, [], NOW)
+                self.assertTrue(memory[kind]["1"]["threads"])
+                retry, exhausted, _ = recovery.interrupted_heads(Interrupted([threads]), "owner/project",
+                                                                 [threads], NOW, memory)
+                self.assertEqual((retry, exhausted), ([], {1: 30}))
+
+    def test_a_retry_that_runs_out_of_threads_too_is_reported_not_retried(self):
+        for changes in (dict(event="workflow_dispatch"), dict(run_attempt=2)):
+            with self.subTest(changes=changes):
+                api = self.api(**changes)
+                self.assertEqual(self.recover(api, apply=True), [])
+                self.assertEqual(api.writes, [])
+        # Spent on that head even after a later build passes and another runs out of threads.
+        api.pulls = [pull(state="SUCCESS", run_id=31)]
+        self.recover(api, apply=True)
+        again = self.api(id=32)
+        again.pulls[0]["commits"]["nodes"][0]["commit"]["status"]["contexts"][0].update(
+            targetUrl="https://github.com/owner/project/actions/runs/32", createdAt="2026-10-28T17:40:00Z")
+        original = again.request
+        again.request = lambda method, path, data=None: original(
+            method, path.replace("/runs/32", "/runs/30") if path.endswith("/runs/32") else path, data)
+        self.assertEqual(self.recover(again, apply=True), [])
+        self.assertEqual(again.writes, [])
+
+    def test_only_a_completed_failed_ordinary_build_qualifies(self):
+        for changes in (dict(conclusion="cancelled"), dict(status="in_progress", conclusion=None), dict(id=31)):
+            with self.subTest(changes=changes):
+                api = self.api(**changes)
+                self.assertEqual(self.recover(api, apply=True), [])
+                self.assertEqual(api.writes, [])
+
+    def test_other_failures_and_self_tested_heads_cost_no_run_read(self):
+        for kwargs in (dict(description="sandboxed build, audit, or simp-NF lint failed"),
+                       dict(labels=["self-tested"])):
+            with self.subTest(**kwargs):
+                api = self.api(**kwargs)
+                self.assertEqual(self.recover(api, apply=True), [])
+                self.assertFalse(any(path.endswith("/actions/runs/30") for path in api.paths))
+                self.assertEqual(api.writes, [])
+
+
 class StuckHeadTests(unittest.TestCase):
     def stuck(self, pulls, live=()):
         return recovery.stuck_heads(pulls, list(live), {}, NOW)

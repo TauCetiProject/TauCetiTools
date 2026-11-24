@@ -158,7 +158,9 @@ build_phase() {
 
 run_lake_build() {
   # `--output-error=warn` keeps tee passing the build's output through even if writing the copy fails,
-  # and `|| true` drops tee's own status, so `pipefail` reports exactly Lake's.
+  # and `|| true` drops tee's own status, so `pipefail` reports exactly Lake's. thread_exhaustion.py
+  # passes Lake's output and status through, except that a build failed only by the host running out
+  # of threads exits 75, which pr-build.yml reports as an infrastructure failure.
   set +e
   # Without the bulk unpack above, or for modules it leaves to stock Lake, Lake restores each
   # cached module with its own leantar, about one per CPU at once, and each leantar's rayon pool
@@ -167,7 +169,7 @@ run_lake_build() {
   # and Lake gives it one, so the extra workers only sit idle: on a 96-CPU host a full stock
   # restore of TauCeti (39,164 modules) peaked at 695 tasks in 37s with 4, against 5,248 tasks
   # in 60s by default.
-  RAYON_NUM_THREADS=4 lake build "${LAKE_BUILD_FLAGS[@]}" 2>&1 \
+  RAYON_NUM_THREADS=4 python3 "$TRUSTED_SCRIPTS/thread_exhaustion.py" lake build "${LAKE_BUILD_FLAGS[@]}" 2>&1 \
     | { tee --output-error=warn "$TELEMETRY/lake-build.log" 2>/dev/null || true; } \
     | { python3 "$TRUSTED_SCRIPTS/ci_log_filter.py" build || { echo '::warning::build log summary failed; showing remaining output'; cat; }; }
   build_status=${PIPESTATUS[0]}

@@ -78,6 +78,7 @@ class LogFilterTests(unittest.TestCase):
                         (trusted / name).write_text('exit 0\n')
                     if not missing_filter:
                         (trusted / 'ci_log_filter.py').write_text(SCRIPT.read_text())
+                    (trusted / 'thread_exhaustion.py').write_text((SCRIPT.parent / 'thread_exhaustion.py').read_text())
                     lake = root / 'bin/lake'
                     lake.write_text('#!/usr/bin/env bash\n'
                         f'if [ "$1" = build ]; then echo "error: TauCeti/A.lean:1:1: example"; exit {status}; fi\n'
