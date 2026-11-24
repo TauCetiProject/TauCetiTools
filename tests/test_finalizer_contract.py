@@ -31,8 +31,9 @@ def load_tests(loader, tests, pattern):
 
 class PublicationGate(unittest.TestCase):
     def test_staged_cache_publication_survives_check_and_reporting_failure(self):
-        # A queue batch publishes whenever its sandboxed build passed and staged its outputs, even
-        # when an audit, a lint or status reporting failed: only `build` lets a candidate land.
+        # A queue batch publishes whenever it staged its outputs, even when status reporting failed:
+        # only `build` lets a candidate land. Staging itself requires every sandboxed phase to pass
+        # (test_failed_checks_stage_nothing).
         gate = yaml.safe_load((ROOT / ".github/workflows/pr-build.yml").read_text())["jobs"]["publish-merge-group-cache"]["if"]
         for cancelled, staged, required, expected in (
             (False, "true", "true", True),
@@ -51,3 +52,16 @@ class PublicationGate(unittest.TestCase):
                     expression = expression.replace(key, repr(value))
                 expression = expression.replace("always()", "True").replace("&&", " and ").replace("!", " not ")
                 self.assertEqual(eval(expression.strip(), {"__builtins__": {}}), expected)
+
+    def test_failed_checks_stage_nothing(self):
+        # Batch 506 attempt 339 published two corrupt archives after its audit driver crashed on them:
+        # a failed audit or lint can mean a bad tree, so only a run whose every phase passed stages.
+        steps = yaml.safe_load((ROOT / ".github/workflows/pr-build.yml").read_text())["jobs"]["sandboxed-build"]["steps"]
+        stage = next(step for step in steps if step.get("id") == "cache_stage")
+        self.assertIn("steps.build.outcome == 'success'", stage["if"])
+        self.assertNotIn("steps.sandbox_build.outcome", stage["if"])
+        build = next(step for step in steps if step.get("id") == "build")
+        for phase in ("sandbox_build", "sandbox_audits", "sandbox_module_system", "sandbox_lint_env",
+                      "sandbox_lint_style", "sandbox_finish"):
+            self.assertIn(f"steps.{phase}.outcome == 'success'", build["if"])
+        self.assertLess(steps.index(build), steps.index(stage))
