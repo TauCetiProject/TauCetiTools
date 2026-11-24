@@ -274,6 +274,12 @@ jobs:
           S3_ARTIFACT_ENDPOINT: ${{ vars.LAKE_CACHE_ARTIFACT_ENDPOINT }}
           S3_REVISION_ENDPOINT: ${{ vars.LAKE_CACHE_REVISION_ENDPOINT }}
         run: |
+          # leantar 0.1.21 (Lean v4.37.0-rc1) needs about 11 MiB of stack to unpack
+          # TauCeti.Algebra.Lie.F4.ModularLattice and exits 139 at the default 8 MiB. Lake's stock
+          # restoration unpacks it on leantar's main thread, so raise the rlimit, as
+          # sandbox-build.sh and api-docs.yml do.
+          ulimit -s unlimited 2>/dev/null || ulimit -s "$(ulimit -H -s)" 2>/dev/null || true
+          echo "stack limit for the build: $(ulimit -s)"
           lake_build_flags=()
           if [ -n "$S3_ARTIFACT_ENDPOINT" ] && [ -n "$S3_REVISION_ENDPOINT" ]; then
             export LAKE_ARTIFACT_CACHE=true LAKE_RESTORE_ARTIFACTS=true
@@ -404,6 +410,8 @@ jobs:
           LAKE_CACHE_DIR: ${{ github.workspace }}/.lake/cache
           PUBLIC_ARTIFACT_ENDPOINT: ${{ vars.LAKE_CACHE_ARTIFACT_ENDPOINT_PUBLIC }}
         run: |
+          # Packing ModularLattice needs about 14 MiB of stack (see the Build step).
+          ulimit -s unlimited 2>/dev/null || ulimit -s "$(ulimit -H -s)" 2>/dev/null || true
           lake cache stage .lake/outputs.jsonl .lake/publication-stage
           python3 scripts/lake_cache_publish.py stage .lake/publication-stage "$RUNNER_TEMP/lake-cache-staging"
           # The isolated publisher never configures the workspace, so it cannot derive
