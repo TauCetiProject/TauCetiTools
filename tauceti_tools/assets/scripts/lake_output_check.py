@@ -216,7 +216,7 @@ def discard(project: Path, found) -> int:
                     rest = entry.name[len(stem.name) + 1:]
                     if rest.split(".", 1)[0] in {"trace", "olean", "ilean", "ir", "c", "bc", "ltar", "setup", "log"}:
                         entry.unlink(missing_ok=True)
-    return max(len(removed), 1) if found else 0
+    return len(removed)
 
 
 def main(argv=None) -> int:
@@ -237,8 +237,8 @@ def main(argv=None) -> int:
         return 0
     if args.action == "discard":
         count = discard(args.project, found)
-        print(f"lake output check: removed {count} damaged modules' outputs and cache records; "
-              "the next build compiles them", flush=True)
+        print(f"lake output check: removed {len(found)} damaged files, {count} modules' outputs and their "
+              "cache records; the next build restores or compiles them", flush=True)
         return 3
     return 1
 

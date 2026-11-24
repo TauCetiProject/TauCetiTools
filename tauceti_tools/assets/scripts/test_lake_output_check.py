@@ -102,7 +102,7 @@ class OutputCheckTests(unittest.TestCase):
             + json.dumps(["2222222222222222", stray]) + "\n")
         _, _, found = check.mismatches(self.root, hasher=fake_hasher)
         self.assertEqual(sorted(path.name for _, _, path, *_ in found), sorted([basic["olean.private"], archive]))
-        self.assertEqual(check.discard(self.root, found), 1)
+        self.assertEqual(check.discard(self.root, found), 1)  # Basic; the archive is its own
         self.assertFalse((self.artifacts / archive).exists())
         self.assertFalse((self.lib / "Basic.trace").exists())
         self.assertTrue((self.artifacts / stray).exists())
