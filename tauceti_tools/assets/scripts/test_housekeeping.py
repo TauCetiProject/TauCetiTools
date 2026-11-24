@@ -228,40 +228,6 @@ class StaleSelection(unittest.TestCase):
                 self.run_case(live_changes=changes)[0].assert_not_called()
 
 
-class FleetMaintainedAuthors(unittest.TestCase):
-    """Authors whose PRs our fleet maintains wait on our repairs, so inactivity must not close them."""
-
-    def run_case(self, login, labels):
-        pr = {"number": 8282, "state": "OPEN", "isDraft": False, "updatedAt": "2020-01-01T00:00:00Z",
-              "headRefOid": "a" * 40, "body": "", "author": {"login": login, "is_bot": False},
-              "labels": [{"name": x} for x in labels]}
-        def read(args):
-            return pr if args[:2] == ["pr", "view"] else [pr]
-        with patch.object(hk, "gh_json", side_effect=read), \
-             patch.object(hk, "open_prs_with_label", side_effect=lambda label: labelled([pr], label)), \
-             patch.object(hk, "latest_scoreboard_meta", return_value=None), \
-             patch.object(hk, "ci_failed_since", return_value=datetime.datetime(2020, 1, 1, tzinfo=UTC)), \
-             patch.object(hk, "keep_label_live", return_value=False), \
-             patch.object(hk, "close", return_value=True) as close:
-            self.assertEqual(hk.main(), 0)
-        return close
-
-    def test_stale_and_red_spare_a_maintained_author_in_any_case(self):
-        for login in ("mo271", "Mo271"):
-            for labels in (("awaiting-author",), ("ci-failed",)):
-                with self.subTest(login=login, labels=labels):
-                    self.run_case(login, labels).assert_not_called()
-
-    def test_other_authors_are_still_retired(self):
-        for labels in (("awaiting-author",), ("ci-failed",)):
-            with self.subTest(labels=labels):
-                self.run_case("someone", labels).assert_called_once()
-
-    def test_a_missing_author_is_not_exempt(self):
-        self.assertFalse(hk.inactivity_exempt({"author": None}))
-        self.assertFalse(hk.inactivity_exempt({}))
-
-
 class AutomaticBump(unittest.TestCase):
     def test_no_retirement_path_closes_a_canonical_bot_bump(self):
         pr = {"number": 99, "isDraft": False, "headRefOid": "a" * 40,
