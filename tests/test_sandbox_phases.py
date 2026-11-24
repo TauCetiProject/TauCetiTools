@@ -87,6 +87,7 @@ class SandboxPhases(unittest.TestCase):
                        WATCHDOG_TOOLCHAIN=str(root / 'watchdog'),
                        LINT_DRIVER_EXE=str(root / 'drivers/lint-env-driver'),
                        AXIOMS_ONLY_MODULES=str(scope) if scoped else '',
+                       LINT_ONLY_MODULES=str(scope) if scoped else '',
                        STAGE_LAKE_CACHE='1' if staging else '',
                        IS_BATCH='true' if batch else '',
                        LAKE_ARTIFACT_CACHE='true' if cache else '',
@@ -147,9 +148,9 @@ class SandboxPhases(unittest.TestCase):
             return status, [call[:2] for call in calls if call[0] in ('lake', 'lake_output_check')], names
 
         build, check = ['lake', 'build'], ['lake_output_check', 'discard']
-        self.assertEqual(run(), (0, [build, check], ['cache-unpack', 'build', 'output-check']))
+        self.assertEqual(run(), (0, [build, check], ['build', 'output-check']))
         self.assertEqual(run('3'), (0, [build, check, build, check],
-                                    ['cache-unpack', 'build', 'output-check', 'build', 'output-check']))
+                                    ['build', 'output-check', 'build', 'output-check']))
         # A rebuild that reaches further damage repairs that too, at most twice.
         self.assertEqual(run('3,3')[:2], (0, [build, check, build, check, build, check]))
         self.assertEqual(run('3,3,3')[0], 1)
@@ -165,7 +166,7 @@ class SandboxPhases(unittest.TestCase):
     def test_only_the_build_caps_leantar_threads(self):
         # Stock Lake runs one leantar per cached module, about one per CPU at once; each one's
         # rayon pool is capped so a large guest does not start thousands of threads. The bulk
-        # unpack's single leantar keeps its own wider pool.
+        # unpack's single leantar, which only a recording PR build runs, keeps its own wider pool.
         for scenario in ({}, {'cache': True}, {'staging': True, 'batch': True}):
             with self.subTest(**scenario):
                 _, calls, _ = self.run_sandbox([[]], **scenario)
@@ -175,8 +176,22 @@ class SandboxPhases(unittest.TestCase):
                           and call[:2] != ['lake', 'build']]
                 self.assertTrue(others)
                 self.assertTrue(all(call[-1] == 'rayon=' for call in others))
-                # The bulk unpack runs only with the cache, and keeps its own wider pool.
-                self.assertEqual(self.bulk_rayon, ['<unset>'] if scenario else [])
+                self.assertEqual(self.bulk_rayon, ['<unset>'] if scenario == {'cache': True} else [])
+
+    def test_only_a_recording_pr_build_runs_the_bulk_unpack(self):
+        # The bulk unpack leaves the changed modules' base headers for the declaration-names
+        # record; builds that record nothing restore with stock Lake, which is faster.
+        for scenario, expected in (
+            ({'cache': True}, 1), ({'cache': True, 'scoped': False}, 0), ({}, 0),
+            ({'cache': True, 'batch': True}, 0), ({'staging': True, 'batch': True}, 0),
+            ({'staging': True}, 1),
+        ):
+            with self.subTest(**scenario):
+                _, calls, _ = self.run_sandbox([['build']], **scenario)
+                self.assertEqual(sum(call[0] == 'bulk-unpack-cache' for call in calls), expected)
+                if expected:
+                    self.assertLess(calls.index(['bulk-unpack-cache']),
+                                    next(i for i, c in enumerate(calls) if c[:2] == ['lake', 'build']))
 
     def test_each_phase_runs_only_its_own_work(self):
         _, calls, names = self.run_sandbox([['lint-style']])

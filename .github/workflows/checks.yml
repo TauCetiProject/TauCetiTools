@@ -86,8 +86,16 @@ jobs:
           python -m unittest discover -s tests -p test_local_axioms.py
           python -m unittest discover -s tests -p test_numproj.py
       - name: Verify bulk restoration and native publication with stock Lake
-        run: python tauceti_tools/assets/scripts/test_bulk_unpack_cache.py --integration
+        # TauCeti's own toolchain, which the bulk unpack must read. Under the job's older pin this
+        # passed while every TauCeti build on v4.37.0-rc1 (ilean version 6) fell back to stock Lake.
+        env:
+          ELAN_TOOLCHAIN: leanprover/lean4:v4.37.0-rc1
+        run: |
+          elan toolchain install "$ELAN_TOOLCHAIN"
+          python tauceti_tools/assets/scripts/test_bulk_unpack_cache.py --integration
       - name: Verify that damaged built outputs are found and rebuilt with stock Lake
+        env:
+          ELAN_TOOLCHAIN: leanprover/lean4:v4.37.0-rc1
         run: python tauceti_tools/assets/scripts/test_lake_output_check.py --integration
   # Script unit tests, and Lean, Lake and header fixtures that need a real Mathlib project. TauCeti
   # `main` supplies the project; every script under test is this revision's, materialized over its
