@@ -21,6 +21,14 @@ from a file in the candidate-writable tree. Candidate code can print only from a
 compiles, and Lake reports that output under the module's `Building` job with a non-`✔` mark, so
 printing the error text never turns a candidate's failure into an infrastructure one. For the
 same reason a Lean process that aborts with the thread error is an ordinary build failure.
+
+This does not defeat candidate code that subverts the sandbox's process tree. It runs as the
+same user as Lake, so it can write to Lake's output through /proc and then kill Lake. The host
+cannot corroborate the verdict either: native guests run in their own cgroup namespace and do not
+see the host's `pids.events`. What a forged verdict can earn is bounded, so this is accepted. It
+earns one extra PR build per head (ci_recovery.py), and the label `self-tested` staying on a
+failing head. The label already lets its author skip PR CI, and staging builds every landing
+candidate regardless.
 """
 import os
 import re

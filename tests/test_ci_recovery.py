@@ -839,6 +839,17 @@ class ThreadExhaustionTests(unittest.TestCase):
                 api = self.api(**changes)
                 self.assertEqual(self.recover(api, apply=True), [])
                 self.assertEqual(api.writes, [])
+        # Spent on that head even after a later build passes and another runs out of threads.
+        api.pulls = [pull(state="SUCCESS", run_id=31)]
+        self.recover(api, apply=True)
+        again = self.api(id=32)
+        again.pulls[0]["commits"]["nodes"][0]["commit"]["status"]["contexts"][0].update(
+            targetUrl="https://github.com/owner/project/actions/runs/32", createdAt="2026-10-28T17:40:00Z")
+        original = again.request
+        again.request = lambda method, path, data=None: original(
+            method, path.replace("/runs/32", "/runs/30") if path.endswith("/runs/32") else path, data)
+        self.assertEqual(self.recover(again, apply=True), [])
+        self.assertEqual(again.writes, [])
 
     def test_only_a_completed_failed_ordinary_build_qualifies(self):
         for changes in (dict(conclusion="cancelled"), dict(status="in_progress", conclusion=None), dict(id=31)):

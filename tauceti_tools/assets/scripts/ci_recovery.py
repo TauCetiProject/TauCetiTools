@@ -432,9 +432,11 @@ def remember(previous, observed, exhausted, dispatched, now):
             elif now - entry["seen"] <= MEMORY_DAYS * 86400:
                 kept[key] = entry
         memory[kind] = kept
+    threads = {str(p["number"]) for p in observed if threads_build(p)}
     for number in exhausted:
         if str(number) not in memory["retried"] and current.get(str(number)):
-            memory["exhausted"][str(number)] = dict(current[str(number)], seen=now)
+            memory["exhausted"][str(number)] = dict(current[str(number)], seen=now,
+                                                    **({"threads": True} if str(number) in threads else {}))
     for number, pull in dispatched:
         memory["retried"][str(number)] = dict(verdict(pull), seen=now, **({"threads": True} if threads_build(pull) else {}))
     return memory
