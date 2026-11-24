@@ -30,6 +30,10 @@ class DeclarationNamesStepTest(unittest.TestCase):
         trusted = self.root / "trusted"
         trusted.mkdir()
         (trusted / "DeclarationNames.lean").write_text("-- script\n")
+        # A restored cache whose base map holds no changed module: TauCeti.New is new.
+        maps = self.root / ".lake/cache/revisions/TauCeti"
+        maps.mkdir(parents=True)
+        (maps / ("b" * 40 + ".jsonl")).write_text('"2026-03-17"\n')
         fake = self.root / "bin"
         fake.mkdir()
         (fake / "lake").write_text(FAKE_LAKE)
@@ -44,6 +48,7 @@ class DeclarationNamesStepTest(unittest.TestCase):
             "CI_RESOURCE_TESTED_BASE": "b" * 40,
             "CI_RESOURCE_TESTED_COMMIT": "t" * 40,
             "FAKE_LOG": str(self.log),
+            "LAKE_CACHE_DIR": str(self.root / ".lake/cache"),
         }
         self.env.pop("IS_BATCH", None)
         self.env.pop("WATCHDOG_TOOLCHAIN", None)
@@ -65,6 +70,25 @@ class DeclarationNamesStepTest(unittest.TestCase):
         base = self.root / ".lake/telemetry/base-oleans/TauCeti"
         self.assertEqual((base / "A.olean").read_bytes(), b"base A")
         self.assertFalse((base / "New.olean").exists())
+
+    def test_save_reads_missing_headers_from_the_cache(self):
+        (self.root / ".lake/build").rename(self.root / "unused-build")
+        result = self.run_helper("save")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("base-headers: 0 of 2 changed modules", result.stderr)
+        self.assertFalse((self.root / ".lake/telemetry/base-oleans/.unavailable").exists())
+
+    def test_no_record_without_base_headers(self):
+        result = self.run_helper("save", LAKE_CACHE_DIR=str(self.root / "absent"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.root / ".lake/telemetry/base-oleans/.unavailable").exists())
+        result = self.run_helper("record")
+        self.assertEqual((result.returncode, result.stdout), (0, ""))
+        self.assertIn("no base headers; no record", result.stderr)
+        self.assertFalse(self.log.exists())
+        # A later save that finds the headers clears the mark.
+        self.run_helper("save")
+        self.assertEqual(self.run_helper("record").stdout.count("DECLARATION-NAMES"), 1)
 
     def test_record_prints_exactly_one_line_and_routes_diagnostics(self):
         self.run_helper("save")

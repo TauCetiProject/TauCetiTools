@@ -100,24 +100,15 @@ fi
 build_phase() {
   # The build is the first phase, so it starts the phase record afresh.
   : > "$TELEMETRY/phases.tsv" 2>/dev/null || true
-  # Only a build that records declaration names (declaration-names.sh: not a batch, with a
-  # changed-module list) runs the bulk unpack. It is the one step that leaves each changed module's
-  # merge-base header in .lake/build for `declaration-names.sh save`; stock Lake restores only
-  # outputs whose inputs still match, never the base version of a changed module. Everything else,
-  # staging included, restores with stock Lake, which on Lean v4.37.0-rc1 is faster: for all of
-  # TauCeti on 96 CPUs about 30s, against about 120s for the bulk unpack and the build after it,
-  # which in turn uses about 25% less CPU and a fifth of the peak tasks.
-  if [ "${LAKE_ARTIFACT_CACHE:-}" = "true" ] && [ "${LAKE_RESTORE_ARTIFACTS:-}" = "true" ] \
-     && [ "${IS_BATCH:-}" != "true" ] && [ -n "${LINT_ONLY_MODULES:-}" ] && [ -r "$LINT_ONLY_MODULES" ]; then
-    # Retain archives for native publication; Lake still verifies inputs before using the
-    # restored outputs.
-    phase cache-unpack
-    python3 "$TRUSTED_SCRIPTS/bulk-unpack-cache.py" .
-  fi
-  # Keep each changed module's restored main header for the declaration-names record below.
-  # Advisory: a failure here only means no record.
-  bash "$TRUSTED_SCRIPTS/declaration-names.sh" save || true
+  # Keep each changed module's base main header for the declaration-names record below. Stock Lake
+  # restores only outputs whose inputs still match, never the base version of a changed module, so
+  # declaration-names.sh reads those from the restored cache (base-headers.py), extracting only the
+  # archives whose file names could hold one. For all of TauCeti that took 2 to 5s on 96 CPUs,
+  # where unpacking the whole cache for it (bulk-unpack-cache.py) took about 110s there and about
+  # 400s on a 96-CPU fleet guest, against about 30s for Lake's own restore. Advisory: a failure
+  # here only means no record.
   phase build
+  bash "$TRUSTED_SCRIPTS/declaration-names.sh" save || true
   run_lake_build
   # A staging build's outputs are published. Lake trusts any output whose trace matches its inputs
   # without reading it, so an interrupted write or a corrupt cached archive (a truncated
@@ -162,8 +153,7 @@ run_lake_build() {
   # passes Lake's output and status through, except that a build failed only by the host running out
   # of threads exits 75, which pr-build.yml reports as an infrastructure failure.
   set +e
-  # Without the bulk unpack above, or for modules it leaves to stock Lake, Lake restores each
-  # cached module with its own leantar, about one per CPU at once, and each leantar's rayon pool
+  # Lake restores each cached module with its own leantar, about one per CPU at once, and each leantar's rayon pool
   # defaults to one thread per CPU. On a 96-CPU native fleet guest that reached thousands of tasks per build and exhausted
   # the host's CI task limit (24 Nov 2026). leantar parallelises across the archives it is given,
   # and Lake gives it one, so the extra workers only sit idle: on a 96-CPU host a full stock

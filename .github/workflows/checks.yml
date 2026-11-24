@@ -93,6 +93,12 @@ jobs:
         run: |
           elan toolchain install "$ELAN_TOOLCHAIN"
           python tauceti_tools/assets/scripts/test_bulk_unpack_cache.py --integration
+      - name: Verify that base headers are read from a stock Lake cache
+        env:
+          ELAN_TOOLCHAIN: leanprover/lean4:v4.37.0-rc1
+          BASE_HEADERS_INTEGRATION: "1"
+        # The fixture projects pin this toolchain; the bulk restoration step above installed it.
+        run: python -m unittest discover -s tests -p test_base_headers.py
       - name: Verify that damaged built outputs are found and rebuilt with stock Lake
         env:
           ELAN_TOOLCHAIN: leanprover/lean4:v4.37.0-rc1
