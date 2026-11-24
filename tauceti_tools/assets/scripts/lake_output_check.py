@@ -68,7 +68,10 @@ def expected_outputs(project: Path):
     """
     lib = project / ".lake/build/lib/lean"
     ir = project / ".lake/build/ir"
-    if not lib.is_dir():
+    try:
+        if not stat.S_ISDIR(lib.stat().st_mode):
+            return
+    except FileNotFoundError:
         return
     for directory, _, files in os.walk(lib, onerror=raise_error):
         for file in files:
