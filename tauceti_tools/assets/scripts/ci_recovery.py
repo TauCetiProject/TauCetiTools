@@ -232,7 +232,7 @@ def cancelled_before_build(api, repo, run):
 CUT_OFF_DESCRIPTION = self_tested_route.CUT_OFF_DESCRIPTION
 # The `build` description PR CI posts when its build failed only because the CI host ran out of
 # threads (pr-build.yml, thread_exhaustion.py). Like a cut-off build, the head is owed one retry.
-THREADS_DESCRIPTION = "infrastructure failure: the CI host ran out of threads; CI recovery retries once"
+THREADS_DESCRIPTION = self_tested_route.THREADS_DESCRIPTION
 # How far back the hourly pass lists cancelled runs. Every interruption is seen by many passes
 # within it; the report's memory keeps what an earlier pass learned about a head after that.
 INTERRUPTED_WINDOW = 2 * 86400
