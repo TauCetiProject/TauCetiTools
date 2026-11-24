@@ -32,15 +32,18 @@ class BaseHeadersTests(unittest.TestCase):
         self.contents = {}
         self.counter = 0
 
-    def archive(self, module, olean=None, trace=None):
+    def archive(self, module, olean=None, trace=None, header=None, ilean=None):
         """Write a fixture archive for `module`; return its (input hash, archive name)."""
         self.counter += 1
         digest = f"{self.counter:016x}"
         name = f"{self.counter + 0xa000:016x}.ltar"
         last = module.split(".")[-1]
         (self.cache / "artifacts" / name).write_bytes(
-            b"LTR4\0" + (trace or last + ".trace").encode() + b"\0\x06compressed")
-        self.contents[name] = (module, olean if olean is not None else module.encode())
+            (header if header is not None else b"LTR4\0")
+            + (trace or last + ".trace").encode() + b"\0\x06compressed")
+        self.contents[name] = (module, olean if olean is not None else module.encode(),
+                               ilean if ilean is not None else json.dumps(
+                                   {"decls": {}, "module": module, "version": 6}))
         return digest, name
 
     def revision(self, rev, rows):
@@ -50,13 +53,13 @@ class BaseHeadersTests(unittest.TestCase):
     def leantar(self, *args, **kwargs):
         self.requests.append(json.loads(kwargs["input"]))
         for request in self.requests[-1]:
-            module, olean = self.contents[Path(request["file"]).name]
+            module, olean, ilean = self.contents[Path(request["file"]).name]
             lib, ir = map(Path, request["base"])
             lib.mkdir(parents=True)
             ir.mkdir(parents=True)
             last = module.split(".")[-1]
             (lib / (last + ".olean")).write_bytes(olean)
-            (lib / (last + ".ilean")).write_text(json.dumps({"decls": {}, "module": module, "version": 6}))
+            (lib / (last + ".ilean")).write_text(ilean)
 
     def run_headers(self, modules, base=BASE, cache=None):
         self.modules.write_text("\n".join(modules) + "\n")
@@ -89,11 +92,35 @@ class BaseHeadersTests(unittest.TestCase):
                          sorted(name for _, name in (rows[0], rows[1], rows[3])))
         self.assertEqual({r["hash"] for r in request}, {rows[0][0], rows[1][0], rows[3][0]})
 
-    def test_base_revision_map_wins(self):
+    def test_only_the_base_revision_map_is_read(self):
+        # Another revision's version of a changed module, or a module only another revision has,
+        # never stands in for the base.
         older = self.archive("TauCeti.A", b"older A")
+        only_other = self.archive("TauCeti.B", b"other B")
         base = self.archive("TauCeti.A", b"base A")
-        self.revision(OTHER, [older])
+        self.revision(OTHER, [older, only_other])
         self.revision(BASE, [base])
+        self.assertEqual(self.run_headers(["TauCeti.A", "TauCeti.B"]), 0)
+        self.assertEqual(self.header("TauCeti.A"), b"base A")
+        self.assertIsNone(self.header("TauCeti.B"))
+        (request,) = self.requests
+        self.assertEqual([Path(r["file"]).name for r in request], [base[1]])
+
+    def test_without_the_base_revision_map_the_cache_cannot_answer(self):
+        # A cache walk that found only an ancestor's outputs must not stand in for the base.
+        self.revision(OTHER, [self.archive("TauCeti.A")])
+        self.assertEqual(self.run_headers(["TauCeti.A"]), 1)
+        self.assertEqual(self.run_headers(["TauCeti.A"], base=""), 1)
+        self.assertEqual(self.run_headers(["TauCeti.A"], base="../" + "b" * 37), 1)
+        self.assertFalse(self.dest.exists())
+
+    def test_two_versions_of_a_module_in_the_base_map_cannot_answer(self):
+        self.revision(BASE, [self.archive("TauCeti.A", b"one"), self.archive("TauCeti.A", b"two")])
+        self.assertEqual(self.run_headers(["TauCeti.A"]), 1)
+
+    def test_archive_header_with_an_input_hash(self):
+        # leantar writes flag 1 and an 8-byte input hash before the name unless packed with -s.
+        self.revision(BASE, [self.archive("TauCeti.A", b"base A", header=b"LTR4\x01" + b"\0trace\0h")])
         self.assertEqual(self.run_headers(["TauCeti.A"]), 0)
         self.assertEqual(self.header("TauCeti.A"), b"base A")
 
@@ -115,20 +142,31 @@ class BaseHeadersTests(unittest.TestCase):
         self.assertEqual(self.run_headers(["TauCeti.A"]), 1)
         self.assertEqual(self.run_headers(["TauCeti.A"], cache=""), 1)
 
-    def test_missing_base_archive_is_unavailable_but_another_revision_may_lack_one(self):
-        present = self.archive("TauCeti.A", b"base A")
-        self.revision(OTHER, [("ffffffffffffffff", "eeeeeeeeeeeeeeee.ltar")])
-        self.revision(BASE, [present])
+    def test_missing_base_archive_is_unavailable(self):
+        self.revision(BASE, [self.archive("TauCeti.A"), ("ffffffffffffffff", "eeeeeeeeeeeeeeee.ltar")])
+        self.assertEqual(self.run_headers(["TauCeti.A"]), 1)
+
+    def test_any_malformed_extracted_ilean_is_unavailable(self):
+        # Including one for an unrelated module that only shares the last name.
+        for ilean in ("{", "[]", json.dumps({"module": "TauCeti.B.A", "version": 4}),
+                      json.dumps({"version": 6}), json.dumps({"module": "TauCeti.B.C", "version": 6})):
+            with self.subTest(ilean=ilean):
+                shutil.rmtree(self.dest, ignore_errors=True)
+                self.revision(BASE, [self.archive("TauCeti.A", b"base A"),
+                                     self.archive("TauCeti.B.A", ilean=ilean)])
+                self.assertEqual(self.run_headers(["TauCeti.A"]), 1)
+
+    def test_escaped_module_name_in_the_ilean_still_matches(self):
+        self.revision(BASE, [self.archive("TauCeti.A", b"base A",
+                                          ilean=r'{"module": "TauCeti.\u0041", "version": 6}')])
         self.assertEqual(self.run_headers(["TauCeti.A"]), 0)
         self.assertEqual(self.header("TauCeti.A"), b"base A")
-        shutil.rmtree(self.dest)
-        self.revision(BASE, [present, ("ffffffffffffffff", "eeeeeeeeeeeeeeee.ltar")])
-        self.assertEqual(self.run_headers(["TauCeti.A"]), 1)
 
     def test_unknown_archive_format_or_malformed_input_is_unavailable(self):
         digest, name = self.archive("TauCeti.A")
         self.revision(BASE, [(digest, name)])
-        for header in (b"LTR5\0A.trace\0", b"LTR4\0A.olean\0", b"LTR4\0A.trace"):
+        for header in (b"LTR5\0A.trace\0", b"LTR4\0A.olean\0", b"LTR4\0A.trace", b"LTR4\x02A.trace\0",
+                       b"LTR4\x01short", b"LTR4", b""):
             with self.subTest(header=header):
                 (self.cache / "artifacts" / name).write_bytes(header)
                 self.assertEqual(self.run_headers(["TauCeti.A"]), 1)
@@ -153,7 +191,8 @@ class BaseHeadersTests(unittest.TestCase):
         with patch.object(headers.subprocess, "check_output", return_value="/toolchain\n"), \
                 patch.object(headers.subprocess, "run",
                              side_effect=subprocess.CalledProcessError(101, "leantar")):
-            self.assertEqual(headers.main([str(self.modules), str(self.dest), "--cache", str(self.cache)]), 1)
+            self.assertEqual(headers.main([str(self.modules), str(self.dest), "--cache", str(self.cache),
+                                           "--base", BASE]), 1)
 
 
 @unittest.skipUnless(os.environ.get("BASE_HEADERS_INTEGRATION") and shutil.which("lake"),

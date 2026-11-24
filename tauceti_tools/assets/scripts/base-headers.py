@@ -7,17 +7,17 @@ tested header with its header at the base revision. Stock Lake restores only out
 inputs still match, never the base version of a changed module, so read that version straight
 from the cache that `lake cache get` fetched.
 
-The revision maps (`<cache>/revisions/TauCeti/<rev>.jsonl`) list `[input hash, archive]` for
-every module of a revision, without module names. Each archive begins with its trace's file name,
-`<last name component>.trace`, uncompressed, so this reads only those first bytes to keep the
-archives that could hold a changed module, extracts just those with one `leantar` invocation,
-and takes the module name from each extracted `.ilean`. The base revision's map is read first;
-the first archive found for a module wins.
+The base revision's map (`<cache>/revisions/TauCeti/<base>.jsonl`, which `lake cache get --rev`
+leaves) lists `[input hash, archive]` for every module of that revision, without module names.
+Each archive begins with its trace's file name, `<last name component>.trace`, uncompressed, so
+this reads only those first bytes to keep the archives that could hold a changed module,
+extracts just those with one `leantar` invocation, and takes the module name from each extracted
+`.ilean`. No other revision's map is read.
 
-Usage: base-headers.py MODULES DEST [--cache DIR] [--base REV]
-Exit 0 after copying every base header the cache holds (a changed module with none is new).
-Exit 1 when the cache cannot answer: no cache, no revision map, an unknown archive format or a
-failed extraction. The caller then publishes no record, rather than a record that counts every
+Usage: base-headers.py MODULES DEST --base REV [--cache DIR]
+Exit 0 after copying every base header the base map holds (a changed module with none is new).
+Exit 1 when the cache cannot answer: no cache, no map for the base revision, a missing archive,
+an unknown archive or ilean format, or a failed extraction. The caller then publishes no record, rather than a record that counts every
 name of an existing module as added.
 """
 
@@ -38,8 +38,10 @@ HASH = re.compile(r"[0-9a-f]{16}")
 ARCHIVE = re.compile(r"[0-9a-f]{16}\.ltar")
 REVISION = re.compile(r"[0-9a-f]{40}")
 MODULE = re.compile(r"TauCeti(?:\.[A-Za-z_][A-Za-z0-9_']*)+")
-# leantar's archive header: this magic and a flag byte, then the trace's NUL-terminated file name.
+# leantar's archive header: this magic, a flag byte (1 when an 8-byte input hash follows, 0 when
+# it was stripped), then the trace's NUL-terminated file name.
 MAGIC = b"LTR4"
+HASH_FLAGS = {0: 0, 1: 8}
 HEADER_BYTES = 1024
 # The oldest ilean format whose "module" field this script relies on; v4.37.0-rc1 writes 6.
 ILEAN_VERSION = 5
@@ -69,22 +71,27 @@ def changed_modules(path):
 
 
 def revision_rows(cache, base):
-    """`(input hash, archive, from the base map)` rows of every revision map, the base revision's first."""
-    directory = cache / "revisions/TauCeti"
-    maps = sorted(directory.glob("*.jsonl")) if directory.is_dir() else []
-    maps = [path for path in maps if REVISION.fullmatch(path.stem)]
-    if not maps:
-        raise Unavailable("no revision map in " + str(directory))
-    maps.sort(key=lambda path: path.stem != base)
+    """`(input hash, archive)` rows of the base revision's own map.
+
+    Only that map says what the base revision built. Another map (an ancestor that a cache walk
+    found instead, a repair revision) would attribute its headers to the base, so its absence
+    makes the cache unable to answer.
+    """
+    if not REVISION.fullmatch(base or ""):
+        raise Unavailable("no base revision")
+    path = cache / "revisions/TauCeti" / (base + ".jsonl")
+    try:
+        lines = regular(path).read_text().splitlines()
+    except FileNotFoundError:
+        raise Unavailable("no revision map for the base revision " + base) from None
     rows = []
-    for path in maps:
-        for line in regular(path).read_text().splitlines()[1:]:
-            row = json.loads(line)
-            if (not isinstance(row, list) or len(row) != 2 or not isinstance(row[0], str)
-                    or not HASH.fullmatch(row[0]) or not isinstance(row[1], str)
-                    or not ARCHIVE.fullmatch(row[1])):
-                raise Unavailable("unexpected revision map row in " + path.name)
-            rows.append((row[0], row[1], path.stem == base))
+    for line in lines[1:]:
+        row = json.loads(line)
+        if (not isinstance(row, list) or len(row) != 2 or not isinstance(row[0], str)
+                or not HASH.fullmatch(row[0]) or not isinstance(row[1], str)
+                or not ARCHIVE.fullmatch(row[1])):
+            raise Unavailable("unexpected revision map row in " + path.name)
+        rows.append((row[0], row[1]))
     return rows
 
 
@@ -97,10 +104,13 @@ def trace_name(archive):
         head = os.read(descriptor, HEADER_BYTES)
     finally:
         os.close(descriptor)
-    end = head.find(b"\0", len(MAGIC) + 1)
-    if not head.startswith(MAGIC) or end < 0:
+    if len(head) <= len(MAGIC) or not head.startswith(MAGIC) or head[len(MAGIC)] not in HASH_FLAGS:
         raise Unavailable("unknown archive format: " + os.path.basename(archive))
-    name = head[len(MAGIC) + 1:end].decode("utf-8", "replace")
+    start = len(MAGIC) + 1 + HASH_FLAGS[head[len(MAGIC)]]
+    end = head.find(b"\0", start)
+    if end < 0:
+        raise Unavailable("unknown archive format: " + os.path.basename(archive))
+    name = head[start:end].decode("utf-8", "replace")
     if not name.endswith(".trace") or "/" in name:
         raise Unavailable("unknown archive format: " + os.path.basename(archive))
     return name
@@ -136,18 +146,17 @@ def extract(candidates, staging):
 
 
 def archive_module(lib, modules):
-    """The changed module an extracted archive holds, read from its `.ilean`, or None.
+    """The module an extracted archive holds, read from its `.ilean`, if it is one of `modules`.
 
-    Several thousand archives can share a common last name such as `Basic`, so only an ilean
-    whose text names one of `modules` is parsed; any ilean that is parsed must be well formed.
+    Every extracted ilean must be well formed, so that a changed layout makes the cache unable to
+    answer rather than hiding a base module.
     """
     ileans = list(lib.glob("*.ilean")) if lib.is_dir() and not lib.is_symlink() else []
     if len(ileans) != 1:
         raise Unavailable("unexpected archive contents")
-    text = regular(ileans[0]).read_bytes()
-    if not any(json.dumps(module).encode() in text for module in modules):
-        return None
-    info = json.loads(text)
+    info = json.loads(regular(ileans[0]).read_bytes())
+    if not isinstance(info, dict):
+        raise Unavailable("unknown archive module layout")
     module, version = info.get("module"), info.get("version")
     if (not isinstance(module, str) or not MODULE.fullmatch(module)
             or not isinstance(version, int) or isinstance(version, bool) or version < ILEAN_VERSION
@@ -159,26 +168,23 @@ def archive_module(lib, modules):
 def scan(cache, rows, wanted):
     """The rows whose archive can hold a wanted trace, and how many archives were read."""
     unique, seen = [], set()
-    for digest, name, from_base in rows:
+    for digest, name in rows:
         if name not in seen:
             seen.add(name)
-            unique.append((digest, str(cache / "artifacts" / name), from_base))
+            unique.append((digest, str(cache / "artifacts" / name)))
 
     def read(row):
         try:
             return trace_name(row[1])
         except FileNotFoundError:
-            # `lake cache get` installs every archive of the base map or discards the whole
-            # cache. A failed repair fetch can leave another revision's map without its archives.
-            if row[2]:
-                raise Unavailable("base archive missing: " + os.path.basename(row[1]))
-            return None
+            # `lake cache get` installs every archive of the map or discards the whole cache.
+            raise Unavailable("base archive missing: " + os.path.basename(row[1])) from None
 
     # Reading one header is a file open and a small read; overlap them, as a just-downloaded
     # cache need not be in memory.
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
         names = list(pool.map(read, unique, chunksize=256))
-    return [(digest, Path(path)) for (digest, path, _), name in zip(unique, names)
+    return [(digest, Path(path)) for (digest, path), name in zip(unique, names)
             if name in wanted], len(unique)
 
 
@@ -200,9 +206,10 @@ def base_headers(modules_file, destination, cache, base=""):
         with tempfile.TemporaryDirectory(prefix="base-headers-", dir=scratch) as staging:
             for lib in extract(candidates, Path(staging)):
                 module = archive_module(lib, modules)
-                # The rows are in map order, the base revision's first; its version wins.
-                if module is None or module in found:
+                if module is None:
                     continue
+                if module in found:
+                    raise Unavailable("the base map holds two versions of " + module)
                 found.add(module)
                 target = destination / (module.replace(".", "/") + ".olean")
                 target.parent.mkdir(parents=True, exist_ok=True)
