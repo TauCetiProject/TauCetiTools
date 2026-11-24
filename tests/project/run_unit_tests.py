@@ -15,6 +15,7 @@ as well.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -104,18 +105,24 @@ sys.exit(not unittest.TextTestRunner().run(suite).wasSuccessful())
 
 
 def stubs(project):
-    """Project workflows that only call this repository's workflow of the same name."""
+    """This repository's workflows that the project calls, where the project's file of the same name
+    is absent or itself only calls ours (pr-build.yml, or nightly-verify.yml once TauCeti's
+    nightly-verify-schedule.yml calls it here)."""
     workflows = project / ".github/workflows"
-    return sorted(path.name for path in workflows.glob("*.yml")
-                  if f"TauCetiTools/.github/workflows/{path.name}@" in path.read_text())
+    called = set()
+    for path in workflows.glob("*.yml"):
+        called.update(re.findall(r"TauCetiTools/\.github/workflows/([\w.-]+\.yml)@", path.read_text()))
+    return sorted(name for name in called if not (workflows / name).exists()
+                  or f"TauCetiTools/.github/workflows/{name}@" in (workflows / name).read_text())
 
 
 def use_this_revisions_workflows(project):
     """Test this revision's workflows in place of the project's stubs that call them.
 
-    The workflow tests read `.github/workflows/<name>.yml` from the project. When that file is a
-    stub calling TauCetiTools' reusable workflow of the same name, put this revision's copy (and,
-    for pr-build, the actions it uses) in its place, so the tests check what the project runs.
+    The workflow tests read `.github/workflows/<name>.yml` from the project. When the project calls
+    TauCetiTools' `<name>.yml` and its own file of that name is a stub or absent, put this
+    revision's copy (and, for pr-build, the actions it uses) there, so the tests check what the
+    project runs.
     """
     workflows = project / ".github/workflows"
     tools = HERE.parents[1]

@@ -37,6 +37,16 @@ workflows:
           triggers: [repository_dispatch]
     jobs: [pick-runner, sandboxed-build, publish-merge-group-cache, finalize-merge-group-build]
     runner_groups: [TauCetiFleet, TauCetiQueueControl]
+  nightly-verify.yml:
+    callers:
+      TauCetiProject/TauCeti:
+        # The caller admits only main and holds the one-at-a-time concurrency group.
+        - file: nightly-verify-schedule.yml
+          job: run
+          triggers: [schedule, workflow_dispatch]
+          pending: true
+    jobs: [verify, pick-reference-runner, reference, report]
+    runner_groups: [TauCetiFleet]
   publish-lake-cache.yml:
     internal: true
   retry-ci-status.yml:
