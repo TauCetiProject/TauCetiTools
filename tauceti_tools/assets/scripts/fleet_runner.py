@@ -405,6 +405,55 @@ def route(*, kind, order, machines, runner_pages, observed, github_budget, names
     return dict(pool="github", waiting=True)
 
 
+MAIN_INTEGRATION_LABELS = ["self-hosted", "linux", "x64", "tauceti-fleet-pr"]
+
+
+def main_integration_route(runner_pages, observed, min_idle):
+    """Idle Fleet PR capacity for the queue's main-integration build, or none.
+
+    The build is optional work on spare capacity: it never uses GitHub-hosted or Namespace
+    runners, and only runs when at least `min_idle` online PR runners are idle and no Fleet PR
+    job is known to be waiting. Anything unknown or unreadable means busy.
+    """
+    if type(min_idle) is not int or min_idle < 1:
+        raise ObservationError("invalid main-integration idle threshold")
+    try:
+        runners = inventory(runner_pages) if runner_pages else []
+        idle = len(ranked_runners(runner_pages, kind="pr", machines=discover_machines(runners))) if runners else 0
+        queued = observed.get("queued_fleet")
+        waiting = None
+        # Only a complete queue observation can show that no PR job is waiting.
+        if (isinstance(queued, list) and observed.get("fleet_queue_complete") is True
+                and not observed.get("placement_unavailable")):
+            waiting = sum("tauceti-fleet-pr" in labels for labels in queued)
+    except (ValueError, KeyError, TypeError):
+        return dict(pool="busy", idle=0)
+    if idle >= min_idle and waiting == 0:
+        return dict(pool="fleet", labels=list(MAIN_INTEGRATION_LABELS), idle=idle)
+    return dict(pool="busy", idle=idle)
+
+
+def main_integration_main(environment, repository):
+    raw = (environment.get("MAIN_INTEGRATION_MIN_IDLE") or "").strip()
+    min_idle = int(raw) if raw.isdigit() and int(raw) > 0 else 8
+    observed = dict(queued_fleet=None)
+    try:
+        observed = shared_capacity(repository, environment.get("GITHUB_STATE_TOKEN", ""), 1) or observed
+    except (OSError, ValueError, KeyError, TypeError):
+        print("::warning::Shared capacity unavailable; treating the Fleet PR pool as busy")
+    try:
+        runner_pages = fleet_inventory(environment, repository)
+    except (OSError, ValueError, KeyError, TypeError):
+        runner_pages = []
+    selected = main_integration_route(runner_pages, observed, min_idle)
+    target = json.dumps(dict(group="TauCetiFleet", labels=selected["labels"]), separators=(",", ":")) if selected["pool"] == "fleet" else ""
+    values = dict(runner=target, pool=selected["pool"], idle=selected["idle"], attempt=environment["GITHUB_RUN_ATTEMPT"])
+    with open(environment["GITHUB_OUTPUT"], "a") as out:
+        out.write("".join(f"{k}={v}\n" for k, v in values.items()))
+    print(f"CI class=main-integration; pool={selected['pool']}; idle Fleet PR runners={selected['idle']} (need {min_idle}); "
+          f"waiting Fleet jobs={'unknown' if not isinstance(observed.get('queued_fleet'), list) else len(observed['queued_fleet'])}")
+
+
 def failed_placements(read, repository, run_id, attempt):
     """A same-run retry skips only pools whose earlier job never acquired a runner."""
     excluded = set()
@@ -462,6 +511,8 @@ def route_main():
         raise ObservationError("invalid repository")
     config = tomllib.loads(Path("tauceti.toml").read_text())["services"]["fleet"]
     kind = environment.get("FLEET_JOB_KIND", "other")
+    if kind == "main-integration":
+        return main_integration_main(environment, repository)
     budget = int(environment.get("BUDGET") or "18")
     namespace_enabled, namespace_cap = namespace_policy(config, environment)
     pr_queue_limit = config.get("pr_queue_limit", 0)

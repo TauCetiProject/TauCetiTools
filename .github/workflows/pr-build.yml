@@ -101,11 +101,19 @@ concurrency:
       format('bors-staging-{0}-{1}-{2}-{3}-{4}', github.repository_id, github.event.client_payload.batch_id,
         github.event.client_payload.head_sha, github.event.client_payload.base_sha, github.event.client_payload.base_ref)
       || format('bors-staging-run-{0}', github.run_id)
+    ) || github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-main-integration' && (
+      format('main-integration-{0}-{1}-{2}', github.repository_id, github.event.client_payload.head_sha,
+        github.event.client_payload.main_sha)
     ) || github.event.pull_request.number || inputs.pr || github.event.client_payload.pr || github.event.merge_group.head_sha }}
-  cancel-in-progress: ${{ !(github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-source-candidate-v2') }}
+  # A main-integration build (the queue's idle-capacity test of an accepted head on current main)
+  # has its own group per head and main, so it never cancels, or is cancelled by, the PR's build.
+  cancel-in-progress: ${{ !(github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-source-candidate-v2' || github.event.action == 'tauceti-main-integration')) }}
 
 env:
   SOURCE_CANDIDATE: ${{ github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-source-candidate-v2' }}
+  # The queue's main-integration build: accepted head H merged onto the main M it names, run only on
+  # idle Fleet PR capacity, reported only as the `main-integration` status on H (docs/main-integration.md).
+  MAIN_INTEGRATION: ${{ github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-main-integration' }}
   MERGE_BACKEND: ${{ vars.MERGE_BACKEND || 'queue' }}
   CI_STATUS_MERGE_BACKEND: ${{ vars.MERGE_BACKEND || 'queue' }}
   IS_BATCH: ${{ github.event_name == 'merge_group' || (github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-source-candidate-v2')) }}
@@ -143,7 +151,7 @@ jobs:
           !contains(github.event.pull_request.labels.*.name, 'full-lint') &&
           !contains(github.event.pull_request.labels.*.name, 'lint-repair') &&
           !startsWith(github.event.pull_request.head.ref, 'lint-repair/')))
-    runs-on: ${{ ((github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging') || (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.label_head != '') || (github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-pr-approved'))) && fromJSON(inputs.control_runner) || ((vars.FLEET_CI_ENABLED == 'true' && vars.PICKER_GITHUB_FALLBACK != 'true') && fromJSON(inputs.fleet_pr_runner) || 'ubuntu-24.04') }}
+    runs-on: ${{ ((github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging') || (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.label_head != '') || (github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-pr-approved' || github.event.action == 'tauceti-main-integration')))) && fromJSON(inputs.control_runner) || ((vars.FLEET_CI_ENABLED == 'true' && vars.PICKER_GITHUB_FALLBACK != 'true') && fromJSON(inputs.fleet_pr_runner) || 'ubuntu-24.04') }}
     timeout-minutes: 5
     continue-on-error: true
     permissions:
@@ -156,6 +164,7 @@ jobs:
       namespace-slot: ${{ steps.pick.outputs.namespace_slot }}
       runner: ${{ steps.pick.outputs.runner }}
       pool: ${{ steps.pick.outputs.pool }}
+      idle: ${{ steps.pick.outputs.idle }}
       attempt: ${{ steps.pick.outputs.attempt }}
       busy: ${{ steps.pick.outputs.busy }}
       budget: ${{ steps.pick.outputs.budget }}
@@ -223,12 +232,27 @@ jobs:
           NAMESPACE_ENABLED: ${{ vars.NAMESPACE_ENABLED }}
           NAMESPACE_BUILD_CAP: ${{ vars.NAMESPACE_BUILD_CAP }}
           API_RESERVE: ${{ vars.PICKER_REPOSITORY_API_RESERVE || '250' }}
-          FLEET_JOB_KIND: ${{ (github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging') && 'staging' || (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.label_head != '') || (github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-pr-approved')) && 'pr' || 'other' }}
+          FLEET_JOB_KIND: ${{ (github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging') && 'staging' || (github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-main-integration') && 'main-integration' || (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.label_head != '') || (github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-pr-approved')) && 'pr' || 'other' }}
           PR_HEAD: ${{ github.event.pull_request.head.sha || github.event.client_payload.head_sha || inputs.label_head || '' }}
           FLEET_CI_ENABLED: ${{ vars.FLEET_CI_ENABLED }}
           FLEET_RUNNER_GROUP_ID: ${{ vars.FLEET_RUNNER_GROUP_ID }}
           FLEET_READ_TOKEN: ${{ steps.inventory.outputs.token || secrets.FLEET_READ_TOKEN }}
+          MAIN_INTEGRATION_MIN_IDLE: ${{ vars.MAIN_INTEGRATION_MIN_IDLE }}
         run: python3 scripts/fleet_runner.py --route
+      # A main-integration build only uses idle Fleet PR capacity. When the picker found none (or
+      # could not look), it builds nothing and says so on H, so the queue asks again later.
+      - name: Defer a main-integration build while the Fleet PR pool is busy
+        if: ${{ always() && env.MAIN_INTEGRATION == 'true' && steps.pick.outputs.pool != 'fleet' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.client_payload.head_sha }}
+          MAIN_SHA: ${{ github.event.client_payload.main_sha }}
+          IDLE: ${{ steps.pick.outputs.idle }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ && "$MAIN_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid main-integration payload"; exit 1; }
+          python3 scripts/ci_status.py post --sha "$HEAD_SHA" --context main-integration --state error \
+            --description "B=${MAIN_SHA:0:12} deferred: Fleet PR pool busy (idle ${IDLE:-unknown})"
 
   # Name kept distinct from `build` on purpose — see the header note. The required merge check is the
   # `build` commit STATUS posted in the final step, not this job's auto-created check-run.
@@ -242,6 +266,8 @@ jobs:
     needs: pick-runner
     if: >-
       !cancelled() &&
+      !(github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-main-integration' && (needs.pick-runner.outputs.pool != 'fleet' ||
+        needs.pick-runner.outputs.attempt != format('{0}', github.run_attempt))) &&
       !(inputs.fleet_routing && ((github.event_name == 'workflow_dispatch' && inputs.skip_build) ||
         (github.event_name == 'pull_request_target' &&
           contains(github.event.pull_request.labels.*.name, 'self-tested') &&
@@ -419,6 +445,8 @@ jobs:
           BORS_BATCH_ID: ${{ github.event.client_payload.batch_id }}
           BORS_BASE_REF: ${{ github.event.client_payload.base_ref }}
           REQUESTED_PR: ${{ inputs.pr || github.event.client_payload.pr }}
+          MI_HEAD_SHA: ${{ github.event.client_payload.head_sha }}
+          MI_MAIN_SHA: ${{ github.event.client_payload.main_sha }}
           CI_SOURCE_READ_TOKEN: ${{ secrets.CI_SOURCE_READ_TOKEN }}
           CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
           CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
@@ -464,6 +492,18 @@ jobs:
             # Payload fields never choose a ref, URL, executable or authority.
             STAGING_REF=$(python3 gate/scripts/bors_train_identity.py \
               --head "$SHA" --base "$BASE_REF" --batch-id "$BORS_BATCH_ID" --branch "$BORS_BASE_REF")
+          elif [ "${MAIN_INTEGRATION:-false}" = true ]; then
+            # The queue's accepted head, merged onto the exact main it names. The head is retained
+            # in this repository (refs/tauceti-queue/inputs/...), so no fork is read.
+            NUM="$REQUESTED_PR"
+            SHA="$MI_HEAD_SHA"
+            BASE_REF="$MI_MAIN_SHA"
+            REPO='${{ github.repository }}'
+            STATUS_SHA="$SHA"
+            AUTHOR=""
+            [[ "$NUM" =~ ^[1-9][0-9]*$ && "$SHA" =~ ^[0-9a-f]{40}$ && "$BASE_REF" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "::error::main-integration dispatch needs a PR number and two commit SHAs"; exit 1;
+            }
           elif [ "${{ github.event_name }}" = "pull_request_target" ]; then
             NUM='${{ github.event.pull_request.number }}'
             SHA='${{ github.event.pull_request.head.sha }}'
@@ -1071,22 +1111,6 @@ jobs:
           rm -rf pr/.lake
           mkdir -p pr/.lake
 
-      # A queue staging attempt on a reserved Fleet staging slot may reuse the build/ and cache/
-      # that the previous attempt of the same batch (same accepted members, toolchain and Lake
-      # manifest) left on the slot's persistent disk. Here the kept tree stays hidden: pr/.lake
-      # becomes a fresh empty directory on that disk, so trusted setup runs as on a cold runner.
-      # The kept tree joins it only immediately before the sandboxed build. scripts/warm_tree.py
-      # documents why. Without the disk, or on anything unexpected, this is the cold path.
-      - name: Prepare this batch's staging tree from its previous attempt
-        if: ${{ env.INFRA != '1' && env.SOURCE_CANDIDATE == 'true' && env.IS_BATCH == 'true' }}
-        # Optional: if this is cut short, its results are never exported and the job continues cold.
-        continue-on-error: true
-        timeout-minutes: 10
-        run: |
-          python3 gate/scripts/warm_tree.py prepare --workspace "$GITHUB_WORKSPACE" --project pr \
-            --request "$RUNNER_TEMP/source-candidate-request.json" \
-            --members "$RUNNER_TEMP/source-members.json" --github-env "$GITHUB_ENV"
-
       - name: Attest integrated Lake configuration before executing Lake
         if: ${{ env.INFRA != '1' && env.IS_BATCH != 'true' }}
         env:
@@ -1439,9 +1463,8 @@ jobs:
       # trusted script retains hash-verified artifacts between attempts and retries only missing
       # downloads. If all attempts remain incomplete, it discards the partial cache and falls
       # back to no cache so ci.yml's post-merge build has the same final semantics.
-      # A kept tree already holds this batch's outputs; the repair outputs below still arrive.
       - name: Fetch ${{ inputs.lean_root }}'s own oleans from the Lake cache (network, no token; no PR code)
-        if: ${{ env.INFRA != '1' && env.TAUCETI_CACHE_ENABLED == '1' && env.WARM_TREE != '1' }}
+        if: ${{ env.INFRA != '1' && env.TAUCETI_CACHE_ENABLED == '1' }}
         env:
           # Passed under non-LAKE_ names so Lake never sees the deprecated endpoint
           # environment variables; the script hands it the endpoints through a `--service` config.
@@ -1543,15 +1566,6 @@ jobs:
       # passed, except in a queue batch, where every phase after a passing build runs whatever
       # an earlier check found, so one run reports every failing check. The `build` step below
       # combines their outcomes into the one outcome the reporting steps read.
-      # After every trusted setup step and before any candidate code: from here on only the
-      # sandbox and the post-sandbox steps, which already treat pr/.lake as candidate-written,
-      # see the kept tree.
-      - name: Join this batch's previous staging tree
-        if: ${{ env.INFRA != '1' && env.WARM_VOLUME == '1' }}
-        continue-on-error: true
-        timeout-minutes: 10
-        run: python3 gate/scripts/warm_tree.py activate --project pr --warm "$WARM_TREE" --github-env "$GITHUB_ENV"
-
       - name: Build exact candidate under bwrap, offline
         id: sandbox_build
         if: ${{ env.INFRA != '1' }}
@@ -1739,9 +1753,13 @@ jobs:
             [ "$outcome" = success ] || exit 1
           done
 
+      # Only a batch whose every sandboxed phase passed stages outputs for publication. A failed audit
+      # or lint can mean the tree itself is bad (a truncated restored output crashes the audit driver
+      # while Lake still trusts its trace), so its outputs never reach the public cache. Batch 506's
+      # attempt 339 published two corrupt archives that way on 24 Nov 2026.
       - name: Prepare merge-group cache artifact metadata
         id: cache_stage
-        if: ${{ !cancelled() && env.IS_BATCH == 'true' && env.STAGE_LAKE_CACHE == '1' && steps.sandbox_build.outcome == 'success' && steps.sandbox_finish.outcome == 'success' }}
+        if: ${{ !cancelled() && env.IS_BATCH == 'true' && env.STAGE_LAKE_CACHE == '1' && steps.build.outcome == 'success' }}
         run: |
           set -euo pipefail
           python3 gate/scripts/lake_cache_publish.py stage pr/.lake/publication-stage "$RUNNER_TEMP/lake-cache-staging"
@@ -1923,6 +1941,8 @@ jobs:
           post_fail=0
           post_status() {
             local ctx="$1" st="$2" dsc="$3"
+            # A main-integration build reports only its own status, below.
+            if [ "${MAIN_INTEGRATION:-false}" = true ]; then return 0; fi
             if [ "${SOURCE_CANDIDATE:-false}" = true ]; then
               if [ "$ctx" = scope ]; then
                 if [ "${OUT_OF_SCOPE:-}" = 1 ] || [ "${BUMP_BAD:-}" = 1 ] || [ "${TOO_LARGE:-}" = 1 ] \
@@ -2114,6 +2134,30 @@ jobs:
             } >> "$GITHUB_OUTPUT"
           fi
 
+          # main-integration: success only for a passing build; failure only for what the PR's
+          # source does on that main (build, audit, lint, pre-build source checks, shim expiry);
+          # anything that did not reach a verdict, a textual conflict included, is an error the
+          # queue does not act on. Never `build`, `scope` or `bump-guard`, and no PR fence.
+          if [ "${MAIN_INTEGRATION:-false}" = true ]; then
+            mi_base="B=${CAPTURED_BASE:0:12} T=${TESTED_SHA:0:12}"
+            if [ "$state" = success ]; then
+              mi_state=success; mi_desc="$mi_base passed sandboxed build and audits"
+            elif [ "${{ env.INTEGRATION_CONFLICT }}" = "1" ]; then
+              mi_state=error; mi_desc="B=${CAPTURED_BASE:0:12} conflict: H does not merge onto main"
+            elif [ "${{ env.INFRA }}" != "1" ] && [ "$identity_ok" = 1 ] && {
+                   [ "${{ steps.build.outcome }}" = "failure" ] || [ "$source_check" = failure ] \
+                   || [ "${{ env.SHIM_EXPIRY_RC }}" = "3" ]; }; then
+              # The same evidence staging's source verdict accepts (a combined sandbox phase
+              # failure, a completed pre-build check's rejection, a concrete shim replacement);
+              # the queue still confirms a failure with a second run before acting on it.
+              mi_state=failure; mi_desc="$mi_base failed: $desc"
+            else
+              mi_state=error; mi_desc="B=${CAPTURED_BASE:0:12} no verdict: $desc"
+            fi
+            python3 gate/scripts/ci_status.py post --record-only --sha '${{ steps.pr.outputs.status_sha }}' \
+              --context main-integration --state "$mi_state" --description "${mi_desc:0:140}" || post_fail=1
+          fi
+
           if [ "${SOURCE_CANDIDATE:-false}" != true ]; then
             # Scope and bump-guard are required queue verdicts. A transient
             # status failure must retry and remain visible to recovery.
@@ -2233,17 +2277,9 @@ jobs:
         if: ${{ always() && failure() && env.TAUCETI_CI_QUOTA_UNAVAILABLE == '1' }}
         run: exit 1
 
-      # Last, after every step that reads pr/.lake. Only a build that ran to an outcome, passing or
-      # failing, leaves a reusable tree; a cancelled job or an interrupted build leaves none.
-      - name: Keep this batch's staging tree for its next attempt
-        if: ${{ !cancelled() && env.WARM_ACTIVE == '1' && (steps.sandbox_build.outcome == 'success' || steps.sandbox_build.outcome == 'failure') }}
-        continue-on-error: true
-        timeout-minutes: 5
-        run: python3 gate/scripts/warm_tree.py retain --project pr --key "$WARM_TREE_KEY"
-
-  # A queue batch publishes whenever its sandboxed build passed, so the next repair and staging
-  # attempt restore it even when an audit or lint failed; every consumer reruns the audits on its
-  # own candidate, and only the `build` status lets a candidate land. The reusable workflow runs on a
+  # A queue batch publishes only when its sandboxed build, audits and lints all passed (the
+  # `cache_stage` step above stages nothing otherwise); status reporting failures do not stop it.
+  # A failed attempt's next try restores from the base and repair caches. The reusable workflow runs on a
   # fresh runner, sparsely checks out that commit's toolchain pin and key-free confirmation
   # helper, and is the sole holder of the key. The helper runs only after the key-bearing step.
   publish-merge-group-cache:

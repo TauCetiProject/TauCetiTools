@@ -153,7 +153,14 @@ run_lake_build() {
   # `--output-error=warn` keeps tee passing the build's output through even if writing the copy fails,
   # and `|| true` drops tee's own status, so `pipefail` reports exactly Lake's.
   set +e
-  lake build "${LAKE_BUILD_FLAGS[@]}" 2>&1 \
+  # When the bulk unpack above leaves modules to stock Lake, Lake restores each one with its own
+  # leantar, about one per CPU at once, and each leantar's rayon pool defaults to one thread per
+  # CPU. On a 96-CPU native fleet guest that reached thousands of tasks per build and exhausted
+  # the host's CI task limit (24 Nov 2026). leantar parallelises across the archives it is given,
+  # and Lake gives it one, so the extra workers only sit idle: on a 96-CPU host a full stock
+  # restore of TauCeti (39,164 modules) peaked at 695 tasks in 37s with 4, against 5,248 tasks
+  # in 60s by default.
+  RAYON_NUM_THREADS=4 lake build "${LAKE_BUILD_FLAGS[@]}" 2>&1 \
     | { tee --output-error=warn "$TELEMETRY/lake-build.log" 2>/dev/null || true; } \
     | { python3 "$TRUSTED_SCRIPTS/ci_log_filter.py" build || { echo '::warning::build log summary failed; showing remaining output'; cat; }; }
   build_status=${PIPESTATUS[0]}

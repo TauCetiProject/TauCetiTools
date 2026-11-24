@@ -86,6 +86,18 @@ class StatusIntentTests(unittest.TestCase):
             self.assertEqual(json.loads(path.read_text()), record)
             api.assert_not_called()
 
+    def test_main_integration_posts_without_a_pr_fence_even_for_self_tested_heads(self):
+        path, record = ci_status.record_intent(self.sha, 'main-integration', 'failure', 'B=abc T=def failed')
+        self.assertIsNone(record['pr'])
+        with patch.object(ci_status, 'eligible', return_value=True) as eligible:
+            ok, fake = self.publish([(path, record)], [self.run, {}])
+        self.assertTrue(ok)
+        eligible.assert_not_called()
+        self.assertFalse(any('/pulls/' in call[1] for call in fake.calls))
+        posts = [call for call in fake.calls if call[0] == 'POST']
+        self.assertEqual([(call[1], call[2]['context'], call[2]['state']) for call in posts],
+                         [(f'repos/Owner/Repo/statuses/{self.sha}', 'main-integration', 'failure')])
+
     def test_old_receipt_does_not_override_current_label_intent(self):
         _, record = self.record()
         assertion = dict(context="self-tested/7",state="success")

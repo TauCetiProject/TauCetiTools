@@ -18,7 +18,9 @@ from github_api import APIError, Deferred, GitHub
 from tauceti_tools.self_tested import eligible
 
 SCHEMA = "tauceti-ci.pr-status-intent/v1"
-CONTEXTS = {"build", "bump-guard", "scope"}
+# `main-integration` is the queue's idle-capacity test of an accepted head on current main; it is
+# posted without a PR fence (the head may be self-tested or no longer the PR's head).
+CONTEXTS = {"build", "bump-guard", "main-integration", "scope"}
 STATES = {"error", "failure", "pending", "success"}
 FIELDS = {"schema", "repo", "sha", "run_id", "attempt", "pr", "base_ref", "payload"}
 PAYLOAD_FIELDS = {"state", "context", "description", "target_url"}
