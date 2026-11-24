@@ -38,12 +38,7 @@ def valid_until(pr, comments, repo):
     from tauceti_tools import self_tested
     if self_tested.requested(pr.get('labels'), pr['head'].get('ref', '')):
         if pr['head'].get('ref', '').startswith(self_tested.BUMP_BRANCH):
-            return time.time()  # The labeller and inline pin guard are rechecked.
-        key = self_tested.team(repo), pr.get('user', {}).get('login', '')
-        observed = self_tested._MEMBERS.get(key)
-        if not observed:
-            return time.time()
-        deadline = min(deadline, time.time() + max(0, observed[0]+60-time.monotonic()))
+            return time.time()  # The inline pin guard is rechecked against main's tip.
     for comment in comments:
         for match in re.finditer(r'"expires_at"\s*:\s*(\d+(?:\.\d+)?)', comment.get('body') or ''):
             expires = float(match[1])

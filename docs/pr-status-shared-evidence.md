@@ -44,7 +44,7 @@ queue-control runners retain their current capacity and trust restrictions.
 The checkpoint retains pending PRs, retryable errors, quota holds by credential
 and API resource, and the last complete shared change boundary. Disposable
 decision caches bind the repository, head, merge base, policy, relevant labels,
-comments and statuses. Membership validity is never extended by decision reuse.
+comments and statuses.
 Verified immutable comparisons and changed paths are reusable across restarts.
 
 Exit 0 means the observed discovery boundary completed without errors. Exit 75

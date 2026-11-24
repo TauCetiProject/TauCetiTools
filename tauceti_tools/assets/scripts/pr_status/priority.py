@@ -25,7 +25,7 @@ def scan(repo, previous, *, now, api=None):
 
     Track age from the first observation of this head awaiting a decision. It
     is a lower bound on the request's age, never the PR's unrelated update age.
-    The normal assessment still checks membership, paths and the live label.
+    The normal assessment still checks paths and the live label.
     """
     api = api or GitHub(max_wait=0)
     owner, name = repo.split("/")

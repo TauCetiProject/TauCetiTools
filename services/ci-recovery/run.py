@@ -17,19 +17,9 @@ def main():
     sys.path[:0] = [str(root), str(checkout)]
     from tauceti_queue.github_app import GitHubApp
 
-    # Every request, including the self-tested team lookup, uses the queue App's installation;
-    # never the host's personal `gh` login, whose quota every agent on that account shares.
-    tokens = GitHubApp.load().tokens
-    token = tokens.token()
-    granted = getattr(getattr(tokens, "_current", None), "permissions", None) or {}
-    if "members" not in granted and not os.environ.get("SELF_TESTED_TEAM_TOKEN"):
-        # Without the App's organization Members: read permission the team is unknown. Unknown
-        # membership never cancels a build, so this pass keeps every self-tested PR's CI.
-        print(
-            "ci-recovery: the queue App lacks organization Members: read; self-tested cleanup is skipped this pass",
-            file=sys.stderr,
-        )
-        os.environ["TAUCETI_SELF_TESTED_TEAM"] = ""
+    # Every request uses the queue App's installation; never the host's personal `gh` login,
+    # whose quota every agent on that account shares.
+    token = GitHubApp.load().tokens.token()
     # The merge queue on this host reads this report for its status and its stuck-head alert.
     os.environ.setdefault("TAUCETI_CI_STUCK_REPORT", str(Path.home() / ".local/state/tauceti-ci-recovery/stuck-heads.json"))
     os.environ.update(

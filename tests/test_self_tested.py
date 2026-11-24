@@ -1,4 +1,4 @@
-"""Persistent declarations use inline author/scope eligibility, with no Actions receipts."""
+"""Persistent declarations from any author use inline scope eligibility, with no Actions receipts."""
 
 import base64
 import copy
@@ -8,7 +8,6 @@ import os
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -37,20 +36,14 @@ class API:
             changed_files=1,
         )
         self.files = [dict(filename="TauCeti/A.lean", status="modified")]
-        self.member = True
         self.calls = []
-        self.events = [dict(id=1, event="labeled", label=dict(name="self-tested"), actor=dict(login="trusted"))]
 
     def request(self, method, path, *args, **kwargs):
         self.calls.append((method, path))
         if method != "GET":
             raise AssertionError("eligibility must never write statuses, labels or workflow requests")
-        if path.startswith("orgs/"):
-            return dict(state="active" if self.member else "inactive")
         if "/files?" in path:
             return copy.deepcopy(self.files)
-        if "/events?" in path:
-            return copy.deepcopy(self.events)
         if path.endswith("/pulls/7"):
             return copy.deepcopy(self.pr)
         raise AssertionError("unexpected observation: " + path)
@@ -58,7 +51,6 @@ class API:
 
 class PersistentRouteTests(unittest.TestCase):
     def setUp(self):
-        policy._MEMBERS.clear()
         self.api = API()
 
     def decide(self, **kwargs):
@@ -66,7 +58,8 @@ class PersistentRouteTests(unittest.TestCase):
 
     def test_label_is_enough_without_any_status_or_timeline_history(self):
         self.assertTrue(self.decide())
-        self.assertFalse(any("/status" in p or "/events" in p or "graphql" in p for _, p in self.api.calls))
+        self.assertFalse(any("/status" in p or "/events" in p or "graphql" in p or p.startswith("orgs/")
+                             for _, p in self.api.calls))
         self.assertTrue(all(m == "GET" for m, _ in self.api.calls))
 
     def test_pushes_fix_rounds_and_main_advances_preserve_the_declaration(self):
@@ -77,9 +70,14 @@ class PersistentRouteTests(unittest.TestCase):
         self.api.pr["base"]["sha"] = "d" * 40
         self.assertTrue(self.decide())
 
-    def test_member_and_source_scope_still_control_admission(self):
+    def test_any_author_qualifies(self):
+        for login in ("author", "first-time-contributor", "sqrt-of-2"):
+            with self.subTest(login=login):
+                self.api.pr["user"]["login"] = login
+                self.assertTrue(self.decide())
+
+    def test_source_scope_still_controls_admission(self):
         for change in [
-            "member",
             "infrastructure",
             "pins",
             "empty",
@@ -91,9 +89,7 @@ class PersistentRouteTests(unittest.TestCase):
         ]:
             with self.subTest(change=change):
                 self.setUp()
-                if change == "member":
-                    self.api.member = False
-                elif change == "infrastructure":
+                if change == "infrastructure":
                     self.api.files = [dict(filename="scripts/tool.py")]
                 elif change == "pins":
                     self.api.files = [dict(filename="lean-toolchain")]
@@ -125,118 +121,10 @@ class PersistentRouteTests(unittest.TestCase):
         self.assertTrue(self.decide(pr=self.api.pr, paths=["TauCeti/A.lean"]))
         self.assertFalse(any("/files" in p or "/pulls/" in p for _, p in self.api.calls))
 
-    def test_incomplete_files_and_unknown_membership_never_grant_admission(self):
+    def test_incomplete_files_never_grant_admission(self):
         self.api.pr["changed_files"] = 2
         with self.assertRaisesRegex(RuntimeError, "incomplete"):
             self.decide()
-        policy._MEMBERS.clear()
-        original = self.api.request
-
-        def unavailable(method, path):
-            if path.startswith("orgs/"):
-                raise RuntimeError("membership unavailable")
-            return original(method, path)
-
-        with patch.object(self.api, "request", side_effect=unavailable):
-            with self.assertRaisesRegex(RuntimeError, "membership unavailable"):
-                self.decide()
-
-    def test_membership_cache_is_bounded_and_shared_between_inline_consumers(self):
-        self.assertTrue(self.decide())
-        self.assertTrue(self.decide())
-        self.assertEqual(sum(p.startswith("orgs/") for _, p in self.api.calls), 1)
-        for key, (at, value) in policy._MEMBERS.copy().items():
-            policy._MEMBERS[key] = (at - 61, value)
-        self.api.member = False
-        self.assertFalse(self.decide())
-        self.assertEqual(sum(p.startswith("orgs/") for _, p in self.api.calls), 2)
-
-    def _missing(self):
-        original = self.api.request
-
-        def missing(method, path):
-            if path.startswith("orgs/"):
-                self.api.calls.append((method, path))
-                error = RuntimeError("not found")
-                error.status = 404
-                raise error
-            return original(method, path)
-
-        return patch.object(self.api, "request", side_effect=missing)
-
-    def lookups(self):
-        return sum(p.startswith("orgs/") for _, p in self.api.calls)
-
-    def test_admission_does_not_cache_a_404(self):
-        with self._missing():
-            self.assertFalse(self.decide())
-            self.assertFalse(self.decide())
-        self.assertEqual(self.lookups(), 2)
-
-    def test_a_run_keeps_one_answer_per_author_including_a_404(self):
-        with policy.membership_run(policy.RunMembership()):
-            with self._missing():
-                self.assertFalse(self.decide())
-                self.assertFalse(self.decide())
-        self.assertEqual(self.lookups(), 1)
-        with policy.membership_run(policy.RunMembership()):
-            self.assertTrue(self.decide())
-            self.assertTrue(self.decide())
-        self.assertEqual(self.lookups(), 2)
-
-    def test_a_run_neither_reads_nor_fills_the_admission_cache(self):
-        self.assertTrue(self.decide())
-        for key, (at, value) in policy._MEMBERS.copy().items():
-            policy._MEMBERS[key] = (at - 3600, value)
-        with policy.membership_run(policy.RunMembership()):
-            self.api.member = False
-            self.assertFalse(self.decide())
-        self.assertEqual(self.lookups(), 2)
-        self.assertTrue(all(time_value[1] for time_value in policy._MEMBERS.values()))
-        self.assertFalse(self.decide())  # The expired admission entry is not revived.
-        self.assertEqual(self.lookups(), 3)
-
-    def test_a_run_ignores_a_fresh_admission_entry(self):
-        self.assertTrue(self.decide())
-        before = dict(policy._MEMBERS)
-        with policy.membership_run(policy.RunMembership()):
-            self.api.member = False
-            self.assertFalse(self.decide())
-        self.assertEqual(self.lookups(), 2)
-        self.assertEqual(policy._MEMBERS, before)
-
-    def test_a_run_does_not_cache_an_unknown_answer(self):
-        run = policy.RunMembership()
-        calls = []
-
-        def unavailable():
-            calls.append(1)
-            raise RuntimeError("membership unavailable")
-
-        for _ in range(2):
-            with self.assertRaises(RuntimeError):
-                run.answer(("team", "author"), unavailable)
-        self.assertEqual(len(calls), 2)
-
-    def test_concurrent_misses_in_a_run_make_one_request(self):
-        import threading
-        run = policy.RunMembership()
-        calls, start = [], threading.Barrier(4)
-
-        def lookup():
-            calls.append(1)
-            time.sleep(0.05)
-            return True
-
-        def ask():
-            start.wait()
-            return run.answer(("team", "author"), lookup)
-
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            answers = [future.result() for future in [pool.submit(ask) for _ in range(4)]]
-        self.assertEqual(answers, [True] * 4)
-        self.assertEqual(len(calls), 1)
 
     def test_observe_uses_live_label_and_scope_not_a_status(self):
         self.assertTrue(policy.observe(REPO, 7, HEAD, lambda p: self.api.request("GET", p)))
@@ -244,30 +132,24 @@ class PersistentRouteTests(unittest.TestCase):
         self.api.pr["labels"] = []
         self.assertFalse(policy.observe(REPO, 7, HEAD, lambda p: self.api.request("GET", p)))
 
-    def test_team_lookup_can_use_existing_org_read_credential(self):
-        with patch.dict(os.environ, SELF_TESTED_TEAM_TOKEN="fixture-org-token"):
-            with patch.object(policy, "gh_read", return_value={"state": "active"}) as org_read:
-                self.assertTrue(self.decide())
-        org_read.assert_called_once_with(
-            "orgs/TauCetiProject/teams/self-tested/memberships/author", token="fixture-org-token"
-        )
-        self.assertFalse(any(p.startswith("orgs/") for _, p in self.api.calls))
+    def test_only_the_configured_repository_honours_the_label(self):
+        def eligible(repo):
+            return policy.eligible(self.api.pr, repo, paths=["TauCeti/A.lean"], read=lambda p: self.api.request("GET", p))
 
-    def test_unconfigured_repository_cannot_use_the_team(self):
         with patch.dict(os.environ, {}, clear=True):
-            self.assertFalse(
-                policy.eligible(
-                    self.api.pr, "Other/Project", paths=["TauCeti/A.lean"], read=lambda p: self.api.request("GET", p)
-                )
-            )
+            self.assertFalse(eligible("Other/Project"))
+            self.assertTrue(eligible(REPO))
+        with patch.dict(os.environ, TAUCETI_SELF_TESTED_REPO="Other/Project"):
+            self.assertTrue(eligible("Other/Project"))
+            self.assertFalse(eligible(REPO))
 
     def test_requested_status_parameter_is_no_longer_a_gate(self):
         labels = [dict(name="self-tested")]
         for status in [None, "", "pending", "failure", "success"]:
-            self.assertTrue(policy.accepted(labels, status, member=True))
-            self.assertFalse(policy.accepted(labels, status, member=False))
-        self.assertFalse(policy.accepted(labels + [dict(name="full-lint")], member=True))
-        self.assertFalse(policy.accepted(labels, member=True, branch="lint-repair/x"))
+            self.assertTrue(policy.accepted(labels, status))
+            self.assertTrue(policy.accepted(labels, status, member=False))  # Ignored: any author counts.
+        self.assertFalse(policy.accepted(labels + [dict(name="full-lint")]))
+        self.assertFalse(policy.accepted(labels, branch="lint-repair/x"))
 
     def test_inline_bump_reads_allow_missing_alternative_lakefile_from_queue_client(self):
         class Missing(RuntimeError):
@@ -284,7 +166,7 @@ class PersistentRouteTests(unittest.TestCase):
             self.assertFalse((Path(directory) / "lakefile.lean").exists())
             self.assertTrue((Path(directory) / "lakefile.toml").exists())
 
-    def test_bumps_keep_their_trusted_labeller_and_real_pin_guard(self):
+    def test_bumps_keep_their_bot_author_and_real_pin_guard(self):
         self.api.pr["user"]["login"] = policy.BUMP_AUTHOR
         self.api.pr["head"]["ref"] = "bump-mathlib/latest"
         self.api.files = [dict(filename="lean-toolchain")]

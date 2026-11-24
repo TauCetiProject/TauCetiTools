@@ -817,101 +817,26 @@ class StuckHeadTests(unittest.TestCase):
 
 
 
-class Team(Interrupted):
-    """Interrupted, plus PR authors and the self-tested team's member listing."""
+class AnyAuthorSelfTestTests(unittest.TestCase):
+    """Readiness and admission honour the label from any author, so it always keeps its route here."""
 
-    def __init__(self, pulls, *, members=("member",), authors=None, **kwargs):
-        super().__init__(pulls, **kwargs)
-        self.members = members
-        self.authors = authors or {}
-        for item in self.pulls:
-            item["author"] = dict(login=self.authors.get(item["number"], "member"))
-            item["headRefName"] = "feature"
-
-    def graphql(self, query, variables):
-        data = super().graphql(query, variables)
-        if query == recovery.CURRENT:
-            found = next(p for p in self.pulls if p["number"] == variables["pr"])
-            data["repository"]["pullRequest"].update(author=found["author"], headRefName=found["headRefName"])
-        return data
-
-    def request(self, method, path, data=None):
-        if path.startswith("orgs/TauCetiProject/teams/self-tested/members?"):
-            self.paths.append(path)
-            if isinstance(self.members, Exception):
-                raise self.members
-            return [dict(login=login) for login in self.members]
-        return super().request(method, path, data)
-
-
-class UndeclaredSelfTestTests(unittest.TestCase):
-    """The label alone skips PR CI; readiness and admission honour it only from a team member."""
-
-    REPO = "owner/project"
-
-    def setUp(self):
-        configured = patch.dict("os.environ", {"TAUCETI_SELF_TESTED_TEAM": "TauCetiProject/self-tested"})
-        configured.start()
-        self.addCleanup(configured.stop)
-
-    def recover(self, api, **kwargs):
+    def test_any_authors_labelled_head_is_neither_built_retried_nor_stuck(self):
+        old = "2026-10-21T05:00:00Z"
+        api = Interrupted([pull(labels=["self-tested"], pushed=old)])
         with TemporaryDirectory() as tmp:
-            return recovery.recover(api, self.REPO, now=NOW, cleanup=False,
-                                    stuck_report=Path(tmp) / "stuck.json", **kwargs)
-
-    def test_a_non_members_self_tested_head_without_ci_is_built(self):
-        old = "2026-10-21T05:00:00Z"
-        api = Team([pull(labels=["self-tested"], pushed=old), pull(2, head="b" * 40, labels=["self-tested"], pushed=old)],
-                   authors={2: "Outsider"})
-        self.recover(api, apply=True)
-        self.assertEqual(dispatches(api), ["2"])
-
-    def test_membership_compares_logins_without_case(self):
-        item = dict(pull(labels=["self-tested"]), author=dict(login="Member"), headRefName="feature")
-        self.assertTrue(recovery.self_tested(item, {"member"}))
-        self.assertFalse(recovery.self_tested(item, {"other"}))
-        self.assertTrue(recovery.self_tested(item))  # unknown team: the label keeps its route
-
-    def test_only_the_bots_own_bumps_keep_the_labels_route(self):
-        item = dict(pull(labels=["self-tested"]), author=dict(login="tauceti-review-bot"), headRefName="bump-mathlib/x",
-                    headRepository=dict(nameWithOwner=self.REPO))
-        self.assertTrue(recovery.self_tested(item, {"member"}, self.REPO))
-        for changes in (dict(author=dict(login="outsider")), dict(headRepository=dict(nameWithOwner="outsider/fork"))):
-            with self.subTest(changes=changes):
-                self.assertFalse(recovery.self_tested(dict(item, **changes), {"member"}, self.REPO))
-
-    def test_the_team_token_override_lists_the_team(self):
-        api = Team([], members=recovery.APIError("GET", "orgs", 403, {"message": "Resource not accessible"}))
-        with patch.dict("os.environ", {"SELF_TESTED_TEAM_TOKEN": "test-only"}), \
-                patch.object(recovery, "gh_read", return_value=[dict(login="Member")]) as read:
-            self.assertEqual(recovery.team_members(api, self.REPO), {"member"})
-        self.assertEqual(read.call_args.kwargs["token"], "test-only")
-        self.assertEqual(api.paths, [])
-        with patch.dict("os.environ", {"SELF_TESTED_TEAM_TOKEN": "test-only"}), \
-                patch.object(recovery, "gh_read", side_effect=recovery.subprocess.TimeoutExpired("gh", 30)):
-            self.assertIsNone(recovery.team_members(api, self.REPO))
-
-    def test_an_unreadable_team_keeps_every_self_tested_route(self):
-        old = "2026-10-21T05:00:00Z"
-        for members in (recovery.APIError("GET", "orgs", 403, {"message": "Resource not accessible"}), ()):
-            with self.subTest(members=members):
-                api = Team([pull(labels=["self-tested"], pushed=old)], members=members, authors={1: "outsider"})
-                self.recover(api, apply=True)
-                self.assertEqual(api.writes, [])
-
-    def test_a_non_members_interrupted_build_is_retried_and_a_missing_one_reported(self):
-        api = Team([pull(state="FAILURE", labels=["self-tested"])], cancelled_runs=[cancelled()],
-                   jobs={30: [TIMED_OUT]}, authors={1: "outsider"})
-        self.assertEqual(self.recover(api, apply=True)[0]["retry_of_interrupted"], 30)
-        outsider = dict(pull(labels=["self-tested"]), author=dict(login="outsider"), headRefName="feature")
-        self.assertEqual([h["pr"] for h in recovery.stuck_heads([outsider], [], {}, NOW, {"member"})], [1])
-        self.assertEqual(recovery.stuck_heads([outsider], [], {}, NOW), [])
-
-    def test_other_repositories_never_read_a_team(self):
-        api = Team([pull(labels=["self-tested"])])
-        with patch.dict("os.environ", {"TAUCETI_SELF_TESTED_TEAM": ""}):
-            self.assertIsNone(recovery.team_members(api, "owner/project"))
-        self.assertEqual(api.paths, [])
+            recovery.recover(api, "owner/project", now=NOW, cleanup=False, apply=True,
+                             stuck_report=Path(tmp) / "stuck.json")
+        self.assertEqual(api.writes, [])
+        api = Interrupted([pull(state="FAILURE", labels=["self-tested"])], cancelled_runs=[cancelled()],
+                          jobs={30: [TIMED_OUT]})
+        with TemporaryDirectory() as tmp:
+            recovery.recover(api, "owner/project", now=NOW, cleanup=False, apply=True,
+                             stuck_report=Path(tmp) / "stuck.json")
+        self.assertEqual(api.writes, [])
+        self.assertEqual(recovery.stuck_heads([pull(labels=["self-tested"])], [], {}, NOW), [])
+        for excluded in ("full-lint", "lint-repair"):
+            with self.subTest(excluded=excluded):
+                self.assertFalse(recovery.self_tested(pull(labels=["self-tested", excluded])))
 
 
 if __name__ == "__main__":

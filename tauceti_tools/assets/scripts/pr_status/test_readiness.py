@@ -174,9 +174,8 @@ class GateContract(unittest.TestCase):
 
 
 class ReadEvidence(unittest.TestCase):
-    def test_shared_unchanged_decision_reuses_gate_without_extending_membership_expiry(self):
+    def test_shared_unchanged_decision_reuses_a_self_tested_gate(self):
         from transport import ReconciliationAPI
-        from tauceti_tools import self_tested as declarations
         import self_tested
         current = copy.deepcopy(PR)
         current.update(user={'login': 'peer'}, labels=[{'name': 'self-tested'}])
@@ -184,14 +183,9 @@ class ReadEvidence(unittest.TestCase):
         statuses = {k: v for k, v in STATUSES.items() if k != 'build'}
         api = ReconciliationAPI()
         api.shared_evidence, api.git_cache, api.policy = MagicMock(), 'verified-git-cache', 'policy-pin'
-        key = 'Org/team', 'peer'
-        previous = declarations._MEMBERS.get(key)
-        declarations._MEMBERS[key] = time.monotonic()-40, True
-        self.addCleanup(lambda: declarations._MEMBERS.pop(key, None) if previous is None
-                        else declarations._MEMBERS.__setitem__(key, previous))
         with patch.object(readiness.core, 'transport', api), \
              patch.object(readiness, 'evidence', side_effect=lambda *a, **kw: (copy.deepcopy(current), [board()], statuses)), \
-             patch.dict('os.environ', TAUCETI_SELF_TESTED_TEAM='Org/team'), \
+             patch.dict('os.environ', TAUCETI_SELF_TESTED_REPO='owner/repo'), \
              patch.object(readiness.core, 'gh_api', side_effect=AssertionError('no direct API reads')), \
              patch('tauceti_tools.git_inputs.merge_base', return_value=MERGE_BASE), \
              patch.object(readiness, 'diff_engine', return_value=SimpleNamespace(git_diff=Mock(return_value=PATHS))) as diff, \
@@ -199,13 +193,12 @@ class ReadEvidence(unittest.TestCase):
              patch.object(self_tested, 'decide', return_value=True) as eligibility:
             first = readiness.assess(1, repo='owner/repo')
             saved_until = api.decisions['1']['valid_until']
-            self.assertLessEqual(saved_until, time.time()+20)
+            self.assertGreater(saved_until, time.time()+60)
             current['labels'].append({'name': 'ready-to-merge'})
             current['base']['sha'] = 'new-main-same-merge-base'
             second = readiness.assess(1, repo='owner/repo')
             self.assertEqual(api.decisions['1']['valid_until'], saved_until)
             api.decisions['1']['valid_until'] = 0
-            declarations._MEMBERS[key] = time.monotonic()-61, False
             eligibility.return_value = False
             expired = readiness.assess(1, repo='owner/repo')
         self.assertTrue(first['eligible'])
@@ -349,16 +342,14 @@ class ReadEvidence(unittest.TestCase):
 
     def test_audit_assesses_open_prs_concurrently_and_keeps_each_result_with_its_pr(self):
         import threading
-        import tauceti_tools.self_tested as policy
         snapshot = {"repo": "owner/repo", "prs": [
             {"number": n, "state": "OPEN" if n != 3 else "CLOSED", "is_draft": n == 4} for n in range(1, 9)]}
-        seen_runs, lock, active, peak = [], threading.Lock(), [0], [0]
+        lock, active, peak = threading.Lock(), [0], [0]
 
         def assess(number, repo=None):
             with lock:
                 active[0] += 1
                 peak[0] = max(peak[0], active[0])
-                seen_runs.append(policy._RUN.get())
             time.sleep(0.05)
             with lock:
                 active[0] -= 1
@@ -376,10 +367,6 @@ class ReadEvidence(unittest.TestCase):
         self.assertEqual(result["prs"]["5"]["reason"], "evidence unavailable")
         self.assertGreater(peak[0], 1)
         self.assertLessEqual(peak[0], 3)
-        # Every worker sees the same audit-scoped membership answers, and they end with the audit.
-        self.assertEqual(len({id(run) for run in seen_runs}), 1)
-        self.assertIsInstance(seen_runs[0], policy.RunMembership)
-        self.assertIsNone(policy._RUN.get())
 
     def test_missing_policy_publishes_unverified_audit(self):
         with patch.object(readiness, "engine", side_effect=RuntimeError("missing policy")):
