@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import importlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -74,6 +75,28 @@ def diff_guards(repo, merge_base, head, remote=None):
     if result["new_files_too_long"]:
         return result["violations"], SCOPE_NEW_FILE
     return [], ""
+
+
+def red_build(repo, head, statuses):
+    """Whether `head`'s `build` status is a completed PR build that failed.
+
+    The evidence carries only each context's state, and a build cut off by a cancellation or a
+    timeout also reports a failure. So only a failing head pays for more: its status description,
+    and the run the status links to, which must have completed without being cancelled.
+    """
+    from tauceti_tools import self_tested
+    if not self_tested.red_build(statuses.get("build", "")):
+        return False
+    owner, name = repo.split("/", 1)
+    data = graphql_data(BUILD_STATUS, owner=owner, name=name, head=head)
+    row = ((((data.get("repository") or {}).get("object") or {}).get("status") or {}).get("context")) or {}
+    if not self_tested.red_build(row.get("state"), row.get("description")):
+        return False
+    match = re.search(r"/actions/runs/([1-9][0-9]*)", row.get("targetUrl") or "")
+    if not match:
+        return False  # Not PR CI's own report.
+    run = json.loads(core.gh_api(f"repos/{repo}/actions/runs/{match[1]}", jq="{status, conclusion}") or "{}")
+    return run.get("status") == "completed" and run.get("conclusion") != "cancelled"
 
 
 def routing_state(pr):
@@ -204,10 +227,18 @@ _FIELDS = """number state isDraft baseRefName baseRefOid headRefOid headRefName 
 """
 
 
+BUILD_STATUS = """query($owner:String!, $name:String!, $head:GitObjectID!) {
+  repository(owner:$owner, name:$name) { object(oid:$head) { ... on Commit {
+    status { context(name:"build") { state description targetUrl } } } } } }"""
+
+
 def graphql(query, **variables):
+    return graphql_data(query, **variables)["repository"]["pullRequest"]
+
+
+def graphql_data(query, **variables):
     if core.transport is not None:
-        data = core.transport.client().graphql(query, variables)
-        return data['repository']['pullRequest']
+        return core.transport.client().graphql(query, variables)
     if time.time() < core._BLOCKED_UNTIL:
         raise core.RateLimited("GitHub reads paused after a rate limit")
     cmd = ["gh", "api", "graphql", "-f", "query=" + query]
@@ -225,7 +256,7 @@ def graphql(query, **variables):
         raise core.RateLimited("GitHub rate limited the readiness audit; retry on the next run")
     if out.returncode or errors or not payload.get("data"):
         raise RuntimeError(f"Readiness GraphQL read failed: {out.stderr.strip() or errors}")
-    return payload["data"]["repository"]["pullRequest"]
+    return payload["data"]
 
 
 def _rest_login(author):
@@ -299,8 +330,13 @@ def assess(pr, repo=None, now=None):
                                  jq=".merge_base_commit.sha").strip()
     if not merge_base and cheap is None:
         raise RuntimeError(f"No merge base for #{number} from the compare API")
+    from tauceti_tools import self_tested as declarations
+    # The decision key holds status states, not descriptions, so a cut-off build replaced by a
+    # real failure would keep its cached answer. A labelled failing head is always reassessed.
+    contested = (cheap is None and declarations.LABEL in declarations.label_names(current.get("labels"))
+                 and declarations.red_build(statuses.get("build", "")))
     cached, key = None, None
-    if core.transport is not None and core.transport.shared_evidence is not None:
+    if core.transport is not None and core.transport.shared_evidence is not None and not contested:
         from shared import decision_key
         from labels import STATUS_LABELS
         key = decision_key(current, comments, statuses, merge_base, core.transport.policy, STATUS_LABELS, repo=repo)
@@ -320,7 +356,12 @@ def assess(pr, repo=None, now=None):
             if core.transport is not None and core.transport.shared_evidence is not None:
                 return core.transport.changed_paths(repo, number, merge_base, head)
             return diff_engine().git_diff(f'https://github.com/{repo}', merge_base, head)
-        if cheap is None and requested(current.get("labels"), current["head"].get("ref", "")):
+        # A PR build that ran on this head and failed removes the label (labels.py), for any
+        # author, so the PR follows the ordinary ci-failed path from this assessment on. That
+        # includes a label a full-lint or lint-repair route leaves inert for now.
+        drop = contested and red_build(repo, head, statuses)
+        labelled = not drop and cheap is None and requested(current.get("labels"), current["head"].get("ref", ""))
+        if labelled:
             paths = changed_paths()
             local = (decide_local_route(core.transport.client(), repo, number, pr=current, paths=paths)
                      if core.transport is not None else reconcile_local_route(number, repo, pr=current, paths=paths))
@@ -330,7 +371,9 @@ def assess(pr, repo=None, now=None):
         if paths is None and result["category"] in {"needs-human-review", "merge-check-failed"}:
             paths = changed_paths()
             result = classify(current, comments, statuses, paths, merge_base, now=now, self_tested=local)
-        if cheap is None and requested(current.get("labels"), current["head"].get("ref", "")):
+        if drop:
+            result["drop_self_tested"] = True
+        elif labelled:
             # The label alone skips PR CI (pr-build.yml), so apply its diff guards here, labelled
             # as PR CI's would be: an oversized diff is a failed build, a long new file a failed
             # merge check. Admission refuses the same heads with the same sentences.
@@ -343,6 +386,7 @@ def assess(pr, repo=None, now=None):
     after, _, _ = evidence(number, repo, comments=False)
     if routing_state(after) != routing_state(current):
         result.pop("scope_failure", None)  # Measured for the old head; never post it on the new one.
+        result.pop("drop_self_tested", None)
         result.update(eligible=False, category="awaiting-CI" if after["state"] == "open" else None,
                       reason="PR changed while collecting merge evidence; awaiting reconciliation",
                       head=after["head"]["sha"])

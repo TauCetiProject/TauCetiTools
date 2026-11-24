@@ -1,6 +1,7 @@
 """Contract tests using the actual pinned Auto-merge engine, without network calls."""
 
 import copy
+from contextlib import nullcontext
 import time
 import importlib
 import json
@@ -209,6 +210,35 @@ class ReadEvidence(unittest.TestCase):
         self.assertEqual(expired['category'], 'awaiting-CI')
         self.assertEqual(eligibility.call_count, 2)
         self.assertEqual(diff.return_value.git_diff.call_count, 1)
+
+    def test_a_labelled_failing_head_is_never_answered_from_the_cache(self):
+        from transport import ReconciliationAPI
+        from tauceti_tools.self_tested import CUT_OFF_DESCRIPTION
+        current = copy.deepcopy(PR)
+        current.update(labels=[{'name': 'self-tested'}])
+        current['head']['ref'] = 'math'
+        statuses = dict(STATUSES, build='failure')
+        api = ReconciliationAPI()
+        api.shared_evidence, api.git_cache, api.policy = MagicMock(), 'verified-git-cache', 'policy-pin'
+        descriptions = [CUT_OFF_DESCRIPTION, 'sandboxed build, audit, or simp-NF lint failed']
+        replies = [{'repository': {'object': {'status': {'context': {
+            'state': 'FAILURE', 'description': d, 'targetUrl': 'https://github.com/owner/repo/actions/runs/7'}}}}}
+            for d in descriptions]
+        import self_tested
+        with patch.object(readiness.core, 'transport', api), \
+             patch.object(readiness, 'evidence', side_effect=lambda *a, **kw: (copy.deepcopy(current), [board()], dict(statuses))), \
+             patch('tauceti_tools.git_inputs.merge_base', return_value=MERGE_BASE), \
+             patch.object(readiness, 'diff_engine', return_value=SimpleNamespace(git_diff=Mock(return_value=PATHS))), \
+             patch.object(readiness, 'diff_guards', return_value=([], '')), \
+             patch.object(readiness, 'graphql_data', side_effect=replies), \
+             patch.object(readiness.core, 'gh_api', return_value='{"status":"completed","conclusion":"failure"}'), \
+             patch.object(self_tested, 'decide', return_value=True):
+            first = readiness.assess(1, repo='owner/repo')
+            second = readiness.assess(1, repo='owner/repo')
+        self.assertNotIn('drop_self_tested', first)
+        self.assertTrue(second['drop_self_tested'])
+        self.assertEqual(second['category'], 'ci-failed')
+        self.assertEqual((api.cache_hits, api.decisions), (0, {}))
 
     def node(self):
         return {"number": 1, "state": "OPEN", "isDraft": False, "baseRefName": "main",
@@ -447,7 +477,7 @@ class SelfTestedDiffGuards(unittest.TestCase):
             self.assertIn(f'"${{{{ env.{variable} }}}}" = "1" ]; then\n'
                           f'            sc_state=failure; sc_desc="{description}"', text)
 
-    def assess(self, guards, statuses=None, labels=("self-tested",), comments=None):
+    def assess(self, guards, statuses=None, labels=("self-tested",), comments=None, patch_api=True):
         current = copy.deepcopy(PR)
         current["labels"] = [{"name": name} for name in labels]
         current["head"]["ref"] = "math"
@@ -457,7 +487,7 @@ class SelfTestedDiffGuards(unittest.TestCase):
         with patch.object(readiness, "evidence", return_value=(
                     current, [board()] if comments is None else comments,
                     {"scope": "success"} if statuses is None else statuses)), \
-             patch.object(readiness.core, "gh_api", return_value=MERGE_BASE), \
+             patch.object(readiness.core, "gh_api", return_value=MERGE_BASE) if patch_api else nullcontext(), \
              patch.object(readiness, "diff_engine", return_value=fake), \
              patch.object(readiness, "diff_guards", return_value=guards) as measure, \
              patch.object(self_tested, "reconcile", return_value=True):
@@ -503,6 +533,69 @@ class SelfTestedDiffGuards(unittest.TestCase):
         result, _ = self.assess(([], ""))
         self.assertTrue(result["eligible"], result)
         self.assertNotIn("scope_failure", result)
+
+    def red(self, description, state="FAILURE", labels=("self-tested",), run=None,
+            url="https://github.com/owner/repo/actions/runs/7"):
+        """Assess a labelled head whose `build` status failed, with `description` on GitHub."""
+        statuses = dict(STATUSES, build="failure")
+        reply = {"repository": {"object": {"status": {"context": {
+            "state": state, "description": description, "targetUrl": url}}}}}
+        run = json.dumps(run or {"status": "completed", "conclusion": "failure"})
+        with patch.object(readiness, "graphql_data", return_value=reply) as read, \
+             patch.object(readiness.core, "gh_api", side_effect=lambda path, **kw:
+                          run if "/actions/runs/" in path else MERGE_BASE):
+            result, measure = self.assess((["too large"], readiness.SCOPE_TOO_LARGE),
+                                          statuses=statuses, labels=labels, patch_api=False)
+        return result, measure, read
+
+    def test_a_cancelled_or_unfinished_run_keeps_the_label(self):
+        for run in ({"status": "completed", "conclusion": "cancelled"}, {"status": "in_progress", "conclusion": None}):
+            result, _, _ = self.red("sandboxed build, audit, or simp-NF lint failed", run=run)
+            self.assertNotIn("drop_self_tested", result, run)
+        result, _, _ = self.red("sandboxed build, audit, or simp-NF lint failed", url="https://example.org/x")
+        self.assertNotIn("drop_self_tested", result)
+
+    def test_a_failed_pr_build_on_the_head_removes_the_label(self):
+        result, measure, read = self.red("sandboxed build, audit, or simp-NF lint failed")
+        read.assert_called_once_with(readiness.BUILD_STATUS, owner="owner", name="repo", head=HEAD)
+        measure.assert_not_called()
+        self.assertTrue(result["drop_self_tested"])
+        self.assertEqual(result["category"], "ci-failed")
+        self.assertFalse(result["eligible"])
+        self.assertNotIn("scope_failure", result)
+
+    def test_an_inert_label_is_removed_too(self):
+        for labels in (("self-tested", "full-lint"), ("self-tested", "lint-repair")):
+            result, _, read = self.red("sandboxed build, audit, or simp-NF lint failed", labels=labels)
+            read.assert_called_once()
+            self.assertTrue(result["drop_self_tested"], labels)
+            self.assertEqual(result["category"], "ci-failed")
+
+    def test_a_cut_off_build_keeps_the_label(self):
+        from tauceti_tools.self_tested import CUT_OFF_DESCRIPTION
+        result, measure, _ = self.red(CUT_OFF_DESCRIPTION)
+        self.assertNotIn("drop_self_tested", result)
+        measure.assert_called_once()
+
+    def test_a_status_that_is_no_longer_failed_keeps_the_label(self):
+        for state in ("PENDING", "SUCCESS"):
+            result, _, _ = self.red("sandboxed build, audit, or simp-NF lint failed", state=state)
+            self.assertNotIn("drop_self_tested", result)
+
+    def test_unlabelled_and_green_heads_read_nothing_more(self):
+        for labels, statuses in (((), dict(STATUSES, build="failure")), (("self-tested",), STATUSES)):
+            with patch.object(readiness, "graphql_data") as read:
+                result, _ = self.assess(([], ""), statuses=statuses, labels=labels)
+            read.assert_not_called()
+            self.assertNotIn("drop_self_tested", result)
+
+    def test_cut_off_description_is_pr_ci_word_for_word(self):
+        from pathlib import Path
+        from tauceti_tools.self_tested import CUT_OFF_DESCRIPTION
+        workflow = next(directory / ".github/workflows/pr-build.yml"
+                        for directory in Path(readiness.__file__).resolve().parents
+                        if (directory / ".github/workflows/pr-build.yml").is_file())
+        self.assertIn(f'state=failure; desc="{CUT_OFF_DESCRIPTION}"', workflow.read_text())
 
     def test_prs_that_ran_pr_ci_are_not_measured(self):
         for labels in ((), ("self-tested", "full-lint")):
