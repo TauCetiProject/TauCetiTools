@@ -18,7 +18,8 @@ import json, os, sys
 from pathlib import Path
 name = Path(sys.argv[0]).name
 with open(os.environ['CALLS'], 'a') as f:
-    f.write(json.dumps([name, *sys.argv[1:], 'cache=' + os.environ.get('LAKE_ARTIFACT_CACHE', '')]) + '\\n')
+    f.write(json.dumps([name, *sys.argv[1:], 'cache=' + os.environ.get('LAKE_ARTIFACT_CACHE', ''),
+                        'rayon=' + os.environ.get('RAYON_NUM_THREADS', '')]) + '\\n')
 def status(key):
     return int(os.environ.get(key, '0'))
 if name == 'lake':
@@ -71,6 +72,7 @@ class SandboxPhases(unittest.TestCase):
                 path.chmod(0o755)
             env = dict(os.environ, PATH=str(root / 'bin') + ':' + os.environ['PATH'],
                        CALLS=str(root / 'calls.jsonl'), TAUCETI_TRUSTED_SCRIPTS=str(root / 'trusted'),
+                       RAYON_NUM_THREADS='',
                        WATCHDOG_TOOLCHAIN=str(root / 'watchdog'),
                        LINT_DRIVER_EXE=str(root / 'drivers/lint-env-driver'),
                        AXIOMS_ONLY_MODULES=str(scope) if scoped else '',
@@ -122,6 +124,20 @@ class SandboxPhases(unittest.TestCase):
                 self.assertEqual(len(builds), 1)
                 self.assertEqual('--fail-fast' in builds[0], expected)
                 self.assertIn('--iofail', builds[0])
+
+    def test_only_the_build_caps_leantar_threads(self):
+        # Stock Lake runs one leantar per cached module, about one per CPU at once; each one's
+        # rayon pool is capped so a large guest does not start thousands of threads. The bulk
+        # unpack's single leantar keeps its own wider pool.
+        for scenario in ({}, {'cache': True}, {'staging': True, 'batch': True}):
+            with self.subTest(**scenario):
+                _, calls, _ = self.run_sandbox([[]], **scenario)
+                builds = [call for call in calls if call[:2] == ['lake', 'build']]
+                self.assertEqual([call[-1] for call in builds], ['rayon=4'])
+                others = [call for call in calls if call[0] in ('lake', 'audit-driver', 'local-axioms', 'lean')
+                          and call[:2] != ['lake', 'build']]
+                self.assertTrue(others)
+                self.assertTrue(all(call[-1] == 'rayon=' for call in others))
 
     def test_each_phase_runs_only_its_own_work(self):
         _, calls, names = self.run_sandbox([['lint-style']])

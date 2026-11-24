@@ -268,6 +268,9 @@ jobs:
           # never let the build itself reach a remote cache service. Same rule as the
           # sandboxed build in pr-build.yml and as the publish step below.
           LAKE_NO_CACHE: "true"
+          # Stock restoration runs about one leantar per CPU at once; cap each one's rayon pool,
+          # as sandbox-build.sh does, so a large runner does not start thousands of threads.
+          RAYON_NUM_THREADS: "4"
           S3_ARTIFACT_ENDPOINT: ${{ vars.LAKE_CACHE_ARTIFACT_ENDPOINT }}
           S3_REVISION_ENDPOINT: ${{ vars.LAKE_CACHE_REVISION_ENDPOINT }}
         run: |
