@@ -37,6 +37,14 @@ workflows:
           triggers: [repository_dispatch]
     jobs: [pick-runner, sandboxed-build, publish-merge-group-cache, finalize-merge-group-build]
     runner_groups: [TauCetiFleet, TauCetiQueueControl]
+  api-docs.yml:
+    callers:
+      TauCetiProject/TauCeti:
+        - file: api-docs.yml
+          job: api-docs
+          triggers: [push, schedule, workflow_dispatch]
+          pending: true
+    jobs: [build-docs]
   nightly-verify.yml:
     callers:
       TauCetiProject/TauCeti:
