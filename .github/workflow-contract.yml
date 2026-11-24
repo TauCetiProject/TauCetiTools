@@ -1,0 +1,57 @@
+# What a project's caller must provide for each reusable workflow here, checked by
+# tests/workflow_contract.py against TauCeti main and TauCetiFleet main (workflow-contract.yml).
+#
+# Projects call these workflows at @main, so a change here reaches their CI without a project
+# review. The contract test checks every caller against the callee it names: inputs, secrets,
+# outputs, the permission ceiling (including nested calls), concurrency groups, the caller's
+# triggers and name, and that every job that can land on a workflow-restricted runner group is
+# defined in a file that group's Fleet policy admits.
+#
+# Every reusable workflow (an `on: workflow_call` file) must appear under `workflows`, either
+# with its callers or with `internal: true`.
+#
+# callers: project repository -> caller files. A caller entry gives:
+#   file:     the caller's file under .github/workflows/.
+#   job:      the caller's job that calls this workflow. Check names are `<job> / <callee job>`.
+#   name:     the caller's workflow name, when other workflows or the queue match it
+#             (`workflow_run` chains match by name).
+#   triggers: events the caller must keep; the callee's behaviour depends on them.
+#   pending:  true while the project's file does not yet call this workflow. The entry is then
+#             checked only once the caller exists and calls it; drop the flag when it lands.
+# jobs: callee job ids that something outside this repository depends on (the queue, CI
+#   statistics, status recovery). Renaming one of them is a cross-repository change.
+# A workflow with `callers: {}` has no project caller yet.
+# runner_groups: runner groups a job may reach through a runner chosen at run time (a picker's
+#   output), which the test cannot read from the workflow text.
+
+workflows:
+  pr-build.yml:
+    callers:
+      TauCetiProject/TauCeti:
+        - file: pr-build.yml
+          job: pr-build
+          name: pr-build
+          triggers: [pull_request_target, merge_group, repository_dispatch, workflow_dispatch]
+        - file: source-candidate.yml
+          job: candidate
+          triggers: [repository_dispatch]
+    jobs: [pick-runner, sandboxed-build, publish-merge-group-cache, finalize-merge-group-build]
+    runner_groups: [TauCetiFleet, TauCetiQueueControl]
+  publish-lake-cache.yml:
+    internal: true
+  # No project calls it yet; TauCeti's retry-ci-status.yml still holds its own copy.
+  retry-ci-status.yml:
+    callers: {}
+  pick-runner.yml:
+    internal: true
+  check-workflow-identity.yml:
+    internal: true
+
+# Runner labels that only runners in workflow-restricted groups carry, and the groups those
+# runners can be in. A job whose runs-on names one of these labels can only run if its
+# defining file is admitted by every listed group's policy.
+runner_labels:
+  tauceti-fleet-pr: [TauCetiFleet]
+  tauceti-fleet-staging: [TauCetiFleet]
+  tauceti-fleet-queue-control: [TauCetiQueueControl]
+  tauceti-fleet-pr-status: [TauCetiPRStatus]

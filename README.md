@@ -53,6 +53,21 @@ requires a separate operator grant.
 A [disposable project](examples/disposable-project) supplies separate content and roadmap trees
 with real immutable tool and Mathlib pins. It does not create repositories or enroll hosted services.
 
+## Callers of these workflows
+
+`.github/workflow-contract.yml` lists each reusable workflow and the TauCeti workflows that call
+it. `workflow-contract.yml` checks every change here, and every three hours, against TauCeti main
+and TauCetiFleet main: inputs, secrets and outputs match, no job asks for a permission its caller
+did not grant, caller and callee never share a concurrency group, callers keep the triggers and
+names the contract lists, and every job that can reach a workflow-restricted runner group is
+defined in a file the group's Fleet policy admits. It also runs actionlint on the workflows here.
+Run it locally with `python3 tests/workflow_contract.py TAUCETI_CHECKOUT FLEET_CHECKOUT`.
+
+Moving a workflow here from TauCeti: add it to the contract with its caller marked `pending`,
+merge, convert TauCeti's file to a stub calling it at `@main`, then drop `pending`. A job that
+runs on a restricted Fleet group needs the Fleet policy and the GitHub runner group to admit the
+file here before the stub lands.
+
 ## If `main` breaks CI
 
 Projects that call these workflows and actions at `@main` (TauCeti does) run every new commit on

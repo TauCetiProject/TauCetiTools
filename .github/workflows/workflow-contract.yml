@@ -1,0 +1,66 @@
+name: workflow-contract
+# TauCeti calls this repository's workflows at @main, so they are checked against TauCeti main's
+# callers and TauCetiFleet main's runner policy on every change here, and on a schedule to catch
+# a change on the TauCeti or Fleet side. See .github/workflow-contract.yml.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '41 */3 * * *'
+  workflow_dispatch:
+concurrency:
+  group: workflow-contract-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+permissions:
+  contents: read
+jobs:
+  workflow-contract:
+    # Same placement as checks.yml (FLEET_INFRA_CI); fork pull requests always run hosted.
+    runs-on: ${{ vars.FLEET_INFRA_CI == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('{"group":"TauCetiInfra","labels":["self-hosted","linux","x64","tauceti-fleet-infra"]}') || 'ubuntu-24.04' }}
+    timeout-minutes: 10
+    env:
+      ACTIONLINT_VER: 1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tools
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: TauCetiProject/TauCeti
+          ref: main
+          path: project
+          sparse-checkout: .github
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: TauCetiProject/TauCetiFleet
+          ref: main
+          path: fleet
+          sparse-checkout: services/ci-broker/src
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install 'PyYAML>=6'
+      - name: Check TauCeti's callers and Fleet's runner policy against these workflows
+        working-directory: tools
+        env:
+          TAUCETI_CONTRACT_PROJECT: ${{ github.workspace }}/project
+          TAUCETI_CONTRACT_FLEET: ${{ github.workspace }}/fleet
+        run: python -m unittest tests/test_workflow_contract.py -v
+      - name: Install pinned actionlint
+        run: |
+          set -euo pipefail
+          archive="actionlint_${ACTIONLINT_VER}_linux_amd64.tar.gz"
+          curl --fail --retry 3 --retry-all-errors --connect-timeout 15 --max-time 60 -sSL \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VER}/${archive}" -o "$RUNNER_TEMP/$archive"
+          echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" actionlint
+      - name: actionlint
+        working-directory: tools
+        # Shell and Python inside steps are not linted yet; this checks workflow structure,
+        # expressions, contexts and local reusable-workflow calls.
+        run: '"$RUNNER_TEMP/actionlint" -shellcheck= -pyflakes= -color'
