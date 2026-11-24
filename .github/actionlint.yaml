@@ -1,0 +1,16 @@
+# actionlint configuration for this repository's workflows (run by workflow-contract.yml).
+self-hosted-runner:
+  labels:
+    - tauceti-fleet-pr
+    - tauceti-fleet-staging
+    - tauceti-fleet-queue-control
+    - tauceti-fleet-pr-status
+    - tauceti-fleet-infra
+    - fleet-*
+paths:
+  .github/workflows/**/*.{yml,yaml}:
+    ignore:
+      # GitHub features newer than actionlint 1.7.12: the job context's reusable-workflow
+      # identity fields and concurrency `queue`.
+      - 'property "workflow_(repository|sha|ref|file_path)" is not defined in object type \{check_run_id'
+      - 'unexpected key "queue" for "concurrency" section'

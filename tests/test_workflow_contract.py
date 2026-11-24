@@ -1,0 +1,406 @@
+"""Tests for tests/workflow_contract.py, and the live contract when its checkouts are given.
+
+The live check runs in workflow-contract.yml with TAUCETI_CONTRACT_PROJECT (a TauCeti checkout)
+and TAUCETI_CONTRACT_FLEET (a TauCetiFleet checkout) set; elsewhere it is skipped.
+"""
+
+import json
+import os
+import sys
+import tempfile
+import textwrap
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import workflow_contract  # noqa: E402
+
+FLEET = """\
+const TAUCETI='TauCetiProject/TauCeti/.github/workflows/';
+const HARNESS='TauCetiProject/TauCetiTools/.github/workflows/';
+export const CHECKS={
+  3:expect('TauCetiFleet',main(TAUCETI,['pr-build.yml']),
+    [...main(TAUCETI,['api-docs.yml']),...main(HARNESS,['build.yml'])]),
+  6:expect('TauCetiQueueControl',main(TAUCETI,['pr-build.yml']),
+    main(HARNESS,['build.yml']),'TauCetiProject/TauCeti'),
+  [INFRA_GROUP]:{name:'TauCetiInfra',workflows:false,repositories:INFRA_REPOSITORIES},
+};
+"""
+
+CONTRACT = """\
+workflows:
+  build.yml:
+    callers:
+      TauCetiProject/TauCeti:
+        - {file: stub.yml, job: build, name: build, triggers: [pull_request_target]}
+    jobs: [compile]
+    runner_groups: [TauCetiFleet]
+  inner.yml:
+    internal: true
+runner_labels:
+  tauceti-fleet-pr: [TauCetiFleet]
+  tauceti-fleet-queue-control: [TauCetiQueueControl]
+"""
+
+CALLEE = """\
+name: build
+on:
+  workflow_call:
+    inputs:
+      runner: {type: string, required: true}
+      fast: {type: boolean, default: false}
+    secrets:
+      TOKEN: {required: true}
+      OPTIONAL: {required: false}
+    outputs:
+      verdict: {value: ok}
+permissions:
+  contents: read
+concurrency:
+  group: build-${{ github.ref }}
+jobs:
+  compile:
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    permissions:
+      contents: read
+      statuses: write
+    steps: [{run: 'true'}]
+  nested:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/inner.yml
+"""
+
+INNER = """\
+on:
+  workflow_call: {}
+jobs:
+  pick:
+    runs-on: ubuntu-24.04
+    steps: [{run: 'true'}]
+"""
+
+STUB = """\
+name: build
+on:
+  pull_request_target:
+permissions:
+  contents: read
+  statuses: write
+jobs:
+  build:
+    uses: TauCetiProject/TauCetiTools/.github/workflows/build.yml@main
+    with:
+      runner: '{"group":"TauCetiFleet","labels":["self-hosted","tauceti-fleet-pr"]}'
+      fast: true
+    secrets:
+      TOKEN: ${{ secrets.TOKEN }}
+  report:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo ${{ needs.build.outputs.verdict }}
+"""
+
+
+class Fixture:
+    def __init__(self, base):
+        self.base = Path(base)
+        self.write("tools/.github/workflow-contract.yml", CONTRACT)
+        self.write("tools/.github/workflows/build.yml", CALLEE)
+        self.write("tools/.github/workflows/inner.yml", INNER)
+        self.write("project/.github/workflows/stub.yml", STUB)
+        self.write("fleet/services/ci-broker/src/github.mjs", FLEET)
+
+    def write(self, name, text):
+        path = self.base / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(textwrap.dedent(text))
+
+    def edit(self, name, old, new):
+        path = self.base / name
+        text = path.read_text()
+        assert old in text, (name, old)
+        path.write_text(text.replace(old, new))
+
+    def errors(self):
+        checker = workflow_contract.Checker(self.base / "tools", self.base / "project", self.base / "fleet")
+        return checker.run()
+
+
+class ContractTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.fixture = Fixture(self.directory.name)
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def assertViolation(self, fragment):
+        errors = self.fixture.errors()
+        self.assertTrue(any(fragment in error for error in errors), errors)
+
+    def test_matching_caller_and_callee_pass(self):
+        self.assertEqual(self.fixture.errors(), [])
+
+    def test_fleet_policy_is_read_from_the_broker_table(self):
+        policy = workflow_contract.fleet_policy(self.fixture.base / "fleet")
+        self.assertIsNone(policy["TauCetiInfra"])
+        self.assertIn("TauCetiProject/TauCetiTools/.github/workflows/build.yml@refs/heads/main",
+                      policy["TauCetiQueueControl"])
+        self.assertIn("TauCetiProject/TauCeti/.github/workflows/api-docs.yml@refs/heads/main",
+                      policy["TauCetiFleet"])
+
+    def test_nested_job_asking_beyond_the_ceiling_fails(self):
+        # Tools #288: a callee job asked for issues: write, which the caller did not grant.
+        self.fixture.edit("tools/.github/workflows/build.yml", "      statuses: write\n",
+                          "      statuses: write\n      issues: write\n")
+        self.assertViolation("issues: write beyond the caller's ceiling")
+
+    def test_job_inside_a_nested_call_is_held_to_the_calling_job(self):
+        self.fixture.write("tools/.github/workflows/inner.yml", INNER.replace(
+            "    runs-on: ubuntu-24.04\n", "    runs-on: ubuntu-24.04\n    permissions:\n      statuses: write\n"))
+        self.assertViolation("inner.yml job pick: asks for statuses: write")
+
+    def test_callee_workflow_permissions_beyond_the_ceiling_fail(self):
+        self.fixture.edit("tools/.github/workflows/build.yml", "permissions:\n  contents: read\n",
+                          "permissions:\n  contents: write\n")
+        self.assertViolation("contents: write beyond")
+
+    def test_write_all_is_bounded_by_the_ceiling(self):
+        self.fixture.edit("tools/.github/workflows/build.yml", "permissions:\n  contents: read\nconcurrency",
+                          "permissions: write-all\nconcurrency")
+        self.assertViolation("beyond the caller's ceiling")
+
+    def test_caller_without_permissions_fails(self):
+        self.fixture.edit("project/.github/workflows/stub.yml", "permissions:\n  contents: read\n  statuses: write\n", "")
+        self.assertViolation("sets no permissions")
+
+    def test_missing_required_input_fails(self):
+        self.fixture.edit("project/.github/workflows/stub.yml", "      runner: '", "      other: '")
+        errors = self.fixture.errors()
+        self.assertTrue(any("does not pass required input 'runner'" in e for e in errors), errors)
+        self.assertTrue(any("passes input 'other'" in e for e in errors), errors)
+
+    def test_literal_of_the_wrong_type_fails(self):
+        self.fixture.edit("project/.github/workflows/stub.yml", "fast: true", "fast: 'yes'")
+        self.assertViolation("to boolean input 'fast'")
+
+    def test_secrets_are_checked_both_ways(self):
+        self.fixture.edit("project/.github/workflows/stub.yml", "      TOKEN: ${{ secrets.TOKEN }}\n",
+                          "      EXTRA: ${{ secrets.EXTRA }}\n")
+        errors = self.fixture.errors()
+        self.assertTrue(any("passes secret 'EXTRA'" in e for e in errors), errors)
+        self.assertTrue(any("required secret 'TOKEN'" in e for e in errors), errors)
+
+    def test_inherited_secrets_fail(self):
+        self.fixture.edit("project/.github/workflows/stub.yml", "    secrets:\n      TOKEN: ${{ secrets.TOKEN }}\n",
+                          "    secrets: inherit\n")
+        self.assertViolation("secrets: inherit")
+
+    def test_undeclared_output_fails(self):
+        self.fixture.edit("project/.github/workflows/stub.yml", "outputs.verdict", "outputs.result")
+        self.assertViolation("reads output 'result'")
+
+    def test_shared_concurrency_group_fails(self):
+        self.fixture.edit("project/.github/workflows/stub.yml", "jobs:\n  build:\n",
+                          "concurrency:\n  group: build-${{ github.ref }}\njobs:\n  build:\n")
+        self.assertViolation("wait on itself")
+
+    def test_restricted_group_must_admit_the_defining_file(self):
+        self.fixture.edit("fleet/services/ci-broker/src/github.mjs", "...main(HARNESS,['build.yml'])", "")
+        self.assertViolation("runner group TauCetiFleet, whose Fleet policy does not admit "
+                             "TauCetiProject/TauCetiTools/.github/workflows/build.yml")
+
+    def test_restricted_label_through_a_nested_input_is_traced(self):
+        self.fixture.write("tools/.github/workflows/inner.yml", INNER.replace(
+            "on:\n  workflow_call: {}\n", "on:\n  workflow_call:\n    inputs:\n      where: {type: string}\n").replace(
+            "runs-on: ubuntu-24.04", "runs-on: ${{ fromJSON(inputs.where) }}"))
+        self.fixture.edit("tools/.github/workflows/build.yml", "    uses: ./.github/workflows/inner.yml\n",
+                          "    uses: ./.github/workflows/inner.yml\n    with:\n      where: ${{ inputs.runner }}\n")
+        self.assertViolation("inner.yml job pick: can run in runner group TauCetiFleet")
+
+    def test_runtime_runner_needs_declared_groups(self):
+        self.fixture.edit("tools/.github/workflows/build.yml", "runs-on: ${{ fromJSON(inputs.runner) }}",
+                          "runs-on: ${{ fromJSON(needs.nested.outputs.runner) }}")
+        self.fixture.edit("tools/.github/workflow-contract.yml", "    runner_groups: [TauCetiFleet]\n", "")
+        self.assertViolation("picks its runner at run time")
+
+    def test_unknown_group_fails(self):
+        self.fixture.edit("project/.github/workflows/stub.yml", '"group":"TauCetiFleet"', '"group":"Elsewhere"')
+        self.assertViolation("runner group Elsewhere, which Fleet does not know")
+
+    def test_caller_must_keep_its_triggers_and_name(self):
+        self.fixture.edit("project/.github/workflows/stub.yml", "on:\n  pull_request_target:\n",
+                          "on:\n  workflow_dispatch:\n")
+        self.fixture.edit("project/.github/workflows/stub.yml", "name: build\n", "name: renamed\n")
+        errors = self.fixture.errors()
+        self.assertTrue(any("lacks the pull_request_target trigger" in e for e in errors), errors)
+        self.assertTrue(any("workflow name 'renamed'" in e for e in errors), errors)
+
+    def test_contracted_job_must_exist(self):
+        self.fixture.edit("tools/.github/workflows/build.yml", "  compile:\n", "  compiled:\n")
+        self.assertViolation("job 'compile', which other repositories depend on, is gone")
+
+    def test_every_reusable_workflow_needs_an_entry(self):
+        self.fixture.write("tools/.github/workflows/new.yml", INNER)
+        self.assertViolation("reusable workflow new.yml has no entry")
+
+    def test_unlisted_caller_fails(self):
+        self.fixture.write("project/.github/workflows/other.yml", STUB)
+        self.assertViolation("other.yml job build: is not listed as a caller")
+
+    def test_pending_caller_is_checked_once_it_calls(self):
+        self.fixture.edit("tools/.github/workflow-contract.yml", "triggers: [pull_request_target]}",
+                          "triggers: [pull_request_target], pending: true}")
+        self.assertEqual(self.fixture.errors(), [])
+        (self.fixture.base / "project/.github/workflows/stub.yml").unlink()
+        self.assertEqual(self.fixture.errors(), [])
+
+    def test_dropped_caller_must_be_marked_pending(self):
+        (self.fixture.base / "project/.github/workflows/stub.yml").unlink()
+        self.assertViolation("no longer calls build.yml")
+
+    def test_calling_job_concurrency_reaches_the_nested_workflow(self):
+        self.fixture.edit("tools/.github/workflows/build.yml", "    uses: ./.github/workflows/inner.yml\n",
+                          "    concurrency: nested-lock\n    uses: ./.github/workflows/inner.yml\n")
+        self.fixture.write("tools/.github/workflows/inner.yml", INNER.replace(
+            "    runs-on: ubuntu-24.04\n", "    runs-on: ubuntu-24.04\n    concurrency: {group: NESTED-lock}\n"))
+        self.assertViolation("inner.yml job pick: shares a concurrency group")
+
+    def test_concurrency_compares_case_and_spacing_insensitively(self):
+        self.fixture.edit("project/.github/workflows/stub.yml", "jobs:\n  build:\n",
+                          "concurrency:\n  group: BUILD-${{github.ref}}\njobs:\n  build:\n")
+        self.assertViolation("wait on itself")
+
+    def test_one_spelling_in_two_input_contexts_is_not_one_group(self):
+        self.fixture.edit("tools/.github/workflows/build.yml", "  group: build-${{ github.ref }}\n",
+                          "  group: lock-${{ inputs.runner }}\n")
+        self.fixture.edit("project/.github/workflows/stub.yml", "jobs:\n  build:\n",
+                          "concurrency:\n  group: lock-${{ inputs.runner }}\njobs:\n  build:\n")
+        self.assertEqual(self.fixture.errors(), [])
+
+    def test_group_passed_as_an_input_value_is_compared_by_value(self):
+        self.fixture.edit("tools/.github/workflows/build.yml", "  group: build-${{ github.ref }}\n",
+                          "  group: ${{ inputs.runner }}\n")
+        self.fixture.edit("project/.github/workflows/stub.yml", "jobs:\n  build:\n",
+                          "concurrency: {group: nested-lock}\njobs:\n  build:\n")
+        self.fixture.edit("project/.github/workflows/stub.yml",
+                          """      runner: '{"group":"TauCetiFleet","labels":["self-hosted","tauceti-fleet-pr"]}'""",
+                          "      runner: nested-lock")
+        self.assertViolation("wait on itself")
+
+    def test_forwarded_expression_keeps_its_structure(self):
+        self.fixture.edit("tools/.github/workflows/build.yml", "  group: build-${{ github.ref }}\n",
+                          "  group: ${{ format('lock-{0}', inputs.runner) }}\n")
+        self.fixture.edit("project/.github/workflows/stub.yml", "jobs:\n  build:\n",
+                          "concurrency: {group: \"${{ format('lock-{0}', (github.workflow)) }}\"}\njobs:\n  build:\n")
+        self.fixture.edit("project/.github/workflows/stub.yml",
+                          """      runner: '{"group":"TauCetiFleet","labels":["self-hosted","tauceti-fleet-pr"]}'""",
+                          "      runner: ${{ github.workflow }}")
+        self.fixture.edit("tools/.github/workflows/build.yml", "runs-on: ${{ fromJSON(inputs.runner) }}", "runs-on: ubuntu-24.04")
+        self.assertViolation("wait on itself")
+
+    def test_spaces_inside_quoted_literals_are_kept(self):
+        self.fixture.edit("tools/.github/workflows/build.yml", "  group: build-${{ github.ref }}\n",
+                          "  group: ${{ format('a b{0}', github.ref) }}\n")
+        self.fixture.edit("project/.github/workflows/stub.yml", "jobs:\n  build:\n",
+                          "concurrency: {group: \"${{ format('ab{0}', github.ref) }}\"}\njobs:\n  build:\n")
+        self.assertEqual(self.fixture.errors(), [])
+
+    def test_runner_from_a_variable_or_payload_needs_declared_groups(self):
+        for runs_on in ("${{ vars.RUNNER }}", "${{ fromJSON(github.event.client_payload.runner) }}",
+                        "${{ vars.FLEET == 'true' && fromJSON(vars.RUNNER) || 'ubuntu-24.04' }}",
+                        "${{ vars['RUNNER'] }}"):
+            with self.subTest(runs_on=runs_on):
+                self.fixture.write("tools/.github/workflows/inner.yml",
+                                   INNER.replace("runs-on: ubuntu-24.04", f"runs-on: {runs_on}"))
+                self.assertViolation("inner.yml job pick: picks its runner at run time")
+
+    def test_conditions_between_shown_routes_need_no_declaration(self):
+        runs_on = ("${{ vars.FLEET == 'true' && github.event_name != 'pull_request' && "
+                   "!contains(github.event.pull_request.labels.*.name, 'x') && "
+                   "fromJSON('{\"group\":\"TauCetiFleet\",\"labels\":[\"self-hosted\"]}') || 'ubuntu-24.04' }}")
+        self.fixture.write("tools/.github/workflows/inner.yml", INNER.replace("runs-on: ubuntu-24.04", "runs-on: " + json.dumps(runs_on)))
+        self.assertViolation("inner.yml job pick: can run in runner group TauCetiFleet, whose Fleet policy")
+        self.assertFalse(any("picks its runner" in e for e in self.fixture.errors()))
+
+    def test_predicate_around_a_literal_is_a_condition(self):
+        runs_on = ("${{ contains(fromJSON('[\"push\"]'), github.event_name) && "
+                   "fromJSON('[\"self-hosted\",\"tauceti-fleet-pr\"]') || 'ubuntu-24.04' }}")
+        self.fixture.write("tools/.github/workflows/inner.yml", INNER.replace("runs-on: ubuntu-24.04", "runs-on: " + json.dumps(runs_on)))
+        errors = self.fixture.errors()
+        self.assertFalse(any("picks its runner" in e for e in errors), errors)
+        self.assertTrue(any("inner.yml job pick: can run in runner group TauCetiFleet" in e for e in errors), errors)
+
+    def test_caller_passing_a_variable_as_a_runner_is_traced(self):
+        self.fixture.edit("project/.github/workflows/stub.yml",
+                          """      runner: '{"group":"TauCetiFleet","labels":["self-hosted","tauceti-fleet-pr"]}'""",
+                          "      runner: ${{ vars.BUILD_RUNNER }}")
+        self.fixture.edit("tools/.github/workflow-contract.yml", "    runner_groups: [TauCetiFleet]\n", "")
+        self.assertViolation("build.yml job compile: picks its runner at run time")
+
+    def test_group_named_through_an_input_is_traced(self):
+        self.fixture.write("tools/.github/workflows/inner.yml", INNER.replace(
+            "on:\n  workflow_call: {}\n", "on:\n  workflow_call:\n    inputs:\n      group: {type: string}\n").replace(
+            "runs-on: ubuntu-24.04", "runs-on:\n      group: ${{ inputs.group }}\n      labels: [self-hosted]"))
+        self.fixture.edit("tools/.github/workflows/build.yml", "    uses: ./.github/workflows/inner.yml\n",
+                          "    uses: ./.github/workflows/inner.yml\n    with:\n      group: TauCetiFleet\n")
+        self.assertViolation("inner.yml job pick: can run in runner group TauCetiFleet")
+
+    def test_unresolved_runner_needs_declared_groups(self):
+        for runs_on in ("${{ matrix.runner }}", "${{ fromJSON(vars.RUNNER) }}", "${{ inputs.unknown }}"):
+            with self.subTest(runs_on=runs_on):
+                self.fixture.write("tools/.github/workflows/inner.yml",
+                                   INNER.replace("runs-on: ubuntu-24.04", f"runs-on: {runs_on}"))
+                self.assertViolation("inner.yml job pick: picks its runner at run time")
+
+    def test_commented_out_fleet_admission_does_not_count(self):
+        self.fixture.edit("fleet/services/ci-broker/src/github.mjs", "[...main(TAUCETI,['api-docs.yml']),...main(HARNESS,['build.yml'])]",
+                          "[...main(TAUCETI,['api-docs.yml'])] /* ...main(HARNESS,['build.yml']) */")
+        self.assertViolation("whose Fleet policy does not admit")
+
+    def test_unreadable_fleet_policy_is_refused(self):
+        self.fixture.edit("fleet/services/ci-broker/src/github.mjs", "main(HARNESS,['build.yml']),'TauCetiProject",
+                          "extra(HARNESS,['build.yml']),'TauCetiProject")
+        with self.assertRaisesRegex(ValueError, "unreadable Fleet runner policy"):
+            self.fixture.errors()
+
+    def test_write_all_shorthand(self):
+        write_all = workflow_contract.permissions("write-all")
+        self.assertEqual(workflow_contract.level(write_all, "models"), 1)
+        self.assertEqual(workflow_contract.level(write_all, "vulnerability-alerts"), 1)
+        self.assertEqual(workflow_contract.level(write_all, "issues"), 2)
+        read_all = workflow_contract.permissions("read-all")
+        self.assertEqual(workflow_contract.exceeding({"*": 0, "artifact-metadata": 1}, read_all), {})
+        self.assertTrue(workflow_contract.exceeding(read_all, {"*": 0, "contents": 1}))
+        self.assertEqual(workflow_contract.exceeding({"*": 0, "models": 1}, write_all), {})
+
+    def test_nesting_beyond_ten_workflows_fails(self):
+        for depth in range(10):
+            target = f"level{depth + 1}.yml" if depth < 9 else None
+            body = "on:\n  workflow_call: {}\njobs:\n  next:\n"
+            body += f"    uses: ./.github/workflows/{target}\n" if target else "    runs-on: ubuntu-24.04\n    steps: [{run: 'true'}]\n"
+            self.fixture.write(f"tools/.github/workflows/level{depth}.yml", body)
+        self.fixture.edit("tools/.github/workflows/build.yml", "uses: ./.github/workflows/inner.yml",
+                          "uses: ./.github/workflows/level0.yml")
+        entries = "".join(f"  level{depth}.yml:\n    internal: true\n" for depth in range(10))
+        self.fixture.edit("tools/.github/workflow-contract.yml", "  inner.yml:\n", entries + "  inner.yml:\n")
+        self.assertViolation("nests reusable workflows more than GitHub allows")
+
+    def test_caller_must_use_main(self):
+        self.fixture.edit("project/.github/workflows/stub.yml", "build.yml@main", "build.yml@v1")
+        self.assertViolation("projects call Tools workflows at @main")
+
+
+@unittest.skipUnless(os.environ.get("TAUCETI_CONTRACT_PROJECT"), "needs TauCeti and TauCetiFleet checkouts")
+class LiveContract(unittest.TestCase):
+    def test_tauceti_main_and_fleet_main_meet_the_contract(self):
+        checker = workflow_contract.Checker(
+            workflow_contract.TOOLS_ROOT, os.environ["TAUCETI_CONTRACT_PROJECT"], os.environ["TAUCETI_CONTRACT_FLEET"])
+        errors = checker.run()
+        self.assertEqual(errors, [], "\n" + "\n".join(errors))
+
+
+if __name__ == "__main__":
+    unittest.main()
