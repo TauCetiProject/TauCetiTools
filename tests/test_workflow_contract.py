@@ -310,7 +310,8 @@ class ContractTests(unittest.TestCase):
 
     def test_runner_from_a_variable_or_payload_needs_declared_groups(self):
         for runs_on in ("${{ vars.RUNNER }}", "${{ fromJSON(github.event.client_payload.runner) }}",
-                        "${{ vars.FLEET == 'true' && fromJSON(vars.RUNNER) || 'ubuntu-24.04' }}"):
+                        "${{ vars.FLEET == 'true' && fromJSON(vars.RUNNER) || 'ubuntu-24.04' }}",
+                        "${{ vars['RUNNER'] }}"):
             with self.subTest(runs_on=runs_on):
                 self.fixture.write("tools/.github/workflows/inner.yml",
                                    INNER.replace("runs-on: ubuntu-24.04", f"runs-on: {runs_on}"))
@@ -323,6 +324,14 @@ class ContractTests(unittest.TestCase):
         self.fixture.write("tools/.github/workflows/inner.yml", INNER.replace("runs-on: ubuntu-24.04", "runs-on: " + json.dumps(runs_on)))
         self.assertViolation("inner.yml job pick: can run in runner group TauCetiFleet, whose Fleet policy")
         self.assertFalse(any("picks its runner" in e for e in self.fixture.errors()))
+
+    def test_predicate_around_a_literal_is_a_condition(self):
+        runs_on = ("${{ contains(fromJSON('[\"push\"]'), github.event_name) && "
+                   "fromJSON('[\"self-hosted\",\"tauceti-fleet-pr\"]') || 'ubuntu-24.04' }}")
+        self.fixture.write("tools/.github/workflows/inner.yml", INNER.replace("runs-on: ubuntu-24.04", "runs-on: " + json.dumps(runs_on)))
+        errors = self.fixture.errors()
+        self.assertFalse(any("picks its runner" in e for e in errors), errors)
+        self.assertTrue(any("inner.yml job pick: can run in runner group TauCetiFleet" in e for e in errors), errors)
 
     def test_caller_passing_a_variable_as_a_runner_is_traced(self):
         self.fixture.edit("project/.github/workflows/stub.yml",

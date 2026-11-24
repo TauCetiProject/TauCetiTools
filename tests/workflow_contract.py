@@ -180,8 +180,10 @@ def unknown_supplies(text):
                     break
             if function not in PREDICATES:
                 found.append(match.group(0))
-        return part
-    in_expression(text, scan)
+    # Scan each whole expression with its quoted literals blanked, so a function call keeps its
+    # arguments around a literal.
+    for match in EXPRESSION.finditer(text):
+        scan(QUOTED.sub("''", match.group(0)[3:-2]))
     return found
 
 
