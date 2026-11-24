@@ -104,7 +104,10 @@ class NightlyVerification(unittest.TestCase):
         self.assertIn('verify', JOBS['reference']['needs'])
         for s in JOBS['reference']['steps']:
             if s.get('uses', '').startswith('actions/checkout@'):
-                self.assertEqual(s['with']['ref'], '${{ github.sha }}')
+                # The project at the commit under test; in TauCetiTools' copy also the shared tools,
+                # at that workflow's own revision.
+                tools = s['with'].get('repository') == '${{ job.workflow_repository }}'
+                self.assertEqual(s['with']['ref'], '${{ job.workflow_sha }}' if tools else '${{ github.sha }}')
                 self.assertFalse(s['with']['persist-credentials'])
         steps = JOBS['verify']['steps']
         snapshot = step('verify', 'Record what the clean build produced')
