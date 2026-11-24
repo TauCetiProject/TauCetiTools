@@ -287,7 +287,8 @@ jobs:
           group_file="$RUNNER_TEMP/docgen-process-group"
           rm -f "$group_file"
           # A copy of the output feeds the failure summary below. `--output-error=warn` keeps tee
-          # passing the output through even if writing the copy fails; pipefail reports Lake's status.
+          # passing the output through even if writing the copy fails (tee then also exits nonzero,
+          # which pipefail reports as a failed build); otherwise pipefail reports Lake's status.
           setsid --wait bash -c 'echo "$$" > "$1" && set -o pipefail && lake build TauCetiDocs:docs 2>&1 | tee --output-error=warn "$2"' _ "$group_file" "$RUNNER_TEMP/docgen-build.log" &
           build=$!
           until [ -s "$group_file" ] || ! kill -0 "$build" 2>/dev/null; do sleep 1; done
@@ -313,7 +314,8 @@ jobs:
           log="$RUNNER_TEMP/docgen-build.log"
           [ -s "$log" ] || { echo "no build log to summarise"; exit 0; }
           targets=$(awk '/^Some required targets logged failures:/ {on=1; next} on && /^- / {print substr($0, 3); next} on {on=0}' "$log")
-          failed=$(grep -a -A3 -E '^✖ ' "$log" | grep -a -E '^(✖ |error: )' | head -n 40 || true)
+          # Each failed job's whole block: from its ✖ line to the next job's status line.
+          failed=$(awk '/^(✔|✖|ℹ|⚠) \[/ {on = /^✖ /} on' "$log" | head -n 60 || true)
           {
             echo "## API docs: doc-gen4 failed"
             if [ -n "$targets" ]; then
@@ -335,7 +337,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           printf '%s\n' "$targets" | while IFS= read -r target; do
             if [ -n "$target" ]; then
-              echo "::error title=doc-gen4 could not build $target::see the run summary for its error"
+              # Workflow-command property escaping, so a name cannot end the title early.
+              title=$(printf '%s' "doc-gen4 could not build $target" | sed 's/%/%25/g; s/\r/%0D/g; s/:/%3A/g; s/,/%2C/g')
+              echo "::error title=${title}::see the run summary for its error"
             fi
           done
 
