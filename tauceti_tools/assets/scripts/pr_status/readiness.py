@@ -77,12 +77,13 @@ def diff_guards(repo, merge_base, head, remote=None):
     return [], ""
 
 
-def red_build(repo, head, statuses):
+def red_build(repo, head, statuses, number=None):
     """Whether `head`'s `build` status is a completed PR build that failed.
 
     The evidence carries only each context's state, and a build cut off by a cancellation or a
     timeout also reports a failure. So only a failing head pays for more: its status description,
-    and the run the status links to, which must have completed without being cancelled.
+    and the run the status links to, which must have completed without being cancelled. A later
+    green build of the same head also clears it (`green_rebuild`).
     """
     from tauceti_tools import self_tested
     if not self_tested.red_build(statuses.get("build", "")):
@@ -95,8 +96,65 @@ def red_build(repo, head, statuses):
     match = re.search(r"/actions/runs/([1-9][0-9]*)", row.get("targetUrl") or "")
     if not match:
         return False  # Not PR CI's own report.
-    run = json.loads(core.gh_api(f"repos/{repo}/actions/runs/{match[1]}", jq="{status, conclusion}") or "{}")
-    return run.get("status") == "completed" and run.get("conclusion") != "cancelled"
+    run = json.loads(core.gh_api(f"repos/{repo}/actions/runs/{match[1]}", jq=RUN_FIELDS) or "{}")
+    if run.get("status") != "completed" or run.get("conclusion") == "cancelled":
+        return False
+    since = row.get("createdAt") or ""
+    if run.get("conclusion") == "success" and built_green(repo, run, since):
+        return False  # The reporting run was rerun, and its latest attempt built the head green.
+    return not green_rebuild(repo, number, head, since)
+
+
+RUN_FIELDS = "{id, event, head_sha, display_title, created_at, run_started_at, run_attempt, status, conclusion}"
+
+
+def built_green(repo, run, since):
+    """Whether `run`'s latest attempt started after `since` and its sandboxed build succeeded.
+
+    The report step fails the job whenever the build status it reports is not success, and a
+    run that skipped PR CI skips this job."""
+    started = run.get("run_started_at") or run.get("created_at") or ""
+    if not since or started <= since.replace("+00:00", "Z"):
+        return False
+    jobs = json.loads(core.gh_api(
+        f"repos/{repo}/actions/runs/{run['id']}/attempts/{run.get('run_attempt') or 1}/jobs?per_page=100",
+        jq="[.jobs[] | {name, conclusion}]") or "[]")
+    return any(j.get("name", "").split(" / ")[-1] == "sandboxed-build" and j.get("conclusion") == "success"
+               for j in jobs)
+
+
+def green_rebuild(repo, number, head, since):
+    """Whether a pr-build run of this head, started after its failing status, built it green.
+
+    PR CI does not publish a self-tested head's build status (its intent is obsolete), so a green
+    rebuild leaves the red status in place. A run is this head's when it is bound to it: by its
+    commit (a pull_request_target run), its `pr-build pr=N head=SHA` title, or, for a workflow or
+    repository dispatch titled `pr-build N`, by starting after the failing status of the head the PR still has.
+    Listings return successful runs by their latest attempt, so a rerun counts by its own start.
+    """
+    if not since:
+        return False
+    stamp = since.replace("+00:00", "Z")
+    base = f"repos/{repo}/actions/workflows/pr-build.yml/runs?status=success&per_page=100"
+
+    def listing(query):
+        pages = core.gh_api(f"{base}&{query}", jq=f"[.workflow_runs[] | {RUN_FIELDS}]", paginate=True)
+        return [run for line in pages.splitlines() if line.strip() for run in json.loads(line)]
+    runs = listing(f"head_sha={head}")
+    if number is not None:
+        # A maintenance dispatch and a human approval's repository_dispatch both build the PR's
+        # current head on the default branch's commit, titled `pr-build N`.
+        for event in ("workflow_dispatch", "repository_dispatch"):
+            runs += listing(f"event={event}&created=%3E%3D{stamp}")
+    for run in sorted({r["id"]: r for r in runs}.values(), key=lambda r: -r["id"]):
+        target = run.get("event") == "pull_request_target"
+        title = run.get("display_title")
+        bound = ((target and run.get("head_sha") == head)
+                 or (number is not None and title == f"pr-build pr={number} head={head}")
+                 or (number is not None and not target and title == f"pr-build {number}"))
+        if bound and built_green(repo, run, since):
+            return True
+    return False
 
 
 def routing_state(pr):
@@ -229,7 +287,7 @@ _FIELDS = """number state isDraft baseRefName baseRefOid headRefOid headRefName 
 
 BUILD_STATUS = """query($owner:String!, $name:String!, $head:GitObjectID!) {
   repository(owner:$owner, name:$name) { object(oid:$head) { ... on Commit {
-    status { context(name:"build") { state description targetUrl } } } } } }"""
+    status { context(name:"build") { state description targetUrl createdAt } } } } } }"""
 
 
 def graphql(query, **variables):
@@ -359,7 +417,7 @@ def assess(pr, repo=None, now=None):
         # A PR build that ran on this head and failed removes the label (labels.py), for any
         # author, so the PR follows the ordinary ci-failed path from this assessment on. That
         # includes a label a full-lint or lint-repair route leaves inert for now.
-        drop = contested and red_build(repo, head, statuses)
+        drop = contested and red_build(repo, head, statuses, number)
         labelled = not drop and cheap is None and requested(current.get("labels"), current["head"].get("ref", ""))
         if labelled:
             paths = changed_paths()

@@ -222,7 +222,8 @@ class ReadEvidence(unittest.TestCase):
         api.shared_evidence, api.git_cache, api.policy = MagicMock(), 'verified-git-cache', 'policy-pin'
         descriptions = [CUT_OFF_DESCRIPTION, 'sandboxed build, audit, or simp-NF lint failed']
         replies = [{'repository': {'object': {'status': {'context': {
-            'state': 'FAILURE', 'description': d, 'targetUrl': 'https://github.com/owner/repo/actions/runs/7'}}}}}
+            'state': 'FAILURE', 'description': d, 'targetUrl': 'https://github.com/owner/repo/actions/runs/7',
+            'createdAt': '2026-11-24T01:00:00Z'}}}}}
             for d in descriptions]
         import self_tested
         with patch.object(readiness.core, 'transport', api), \
@@ -231,7 +232,8 @@ class ReadEvidence(unittest.TestCase):
              patch.object(readiness, 'diff_engine', return_value=SimpleNamespace(git_diff=Mock(return_value=PATHS))), \
              patch.object(readiness, 'diff_guards', return_value=([], '')), \
              patch.object(readiness, 'graphql_data', side_effect=replies), \
-             patch.object(readiness.core, 'gh_api', return_value='{"status":"completed","conclusion":"failure"}'), \
+             patch.object(readiness.core, 'gh_api', side_effect=lambda path, **kw:
+                          '[]' if 'pr-build.yml/runs?' in path else '{"status":"completed","conclusion":"failure"}'), \
              patch.object(self_tested, 'decide', return_value=True):
             first = readiness.assess(1, repo='owner/repo')
             second = readiness.assess(1, repo='owner/repo')
@@ -535,18 +537,69 @@ class SelfTestedDiffGuards(unittest.TestCase):
         self.assertNotIn("scope_failure", result)
 
     def red(self, description, state="FAILURE", labels=("self-tested",), run=None,
-            url="https://github.com/owner/repo/actions/runs/7"):
-        """Assess a labelled head whose `build` status failed, with `description` on GitHub."""
+            url="https://github.com/owner/repo/actions/runs/7", rebuilds=(), jobs=None):
+        """Assess a labelled head whose `build` status failed, with `description` on GitHub.
+
+        `rebuilds` are the successful pr-build runs a listing returns; `jobs` their jobs."""
         statuses = dict(STATUSES, build="failure")
         reply = {"repository": {"object": {"status": {"context": {
-            "state": state, "description": description, "targetUrl": url}}}}}
-        run = json.dumps(run or {"status": "completed", "conclusion": "failure"})
+            "state": state, "description": description, "targetUrl": url,
+            "createdAt": "2026-11-24T01:00:00Z"}}}}}
+        run = json.dumps(dict(dict(id=7, created_at="2026-11-24T00:50:00Z", run_attempt=1),
+                              **(run or {"status": "completed", "conclusion": "failure"})))
+        jobs = json.dumps(jobs if jobs is not None else [{"name": "pr-build / sandboxed-build", "conclusion": "success"}])
+        self.listings = []
+
+        def api(path, **kw):
+            if "/workflows/pr-build.yml/runs?" in path:
+                self.listings.append(path)
+                return json.dumps([r for r in rebuilds if f"event={r['event']}&" in path
+                                   or ("head_sha=" in path and r["event"] == "pull_request_target")])
+            if "/jobs?" in path:
+                return jobs
+            if "/actions/runs/" in path:
+                return run
+            return MERGE_BASE
         with patch.object(readiness, "graphql_data", return_value=reply) as read, \
-             patch.object(readiness.core, "gh_api", side_effect=lambda path, **kw:
-                          run if "/actions/runs/" in path else MERGE_BASE):
+             patch.object(readiness.core, "gh_api", side_effect=api):
             result, measure = self.assess((["too large"], readiness.SCOPE_TOO_LARGE),
                                           statuses=statuses, labels=labels, patch_api=False)
         return result, measure, read
+
+    def test_a_later_green_rebuild_of_the_head_keeps_the_label(self):
+        failed = "sandboxed build, audit, or simp-NF lint failed"
+        later, earlier = "2026-11-24T02:00:00Z", "2026-11-24T00:30:00Z"
+        green = [
+            dict(id=9, event="workflow_dispatch", head_sha="main", display_title="pr-build 1", created_at=later, run_attempt=1),
+            dict(id=8, event="pull_request_target", head_sha=HEAD, display_title="pr-build 1", created_at=later, run_attempt=2),
+            dict(id=10, event="workflow_dispatch", head_sha="main", display_title=f"pr-build pr=1 head={HEAD}",
+                 created_at=later, run_attempt=1),
+            dict(id=11, event="repository_dispatch", head_sha="main", display_title="pr-build 1", created_at=later, run_attempt=1)]
+        for run in green:
+            result, _, _ = self.red(failed, rebuilds=[run])
+            self.assertNotIn("drop_self_tested", result, run)
+        unrelated = [
+            dict(id=9, event="workflow_dispatch", head_sha="main", display_title="pr-build 2", created_at=later, run_attempt=1),
+            dict(id=9, event="workflow_dispatch", head_sha="main", display_title="pr-build 1", created_at=earlier, run_attempt=1),
+            dict(id=8, event="pull_request_target", head_sha="other", display_title="pr-build 1", created_at=later, run_attempt=1),
+            dict(id=6, event="pull_request_target", head_sha=HEAD, display_title="pr-build 1", created_at=earlier,
+                 run_started_at=earlier, run_attempt=1)]
+        for run in unrelated:
+            result, _, _ = self.red(failed, rebuilds=[run])
+            self.assertTrue(result["drop_self_tested"], run)
+        skipped = [{"name": "pr-build / sandboxed-build", "conclusion": "skipped"}]
+        result, _, _ = self.red(failed, rebuilds=green[:1], jobs=skipped)
+        self.assertTrue(result["drop_self_tested"])
+        self.assertTrue(all("status=success" in path for path in self.listings), self.listings)
+
+    def test_a_green_rerun_of_the_reporting_run_keeps_the_label(self):
+        failed = "sandboxed build, audit, or simp-NF lint failed"
+        rerun = dict(status="completed", conclusion="success", run_attempt=2, run_started_at="2026-11-24T02:00:00Z")
+        result, _, _ = self.red(failed, run=rerun)
+        self.assertNotIn("drop_self_tested", result)
+        stale = dict(rerun, run_started_at="2026-11-24T00:50:00Z")
+        result, _, _ = self.red(failed, run=stale)
+        self.assertTrue(result["drop_self_tested"])
 
     def test_a_cancelled_or_unfinished_run_keeps_the_label(self):
         for run in ({"status": "completed", "conclusion": "cancelled"}, {"status": "in_progress", "conclusion": None}):
