@@ -24,7 +24,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 
 TOOLS_TESTS = """
-test_attest_pr_config.py test_bors_scope_approval.py test_bors_staging_identity.py
+test_attest_pr_config.py test_bors_attested.py test_bors_scope_approval.py test_bors_staging_identity.py
 test_bors_train_identity.py test_build_lint_driver.py test_bump_latest.py test_bump_manifest.py
 test_bwrap_pin.py test_cancel_bors_candidate.py test_check_expired_mathlib_shims.py
 test_check_source_options.py test_ci_graphs.py test_ci_host_resources.py test_ci_live_progress.py

@@ -1,5 +1,5 @@
 name: pr-build
-run-name: ${{ github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-source-candidate-v2' && format('source request={0}', github.event.client_payload.request.request_id) || github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging' && format('bors branch={0} batch={1} head={2} base={3}', github.event.client_payload.base_ref || 'unknown', github.event.client_payload.batch_id, github.event.client_payload.head_sha, github.event.client_payload.base_sha) || format('pr-build {0}', github.event.pull_request.number || inputs.pr || github.event.client_payload.pr || github.event.merge_group.head_sha || github.run_id) }}
+run-name: ${{ github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-source-candidate-v2' && format('source request={0}', github.event.client_payload.request.request_id) || github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-bors-attested') && format('bors branch={0} batch={1} head={2} base={3}', github.event.client_payload.base_ref || 'unknown', github.event.client_payload.batch_id, github.event.client_payload.head_sha, github.event.client_payload.base_sha) || format('pr-build {0}', github.event.pull_request.number || inputs.pr || github.event.client_payload.pr || github.event.merge_group.head_sha || github.run_id) }}
 
 # Builds a deterministic integration of immutable PR head H with main B captured once
 # by the existing dispatch. Scope, review and approval remain bound to raw H and its
@@ -95,7 +95,7 @@ concurrency:
       github.event.client_payload.request.request_id &&
       format('source-{0}-{1}', github.repository_id, github.event.client_payload.request.request_id)
       || format('source-run-{0}', github.run_id)
-    ) || github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging' && (
+    ) || github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-bors-attested') && (
       github.event.client_payload.batch_id && github.event.client_payload.head_sha &&
       github.event.client_payload.base_sha && github.event.client_payload.base_ref &&
       format('bors-staging-{0}-{1}-{2}-{3}-{4}', github.repository_id, github.event.client_payload.batch_id,
@@ -114,12 +114,18 @@ env:
   # The queue's main-integration build: accepted head H merged onto the main M it names, run only on
   # idle Fleet PR capacity, reported only as the `main-integration` status on H (docs/main-integration.md).
   MAIN_INTEGRATION: ${{ github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-main-integration' }}
+  # An attested landing (decision 200): the queue's repair worker already built, audited and linted
+  # exactly this staging candidate with main's tools and policy, and the queue attests it
+  # (bors_attested.py). Everything a staging run does runs, except elaboration, the audits and the
+  # lints: the build phase only restores the outputs with `lake build --no-build`, which fails if any
+  # module would need building, and they are published as staging publishes them.
+  ATTESTED: ${{ github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-attested' }}
   MERGE_BACKEND: ${{ vars.MERGE_BACKEND || 'queue' }}
   CI_STATUS_MERGE_BACKEND: ${{ vars.MERGE_BACKEND || 'queue' }}
-  IS_BATCH: ${{ github.event_name == 'merge_group' || (github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-source-candidate-v2')) }}
+  IS_BATCH: ${{ github.event_name == 'merge_group' || (github.event_name == 'repository_dispatch' && ((github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-bors-attested') || github.event.action == 'tauceti-source-candidate-v2')) }}
   # Staging lints the whole library: split that across 4 driver processes, which scale almost
   # linearly where more threads in one process do not. Only lint-env.sh reads it.
-  LINT_SHARDS: ${{ (github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging') && '4' || '1' }}
+  LINT_SHARDS: ${{ (github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-bors-attested')) && '4' || '1' }}
   # Temporary escape hatch for `lake exe cache get`, kept only for an easy rollback
   # during the transition to the cache tool's new default read endpoint. Set the
   # variable to `1` to send cache reads back to the legacy storage endpoint. Clear it to
@@ -151,7 +157,7 @@ jobs:
           !contains(github.event.pull_request.labels.*.name, 'full-lint') &&
           !contains(github.event.pull_request.labels.*.name, 'lint-repair') &&
           !startsWith(github.event.pull_request.head.ref, 'lint-repair/')))
-    runs-on: ${{ ((github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging') || (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.label_head != '') || (github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-pr-approved' || github.event.action == 'tauceti-main-integration')))) && fromJSON(inputs.control_runner) || ((vars.FLEET_CI_ENABLED == 'true' && vars.PICKER_GITHUB_FALLBACK != 'true') && fromJSON(inputs.fleet_pr_runner) || 'ubuntu-24.04') }}
+    runs-on: ${{ ((github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-bors-attested')) || (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.label_head != '') || (github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-pr-approved' || github.event.action == 'tauceti-main-integration')))) && fromJSON(inputs.control_runner) || ((vars.FLEET_CI_ENABLED == 'true' && vars.PICKER_GITHUB_FALLBACK != 'true') && fromJSON(inputs.fleet_pr_runner) || 'ubuntu-24.04') }}
     timeout-minutes: 5
     continue-on-error: true
     permissions:
@@ -232,7 +238,7 @@ jobs:
           NAMESPACE_ENABLED: ${{ vars.NAMESPACE_ENABLED }}
           NAMESPACE_BUILD_CAP: ${{ vars.NAMESPACE_BUILD_CAP }}
           API_RESERVE: ${{ vars.PICKER_REPOSITORY_API_RESERVE || '250' }}
-          FLEET_JOB_KIND: ${{ (github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging') && 'staging' || (github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-main-integration') && 'main-integration' || (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.label_head != '') || (github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-pr-approved')) && 'pr' || 'other' }}
+          FLEET_JOB_KIND: ${{ (github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-bors-attested')) && 'staging' || (github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-main-integration') && 'main-integration' || (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.label_head != '') || (github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-pr-approved')) && 'pr' || 'other' }}
           PR_HEAD: ${{ github.event.pull_request.head.sha || github.event.client_payload.head_sha || inputs.label_head || '' }}
           FLEET_CI_ENABLED: ${{ vars.FLEET_CI_ENABLED }}
           FLEET_RUNNER_GROUP_ID: ${{ vars.FLEET_RUNNER_GROUP_ID }}
@@ -298,10 +304,10 @@ jobs:
     # runtime cap and stable slot-group prefix. Waiting consumes no runner; failed
     # or invalid picker slots share conservative slot zero.
     concurrency:
-      group: ${{ inputs.fleet_routing && !inputs.source_candidate_enabled && (!(github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging') && !(inputs.maintenance || (github.event.pull_request.user.type == 'Bot' && github.event.pull_request.head.repo.full_name == github.repository && (startsWith(github.event.pull_request.head.ref, 'bump-mathlib/') || startsWith(github.event.pull_request.head.ref, 'lint-repair/')))) && needs.pick-runner.outputs.attempt == format('{0}', github.run_attempt) && (contains(needs.pick-runner.outputs.runner, 'nscloud-') || contains(needs.pick-runner.outputs.runner, 'namespace-profile-') || contains(needs.pick-runner.outputs.runner, 'namespace-features:')) && format('tauceti-namespace-build-{0}', contains(fromJSON('["0","1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","18","19","20","21","22","23","24","25","26","27","28","29","30","31","32","33","34","35","36","37","38","39","40","41","42","43","44","45","46","47","48","49","50","51","52","53","54","55","56","57","58","59","60","61","62","63"]'), needs.pick-runner.outputs.namespace-slot) && contains(fromJSON('["1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","18","19","20","21","22","23","24","25","26","27","28","29","30","31","32","33","34","35","36","37","38","39","40","41","42","43","44","45","46","47","48","49","50","51","52","53","54","55","56","57","58","59","60","61","62","63","64"]'), needs.pick-runner.outputs.namespace_cap) && fromJSON(needs.pick-runner.outputs.namespace-slot) < fromJSON(needs.pick-runner.outputs.namespace_cap) && needs.pick-runner.outputs.namespace-slot || '0') || contains(fromJSON('["ubuntu-latest","ubuntu-24.04","ubuntu-22.04"]'), (github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging') && fromJSON((needs.pick-runner.outputs.attempt == format('{0}', github.run_attempt) && contains(fromJSON(inputs.staging_pools), needs.pick-runner.outputs.pool) && needs.pick-runner.outputs.runner) || inputs.staging_runner) || ((inputs.maintenance || (github.event.pull_request.user.type == 'Bot' && github.event.pull_request.head.repo.full_name == github.repository && (startsWith(github.event.pull_request.head.ref, 'bump-mathlib/') || startsWith(github.event.pull_request.head.ref, 'lint-repair/')))) && ((vars.NAMESPACE_ENABLED == '' || vars.NAMESPACE_ENABLED == 'true') && vars.NAMESPACE_BUILD_CAP != '0' && fromJSON(format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=1","namespace-features:container.privileged=true;github.run-id={0}"]', github.run_id)) || 'ubuntu-24.04') || fromJSON(needs.pick-runner.outputs.attempt == format('{0}', github.run_attempt) && needs.pick-runner.outputs.runner || '"ubuntu-24.04"'))) && format('tauceti-hosted-bulk-{0}', needs.pick-runner.outputs.hosted-slot || '0') || format('unlimited-sandboxed-build-{0}', github.run_id)) || format('unlimited-sandboxed-build-{0}', github.run_id) }}
+      group: ${{ inputs.fleet_routing && !inputs.source_candidate_enabled && (!(github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-bors-attested')) && !(inputs.maintenance || (github.event.pull_request.user.type == 'Bot' && github.event.pull_request.head.repo.full_name == github.repository && (startsWith(github.event.pull_request.head.ref, 'bump-mathlib/') || startsWith(github.event.pull_request.head.ref, 'lint-repair/')))) && needs.pick-runner.outputs.attempt == format('{0}', github.run_attempt) && (contains(needs.pick-runner.outputs.runner, 'nscloud-') || contains(needs.pick-runner.outputs.runner, 'namespace-profile-') || contains(needs.pick-runner.outputs.runner, 'namespace-features:')) && format('tauceti-namespace-build-{0}', contains(fromJSON('["0","1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","18","19","20","21","22","23","24","25","26","27","28","29","30","31","32","33","34","35","36","37","38","39","40","41","42","43","44","45","46","47","48","49","50","51","52","53","54","55","56","57","58","59","60","61","62","63"]'), needs.pick-runner.outputs.namespace-slot) && contains(fromJSON('["1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","18","19","20","21","22","23","24","25","26","27","28","29","30","31","32","33","34","35","36","37","38","39","40","41","42","43","44","45","46","47","48","49","50","51","52","53","54","55","56","57","58","59","60","61","62","63","64"]'), needs.pick-runner.outputs.namespace_cap) && fromJSON(needs.pick-runner.outputs.namespace-slot) < fromJSON(needs.pick-runner.outputs.namespace_cap) && needs.pick-runner.outputs.namespace-slot || '0') || contains(fromJSON('["ubuntu-latest","ubuntu-24.04","ubuntu-22.04"]'), (github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-bors-attested')) && fromJSON((needs.pick-runner.outputs.attempt == format('{0}', github.run_attempt) && contains(fromJSON(inputs.staging_pools), needs.pick-runner.outputs.pool) && needs.pick-runner.outputs.runner) || inputs.staging_runner) || ((inputs.maintenance || (github.event.pull_request.user.type == 'Bot' && github.event.pull_request.head.repo.full_name == github.repository && (startsWith(github.event.pull_request.head.ref, 'bump-mathlib/') || startsWith(github.event.pull_request.head.ref, 'lint-repair/')))) && ((vars.NAMESPACE_ENABLED == '' || vars.NAMESPACE_ENABLED == 'true') && vars.NAMESPACE_BUILD_CAP != '0' && fromJSON(format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=1","namespace-features:container.privileged=true;github.run-id={0}"]', github.run_id)) || 'ubuntu-24.04') || fromJSON(needs.pick-runner.outputs.attempt == format('{0}', github.run_attempt) && needs.pick-runner.outputs.runner || '"ubuntu-24.04"'))) && format('tauceti-hosted-bulk-{0}', needs.pick-runner.outputs.hosted-slot || '0') || format('unlimited-sandboxed-build-{0}', github.run_id)) || format('unlimited-sandboxed-build-{0}', github.run_id) }}
       queue: max
       cancel-in-progress: false
-    runs-on: ${{ inputs.source_candidate_enabled && fromJSON(inputs.source_candidate_runner) || inputs.fleet_routing && ((github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging') && fromJSON((needs.pick-runner.outputs.attempt == format('{0}', github.run_attempt) && contains(fromJSON(inputs.staging_pools), needs.pick-runner.outputs.pool) && needs.pick-runner.outputs.runner) || inputs.staging_runner) || ((inputs.maintenance || (github.event.pull_request.user.type == 'Bot' && github.event.pull_request.head.repo.full_name == github.repository && (startsWith(github.event.pull_request.head.ref, 'bump-mathlib/') || startsWith(github.event.pull_request.head.ref, 'lint-repair/')))) && ((vars.NAMESPACE_ENABLED == '' || vars.NAMESPACE_ENABLED == 'true') && vars.NAMESPACE_BUILD_CAP != '0' && fromJSON(format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=1","namespace-features:container.privileged=true;github.run-id={0}"]', github.run_id)) || 'ubuntu-24.04') || fromJSON(needs.pick-runner.outputs.attempt == format('{0}', github.run_attempt) && needs.pick-runner.outputs.runner || '"ubuntu-24.04"'))) || 'ubuntu-24.04' }}
+    runs-on: ${{ inputs.source_candidate_enabled && fromJSON(inputs.source_candidate_runner) || inputs.fleet_routing && ((github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-bors-attested')) && fromJSON((needs.pick-runner.outputs.attempt == format('{0}', github.run_attempt) && contains(fromJSON(inputs.staging_pools), needs.pick-runner.outputs.pool) && needs.pick-runner.outputs.runner) || inputs.staging_runner) || ((inputs.maintenance || (github.event.pull_request.user.type == 'Bot' && github.event.pull_request.head.repo.full_name == github.repository && (startsWith(github.event.pull_request.head.ref, 'bump-mathlib/') || startsWith(github.event.pull_request.head.ref, 'lint-repair/')))) && ((vars.NAMESPACE_ENABLED == '' || vars.NAMESPACE_ENABLED == 'true') && vars.NAMESPACE_BUILD_CAP != '0' && fromJSON(format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=1","namespace-features:container.privileged=true;github.run-id={0}"]', github.run_id)) || 'ubuntu-24.04') || fromJSON(needs.pick-runner.outputs.attempt == format('{0}', github.run_attempt) && needs.pick-runner.outputs.runner || '"ubuntu-24.04"'))) || 'ubuntu-24.04' }}
     outputs:
       status-sha: ${{ steps.pr.outputs.status_sha }}
       build-state: ${{ steps.report.outputs.build-state }}
@@ -476,7 +482,7 @@ jobs:
             STATUS_SHA='${{ github.event.merge_group.head_sha }}'
             NUM="merge-group"   # not a single PR; scope/diff use the combined base..head diff below
             AUTHOR=""           # author was checked before enqueue; strict config validation repeats below
-          elif [ "${{ github.event_name }}" = "repository_dispatch" ] && [ "${{ github.event.action }}" = "tauceti-bors-staging" ]; then
+          elif [ "${{ github.event_name }}" = "repository_dispatch" ] && { [ "${{ github.event.action }}" = "tauceti-bors-staging" ] || [ "${{ github.event.action }}" = "tauceti-bors-attested" ]; }; then
             REPO='${{ github.repository }}'
             SHA="$BORS_HEAD_SHA"
             BASE_REF="$BORS_BASE_SHA"
@@ -548,6 +554,17 @@ jobs:
             echo "base_sha=$BASE_SHA"
             echo "mergebase=$MB"
           } >> "$GITHUB_OUTPUT"
+          if [ "${ATTESTED:-false}" = true ]; then
+            # An attested landing builds nothing, so the queue's own observation must name the attestation
+            # of exactly this commit and tree; the dispatch action alone does not count.
+            TREE=$(git --git-dir "$RUNNER_TEMP/ci-identity.git" rev-parse --verify "$SHA^{tree}" 2>/dev/null) || TREE=""
+            if ! python3 gate/scripts/bors_attested.py --head "$SHA" --base "$BASE_SHA" \
+                 --batch-id "$BORS_BATCH_ID" --branch "$BORS_BASE_REF" --tree "$TREE"; then
+              echo 'INFRA=1' >> "$GITHUB_ENV"
+              echo "::error::the queue does not attest this candidate; an attested landing never builds it"
+              exit 1
+            fi
+          fi
           echo "Building PR #$NUM @ $SHA from $REPO (author=${AUTHOR:-merge-group}, status -> $STATUS_SHA, bump delta vs merge-base $MB)"
 
       # Full history is intentional. lake cache get walks ancestors until it reaches a published
@@ -1512,7 +1529,7 @@ jobs:
       # code.
       - name: Fetch the repair worker's outputs for the staging candidates (network, no token; no PR code)
         id: repair_cache
-        if: ${{ env.INFRA != '1' && env.TAUCETI_CACHE_ENABLED == '1' && github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging' }}
+        if: ${{ env.INFRA != '1' && env.TAUCETI_CACHE_ENABLED == '1' && github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-bors-attested') }}
         env:
           STAGING_HEAD: ${{ steps.pr.outputs.sha }}
           REPAIR_OUTPUTS_REVS: ${{ format('{0} {1} {2}', steps.pr.outputs.sha, join(github.event.client_payload.repair_outputs_revs || fromJSON('[]'), ' '), steps.pr.outputs.base_sha) }}
@@ -1549,8 +1566,13 @@ jobs:
           set -euo pipefail
           export PATH="$HOME/.elan/bin:$PATH"
           out="$RUNNER_TEMP/lint-env-driver"
-          bash gate/scripts/build-lint-driver.sh pr gate/scripts/LintEnvDriver.lean "$out"
-          bash gate/scripts/build-audit-driver.sh pr gate/scripts "$out"
+          if [ "${ATTESTED:-false}" = true ]; then
+            # No audit or lint runs in an attested landing; the sandbox still mounts the directory.
+            mkdir -p "$out"
+          else
+            bash gate/scripts/build-lint-driver.sh pr gate/scripts/LintEnvDriver.lean "$out"
+            bash gate/scripts/build-audit-driver.sh pr gate/scripts "$out"
+          fi
           echo "LINT_DRIVER_DIR=$out" >> "$GITHUB_ENV"
 
       # Environment lint checks changed modules in PR CI; every staging batch, and full-lint and
@@ -1650,6 +1672,7 @@ jobs:
             --setenv AXIOMS_ONLY_MODULES "${AXIOMS_ONLY_MODULES:-}" \
             --setenv STAGE_LAKE_CACHE "${STAGE_LAKE_CACHE:-}" \
             --setenv IS_BATCH "${IS_BATCH:-}" \
+            --setenv ATTESTED_BUILD "${{ env.ATTESTED == 'true' && '1' || '' }}" \
             --setenv CI_RESOURCE_TESTED_HEAD "${CI_RESOURCE_TESTED_HEAD:-}" \
             --setenv CI_RESOURCE_TESTED_BASE "${CI_RESOURCE_TESTED_BASE:-}" \
             --setenv CI_RESOURCE_TESTED_COMMIT "${CI_RESOURCE_TESTED_COMMIT:-}" \
@@ -1669,7 +1692,7 @@ jobs:
 
       - name: Audit the candidate under bwrap (duplicates, axioms)
         id: sandbox_audits
-        if: ${{ !cancelled() && env.INFRA != '1' && (success() || (env.IS_BATCH == 'true' && steps.sandbox_build.outcome == 'success')) }}
+        if: ${{ !cancelled() && env.INFRA != '1' && env.ATTESTED != 'true' && (success() || (env.IS_BATCH == 'true' && steps.sandbox_build.outcome == 'success')) }}
         env:
           SANDBOX_PHASE: audits
           CI_RESOURCE_EXPERIMENT: ${{ vars.CI_RESOURCE_EXPERIMENT }}
@@ -1684,7 +1707,7 @@ jobs:
 
       - name: Check the module system under bwrap
         id: sandbox_module_system
-        if: ${{ !cancelled() && env.INFRA != '1' && (success() || (env.IS_BATCH == 'true' && steps.sandbox_build.outcome == 'success')) }}
+        if: ${{ !cancelled() && env.INFRA != '1' && env.ATTESTED != 'true' && (success() || (env.IS_BATCH == 'true' && steps.sandbox_build.outcome == 'success')) }}
         env:
           SANDBOX_PHASE: module-system
           CI_RESOURCE_EXPERIMENT: ${{ vars.CI_RESOURCE_EXPERIMENT }}
@@ -1699,7 +1722,7 @@ jobs:
 
       - name: Environment lint under bwrap
         id: sandbox_lint_env
-        if: ${{ !cancelled() && env.INFRA != '1' && (success() || (env.IS_BATCH == 'true' && steps.sandbox_build.outcome == 'success')) }}
+        if: ${{ !cancelled() && env.INFRA != '1' && env.ATTESTED != 'true' && (success() || (env.IS_BATCH == 'true' && steps.sandbox_build.outcome == 'success')) }}
         env:
           SANDBOX_PHASE: lint-env
           CI_RESOURCE_EXPERIMENT: ${{ vars.CI_RESOURCE_EXPERIMENT }}
@@ -1714,7 +1737,7 @@ jobs:
 
       - name: Style lint under bwrap
         id: sandbox_lint_style
-        if: ${{ !cancelled() && env.INFRA != '1' && (success() || (env.IS_BATCH == 'true' && steps.sandbox_build.outcome == 'success')) }}
+        if: ${{ !cancelled() && env.INFRA != '1' && env.ATTESTED != 'true' && (success() || (env.IS_BATCH == 'true' && steps.sandbox_build.outcome == 'success')) }}
         env:
           SANDBOX_PHASE: lint-style
           CI_RESOURCE_EXPERIMENT: ${{ vars.CI_RESOURCE_EXPERIMENT }}
@@ -1751,11 +1774,17 @@ jobs:
         id: build
         if: >-
           ${{ always() && (contains(format('{0} {1} {2} {3} {4} {5}', steps.sandbox_build.outcome, steps.sandbox_audits.outcome, steps.sandbox_module_system.outcome, steps.sandbox_lint_env.outcome, steps.sandbox_lint_style.outcome, steps.sandbox_finish.outcome), 'failure') ||
-          (steps.sandbox_build.outcome == 'success' && steps.sandbox_audits.outcome == 'success' && steps.sandbox_module_system.outcome == 'success' && steps.sandbox_lint_env.outcome == 'success' && steps.sandbox_lint_style.outcome == 'success' && steps.sandbox_finish.outcome == 'success')) }}
+          (steps.sandbox_build.outcome == 'success' && steps.sandbox_audits.outcome == 'success' && steps.sandbox_module_system.outcome == 'success' && steps.sandbox_lint_env.outcome == 'success' && steps.sandbox_lint_style.outcome == 'success' && steps.sandbox_finish.outcome == 'success') ||
+          (env.ATTESTED == 'true' && steps.sandbox_build.outcome == 'success' && steps.sandbox_finish.outcome == 'success')) }}
         env:
           OUTCOMES: ${{ steps.sandbox_build.outcome }} ${{ steps.sandbox_audits.outcome }} ${{ steps.sandbox_module_system.outcome }} ${{ steps.sandbox_lint_env.outcome }} ${{ steps.sandbox_lint_style.outcome }} ${{ steps.sandbox_finish.outcome }}
         run: |
           echo "sandboxed phase outcomes: $OUTCOMES"
+          if [ "${ATTESTED:-false}" = true ]; then
+            # An attested landing runs only the build (a restore that elaborates nothing) and the finish.
+            set -- $OUTCOMES
+            OUTCOMES="$1 $6"
+          fi
           for outcome in $OUTCOMES; do
             [ "$outcome" = success ] || exit 1
           done
@@ -2064,7 +2093,9 @@ jobs:
             state=failure; desc="shim expiry probe failed — see failed checker step"
           elif [ "${{ steps.build.outcome }}" = "success" ]; then
             state=success
-            if [ "${{ env.IS_BATCH }}" = "true" ]; then
+            if [ "${ATTESTED:-false}" = true ]; then
+              desc="attested by the queue's trusted verification; every output restored without a build"
+            elif [ "${{ env.IS_BATCH }}" = "true" ]; then
               desc="frozen candidate sandboxed build and workflow-pinned audits passed"
             else
               desc="integration B=${CAPTURED_BASE:0:12} T=${TESTED_SHA:0:12} passed sandboxed build and audits"
@@ -2221,7 +2252,7 @@ jobs:
           CI_RESOURCE_EXPERIMENT: ${{ vars.CI_RESOURCE_EXPERIMENT }}
           BUILD_OUTCOME: ${{ steps.build.outcome }}
           BUILD_EVENT: ${{ github.event_name }}
-          MERGE_ENGINE: ${{ github.event_name == 'merge_group' && 'queue' || (github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging' && (github.event.client_payload.base_ref == 'main' && 'bors' || 'bors_pilot') || 'pr') }}
+          MERGE_ENGINE: ${{ github.event_name == 'merge_group' && 'queue' || (github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-bors-attested') && (github.event.client_payload.base_ref == 'main' && 'bors' || 'bors_pilot') || 'pr') }}
           TESTED_HEAD: ${{ steps.pr.outputs.status_sha }}
           TESTED_BASE: ${{ steps.pr.outputs.base_sha }}
           TESTED_COMMIT: ${{ steps.integration.outputs.tested_sha }}
@@ -2327,8 +2358,8 @@ jobs:
     # Start beside publication so an unacquired publisher cannot suppress terminal reporting.
     # Finalizer (2x4) + publisher (4x8) fit within the freed compiler allocation (8x16).
     needs: sandboxed-build
-    if: ${{ always() && (github.event_name == 'merge_group' || (github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-source-candidate-v2'))) }}
-    runs-on: ${{ inputs.source_candidate_enabled && fromJSON(inputs.source_candidate_control_runner) || inputs.fleet_routing && (github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging') && fromJSON(inputs.control_runner) || 'ubuntu-24.04' }}
+    if: ${{ always() && (github.event_name == 'merge_group' || (github.event_name == 'repository_dispatch' && ((github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-bors-attested') || github.event.action == 'tauceti-source-candidate-v2'))) }}
+    runs-on: ${{ inputs.source_candidate_enabled && fromJSON(inputs.source_candidate_control_runner) || inputs.fleet_routing && (github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-bors-attested')) && fromJSON(inputs.control_runner) || 'ubuntu-24.04' }}
     timeout-minutes: 55
     permissions:
       contents: read  # sparse immutable finalization tools only
@@ -2340,8 +2371,8 @@ jobs:
       BUILD_STATE: ${{ needs.sandboxed-build.outputs.build-state }}
       BUILD_DESCRIPTION: ${{ needs.sandboxed-build.outputs.build-description }}
       PUBLICATION_REQUIRED: ${{ needs.sandboxed-build.outputs.publication-required }}
-      BORS_STAGING: ${{ github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging' }}
-      CI_PUBLISHER_RUNNER_LABELS: ${{ inputs.fleet_routing && (github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-bors-staging') && inputs.control_runner || '' }}
+      BORS_STAGING: ${{ github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-bors-attested') }}
+      CI_PUBLISHER_RUNNER_LABELS: ${{ inputs.fleet_routing && (github.event_name == 'repository_dispatch' && (github.event.action == 'tauceti-bors-staging' || github.event.action == 'tauceti-bors-attested')) && inputs.control_runner || '' }}
       BORS_BATCH_ID: ${{ github.event.client_payload.batch_id }}
       BORS_BASE_SHA: ${{ github.event.client_payload.base_sha }}
       BORS_BASE_REF: ${{ github.event.client_payload.base_ref }}
