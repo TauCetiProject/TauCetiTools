@@ -9,6 +9,7 @@ Run with:
 import json
 import pathlib
 import tempfile
+import subprocess
 import unittest
 import xml.etree.ElementTree as ET
 from unittest import mock
@@ -97,6 +98,32 @@ class ParticipantGraphTest(unittest.TestCase):
         second_args = query.call_args_list[1].args
         self.assertIn("cursor=opaque-cursor", second_args)
         self.assertEqual(second_args[second_args.index("cursor=opaque-cursor") - 1], "-f")
+
+    def test_failing_page_is_retried_smaller_from_the_same_cursor(self):
+        page = {
+            "data": {"repository": {"issues": {
+                "nodes": [{
+                    "number": 1,
+                    "author": {"login": "Someone"},
+                    "participants": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+                }],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }}},
+        }
+        failure = subprocess.CalledProcessError(1, ["gh"])
+        with mock.patch.object(pg, "gh_json", side_effect=[failure, failure, page]) as query:
+            people = pg.fetch_connection("owner/repo", "issues")
+
+        self.assertEqual(people, {"someone"})
+        sizes = [call.args[call.args.index("-F") + 1] for call in query.call_args_list]
+        self.assertEqual(sizes, ["first=100", "first=50", "first=25"])
+
+    def test_smallest_page_failure_still_fails(self):
+        failure = subprocess.CalledProcessError(1, ["gh"])
+        with mock.patch.object(pg, "gh_json", side_effect=failure) as query:
+            with self.assertRaises(subprocess.CalledProcessError):
+                pg.fetch_connection("owner/repo", "issues")
+        self.assertEqual(query.call_count, len(pg.PAGE_SIZES))
 
     def test_contributors_keep_linked_humans_only(self):
         payload = [[
