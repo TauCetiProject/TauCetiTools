@@ -40,7 +40,6 @@ workflows:
           job: main-integration
           name: main-integration
           triggers: [repository_dispatch]
-          pending: true
     jobs: [pick-runner, sandboxed-build, publish-merge-group-cache, finalize-merge-group-build]
     runner_groups: [TauCetiFleet, TauCetiQueueControl]
   api-docs.yml:
@@ -49,7 +48,6 @@ workflows:
         - file: api-docs.yml
           job: api-docs
           triggers: [push, schedule, workflow_dispatch]
-          pending: true
     jobs: [build-docs]
   nightly-verify.yml:
     callers:
@@ -67,8 +65,15 @@ workflows:
         - file: ci.yml
           job: ci
           triggers: [push]
-          pending: true
     jobs: [build, publish-lake-cache]
+  pages.yml:
+    callers:
+      TauCetiProject/TauCeti:
+        - file: pages.yml
+          job: pages
+          triggers: [push, schedule, workflow_dispatch]
+          pending: true
+    jobs: [build-data, build-site, fallback-site, deploy, report-data-freshness, advance-docgen-ref]
   publish-lake-cache.yml:
     internal: true
   retry-ci-status.yml:
@@ -78,7 +83,6 @@ workflows:
         - file: retry-ci-status.yml
           job: publish
           triggers: [workflow_run, schedule, workflow_dispatch]
-          pending: true
     jobs: [publish, recover-builds]
   pick-runner.yml:
     internal: true

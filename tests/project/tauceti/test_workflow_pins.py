@@ -58,7 +58,10 @@ def workflow_jobs(name):
 
 
 def workflow_triggers(name):
-    data = yaml.safe_load((WORKFLOW_DIR / name).read_text())
+    # A TauCetiTools copy tested in place of the project's stub runs under the stub's triggers,
+    # which run_unit_tests.py keeps in .github/stubs/.
+    stub = ROOT / ".github/stubs" / name
+    data = yaml.safe_load((stub if stub.exists() else WORKFLOW_DIR / name).read_text())
     on = data.get("on", data.get(True))  # YAML 1.1 reads a bare `on` key as True
     if isinstance(on, str):
         return {on: None}
