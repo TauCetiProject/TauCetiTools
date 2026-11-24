@@ -43,10 +43,15 @@ IR_EXTENSIONS = ("c", "bc", "ltar")
 
 
 def regular(path: Path) -> bool:
+    """Whether path is a regular file. Absent is False; any other failure stops the check."""
     try:
         return stat.S_ISREG(path.lstat().st_mode)
-    except OSError:
+    except FileNotFoundError:
         return False
+
+
+def raise_error(error: OSError) -> None:
+    raise error
 
 
 def cache_dir(project: Path) -> Path:
@@ -65,7 +70,7 @@ def expected_outputs(project: Path):
     ir = project / ".lake/build/ir"
     if not lib.is_dir():
         return
-    for directory, _, files in os.walk(lib):
+    for directory, _, files in os.walk(lib, onerror=raise_error):
         for file in files:
             if not file.endswith(".trace"):
                 continue
@@ -73,8 +78,8 @@ def expected_outputs(project: Path):
             stem = trace.relative_to(lib).with_suffix("")
             try:
                 value = json.loads(trace.read_text())
-            except (OSError, ValueError):
-                continue
+            except ValueError:
+                continue  # not a trace Lake would trust either; an unreadable one stops the check
             outputs = value.get("outputs") if isinstance(value, dict) else None
             if not isinstance(outputs, dict):
                 continue
@@ -94,7 +99,7 @@ def published_archives(project: Path) -> list[tuple[str, str]]:
     """The (input hash, archive name) rows of the build's native output map, if it wrote one."""
     try:
         lines = (project / ".lake/outputs.jsonl").read_text().splitlines()
-    except OSError:
+    except FileNotFoundError:
         return []
     rows = []
     for line in lines[1:]:

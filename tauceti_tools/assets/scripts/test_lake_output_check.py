@@ -107,6 +107,14 @@ class OutputCheckTests(unittest.TestCase):
         self.assertFalse((self.lib / "Basic.trace").exists())
         self.assertTrue((self.artifacts / stray).exists())
 
+    def test_discovery_errors_make_the_check_unavailable(self):
+        self.module("Basic", "4366fd23170e9e25", self.contents("a"))
+        original = check.lake_hashes
+        check.lake_hashes = fake_hasher
+        self.addCleanup(setattr, check, "lake_hashes", original)
+        (self.root / ".lake/outputs.jsonl").mkdir()  # an output map that cannot be read
+        self.assertEqual(check.main(["check", str(self.root)]), 2)
+
     def test_command_exit_codes(self):
         self.module("Basic", "4366fd23170e9e25", self.contents("a"))
         original = check.lake_hashes
