@@ -93,6 +93,10 @@ jobs:
         run: |
           elan toolchain install "$ELAN_TOOLCHAIN"
           python tauceti_tools/assets/scripts/test_bulk_unpack_cache.py --integration
+      - name: Verify that damaged built outputs are found and rebuilt with stock Lake
+        env:
+          ELAN_TOOLCHAIN: leanprover/lean4:v4.37.0-rc1
+        run: python tauceti_tools/assets/scripts/test_lake_output_check.py --integration
   # Script unit tests, and Lean, Lake and header fixtures that need a real Mathlib project. TauCeti
   # `main` supplies the project; every script under test is this revision's, materialized over its
   # `scripts/` by setup. tests/project/tauceti/ checks workflows that stay in TauCeti.

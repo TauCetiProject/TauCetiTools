@@ -118,6 +118,45 @@ build_phase() {
   # Advisory: a failure here only means no record.
   bash "$TRUSTED_SCRIPTS/declaration-names.sh" save || true
   phase build
+  run_lake_build
+  # A staging build's outputs are published. Lake trusts any output whose trace matches its inputs
+  # without reading it, so an interrupted write or a corrupt cached archive (a truncated
+  # .olean.private, an empty .ir.sig) would otherwise crash the audits and reach the public cache.
+  # Check every output against the content hash its trace names; compile the damaged modules from
+  # source instead of trusting them. This also runs after a failed build, which such a module can
+  # cause.
+  if [ "${STAGE_LAKE_CACHE:-}" = "1" ]; then
+    # A failed build can hide further damaged modules it never reached, so recheck after each
+    # rebuild, up to two rebuilds.
+    for check_round in 1 2 3; do
+      phase output-check
+      check_status=0
+      python3 "$TRUSTED_SCRIPTS/lake_output_check.py" discard . || check_status=$?
+      case "$check_status" in
+        0) break ;;
+        3)
+          if [ "$check_round" = 3 ]; then
+            echo '::error::outputs still differ from their traces after rebuilding them twice'
+            exit 1
+          fi
+          echo '::warning::some outputs differed from their traces; rebuilding those modules from source'
+          phase build
+          run_lake_build
+          ;;
+        *)
+          if [ "$build_status" = 0 ]; then
+            echo '::error::the built outputs could not be checked against their traces, so they cannot be published'
+            exit 1
+          fi
+          break
+          ;;
+      esac
+    done
+  fi
+  if [ "$build_status" != 0 ]; then exit "$build_status"; fi
+}
+
+run_lake_build() {
   # `--output-error=warn` keeps tee passing the build's output through even if writing the copy fails,
   # and `|| true` drops tee's own status, so `pipefail` reports exactly Lake's.
   set +e
@@ -133,7 +172,6 @@ build_phase() {
     | { python3 "$TRUSTED_SCRIPTS/ci_log_filter.py" build || { echo '::warning::build log summary failed; showing remaining output'; cat; }; }
   build_status=${PIPESTATUS[0]}
   set -e
-  if [ "$build_status" != 0 ]; then exit "$build_status"; fi
 }
 
 audits_phase() {
