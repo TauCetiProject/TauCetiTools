@@ -264,7 +264,17 @@ jobs:
           DOCGEN_DEPS_DOCS_URL: https://leanprover-community.github.io/mathlib4_docs
           # The restore above placed what this needs, so do not reach for a remote cache.
           LAKE_NO_CACHE: "true"
+          # Lake restores each cached module with its own leantar, about one per CPU at once;
+          # cap each one's rayon pool, as sandbox-build.sh and ci.yml do.
+          RAYON_NUM_THREADS: "4"
+          # leantar 0.1.21 (Lean v4.37.0-rc1) needs about 11 MiB of stack to unpack
+          # TauCeti.Algebra.Lie.F4.ModularLattice; worker threads take their size from this,
+          # not from the rlimit raised below. It reserves address space only.
+          RUST_MIN_STACK: "67108864"
         run: |
+          # Without this, leantar exits 139 unpacking TauCeti.Algebra.Lie.F4.ModularLattice and
+          # every run since 22 Nov 2026 failed with that one module. Same rule as sandbox-build.sh.
+          ulimit -s unlimited 2>/dev/null || ulimit -s "$(ulimit -H -s)" 2>/dev/null || true
           rm -rf ".lake/build/doc/$LEAN_ROOT" .lake/build/doc/SOURCE_SHA .lake/build/doc/facts.json.gz
           rm -f .lake/build/doc-data/*.docs_built
           # Stop the whole build, not just Lake, before the step limit. When GitHub's step limit
