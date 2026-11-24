@@ -14,7 +14,7 @@ on:
         required: false
         default: main
 concurrency:
-  group: worker-contract-${{ github.event.pull_request.number || github.sha }}-${{ inputs.worker-ref || 'main' }}
+  group: worker-contract-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'auto' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 permissions:
   contents: read
