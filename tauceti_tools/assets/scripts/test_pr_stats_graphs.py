@@ -696,8 +696,9 @@ class MetricsTest(unittest.TestCase):
                          return_value=([], {}, {})) as fetch,
         ):
             stats.fetch_snapshot("example/project")
+        # Besides merged PR authors, only the review posting App's bot, which never authors a PR.
         fetch.assert_called_once_with(
-            "example/project", {1, 2, 3}, {"merged-author"}, None,
+            "example/project", {1, 2, 3}, {"merged-author", "tauceti-review-poster[bot]"}, None,
             pages=stats.SCOREBOARD_PAGES_PER_RUN,
         )
 
@@ -935,7 +936,7 @@ class MergeAppLandingsTest(unittest.TestCase):
               patch.object(stats, "fetch_scoreboards", return_value=([], {}, {})) as scan):
             snapshot = stats.fetch_snapshot("o/r", old)
         # The walk state carries over: verdicts are derived each run, so new trust needs no rescan.
-        scan.assert_called_once_with("o/r", {42}, {"app-only-author"}, old,
+        scan.assert_called_once_with("o/r", {42}, {"app-only-author"} | stats.REVIEW_APP_LOGINS, old,
                                      pages=stats.SCOREBOARD_PAGES_PER_RUN)
         self.assertEqual(snapshot["prs"][0]["merge_source"], "tau-ceti-bors")
         self.assertTrue(snapshot["merge_evidence_complete"])

@@ -300,6 +300,14 @@ class ScoreboardMeta(unittest.TestCase):
         with mock.patch.object(core, "issue_comments", return_value=comments):
             self.assertEqual(core.repo_associated_scoreboard_meta("9").get("n"), 1)
 
+    def test_destructive_selector_trusts_the_review_posting_app(self):
+        app = dict(self.board(2, "2026-02-01", "NONE"), login="tauceti-review-poster[bot]", type="Bot")
+        impostor = dict(self.board(3, "2026-03-01", "NONE"), login="tauceti-review-poster[bot]", type="User")
+        other = dict(self.board(4, "2026-04-01", "NONE"), login="someone-else[bot]", type="Bot")
+        comments = [self.board(1, "2026-01-01", "MEMBER"), app, impostor, other]
+        with mock.patch.object(core, "issue_comments", return_value=comments):
+            self.assertEqual(core.repo_associated_scoreboard_meta("9").get("n"), 2)
+
     def test_issue_comment_fetch_has_no_author_filter(self):
         raw = json.dumps({
             "body": "external review",

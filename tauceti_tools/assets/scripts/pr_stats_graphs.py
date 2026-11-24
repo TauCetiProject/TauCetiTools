@@ -51,6 +51,9 @@ from pathlib import Path
 from typing import Iterable
 
 from arxiv_categories import ARXIV_MATH, read_topic
+
+# Kept equal to pr_status.core.REVIEW_APP_LOGINS; this script does not import pr_status.
+REVIEW_APP_LOGINS = frozenset({"tauceti-review-poster[bot]"})
 from chart_style import (
     BAR_BG, BG, MUTED, PALETTE, REFERENCE_WIDTH, SUBTITLE_SIZE, TEXT, base_css, card_rect, css_px, hover_metadata,
 )
@@ -854,10 +857,11 @@ def fetch_snapshot(repo: str, previous: dict | None = None,
                if forgejo_repo else None)
     prs = fetch_prs(repo, previous)
     complete = apply_app_merges(repo, prs, previous, receipt_checks)
+    # The review posting App posts scoreboards but never authors a merged PR.
     trusted_logins = {
         pr["author"] for pr in prs
         if pr.get("merged_at") and pr.get("author") != "unknown"
-    }
+    } | REVIEW_APP_LOGINS
     scoreboards, rejected, scan_state = fetch_scoreboards(
         repo, {pr["number"] for pr in prs}, trusted_logins, previous, pages=scoreboard_pages,
     )

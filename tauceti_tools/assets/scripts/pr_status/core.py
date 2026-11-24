@@ -6,8 +6,8 @@ labels and pipeline health call readiness.py, which uses the pinned Auto-merge g
 These summary helpers must not be used to infer that a PR can enter the queue.
 
 Destructive housekeeping separately uses repo_associated_scoreboard_meta, which
-accepts only OWNER/MEMBER/COLLABORATOR comments. Ordinary review signals accept
-contributor comments. The module writes nothing and executes no PR code.
+accepts only OWNER/MEMBER/COLLABORATOR comments and the review posting App.
+Ordinary review signals accept contributor comments. The module writes nothing and executes no PR code.
 """
 
 import json
@@ -49,6 +49,9 @@ SCOREBOARD_MARKER = "<!--tauceti-scoreboard-->"
 # lazy `\{.*?\}` would stop at the first inner `}` and mis-parse it. `\s+`/`\s*` tolerate any spacing.
 _META_RE = re.compile(r"<!--tauceti-meta:v1\s+(\{.*\})\s*-->", re.S)
 _REPO_ASSOCIATED = ("OWNER", "MEMBER", "COLLABORATOR")
+# The GitHub App that posts a share of the fleet's reviews (TauCetiWorker review_app.py). Its bot
+# has no repository association, but only that App can author as `<slug>[bot]`.
+REVIEW_APP_LOGINS = frozenset({"tauceti-review-poster[bot]"})
 
 # `gh` exits nonzero on a rate limit without retrying. The sinks driven by
 # pr-status.yml, pr-labels.yml and housekeeping.yml read through gh_api against
@@ -264,7 +267,7 @@ def gh_api(path, jq=None, paginate=False):
 
 
 def issue_comments(pr):
-    """All issue comments as `[{'body','updated','author_association'}]`.
+    """All issue comments as `[{'body','updated','author_association','login','type'}]`.
 
     One paginated fetch is reused for both status review signals below. The jq emits one compact
     object per line (valid JSONL across any number of pages). Keeping the association in the neutral
@@ -273,7 +276,8 @@ def issue_comments(pr):
     """
     out = gh_api(
         f"/repos/{REPO}/issues/{pr}/comments?per_page=100",
-        jq='.[] | {body: .body, updated: .updated_at, author_association: .author_association}',
+        jq=('.[] | {body: .body, updated: .updated_at, author_association: .author_association, '
+            'login: .user.login, type: .user.type}'),
         paginate=True,
     )
     rows = []
@@ -288,9 +292,15 @@ def issue_comments(pr):
     return rows
 
 
+def trusted_author(comment):
+    """An OWNER/MEMBER/COLLABORATOR account, or the review posting App's bot."""
+    return (comment.get("author_association") in _REPO_ASSOCIATED
+            or comment.get("type") == "Bot" and comment.get("login") in REVIEW_APP_LOGINS)
+
+
 def repo_associated_comments(pr):
-    """Only comments by OWNER/MEMBER/COLLABORATOR accounts, for destructive consumers."""
-    return [c for c in issue_comments(pr) if c.get("author_association") in _REPO_ASSOCIATED]
+    """Only comments by trusted authors (see trusted_author), for destructive consumers."""
+    return [c for c in issue_comments(pr) if trusted_author(c)]
 
 
 def scoreboard_meta_from(comments):
