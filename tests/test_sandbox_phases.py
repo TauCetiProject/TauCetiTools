@@ -61,6 +61,12 @@ class SandboxPhases(unittest.TestCase):
                     f".write(json.dumps([\"{name}\", *sys.argv[1:]]) + \"\\n\")' \"$@\"\n"
                     + (f'exit "${{{key}:-0}}"\n' if key else 'exit 0\n'))
             (root / 'trusted/ci_log_filter.py').write_text('import sys\nsys.stdout.write(sys.stdin.read())\n')
+            # Exits with OUTPUT_CHECK_STATUS for `discard` and OUTPUT_RECHECK_STATUS for `check`.
+            (root / 'trusted/lake_output_check.py').write_text(
+                'import json, os, sys\nwith open(os.environ["CALLS"], "a") as f: '
+                'f.write(json.dumps(["lake_output_check", *sys.argv[1:]]) + "\\n")\n'
+                'sys.exit(int(os.environ.get("OUTPUT_CHECK_STATUS" if sys.argv[1] == "discard" '
+                'else "OUTPUT_RECHECK_STATUS", "0")))\n')
             (root / 'trusted/bulk-unpack-cache.py').write_text(
                 'import json, os\nwith open(os.environ["CALLS"], "a") as f: '
                 'f.write(json.dumps(["bulk-unpack-cache"]) + "\\n")\n')
@@ -122,6 +128,28 @@ class SandboxPhases(unittest.TestCase):
                 self.assertEqual(len(builds), 1)
                 self.assertEqual('--fail-fast' in builds[0], expected)
                 self.assertIn('--iofail', builds[0])
+
+    def test_staged_outputs_are_checked_against_their_traces(self):
+        # Batch 506 attempt 339: a truncated restored .olean.private kept its trace, so Lake trusted
+        # it. A staging build checks every output and compiles the damaged modules from source.
+        def run(**scenario):
+            status, calls, names = self.run_sandbox([['build']], staging=True, batch=True, **scenario)
+            return status, [call[:2] for call in calls if call[0] in ('lake', 'lake_output_check')], names
+
+        build = ['lake', 'build']
+        self.assertEqual(run(), (0, [build, ['lake_output_check', 'discard']], ['cache-unpack', 'build', 'output-check']))
+        self.assertEqual(run(OUTPUT_CHECK_STATUS=3),
+                         (0, [build, ['lake_output_check', 'discard'], build, ['lake_output_check', 'check']],
+                          ['cache-unpack', 'build', 'output-check', 'build']))
+        self.assertEqual(run(OUTPUT_CHECK_STATUS=3, OUTPUT_RECHECK_STATUS=1)[0], 1)
+        # A failed build is checked too (a damaged module can fail its dependents' compilation) and
+        # keeps its own status; a check that cannot run blocks only a passing build's publication.
+        self.assertEqual(run(BUILD_STATUS=5)[:2], (5, [build, ['lake_output_check', 'discard']]))
+        self.assertEqual(run(OUTPUT_CHECK_STATUS=2)[0], 1)
+        self.assertEqual(run(OUTPUT_CHECK_STATUS=2, BUILD_STATUS=5)[0], 5)
+        # Ordinary PR builds publish nothing and skip the check.
+        _, calls, _ = self.run_sandbox([['build']], cache=True)
+        self.assertNotIn('lake_output_check', [call[0] for call in calls])
 
     def test_each_phase_runs_only_its_own_work(self):
         _, calls, names = self.run_sandbox([['lint-style']])
