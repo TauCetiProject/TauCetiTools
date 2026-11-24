@@ -8,6 +8,7 @@ these run with no network and no `gh`. Run with:  python3 -m unittest test_pr_la
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import unittest
@@ -307,6 +308,18 @@ class ScoreboardMeta(unittest.TestCase):
         comments = [self.board(1, "2026-01-01", "MEMBER"), app, impostor, other]
         with mock.patch.object(core, "issue_comments", return_value=comments):
             self.assertEqual(core.repo_associated_scoreboard_meta("9").get("n"), 2)
+
+    @unittest.skipUnless(shutil.which("jq"), "needs jq")
+    def test_issue_comment_projection_keeps_the_author_login_and_type(self):
+        with mock.patch.object(core, "gh_api", return_value="") as gh:
+            core.issue_comments("9")
+        rest = json.dumps([{"body": "b", "updated_at": "t", "author_association": "NONE",
+                            "user": {"login": "tauceti-review-poster[bot]", "type": "Bot"}}])
+        out = subprocess.run(["jq", "-c", gh.call_args.kwargs["jq"]], input=rest, capture_output=True,
+                             text=True, check=True).stdout
+        row = json.loads(out)
+        self.assertEqual((row["login"], row["type"]), ("tauceti-review-poster[bot]", "Bot"))
+        self.assertTrue(core.trusted_author(row))
 
     def test_issue_comment_fetch_has_no_author_filter(self):
         raw = json.dumps({
