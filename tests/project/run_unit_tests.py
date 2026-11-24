@@ -129,9 +129,11 @@ def use_this_revisions_workflows(project):
     replaced = stubs(project)
     for name in replaced:
         # The stub keeps the triggers this revision's copy runs under; tests that ask what
-        # triggers a workflow read them from here.
-        (project / ".github/stubs").mkdir(exist_ok=True)
-        shutil.copyfile(workflows / name, project / ".github/stubs" / name)
+        # triggers a workflow read them from here. A workflow the project calls from a file of
+        # another name (nightly-verify.yml, from nightly-verify-schedule.yml) has no stub to keep.
+        if (workflows / name).exists():
+            (project / ".github/stubs").mkdir(exist_ok=True)
+            shutil.copyfile(workflows / name, project / ".github/stubs" / name)
         # The project's own publish-lake-cache.yml stays while its post-merge ci.yml calls it.
         shutil.copyfile(tools / ".github/workflows" / name, workflows / name)
         print(f"testing this revision's {name} in place of the project's stub", flush=True)
