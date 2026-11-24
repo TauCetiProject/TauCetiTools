@@ -75,7 +75,7 @@ class BulkUnpackTests(unittest.TestCase):
 
     def test_later_ilean_versions_keep_the_bulk_path(self):
         # Lean v4.37.0-rc1 writes ilean version 6 with the same "module" field.
-        for version, restored in ((4, 0), (5, 1), (6, 1), (7, 1), ("6", 0), (True, 0), (None, 0)):
+        for version, restored in ((4, 0), (5, 1), (6, 1), (7, 1), (6.0, 0), ("6", 0), (True, 0), (None, 0)):
             with self.subTest(version=version):
                 shutil.rmtree(self.root / ".lake/build", ignore_errors=True)
                 self.record.write_text(json.dumps({"schemaVersion": bulk.SCHEMA, "data": self.archive.name}))
