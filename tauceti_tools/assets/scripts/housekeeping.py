@@ -164,8 +164,8 @@ def parse_ts(s: str) -> datetime.datetime:
 
 def latest_scoreboard_meta(pr: int):
     """The meta block of the newest TRUSTED review scoreboard comment, or None. Trust = the
-    `tauceti-scoreboard` marker AND a repo-associated author (so an external author cannot forge a
-    verdict). Delegates to the shared `core.repo_associated_scoreboard_meta` so both the parse and the
+    `tauceti-scoreboard` marker AND a repo-associated author or the review posting App (so an
+    external author cannot forge a verdict). Delegates to the shared `core.repo_associated_scoreboard_meta` so both the parse and the
     destructive trust policy live in one place; fails safe (None) on any API/parse error, so a hiccup
     never causes a wrong close."""
     try:
