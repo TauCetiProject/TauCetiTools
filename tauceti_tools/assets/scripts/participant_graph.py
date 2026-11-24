@@ -68,12 +68,16 @@ def gh_json(*args: str):
                 timeout=120,
             ).stdout
             return json.loads(out)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError):
             if attempt == 2:
                 raise
             delay = 2 ** attempt
             print(f"GitHub query failed; retrying in {delay}s", file=sys.stderr)
             time.sleep(delay)
+
+
+# Conversations per GraphQL page, largest first; a page that keeps failing is retried smaller.
+PAGE_SIZES = (100, 50, 25, 10)
 
 
 def connection_query(field: str) -> str:
@@ -84,10 +88,10 @@ def connection_query(field: str) -> str:
     else:
         raise ValueError(f"unsupported connection: {field}")
     return f"""
-query($owner: String!, $name: String!, $cursor: String) {{
+query($owner: String!, $name: String!, $cursor: String, $first: Int!) {{
   repository(owner: $owner, name: $name) {{
     {field}(
-      first: 100,
+      first: $first,
       after: $cursor,
       states: {states},
       orderBy: {{field: CREATED_AT, direction: ASC}}
@@ -130,16 +134,30 @@ def fetch_connection(repo: str, field: str) -> set[str]:
     query = connection_query(field)
     people: set[str] = set()
     cursor = None
+    size = PAGE_SIZES[0]
     while True:
         args = [
             "api", "graphql",
             "-f", f"query={query}",
             "-f", f"owner={owner}",
             "-f", f"name={name}",
+            "-F", f"first={size}",
         ]
         if cursor is not None:
             args.extend(["-f", f"cursor={cursor}"])
-        page = gh_json(*args)
+        try:
+            page = gh_json(*args)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError):
+            # A page of 100 conversations with up to 100 participants each is heavy enough for
+            # GitHub to answer HTTP 502 repeatedly; every retry of the same page then fails the
+            # whole scan. Ask for fewer conversations from the same cursor instead.
+            smaller = [s for s in PAGE_SIZES if s < size]
+            if not smaller:
+                raise
+            size = smaller[0]
+            print(f"{repo} {field}: retrying from the same cursor with pages of {size}",
+                  file=sys.stderr)
+            continue
         found, has_next, cursor = actors_from_page(page, field, repo)
         people.update(found)
         if not has_next:

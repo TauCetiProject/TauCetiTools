@@ -289,7 +289,10 @@ jobs:
           # Lake starts; its id is recorded for the backstop step below.
           group_file="$RUNNER_TEMP/docgen-process-group"
           rm -f "$group_file"
-          setsid --wait bash -c 'echo "$$" > "$1" && exec lake build TauCetiDocs:docs' _ "$group_file" &
+          # A copy of the output feeds the failure summary below. `--output-error=warn` keeps tee
+          # passing the output through even if writing the copy fails (tee then also exits nonzero,
+          # which pipefail reports as a failed build); otherwise pipefail reports Lake's status.
+          setsid --wait bash -c 'echo "$$" > "$1" && set -o pipefail && lake build TauCetiDocs:docs 2>&1 | tee --output-error=warn "$2"' _ "$group_file" "$RUNNER_TEMP/docgen-build.log" &
           build=$!
           until [ -s "$group_file" ] || ! kill -0 "$build" 2>/dev/null; do sleep 1; done
           deadline=$((SECONDS + 255 * 60))
@@ -304,6 +307,44 @@ jobs:
             exit 124
           fi
           wait "$build"
+
+      # One module that doc-gen4 cannot build stops the whole site (the aggregator root imports
+      # everything), and its error sits somewhere in a log of over 100,000 lines. Put the failed
+      # targets and their errors in the run summary and as annotations.
+      - name: Report the modules doc-gen4 could not build
+        if: ${{ always() && steps.docgen.outcome == 'failure' }}
+        run: |
+          log="$RUNNER_TEMP/docgen-build.log"
+          [ -s "$log" ] || { echo "no build log to summarise"; exit 0; }
+          targets=$(awk '/^Some required targets logged failures:/ {on=1; next} on && /^- / {print substr($0, 3); next} on {on=0}' "$log")
+          # Each failed job's whole block: from its ✖ line to the next job's status line.
+          failed=$(awk '/^(✔|✖|ℹ|⚠) \[/ {on = /^✖ /} on' "$log" | head -n 60 || true)
+          {
+            echo "## API docs: doc-gen4 failed"
+            if [ -n "$targets" ]; then
+              echo
+              echo "Targets that logged failures:"
+              echo
+              printf '%s\n' "$targets" | sed 's/^/- `/; s/$/`/'
+            fi
+            if [ -n "$failed" ]; then
+              echo
+              echo '```'
+              printf '%s\n' "$failed"
+              echo '```'
+            fi
+            if [ -z "$targets$failed" ]; then
+              echo
+              echo "Lake reported no failed target; the step was stopped or failed outside Lake (see its log)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "$targets" | while IFS= read -r target; do
+            if [ -n "$target" ]; then
+              # Workflow-command property escaping, so a name cannot end the title early.
+              title=$(printf '%s' "doc-gen4 could not build $target" | sed 's/%/%25/g; s/\r/%0D/g; s/:/%3A/g; s/,/%2C/g')
+              echo "::error title=${title}::see the run summary for its error"
+            fi
+          done
 
       # Stamp the tree with the commit it was generated from, BEFORE it is cached, so the
       # provenance travels with the tree wherever it is later restored. This is what makes the
