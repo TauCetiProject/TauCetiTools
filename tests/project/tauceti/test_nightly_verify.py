@@ -69,7 +69,9 @@ class NightlyVerification(unittest.TestCase):
         # No workflow-level group in the caller, which could cancel or displace a running check.
         self.assertNotIn('concurrency', SCHEDULE)
         caller = SCHEDULE['jobs']['run']
-        self.assertEqual(caller['uses'], './.github/workflows/nightly-verify.yml')
+        # TauCeti's own copy, or TauCetiTools' at main once TauCeti's caller is a stub.
+        self.assertIn(caller['uses'], ('./.github/workflows/nightly-verify.yml',
+                                       'TauCetiProject/TauCetiTools/.github/workflows/nightly-verify.yml@main'))
         self.assertEqual(caller['needs'], 'admit')
         self.assertEqual(caller['if'], "needs.admit.outputs.main == 'true'")
         self.assertFalse(caller['concurrency']['cancel-in-progress'])
