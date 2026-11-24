@@ -56,7 +56,6 @@ workflows:
         - file: nightly-verify-schedule.yml
           job: run
           triggers: [schedule, workflow_dispatch]
-          pending: true
     jobs: [verify, pick-reference-runner, reference, report]
     runner_groups: [TauCetiFleet]
   ci.yml:
