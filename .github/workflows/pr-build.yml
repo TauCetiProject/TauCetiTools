@@ -1684,7 +1684,14 @@ jobs:
             --chdir "$PWD/pr" \
             --unshare-user --unshare-ipc --unshare-pid --unshare-net --unshare-uts \
             --unshare-cgroup --disable-userns --die-with-parent --new-session \
-            -- bash -euxo pipefail -c 'exec bash ../gate/scripts/sandbox-build.sh "$1"' sandbox-build "$SANDBOX_PHASE"
+            -- bash -euxo pipefail -c 'exec bash ../gate/scripts/sandbox-build.sh "$1"' sandbox-build "$SANDBOX_PHASE" \
+            || phase_status=$?
+          # The build phase exits 75 only when thread_exhaustion.py found that the host ran out of
+          # threads and nothing else failed; the report step then posts an infrastructure failure.
+          if [ "${phase_status:-0}" = 75 ] && [ "$SANDBOX_PHASE" = build ]; then
+            echo 'infra=thread-exhaustion' >> "$GITHUB_OUTPUT"
+          fi
+          exit "${phase_status:-0}"
 
       - name: Audit the candidate under bwrap (duplicates, axioms)
         id: sandbox_audits
@@ -2060,6 +2067,11 @@ jobs:
             state=failure; desc="dot-notation lint did not complete; re-run pr-build"
           elif [ "$source_check" = failure ]; then
             state=failure; desc="a pre-build source check failed; see the failed guard step"
+          elif [ "${{ steps.build.outcome }}" = "failure" ] && [ "${{ env.IS_BATCH }}" != "true" ] \
+             && [ "${{ steps.sandbox_build.outputs.infra }}" = "thread-exhaustion" ]; then
+            # ci_recovery.py and self_tested.py match this description word for word: the CI recovery
+            # pass retries the head once, and the failure does not count against `self-tested`.
+            state=failure; desc="infrastructure failure: the CI host ran out of threads; CI recovery retries once"
           elif [ "${{ steps.build.outcome }}" = "failure" ]; then
             state=failure; desc="sandboxed build, audit, or simp-NF lint failed"
           elif { [ -n "${{ env.SHIM_COVERAGE_RC }}" ] \

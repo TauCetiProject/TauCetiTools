@@ -112,9 +112,11 @@ build_phase() {
   bash "$TRUSTED_SCRIPTS/declaration-names.sh" save || true
   phase build
   # `--output-error=warn` keeps tee passing the build's output through even if writing the copy fails,
-  # and `|| true` drops tee's own status, so `pipefail` reports exactly Lake's.
+  # and `|| true` drops tee's own status, so `pipefail` reports exactly Lake's. thread_exhaustion.py
+  # passes Lake's output and status through, except that a build failed only by the host running out
+  # of threads exits 75, which pr-build.yml reports as an infrastructure failure.
   set +e
-  lake build "${LAKE_BUILD_FLAGS[@]}" 2>&1 \
+  python3 "$TRUSTED_SCRIPTS/thread_exhaustion.py" lake build "${LAKE_BUILD_FLAGS[@]}" 2>&1 \
     | { tee --output-error=warn "$TELEMETRY/lake-build.log" 2>/dev/null || true; } \
     | { python3 "$TRUSTED_SCRIPTS/ci_log_filter.py" build || { echo '::warning::build log summary failed; showing remaining output'; cat; }; }
   build_status=${PIPESTATUS[0]}

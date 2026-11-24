@@ -229,6 +229,9 @@ def cancelled_before_build(api, repo, run):
 # head was recorded (pr-build.yml). A label event's `skip_build` dispatch cancels an in-flight build
 # through the per-PR concurrency group this way, so such a head can wait any length of time.
 CUT_OFF_DESCRIPTION = "build not run — tested H/B/T identity missing or invalid"
+# The `build` description PR CI posts when its build failed only because the CI host ran out of
+# threads (pr-build.yml, thread_exhaustion.py). Like a cut-off build, the head is owed one retry.
+THREADS_DESCRIPTION = "infrastructure failure: the CI host ran out of threads; CI recovery retries once"
 # How far back the hourly pass lists cancelled runs. Every interruption is seen by many passes
 # within it; the report's memory keeps what an earlier pass learned about a head after that.
 INTERRUPTED_WINDOW = 2 * 86400
@@ -256,6 +259,12 @@ def interrupted(api, repo, run):
     )
 
 
+def failed_on_infrastructure(repo, run):
+    """The run is an ordinary PR build that completed as a failure (its head's `build` status says
+    the host ran out of threads; that status is what made it a candidate)."""
+    return ordinary(run, repo) and run.get("status") == "completed" and run.get("conclusion") == "failure"
+
+
 def retried(run):
     """An interrupted run is itself the head's retry when a dispatch or a rerun produced it."""
     return run.get("event") != "pull_request_target" or (run.get("run_attempt") or 1) > 1
@@ -278,7 +287,9 @@ def interrupted_heads(api, repo, observed, now, memory, api_reserve=0, api_budge
             continue
         key, current = str(pull["number"]), verdict(pull)
         known = [memory.get(kind, {}).get(key) or {} for kind in ("retried", "exhausted")]
-        if any({k: entry.get(k) for k in current} == current for entry in known):
+        if any({k: entry.get(k) for k in current} == current for entry in known) or threads_build(pull) and any(
+                entry.get("threads") and entry.get("head") == current["head"] for entry in known):
+            # A thread-exhaustion retry is spent for the head, whatever build fails on it next.
             exhausted[pull["number"]] = run_id
         else:
             candidates.setdefault(run_id, []).append(pull)
@@ -289,10 +300,10 @@ def interrupted_heads(api, repo, observed, now, memory, api_reserve=0, api_budge
     since = dt.datetime.fromtimestamp(now - INTERRUPTED_WINDOW, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     retry, complete, listed = [], True, set()
 
-    def classify(run):
+    def classify(run, infrastructure=False):
         nonlocal complete
         try:
-            if not interrupted(api, repo, run):
+            if not (failed_on_infrastructure(repo, run) if infrastructure else interrupted(api, repo, run)):
                 return
         except APIError as error:
             print(f"ci-recovery: run {run['id']}: {error}", file=sys.stderr)
@@ -311,10 +322,12 @@ def interrupted_heads(api, repo, observed, now, memory, api_reserve=0, api_budge
         listed.add(run["id"])
         if run["id"] in candidates:
             classify(run)
-    # A head whose build was cut off before the listing window still owes its one retry: read its
-    # run directly. Only the cut-off description qualifies, so real failures cost nothing here.
+    # A head whose build was cut off before the listing window, or whose build failed only because
+    # the host ran out of threads (a failure, so never listed above), still owes its one retry: read
+    # its run directly. Only those two descriptions qualify, so real failures cost nothing here.
     for run_id, pulls in candidates.items():
-        if run_id in listed or not any(cut_off_build(p) for p in pulls):
+        infrastructure = any(threads_build(p) for p in pulls)
+        if run_id in listed or not (infrastructure or any(cut_off_build(p) for p in pulls)):
             continue
         if quota_reserved(api, api_reserve, api_budget):
             return retry, exhausted, False
@@ -326,6 +339,9 @@ def interrupted_heads(api, repo, observed, now, memory, api_reserve=0, api_budge
             continue
         if not isinstance(run, dict) or run.get("id") != run_id:
             continue
+        if infrastructure:
+            classify(run, infrastructure=True)  # The run alone decides; no jobs read.
+            continue
         if quota_reserved(api, api_reserve, api_budget):
             return retry, exhausted, False  # Its jobs read waits for the next pass.
         classify(run)
@@ -336,6 +352,13 @@ def cut_off_build(pull):
     """Whether the head's failing `build` status is PR CI's report of a build cut off mid-run."""
     row = build_status(pull["commits"]["nodes"][-1]["commit"]) or {}
     return row.get("state", "").lower() == "failure" and (row.get("description") or "").startswith(CUT_OFF_DESCRIPTION)
+
+
+def threads_build(pull):
+    """Whether the head's failing `build` status is PR CI's report of a build failed only because the
+    CI host ran out of threads."""
+    row = build_status(pull["commits"]["nodes"][-1]["commit"]) or {}
+    return row.get("state", "").lower() == "failure" and (row.get("description") or "").startswith(THREADS_DESCRIPTION)
 
 
 def last_push(pull):
@@ -390,9 +413,11 @@ MEMORY_DAYS = 14
 
 
 def remember(previous, observed, exhausted, dispatched, now):
-    """The retry memory to keep. An entry holds while its PR's head still has the same verdict; a PR
-    the pass did not observe keeps its entry for `MEMORY_DAYS`, so a draft round trip forgets nothing."""
+    """The retry memory to keep. An entry holds while its PR's head still has the same verdict (a
+    thread-exhaustion retry: while the head is current); a PR the pass did not observe keeps its
+    entry for `MEMORY_DAYS`, so a draft round trip forgets nothing."""
     current = {str(p["number"]): verdict(p) for p in observed}
+    heads = {str(p["number"]): p["headRefOid"] for p in observed}
     memory = {}
     for kind in ("retried", "exhausted"):
         kept = {}
@@ -400,7 +425,9 @@ def remember(previous, observed, exhausted, dispatched, now):
             if not isinstance(entry, dict) or type(entry.get("seen")) not in (int, float):
                 continue
             if key in current:
-                if current[key] and {k: entry.get(k) for k in current[key]} == current[key]:
+                # A thread-exhaustion retry is remembered for as long as its head is current.
+                if (current[key] and {k: entry.get(k) for k in current[key]} == current[key]
+                        or entry.get("threads") and entry.get("head") == heads[key]):
                     kept[key] = dict(entry, seen=now)
             elif now - entry["seen"] <= MEMORY_DAYS * 86400:
                 kept[key] = entry
@@ -409,7 +436,7 @@ def remember(previous, observed, exhausted, dispatched, now):
         if str(number) not in memory["retried"] and current.get(str(number)):
             memory["exhausted"][str(number)] = dict(current[str(number)], seen=now)
     for number, pull in dispatched:
-        memory["retried"][str(number)] = dict(verdict(pull), seen=now)
+        memory["retried"][str(number)] = dict(verdict(pull), seen=now, **({"threads": True} if threads_build(pull) else {}))
     return memory
 
 
