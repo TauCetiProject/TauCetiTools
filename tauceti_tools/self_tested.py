@@ -25,6 +25,9 @@ PIN_FILES = ("lake-manifest.json", "lean-toolchain")
 # PR CI's `build` description for a build cut off before it recorded its tested head
 # (pr-build.yml): a cancellation or timeout, which ci_recovery retries, not a verdict.
 CUT_OFF_DESCRIPTION = "build not run \u2014 tested H/B/T identity missing or invalid"
+# PR CI's `build` description for a build failed only because the CI host ran out of threads
+# (pr-build.yml, thread_exhaustion.py): infrastructure, which ci_recovery retries once.
+THREADS_DESCRIPTION = "infrastructure failure: the CI host ran out of threads; CI recovery retries once"
 
 
 def context(number):
@@ -62,11 +65,12 @@ def red_build(state, description=""):
     """Whether a head's `build` status is a completed, failed PR build.
 
     Such a build removes the label from that head's PR, whoever the author: the label
-    skips PR CI, it does not overrule PR CI that ran and failed. A cut-off build is
-    infrastructure, not a verdict, and leaves the label in place.
+    skips PR CI, it does not overrule PR CI that ran and failed. A cut-off build, or one
+    that failed only because the CI host ran out of threads, is infrastructure, not a
+    verdict, and leaves the label in place.
     """
     return (str(state or "").lower() in {"failure", "error"}
-            and not str(description or "").startswith(CUT_OFF_DESCRIPTION))
+            and not str(description or "").startswith((CUT_OFF_DESCRIPTION, THREADS_DESCRIPTION)))
 
 
 def latest_status(rows, context=CONTEXT):

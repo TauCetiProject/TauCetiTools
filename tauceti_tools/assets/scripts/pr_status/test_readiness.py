@@ -630,6 +630,12 @@ class SelfTestedDiffGuards(unittest.TestCase):
         self.assertNotIn("drop_self_tested", result)
         measure.assert_called_once()
 
+    def test_a_thread_exhaustion_failure_keeps_the_label(self):
+        from tauceti_tools.self_tested import THREADS_DESCRIPTION
+        result, measure, _ = self.red(THREADS_DESCRIPTION)
+        self.assertNotIn("drop_self_tested", result)
+        measure.assert_called_once()
+
     def test_a_status_that_is_no_longer_failed_keeps_the_label(self):
         for state in ("PENDING", "SUCCESS"):
             result, _, _ = self.red("sandboxed build, audit, or simp-NF lint failed", state=state)
