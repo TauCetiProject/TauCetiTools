@@ -23,6 +23,7 @@ which can write any bytes it likes under `.lake` anyway.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import re
@@ -48,8 +49,18 @@ def regular(path: Path) -> bool:
         return False
 
 
+def cache_dir(project: Path) -> Path:
+    configured = os.environ.get("LAKE_CACHE_DIR")
+    return Path(configured).resolve() if configured else project / ".lake/cache"
+
+
 def expected_outputs(project: Path):
-    """Yield (module stem, depHash, [(output path, trace name)]) for every root-package trace."""
+    """Yield (module stem, depHash, [(build path, trace name)]) for every root-package trace.
+
+    Every name the trace gives is listed, whether or not the build file exists: the artifact
+    cache's file of that name is checked either way. TauCeti does not use postponed compilation,
+    whose IR outputs are not in the module trace.
+    """
     lib = project / ".lake/build/lib/lean"
     ir = project / ".lake/build/ir"
     if not lib.is_dir():
@@ -75,83 +86,124 @@ def expected_outputs(project: Path):
                     if not isinstance(name, str) or not re.fullmatch(NAME.pattern + r"\." + re.escape(extension), name):
                         continue
                     root = ir if extension in IR_EXTENSIONS else lib
-                    path = root / (str(stem) + "." + extension)
-                    if regular(path):
-                        pairs.append((path, name))
+                    pairs.append((root / (str(stem) + "." + extension), name))
             yield stem, value.get("depHash"), pairs
 
 
+def published_archives(project: Path) -> list[tuple[str, str]]:
+    """The (input hash, archive name) rows of the build's native output map, if it wrote one."""
+    try:
+        lines = (project / ".lake/outputs.jsonl").read_text().splitlines()
+    except OSError:
+        return []
+    rows = []
+    for line in lines[1:]:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if (isinstance(row, list) and len(row) == 2 and all(isinstance(v, str) for v in row)
+                and NAME.fullmatch(row[0]) and re.fullmatch(NAME.pattern + r"\.ltar", row[1])):
+            rows.append((row[0], row[1]))
+    return rows
+
+
 def lake_hashes(paths: list[Path], scratch: Path, *, jobs: int | None = None) -> dict[str, str]:
-    """The Lake content hash of each path, as 16 hex digits, from parallel CacheHash.lean helpers."""
+    """The Lake content hash of each path, as 16 hex digits, from parallel CacheHash.lean helpers.
+
+    Hard links share one inode, so each file is read once; every helper's output is drained
+    concurrently, so no helper stalls on a full pipe.
+    """
     if not paths:
         return {}
+    inodes: dict[tuple[int, int], Path] = {}
+    for path in paths:
+        info = path.stat()
+        inodes.setdefault((info.st_dev, info.st_ino), path)
+    unique = list(inodes.values())
     lean = Path(subprocess.check_output(["lean", "--print-prefix"], text=True).strip()) / "bin/lean"
     cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
-    count = max(1, min(jobs or 16, cpus, len(paths)))
+    count = max(1, min(jobs or 16, cpus, len(unique)))
     helpers = []
     try:
         for index in range(count):
             request = scratch / f"hash-request-{index}.json"
-            request.write_text(json.dumps([str(p) for p in paths[index::count]]))
+            request.write_text(json.dumps([str(p) for p in unique[index::count]]))
             helpers.append(subprocess.Popen([str(lean), "--run", str(HASHER), str(request)],
                                             stdout=subprocess.PIPE, text=True))
-        hashes = {}
-        for helper in helpers:
-            output, _ = helper.communicate(timeout=1800)
+        with concurrent.futures.ThreadPoolExecutor(len(helpers)) as pool:
+            outputs = list(pool.map(lambda helper: helper.communicate(timeout=1800)[0], helpers))
+        by_inode = {}
+        for helper, output in zip(helpers, outputs):
             if helper.returncode != 0:
                 raise subprocess.CalledProcessError(helper.returncode, "CacheHash.lean")
             for line in output.splitlines():
                 path, value = json.loads(line)
-                hashes[path] = f"{value:016x}"
+                info = os.stat(path)
+                by_inode[(info.st_dev, info.st_ino)] = f"{value:016x}"
     finally:
         for helper in helpers:
             if helper.poll() is None:
                 helper.kill()
                 helper.wait()
-    if len(hashes) != len(paths):
+    if len(by_inode) != len(unique):
         raise ValueError("incomplete output hashes")
+    hashes = {}
+    for path in paths:
+        info = path.stat()
+        hashes[str(path)] = by_inode[(info.st_dev, info.st_ino)]
     return hashes
 
 
 def mismatches(project: Path, hasher=None):
     """Every (stem, depHash, path, trace name, actual hash, size) whose bytes differ from the name.
 
-    Also checks the artifact cache's file of the same name, which Lake hard-links into the build
-    and resolves the trace through, so a damaged cache entry is found even if the build copy is
-    intact.
+    Checks each build output and the artifact cache's file of the same name (Lake resolves the
+    trace through the cache and hard-links it into the build), and every archive the build's
+    output map names, which `lake cache stage` copies for publication without reading it.
     """
     project = project.resolve()
-    artifacts = project / ".lake/cache/artifacts"
+    artifacts = cache_dir(project) / "artifacts"
     modules = list(expected_outputs(project))
-    paths = []
-    for _, _, pairs in modules:
-        for path, name in pairs:
-            paths.append(path)
-            if regular(artifacts / name):
-                paths.append(artifacts / name)
-    paths = list(dict.fromkeys(paths))
-    with tempfile.TemporaryDirectory(prefix="lake-output-check-") as scratch:
-        hashes = (hasher or lake_hashes)(paths, Path(scratch))
-    found = []
+    stems = {dep_hash: stem for stem, dep_hash, _ in modules if isinstance(dep_hash, str)}
+    checks = []  # (stem, depHash, path, name)
     for stem, dep_hash, pairs in modules:
         for path, name in pairs:
-            for candidate in (path, artifacts / name):
-                actual = hashes.get(str(candidate))
-                if actual is not None and actual != name.split(".", 1)[0]:
-                    found.append((stem, dep_hash, candidate, name, actual, candidate.stat().st_size))
+            checks += [(stem, dep_hash, candidate, name) for candidate in (path, artifacts / name)
+                       if regular(candidate)]
+    for dep_hash, name in published_archives(project):
+        if regular(artifacts / name):
+            checks.append((stems.get(dep_hash), dep_hash, artifacts / name, name))
+    paths = list(dict.fromkeys(path for _, _, path, _ in checks))
+    with tempfile.TemporaryDirectory(prefix="lake-output-check-") as scratch:
+        hashes = (hasher or lake_hashes)(paths, Path(scratch))
+    found, seen = [], set()
+    for stem, dep_hash, path, name in checks:
+        actual = hashes.get(str(path))
+        if actual is not None and actual != name.split(".", 1)[0] and (path, name) not in seen:
+            seen.add((path, name))
+            found.append((stem, dep_hash, path, name, actual, path.stat().st_size))
     return len(modules), len(paths), found
 
 
 def discard(project: Path, found) -> int:
-    """Remove each mismatching module's build files and the cache records for its input hash."""
+    """Remove each mismatching module's build files and the cache records for its input hash.
+
+    A damaged artifact cache file goes too. Without its records the next build compiles the
+    module (or restores another record's intact outputs) instead of restoring the damage again.
+    """
     project = project.resolve()
     lib, ir = project / ".lake/build/lib/lean", project / ".lake/build/ir"
-    records = project / ".lake/cache/outputs"
+    cache = cache_dir(project)
+    records = cache / "outputs"
     removed = set()
     for stem, dep_hash, path, _, _, _ in found:
-        if path.is_relative_to(project / ".lake/cache/artifacts"):
+        if path.parent == cache / "artifacts":
             path.unlink(missing_ok=True)
-        if stem in removed:
+        if isinstance(dep_hash, str) and NAME.fullmatch(dep_hash) and records.is_dir():
+            for record in records.glob(f"*/{dep_hash}.json"):
+                record.unlink(missing_ok=True)
+        if stem is None or stem in removed:
             continue
         removed.add(stem)
         for root in (lib, ir):
@@ -164,10 +216,7 @@ def discard(project: Path, found) -> int:
                     rest = entry.name[len(stem.name) + 1:]
                     if rest.split(".", 1)[0] in {"trace", "olean", "ilean", "ir", "c", "bc", "ltar", "setup", "log"}:
                         entry.unlink(missing_ok=True)
-        if isinstance(dep_hash, str) and NAME.fullmatch(dep_hash) and records.is_dir():
-            for record in records.glob(f"*/{dep_hash}.json"):
-                record.unlink(missing_ok=True)
-    return len(removed)
+    return max(len(removed), 1) if found else 0
 
 
 def main(argv=None) -> int:

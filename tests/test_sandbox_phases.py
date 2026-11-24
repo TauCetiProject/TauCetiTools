@@ -61,12 +61,14 @@ class SandboxPhases(unittest.TestCase):
                     f".write(json.dumps([\"{name}\", *sys.argv[1:]]) + \"\\n\")' \"$@\"\n"
                     + (f'exit "${{{key}:-0}}"\n' if key else 'exit 0\n'))
             (root / 'trusted/ci_log_filter.py').write_text('import sys\nsys.stdout.write(sys.stdin.read())\n')
-            # Exits with OUTPUT_CHECK_STATUS for `discard` and OUTPUT_RECHECK_STATUS for `check`.
+            # Exits with the next of the comma-separated OUTPUT_CHECK_STATUSES (0 once they run out).
             (root / 'trusted/lake_output_check.py').write_text(
-                'import json, os, sys\nwith open(os.environ["CALLS"], "a") as f: '
-                'f.write(json.dumps(["lake_output_check", *sys.argv[1:]]) + "\\n")\n'
-                'sys.exit(int(os.environ.get("OUTPUT_CHECK_STATUS" if sys.argv[1] == "discard" '
-                'else "OUTPUT_RECHECK_STATUS", "0")))\n')
+                'import json, os, sys\nfrom pathlib import Path\n'
+                'with open(os.environ["CALLS"], "a") as f: f.write(json.dumps(["lake_output_check", *sys.argv[1:]]) + "\\n")\n'
+                'counter = Path(os.environ["CALLS"] + ".checks")\n'
+                'n = int(counter.read_text()) if counter.exists() else 0\ncounter.write_text(str(n + 1))\n'
+                'statuses = [s for s in os.environ.get("OUTPUT_CHECK_STATUSES", "").split(",") if s]\n'
+                'sys.exit(int(statuses[n]) if n < len(statuses) else 0)\n')
             (root / 'trusted/bulk-unpack-cache.py').write_text(
                 'import json, os\nwith open(os.environ["CALLS"], "a") as f: '
                 'f.write(json.dumps(["bulk-unpack-cache"]) + "\\n")\n')
@@ -132,21 +134,23 @@ class SandboxPhases(unittest.TestCase):
     def test_staged_outputs_are_checked_against_their_traces(self):
         # Batch 506 attempt 339: a truncated restored .olean.private kept its trace, so Lake trusted
         # it. A staging build checks every output and compiles the damaged modules from source.
-        def run(**scenario):
-            status, calls, names = self.run_sandbox([['build']], staging=True, batch=True, **scenario)
+        def run(statuses="", **scenario):
+            status, calls, names = self.run_sandbox([['build']], staging=True, batch=True,
+                                                    OUTPUT_CHECK_STATUSES=statuses, **scenario)
             return status, [call[:2] for call in calls if call[0] in ('lake', 'lake_output_check')], names
 
-        build = ['lake', 'build']
-        self.assertEqual(run(), (0, [build, ['lake_output_check', 'discard']], ['cache-unpack', 'build', 'output-check']))
-        self.assertEqual(run(OUTPUT_CHECK_STATUS=3),
-                         (0, [build, ['lake_output_check', 'discard'], build, ['lake_output_check', 'check']],
-                          ['cache-unpack', 'build', 'output-check', 'build']))
-        self.assertEqual(run(OUTPUT_CHECK_STATUS=3, OUTPUT_RECHECK_STATUS=1)[0], 1)
+        build, check = ['lake', 'build'], ['lake_output_check', 'discard']
+        self.assertEqual(run(), (0, [build, check], ['cache-unpack', 'build', 'output-check']))
+        self.assertEqual(run('3'), (0, [build, check, build, check],
+                                    ['cache-unpack', 'build', 'output-check', 'build', 'output-check']))
+        # A rebuild that reaches further damage repairs that too, at most twice.
+        self.assertEqual(run('3,3')[:2], (0, [build, check, build, check, build, check]))
+        self.assertEqual(run('3,3,3')[0], 1)
         # A failed build is checked too (a damaged module can fail its dependents' compilation) and
         # keeps its own status; a check that cannot run blocks only a passing build's publication.
-        self.assertEqual(run(BUILD_STATUS=5)[:2], (5, [build, ['lake_output_check', 'discard']]))
-        self.assertEqual(run(OUTPUT_CHECK_STATUS=2)[0], 1)
-        self.assertEqual(run(OUTPUT_CHECK_STATUS=2, BUILD_STATUS=5)[0], 5)
+        self.assertEqual(run(BUILD_STATUS=5)[:2], (5, [build, check]))
+        self.assertEqual(run('2')[0], 1)
+        self.assertEqual(run('2', BUILD_STATUS=5)[0], 5)
         # Ordinary PR builds publish nothing and skip the check.
         _, calls, _ = self.run_sandbox([['build']], cache=True)
         self.assertNotIn('lake_output_check', [call[0] for call in calls])

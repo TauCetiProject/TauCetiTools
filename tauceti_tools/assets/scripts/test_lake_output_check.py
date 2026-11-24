@@ -89,6 +89,24 @@ class OutputCheckTests(unittest.TestCase):
         self.assertTrue((self.records / "1111111111111111.json").exists())
         self.assertTrue((self.lib / "Basic.Sub.olean").exists())
 
+    def test_cache_copy_of_a_missing_build_file_and_published_archives_are_checked(self):
+        basic = self.module("Basic", "4366fd23170e9e25", self.contents("a"))
+        (self.lib / "Basic.olean.private").unlink()
+        (self.artifacts / basic["olean.private"]).write_bytes(b"truncated")
+        archive = fixture_hash(b"good archive") + ".ltar"
+        (self.artifacts / archive).write_bytes(b"truncated archive")
+        stray = fixture_hash(b"other") + ".ltar"
+        (self.artifacts / stray).write_bytes(b"other")
+        (self.root / ".lake/outputs.jsonl").write_text(
+            '"2026-03-17"\n' + json.dumps(["4366fd23170e9e25", archive]) + "\n"
+            + json.dumps(["2222222222222222", stray]) + "\n")
+        _, _, found = check.mismatches(self.root, hasher=fake_hasher)
+        self.assertEqual(sorted(path.name for _, _, path, *_ in found), sorted([basic["olean.private"], archive]))
+        self.assertEqual(check.discard(self.root, found), 1)
+        self.assertFalse((self.artifacts / archive).exists())
+        self.assertFalse((self.lib / "Basic.trace").exists())
+        self.assertTrue((self.artifacts / stray).exists())
+
     def test_command_exit_codes(self):
         self.module("Basic", "4366fd23170e9e25", self.contents("a"))
         original = check.lake_hashes

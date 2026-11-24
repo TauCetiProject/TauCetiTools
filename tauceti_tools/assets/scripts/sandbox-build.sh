@@ -119,27 +119,32 @@ build_phase() {
   # source instead of trusting them. This also runs after a failed build, which such a module can
   # cause.
   if [ "${STAGE_LAKE_CACHE:-}" = "1" ]; then
-    phase output-check
-    check_status=0
-    python3 "$TRUSTED_SCRIPTS/lake_output_check.py" discard . || check_status=$?
-    case "$check_status" in
-      0) ;;
-      3)
-        echo '::warning::some outputs differed from their traces; rebuilding those modules from source'
-        phase build
-        run_lake_build
-        if [ "$build_status" = 0 ] && ! python3 "$TRUSTED_SCRIPTS/lake_output_check.py" check .; then
-          echo '::error::outputs still differ from their traces after rebuilding them'
-          exit 1
-        fi
-        ;;
-      *)
-        if [ "$build_status" = 0 ]; then
-          echo '::error::the built outputs could not be checked against their traces, so they cannot be published'
-          exit 1
-        fi
-        ;;
-    esac
+    # A failed build can hide further damaged modules it never reached, so recheck after each
+    # rebuild, up to two rebuilds.
+    for check_round in 1 2 3; do
+      phase output-check
+      check_status=0
+      python3 "$TRUSTED_SCRIPTS/lake_output_check.py" discard . || check_status=$?
+      case "$check_status" in
+        0) break ;;
+        3)
+          if [ "$check_round" = 3 ]; then
+            echo '::error::outputs still differ from their traces after rebuilding them twice'
+            exit 1
+          fi
+          echo '::warning::some outputs differed from their traces; rebuilding those modules from source'
+          phase build
+          run_lake_build
+          ;;
+        *)
+          if [ "$build_status" = 0 ]; then
+            echo '::error::the built outputs could not be checked against their traces, so they cannot be published'
+            exit 1
+          fi
+          break
+          ;;
+      esac
+    done
   fi
   if [ "$build_status" != 0 ]; then exit "$build_status"; fi
 }
