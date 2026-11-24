@@ -1061,8 +1061,7 @@ jobs:
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
+          # No owner or repositories: the token is scoped to the calling repository alone.
           permission-contents: write
           permission-workflows: write
 
