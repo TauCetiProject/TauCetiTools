@@ -278,8 +278,6 @@ class RepairCacheCandidates(FetchHarness):
         self.assertEqual(self.records()["1111111111111111.json"], "head-1\n")
         self.assertEqual(self.records()["2222222222222222.json"], "b-2\n")
         self.assertIn("2 artifacts downloaded", out)
-        preferred = self.root / "pr/.lake/cache/repair-revisions"
-        self.assertEqual(preferred.read_text().split(), [HEAD, REV_B])
 
     def test_first_absent_second_present_from_the_environment(self):
         self.publish(REV_B, ("2222222222222222", "bbbb", "b-2"))
@@ -295,7 +293,6 @@ class RepairCacheCandidates(FetchHarness):
         self.assertEqual(env, {"REPAIR_OUTPUTS_STATE": "absent", "REPAIR_OUTPUTS_REUSED": "0"})
         self.assertEqual(self.requested(), [HEAD, REV_B, REV_C])
         self.assertEqual(self.records(), before)
-        self.assertFalse((self.root / "pr/.lake/cache/repair-revisions").exists())
 
     def test_duplicate_artifact_is_fetched_once_and_earlier_records_win(self):
         self.publish(HEAD, ("1111111111111111", "aaaa", "head-1"), ("2222222222222222", "5eed", "head-2"))

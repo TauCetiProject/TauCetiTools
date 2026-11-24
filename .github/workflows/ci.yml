@@ -257,11 +257,9 @@ jobs:
       - name: Audit import headers against the complete source inventory
         run: python3 scripts/check-imports.py
 
-      # Main-push builds use Lake's stock per-module restoration, one `leantar` process per cached
-      # module; only the sandboxed PR build in pr-build.yml runs TauCetiTools' bulk extraction first.
-      # https://github.com/leanprover/lean4/pull/16418 (libuv process spawning, in v4.37.0-rc1) is
-      # expected to make that per-module cost small; https://github.com/leanprover/lean4/pull/15868
-      # (native bulk unpacking) is still open.
+      # Builds use Lake's stock per-module restoration, one `leantar` process per cached module, as
+      # the sandboxed PR build does. Since https://github.com/leanprover/lean4/pull/16418 (libuv
+      # process spawning, in v4.37.0-rc1) that restores all of TauCeti in about 30s on 96 CPUs.
       - name: Build
         env:
           # Restore only from the locally-populated $LAKE_CACHE_DIR the earlier fetch step filled;

@@ -23,9 +23,6 @@ class CIAxiomPreflightTests(unittest.TestCase):
             for name in ('declaration-names.sh', 'lint-env.sh', 'lint-style.sh'):
                 (root / 'trusted' / name).write_text('exit 0\n')
             (root / 'trusted/ci_log_filter.py').write_text('import sys\nsys.stdout.write(sys.stdin.read())\n')
-            (root / 'trusted/bulk-unpack-cache.py').write_text(
-                'import json, os\nwith open(os.environ["CALLS"], "a") as f: '
-                'f.write(json.dumps(["bulk-unpack-cache"]) + "\\n")\n')
             stub = '''#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
@@ -66,18 +63,12 @@ if name == 'local-axioms': sys.exit(int(os.environ['LOCAL_STATUS']))
         self.assertLess(next(i for i, c in enumerate(calls) if c[0] == 'audit-driver'),
                         next(i for i, c in enumerate(calls) if c[0] == 'local-axioms'))
 
-    def test_ordinary_cached_pr_bulk_restores_before_build_without_staging_flags(self):
-        result, calls, _, _ = self.sandbox(cache=True)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(sum(c[0] == 'bulk-unpack-cache' for c in calls), 1)
-        self.assertLess(next(i for i, c in enumerate(calls) if c[0] == 'bulk-unpack-cache'),
-                        next(i for i, c in enumerate(calls) if c[:2] == ['lake', 'build']))
-        self.assertIn(['lake', 'build', '--iofail'], calls)
-
-    def test_pr_without_artifact_cache_keeps_the_normal_build_path(self):
-        result, calls, _, _ = self.sandbox()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertFalse(any(c[0] == 'bulk-unpack-cache' for c in calls))
+    def test_ordinary_cached_pr_builds_with_stock_lake_restoration(self):
+        for cache in (True, False):
+            with self.subTest(cache=cache):
+                result, calls, _, _ = self.sandbox(cache=cache)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual([c for c in calls if c[:2] == ['lake', 'build']], [['lake', 'build', '--iofail']])
 
     def test_empty_scope_stays_scoped(self):
         result, calls, _, _ = self.sandbox(empty=True)

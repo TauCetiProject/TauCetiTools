@@ -62,11 +62,6 @@ class SandboxPhases(unittest.TestCase):
                     f".write(json.dumps([\"{name}\", *sys.argv[1:]]) + \"\\n\")' \"$@\"\n"
                     + (f'exit "${{{key}:-0}}"\n' if key else 'exit 0\n'))
             (root / 'trusted/ci_log_filter.py').write_text('import sys\nsys.stdout.write(sys.stdin.read())\n')
-            (root / 'trusted/bulk-unpack-cache.py').write_text(
-                'import json, os\nwith open(os.environ["CALLS"], "a") as f: '
-                'f.write(json.dumps(["bulk-unpack-cache"]) + "\\n")\n'
-                'with open(os.environ["CALLS"] + ".rayon", "a") as f: '
-                'f.write(os.environ.get("RAYON_NUM_THREADS", "<unset>") + "\\n")\n')
             for name in ('bin/lake', 'drivers/audit-driver', 'drivers/local-axioms',
                          'drivers/lint-env-driver', 'watchdog/bin/lean'):
                 path = root / name
@@ -93,8 +88,6 @@ class SandboxPhases(unittest.TestCase):
                     break
             calls_file = root / 'calls.jsonl'
             calls = [json.loads(line.replace(str(root), '<root>')) for line in calls_file.read_text().splitlines()] if calls_file.exists() else []
-            self.bulk_rayon = (root / 'calls.jsonl.rayon').read_text().split() \
-                if (root / 'calls.jsonl.rayon').exists() else []
             phases_file = root / '.lake/telemetry/phases.tsv'
             names = [line.split('\t')[0] for line in phases_file.read_text().splitlines()] \
                 if phases_file.exists() else []
@@ -132,8 +125,7 @@ class SandboxPhases(unittest.TestCase):
 
     def test_only_the_build_caps_leantar_threads(self):
         # Stock Lake runs one leantar per cached module, about one per CPU at once; each one's
-        # rayon pool is capped so a large guest does not start thousands of threads. The bulk
-        # unpack's single leantar keeps its own wider pool.
+        # rayon pool is capped so a large guest does not start thousands of threads.
         for scenario in ({}, {'cache': True}, {'staging': True, 'batch': True}):
             with self.subTest(**scenario):
                 _, calls, _ = self.run_sandbox([[]], **scenario)
@@ -143,8 +135,6 @@ class SandboxPhases(unittest.TestCase):
                           and call[:2] != ['lake', 'build']]
                 self.assertTrue(others)
                 self.assertTrue(all(call[-1] == 'rayon=' for call in others))
-                # The bulk unpack runs only with the cache, and keeps its own wider pool.
-                self.assertEqual(self.bulk_rayon, ['<unset>'] if scenario else [])
 
     def test_each_phase_runs_only_its_own_work(self):
         _, calls, names = self.run_sandbox([['lint-style']])

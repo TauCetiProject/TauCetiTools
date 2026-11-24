@@ -100,13 +100,6 @@ fi
 build_phase() {
   # The build is the first phase, so it starts the phase record afresh.
   : > "$TELEMETRY/phases.tsv" 2>/dev/null || true
-  if [ "${LAKE_ARTIFACT_CACHE:-}" = "true" ] && [ "${LAKE_RESTORE_ARTIFACTS:-}" = "true" ]; then
-    # Stock Lake forks once per cached module. Prepare fresh private caches in one
-    # leantar call for ordinary PRs as well as staging. Retain archives for native
-    # publication; Lake still verifies inputs before using the restored outputs.
-    phase cache-unpack
-    python3 "$TRUSTED_SCRIPTS/bulk-unpack-cache.py" .
-  fi
   # Keep each changed module's restored main header for the declaration-names record below.
   # Advisory: a failure here only means no record.
   bash "$TRUSTED_SCRIPTS/declaration-names.sh" save || true
@@ -114,13 +107,13 @@ build_phase() {
   # `--output-error=warn` keeps tee passing the build's output through even if writing the copy fails,
   # and `|| true` drops tee's own status, so `pipefail` reports exactly Lake's.
   set +e
-  # When the bulk unpack above leaves modules to stock Lake, Lake restores each one with its own
-  # leantar, about one per CPU at once, and each leantar's rayon pool defaults to one thread per
-  # CPU. On a 96-CPU native fleet guest that reached thousands of tasks per build and exhausted
+  # Lake restores each cached module with its own leantar, about one per CPU at once, and each
+  # leantar's rayon pool defaults to one thread per CPU. On a 96-CPU native fleet guest that reached thousands of tasks per build and exhausted
   # the host's CI task limit (24 Nov 2026). leantar parallelises across the archives it is given,
   # and Lake gives it one, so the extra workers only sit idle: on a 96-CPU host a full stock
   # restore of TauCeti (39,164 modules) peaked at 695 tasks in 37s with 4, against 5,248 tasks
-  # in 60s by default.
+  # in 60s by default. A separate bulk unpack in one leantar call used to run before this; on
+  # Lean v4.37.0-rc1 (libuv process spawning) it took about 120s against stock Lake's 30s.
   RAYON_NUM_THREADS=4 lake build "${LAKE_BUILD_FLAGS[@]}" 2>&1 \
     | { tee --output-error=warn "$TELEMETRY/lake-build.log" 2>/dev/null || true; } \
     | { python3 "$TRUSTED_SCRIPTS/ci_log_filter.py" build || { echo '::warning::build log summary failed; showing remaining output'; cat; }; }
