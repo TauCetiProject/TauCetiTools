@@ -35,6 +35,12 @@ workflows:
         - file: source-candidate.yml
           job: candidate
           triggers: [repository_dispatch]
+        # The queue dispatches `tauceti-main-integration` to this file by event type (docs/main-integration.md).
+        - file: main-integration.yml
+          job: main-integration
+          name: main-integration
+          triggers: [repository_dispatch]
+          pending: true
     jobs: [pick-runner, sandboxed-build, publish-merge-group-cache, finalize-merge-group-build]
     runner_groups: [TauCetiFleet, TauCetiQueueControl]
   nightly-verify.yml:
