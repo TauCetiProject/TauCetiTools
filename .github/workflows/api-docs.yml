@@ -378,7 +378,7 @@ jobs:
         run: |
           set -euo pipefail
           # The caller's workflow file: runs are listed by the workflow that was triggered.
-          workflow=${GITHUB_WORKFLOW_REF%@*}
+          workflow=${GITHUB_WORKFLOW_REF%%@*}
           workflow=${workflow##*/}
           newest=$(gh run list -R "$REPO" --workflow "$workflow" --branch "$REF_NAME" --status success \
             --limit 1 --json number --jq '.[0].number // 0' || echo 0)
