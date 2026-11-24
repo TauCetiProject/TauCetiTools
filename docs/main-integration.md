@@ -24,8 +24,8 @@ is inert until the repository variable `TAUCETI_MAIN_INTEGRATION_ENABLED` is `tr
 
 - **Placement.** The picker's `main-integration` class (`fleet_runner.main_integration_route`)
   selects the Fleet PR class only when at least `MAIN_INTEGRATION_MIN_IDLE` (repository variable,
-  default 8) online PR runners are idle and no Fleet PR job is known to be waiting. It never
-  chooses GitHub-hosted or Namespace capacity. Otherwise it posts `main-integration` = `error`
+  default 8) online PR runners are idle and a complete queue observation shows no Fleet PR job
+  waiting. It never chooses GitHub-hosted or Namespace capacity. Otherwise it posts `main-integration` = `error`
   "deferred: Fleet PR pool busy" on H and builds nothing.
 - **Build.** H is read from this repository (the queue retains accepted heads under
   `refs/tauceti-queue/inputs/...`) and integrated onto exactly M, then built, audited and linted
@@ -34,8 +34,10 @@ is inert until the repository variable `TAUCETI_MAIN_INTEGRATION_ENABLED` is `tr
 - **Report.** One commit status on H, context `main-integration`, description beginning
   `B=<M prefix>`:
   - `success`: the integration passed (`B=<M> T=<tested commit> passed ...`);
-  - `failure`: the PR's source fails on that main: the build, audit or lint, the import-header
-    preflight or a pre-build source check;
+  - `failure`: the PR's source fails on that main, by the same evidence staging's source verdict
+    accepts: a sandboxed build, audit or lint phase failed, a completed pre-build source check
+    rejected the sources, or a shim's concrete Mathlib replacement exists. The queue confirms a
+    failure with a second run before acting on it;
   - `error`: no verdict (deferred, a textual conflict, infrastructure, a scope or configuration
     guard that stopped the build). The queue does not act on it.
 

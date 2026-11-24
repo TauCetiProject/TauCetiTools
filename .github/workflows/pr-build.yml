@@ -2157,7 +2157,7 @@ jobs:
           fi
 
           # main-integration: success only for a passing build; failure only for what the PR's
-          # source does on that main (build, audit, lint, import headers, pre-build source checks);
+          # source does on that main (build, audit, lint, pre-build source checks, shim expiry);
           # anything that did not reach a verdict, a textual conflict included, is an error the
           # queue does not act on. Never `build`, `scope` or `bump-guard`, and no PR fence.
           if [ "${MAIN_INTEGRATION:-false}" = true ]; then
@@ -2168,7 +2168,10 @@ jobs:
               mi_state=error; mi_desc="B=${CAPTURED_BASE:0:12} conflict: H does not merge onto main"
             elif [ "${{ env.INFRA }}" != "1" ] && [ "$identity_ok" = 1 ] && {
                    [ "${{ steps.build.outcome }}" = "failure" ] || [ "$source_check" = failure ] \
-                   || [ "${{ steps.import_headers.outcome }}" = "failure" ]; }; then
+                   || [ "${{ env.SHIM_EXPIRY_RC }}" = "3" ]; }; then
+              # The same evidence staging's source verdict accepts (a combined sandbox phase
+              # failure, a completed pre-build check's rejection, a concrete shim replacement);
+              # the queue still confirms a failure with a second run before acting on it.
               mi_state=failure; mi_desc="$mi_base failed: $desc"
             else
               mi_state=error; mi_desc="B=${CAPTURED_BASE:0:12} no verdict: $desc"

@@ -1139,7 +1139,7 @@ class MainIntegration(unittest.TestCase):
         guests = [LiveMembership().guest(f"{n:032x}", n) for n in range(1, idle + busy + 1)]
         for guest in guests[idle:]:
             guest["busy"] = True
-        value = dict(queued_fleet=[set(labels) for labels in queued])
+        value = dict(queued_fleet=[set(labels) for labels in queued], fleet_queue_complete=True, placement_unavailable=None)
         value.update(observed)
         return fleet_runner.main_integration_route([dict(total_count=len(guests), runners=guests)], value, 3)
 
@@ -1154,8 +1154,11 @@ class MainIntegration(unittest.TestCase):
         self.assertEqual(self.route(9, queued=[["self-hosted", "tauceti-fleet-pr"]])["pool"], "busy")
         self.assertEqual(self.route(9, queued=[["self-hosted", "tauceti-fleet-staging"]])["pool"], "fleet")
         self.assertEqual(self.route(9, queued_fleet=None)["pool"], "busy")
-        self.assertEqual(fleet_runner.main_integration_route([dict(total_count=2, runners=[])], dict(queued_fleet=[]), 1)["pool"], "busy")
-        self.assertEqual(fleet_runner.main_integration_route([], dict(queued_fleet=[]), 1)["pool"], "busy")
+        self.assertEqual(self.route(9, fleet_queue_complete=False)["pool"], "busy")
+        self.assertEqual(self.route(9, placement_unavailable="capacity_queue_pagination")["pool"], "busy")
+        complete = dict(queued_fleet=[], fleet_queue_complete=True)
+        self.assertEqual(fleet_runner.main_integration_route([dict(total_count=2, runners=[])], complete, 1)["pool"], "busy")
+        self.assertEqual(fleet_runner.main_integration_route([], complete, 1)["pool"], "busy")
         with self.assertRaises(fleet_runner.ObservationError):
             fleet_runner.main_integration_route([], dict(queued_fleet=[]), 0)
 
@@ -1166,12 +1169,12 @@ class MainIntegration(unittest.TestCase):
         common = dict(FLEET_JOB_KIND="main-integration", FLEET_CI_ENABLED="true", FLEET_READ_TOKEN="fleet",
                       FLEET_RUNNER_GROUP_ID="3", GITHUB_STATE_TOKEN="state")
         output, calls = entry.pick(dict(fleet={endpoint: dict(total_count=8, runners=guests)},
-                                        state=dict(shared=entry.shared(queued_fleet=[]))), **common)
+                                        state=dict(shared=entry.shared(queued_fleet=[], routing_version=2, fleet_queue_version=1, namespace_busy=0))), **common)
         self.assertEqual(output["pool"], "fleet")
         self.assertEqual(json.loads(output["runner"]), dict(group="TauCetiFleet", labels=["self-hosted", "linux", "x64", "tauceti-fleet-pr"]))
         self.assertFalse(any(token in ("app", "repository") for token, _ in calls))
         output, _ = entry.pick(dict(fleet={endpoint: dict(total_count=8, runners=guests)},
-                                    state=dict(shared=entry.shared(queued_fleet=[]))), MAIN_INTEGRATION_MIN_IDLE="9", **common)
+                                    state=dict(shared=entry.shared(queued_fleet=[], routing_version=2, fleet_queue_version=1, namespace_busy=0))), MAIN_INTEGRATION_MIN_IDLE="9", **common)
         self.assertEqual((output["pool"], output["runner"], output["idle"]), ("busy", "", "8"))
         output, _ = entry.pick(dict(fleet={endpoint: OSError("down")}, state=dict(shared=OSError("down"))), **common)
         self.assertEqual((output["pool"], output["runner"]), ("busy", ""))

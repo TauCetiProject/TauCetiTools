@@ -422,7 +422,9 @@ def main_integration_route(runner_pages, observed, min_idle):
         idle = len(ranked_runners(runner_pages, kind="pr", machines=discover_machines(runners))) if runners else 0
         queued = observed.get("queued_fleet")
         waiting = None
-        if isinstance(queued, list):
+        # Only a complete queue observation can show that no PR job is waiting.
+        if (isinstance(queued, list) and observed.get("fleet_queue_complete") is True
+                and not observed.get("placement_unavailable")):
             waiting = sum("tauceti-fleet-pr" in labels for labels in queued)
     except (ValueError, KeyError, TypeError):
         return dict(pool="busy", idle=0)
