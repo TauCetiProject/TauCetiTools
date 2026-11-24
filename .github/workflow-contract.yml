@@ -39,9 +39,15 @@ workflows:
     runner_groups: [TauCetiFleet, TauCetiQueueControl]
   publish-lake-cache.yml:
     internal: true
-  # No project calls it yet; TauCeti's retry-ci-status.yml still holds its own copy.
   retry-ci-status.yml:
-    callers: {}
+    callers:
+      TauCetiProject/TauCeti:
+        # The queue dispatches this file by name with source_run_id and source_attempt.
+        - file: retry-ci-status.yml
+          job: publish
+          triggers: [workflow_run, schedule, workflow_dispatch]
+          pending: true
+    jobs: [publish, recover-builds]
   pick-runner.yml:
     internal: true
   check-workflow-identity.yml:
