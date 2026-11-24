@@ -70,11 +70,6 @@ class SandboxPhases(unittest.TestCase):
                 'n = int(counter.read_text()) if counter.exists() else 0\ncounter.write_text(str(n + 1))\n'
                 'statuses = [s for s in os.environ.get("OUTPUT_CHECK_STATUSES", "").split(",") if s]\n'
                 'sys.exit(int(statuses[n]) if n < len(statuses) else 0)\n')
-            (root / 'trusted/bulk-unpack-cache.py').write_text(
-                'import json, os\nwith open(os.environ["CALLS"], "a") as f: '
-                'f.write(json.dumps(["bulk-unpack-cache"]) + "\\n")\n'
-                'with open(os.environ["CALLS"] + ".rayon", "a") as f: '
-                'f.write(os.environ.get("RAYON_NUM_THREADS", "<unset>") + "\\n")\n')
             for name in ('bin/lake', 'drivers/audit-driver', 'drivers/local-axioms',
                          'drivers/lint-env-driver', 'watchdog/bin/lean'):
                 path = root / name
@@ -102,8 +97,6 @@ class SandboxPhases(unittest.TestCase):
                     break
             calls_file = root / 'calls.jsonl'
             calls = [json.loads(line.replace(str(root), '<root>')) for line in calls_file.read_text().splitlines()] if calls_file.exists() else []
-            self.bulk_rayon = (root / 'calls.jsonl.rayon').read_text().split() \
-                if (root / 'calls.jsonl.rayon').exists() else []
             phases_file = root / '.lake/telemetry/phases.tsv'
             names = [line.split('\t')[0] for line in phases_file.read_text().splitlines()] \
                 if phases_file.exists() else []
@@ -165,8 +158,7 @@ class SandboxPhases(unittest.TestCase):
 
     def test_only_the_build_caps_leantar_threads(self):
         # Stock Lake runs one leantar per cached module, about one per CPU at once; each one's
-        # rayon pool is capped so a large guest does not start thousands of threads. The bulk
-        # unpack's single leantar, which only a recording PR build runs, keeps its own wider pool.
+        # rayon pool is capped so a large guest does not start thousands of threads.
         for scenario in ({}, {'cache': True}, {'staging': True, 'batch': True}):
             with self.subTest(**scenario):
                 _, calls, _ = self.run_sandbox([[]], **scenario)
@@ -176,22 +168,18 @@ class SandboxPhases(unittest.TestCase):
                           and call[:2] != ['lake', 'build']]
                 self.assertTrue(others)
                 self.assertTrue(all(call[-1] == 'rayon=' for call in others))
-                self.assertEqual(self.bulk_rayon, ['<unset>'] if scenario == {'cache': True} else [])
 
-    def test_only_a_recording_pr_build_runs_the_bulk_unpack(self):
-        # The bulk unpack leaves the changed modules' base headers for the declaration-names
-        # record; builds that record nothing restore with stock Lake, which is faster.
-        for scenario, expected in (
-            ({'cache': True}, 1), ({'cache': True, 'scoped': False}, 0), ({}, 0),
-            ({'cache': True, 'batch': True}, 0), ({'staging': True, 'batch': True}, 0),
-            ({'staging': True}, 1),
-        ):
+    def test_every_build_saves_base_headers_before_lake_restores(self):
+        # declaration-names.sh decides whether to record; it reads the base headers from the
+        # cache before `lake build`, and stock Lake restores everything, with no bulk unpack.
+        for scenario in ({'cache': True}, {'cache': True, 'scoped': False}, {},
+                         {'cache': True, 'batch': True}, {'staging': True, 'batch': True}):
             with self.subTest(**scenario):
                 _, calls, _ = self.run_sandbox([['build']], **scenario)
-                self.assertEqual(sum(call[0] == 'bulk-unpack-cache' for call in calls), expected)
-                if expected:
-                    self.assertLess(calls.index(['bulk-unpack-cache']),
-                                    next(i for i, c in enumerate(calls) if c[:2] == ['lake', 'build']))
+                names = [call[0] for call in calls]
+                self.assertEqual(names[:2], ['declaration-names.sh', 'lake'])
+                self.assertEqual(calls[0][1], 'save')
+                self.assertEqual(calls[1][:2], ['lake', 'build'])
 
     def test_each_phase_runs_only_its_own_work(self):
         _, calls, names = self.run_sandbox([['lint-style']])
