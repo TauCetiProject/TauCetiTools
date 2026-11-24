@@ -76,6 +76,31 @@ Projects that call these workflows and actions at `@main` (TauCeti does) run eve
 takes effect on the next CI run, and on the next deploy for services that install TauCetiTools
 (the merge queue, repair workers and fleet hosts). Fix the change and re-land it through a normal PR.
 
+## Worker admission contract
+
+The merge queue applies this repository's policies (`self_tested`, `ci_candidate` and others)
+when it admits and verifies pull requests, and it installs TauCetiTools main on every deploy.
+`worker-contract.yml` therefore runs TauCetiWorker main's `queue_admission` and
+`queue_admission_adapter` tests against every pull request and every push to `main` here. It is not
+a required check yet. TauCetiWorker's own CI tests a pinned Tools commit (`tools-rev` in its
+`pyproject.toml`), so a red `worker-contract` here does not turn Worker CI red; it says the next
+queue deploy would run code those tests reject.
+
+A change that alters a policy those tests assert on purpose, as "honour self-tested from any author"
+did, lands in two steps:
+
+1. Open the TauCetiTools pull request. Then open a TauCetiWorker pull request that updates the
+   Worker's tests and code, and sets `tools-rev` to the Tools pull request's head commit. Tools
+   merges with merge commits, so that commit stays on Tools `main` after the merge. The Worker pull
+   request's CI tests the new policy.
+2. Run `worker-contract` on the Tools pull request's branch against the Worker branch
+   (Actions, worker-contract, Run workflow, `worker-ref` set to the Worker branch, or
+   `gh workflow run worker-contract.yml --ref TOOLS_BRANCH -f worker-ref=WORKER_BRANCH`). When it
+   passes, merge the Tools pull request, then the Worker pull request straight after.
+
+Until both merge, `worker-contract` against Worker `main` fails as expected: on the Tools pull
+request, and on Tools `main` in the minutes between the two merges.
+
 ## CI reporting collection
 
 Routine reporting uses job webhooks and bounded service-side recovery. The site

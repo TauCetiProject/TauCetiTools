@@ -139,6 +139,9 @@ def reconcile(pr):
     status = readiness.assess(pr)
     if status.get("clear_deprecation_request"):
         remove_label(pr, "needs-rebase")
+    if status.get("drop_self_tested"):
+        # A PR build ran on this head and failed: the label skips PR CI, it does not overrule it.
+        remove_label(pr, "self-tested")
     desired = status["category"]          # one of STATUS_LABELS, or None (terminal)
     current = (set(status['labels']) & set(STATUS_LABELS) if 'labels' in status
                else set(current_status_labels(pr)))

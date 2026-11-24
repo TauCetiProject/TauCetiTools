@@ -13,7 +13,8 @@ SCRIPT = ROOT / 'tauceti_tools/assets/scripts/sandbox-build.sh'
 
 
 class CIAxiomPreflightTests(unittest.TestCase):
-    def sandbox(self, *, scoped=True, empty=False, duplicate_status=0, local_status=0, full_status=0, cache=False):
+    def sandbox(self, *, scoped=True, empty=False, duplicate_status=0, local_status=0, full_status=0, cache=False,
+                batch=False):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             for name in ('bin', 'trusted', 'drivers', 'watchdog/bin', '.lake/tmp'):
@@ -48,6 +49,7 @@ if name == 'local-axioms': sys.exit(int(os.environ['LOCAL_STATUS']))
                        CALLS=str(root / 'calls.jsonl'), TAUCETI_TRUSTED_SCRIPTS=str(root / 'trusted'),
                        WATCHDOG_TOOLCHAIN=str(root / 'watchdog'), LINT_DRIVER_EXE=str(root / 'drivers/lint-env-driver'),
                        AXIOMS_ONLY_MODULES=str(scope) if scoped else '', STAGE_LAKE_CACHE='',
+                       LINT_ONLY_MODULES=str(scope) if scoped else '', IS_BATCH='true' if batch else '',
                        LAKE_ARTIFACT_CACHE='true' if cache else '',
                        LAKE_RESTORE_ARTIFACTS='true' if cache else '',
                        LAKE_CACHE_DIR=str(root / '.lake/cache') if cache else '',
@@ -78,6 +80,12 @@ if name == 'local-axioms': sys.exit(int(os.environ['LOCAL_STATUS']))
         result, calls, _, _ = self.sandbox()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(any(c[0] == 'bulk-unpack-cache' for c in calls))
+
+    def test_batch_build_restores_with_stock_lake(self):
+        result, calls, _, _ = self.sandbox(cache=True, batch=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(any(c[0] == 'bulk-unpack-cache' for c in calls))
+        self.assertTrue(any(c[:2] == ['lake', 'build'] for c in calls))
 
     def test_empty_scope_stays_scoped(self):
         result, calls, _, _ = self.sandbox(empty=True)
