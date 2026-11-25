@@ -409,7 +409,7 @@ class ReadEvidence(unittest.TestCase):
 
 
 def guard_repository(tmp, files):
-    """A served repository with a base commit and a head adding `files` ({path: line count})."""
+    """A served repository with a base commit and a head adding `files` ({path: line count or bytes})."""
     import os
     import subprocess
     from pathlib import Path
@@ -430,6 +430,9 @@ def guard_repository(tmp, files):
     git("commit", "-qm", "base")
     base = git("rev-parse", "HEAD")
     for path, lines in files.items():
+        if isinstance(lines, bytes):  # raw content rather than a line count
+            (directory / path).write_bytes(lines)
+            continue
         (directory / path).write_text("".join(f"-- line {i}\n" for i in range(lines)))
     git("add", "-A")
     git("commit", "-qm", "head")
@@ -445,6 +448,8 @@ class SelfTestedDiffGuards(unittest.TestCase):
                   "too large to review: +3500 / -0 lines across 5 files"),
                  ({"TauCeti/Long.lean": 1251}, readiness.SCOPE_NEW_FILE,
                   "TauCeti/Long.lean: new Lean files must be at most 1250 lines (found 1251)"),
+                 ({"TauCeti/Blob.lean": b"\0\xff"}, readiness.SCOPE_CONTENT,
+                  "adds content a plain text diff cannot review: TauCeti/Blob.lean contains a NUL byte"),
                  ({"TauCeti/Short.lean": 1250}, "", None))
         for files, scope, sentence in cases:
             with tempfile.TemporaryDirectory() as tmp:
@@ -475,7 +480,8 @@ class SelfTestedDiffGuards(unittest.TestCase):
         text = workflow.read_text()
         for description, variable in ((readiness.SCOPE_TOO_LARGE, "TOO_LARGE"),
                                       (readiness.SCOPE_UNMEASURED, "DIFF_UNKNOWN"),
-                                      (readiness.SCOPE_NEW_FILE, "NEWFILE_TOO_LONG")):
+                                      (readiness.SCOPE_NEW_FILE, "NEWFILE_TOO_LONG"),
+                                      (readiness.SCOPE_CONTENT, "CONTENT_FORBIDDEN")):
             self.assertIn(f'"${{{{ env.{variable} }}}}" = "1" ]; then\n'
                           f'            sc_state=failure; sc_desc="{description}"', text)
 

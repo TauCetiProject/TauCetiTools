@@ -353,6 +353,135 @@ class ReviewSizeTests(unittest.TestCase):
         ).stdout
         self.assertEqual(outside, b".github/x.yml\n")
 
+    def forbidden(self):
+        with ci_git.object_reader(self.repo) as git:
+            return ci_git.forbidden_content(git, self.base, self.commit("head"))
+
+    def test_text_content_guard_rejects_binary_and_non_utf8_content(self):
+        self.assertEqual(self.forbidden(), [])
+        (self.repo / "TauCeti/Nul.lean").write_bytes(b"theorem x : True := trivial\n\0\n")
+        (self.repo / "TauCeti/Latin1.lean").write_bytes("-- café\n".encode("latin-1"))
+        (self.repo / "web").mkdir()
+        (self.repo / "web/logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR")
+        (self.repo / "TauCeti/Unicode.lean").write_text("-- ∀ ε > 0, café\n", encoding="utf-8")
+        (self.repo / "TauCeti/Other.lean").write_bytes(b"\xff\xfe-\0-\0\n\0")
+        self.assertEqual(self.forbidden(), [
+            ("TauCeti/Latin1.lean", "is not valid UTF-8"),
+            ("TauCeti/Nul.lean", "contains a NUL byte"),
+            ("TauCeti/Other.lean", "contains a NUL byte"),
+            ("web/logo.png", "contains a NUL byte"),
+        ])
+
+    def test_text_content_guard_measures_only_added_and_modified_paths(self):
+        (self.repo / "web").mkdir()
+        (self.repo / "web/logo.png").write_bytes(b"\x89PNG\0")
+        self.base = self.commit("binary already on the base")
+        (self.repo / "TauCeti/Other.lean").write_text("-- edited\n")
+        self.assertEqual(self.forbidden(), [])
+        (self.repo / "web/logo.png").unlink()
+        self.assertEqual(self.forbidden(), [])
+        self.git("mv", "TauCeti/Brenier.lean", "TauCeti/Moved.lean")
+        self.assertEqual(self.forbidden(), [])
+
+    def test_text_content_guard_rejects_a_renamed_binary(self):
+        (self.repo / "web").mkdir()
+        (self.repo / "web/logo.png").write_bytes(b"\x89PNG\0" * 100)
+        self.base = self.commit("binary already on the base")
+        self.git("mv", "web/logo.png", "TauCeti/logo.png")
+        self.assertEqual(self.forbidden(), [("TauCeti/logo.png", "contains a NUL byte")])
+
+    def test_text_content_guard_allowlist_is_exact_and_empty(self):
+        self.assertEqual(ci_git.TEXT_CONTENT_ALLOWLIST, frozenset())
+        (self.repo / "web").mkdir()
+        (self.repo / "web/logo.png").write_bytes(b"\x89PNG\0")
+        (self.repo / "web/logo.png.txt").write_bytes(b"\0")
+        with patch.object(ci_git, "TEXT_CONTENT_ALLOWLIST", frozenset({"web/logo.png"})):
+            self.assertEqual(self.forbidden(), [("web/logo.png.txt", "contains a NUL byte")])
+
+    def test_text_content_guard_rejects_lfs_pointers_submodules_and_symlinked_attributes(self):
+        (self.repo / "TauCeti/Big.lean").write_text(
+            "version https://git-lfs.github.com/spec/v1\noid sha256:" + "0" * 64 + "\nsize 12\n")
+        os.symlink("TauCeti/Other.lean", self.repo / ".gitattributes")
+        os.symlink("Other.lean", self.repo / "TauCeti/Link.lean")
+        self.git("add", "--all")
+        # A gitlink has no worktree directory, so `commit` (which adds everything) would drop it.
+        self.git("update-index", "--add", "--cacheinfo", f"160000,{self.base},TauCeti/Sub")
+        self.git("commit", "--quiet", "-m", "gitlink")
+        with ci_git.object_reader(self.repo) as git:
+            found = ci_git.forbidden_content(git, self.base, self.git("rev-parse", "HEAD"))
+        self.assertEqual(found, [
+            (".gitattributes", "is a symbolic link"),
+            ("TauCeti/Big.lean", "is a Git LFS pointer"),
+            ("TauCeti/Sub", "is a submodule (gitlink)"),
+        ])
+
+    def test_text_content_guard_rejects_diff_hiding_gitattributes(self):
+        (self.repo / "TauCeti/.gitattributes").write_text(
+            "# comment\n"
+            "*.lean text eol=lf whitespace=trailing-space diff\n"
+            "* text=auto\n"
+            "*.md linguist-generated=false -linguist-generated\n"
+            "*.olean binary\n"
+            "Secret.lean -diff\n"
+            "Hidden.lean !diff\n"
+            "Driver.lean diff=hidden\n"
+            "Raw.lean -text\n"
+            "Union.lean merge=union\n"
+            "Lfs.lean filter=lfs\n"
+            "Enc.lean working-tree-encoding=UTF-16\n"
+            "Gen.lean linguist-generated\n"
+            "[attr]hide -diff -merge\n"
+            '"Quoted name.lean" -text\n'
+            '"Broken.lean -diff\n'
+        )
+        found = self.forbidden()
+        self.assertEqual([reason for _, reason in found], [
+            "line 10 sets `merge=union`",
+            "line 11 sets `filter=lfs`",
+            "line 12 sets `working-tree-encoding=UTF-16`",
+            "line 13 sets `linguist-generated`",
+            "line 14 defines an attribute macro",
+            "line 15 sets `-text`",
+            "line 16 is unreadable (unterminated quoted pattern)",
+            "line 5 sets `binary`",
+            "line 6 sets `-diff`",
+            "line 7 sets `!diff`",
+            "line 8 sets `diff=hidden`",
+            "line 9 sets `-text`",
+        ])
+        self.assertEqual({path for path, _ in found}, {"TauCeti/.gitattributes"})
+
+    def test_pr_guards_report_forbidden_content_without_lifting_it(self):
+        (self.repo / "TauCeti/Nul.lean").write_bytes(b"\0")
+        head = self.commit("head")
+        with ci_git.object_reader(self.repo) as git:
+            for kwargs in ({}, {"scope": False}, {"scope": False, "large_refactor": True}):
+                result = ci_git.pr_guards(git, self.base, head, **kwargs)
+                self.assertEqual(result["forbidden_content"], [("TauCeti/Nul.lean", "contains a NUL byte")])
+                self.assertEqual(len(result["violations"]), 1)
+                self.assertIn("TauCeti/Nul.lean contains a NUL byte", result["violations"][0])
+        output = json.loads(subprocess.check_output(
+            [sys.executable, str(SCRIPT), "pr-guards", "--no-scope", "--checkout", str(self.repo),
+             "--base", self.base, "--head", head]))
+        self.assertEqual(output["forbidden_content"], [["TauCeti/Nul.lean", "contains a NUL byte"]])
+
+    def test_forbidden_content_sentence_lists_at_most_twenty_paths(self):
+        for index in range(25):
+            (self.repo / f"TauCeti/B{index:02}.bin").write_bytes(b"\0")
+        result = self.guards(scope=False)
+        self.assertEqual(len(result["forbidden_content"]), 25)
+        (sentence,) = result["violations"]
+        self.assertIn("TauCeti/B19.bin contains a NUL byte; and 5 more.", sentence)
+        self.assertNotIn("B20", sentence)
+
+    def test_unreadable_blob_listing_fails_closed(self):
+        git = Mock()
+        git.run.return_value = Mock(stdout=b"0" * 40 + b" missing\n")
+        with self.assertRaises(ValueError):
+            ci_git._read_blobs(git, ["0" * 40])
+        with self.assertRaises(ValueError):
+            ci_git._raw_records(b":100644 100644 x\0")
+
     def test_repository_reader_reads_worktrees(self):
         head = self.commit("head")
         worktree = Path(self.temp.name) / "worktree"
