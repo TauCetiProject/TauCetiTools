@@ -258,7 +258,12 @@ async function timedFetch(input:any,init?:any):Promise<Response> {
   }catch(error){fetchPhases.failed_reading_body++;throw error;}finally{fetchPhases.body.delete(id);release();}
 }
 export const __timedFetchForTests=timedFetch;
-try{if(neonConfig)neonConfig.fetchFunction=timedFetch;}catch{}
+// Send HTTP queries to the compute endpoint's own hostname, which Neon also
+// serves at /sql, rather than the driver default of the shared regional
+// api.<cell> host. The writer WebSocket already uses this hostname and stays
+// healthy while HTTP requests to the shared host stall before headers.
+export const neonFetchEndpoint=(host:string):string=>'https://'+host+'/sql';
+try{if(neonConfig){neonConfig.fetchFunction=timedFetch;neonConfig.fetchEndpoint=neonFetchEndpoint;}}catch{}
 export const HTTP_READ_CONCURRENCY=4;
 export const HTTP_READ_QUEUE=32;
 export const HTTP_READ_ADMISSION_MS=5000;
