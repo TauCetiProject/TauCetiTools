@@ -1179,6 +1179,23 @@ class MainIntegration(unittest.TestCase):
         output, _ = entry.pick(dict(fleet={endpoint: OSError("down")}, state=dict(shared=OSError("down"))), **common)
         self.assertEqual((output["pool"], output["runner"]), ("busy", ""))
 
+    def test_pr_priority_queues_on_the_fleet_pr_class_without_reading_capacity(self):
+        # The queue's build of a Forgejo PR waits for the Fleet PR class like any PR build, however
+        # busy it is; only the exact value `pr` does that, and it still never names a cloud runner.
+        entry = RoutingEntrypoint()
+        endpoint = "orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1"
+        common = dict(FLEET_JOB_KIND="main-integration", FLEET_CI_ENABLED="true", FLEET_READ_TOKEN="fleet",
+                      FLEET_RUNNER_GROUP_ID="3", GITHUB_STATE_TOKEN="state")
+        down = dict(fleet={endpoint: OSError("down")}, state=dict(shared=OSError("down")))
+        output, calls = entry.pick(down, MAIN_INTEGRATION_PRIORITY="pr", **common)
+        self.assertEqual(output["pool"], "fleet")
+        self.assertEqual(json.loads(output["runner"]), dict(group="TauCetiFleet", labels=["self-hosted", "linux", "x64", "tauceti-fleet-pr"]))
+        self.assertEqual(calls, [])
+        for other in ("", "idle", "PR", "pr "):
+            with self.subTest(priority=other):
+                output, _ = entry.pick(down, MAIN_INTEGRATION_PRIORITY=other, **common)
+                self.assertEqual((output["pool"], output["runner"]), ("busy", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

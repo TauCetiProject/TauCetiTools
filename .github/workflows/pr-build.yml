@@ -111,8 +111,10 @@ concurrency:
 
 env:
   SOURCE_CANDIDATE: ${{ github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-source-candidate-v2' }}
-  # The queue's main-integration build: accepted head H merged onto the main M it names, run only on
-  # idle Fleet PR capacity, reported only as the `main-integration` status on H (docs/main-integration.md).
+  # The queue's main-integration build: accepted head H merged onto the main M it names, run on idle
+  # Fleet PR capacity (or, at `priority` `pr`, queued on the Fleet PR class like a PR build), reported
+  # only as the `main-integration` status on H (docs/main-integration.md). Its `source` names the forge
+  # of its PR number; a `forgejo` number is never looked up on GitHub.
   MAIN_INTEGRATION: ${{ github.event_name == 'repository_dispatch' && github.event.action == 'tauceti-main-integration' }}
   # An attested landing (decision 200): the queue's repair worker already built, audited and linted
   # exactly this staging candidate with main's tools and policy, and the queue attests it
@@ -244,9 +246,12 @@ jobs:
           FLEET_RUNNER_GROUP_ID: ${{ vars.FLEET_RUNNER_GROUP_ID }}
           FLEET_READ_TOKEN: ${{ steps.inventory.outputs.token || secrets.FLEET_READ_TOKEN }}
           MAIN_INTEGRATION_MIN_IDLE: ${{ vars.MAIN_INTEGRATION_MIN_IDLE }}
+          MAIN_INTEGRATION_PRIORITY: ${{ github.event.client_payload.priority }}
         run: python3 scripts/fleet_runner.py --route
-      # A main-integration build only uses idle Fleet PR capacity. When the picker found none (or
-      # could not look), it builds nothing and says so on H, so the queue asks again later.
+      # An idle-priority main-integration build only uses idle Fleet PR capacity. When the picker
+      # found none (or could not look), it builds nothing and says so on H, so the queue asks again
+      # later. A `pr`-priority build is always routed to the Fleet PR class, so it reaches this
+      # step only when the picker itself failed.
       - name: Defer a main-integration build while the Fleet PR pool is busy
         if: ${{ always() && env.MAIN_INTEGRATION == 'true' && steps.pick.outputs.pool != 'fleet' }}
         env:
@@ -453,6 +458,7 @@ jobs:
           REQUESTED_PR: ${{ inputs.pr || github.event.client_payload.pr }}
           MI_HEAD_SHA: ${{ github.event.client_payload.head_sha }}
           MI_MAIN_SHA: ${{ github.event.client_payload.main_sha }}
+          MI_SOURCE: ${{ github.event.client_payload.source }}
           CI_SOURCE_READ_TOKEN: ${{ secrets.CI_SOURCE_READ_TOKEN }}
           CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
           CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
@@ -507,9 +513,13 @@ jobs:
             REPO='${{ github.repository }}'
             STATUS_SHA="$SHA"
             AUTHOR=""
+            SOURCE="${MI_SOURCE:-github}"
             [[ "$NUM" =~ ^[1-9][0-9]*$ && "$SHA" =~ ^[0-9a-f]{40}$ && "$BASE_REF" =~ ^[0-9a-f]{40}$ ]] || {
               echo "::error::main-integration dispatch needs a PR number and two commit SHAs"; exit 1;
             }
+            # A Forgejo PR's number can name an unrelated GitHub PR, so the steps below that read a
+            # GitHub PR by number (the large-refactor exemption, the lint-scope labels) skip it.
+            [[ "$SOURCE" =~ ^(github|forgejo)$ ]] || { echo "::error::main-integration source must be github or forgejo"; exit 1; }
           elif [ "${{ github.event_name }}" = "pull_request_target" ]; then
             NUM='${{ github.event.pull_request.number }}'
             SHA='${{ github.event.pull_request.head.sha }}'
@@ -530,6 +540,7 @@ jobs:
           [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid head SHA"; exit 1; }
           {
             echo "num=$NUM"
+            echo "source=${SOURCE:-github}"
             echo "sha=$SHA"
             echo "repo=$REPO"
             echo "base_ref=$BASE_REF"
@@ -813,7 +824,7 @@ jobs:
         env:
           SIZE_BASE: ${{ steps.pr.outputs.mergebase }}
           SIZE_HEAD: ${{ steps.pr.outputs.sha }}
-          SIZE_PR: ${{ steps.pr.outputs.num }}
+          SIZE_PR: ${{ steps.pr.outputs.source == 'github' && steps.pr.outputs.num || '' }}
           GH_READ_TOKEN: ${{ steps.ci-api.outputs.read-token || github.token }}
           TAUCETI_GITHUB_READ_ROLE: ${{ steps.ci-api.outputs.read-role }}
         run: |
@@ -1385,6 +1396,8 @@ jobs:
           EVENT: ${{ github.event_name }}
           IS_BATCH: ${{ env.IS_BATCH }}
           NUM: ${{ steps.pr.outputs.num }}
+          # A Forgejo PR's number is not a GitHub PR: lint-scope.sh reads no GitHub labels for it.
+          PR_SOURCE: ${{ steps.pr.outputs.source }}
           # Raw H remains the GitHub metadata/label identity. TESTED_* below select
           # the local T-vs-B module diff without asking GitHub about synthetic T.
           BASE: ${{ env.IS_BATCH == 'true' && steps.pr.outputs.base_ref || steps.pr.outputs.base_sha }}

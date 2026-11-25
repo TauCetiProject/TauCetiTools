@@ -11,8 +11,21 @@ The controller sends a `repository_dispatch` of type `tauceti-main-integration` 
 
 ```json
 {"event_type": "tauceti-main-integration",
- "client_payload": {"pr": 123, "head_sha": "<H>", "main_sha": "<M>"}}
+ "client_payload": {"pr": 123, "head_sha": "<H>", "main_sha": "<M>",
+                    "source": "github", "priority": "idle"}}
 ```
+
+Two fields are optional:
+
+- `source` names the forge of `pr`: `github` (the default) or `forgejo`. A Forgejo PR's number can
+  also name an unrelated GitHub PR (both forges have a #550), so a `forgejo` build never reads a
+  GitHub PR by that number: it gets no `large-refactor` exemption, and its lint scope is the
+  changed modules without the GitHub `full-lint` label or `lint-repair/` branch rules. Any other
+  value fails the run.
+- `priority` is `idle` (the default) or `pr`. The queue sends `pr` for the PR build of a Forgejo
+  PR, which no GitHub event builds (TauCetiWorker `tauceti_queue/forgejo_pr_build.py`): it waits
+  for the Fleet PR class like any PR build instead of using only idle capacity, and is never
+  deferred. Any other value is `idle`.
 
 The project's `.github/workflows/main-integration.yml` (name `main-integration`) calls this
 repository's `pr-build.yml@main` with the same routing inputs as its `pr-build.yml`. Because it is
@@ -22,7 +35,8 @@ is inert until the repository variable `TAUCETI_MAIN_INTEGRATION_ENABLED` is `tr
 
 ## What the run does
 
-- **Placement.** The picker's `main-integration` class (`fleet_runner.main_integration_route`)
+- **Placement.** At `priority` `pr` the picker queues the build on the Fleet PR class. Otherwise
+  the picker's `main-integration` class (`fleet_runner.main_integration_route`)
   selects the Fleet PR class only when at least `MAIN_INTEGRATION_MIN_IDLE` (repository variable,
   default 8) online PR runners are idle and a complete queue observation shows no Fleet PR job
   waiting. It never chooses GitHub-hosted or Namespace capacity. Otherwise it posts `main-integration` = `error`
