@@ -7,6 +7,7 @@ const bundle=await build({entryPoints:['src/repository_store.ts'],bundle:true,pl
  b.onResolve({filter:/^\.\/storage$/},()=>({path:'logging',namespace:'outbound-fixture'}));
  b.onLoad({filter:/.*/,namespace:'outbound-fixture'},({path})=>({contents:path==='logging'?`export const log=(event,fields)=>globalThis.${key}.logs.push({event,...fields});`:`
  export const types={setTypeParser(){}};
+ export const neonConfig={};
  // Neon query results are lazy thenables: nothing is sent until awaited.
  export const neon=()=>({query:(sql,bindings,options)=>({then:(resolve,reject)=>globalThis.${key}.http(sql,bindings,options).then(resolve,reject)}),transaction:(queries,options)=>globalThis.${key}.http('transaction',[],options).then(rows=>queries.map(()=>rows))});
  export class Client {constructor(){throw Error('no writer in this fixture');}}
@@ -97,4 +98,14 @@ test('an aborted waiter leaves the queue without consuming a slot',async()=>{
  const waiter=gate.run(async()=>{started=true;},{signal:abort.signal});
  abort.abort();await assert.rejects(waiter,error=>error instanceof StoreUnavailable);
  assert.equal(gate.waiting,0);release();await first;assert.equal(gate.inFlight,0);assert.equal(started,false);
+});
+test('diagnostics name running and slow reads by SQL text only',async()=>{
+ const gate=new OutboundGate(2,10,1000);let release;
+ const held=gate.run(()=>new Promise(resolve=>{release=resolve;}),{label:'SELECT  data\n FROM resources WHERE id=?'});
+ await tick();
+ const running=gate.snapshot().running;assert.equal(running.length,1);assert.equal(running[0].label,'SELECT data FROM resources WHERE id=?');
+ release();await held;
+ await assert.rejects(gate.run(async()=>{throw Error('private value');},{label:'SELECT 1'}));
+ const snapshot=gate.snapshot();assert.equal(snapshot.running.length,0);assert.equal(snapshot.recent_slow.at(-1).label,'SELECT 1');assert.equal(snapshot.recent_slow.at(-1).ok,false);
+ assert.ok(!JSON.stringify(snapshot).includes('private'));
 });

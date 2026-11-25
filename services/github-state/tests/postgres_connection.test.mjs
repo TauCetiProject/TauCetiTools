@@ -7,6 +7,7 @@ const bundle=await build({entryPoints:['src/repository_store.ts'],bundle:true,pl
  b.onResolve({filter:/^\.\/storage$/},()=>({path:'logging',namespace:'connection-fixture'}));
  b.onLoad({filter:/.*/,namespace:'connection-fixture'},({path})=>({contents:path==='logging'?`export const log=(event,fields)=>globalThis.${key}.log(event,fields);`:`
  export const types={setTypeParser(){}};
+ export const neonConfig={};
  export const neon=()=>({query:(...args)=>globalThis.${key}.http(...args),transaction:queries=>Promise.all(queries)});
  export class Client {constructor(){return globalThis.${key}.client();}}
  `,loader:'js'}));
