@@ -8,7 +8,8 @@
 #   declaration-names.sh record   after the lint phases: run the workflow-pinned
 #                                 DeclarationNames.lean and print its single record line.
 # Inputs come from the sandbox environment: IS_BATCH, LAKE_CACHE_DIR, LINT_ONLY_MODULES (one module name per
-# line), TAUCETI_TRUSTED_SCRIPTS (or TRUSTED_SCRIPTS), WATCHDOG_TOOLCHAIN and CI_RESOURCE_TESTED_{HEAD,BASE,COMMIT}.
+# line), TAUCETI_TRUSTED_SCRIPTS (or TRUSTED_SCRIPTS), WATCHDOG_TOOLCHAIN, SHARED_TREE_HIT and
+# CI_RESOURCE_TESTED_{HEAD,BASE,COMMIT}.
 # Staging batches (IS_BATCH=true) and builds without a changed-module list record nothing.
 set -u
 mode="${1:-}"
@@ -21,7 +22,10 @@ unavailable="$base_dir/.unavailable"
 case "$mode" in
   save)
     mkdir -p "$base_dir" 2>/dev/null || exit 0
-    while IFS= read -r module; do
+    # Over the shared build tree (SHARED_TREE_HIT=1, scripts/shared_tree.py) .lake/build already
+    # holds an older main's outputs, not the captured base's, so every header comes from the
+    # base's own map below instead.
+    [ "${SHARED_TREE_HIT:-}" = 1 ] || while IFS= read -r module; do
       module="${module//[[:space:]]/}"
       [ -n "$module" ] || continue
       rel="${module//./\/}.olean"

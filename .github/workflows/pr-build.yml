@@ -1342,7 +1342,8 @@ jobs:
           # A hit or a miss exits 0. Nonzero means pr/.lake is neither the verified overlay nor
           # the empty directory it was: an infrastructure failure, never the candidate's.
           if ! python3 gate/scripts/shared_tree.py mount --project pr --watchdog "$WATCHDOG_TOOLCHAIN" \
-               --overlay "$(dirname "$RUNNER_TEMP")/_shared-tree-overlay" --record "$record"; then
+               --overlay "$(dirname "$RUNNER_TEMP")/_shared-tree-overlay" --record "$record" \
+               --github-env "$GITHUB_ENV"; then
             echo "INFRA=1" >> "$GITHUB_ENV"
             exit 1
           fi
@@ -1732,6 +1733,7 @@ jobs:
             --setenv AXIOMS_ONLY_MODULES "${AXIOMS_ONLY_MODULES:-}" \
             --setenv STAGE_LAKE_CACHE "${STAGE_LAKE_CACHE:-}" \
             --setenv IS_BATCH "${IS_BATCH:-}" \
+            --setenv SHARED_TREE_HIT "${SHARED_TREE_HIT:-}" \
             --setenv ATTESTED_BUILD "${{ env.ATTESTED == 'true' && '1' || '' }}" \
             --setenv CI_RESOURCE_TESTED_HEAD "${CI_RESOURCE_TESTED_HEAD:-}" \
             --setenv CI_RESOURCE_TESTED_BASE "${CI_RESOURCE_TESTED_BASE:-}" \

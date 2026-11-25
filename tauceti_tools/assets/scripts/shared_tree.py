@@ -166,7 +166,7 @@ def prune(project, lake):
     return removed
 
 
-def mount(project, watchdog, overlay, record, *, tree=TREE, key_tool=KEY_TOOL, sudo=("sudo", "-n")):
+def mount(project, watchdog, overlay, record, *, tree=TREE, key_tool=KEY_TOOL, sudo=("sudo", "-n"), github_env=None):
     started = time.monotonic()
     project = Path(project).absolute()
     lake = project / ".lake"
@@ -201,17 +201,23 @@ def mount(project, watchdog, overlay, record, *, tree=TREE, key_tool=KEY_TOOL, s
         (overlay / "work").mkdir(mode=0o700)
         options = (f"userxattr,volatile,nosuid,nodev,lowerdir={tree / 'lake'},"
                    f"upperdir={overlay / 'upper'},workdir={overlay / 'work'}")
+        # From here on the mount may exist whatever the command reports (a timeout after the
+        # kernel mounted it, say): every exit below inspects the real mount point.
+        mounted = True
         try:
             run([*sudo, "mount", "-t", "overlay", "overlay", "-o", options, str(lake)])
         except (subprocess.SubprocessError, OSError):
             raise Miss("mount-failed") from None
-        mounted = True
         if not is_mount(lake) or mount_type(lake) != "overlay":
             raise RuntimeError("pr/.lake is not the overlay after mounting")
         value["pruned"] = prune(project, lake)
         (lake / "tmp").mkdir(exist_ok=True)
         value.update(shared_tree="hit", mount_seconds=round(time.monotonic() - started, 1))
         write_json(record, value)
+        if github_env:
+            # Later trusted steps and the sandbox learn that .lake starts populated.
+            with open(github_env, "a") as stream:
+                stream.write("SHARED_TREE_HIT=1\n")
         print(f"Shared CI tree: hit; entry {ready['id']} (main {ready['commit'][:12]}), "
               f"{value['pruned']} outputs of modules without a source removed")
         return 0
@@ -223,10 +229,11 @@ def mount(project, watchdog, overlay, record, *, tree=TREE, key_tool=KEY_TOOL, s
     if mounted:
         # Back to the plain empty directory the step found, or stop: a half-prepared .lake must
         # never reach the build.
-        try:
-            run([*sudo, "umount", str(lake)])
-        except (subprocess.SubprocessError, OSError):
-            pass
+        if is_mount(lake):
+            try:
+                run([*sudo, "umount", str(lake)])
+            except (subprocess.SubprocessError, OSError):
+                pass
         if is_mount(lake) or any(lake.iterdir()):
             value.update(shared_tree="miss:" + reason, unrestored=True)
             write_json(record, value)
@@ -276,13 +283,14 @@ def main(argv=None):
     m.add_argument("--watchdog", required=True)
     m.add_argument("--overlay", required=True)
     m.add_argument("--record", required=True)
+    m.add_argument("--github-env", help="append SHARED_TREE_HIT=1 here on a hit")
     r = sub.add_parser("record")
     r.add_argument("--overlay", required=True)
     r.add_argument("--record", required=True)
     r.add_argument("--field", action="append", default=[], help="NAME=VALUE to add to the record")
     args = parser.parse_args(argv)
     if args.action == "mount":
-        return mount(args.project, args.watchdog, args.overlay, args.record)
+        return mount(args.project, args.watchdog, args.overlay, args.record, github_env=args.github_env)
     fields = {}
     for item in args.field:
         name, separator, text = item.partition("=")

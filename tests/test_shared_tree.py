@@ -196,6 +196,27 @@ class Mount(unittest.TestCase):
         self.assertEqual([call[0] for call in mounts.calls], ["mount", "umount"])
         self.assertEqual(list((self.project / ".lake").iterdir()), [])
 
+    def test_a_mount_command_that_fails_after_mounting_is_undone(self):
+        with FakeMounts(self) as mounts:
+            real = mounts.run
+
+            def mounted_then_failed(args, timeout=60, **kwargs):
+                result = real(args, timeout=timeout, **kwargs)
+                if args[0] == "mount":
+                    raise subprocess.TimeoutExpired(args, timeout)
+                return result
+            with patch.object(shared_tree, "run", side_effect=mounted_then_failed):
+                status, value = self.mount()
+        self.assertEqual((status, value["shared_tree"]), (0, "miss:mount-failed"))
+        self.assertEqual([call[0] for call in mounts.calls], ["mount", "umount"])
+        self.assertEqual(list((self.project / ".lake").iterdir()), [])
+
+    def test_a_hit_tells_later_steps(self):
+        github_env = self.root / "github-env"
+        with FakeMounts(self):
+            self.mount(github_env=github_env)
+        self.assertEqual(github_env.read_text(), "SHARED_TREE_HIT=1\n")
+
     def test_an_overlay_that_cannot_be_removed_fails_the_step(self):
         with FakeMounts(self) as mounts, patch.object(shared_tree, "prune", side_effect=OSError("boom")):
             mounts.stuck = True
@@ -310,6 +331,12 @@ class Workflow(unittest.TestCase):
             if "bwrap" in (step.get("run") or ""):
                 self.assertNotIn("SHARED_TREE_OVERLAY", step["run"])
                 self.assertNotIn("/opt/tauceti-shared-tree", step["run"])
+
+    def test_the_sandbox_learns_of_a_hit(self):
+        build = next(s for s in self.steps() if s.get("id") == "sandbox_build")
+        self.assertIn('--setenv SHARED_TREE_HIT "${SHARED_TREE_HIT:-}"', build["run"])
+        mount = next(s for s in self.steps() if s.get("id") == "shared_tree")
+        self.assertIn('--github-env "$GITHUB_ENV"', mount["run"])
 
     def test_the_record_step_never_fails_the_job(self):
         step = next(s for s in self.steps() if s.get("name", "").startswith("Record the shared build tree"))

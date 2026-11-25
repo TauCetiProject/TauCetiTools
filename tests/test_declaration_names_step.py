@@ -71,6 +71,13 @@ class DeclarationNamesStepTest(unittest.TestCase):
         self.assertEqual((base / "A.olean").read_bytes(), b"base A")
         self.assertFalse((base / "New.olean").exists())
 
+    def test_save_over_the_shared_tree_ignores_the_older_build(self):
+        result = self.run_helper("save", SHARED_TREE_HIT="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # The older build's header is not copied; only the base's map (empty here) supplies headers.
+        self.assertFalse((self.root / ".lake/telemetry/base-oleans/TauCeti/A.olean").exists())
+        self.assertIn("base-headers: 0 of 2 changed modules", result.stderr)
+
     def test_save_reads_missing_headers_from_the_cache(self):
         (self.root / ".lake/build").rename(self.root / "unused-build")
         result = self.run_helper("save")
