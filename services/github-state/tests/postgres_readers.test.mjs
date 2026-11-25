@@ -57,3 +57,9 @@ test('standalone writes never use a read session',async()=>{
  const f=fixture();f.store.transaction=async()=>'writer';
  assert.equal(await f.store.batch([{sql:'UPDATE jobs SET due=?',bindings:[1]}]),'writer');assert.equal(f.clients.length,0);
 });
+test('idle sessions that end or age leave the pool and the open count',async()=>{
+ const f=fixture();await Promise.all([f.store.exec('SELECT 1'),f.store.exec('SELECT 1')]);
+ assert.equal(f.store.outbound().readers.idle,2);
+ f.clients[0].emit('end');assert.equal(f.store.outbound().readers.idle,1);assert.equal(f.store.outbound().readers.open,1);
+ const realNow=Date.now;try{Date.now=()=>realNow()+READER_MAX_AGE_MS+1;assert.equal(f.store.outbound().readers.idle,0);assert.equal(f.store.outbound().readers.open,0);}finally{Date.now=realNow;}
+});

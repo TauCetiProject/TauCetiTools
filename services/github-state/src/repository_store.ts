@@ -352,17 +352,28 @@ export class ReaderPool {
   private idle:Reader[]=[];
   private counters={opened:0,open:0,reused:0,discarded:0,connect_failures:0,timeouts:0};
   constructor(private url:string) {}
-  snapshot():Record<string,unknown> {return {...this.counters,idle:this.idle.length};}
+  snapshot():Record<string,unknown> {this.reap();return {...this.counters,idle:this.idle.length};}
+  // Expire every aged idle session, not only the one a read would pop.
+  reap():void {for(const reader of [...this.idle])if(reader.broken || Date.now()-reader.opened>READER_MAX_AGE_MS)this.discard(reader);}
+  private reapTimer?:ReturnType<typeof setTimeout>;
+  private scheduleReap():void {
+    if(this.reapTimer || !this.idle.length)return;
+    this.reapTimer=setTimeout(()=>{this.reapTimer=undefined;this.reap();this.scheduleReap();},READER_MAX_AGE_MS);
+    (this.reapTimer as any)?.unref?.();
+  }
   private discard(reader:Reader):void {
-    if(reader.broken && (reader as any).gone)return;
+    if((reader as any).gone)return;
     (reader as any).gone=true;reader.broken=true;this.counters.open--;this.counters.discarded++;
+    const index=this.idle.indexOf(reader);if(index>=0)this.idle.splice(index,1);
     try{void reader.client.end().catch(()=>{});}catch{}
     try{reader.client.neonConfig.destroy();}catch{}
   }
   private async connect():Promise<Reader> {
     let client:Client;try{client=new Client({connectionString:this.url,connectionTimeoutMillis:10000,query_timeout:READER_QUERY_MS});}catch{throw new StoreUnavailable();}
     const reader:Reader={client,broken:false,opened:Date.now()};this.counters.opened++;this.counters.open++;
-    client.on('error',()=>{reader.broken=true;});client.on('end',()=>{reader.broken=true;});
+    // A session that fails or closes while idle leaves the pool at once.
+    const lost=()=>{reader.broken=true;if(this.idle.includes(reader))this.discard(reader);};
+    client.on('error',lost);client.on('end',lost);
     let timer:ReturnType<typeof setTimeout>|undefined;
     try{
       await Promise.race([(async()=>{await client.connect();await client.query("SET default_transaction_read_only=on; SET statement_timeout='15s'; SET idle_in_transaction_session_timeout='30s'");})(),
@@ -372,6 +383,7 @@ export class ReaderPool {
   }
   async use<T>(work:(client:Client)=>Promise<T>):Promise<T> {
     let reader:Reader|undefined;
+    this.reap();
     while(this.idle.length){const candidate=this.idle.pop()!;if(candidate.broken || Date.now()-candidate.opened>READER_MAX_AGE_MS)this.discard(candidate);else{reader=candidate;this.counters.reused++;break;}}
     reader ??= await this.connect();
     let timer:ReturnType<typeof setTimeout>|undefined,healthy=false;
@@ -384,7 +396,7 @@ export class ReaderPool {
       throw error;
     }finally{
       if(timer)clearTimeout(timer);
-      if(healthy && !reader.broken)this.idle.push(reader);else this.discard(reader);
+      if(healthy && !reader.broken){this.idle.push(reader);this.scheduleReap();}else this.discard(reader);
     }
   }
 }
