@@ -132,27 +132,21 @@ class NightlyVerification(unittest.TestCase):
             # independent comparison when the source build and evidence transfer succeeded.
             needs = SimpleNamespace(verify=SimpleNamespace(result='failure',
                 outputs=SimpleNamespace(build=build, manifest_upload=upload)))
-            for job in ('pick-reference-runner', 'reference'):
-                self.assertEqual(condition(JOBS[job]['if'], needs=needs,
-                    github=SimpleNamespace(repository='TauCetiProject/TauCeti')), expected)
+            self.assertEqual(condition(JOBS['reference']['if'], needs=needs,
+                github=SimpleNamespace(repository='TauCetiProject/TauCeti')), expected)
             self.assertEqual(condition(step('verify', 'fresh_manifest')['if'],
                 steps=SimpleNamespace(fresh_build=SimpleNamespace(outcome=build))), build == 'success')
 
-    def test_reference_placement_uses_a_new_capacity_decision_and_attempt_fence(self):
-        self.assertEqual(JOBS['pick-reference-runner']['needs'], 'verify')
-        source = JOBS['reference']['runs-on'].replace('needs.pick-reference-runner', 'needs.picker')
-        for current, selected, target, expected in (
-            (1, '1', '["self-hosted","tauceti-fleet-pr"]', ['self-hosted', 'tauceti-fleet-pr']),
-            (1, '1', '["nscloud-build"]', ['nscloud-build']),
-            (2, '1', '["namespace-build"]', 'ubuntu-24.04'),
-            (2, '', '', 'ubuntu-24.04'),
-        ):
-            with self.subTest(current=current, selected=selected):
-                actual = condition(source, github=SimpleNamespace(run_attempt=current),
-                                   needs=SimpleNamespace(picker=SimpleNamespace(
-                                       outputs=SimpleNamespace(attempt=selected, runner=target))),
-                                   fromJSON=json.loads, format=lambda s, *args: s.format(*args))
-                self.assertEqual(actual, expected)
+    def test_reference_waits_for_the_fleet_pr_class_and_never_cloud_capacity(self):
+        self.assertNotIn('pick-reference-runner', JOBS)
+        self.assertEqual(JOBS['reference']['needs'], 'verify')
+        self.assertNotIn('concurrency', JOBS['reference'])
+        for job in ('verify', 'reference'):
+            self.assertEqual(JOBS[job]['runs-on'], {
+                'group': 'TauCetiFleet', 'labels': ['self-hosted', 'linux', 'x64', 'tauceti-fleet-pr']})
+        text = (ROOT / '.github/workflows/nightly-verify.yml').read_text()
+        for label in ('nscloud-', 'namespace-profile-', 'namespace-features:'):
+            self.assertNotIn(label, text)
 
     def test_restore_uses_the_materialized_helper_with_the_reference_as_target(self):
         # Model the reference checkout's uvx wrapper failing on a runner without uvx.
