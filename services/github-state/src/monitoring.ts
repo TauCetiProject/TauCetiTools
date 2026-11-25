@@ -173,6 +173,27 @@ export async function within<T>(work:Promise<T>,ms:number):Promise<T> {
 const timedBuckets=new WeakMap<object,{buckets:WeakMap<R2Bucket,R2Bucket>,pending:number}>();
 const MAX_TIMED_BUCKET_IO=16;
 const BODY_READS=new Set<PropertyKey>(['text','json','arrayBuffer','blob','bytes']);
+// Diagnostics only: counts R2 calls awaiting a response (each holds one of the
+// invocation's outbound connections until its headers arrive).
+export interface BucketCounters {in_flight:number;max_in_flight:number;started:number;failed:number;starts:Map<number,number>;next:number}
+export const bucketCounters=():BucketCounters=>({in_flight:0,max_in_flight:0,started:0,failed:0,starts:new Map(),next:0});
+export function bucketSnapshot(c:BucketCounters):Record<string,unknown> {
+  const oldest=Math.min(...c.starts.values());
+  return {in_flight:c.in_flight,max_in_flight:c.max_in_flight,started:c.started,failed:c.failed,oldest_ms:Number.isFinite(oldest)?Date.now()-oldest:null};
+}
+export function countedBucket(bucket:R2Bucket,counters:BucketCounters):R2Bucket {
+  return new Proxy(bucket,{get(target,key){
+    const value=Reflect.get(target,key,target);
+    if(typeof value!=='function')return value;
+    return (...args:any[])=>{
+      const id=counters.next++;counters.in_flight++;counters.started++;counters.max_in_flight=Math.max(counters.max_in_flight,counters.in_flight);counters.starts.set(id,Date.now());
+      const done=()=>{counters.in_flight--;counters.starts.delete(id);};
+      let result:any;
+      try{result=value.apply(target,args);}catch(error){done();counters.failed++;throw error;}
+      return Promise.resolve(result).then(v=>{done();return v;},error=>{done();counters.failed++;throw error;});
+    };
+  }});
+}
 export function timedBucket(bucket:R2Bucket,owner?:object):R2Bucket {
   let budget=owner?timedBuckets.get(owner):undefined;
   if(!budget){budget={buckets:new WeakMap(),pending:0};if(owner)timedBuckets.set(owner,budget);}

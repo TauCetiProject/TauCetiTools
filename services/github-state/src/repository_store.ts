@@ -201,32 +201,53 @@ const storeLog=(event:string,fields:Record<string,unknown>)=>{try{log(event,fiel
 // writer WebSocket and R2), starts each read timeout only once admitted, and
 // sheds reads that cannot be admitted promptly instead of stacking them.
 export const HTTP_READ_CONCURRENCY=4;
-export const HTTP_READ_QUEUE=64;
+export const HTTP_READ_QUEUE=32;
 export const HTTP_READ_ADMISSION_MS=5000;
+interface GateEntry {deadline:number;admit:()=>void;expire:()=>void}
 export class OutboundGate {
   private active=0;
-  private queue:{admit:()=>void}[]=[];
-  private counters={admitted:0,queued:0,shed_queue_full:0,shed_wait:0,completed:0,failed:0,wait_ms_total:0,max_wait_ms:0,busy_ms_total:0,max_busy_ms:0};
+  // Priority entries (session cleanup) are admitted before ordinary reads.
+  private queue:GateEntry[]=[];private priority:GateEntry[]=[];
+  private counters={admitted:0,queued:0,shed_queue_full:0,shed_wait:0,cancelled:0,completed:0,failed:0,wait_ms_total:0,max_wait_ms:0,busy_ms_total:0,max_busy_ms:0};
   private lastShedAt:number|null=null;private lastShedLog=0;
   constructor(readonly limit=HTTP_READ_CONCURRENCY,readonly maxQueue=HTTP_READ_QUEUE,readonly maxWaitMs=HTTP_READ_ADMISSION_MS) {}
   get inFlight():number{return this.active;}
-  get waiting():number{return this.queue.length;}
-  private shed(reason:'queue_full'|'wait'):never {
+  get waiting():number{return this.queue.length+this.priority.length;}
+  private shedError(reason:'queue_full'|'wait'):StoreUnavailable {
     if(reason==='queue_full')this.counters.shed_queue_full++;else this.counters.shed_wait++;
     const now=Date.now();this.lastShedAt=now;
     if(now-this.lastShedLog>=10000){this.lastShedLog=now;storeLog('repository_http_shed',{reason,...this.snapshot()});}
-    throw new StoreUnavailable();
+    return new StoreUnavailable();
   }
-  async run<T>(work:()=>Promise<T>):Promise<T> {
+  private remove(entry:GateEntry):boolean {
+    for(const list of [this.priority,this.queue]){const index=list.indexOf(entry);if(index>=0){list.splice(index,1);return true;}}
+    return false;
+  }
+  // Hand a released slot to the next unexpired waiter; expired waiters are
+  // shed here even if their timer has not fired yet.
+  private release():void {
+    const now=Date.now();
+    for(;;){
+      const next=this.priority.shift() ?? this.queue.shift();
+      if(!next){this.active--;return;}
+      if(next.deadline<now){next.expire();continue;}
+      next.admit();return;
+    }
+  }
+  async run<T>(work:()=>Promise<T>,options:{priority?:boolean,signal?:AbortSignal}={}):Promise<T> {
     const enqueued=Date.now();
+    if(options.signal?.aborted)throw new StoreUnavailable();
     if(this.active>=this.limit) {
-      if(this.queue.length>=this.maxQueue)this.shed('queue_full');
+      if(!options.priority && this.queue.length>=this.maxQueue)throw this.shedError('queue_full');
       this.counters.queued++;
-      let admitted=false;
       await new Promise<void>((resolve,reject)=>{
-        const entry={admit:()=>{admitted=true;clearTimeout(timer);resolve();}};
-        const timer=setTimeout(()=>{if(admitted)return;const index=this.queue.indexOf(entry);if(index>=0)this.queue.splice(index,1);try{this.shed('wait');}catch(error){reject(error);}},this.maxWaitMs);
-        this.queue.push(entry);
+        let timer:ReturnType<typeof setTimeout>|undefined,settled=false;
+        const finish=(error?:unknown)=>{if(settled)return;settled=true;if(timer)clearTimeout(timer);options.signal?.removeEventListener('abort',cancel);if(error)reject(error);else resolve();};
+        const entry:GateEntry={deadline:enqueued+this.maxWaitMs,admit:()=>finish(),expire:()=>finish(this.shedError('wait'))};
+        const cancel=()=>{if(this.remove(entry)){this.counters.cancelled++;finish(new StoreUnavailable());}};
+        timer=setTimeout(()=>{if(this.remove(entry))entry.expire();},this.maxWaitMs);
+        options.signal?.addEventListener('abort',cancel);
+        (options.priority?this.priority:this.queue).push(entry);
       });
       // release() hands its slot over without decrementing active.
     }else this.active++;
@@ -237,12 +258,12 @@ export class OutboundGate {
     finally{
       const busy=Date.now()-admittedAt;this.counters.busy_ms_total+=busy;this.counters.max_busy_ms=Math.max(this.counters.max_busy_ms,busy);
       if(ok)this.counters.completed++;else this.counters.failed++;
-      const next=this.queue.shift();if(next)next.admit();else this.active--;
+      this.release();
     }
   }
   snapshot():Record<string,unknown> {
-    const c=this.counters;
-    return {limit:this.limit,max_queue:this.maxQueue,max_wait_ms_allowed:this.maxWaitMs,in_flight:this.active,waiting:this.queue.length,...c,
+    const c=this.counters,oldest=Math.min(...this.priority.concat(this.queue).map(e=>e.deadline));
+    return {limit:this.limit,max_queue:this.maxQueue,max_wait_ms_allowed:this.maxWaitMs,in_flight:this.active,waiting:this.waiting,oldest_wait_ms:Number.isFinite(oldest)?Math.max(0,Date.now()-(oldest-this.maxWaitMs)):null,...c,
       mean_wait_ms:c.admitted?Math.round(c.wait_ms_total/c.admitted):null,mean_busy_ms:c.completed+c.failed?Math.round(c.busy_ms_total/(c.completed+c.failed)):null,last_shed_at:this.lastShedAt};
   }
 }
@@ -263,7 +284,7 @@ export class PostgresStore implements RepositoryStore {
   private gate=new OutboundGate();
   private writerSocket:{open:number,since:number|null,opened:number}={open:0,since:null,opened:0};
   outbound():Record<string,unknown> {return {http_reads:this.gate.snapshot(),writer_socket:{...this.writerSocket,open_ms:this.writerSocket.since===null?null:Date.now()-this.writerSocket.since},writer_queued:this.writer.queuedOtherWork};}
-  private gated<T>(work:()=>Promise<T>):Promise<T> {return this.gate.run(work);}
+  private gated<T>(work:()=>Promise<T>,options?:{priority?:boolean,signal?:AbortSignal}):Promise<T> {return this.gate.run(work,options);}
   constructor(private url:string,repository:string,private generation:string,private client?:Client,private diagnostics:{connections:number,queries:number,lastConnection?:number}={connections:0,queries:0},private connectionState?:ConnectionState,private onQuery?:()=>void) {
     this.schema=schemaName(repository);
     // Match the driver host parser. Endpoint overrides or ambiguous URL
@@ -366,7 +387,7 @@ export class PostgresStore implements RepositoryStore {
       // backend. Never signal a pooler backend which could have been reused.
       const direct=this.directEndpoint;
       const rows=await Promise.race([
-        this.gated(()=>this.http.query(`SELECT ${direct?'pg_terminate_backend(pid,1000)':'false'} AS terminated FROM pg_stat_activity WHERE pid=$1 AND (EXTRACT(EPOCH FROM backend_start)*1000000)::bigint::text=$2 AND application_name=$3 AND usename=current_user AND datname=current_database()`,[session.pid,session.started_us,session.token],{fetchOptions:{signal:abort.signal}})),
+        this.gated(()=>this.http.query(`SELECT ${direct?'pg_terminate_backend(pid,1000)':'false'} AS terminated FROM pg_stat_activity WHERE pid=$1 AND (EXTRACT(EPOCH FROM backend_start)*1000000)::bigint::text=$2 AND application_name=$3 AND usename=current_user AND datname=current_database()`,[session.pid,session.started_us,session.token],{fetchOptions:{signal:abort.signal}}),{priority:true,signal:abort.signal}),
         new Promise<never>((_,reject)=>{timer=setTimeout(()=>{abort.abort();reject(new StoreUnavailable());},3000);})
       ]);
       if(rows.length===0)result='already_ended';

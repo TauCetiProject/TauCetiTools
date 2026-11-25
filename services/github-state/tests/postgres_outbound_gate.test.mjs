@@ -73,3 +73,28 @@ test('a failed read releases its slot',async()=>{
  assert.equal(gate.inFlight,0);assert.equal(gate.snapshot().failed,1);
  assert.equal(await gate.run(async()=>7),7);
 });
+test('an expired waiter is shed at handoff even before its timer fires',async()=>{
+ const gate=new OutboundGate(1,10,5);let release;
+ const first=gate.run(()=>new Promise(resolve=>{release=resolve;}));
+ let started=false;const second=gate.run(async()=>{started=true;});
+ const spin=Date.now();while(Date.now()-spin<15){}
+ release();await first;
+ await assert.rejects(second,error=>error instanceof StoreUnavailable);
+ assert.equal(started,false);assert.equal(gate.inFlight,0);assert.equal(gate.snapshot().shed_wait,1);
+});
+test('priority waiters are admitted first and bypass the ordinary queue bound',async()=>{
+ const gate=new OutboundGate(1,1,60000);const releases=[],order=[];
+ const first=gate.run(()=>new Promise(resolve=>releases.push(resolve)));
+ const ordinary=gate.run(async()=>{order.push('ordinary');});
+ const cleanup=gate.run(async()=>{order.push('cleanup');},{priority:true});
+ releases.shift()();await Promise.all([first,ordinary,cleanup]);
+ assert.deepEqual(order,['cleanup','ordinary']);
+});
+test('an aborted waiter leaves the queue without consuming a slot',async()=>{
+ const gate=new OutboundGate(1,10,60000);let release;
+ const first=gate.run(()=>new Promise(resolve=>{release=resolve;}));
+ const abort=new AbortController();let started=false;
+ const waiter=gate.run(async()=>{started=true;},{signal:abort.signal});
+ abort.abort();await assert.rejects(waiter,error=>error instanceof StoreUnavailable);
+ assert.equal(gate.waiting,0);release();await first;assert.equal(gate.inFlight,0);assert.equal(started,false);
+});
