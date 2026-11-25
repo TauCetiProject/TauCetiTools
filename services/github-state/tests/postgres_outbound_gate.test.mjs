@@ -13,7 +13,7 @@ const bundle=await build({entryPoints:['src/repository_store.ts'],bundle:true,pl
  export class Client {constructor(){throw Error('no writer in this fixture');}}
  `,loader:'js'}));
 }}]});
-const {PostgresStore,OutboundGate,StoreUnavailable,HTTP_READ_CONCURRENCY}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
+const {PostgresStore,OutboundGate,StoreUnavailable,HTTP_READ_CONCURRENCY,HEAVY_READ_CONCURRENCY,isHeavyRead}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
 function fixture(){
  const pending=[],state={active:0,max:0,signals:[]};
  globalThis[key]={logs:[],http(sql,bindings,options){
@@ -41,6 +41,47 @@ test('read batches and reads share one gate',async()=>{
  await tick();assert.equal(f.state.active,HTTP_READ_CONCURRENCY);
  while(f.pending.length || f.state.active){f.pending.splice(0).forEach(release=>release());await tick();}
  await Promise.all(work);assert.equal(f.state.max,HTTP_READ_CONCURRENCY);
+});
+test('heavy reads leave at least one slot for small reads',async()=>{
+ const f=fixture();
+ assert.ok(HEAVY_READ_CONCURRENCY<HTTP_READ_CONCURRENCY);
+ const page='SELECT * FROM (SELECT stored_page.* FROM (SELECT 1) AS stored_page) AS bounded_page WHERE true';
+ assert.equal(isHeavyRead(page),true);assert.equal(isHeavyRead('SELECT data FROM resources WHERE id=?'),false);
+ const heavy=[...Array.from({length:2},()=>f.store.exec(page)),...Array.from({length:2},()=>f.store.batch([{sql:'SELECT 1'},{sql:'SELECT 2'}]))];
+ await tick();
+ assert.equal(f.state.active,HEAVY_READ_CONCURRENCY);
+ let snapshot=f.store.outbound().http_reads;assert.equal(snapshot.in_flight_heavy,HEAVY_READ_CONCURRENCY);assert.equal(snapshot.waiting_heavy,4-HEAVY_READ_CONCURRENCY);
+ // A small read arriving behind waiting heavy reads takes the reserved slot.
+ const small=f.store.exec('SELECT 1');await tick();
+ assert.equal(f.state.active,HEAVY_READ_CONCURRENCY+1);
+ f.pending.pop()();assert.deepEqual((await small).toArray(),[{ok:1}]);
+ snapshot=f.store.outbound().http_reads;assert.equal(snapshot.by_class.small.admitted,1);assert.equal(snapshot.by_class.heavy.admitted,HEAVY_READ_CONCURRENCY);
+ while(f.pending.length || f.state.active){f.pending.splice(0).forEach(release=>release());await tick();}
+ await Promise.all(heavy);assert.equal(f.state.max,HEAVY_READ_CONCURRENCY+1);
+ snapshot=f.store.outbound().http_reads;assert.equal(snapshot.by_class.heavy.admitted,4);assert.equal(snapshot.in_flight_heavy,0);
+});
+test('a heavy read waiting for the heavy cap does not block small reads queued behind it',async()=>{
+ const gate=new OutboundGate(3,10,60000);const releases=new Map(),order=[];
+ const hold=(heavy,name)=>gate.run(()=>new Promise(resolve=>releases.set(name,resolve)).then(()=>order.push(name)),{heavy});
+ const held=[hold(true,'h1'),hold(true,'h2'),hold(false,'s1')];await tick();
+ assert.equal(gate.inFlight,3);assert.equal(gate.snapshot().in_flight_heavy,2);
+ held.push(hold(true,'h3'),hold(false,'s2'));await tick();
+ // A small read frees its slot; the heavy cap is full, so the small read
+ // queued behind the waiting heavy read is admitted first.
+ releases.get('s1')();await tick();
+ assert.ok(releases.has('s2'));assert.ok(!releases.has('h3'));assert.equal(gate.snapshot().waiting_heavy,1);
+ // Once a heavy read finishes, the waiting heavy read takes its slot.
+ releases.get('h1')();await tick();assert.ok(releases.has('h3'));assert.equal(gate.waiting,0);
+ for(const name of ['h2','s2','h3'])releases.get(name)();
+ await Promise.all(held);assert.equal(gate.snapshot().completed,5);assert.equal(gate.inFlight,0);
+});
+test('a shed heavy read is counted by class',async()=>{
+ const gate=new OutboundGate(2,10,20);let release;
+ const first=gate.run(()=>new Promise(resolve=>{release=resolve;}),{heavy:true});
+ await assert.rejects(gate.run(async()=>'late',{heavy:true}),error=>error instanceof StoreUnavailable);
+ assert.equal(gate.snapshot().by_class.heavy.shed_wait,1);assert.equal(gate.snapshot().by_class.small.shed_wait,0);
+ assert.equal(await gate.run(async()=>'small'),'small');
+ release();await first;assert.equal(gate.inFlight,0);
 });
 test('the read timeout starts only after admission',async()=>{
  const f=fixture();

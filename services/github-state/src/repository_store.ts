@@ -265,79 +265,99 @@ export const __timedFetchForTests=timedFetch;
 export const neonFetchEndpoint=(host:string):string=>'https://'+host+'/sql';
 try{if(neonConfig){neonConfig.fetchFunction=timedFetch;neonConfig.fetchEndpoint=neonFetchEndpoint;}}catch{}
 export const HTTP_READ_CONCURRENCY=3;
+// Heavy reads (stored scan pages and multi-statement read batches) move up to
+// a few MB each and can hold a slot for seconds. They may use at most this many
+// slots, so at least one slot always serves small reads. Raising the total
+// instead would leave the writer WebSocket and R2 too few of the six outbound
+// connections described above.
+export const HEAVY_READ_CONCURRENCY=2;
 export const HTTP_READ_QUEUE=32;
 export const HTTP_READ_ADMISSION_MS=5000;
-interface GateEntry {deadline:number;admit:()=>void;expire:()=>void}
+// scanRows wraps each PostgreSQL page in this derived table.
+export const isHeavyRead=(sql:string):boolean=>sql.includes(' AS bounded_page ');
+type ReadClass='small'|'heavy';
+interface GateEntry {deadline:number;heavy:boolean;admit:()=>void;expire:()=>void}
+const classCounters=()=>({admitted:0,shed_queue_full:0,shed_wait:0,failed:0,wait_ms_total:0,max_wait_ms:0,busy_ms_total:0,max_busy_ms:0,over_5s:0});
 export class OutboundGate {
-  private active=0;
+  private active=0;private activeHeavy=0;
   // Priority entries (session cleanup) are admitted before ordinary reads.
+  // Ordinary reads are FIFO, except that a heavy read waits while heavy reads
+  // already hold heavyLimit slots; small reads behind it may go first.
   private queue:GateEntry[]=[];private priority:GateEntry[]=[];
   private counters={admitted:0,queued:0,shed_queue_full:0,shed_wait:0,cancelled:0,completed:0,failed:0,wait_ms_total:0,max_wait_ms:0,busy_ms_total:0,max_busy_ms:0};
+  private classes:Record<ReadClass,ReturnType<typeof classCounters>>={small:classCounters(),heavy:classCounters()};
   private lastShedAt:number|null=null;private lastShedLog=0;
   // Diagnostics only: SQL text prefixes (never bindings) of running reads and
   // of recent reads that failed or took over a second.
-  private running=new Map<number,{label:string,started:number}>();private nextRun=0;
-  private slow:{label:string,busy_ms:number,ok:boolean,at:number}[]=[];
+  private running=new Map<number,{label:string,started:number,heavy:boolean}>();private nextRun=0;
+  private slow:{label:string,busy_ms:number,ok:boolean,at:number,heavy:boolean}[]=[];
   private buckets={under_100ms:0,under_1s:0,under_5s:0,over_5s:0};
-  constructor(readonly limit=HTTP_READ_CONCURRENCY,readonly maxQueue=HTTP_READ_QUEUE,readonly maxWaitMs=HTTP_READ_ADMISSION_MS) {}
+  constructor(readonly limit=HTTP_READ_CONCURRENCY,readonly maxQueue=HTTP_READ_QUEUE,readonly maxWaitMs=HTTP_READ_ADMISSION_MS,readonly heavyLimit=Math.min(HEAVY_READ_CONCURRENCY,Math.max(1,limit-1))) {}
   get inFlight():number{return this.active;}
   get waiting():number{return this.queue.length+this.priority.length;}
-  private shedError(reason:'queue_full'|'wait'):StoreUnavailable {
-    if(reason==='queue_full')this.counters.shed_queue_full++;else this.counters.shed_wait++;
+  private shedError(reason:'queue_full'|'wait',heavy:boolean):StoreUnavailable {
+    const c=this.classes[heavy?'heavy':'small'];
+    if(reason==='queue_full'){this.counters.shed_queue_full++;c.shed_queue_full++;}else{this.counters.shed_wait++;c.shed_wait++;}
     const now=Date.now();this.lastShedAt=now;
-    if(now-this.lastShedLog>=10000){this.lastShedLog=now;storeLog('repository_http_shed',{reason,...this.snapshot()});}
+    if(now-this.lastShedLog>=10000){this.lastShedLog=now;storeLog('repository_http_shed',{reason,heavy,...this.snapshot()});}
     return new StoreUnavailable();
   }
   private remove(entry:GateEntry):boolean {
     for(const list of [this.priority,this.queue]){const index=list.indexOf(entry);if(index>=0){list.splice(index,1);return true;}}
     return false;
   }
-  // Hand a released slot to the next unexpired waiter; expired waiters are
-  // shed here even if their timer has not fired yet.
-  private release():void {
+  private admissible(heavy:boolean):boolean {return this.active<this.limit && (!heavy || this.activeHeavy<this.heavyLimit);}
+  private take(heavy:boolean):void {this.active++;if(heavy)this.activeHeavy++;}
+  // Hand free slots to the earliest admissible unexpired waiters; expired
+  // waiters met on the way are shed even if their timer has not fired yet.
+  private pump():void {
     const now=Date.now();
-    for(;;){
-      const next=this.priority.shift() ?? this.queue.shift();
-      if(!next){this.active--;return;}
-      if(next.deadline<now){next.expire();continue;}
-      next.admit();return;
-    }
+    for(const list of [this.priority,this.queue])
+      for(let index=0;index<list.length && this.active<this.limit;) {
+        const entry=list[index];
+        if(entry.deadline<now){list.splice(index,1);entry.expire();continue;}
+        if(!this.admissible(entry.heavy)){index++;continue;}
+        list.splice(index,1);this.take(entry.heavy);entry.admit();
+      }
   }
-  async run<T>(work:()=>Promise<T>,options:{priority?:boolean,signal?:AbortSignal,label?:string}={}):Promise<T> {
-    const enqueued=Date.now();
+  async run<T>(work:()=>Promise<T>,options:{priority?:boolean,signal?:AbortSignal,label?:string,heavy?:boolean}={}):Promise<T> {
+    const enqueued=Date.now(),heavy=Boolean(options.heavy) && !options.priority,cls=this.classes[heavy?'heavy':'small'];
     if(options.signal?.aborted)throw new StoreUnavailable();
-    if(this.active>=this.limit) {
-      if(!options.priority && this.queue.length>=this.maxQueue)throw this.shedError('queue_full');
+    if(!this.admissible(heavy)) {
+      if(!options.priority && this.queue.length>=this.maxQueue)throw this.shedError('queue_full',heavy);
       this.counters.queued++;
       await new Promise<void>((resolve,reject)=>{
         let timer:ReturnType<typeof setTimeout>|undefined,settled=false;
         const finish=(error?:unknown)=>{if(settled)return;settled=true;if(timer)clearTimeout(timer);options.signal?.removeEventListener('abort',cancel);if(error)reject(error);else resolve();};
-        const entry:GateEntry={deadline:enqueued+this.maxWaitMs,admit:()=>finish(),expire:()=>finish(this.shedError('wait'))};
+        const entry:GateEntry={deadline:enqueued+this.maxWaitMs,heavy,admit:()=>finish(),expire:()=>finish(this.shedError('wait',heavy))};
         const cancel=()=>{if(this.remove(entry)){this.counters.cancelled++;finish(new StoreUnavailable());}};
         timer=setTimeout(()=>{if(this.remove(entry))entry.expire();},this.maxWaitMs);
         options.signal?.addEventListener('abort',cancel);
         (options.priority?this.priority:this.queue).push(entry);
       });
-      // release() hands its slot over without decrementing active.
-    }else this.active++;
+      // pump() took the slot for this waiter before admitting it.
+    }else this.take(heavy);
     const admittedAt=Date.now(),wait=admittedAt-enqueued;
     this.counters.admitted++;this.counters.wait_ms_total+=wait;this.counters.max_wait_ms=Math.max(this.counters.max_wait_ms,wait);
-    let ok=false;const run=this.nextRun++,label=(options.label ?? 'unlabelled').replace(/\s+/g,' ').slice(0,120);this.running.set(run,{label,started:admittedAt});
+    cls.admitted++;cls.wait_ms_total+=wait;cls.max_wait_ms=Math.max(cls.max_wait_ms,wait);
+    let ok=false;const run=this.nextRun++,label=(options.label ?? 'unlabelled').replace(/\s+/g,' ').slice(0,120);this.running.set(run,{label,started:admittedAt,heavy});
     try{const result=await work();ok=true;return result;}
     finally{
       this.running.delete(run);
       const busy=Date.now()-admittedAt;this.counters.busy_ms_total+=busy;this.counters.max_busy_ms=Math.max(this.counters.max_busy_ms,busy);
+      cls.busy_ms_total+=busy;cls.max_busy_ms=Math.max(cls.max_busy_ms,busy);if(busy>=5000)cls.over_5s++;
       this.buckets[busy<100?'under_100ms':busy<1000?'under_1s':busy<5000?'under_5s':'over_5s']++;
-      if(!ok || busy>=1000){this.slow.push({label,busy_ms:busy,ok,at:Date.now()});if(this.slow.length>20)this.slow.shift();}
-      if(ok)this.counters.completed++;else this.counters.failed++;
-      this.release();
+      if(!ok || busy>=1000){this.slow.push({label,busy_ms:busy,ok,at:Date.now(),heavy});if(this.slow.length>20)this.slow.shift();}
+      if(ok)this.counters.completed++;else{this.counters.failed++;cls.failed++;}
+      this.active--;if(heavy)this.activeHeavy--;
+      this.pump();
     }
   }
   snapshot():Record<string,unknown> {
     const c=this.counters,oldest=Math.min(...this.priority.concat(this.queue).map(e=>e.deadline));
-    return {limit:this.limit,max_queue:this.maxQueue,max_wait_ms_allowed:this.maxWaitMs,in_flight:this.active,waiting:this.waiting,oldest_wait_ms:Number.isFinite(oldest)?Math.max(0,Date.now()-(oldest-this.maxWaitMs)):null,...c,
+    return {limit:this.limit,heavy_limit:this.heavyLimit,max_queue:this.maxQueue,max_wait_ms_allowed:this.maxWaitMs,in_flight:this.active,in_flight_heavy:this.activeHeavy,waiting:this.waiting,waiting_heavy:this.queue.filter(e=>e.heavy).length,oldest_wait_ms:Number.isFinite(oldest)?Math.max(0,Date.now()-(oldest-this.maxWaitMs)):null,...c,
       mean_wait_ms:c.admitted?Math.round(c.wait_ms_total/c.admitted):null,mean_busy_ms:c.completed+c.failed?Math.round(c.busy_ms_total/(c.completed+c.failed)):null,last_shed_at:this.lastShedAt,
-      busy_buckets:{...this.buckets},running:[...this.running.values()].map(r=>({label:r.label,age_ms:Date.now()-r.started})),recent_slow:[...this.slow]};
+      busy_buckets:{...this.buckets},by_class:{small:{...this.classes.small},heavy:{...this.classes.heavy}},running:[...this.running.values()].map(r=>({label:r.label,heavy:r.heavy,age_ms:Date.now()-r.started})),recent_slow:[...this.slow]};
   }
 }
 // Reads over persistent WebSocket sessions to the compute endpoint, the same
@@ -419,7 +439,7 @@ export class PostgresStore implements RepositoryStore {
   readers?:ReaderPool;
   private writerSocket:{open:number,since:number|null,opened:number}={open:0,since:null,opened:0};
   outbound():Record<string,unknown> {return {read_transport:this.readers?'websocket':'http',http_reads:this.gate.snapshot(),http_fetch:fetchPhaseSnapshot(),readers:this.readers?.snapshot() ?? null,writer_socket:{...this.writerSocket,open_ms:this.writerSocket.since===null?null:Date.now()-this.writerSocket.since},writer_queued:this.writer.queuedOtherWork};}
-  private gated<T>(work:()=>Promise<T>,options?:{priority?:boolean,signal?:AbortSignal,label?:string}):Promise<T> {return this.gate.run(work,options);}
+  private gated<T>(work:()=>Promise<T>,options?:{priority?:boolean,signal?:AbortSignal,label?:string,heavy?:boolean}):Promise<T> {return this.gate.run(work,options);}
   constructor(private url:string,repository:string,private generation:string,private client?:Client,private diagnostics:{connections:number,queries:number,lastConnection?:number}={connections:0,queries:0},private connectionState?:ConnectionState,private onQuery?:()=>void) {
     this.schema=schemaName(repository);
     // Match the driver host parser. Endpoint overrides or ambiguous URL
@@ -457,8 +477,8 @@ export class PostgresStore implements RepositoryStore {
     // Standalone writes are still fenced and atomic. The callback path uses a
     // request-scoped interactive connection, closed before the request returns.
     if(!this.client && !/^\s*SELECT\b/i.test(sql))return (await this.batch([{sql,bindings}]))[0] as Rows<T>;
-    if(!this.client && this.readers){const readers=this.readers;return this.run(async()=>new Rows<T>(await this.gated(()=>readers.use(async client=>(await client.query(query,bindings)).rows),{label:sql})));}
-    return this.run(async()=>new Rows<T>(this.client?(await this.client.query(query,bindings)).rows:(await this.gated(()=>this.http.transaction([this.http.query(query,bindings)],{readOnly:true,fetchOptions:{signal:AbortSignal.timeout(15000)}}),{label:sql}))[0] as T[]));
+    if(!this.client && this.readers){const readers=this.readers;return this.run(async()=>new Rows<T>(await this.gated(()=>readers.use(async client=>(await client.query(query,bindings)).rows),{label:sql,heavy:isHeavyRead(sql)})));}
+    return this.run(async()=>new Rows<T>(this.client?(await this.client.query(query,bindings)).rows:(await this.gated(()=>this.http.transaction([this.http.query(query,bindings)],{readOnly:true,fetchOptions:{signal:AbortSignal.timeout(15000)}}),{label:sql,heavy:isHeavyRead(sql)}))[0] as T[]));
   }
   async batch(statements:Statement[]):Promise<Rows<any>[]> {
     if(!this.client && statements.some(s=>!/^\s*SELECT\b/i.test(s.sql)))return this.transaction(tx=>tx.batch(statements));
@@ -469,7 +489,7 @@ export class PostgresStore implements RepositoryStore {
     if(!this.client && this.readers){
       // HTTP batches here are stored reads only (mutations entered transaction() above).
       const readers=this.readers;
-      return this.selectBatch(statements,query=>this.run(()=>this.gated(()=>readers.use(client=>query(client)),{label:'batch['+statements.length+'] '+statements.map(s=>s.sql.slice(0,40)).join(' | ')})));
+      return this.selectBatch(statements,query=>this.run(()=>this.gated(()=>readers.use(client=>query(client)),{label:'batch['+statements.length+'] '+statements.map(s=>s.sql.slice(0,40)).join(' | '),heavy:statements.length>1})));
     }
     if(this.client) {
       if(statements.every(s=>/^\s*SELECT\b/i.test(s.sql)))return this.selectBatch(statements,query=>this.run(()=>query(this.client!)));
@@ -491,7 +511,7 @@ export class PostgresStore implements RepositoryStore {
       const results=await this.gated(()=>{
         const queries=statements.map(s=>this.http.query(postgresSQL(s.sql,this.schema),s.bindings || []));
         return this.http.transaction(queries,{readOnly:true,isolationLevel:'RepeatableRead',fetchOptions:{signal:AbortSignal.timeout(15000)}});
-      },{label:'batch['+statements.length+'] '+statements.map(s=>s.sql.slice(0,40)).join(' | ')});
+      },{label:'batch['+statements.length+'] '+statements.map(s=>s.sql.slice(0,40)).join(' | '),heavy:statements.length>1});
       return results.map(rows=>new Rows(rows));
     });
   }

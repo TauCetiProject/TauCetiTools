@@ -505,6 +505,8 @@ export class RepositoryState extends DurableObject<Env> {
     const remote=this.store.backend==='postgres';let limit=remote?4096:256;
     // Bound transferred bytes as well as row count, without multiplying remote
     // round trips for small rows. One oversized row is allowed for progress.
+    // The bounded_page alias also marks these pages as heavy reads for the
+    // PostgreSQL outbound gate (isHeavyRead).
     const bounded=(query:string,order:string)=>remote?'SELECT * FROM (SELECT stored_page.*,SUM(octet_length(to_jsonb(stored_page)::text)) OVER (ORDER BY '+order+' ROWS UNBOUNDED PRECEDING) AS __bytes,ROW_NUMBER() OVER (ORDER BY '+order+') AS __position,COUNT(*) OVER () AS __candidate_count FROM ('+query+') AS stored_page) AS bounded_page WHERE __bytes<=2097152 OR __position=1 ORDER BY '+order:query;
     const finished=(page:any[])=>!page.length || (remote?page.length===page[0].__candidate_count && page[0].__candidate_count<limit:page.length<limit);
     // A byte cut must also reduce candidate work on subsequent pages. Otherwise
