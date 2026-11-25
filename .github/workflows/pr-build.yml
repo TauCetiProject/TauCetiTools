@@ -1300,6 +1300,53 @@ jobs:
           if [ "$rc" = 1 ]; then echo "SOURCE_REJECTED=1" >> "$GITHUB_ENV"; fi
           exit "$rc"
 
+      # Before the shared tree's key, which names this exact watchdog by content.
+      - name: Prepare trusted read-only Lean watchdog toolchain
+        if: ${{ env.INFRA != '1' }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.elan/bin:$PATH"
+          real_lean=$(cd pr && elan which lean)
+          watchdog="$RUNNER_TEMP/lean-watchdog-toolchain"
+          bash gate/scripts/perf/prepare-watchdog-toolchain.sh "$watchdog" "$real_lean"
+          echo "WATCHDOG_TOOLCHAIN=$watchdog" >> "$GITHUB_ENV"
+
+      # The host's shared read-only build tree (TauCetiWorker decisions 211 and 216). Fleet binds
+      # one immutable, verified entry, a complete .lake for a published main commit, read-only at
+      # /opt/tauceti-shared-tree in PR guests whose slot leased one. When its key (toolchain,
+      # Lean and wrapper binaries, watchdog, Lake, manifest, lakefile, path) matches this job's,
+      # the trusted script mounts it as the lower layer of a private overlay on the still-empty
+      # pr/.lake. Every write, the sandbox's included, lands in an upper layer outside anything
+      # the sandbox mounts, so no job can change what another reads. It then deletes the outputs
+      # of every root module without a source in the candidate, so audits reading build/lib/lean
+      # wholesale see only the candidate's modules. The restore steps below then fetch only what
+      # is missing, and Lake checks every trace and restores or rebuilds what differs, as for any
+      # base older than the merge base. Ordinary PR builds only: batches (staging, attested,
+      # source candidates, merge groups) and Lake-pin bumps keep today's path, and so does any
+      # miss. Setting the TAUCETI_SHARED_TREE repository variable to `off` stops new jobs using
+      # it at once, wherever Fleet offers it. The record goes to Fleet's job evidence.
+      - name: Mount the host's shared read-only build tree (ordinary PR builds on Fleet)
+        id: shared_tree
+        if: >-
+          ${{ env.INFRA != '1' && env.IS_BATCH != 'true' && env.BUMP != '1' && startsWith(runner.name, 'fleet-')
+          && vars.TAUCETI_SHARED_TREE != 'off'
+          && vars.LAKE_CACHE_ARTIFACT_ENDPOINT_PUBLIC != '' && vars.LAKE_CACHE_REVISION_ENDPOINT_PUBLIC != '' }}
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.elan/bin:$PATH"
+          record="$RUNNER_TEMP/shared-tree.json"
+          if [ -d /fleet-link/telemetry ] && [ -w /fleet-link/telemetry ]; then record=/fleet-link/telemetry/shared-tree.json; fi
+          echo "SHARED_TREE_RECORD=$record" >> "$GITHUB_ENV"
+          echo "SHARED_TREE_OVERLAY=$(dirname "$RUNNER_TEMP")/_shared-tree-overlay" >> "$GITHUB_ENV"
+          # A hit or a miss exits 0. Nonzero means pr/.lake is neither the verified overlay nor
+          # the empty directory it was: an infrastructure failure, never the candidate's.
+          if ! python3 gate/scripts/shared_tree.py mount --project pr --watchdog "$WATCHDOG_TOOLCHAIN" \
+               --overlay "$(dirname "$RUNNER_TEMP")/_shared-tree-overlay" --record "$record"; then
+            echo "INFRA=1" >> "$GITHUB_ENV"
+            exit 1
+          fi
+
       # Restore only Mathlib's compressed, content-addressed `.ltar` download store from a
       # trusted main publisher. This workflow never writes that GitHub Actions cache. The keys
       # hash the exact candidate pins, so an exact historical or new-pin snapshot is preferred. A
@@ -1568,16 +1615,6 @@ jobs:
           PUBLIC_ARTIFACT_ENDPOINT: ${{ vars.LAKE_CACHE_ARTIFACT_ENDPOINT_PUBLIC }}
           PUBLIC_REVISION_ENDPOINT: ${{ vars.LAKE_CACHE_REVISION_ENDPOINT_PUBLIC }}
         run: bash gate/scripts/repair-cache-get.sh pr "$REPAIR_HEAD" "$REPAIR_BASE"
-
-      - name: Prepare trusted read-only Lean watchdog toolchain
-        if: ${{ env.INFRA != '1' }}
-        run: |
-          set -euo pipefail
-          export PATH="$HOME/.elan/bin:$PATH"
-          real_lean=$(cd pr && elan which lean)
-          watchdog="$RUNNER_TEMP/lean-watchdog-toolchain"
-          bash gate/scripts/perf/prepare-watchdog-toolchain.sh "$watchdog" "$real_lean"
-          echo "WATCHDOG_TOOLCHAIN=$watchdog" >> "$GITHUB_ENV"
 
       # The environment lint and governance audit drivers, built on the host from workflow-pinned
       # scripts/LintEnvDriver.lean (pinned Batteries) and scripts/Axioms.lean (Lean sysroot),
@@ -2262,6 +2299,27 @@ jobs:
             ${{ runner.temp }}/ci-host-resources-*.json
           if-no-files-found: warn
           retention-days: 30
+
+      # Fleet's per-job evidence joins this with the job's block I/O: hit or miss, the upper
+      # layer's size and the verdict, so shared and normal jobs compare like with like.
+      - name: Record the shared build tree's use (statistics only)
+        if: ${{ always() && env.SHARED_TREE_RECORD != '' }}
+        continue-on-error: true
+        timeout-minutes: 12
+        env:
+          BUILD_STATE: ${{ steps.report.outputs.build-state }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          SANDBOX_BUILD_OUTCOME: ${{ steps.sandbox_build.outcome }}
+          TESTED_HEAD: ${{ steps.pr.outputs.status_sha }}
+          TESTED_BASE: ${{ steps.pr.outputs.base_sha }}
+          TESTED_COMMIT: ${{ steps.integration.outputs.tested_sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr || github.event.client_payload.pr }}
+        run: |
+          python3 gate/scripts/shared_tree.py record --overlay "$SHARED_TREE_OVERLAY" \
+            --record "$SHARED_TREE_RECORD" --field "build_state=$BUILD_STATE" --field "build_outcome=$BUILD_OUTCOME" \
+            --field "sandbox_build_outcome=$SANDBOX_BUILD_OUTCOME" --field "tested_head=$TESTED_HEAD" \
+            --field "tested_base=$TESTED_BASE" --field "tested_commit=$TESTED_COMMIT" --field "pr=$PR_NUMBER" \
+            --field "run_id=$GITHUB_RUN_ID" --field "run_attempt=$GITHUB_RUN_ATTEMPT" --field "runner=$RUNNER_NAME"
 
       # Statistics for TauCetiCI (https://github.com/TauCetiProject/TauCetiCI): when each phase of
       # the sandboxed build started, how many modules were built or restored from the cache, the

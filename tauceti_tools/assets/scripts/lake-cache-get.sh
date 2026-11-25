@@ -62,11 +62,13 @@ write_lake_cache_config "$CFG" "$PUBLIC_ARTIFACT_ENDPOINT" "$PUBLIC_REVISION_END
 # whole build, which is worse than the partial cache it was clearing. Rename first (atomic,
 # and unaffected by concurrent writes under the old path), then delete the renamed copy
 # best-effort. What matters for correctness is only that the cache PATH is empty for the next
-# attempt, not that the bytes are reclaimed promptly.
+# attempt, not that the bytes are reclaimed promptly. The rename is rename(2) alone: `mv` copies
+# when rename fails with EXDEV, which is what renaming a lower-layer directory of the shared
+# build tree's overlay does (scripts/shared_tree.py), and that would copy the whole cache up.
 discard_cache() {
   local d="$PROJECT_DIR/.lake/cache"
   [ -e "$d" ] || return 0
-  if mv "$d" "$d.discard.$$" 2>/dev/null; then
+  if python3 -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' "$d" "$d.discard.$$" 2>/dev/null; then
     rm -rf "$d.discard.$$" 2>/dev/null || true
   else
     rm -rf "$d" 2>/dev/null || true
