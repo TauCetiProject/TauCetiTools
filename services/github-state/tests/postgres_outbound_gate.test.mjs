@@ -109,3 +109,48 @@ test('diagnostics name running and slow reads by SQL text only',async()=>{
  const snapshot=gate.snapshot();assert.equal(snapshot.running.length,0);assert.equal(snapshot.recent_slow.at(-1).label,'SELECT 1');assert.equal(snapshot.recent_slow.at(-1).ok,false);
  assert.ok(!JSON.stringify(snapshot).includes('private'));
 });
+const {__timedFetchForTests:timedFetch,resendable,HEADER_TIMEOUT_MS,HEADER_ATTEMPTS}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
+async function withFetch(plan,run){
+ const original=globalThis.fetch,calls=[];
+ globalThis.fetch=(input,init)=>{const behaviour=plan[calls.length] ?? 'ok';calls.push(init);
+  if(behaviour==='hang')return new Promise((_,reject)=>init.signal.addEventListener('abort',()=>reject(init.signal.reason)));
+  return Promise.resolve(new Response('{"rows":[]}',{status:200}));};
+ try{return await run(calls);}finally{globalThis.fetch=original;}
+}
+const select=JSON.stringify({queries:[{query:'SELECT value FROM meta WHERE key=$1',params:['x']}]}),readOnly={'Neon-Batch-Read-Only':'true'};
+test('a read whose headers stall is resent within its deadline',async()=>{
+ await withFetch(['hang','ok'],async calls=>{
+  const started=Date.now();const response=await timedFetch('https://api.example/sql',{method:'POST',body:select,headers:readOnly,signal:AbortSignal.timeout(15000)});
+  assert.equal(await response.text(),'{"rows":[]}');assert.equal(calls.length,2);
+  assert.ok(Date.now()-started>=HEADER_TIMEOUT_MS-50 && Date.now()-started<HEADER_TIMEOUT_MS+1000);
+ });
+});
+test('the final attempt waits for the caller deadline and its abort propagates',async()=>{
+ await withFetch(Array(HEADER_ATTEMPTS).fill('hang'),async calls=>{
+  const outer=new AbortController();setTimeout(()=>outer.abort(new Error('caller deadline')),HEADER_TIMEOUT_MS*(HEADER_ATTEMPTS-1)+300);
+  await assert.rejects(timedFetch('https://api.example/sql',{method:'POST',body:select,headers:readOnly,signal:outer.signal}),/caller deadline/);
+  assert.equal(calls.length,HEADER_ATTEMPTS);
+ });
+});
+test('only database-enforced read-only batches are resent',async()=>{
+ assert.equal(resendable({body:select,headers:readOnly}),true);
+ assert.equal(resendable({body:select,headers:new Headers(readOnly)}),true);
+ assert.equal(resendable({body:select,headers:{}}),false,'a batch without the read-only header');
+ assert.equal(resendable({body:JSON.stringify({query:'SELECT 1',params:[]}),headers:readOnly}),false,'a standalone query');
+ assert.equal(resendable({body:JSON.stringify({queries:[{query:'UPDATE jobs SET due=$1',params:[1]}]}),headers:readOnly}),false);
+ assert.equal(resendable({body:'not json',headers:readOnly}),false);
+ await withFetch(['hang'],async calls=>{
+  const outer=new AbortController();setTimeout(()=>outer.abort(new Error('caller deadline')),HEADER_TIMEOUT_MS+500);
+  await assert.rejects(timedFetch('https://api.example/sql',{method:'POST',body:select,headers:{},signal:outer.signal}),/caller deadline/);
+  assert.equal(calls.length,1);
+ });
+});
+test('the caller abort still cancels a stalled body after headers',async()=>{
+ const original=globalThis.fetch;let bodySignal;
+ globalThis.fetch=(input,init)=>{bodySignal=init.signal;return Promise.resolve(new Response(new ReadableStream({start(c){init.signal.addEventListener('abort',()=>c.error(init.signal.reason));}})));};
+ try{
+  const outer=new AbortController();setTimeout(()=>outer.abort(new Error('caller deadline')),50);
+  await assert.rejects(timedFetch('https://api.example/sql',{method:'POST',body:select,headers:readOnly,signal:outer.signal}),/caller deadline/);
+  assert.equal(bodySignal.aborted,true);
+ }finally{globalThis.fetch=original;}
+});

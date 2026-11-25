@@ -203,22 +203,61 @@ const storeLog=(event:string,fields:Record<string,unknown>)=>{try{log(event,fiel
 // Diagnostics only: times each Neon HTTP fetch to its response headers and to
 // its fully read body, separating a pre-header transport stall from a slow
 // response body. The driver reads the buffered body exactly as before.
-const fetchPhases={started:0,headers:0,bodies:0,failed_before_headers:0,failed_reading_body:0,max_headers_ms:0,max_body_ms:0,pre:new Map<number,number>(),body:new Map<number,number>(),next:0};
+const fetchPhases={started:0,headers:0,bodies:0,failed_before_headers:0,failed_reading_body:0,max_headers_ms:0,max_body_ms:0,header_timeouts:0,retries:0,retry_successes:0,pre:new Map<number,number>(),body:new Map<number,number>(),next:0};
 export function fetchPhaseSnapshot():Record<string,unknown> {
   const now=Date.now(),oldest=(m:Map<number,number>)=>{const v=Math.min(...m.values());return Number.isFinite(v)?now-v:null;};
   const {pre,body,next,...counts}=fetchPhases;
   return {...counts,awaiting_headers:pre.size,oldest_awaiting_headers_ms:oldest(pre),reading_body:body.size,oldest_reading_body_ms:oldest(body)};
 }
+// Healthy Neon HTTP responses send headers within about 100 ms. Some fetches
+// from the Durable Object instead receive no headers at all until the caller's
+// 15 s abort, while Neon shows no matching query. A request that the database
+// itself runs read-only (a Neon batch with the read-only header, which every
+// HTTP read here uses) is abandoned and sent again when its headers do not
+// arrive promptly, within the caller's own deadline. Nothing else is resent.
+export const HEADER_TIMEOUT_MS=1500;
+export const HEADER_ATTEMPTS=4;
+export function resendable(init:any):boolean {
+  const headers=init?.headers,readOnly=headers instanceof Headers?headers.get('Neon-Batch-Read-Only'):headers?.['Neon-Batch-Read-Only'];
+  if(readOnly!=='true' || typeof init?.body!=='string')return false;
+  let parsed:any;try{parsed=JSON.parse(init.body);}catch{return false;}
+  return Array.isArray(parsed?.queries) && parsed.queries.length>0 && parsed.queries.every((q:any)=>typeof q?.query==='string' && /^\s*SELECT\b/i.test(q.query));
+}
+class HeaderTimeout extends Error {constructor(){super('Neon response headers timed out');}}
+// The caller's abort stays attached until the body has been read; only the
+// header timer ends when headers arrive.
+async function attemptFetch(input:any,init:any,outer:AbortSignal|undefined,limit:number|undefined):Promise<{response:Response,release:()=>void}> {
+  const controller=new AbortController();let timer:ReturnType<typeof setTimeout>|undefined,timedOut=false;
+  const forward=()=>controller.abort(outer?.reason);
+  const release=()=>outer?.removeEventListener('abort',forward);
+  if(outer?.aborted)forward();else outer?.addEventListener('abort',forward);
+  if(limit!==undefined)timer=setTimeout(()=>{timedOut=true;controller.abort(new HeaderTimeout());},limit);
+  try{return {response:await fetch(input,{...init,signal:controller.signal}),release};}
+  catch(error){release();if(timedOut && !outer?.aborted)throw new HeaderTimeout();throw error;}
+  finally{if(timer)clearTimeout(timer);}
+}
 async function timedFetch(input:any,init?:any):Promise<Response> {
   const id=fetchPhases.next++,started=Date.now();fetchPhases.started++;fetchPhases.pre.set(id,started);
-  let response:Response;
-  try{response=await fetch(input,init);}catch(error){fetchPhases.failed_before_headers++;throw error;}finally{fetchPhases.pre.delete(id);}
+  const outer:AbortSignal|undefined=init?.signal,retry=resendable(init);
+  let attempt:{response:Response,release:()=>void}|undefined;
+  try{
+    for(let n=1;;n++){
+      const last=!retry || n>=HEADER_ATTEMPTS;
+      try{attempt=await attemptFetch(input,init,outer,last?undefined:HEADER_TIMEOUT_MS);if(n>1)fetchPhases.retry_successes++;break;}
+      catch(error){
+        if(!(error instanceof HeaderTimeout) || last || outer?.aborted)throw error;
+        fetchPhases.header_timeouts++;fetchPhases.retries++;
+      }
+    }
+  }catch(error){fetchPhases.failed_before_headers++;throw error;}finally{fetchPhases.pre.delete(id);}
+  const {response,release}=attempt!;
   const headersAt=Date.now();fetchPhases.headers++;fetchPhases.max_headers_ms=Math.max(fetchPhases.max_headers_ms,headersAt-started);fetchPhases.body.set(id,headersAt);
   try{
     const body=await response.arrayBuffer();fetchPhases.bodies++;fetchPhases.max_body_ms=Math.max(fetchPhases.max_body_ms,Date.now()-headersAt);
     return new Response(body,{status:response.status,statusText:response.statusText,headers:response.headers});
-  }catch(error){fetchPhases.failed_reading_body++;throw error;}finally{fetchPhases.body.delete(id);}
+  }catch(error){fetchPhases.failed_reading_body++;throw error;}finally{fetchPhases.body.delete(id);release();}
 }
+export const __timedFetchForTests=timedFetch;
 try{if(neonConfig)neonConfig.fetchFunction=timedFetch;}catch{}
 export const HTTP_READ_CONCURRENCY=4;
 export const HTTP_READ_QUEUE=32;
@@ -351,7 +390,7 @@ export class PostgresStore implements RepositoryStore {
     // Standalone writes are still fenced and atomic. The callback path uses a
     // request-scoped interactive connection, closed before the request returns.
     if(!this.client && !/^\s*SELECT\b/i.test(sql))return (await this.batch([{sql,bindings}]))[0] as Rows<T>;
-    return this.run(async()=>new Rows<T>(this.client?(await this.client.query(query,bindings)).rows:await this.gated(()=>this.http.query(query,bindings,{fetchOptions:{signal:AbortSignal.timeout(15000)}}),{label:sql}) as T[]));
+    return this.run(async()=>new Rows<T>(this.client?(await this.client.query(query,bindings)).rows:(await this.gated(()=>this.http.transaction([this.http.query(query,bindings)],{readOnly:true,fetchOptions:{signal:AbortSignal.timeout(15000)}}),{label:sql}))[0] as T[]));
   }
   async batch(statements:Statement[]):Promise<Rows<any>[]> {
     if(!this.client && statements.some(s=>!/^\s*SELECT\b/i.test(s.sql)))return this.transaction(tx=>tx.batch(statements));

@@ -613,6 +613,8 @@ pg('concurrent raw receipt checks use one PostgreSQL read batch without entering
   const group=lookup.runGroup(ids.map((id,i)=>async()=>{if(i===ids.length-1)await lastBody;return lookup.known(repo,id);}));
   await new Promise(resolve=>setTimeout(resolve,30));assert.equal(requests,0,'a slow original body must not split the group at the old20ms window');release();
   const results=await group;assert.deepEqual(results,ids.map(id=>known.includes(id)));assert.equal(requests,1);assert.equal(readBatches,1);assert.equal(lookup.summary().known_lookups,known.length);
+  // Standalone reads are single-statement read-only batches; count only the lookup.
+  f.store.http.transaction=transaction;
   assert.equal((await f.store.exec('SELECT COUNT(*) n FROM deliveries')).one().n,known.length);for(const table of['changes','jobs','resources'])assert.equal((await f.store.exec('SELECT COUNT(*) n FROM '+table)).one().n,0);
  }finally{await f.close();}
 });
