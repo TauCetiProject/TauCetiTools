@@ -110,6 +110,15 @@ Cron and repair selection do not await optional housekeeping. Stored reads can
 derive dirty survey projections from current fragments while the cache catches
 up. SQLite retains its foreground expiry path for local storage recovery.
 
+Cloudflare bills Durable Object SQLite per row read and written, counting each
+index entry an update touches even when the stored values do not change. On
+SQLite, re-enqueueing an existing job, repeating a webhook's repair request,
+setting metadata to its current value and clearing an already clear validator
+therefore skip the write entirely; the stored rows are identical either way.
+The next repair alarm walks the due index and stops once no later job can wake
+earlier, instead of aggregating every job on each scheduling turn, and
+installation accounting expiry reads only the expired prefix of the ledger.
+
 Snapshots paginate at 500 rows or approximately 1.49 MB per page. Continuation
 pages are written to private R2 (at most four uploads at a time), never to
 SQLite; continuation reads individual pages rather than repeatedly decoding the

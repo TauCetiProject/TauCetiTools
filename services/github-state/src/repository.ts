@@ -26,6 +26,13 @@ type GroupedIngest={pointer:EventPointer,body:any,encodings:Map<string,string>,q
 // many such groups wait for the writer at once.
 const INGEST_GROUP_LIMIT=16,INGEST_GROUP_FLIGHTS=4;
 type IngestRepair={q:Query,priority:number,dirty?:boolean,dirtyIfMissing?:boolean,missingOnly?:boolean};
+// SQLite bills every row an UPDATE rewrites, plus each index entry on a
+// changed column, even when the new values equal the stored ones. These
+// upsert guards skip exactly the conflicts whose SET list would store the
+// values already present, so the resulting rows are unchanged.
+const UNCHANGED_ENQUEUED_JOB=' WHERE priority IS NOT excluded.priority OR lane IS NOT excluded.lane OR requested_at IS NOT excluded.requested_at OR dirty IS NOT MAX(dirty,excluded.dirty) OR generation IS NOT generation+excluded.generation OR due IS NOT (CASE WHEN excluded.generation>0 AND wait_reason IS NULL AND attempt=0 THEN MIN(due,excluded.due) ELSE due END)';
+const UNCHANGED_INGEST_JOB=' WHERE priority IS NOT excluded.priority OR due IS NOT excluded.due OR dirty IS NOT excluded.dirty OR generation IS NOT generation+excluded.generation OR lane IS NOT excluded.lane OR requested_at IS NOT excluded.requested_at';
+const UNCHANGED_META=' WHERE value IS NOT excluded.value';
 const INGEST_EVENT_TYPES=new Set(['pull_request','issues','issue_comment','pull_request_review_comment','pull_request_review','pull_request_review_thread','status','push','create','delete','repository','label','milestone','merge_group']);
 interface RepairWait {job:any;due:number;attempts:number;reason:string;event:string;installationCapacity?:boolean;memberFailure?:boolean;failure?:{category:string,request_id?:string}}
 interface PreparedRefresh {job:any;q:Query;repo:any;started:number;response:Response|null;result:any;memberRetryAt?:number;preparedNext?:string;staged?:{key:string,expires:number};objects:Map<string,string>;encodings:Map<string,string>}
@@ -593,7 +600,7 @@ export class RepositoryState extends DurableObject<Env> {
     const row=(await this.store.exec<any>('SELECT value FROM meta WHERE key=?',key)).toArray()[0],value=row?JSON.parse(row.value):undefined;
     if(key==='repository')this.repositoryMemo=value;return value;
   }
-  async setMeta(key:string,value:unknown): Promise<void> { await this.store.exec('INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',key,JSON.stringify(value));if(key==='revision')this.revisionState.value=Number(value);if(key==='repository')this.repositoryMemo=value; }
+  async setMeta(key:string,value:unknown): Promise<void> { await this.store.exec('INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value'+(this.store.backend==='sqlite'?UNCHANGED_META:''),key,JSON.stringify(value));if(key==='revision')this.revisionState.value=Number(value);if(key==='repository')this.repositoryMemo=value; }
   async revision():Promise<number> {
     if(this.readRevision!==undefined)return this.readRevision;
     if(this.revisionState.value!==undefined)return this.revisionState.value;
@@ -704,8 +711,8 @@ export class RepositoryState extends DurableObject<Env> {
     if(kind==='pr' && data?.number){
       const key=queryKey({operation:'pr',args:{number:data.number}});
       const textKey=queryKey({operation:'pr',args:{number:String(data.number)}});
-      await this.store.exec('UPDATE jobs SET etag=NULL WHERE key IN (?,?)',key,textKey);
-      await this.store.exec('UPDATE collections SET etag=NULL WHERE key IN (?,?)',key,textKey);
+      await this.store.exec('UPDATE jobs SET etag=NULL WHERE key IN (?,?)'+(this.store.backend==='sqlite'?' AND etag IS NOT NULL':''),key,textKey);
+      await this.store.exec('UPDATE collections SET etag=NULL WHERE key IN (?,?)'+(this.store.backend==='sqlite'?' AND etag IS NOT NULL':''),key,textKey);
       if(!fromEvent || oldStored?.headRefOid!==data.headRefOid || oldStored?.state!==data.state)this.prQueriesChanged.add(String(data.number));
     }
     if(this.store instanceof ReadCacheStore)this.store.seed('SELECT data,tombstone FROM resources WHERE kind=? AND id=?',[kind,id],[{data:encoded,tombstone:Number(deleted)}]);
@@ -930,7 +937,7 @@ export class RepositoryState extends DurableObject<Env> {
     // inventory/history fan-out path; remote latency is bounded per batch.
     for(let offset=0;offset<values.length;offset+=writeBatch) {
       const batch=values.slice(offset,offset+writeBatch);
-      await this.store.exec('INSERT INTO jobs(key,query,priority,due,dirty,generation,lane,requested_at,created_at) VALUES '+batch.map(()=>'(?,?,?,?,?,?,?,?,?)').join(',')+' ON CONFLICT(key) DO UPDATE SET priority=excluded.priority,lane=excluded.lane,requested_at=excluded.requested_at,dirty=MAX(dirty,excluded.dirty),generation=generation+excluded.generation,due=CASE WHEN excluded.generation>0 AND wait_reason IS NULL AND attempt=0 THEN MIN(due,excluded.due) ELSE due END',...batch.flat());
+      await this.store.exec('INSERT INTO jobs(key,query,priority,due,dirty,generation,lane,requested_at,created_at) VALUES '+batch.map(()=>'(?,?,?,?,?,?,?,?,?)').join(',')+' ON CONFLICT(key) DO UPDATE SET priority=excluded.priority,lane=excluded.lane,requested_at=excluded.requested_at,dirty=MAX(dirty,excluded.dirty),generation=generation+excluded.generation,due=CASE WHEN excluded.generation>0 AND wait_reason IS NULL AND attempt=0 THEN MIN(due,excluded.due) ELSE due END'+(this.store.backend==='sqlite'?UNCHANGED_ENQUEUED_JOB:''),...batch.flat());
     }
     for(const [at,event,lane,operation,value] of metrics)this.repairMetrics.record(event,lane,operation,value,at);
     const alarm=this.store.backend==='postgres'?null:await this.ctx.storage.getAlarm();
@@ -971,7 +978,7 @@ export class RepositoryState extends DurableObject<Env> {
     const rows=[...writes.values()],writeBatch=this.store.backend==='sqlite'?10:200;
     for(let offset=0;offset<rows.length;offset+=writeBatch) {
       const chunk=rows.slice(offset,offset+writeBatch);
-      await this.store.exec('INSERT INTO jobs(key,query,priority,due,dirty,generation,lane,requested_at,created_at) VALUES '+chunk.map(()=>'(?,?,?,?,?,?,?,?,?)').join(',')+' ON CONFLICT(key) DO UPDATE SET priority=excluded.priority,due=excluded.due,dirty=excluded.dirty,generation=generation+excluded.generation,lane=excluded.lane,requested_at=excluded.requested_at',...chunk.flat());
+      await this.store.exec('INSERT INTO jobs(key,query,priority,due,dirty,generation,lane,requested_at,created_at) VALUES '+chunk.map(()=>'(?,?,?,?,?,?,?,?,?)').join(',')+' ON CONFLICT(key) DO UPDATE SET priority=excluded.priority,due=excluded.due,dirty=excluded.dirty,generation=generation+excluded.generation,lane=excluded.lane,requested_at=excluded.requested_at'+(this.store.backend==='sqlite'?UNCHANGED_INGEST_JOB:''),...chunk.flat());
     }
     if(rows.length && this.store.backend==='sqlite') {
       const scheduled=Math.min(...rows.map(row=>Number(row[3]))),alarm=await this.ctx.storage.getAlarm();
@@ -1964,7 +1971,7 @@ export class RepositoryState extends DurableObject<Env> {
     pages[String(job.page)]={key:staged.key,expires:staged.expires};
     await this.setMeta(stagingStateKey(job.key),{version:1,started,pages});
     if (job.lease_id && (await this.store.exec<any>('SELECT lease_id FROM jobs WHERE key=?',job.key)).toArray()[0]?.lease_id!==job.lease_id) throw new LeaseLost();
-    await this.store.exec('UPDATE jobs SET nested=NULL,wait_reason=NULL WHERE key=?',job.key);
+    await this.store.exec('UPDATE jobs SET nested=NULL,wait_reason=NULL WHERE key=?'+(this.store.backend==='sqlite'?' AND (nested IS NOT NULL OR wait_reason IS NOT NULL)':''),job.key);
     await this.metric('page',q,job.lane || 'verification');
     const next=preparedNext;
     if (next) {
@@ -2862,7 +2869,7 @@ export class RepositoryState extends DurableObject<Env> {
     const futureOnly=coordinator.full || coordinator.unproductiveStop || restricted || this.owner.mutationState.blocked || typeof this.owner.schema==='object';
     const where=futureOnly?' WHERE (due>? OR lease_until>?)':omit.sql?' WHERE (due>? OR lease_until>? OR (1=1'+omit.sql+'))':'';
     const bindings=futureOnly?[now,now]:omit.sql?[now,now,...omit.bindings]:[];
-    const row=(await this.store.exec<any>('SELECT MIN(MAX(due,lease_until)) AS due FROM jobs'+where,...bindings)).one();
+    const row:any={due:await this.earliestWake(where,bindings)};
     const retryAt=!coordinator.full?this.quotaRestriction?.retry_at:undefined,soon=Date.now()+100;
     const quotaAt=retryAt?Math.max(soon,retryAt):undefined,jobAt=row.due?Math.max(soon,row.due):undefined;
     const at=quotaAt&&jobAt?Math.min(quotaAt,jobAt):quotaAt || jobAt;if(!at)return;
@@ -2870,6 +2877,23 @@ export class RepositoryState extends DurableObject<Env> {
     const quota=Boolean(quotaAt===at && this.quotaRestriction?.category==='capacity');
     const continuation=Boolean(!quota && jobAt===at && row.due<=now);
     if(!earlier || earlier>at)await this.setAlarm(at,quota,continuation,true);
+  }
+  // MIN(MAX(due,lease_until)) over the matching jobs, without reading every
+  // job. A bounded prefix of the due index is read in due order, whether or
+  // not each row matches. Each wake is at least its due, so once a row's due
+  // reaches the earliest matching wake already seen, no later row can be
+  // earlier. Rows with a NULL due or lease contribute no wake. A short prefix
+  // usually decides; a longer one covers many leased or excluded early rows,
+  // and an undecided prefix falls back to the complete aggregate.
+  private async earliestWake(where:string,bindings:(string|number)[]):Promise<number|null> {
+    const matches=where?where.slice(' WHERE '.length):'1';
+    for(const limit of [8,256]){
+      const rows=(await this.store.exec<any>('SELECT due,MAX(due,lease_until) AS wake,'+matches+' AS matches FROM jobs WHERE due IS NOT NULL AND lease_until IS NOT NULL ORDER BY due LIMIT '+limit,...bindings)).toArray();
+      let best:number|null=null;
+      for(const row of rows)if(row.matches && (best===null || row.wake<best))best=row.wake;
+      if(rows.length<limit || best!==null && rows[rows.length-1].due>=best)return best;
+    }
+    return (await this.store.exec<any>('SELECT MIN(MAX(due,lease_until)) AS due FROM jobs'+where,...bindings)).one().due;
   }
   protected get repairHopLimit():number{return REPAIR_HOP_MS;}
   private repairEnvironment(group:RepairGroup):Env {
