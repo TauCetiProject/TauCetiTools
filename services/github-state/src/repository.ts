@@ -18,7 +18,7 @@ import { controllerStep, preflight as cutoverPreflight, FREEZE_LEASE_MS } from '
 import { Migration, terminalReceipt, compatibilityStep, blocksRepairs, blocksWrites, archiveKey, beginExport, expectedTables, exportStep, generation, encodeMigration, publicReceipt, readMigration, saveMigration, targetIdentity, verifyStep } from './migration';
 import { backlog, backoff, receiptKey, controlKey, noteRepositoryFull, storageKey } from './ingress';
 import { Checkpoint, DEFAULT_POLICY, Policy, RetentionClass, R2_CLASSES, RULES, policy, sweep, sweepStore } from './retention';
-import { CapacitySample, RepairMetrics, RequestMetrics, SQLITE_ALLOWANCE, capacity, postgresCapacity, emitAlarm, timedBucket, within } from './monitoring';
+import { CapacitySample, RepairMetrics, RequestMetrics, SQLITE_ALLOWANCE, capacity, postgresCapacity, emitAlarm, timedBucket, within, bucketCounters, bucketSnapshot, countedBucket } from './monitoring';
 import { Failure, FULL_MESSAGE, AdminError, CLEANUP, PARKABLE, classify, deleteClass, faultySql, log, missingSchema, requestId, scan, summary, userTables as summaryTables } from './storage';
 
 type GroupedIngest={pointer:EventPointer,body:any,encodings:Map<string,string>,queuedAt:number,resolve:(committed:boolean)=>void,reject:(error:unknown)=>void};
@@ -89,6 +89,7 @@ function coordinationWindows(history:any,now:number):any {
 export class RepositoryState extends DurableObject<Env> {
   private [ACTIVITY_CLOCK]?:number;
   private inflightQueries=new Map<string,Promise<Result>>();
+  private r2Counters=bucketCounters();
   private publicCompletedQueries=new Map<string,{result:Result,expires:number,built:number,bytes?:number}>();
   private completedQueries=new Map<string,{result:Result,expires:number,built:number,bytes?:number}>();
   private prQueryEpoch=0;
@@ -191,6 +192,13 @@ export class RepositoryState extends DurableObject<Env> {
   private logged=new Map<string,number>();
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx,env);
+    // Count outbound R2 calls for /health; every other binding is unchanged.
+    const counted=new WeakMap<R2Bucket,R2Bucket>(),counters=this.r2Counters;
+    this.env=new Proxy(env,{get:(target,key)=>{
+      const value=Reflect.get(target,key,target);
+      if(key!=='ARCHIVE' || !value || typeof value!=='object')return value;
+      let archive=counted.get(value);if(!archive){archive=countedBucket(value,counters);counted.set(value,archive);}return archive;
+    }});
     this.sql=env.FAULT_INJECTION==='true'?faultySql(ctx.storage.sql,()=>this.faultFull):ctx.storage.sql;
     const sourceSql=this.sql;this.nativeSql=sourceSql;
     this.sql=new Proxy(sourceSql,{get:(target,property)=>{
@@ -3843,7 +3851,7 @@ export class RepositoryState extends DurableObject<Env> {
       }
       if (path==='/health' && this.store.backend==='postgres') {
         const monitoring=await this.preparedObservation(),storage=monitoring.storage || {backend:'postgres',schema_version:null,expected_schema_version:1,expected_generation:this.backendGeneration(),connected:null,stale:true};
-        return json({...this.diagnostics,grouped_publication:this.owner.groupedPublication,repair_scheduler:{...this.owner.repairCoordinator?.snapshot(),lease_renewal_row_updates:this.owner.renewedLeases || 0},ingestion:[...this.owner.ingestStats].map(([event_type,row])=>({event_type,...row})),reconciliation_version:2,revision:this.revisionState.value ?? this.diagnostics.revision ?? null,repository:this.repositoryMemo ?? this.diagnostics.repository ?? null,storage,monitoring,request_id,deployment_id:this.env.CF_VERSION?.id,diagnostics_at:this.diagnosticsAt || null,diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
+        return json({...this.diagnostics,grouped_publication:this.owner.groupedPublication,repair_scheduler:{...this.owner.repairCoordinator?.snapshot(),lease_renewal_row_updates:this.owner.renewedLeases || 0},ingestion:[...this.owner.ingestStats].map(([event_type,row])=>({event_type,...row})),reconciliation_version:2,revision:this.revisionState.value ?? this.diagnostics.revision ?? null,repository:this.repositoryMemo ?? this.diagnostics.repository ?? null,storage,monitoring,outbound:{...this.store.outbound?.(),r2:bucketSnapshot(this.r2Counters),active_requests:this.owner.activeOperations,inflight_queries:this.inflightQueries.size},request_id,deployment_id:this.env.CF_VERSION?.id,diagnostics_at:this.diagnosticsAt || null,diagnostics_stale:!this.diagnosticsAt || Date.now()-this.diagnosticsAt>180000});
       }
       if (path==='/health') {
         const storage={...await this.storageState(),backend:'sqlite',schema_version:SCHEMA_VERSION};
