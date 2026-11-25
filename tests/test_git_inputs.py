@@ -1,12 +1,26 @@
 """Exact Git snapshots reuse objects and handle filenames through machine output."""
 
+import contextlib
+import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tauceti_tools.git_inputs import _git, changed_paths, snapshot, merge_base
+from tauceti_tools.git_inputs import _git, _git_env, changed_paths, snapshot, merge_base
+
+
+@contextlib.contextmanager
+def without_waitid():
+    """CPython has no os.waitid on macOS before 3.13."""
+    saved = os.__dict__.pop("waitid", None)
+    try:
+        yield
+    finally:
+        if saved is not None:
+            os.waitid = saved
 
 
 class GitInputs(unittest.TestCase):
@@ -105,6 +119,24 @@ class GitInputs(unittest.TestCase):
             git("commit", "-qm", "rename")
             head = git("rev-parse", "HEAD")
             self.assertEqual(changed_paths(str(root), base, head), ["space and\nnewline.lean"])
+
+    def test_git_runs_fails_and_is_killed_without_waitid(self):
+        with without_waitid(), tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _git(directory, ["init", "-q", "--bare"], _git_env(), 30)
+            self.assertTrue((root / "HEAD").is_file())
+            with self.assertRaisesRegex(RuntimeError, "git rev-parse failed"):
+                _git(directory, ["rev-parse", "--verify", "missing"], _git_env(), 30)
+            # A stand-in git that closes stdout early keeps running into the fallback wait itself.
+            fake = root / "bin" / "git"
+            fake.parent.mkdir()
+            fake.write_text("#!/bin/sh\nexec >&-\nexec sleep 60\n")
+            fake.chmod(0o755)
+            environment = {**_git_env(), "PATH": f"{fake.parent}{os.pathsep}{os.environ['PATH']}"}
+            started = time.monotonic()
+            with self.assertRaisesRegex(RuntimeError, "git diff timed out"):
+                _git(directory, ["diff"], environment, 1)
+            self.assertLess(time.monotonic() - started, 20)
 
 
 if __name__ == "__main__":

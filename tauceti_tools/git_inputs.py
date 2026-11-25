@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 # Blob-id abbreviation on `index` lines, as GitHub renders them for TauCeti today. Cosmetic: the
 # patch digest normalises these ids away.
@@ -164,8 +165,8 @@ def _git(d, args, env, timeout, sink=None, limit=MAX_BYTES, stdin=b"", disk_cap=
         lock = threading.Lock()
 
         def kill(reason):
-            # Only while git is unreaped (`done` is set before the reaping wait), so a recycled PID
-            # is never signalled.
+            # Only while git is unreaped (`done` is set, under this lock, no later than the reaping
+            # wait), so a recycled PID is never signalled.
             with lock:
                 if not done.is_set():
                     reason.set()
@@ -198,7 +199,17 @@ def _git(d, args, env, timeout, sink=None, limit=MAX_BYTES, stdin=b"", disk_cap=
                     sink.write(chunk)
             # Wait for git to exit WITHOUT reaping it, so the timer and the watcher can still
             # kill it safely until `done` is set below.
-            os.waitid(os.P_PID, p.pid, os.WEXITED | os.WNOWAIT)
+            if hasattr(os, "waitid"):
+                os.waitid(os.P_PID, p.pid, os.WEXITED | os.WNOWAIT)
+            else:
+                # CPython has no os.waitid on macOS before 3.13. Reap under kill()'s lock instead,
+                # setting `done` before releasing it. stdout is at EOF, so git is normally exiting.
+                while True:
+                    with lock:
+                        if p.poll() is not None:
+                            done.set()
+                            break
+                    time.sleep(0.01)
         except BaseException:
             kill(threading.Event())
             raise
