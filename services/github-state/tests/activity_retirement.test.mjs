@@ -29,11 +29,14 @@ test('ordinary retirement advances past retained final files and removes obsolet
   await f.state.put('review_comments','comment',{id:'comment',body:'old'},Date.now(),false,'200');await enqueue(f,reaction);
   const unmapped={repository:'org/repo',operation:'statuses',args:{sha:sha(777)}};await enqueue(f,unmapped);
   await f.store.exec('INSERT INTO demand VALUES(?,?)',key(hot),Date.now());
-  await f.store.exec('UPDATE jobs SET lease_id=?,lease_until=? WHERE key=?','owner',Date.now()+60000,key(owned));
+  // The owner holds its lease, and the hot history keeps its reader, for the whole test: four sweeps
+  // over a remote PostgreSQL can outlast a one-minute lease or the five-minute demand window.
+  await f.store.exec('UPDATE jobs SET lease_id=?,lease_until=? WHERE key=?','owner',Date.now()+3600000,key(owned));
+  const sweep=async()=>{await f.store.exec('UPDATE demand SET at=? WHERE key=?',Date.now(),key(hot));await f.state.retireQuotaObsolete();};
   const resources=(await f.store.exec('SELECT COUNT(*) n FROM resources')).one().n;
   assert.equal(f.state.quotaRestriction,undefined);
-  await f.state.retireQuotaObsolete();assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(review))).one().n,0);
-  for(let i=0;i<3;i++)await f.state.retireQuotaObsolete();
+  await sweep();assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(review))).one().n,0);
+  for(let i=0;i<3;i++)await sweep();
   for(const q of [review,detail,final,reaction,unmapped])assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(q))).one().n,0,key(q));
   for(const q of [stale,missing,hot,owned])assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(q))).one().n,1,key(q));
   assert.equal((await f.store.exec('SELECT COUNT(*) n FROM resources')).one().n,resources,'retirement preserves stored facts');
@@ -48,9 +51,9 @@ test('final file publication keeps ordinary cadence and retires after header cor
   const q=query('files',7),incomplete={...header(7),changedFiles:2};await f.state.put('pr','7',incomplete);await files(f,7);
   const job=await f.state.claim(await enqueue(f,q));
   await f.store.exec('INSERT INTO demand VALUES(?,?)',key(q),Date.now());
-  await f.state.finishJob(job,q);
+  const finishing=Date.now();await f.state.finishJob(job,q);
   const retained=(await f.store.exec('SELECT * FROM jobs WHERE key=?',key(q))).one();
-  assert.equal(retained.dirty,0);assert.ok(retained.due>=Date.now()+await f.state.interval(q)-10000);
+  assert.equal(retained.dirty,0);assert.ok(retained.due>=finishing+await f.state.interval(q));
   assert.equal(await f.state.activityLOC(7,incomplete),null);
   await f.store.exec('UPDATE jobs SET lease_id=NULL,lease_until=0 WHERE key=?',key(q));
   await f.state.put('pr','7',header(7));
@@ -198,7 +201,7 @@ test('background retirement validates real R2 files outside the writer and prese
   f.state.decode=async function(...args){assert.equal(Boolean(this.store.transactional),false);assert.notEqual(this.env.ARCHIVE,archive,'background validation uses its timed R2 scope');decoded++;return decode.apply(this,args);};
   f.state.obsoleteJobs=async function(group){
    const result=await predicate.call(this,group);
-   if(!this.store.transactional && !raced){raced=true;await f.store.exec('UPDATE jobs SET lease_id=?,lease_until=? WHERE key=?','new-owner',Date.now()+60000,key(query('files',14)));}
+   if(!this.store.transactional && !raced){raced=true;await f.store.exec('UPDATE jobs SET lease_id=?,lease_until=? WHERE key=?','new-owner',Date.now()+3600000,key(query('files',14)));}
    return result;
   };
   f.state.startRetirementMaintenance();const flight=f.state.retirementFlight;assert.ok(flight);await flight;
