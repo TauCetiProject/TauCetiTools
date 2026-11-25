@@ -98,3 +98,13 @@ test('an aborted waiter leaves the queue without consuming a slot',async()=>{
  abort.abort();await assert.rejects(waiter,error=>error instanceof StoreUnavailable);
  assert.equal(gate.waiting,0);release();await first;assert.equal(gate.inFlight,0);assert.equal(started,false);
 });
+test('diagnostics name running and slow reads by SQL text only',async()=>{
+ const gate=new OutboundGate(2,10,1000);let release;
+ const held=gate.run(()=>new Promise(resolve=>{release=resolve;}),{label:'SELECT  data\n FROM resources WHERE id=?'});
+ await tick();
+ const running=gate.snapshot().running;assert.equal(running.length,1);assert.equal(running[0].label,'SELECT data FROM resources WHERE id=?');
+ release();await held;
+ await assert.rejects(gate.run(async()=>{throw Error('private value');},{label:'SELECT 1'}));
+ const snapshot=gate.snapshot();assert.equal(snapshot.running.length,0);assert.equal(snapshot.recent_slow.at(-1).label,'SELECT 1');assert.equal(snapshot.recent_slow.at(-1).ok,false);
+ assert.ok(!JSON.stringify(snapshot).includes('private'));
+});

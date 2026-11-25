@@ -210,6 +210,11 @@ export class OutboundGate {
   private queue:GateEntry[]=[];private priority:GateEntry[]=[];
   private counters={admitted:0,queued:0,shed_queue_full:0,shed_wait:0,cancelled:0,completed:0,failed:0,wait_ms_total:0,max_wait_ms:0,busy_ms_total:0,max_busy_ms:0};
   private lastShedAt:number|null=null;private lastShedLog=0;
+  // Diagnostics only: SQL text prefixes (never bindings) of running reads and
+  // of recent reads that failed or took over a second.
+  private running=new Map<number,{label:string,started:number}>();private nextRun=0;
+  private slow:{label:string,busy_ms:number,ok:boolean,at:number}[]=[];
+  private buckets={under_100ms:0,under_1s:0,under_5s:0,over_5s:0};
   constructor(readonly limit=HTTP_READ_CONCURRENCY,readonly maxQueue=HTTP_READ_QUEUE,readonly maxWaitMs=HTTP_READ_ADMISSION_MS) {}
   get inFlight():number{return this.active;}
   get waiting():number{return this.queue.length+this.priority.length;}
@@ -234,7 +239,7 @@ export class OutboundGate {
       next.admit();return;
     }
   }
-  async run<T>(work:()=>Promise<T>,options:{priority?:boolean,signal?:AbortSignal}={}):Promise<T> {
+  async run<T>(work:()=>Promise<T>,options:{priority?:boolean,signal?:AbortSignal,label?:string}={}):Promise<T> {
     const enqueued=Date.now();
     if(options.signal?.aborted)throw new StoreUnavailable();
     if(this.active>=this.limit) {
@@ -253,10 +258,13 @@ export class OutboundGate {
     }else this.active++;
     const admittedAt=Date.now(),wait=admittedAt-enqueued;
     this.counters.admitted++;this.counters.wait_ms_total+=wait;this.counters.max_wait_ms=Math.max(this.counters.max_wait_ms,wait);
-    let ok=false;
+    let ok=false;const run=this.nextRun++,label=(options.label ?? 'unlabelled').replace(/\s+/g,' ').slice(0,120);this.running.set(run,{label,started:admittedAt});
     try{const result=await work();ok=true;return result;}
     finally{
+      this.running.delete(run);
       const busy=Date.now()-admittedAt;this.counters.busy_ms_total+=busy;this.counters.max_busy_ms=Math.max(this.counters.max_busy_ms,busy);
+      this.buckets[busy<100?'under_100ms':busy<1000?'under_1s':busy<5000?'under_5s':'over_5s']++;
+      if(!ok || busy>=1000){this.slow.push({label,busy_ms:busy,ok,at:Date.now()});if(this.slow.length>20)this.slow.shift();}
       if(ok)this.counters.completed++;else this.counters.failed++;
       this.release();
     }
@@ -264,7 +272,8 @@ export class OutboundGate {
   snapshot():Record<string,unknown> {
     const c=this.counters,oldest=Math.min(...this.priority.concat(this.queue).map(e=>e.deadline));
     return {limit:this.limit,max_queue:this.maxQueue,max_wait_ms_allowed:this.maxWaitMs,in_flight:this.active,waiting:this.waiting,oldest_wait_ms:Number.isFinite(oldest)?Math.max(0,Date.now()-(oldest-this.maxWaitMs)):null,...c,
-      mean_wait_ms:c.admitted?Math.round(c.wait_ms_total/c.admitted):null,mean_busy_ms:c.completed+c.failed?Math.round(c.busy_ms_total/(c.completed+c.failed)):null,last_shed_at:this.lastShedAt};
+      mean_wait_ms:c.admitted?Math.round(c.wait_ms_total/c.admitted):null,mean_busy_ms:c.completed+c.failed?Math.round(c.busy_ms_total/(c.completed+c.failed)):null,last_shed_at:this.lastShedAt,
+      busy_buckets:{...this.buckets},running:[...this.running.values()].map(r=>({label:r.label,age_ms:Date.now()-r.started})),recent_slow:[...this.slow]};
   }
 }
 export class PostgresStore implements RepositoryStore {
@@ -284,7 +293,7 @@ export class PostgresStore implements RepositoryStore {
   private gate=new OutboundGate();
   private writerSocket:{open:number,since:number|null,opened:number}={open:0,since:null,opened:0};
   outbound():Record<string,unknown> {return {http_reads:this.gate.snapshot(),writer_socket:{...this.writerSocket,open_ms:this.writerSocket.since===null?null:Date.now()-this.writerSocket.since},writer_queued:this.writer.queuedOtherWork};}
-  private gated<T>(work:()=>Promise<T>,options?:{priority?:boolean,signal?:AbortSignal}):Promise<T> {return this.gate.run(work,options);}
+  private gated<T>(work:()=>Promise<T>,options?:{priority?:boolean,signal?:AbortSignal,label?:string}):Promise<T> {return this.gate.run(work,options);}
   constructor(private url:string,repository:string,private generation:string,private client?:Client,private diagnostics:{connections:number,queries:number,lastConnection?:number}={connections:0,queries:0},private connectionState?:ConnectionState,private onQuery?:()=>void) {
     this.schema=schemaName(repository);
     // Match the driver host parser. Endpoint overrides or ambiguous URL
@@ -322,7 +331,7 @@ export class PostgresStore implements RepositoryStore {
     // Standalone writes are still fenced and atomic. The callback path uses a
     // request-scoped interactive connection, closed before the request returns.
     if(!this.client && !/^\s*SELECT\b/i.test(sql))return (await this.batch([{sql,bindings}]))[0] as Rows<T>;
-    return this.run(async()=>new Rows<T>(this.client?(await this.client.query(query,bindings)).rows:await this.gated(()=>this.http.query(query,bindings,{fetchOptions:{signal:AbortSignal.timeout(15000)}})) as T[]));
+    return this.run(async()=>new Rows<T>(this.client?(await this.client.query(query,bindings)).rows:await this.gated(()=>this.http.query(query,bindings,{fetchOptions:{signal:AbortSignal.timeout(15000)}}),{label:sql}) as T[]));
   }
   async batch(statements:Statement[]):Promise<Rows<any>[]> {
     if(!this.client && statements.some(s=>!/^\s*SELECT\b/i.test(s.sql)))return this.transaction(tx=>tx.batch(statements));
@@ -358,7 +367,7 @@ export class PostgresStore implements RepositoryStore {
       const results=await this.gated(()=>{
         const queries=statements.map(s=>this.http.query(postgresSQL(s.sql,this.schema),s.bindings || []));
         return this.http.transaction(queries,{readOnly:true,isolationLevel:'RepeatableRead',fetchOptions:{signal:AbortSignal.timeout(15000)}});
-      });
+      },{label:'batch['+statements.length+'] '+statements.map(s=>s.sql.slice(0,40)).join(' | ')});
       return results.map(rows=>new Rows(rows));
     });
   }
@@ -387,7 +396,7 @@ export class PostgresStore implements RepositoryStore {
       // backend. Never signal a pooler backend which could have been reused.
       const direct=this.directEndpoint;
       const rows=await Promise.race([
-        this.gated(()=>this.http.query(`SELECT ${direct?'pg_terminate_backend(pid,1000)':'false'} AS terminated FROM pg_stat_activity WHERE pid=$1 AND (EXTRACT(EPOCH FROM backend_start)*1000000)::bigint::text=$2 AND application_name=$3 AND usename=current_user AND datname=current_database()`,[session.pid,session.started_us,session.token],{fetchOptions:{signal:abort.signal}}),{priority:true,signal:abort.signal}),
+        this.gated(()=>this.http.query(`SELECT ${direct?'pg_terminate_backend(pid,1000)':'false'} AS terminated FROM pg_stat_activity WHERE pid=$1 AND (EXTRACT(EPOCH FROM backend_start)*1000000)::bigint::text=$2 AND application_name=$3 AND usename=current_user AND datname=current_database()`,[session.pid,session.started_us,session.token],{fetchOptions:{signal:abort.signal}}),{priority:true,signal:abort.signal,label:'session_cleanup'}),
         new Promise<never>((_,reject)=>{timer=setTimeout(()=>{abort.abort();reject(new StoreUnavailable());},3000);})
       ]);
       if(rows.length===0)result='already_ended';
@@ -488,7 +497,7 @@ export class PostgresStore implements RepositoryStore {
       const result=await this.gated(()=>this.http.transaction([
         this.http.query("SELECT set_config('statement_timeout','5s',true)"),
         this.http.query(`SELECT "${this.schema}".prepare_monitoring($1,$2,$3) AS result`,[this.generation,analyzeTables,attemptToken])
-      ],{fetchOptions:{signal:AbortSignal.timeout(6000)}}));
+      ],{fetchOptions:{signal:AbortSignal.timeout(6000)}}),{label:'prepare_monitoring'});
       return result[1][0].result;
     });
   }
