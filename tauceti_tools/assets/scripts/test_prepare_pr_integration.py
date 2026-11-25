@@ -169,7 +169,7 @@ if stable and old:
         self.write('TauCeti/Common.lean', 'author change\n')
         head = self.commit('conflict')
         candidate, policy = self.checkouts(head)
-        with self.assertRaisesRegex(integration.IntegrationConflict, 'not stacking evidence'):
+        with self.assertRaisesRegex(integration.IntegrationConflict, r'needs a rebase onto main \(not stacking evidence'):
             integration.prepare(candidate, policy, head, self.base, 'pr-integration')
         self.assertEqual(self.git('rev-parse', 'HEAD', cwd=candidate), head)
 
@@ -428,7 +428,7 @@ print(json.dumps(response))
             (dict(CONFIG_BAD='1', INFRA='1'), 'Lake configuration failed'),
             (dict(BUMP_BAD='1', INFRA='1'), 'see the scope check'),
             (dict(INTEGRATION_BAD='1', INFRA='1'), 'integration preparation failed'),
-            (dict(INTEGRATION_CONFLICT='1', INTEGRATION_BAD='1', INFRA='1'), 'conflicts')):
+            (dict(INTEGRATION_CONFLICT='1', INTEGRATION_BAD='1', INFRA='1'), 'the PR needs a rebase onto main')):
             with self.subTest(guards=guards):
                 result, posts = self.report(missing=True, guards=guards)
                 self.assertNotEqual(result.returncode, 0)
@@ -436,6 +436,7 @@ print(json.dumps(response))
                 self.assertIn(diagnostic, posts['build']['description'])
                 if guards.get('INTEGRATION_CONFLICT'):
                     self.assertEqual(posts['scope']['state'], 'success')
+                    self.assertNotIn('human', posts['build']['description'])
 
     def test_head_changes_and_retarget_cannot_publish_obsolete_results(self):
         for options in (dict(moved=True), dict(retarget=True)):

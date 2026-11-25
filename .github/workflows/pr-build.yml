@@ -2055,7 +2055,7 @@ jobs:
           # pin is never executed and therefore reports a required failure rather than pretending
           # that a different configuration built.
           if [ "${{ env.INTEGRATION_CONFLICT }}" = "1" ]; then
-            state=failure; desc="integration with captured main conflicts — human resolution required; see H/B in run"
+            state=failure; desc="integration with captured main conflicts; the PR needs a rebase onto main, see H/B in run"
           elif [ "${{ env.INTEGRATION_BAD }}" = "1" ]; then
             state=failure; desc="build not run — integration preparation failed; see H/B diagnostics in run"
           elif [ "${{ env.CONFIG_BAD }}" = "1" ]; then
