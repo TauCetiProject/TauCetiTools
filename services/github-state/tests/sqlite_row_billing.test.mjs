@@ -164,7 +164,7 @@ test('accounting expiry reads only the expired prefix and deletes exactly the sa
  try{
   const ns=await mf.getDurableObjectNamespace('INSTALLATIONS'),stub=ns.get(ns.idFromName(repository.installation));
   const quiet=await (await send(stub,'/t/accounting',{old:0,fresh:300})).json();
-  assert.equal(quiet.remaining.length,300);assert.ok(quiet.read<=5,'a live first row stops the scan: '+quiet.read);
+  assert.equal(quiet.remaining.length,300);assert.ok(quiet.read<=16,'a live first row stops after one small page: '+quiet.read);
   // A later expired row behind a live one is retained, as before.
   const mixed=await (await send(stub,'/t/accounting',{old:250,fresh:20,late:true})).json();
   assert.deepEqual(mixed.remaining,[...Array(20).fill('fresh'),'old']);

@@ -437,11 +437,18 @@ export class InstallationScheduler extends DurableObject<Env> {
     try {
       // Accounting is append-only with the application clock and integer PK.
       // Restart at the oldest row, stopping at the live diagnostic window.
-      // Step through the oldest rows and stop at the first live one. Each
-      // tick usually finds only the rows that expired since the last one, and
-      // the cursor reads lazily, so live rows after it are never read.
+      // Read the oldest rows in growing pages and stop at the first live one.
+      // Each tick usually finds only the rows that expired since the last, so
+      // reading 5,000 rows every time would bill mostly for live rows.
       const cutoff=Date.now()-7*86400000,ids:number[]=[];
-      for(const row of this.ctx.storage.sql.exec<any>('SELECT id,at FROM accounting ORDER BY id LIMIT 5000')) {if(row.at>=cutoff)break;ids.push(row.id);}
+      for(let after:number|null=null,page=16;ids.length<5000;page=Math.min(512,page*2)) {
+        const limit=Math.min(page,5000-ids.length);
+        const rows=this.ctx.storage.sql.exec<any>('SELECT id,at FROM accounting'+(after===null?'':' WHERE id>?')+' ORDER BY id LIMIT ?',...(after===null?[]:[after]),limit).toArray();
+        let fresh=false;
+        for(const row of rows) {if(row.at>=cutoff){fresh=true;break;}ids.push(row.id);}
+        if(fresh || rows.length<limit)break;
+        after=rows[rows.length-1].id;
+      }
       for(let i=0;i<ids.length;i+=50) {
         const group=ids.slice(i,i+50);
         this.ctx.storage.sql.exec('DELETE FROM accounting WHERE at<? AND id IN ('+group.map(()=>'?').join(',')+')',cutoff,...group);
