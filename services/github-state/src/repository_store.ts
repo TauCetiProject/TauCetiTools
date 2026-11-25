@@ -203,22 +203,56 @@ const storeLog=(event:string,fields:Record<string,unknown>)=>{try{log(event,fiel
 // Diagnostics only: times each Neon HTTP fetch to its response headers and to
 // its fully read body, separating a pre-header transport stall from a slow
 // response body. The driver reads the buffered body exactly as before.
-const fetchPhases={started:0,headers:0,bodies:0,failed_before_headers:0,failed_reading_body:0,max_headers_ms:0,max_body_ms:0,pre:new Map<number,number>(),body:new Map<number,number>(),next:0};
+const fetchPhases={started:0,headers:0,bodies:0,failed_before_headers:0,failed_reading_body:0,max_headers_ms:0,max_body_ms:0,header_timeouts:0,retries:0,retry_successes:0,pre:new Map<number,number>(),body:new Map<number,number>(),next:0};
 export function fetchPhaseSnapshot():Record<string,unknown> {
   const now=Date.now(),oldest=(m:Map<number,number>)=>{const v=Math.min(...m.values());return Number.isFinite(v)?now-v:null;};
   const {pre,body,next,...counts}=fetchPhases;
   return {...counts,awaiting_headers:pre.size,oldest_awaiting_headers_ms:oldest(pre),reading_body:body.size,oldest_reading_body_ms:oldest(body)};
 }
+// Healthy Neon HTTP responses send headers within about 100 ms. Some fetches
+// from the Durable Object instead receive no headers at all until the caller's
+// 15 s abort, while Neon shows no matching query. A read-only request whose
+// headers do not arrive promptly is abandoned and sent again, within the
+// caller's own deadline; anything that may write is never resent.
+export const HEADER_TIMEOUT_MS=1500;
+export const HEADER_ATTEMPTS=4;
+export function resendable(body:unknown):boolean {
+  if(typeof body!=='string')return false;
+  let parsed:any;try{parsed=JSON.parse(body);}catch{return false;}
+  const queries=Array.isArray(parsed?.queries)?parsed.queries:[parsed];
+  return queries.length>0 && queries.every((q:any)=>typeof q?.query==='string' && /^\s*SELECT\b/i.test(q.query) && !/prepare_monitoring|pg_terminate_backend|set_config/i.test(q.query));
+}
+class HeaderTimeout extends Error {constructor(){super('Neon response headers timed out');}}
+async function attemptFetch(input:any,init:any,outer:AbortSignal|undefined,limit:number|undefined):Promise<Response> {
+  const controller=new AbortController();let timer:ReturnType<typeof setTimeout>|undefined,timedOut=false;
+  const forward=()=>controller.abort(outer?.reason);
+  if(outer?.aborted)forward();else outer?.addEventListener('abort',forward);
+  if(limit!==undefined)timer=setTimeout(()=>{timedOut=true;controller.abort(new HeaderTimeout());},limit);
+  try{return await fetch(input,{...init,signal:controller.signal});}
+  catch(error){if(timedOut && !outer?.aborted)throw new HeaderTimeout();throw error;}
+  finally{if(timer)clearTimeout(timer);outer?.removeEventListener('abort',forward);}
+}
 async function timedFetch(input:any,init?:any):Promise<Response> {
   const id=fetchPhases.next++,started=Date.now();fetchPhases.started++;fetchPhases.pre.set(id,started);
-  let response:Response;
-  try{response=await fetch(input,init);}catch(error){fetchPhases.failed_before_headers++;throw error;}finally{fetchPhases.pre.delete(id);}
+  const outer:AbortSignal|undefined=init?.signal,retry=resendable(init?.body);
+  let response:Response|undefined;
+  try{
+    for(let attempt=1;;attempt++){
+      const last=!retry || attempt>=HEADER_ATTEMPTS;
+      try{response=await attemptFetch(input,init,outer,last?undefined:HEADER_TIMEOUT_MS);if(attempt>1)fetchPhases.retry_successes++;break;}
+      catch(error){
+        if(!(error instanceof HeaderTimeout) || last)throw error;
+        fetchPhases.header_timeouts++;fetchPhases.retries++;
+      }
+    }
+  }catch(error){fetchPhases.failed_before_headers++;throw error;}finally{fetchPhases.pre.delete(id);}
   const headersAt=Date.now();fetchPhases.headers++;fetchPhases.max_headers_ms=Math.max(fetchPhases.max_headers_ms,headersAt-started);fetchPhases.body.set(id,headersAt);
   try{
-    const body=await response.arrayBuffer();fetchPhases.bodies++;fetchPhases.max_body_ms=Math.max(fetchPhases.max_body_ms,Date.now()-headersAt);
-    return new Response(body,{status:response.status,statusText:response.statusText,headers:response.headers});
+    const body=await response!.arrayBuffer();fetchPhases.bodies++;fetchPhases.max_body_ms=Math.max(fetchPhases.max_body_ms,Date.now()-headersAt);
+    return new Response(body,{status:response!.status,statusText:response!.statusText,headers:response!.headers});
   }catch(error){fetchPhases.failed_reading_body++;throw error;}finally{fetchPhases.body.delete(id);}
 }
+export const __timedFetchForTests=timedFetch;
 try{if(neonConfig)neonConfig.fetchFunction=timedFetch;}catch{}
 export const HTTP_READ_CONCURRENCY=4;
 export const HTTP_READ_QUEUE=32;

@@ -109,3 +109,35 @@ test('diagnostics name running and slow reads by SQL text only',async()=>{
  const snapshot=gate.snapshot();assert.equal(snapshot.running.length,0);assert.equal(snapshot.recent_slow.at(-1).label,'SELECT 1');assert.equal(snapshot.recent_slow.at(-1).ok,false);
  assert.ok(!JSON.stringify(snapshot).includes('private'));
 });
+const {__timedFetchForTests:timedFetch,resendable,HEADER_TIMEOUT_MS,HEADER_ATTEMPTS}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
+async function withFetch(plan,run){
+ const original=globalThis.fetch,calls=[];
+ globalThis.fetch=(input,init)=>{const behaviour=plan[calls.length] ?? 'ok';calls.push(init);
+  if(behaviour==='hang')return new Promise((_,reject)=>init.signal.addEventListener('abort',()=>reject(init.signal.reason)));
+  return Promise.resolve(new Response('{"rows":[]}',{status:200}));};
+ try{return await run(calls);}finally{globalThis.fetch=original;}
+}
+const select=JSON.stringify({query:'SELECT value FROM meta WHERE key=$1',params:['x']});
+test('a read whose headers stall is resent within its deadline',async()=>{
+ await withFetch(['hang','ok'],async calls=>{
+  const started=Date.now();const response=await timedFetch('https://api.example/sql',{method:'POST',body:select,signal:AbortSignal.timeout(15000)});
+  assert.equal(await response.text(),'{"rows":[]}');assert.equal(calls.length,2);
+  assert.ok(Date.now()-started>=HEADER_TIMEOUT_MS-50 && Date.now()-started<HEADER_TIMEOUT_MS+1000);
+ });
+});
+test('the final attempt waits for the caller deadline and its abort propagates',async()=>{
+ await withFetch(Array(HEADER_ATTEMPTS).fill('hang'),async calls=>{
+  const outer=new AbortController();setTimeout(()=>outer.abort(new Error('caller deadline')),HEADER_TIMEOUT_MS*(HEADER_ATTEMPTS-1)+300);
+  await assert.rejects(timedFetch('https://api.example/sql',{method:'POST',body:select,signal:outer.signal}),/caller deadline/);
+  assert.equal(calls.length,HEADER_ATTEMPTS);
+ });
+});
+test('requests that may write are never resent',async()=>{
+ for(const body of [JSON.stringify({query:'UPDATE jobs SET due=$1',params:[1]}),JSON.stringify({queries:[{query:"SELECT set_config('statement_timeout','5s',true)",params:[]},{query:'SELECT "s".prepare_monitoring($1)',params:[]}]}),JSON.stringify({query:'SELECT pg_terminate_backend(pid,1000)',params:[]}),'not json'])assert.equal(resendable(body),false,body);
+ assert.equal(resendable(JSON.stringify({queries:[{query:'SELECT 1',params:[]},{query:' select 2',params:[]}]})),true);
+ await withFetch(['hang'],async calls=>{
+  const outer=new AbortController();setTimeout(()=>outer.abort(new Error('caller deadline')),HEADER_TIMEOUT_MS+500);
+  await assert.rejects(timedFetch('https://api.example/sql',{method:'POST',body:JSON.stringify({query:'UPDATE jobs SET due=$1',params:[1]}),signal:outer.signal}),/caller deadline/);
+  assert.equal(calls.length,1);
+ });
+});
