@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {postgresFixture,PostgresStore,postgresSQL,rawReceiptLookup} from './postgres_runtime.mjs';
+import {postgresFixture,PostgresStore,postgresSQL,rawReceiptLookup,SURVEY_INDEX_VERSION} from './postgres_runtime.mjs';
 const enabled=Boolean(process.env.TEST_POSTGRES_URL && process.env.TEST_POSTGRES_MIGRATION_URL);
 const pg=(name,fn)=>test(name,{skip:!enabled},fn);
 function requireDirectCleanup(){const host=new URL(process.env.TEST_POSTGRES_URL).hostname;assert.ok(host.endsWith('.neon.tech')&&!host.split('.')[0].endsWith('-pooler'),'Session termination fault tests require a direct, unpooled Neon test endpoint');}
@@ -169,7 +169,7 @@ pg('stored survey hydration batches large histories without GitHub calls',async(
 });
 pg('global surveys batch dirty projections without per-PR SQL and retain exact membership',async()=>{
  const f=await postgresFixture();try {
-  const count=300,contract=JSON.parse(await (await import('node:fs/promises')).readFile(new URL('../../../tauceti_tools/survey_contract.json',import.meta.url),'utf8')).id;
+  const count=300;
   const resources=[],collections=[{key:'open_prs:{}',operation:'open_prs',args:'{}'}],fragments=[],members=[];
   for(let number=1;number<=count;number++) {
    const n=String(number),sha=number.toString(16).padStart(40,'0');
@@ -192,7 +192,7 @@ pg('global surveys batch dirty projections without per-PR SQL and retain exact m
   await f.admin.query(`INSERT INTO ${f.schema}.collections(key,operation,args,complete,verified,revision) SELECT key,operation,args,1,0,0 FROM jsonb_to_recordset($1::jsonb) AS r(key text,operation text,args text)`,[JSON.stringify(collections)]);
   await f.admin.query(`INSERT INTO ${f.schema}.members(collection,id) SELECT collection,id FROM jsonb_to_recordset($1::jsonb) AS r(collection text,id text)`,[JSON.stringify(members)]);
   await f.admin.query(`INSERT INTO ${f.schema}.survey_fragments(kind,id,parent,data) SELECT kind,id,parent,data FROM jsonb_to_recordset($1::jsonb) AS r(kind text,id text,parent text,data text)`,[JSON.stringify(fragments)]);
-  await f.admin.query(`INSERT INTO ${f.schema}.survey_hydrated(number,contract) SELECT id,$1 FROM ${f.schema}.resources WHERE kind='pr'`,[contract+':completed-scoreboards']);
+  await f.admin.query(`INSERT INTO ${f.schema}.survey_hydrated(number,contract) SELECT id,$1 FROM ${f.schema}.resources WHERE kind='pr'`,[SURVEY_INDEX_VERSION]);
   await f.admin.query(`INSERT INTO ${f.schema}.survey_state(number,data,revision) SELECT id,'{"meta":null,"contest":null,"rebase_heads":[]}',0 FROM ${f.schema}.resources WHERE kind='pr'`);
   await f.admin.query(`INSERT INTO ${f.schema}.survey_dirty(number) SELECT id FROM ${f.schema}.resources WHERE kind='pr'`);
   const reference=JSON.parse(await f.state.projectedSurvey('1'));
