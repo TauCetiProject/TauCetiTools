@@ -2879,17 +2879,18 @@ export class RepositoryState extends DurableObject<Env> {
     if(!earlier || earlier>at)await this.setAlarm(at,quota,continuation,true);
   }
   // MIN(MAX(due,lease_until)) over the matching jobs, without reading every
-  // job. Rows come from the due index in due order and each wake is at least
-  // its due, so once a row's due reaches the earliest wake already seen, no
-  // later row can be earlier. Rows with a NULL due or lease contribute no wake.
-  // A short prefix usually decides; a longer one covers many leased early
-  // rows, and an undecided prefix falls back to the complete aggregate.
+  // job. A bounded prefix of the due index is read in due order, whether or
+  // not each row matches. Each wake is at least its due, so once a row's due
+  // reaches the earliest matching wake already seen, no later row can be
+  // earlier. Rows with a NULL due or lease contribute no wake. A short prefix
+  // usually decides; a longer one covers many leased or excluded early rows,
+  // and an undecided prefix falls back to the complete aggregate.
   private async earliestWake(where:string,bindings:(string|number)[]):Promise<number|null> {
-    const filter=where?' AND '+where.slice(' WHERE '.length):'';
+    const matches=where?where.slice(' WHERE '.length):'1';
     for(const limit of [8,256]){
-      const rows=(await this.store.exec<any>('SELECT due,MAX(due,lease_until) AS wake FROM jobs WHERE due IS NOT NULL AND lease_until IS NOT NULL'+filter+' ORDER BY due LIMIT '+limit,...bindings)).toArray();
+      const rows=(await this.store.exec<any>('SELECT due,MAX(due,lease_until) AS wake,'+matches+' AS matches FROM jobs WHERE due IS NOT NULL AND lease_until IS NOT NULL ORDER BY due LIMIT '+limit,...bindings)).toArray();
       let best:number|null=null;
-      for(const row of rows)if(best===null || row.wake<best)best=row.wake;
+      for(const row of rows)if(row.matches && (best===null || row.wake<best))best=row.wake;
       if(rows.length<limit || best!==null && rows[rows.length-1].due>=best)return best;
     }
     return (await this.store.exec<any>('SELECT MIN(MAX(due,lease_until)) AS due FROM jobs'+where,...bindings)).one().due;

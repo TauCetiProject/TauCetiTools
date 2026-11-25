@@ -131,12 +131,16 @@ test('the repair wake matches the full aggregate while reading a few indexed row
    // Equal due values, NULL clocks and past leases.
    mixed:n=>Array.from({length:n},(_,i)=>['k'+i,random()<0.1?null:now+Math.floor(random()*5)*1000,random()<0.1?null:random()<0.5?now-5000:now+Math.floor(random()*8000)]),
    empty:()=>[],small:()=>[['a',now+5,now+9],['b',null,now+1],['c',now+7,null]],
+   // An overdue unleased backlog that a full coordinator must look past.
+   backlog:n=>[...Array.from({length:n},(_,i)=>['b'+i,now-n+i,0]),...Array.from({length:30},(_,i)=>['f'+i,now+1000+i,now+90_000_000])],
   };
   for(const [name,layout] of Object.entries(layouts))for(const n of [3,64,65,500]){
    const rows=layout(n);await send(stub,'/t/jobs',{rows});
    const results=await (await send(stub,'/t/wake',{cases:forms(rows.slice(0,3).map(row=>row[0]))})).json();
    for(const result of results)assert.equal(result.actual,result.expected,name+' '+n+' '+JSON.stringify(result));
    if(name==='ordinary' && n===500)for(const result of results)assert.ok(result.read<=40,'reads '+result.read+' rows instead of every job');
+   // The examined prefix is bounded even when few early rows match.
+   if(n===500)for(const result of results)assert.ok(result.read<=2*(rows.length+30)+2*(8+256),name+' reads '+result.read);
   }
  }finally{await mf.dispose();}
 });
@@ -160,7 +164,7 @@ test('accounting expiry reads only the expired prefix and deletes exactly the sa
  try{
   const ns=await mf.getDurableObjectNamespace('INSTALLATIONS'),stub=ns.get(ns.idFromName(repository.installation));
   const quiet=await (await send(stub,'/t/accounting',{old:0,fresh:300})).json();
-  assert.equal(quiet.remaining.length,300);assert.ok(quiet.read<=101,'a live first row stops after one small page: '+quiet.read);
+  assert.equal(quiet.remaining.length,300);assert.ok(quiet.read<=5,'a live first row stops the scan: '+quiet.read);
   // A later expired row behind a live one is retained, as before.
   const mixed=await (await send(stub,'/t/accounting',{old:250,fresh:20,late:true})).json();
   assert.deepEqual(mixed.remaining,[...Array(20).fill('fresh'),'old']);
