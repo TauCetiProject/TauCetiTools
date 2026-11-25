@@ -1,4 +1,4 @@
-import { RepositoryStore, StoreUnavailable, StoreFenced, canReplayPublication, isBackendFailure, isMemberDataFailure, WriterPurpose, WriterOperation, SQLiteStore, PostgresStore, ReadCacheStore, BufferedStore, SerialLane, columns, collectionJoin } from './repository_store';
+import { RepositoryStore, StoreUnavailable, StoreFenced, canReplayPublication, isBackendFailure, isMemberDataFailure, WriterPurpose, WriterOperation, SQLiteStore, PostgresStore, ReaderPool, ReadCacheStore, BufferedStore, SerialLane, columns, collectionJoin } from './repository_store';
 import { repositoryHealth } from './repository_health';
 import { DurableObject } from 'cloudflare:workers';
 import { Env, EventPointer, matchesETag, Query, Result, digest, json, queryKey, repository, stub, validateQuery, parseGitHub, CI_EVENTS, NOT_MIRRORED, publicQuery, stagingStateKey, stagedPageKey } from './protocol';
@@ -86,6 +86,11 @@ function coordinationWindows(history:any,now:number):any {
     legacy_lease_upper_bound:Math.max(0,...Object.values(history.buckets).map((b:any)=>b.legacy_until || 0))};
 }
 
+// Repository reads use WebSocket sessions unless REPOSITORY_READ_TRANSPORT=http.
+function withReaders(store:PostgresStore,env:Env):PostgresStore {
+  if(env.REPOSITORY_READ_TRANSPORT!=='http' && env.REPOSITORY_DATABASE_URL)store.readers=new ReaderPool(env.REPOSITORY_DATABASE_URL);
+  return store;
+}
 export class RepositoryState extends DurableObject<Env> {
   private [ACTIVITY_CLOCK]?:number;
   private inflightQueries=new Map<string,Promise<Result>>();
@@ -229,7 +234,7 @@ export class RepositoryState extends DurableObject<Env> {
     if(env.REPOSITORY_BACKEND==='postgres') {
       const repo=JSON.parse(env.ALLOWED_REPOSITORIES || '[]').find((r:any)=>env.REPOSITORIES.idFromName(r.id).toString()===ctx.id.toString());
       if(!repo || !env.REPOSITORY_DATABASE_URL || !env.REPOSITORY_GENERATION) throw new Error('PostgreSQL backend configuration missing');
-      this.store=new PostgresStore(env.REPOSITORY_DATABASE_URL,repo.id,env.REPOSITORY_GENERATION);
+      this.store=withReaders(new PostgresStore(env.REPOSITORY_DATABASE_URL,repo.id,env.REPOSITORY_GENERATION),env);
       return; // No schema creation, migration, bootstrap or GitHub reads.
     }
     if(env.REPOSITORY_BACKEND && env.REPOSITORY_BACKEND!=='sqlite') throw new Error('Unknown repository backend');
@@ -3303,7 +3308,7 @@ export class RepositoryState extends DurableObject<Env> {
       const url=new URL(this.env.REPOSITORY_DATABASE_URL);
       if(!['postgres:','postgresql:'].includes(url.protocol) || url.hostname!==identity.hostname || decodeURIComponent(url.pathname.slice(1))!==identity.database || decodeURIComponent(url.username)!==identity.application_role)throw 0;
     }catch {throw new AdminError('migration_target_configuration');}
-    this.store=new PostgresStore(this.env.REPOSITORY_DATABASE_URL,repo,owner.generation);
+    this.store=withReaders(new PostgresStore(this.env.REPOSITORY_DATABASE_URL,repo,owner.generation),this.env);
     this.selectedMigrationGeneration=owner.generation;this.schema='current';this.degraded=undefined;this.storageMarkerUnavailable=false;
     this.repositoryMemo=undefined;this.revisionState.value=undefined;this.completedQueries.clear();this.publicCompletedQueries.clear();
   }

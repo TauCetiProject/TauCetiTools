@@ -264,7 +264,7 @@ export const __timedFetchForTests=timedFetch;
 // healthy while HTTP requests to the shared host stall before headers.
 export const neonFetchEndpoint=(host:string):string=>'https://'+host+'/sql';
 try{if(neonConfig){neonConfig.fetchFunction=timedFetch;neonConfig.fetchEndpoint=neonFetchEndpoint;}}catch{}
-export const HTTP_READ_CONCURRENCY=4;
+export const HTTP_READ_CONCURRENCY=3;
 export const HTTP_READ_QUEUE=32;
 export const HTTP_READ_ADMISSION_MS=5000;
 interface GateEntry {deadline:number;admit:()=>void;expire:()=>void}
@@ -340,6 +340,66 @@ export class OutboundGate {
       busy_buckets:{...this.buckets},running:[...this.running.values()].map(r=>({label:r.label,age_ms:Date.now()-r.started})),recent_slow:[...this.slow]};
   }
 }
+// Reads over persistent WebSocket sessions to the compute endpoint, the same
+// transport as the writer, instead of HTTP. Each session is read-only at the
+// database (default_transaction_read_only) and bounded by statement_timeout.
+// The outbound gate bounds sessions in use; idle sessions are reused and
+// replaced after READER_MAX_AGE_MS or on any transport failure.
+export const READER_MAX_AGE_MS=60000;
+export const READER_QUERY_MS=15000;
+interface Reader {client:Client;broken:boolean;opened:number}
+export class ReaderPool {
+  private idle:Reader[]=[];
+  private counters={opened:0,open:0,reused:0,discarded:0,connect_failures:0,timeouts:0};
+  constructor(private url:string) {}
+  snapshot():Record<string,unknown> {this.reap();return {...this.counters,idle:this.idle.length};}
+  // Expire every aged idle session, not only the one a read would pop.
+  reap():void {for(const reader of [...this.idle])if(reader.broken || Date.now()-reader.opened>READER_MAX_AGE_MS)this.discard(reader);}
+  private reapTimer?:ReturnType<typeof setTimeout>;
+  private scheduleReap():void {
+    if(this.reapTimer || !this.idle.length)return;
+    this.reapTimer=setTimeout(()=>{this.reapTimer=undefined;this.reap();this.scheduleReap();},READER_MAX_AGE_MS);
+    (this.reapTimer as any)?.unref?.();
+  }
+  private discard(reader:Reader):void {
+    if((reader as any).gone)return;
+    (reader as any).gone=true;reader.broken=true;this.counters.open--;this.counters.discarded++;
+    const index=this.idle.indexOf(reader);if(index>=0)this.idle.splice(index,1);
+    try{void reader.client.end().catch(()=>{});}catch{}
+    try{reader.client.neonConfig.destroy();}catch{}
+  }
+  private async connect():Promise<Reader> {
+    let client:Client;try{client=new Client({connectionString:this.url,connectionTimeoutMillis:10000,query_timeout:READER_QUERY_MS});}catch{throw new StoreUnavailable();}
+    const reader:Reader={client,broken:false,opened:Date.now()};this.counters.opened++;this.counters.open++;
+    // A session that fails or closes while idle leaves the pool at once.
+    const lost=()=>{reader.broken=true;if(this.idle.includes(reader))this.discard(reader);};
+    client.on('error',lost);client.on('end',lost);
+    let timer:ReturnType<typeof setTimeout>|undefined;
+    try{
+      await Promise.race([(async()=>{await client.connect();await client.query("SET default_transaction_read_only=on; SET statement_timeout='15s'; SET idle_in_transaction_session_timeout='30s'");})(),
+        new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new StoreUnavailable('08001')),10000);})]);
+    }catch(error){this.counters.connect_failures++;this.discard(reader);throw error;}finally{if(timer)clearTimeout(timer);}
+    return reader;
+  }
+  async use<T>(work:(client:Client)=>Promise<T>):Promise<T> {
+    let reader:Reader|undefined;
+    this.reap();
+    while(this.idle.length){const candidate=this.idle.pop()!;if(candidate.broken || Date.now()-candidate.opened>READER_MAX_AGE_MS)this.discard(candidate);else{reader=candidate;this.counters.reused++;break;}}
+    reader ??= await this.connect();
+    let timer:ReturnType<typeof setTimeout>|undefined,healthy=false;
+    try{
+      const result=await Promise.race([work(reader.client),new Promise<never>((_,reject)=>{timer=setTimeout(()=>{this.counters.timeouts++;reader!.broken=true;reject(new StoreUnavailable('57014'));},READER_QUERY_MS+1000);})]);
+      healthy=true;return result;
+    }catch(error){
+      // A server ERROR leaves the session usable; anything else discards it.
+      if((error as any)?.severity==='ERROR' && !reader.broken)healthy=true;
+      throw error;
+    }finally{
+      if(timer)clearTimeout(timer);
+      if(healthy && !reader.broken){this.idle.push(reader);this.scheduleReap();}else this.discard(reader);
+    }
+  }
+}
 export class PostgresStore implements RepositoryStore {
   readonly backend='postgres';
   readonly schema:string;
@@ -355,8 +415,10 @@ export class PostgresStore implements RepositoryStore {
   private directEndpoint=false;
   // Shared by every scoped store of this repository object.
   private gate=new OutboundGate();
+  // Set by the repository object; absent means HTTP reads.
+  readers?:ReaderPool;
   private writerSocket:{open:number,since:number|null,opened:number}={open:0,since:null,opened:0};
-  outbound():Record<string,unknown> {return {http_reads:this.gate.snapshot(),http_fetch:fetchPhaseSnapshot(),writer_socket:{...this.writerSocket,open_ms:this.writerSocket.since===null?null:Date.now()-this.writerSocket.since},writer_queued:this.writer.queuedOtherWork};}
+  outbound():Record<string,unknown> {return {read_transport:this.readers?'websocket':'http',http_reads:this.gate.snapshot(),http_fetch:fetchPhaseSnapshot(),readers:this.readers?.snapshot() ?? null,writer_socket:{...this.writerSocket,open_ms:this.writerSocket.since===null?null:Date.now()-this.writerSocket.since},writer_queued:this.writer.queuedOtherWork};}
   private gated<T>(work:()=>Promise<T>,options?:{priority?:boolean,signal?:AbortSignal,label?:string}):Promise<T> {return this.gate.run(work,options);}
   constructor(private url:string,repository:string,private generation:string,private client?:Client,private diagnostics:{connections:number,queries:number,lastConnection?:number}={connections:0,queries:0},private connectionState?:ConnectionState,private onQuery?:()=>void) {
     this.schema=schemaName(repository);
@@ -395,6 +457,7 @@ export class PostgresStore implements RepositoryStore {
     // Standalone writes are still fenced and atomic. The callback path uses a
     // request-scoped interactive connection, closed before the request returns.
     if(!this.client && !/^\s*SELECT\b/i.test(sql))return (await this.batch([{sql,bindings}]))[0] as Rows<T>;
+    if(!this.client && this.readers){const readers=this.readers;return this.run(async()=>new Rows<T>(await this.gated(()=>readers.use(async client=>(await client.query(query,bindings)).rows),{label:sql})));}
     return this.run(async()=>new Rows<T>(this.client?(await this.client.query(query,bindings)).rows:(await this.gated(()=>this.http.transaction([this.http.query(query,bindings)],{readOnly:true,fetchOptions:{signal:AbortSignal.timeout(15000)}}),{label:sql}))[0] as T[]));
   }
   async batch(statements:Statement[]):Promise<Rows<any>[]> {
@@ -403,16 +466,13 @@ export class PostgresStore implements RepositoryStore {
   }
   private async executeBatch(statements:Statement[]):Promise<Rows<any>[]> {
     if(!statements.length)return [];
+    if(!this.client && this.readers){
+      // HTTP batches here are stored reads only (mutations entered transaction() above).
+      const readers=this.readers;
+      return this.selectBatch(statements,query=>this.run(()=>this.gated(()=>readers.use(client=>query(client)),{label:'batch['+statements.length+'] '+statements.map(s=>s.sql.slice(0,40)).join(' | ')})));
+    }
     if(this.client) {
-      if(statements.every(s=>/^\s*SELECT\b/i.test(s.sql))) {
-        const bindings:Bind[]=[],queries=statements.map((s,i)=>{
-          const offset=bindings.length,query=postgresSQL(s.sql,this.schema).replace(/'(?:''|[^'])*'|\$(\d+)/g,(part,n)=>n?'$'+(Number(n)+offset):part);
-          bindings.push(...(s.bindings || []));return `(SELECT COALESCE(jsonb_agg(to_jsonb(q${i})),'[]'::jsonb) FROM (${query}) AS q${i})`;
-        });
-        const rows=await this.run(async()=> (await this.client!.query('SELECT jsonb_build_array('+queries.join(',')+') AS batches',bindings)).rows[0].batches as any[][]);
-        const check=(value:any):void=>{if(typeof value==='number' && (!Number.isFinite(value) || Number.isInteger(value)&&!Number.isSafeInteger(value)))throw new StoreUnavailable('22003');if(value && typeof value==='object')for(const child of Object.values(value))check(child);};
-        check(rows);return rows.map(row=>new Rows(row));
-      }
+      if(statements.every(s=>/^\s*SELECT\b/i.test(s.sql)))return this.selectBatch(statements,query=>this.run(()=>query(this.client!)));
       const tables=statements.map(s=>s.sql.match(/^\s*(?:INSERT(?: OR IGNORE)? INTO|UPDATE|DELETE FROM) (\w+)/i)?.[1]);
       if(tables.every(Boolean) && new Set(tables).size===tables.length && statements.every(s=>!/\b(RETURNING|SELECT)\b/i.test(s.sql))) {
         const bindings:Bind[]=[],parts=statements.map((s,i)=>{
@@ -434,6 +494,16 @@ export class PostgresStore implements RepositoryStore {
       },{label:'batch['+statements.length+'] '+statements.map(s=>s.sql.slice(0,40)).join(' | ')});
       return results.map(rows=>new Rows(rows));
     });
+  }
+  // One statement, so one snapshot, matching the read-only HTTP batch.
+  private async selectBatch(statements:Statement[],execute:(query:(client:Client)=>Promise<any[][]>)=>Promise<any[][]>):Promise<Rows<any>[]> {
+    const bindings:Bind[]=[],queries=statements.map((s,i)=>{
+      const offset=bindings.length,query=postgresSQL(s.sql,this.schema).replace(/'(?:''|[^'])*'|\$(\d+)/g,(part,n)=>n?'$'+(Number(n)+offset):part);
+      bindings.push(...(s.bindings || []));return `(SELECT COALESCE(jsonb_agg(to_jsonb(q${i})),'[]'::jsonb) FROM (${query}) AS q${i})`;
+    });
+    const rows=await execute(async client=>(await client.query('SELECT jsonb_build_array('+queries.join(',')+') AS batches',bindings)).rows[0].batches as any[][]);
+    const check=(value:any):void=>{if(typeof value==='number' && (!Number.isFinite(value) || Number.isInteger(value)&&!Number.isSafeInteger(value)))throw new StoreUnavailable('22003');if(value && typeof value==='object')for(const child of Object.values(value))check(child);};
+    check(rows);return rows.map(row=>new Rows(row));
   }
   async transaction<T>(apply:(store:RepositoryStore)=>Promise<T>,purpose:WriterPurpose='other',operation?:WriterOperation):Promise<T> {
     if(this.client)return apply(this);
