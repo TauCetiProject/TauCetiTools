@@ -1,4 +1,4 @@
-import { RepositoryStore, StoreUnavailable, StoreFenced, canReplayPublication, isBackendFailure, isMemberDataFailure, WriterPurpose, WriterOperation, SQLiteStore, PostgresStore, ReaderPool, ReadCacheStore, BufferedStore, SerialLane, columns, collectionJoin, HEAVY_READ } from './repository_store';
+import { RepositoryStore, StoreUnavailable, StoreFenced, canReplayPublication, isBackendFailure, isMemberDataFailure, WriterPurpose, WriterOperation, SQLiteStore, PostgresStore, ReaderPool, ReadCacheStore, BufferedStore, SerialLane, columns, collectionJoin, HEAVY_READ, Statement } from './repository_store';
 import { repositoryHealth } from './repository_health';
 import { DurableObject } from 'cloudflare:workers';
 import { Env, EventPointer, matchesETag, Query, Result, digest, json, queryKey, repository, stub, validateQuery, parseGitHub, CI_EVENTS, NOT_MIRRORED, publicQuery, stagingStateKey, stagedPageKey } from './protocol';
@@ -525,14 +525,16 @@ export class RepositoryState extends DurableObject<Env> {
     const selected=(where<0?sql:sql.slice(0,where)).replace(/^SELECT /,`SELECT ${identity} AS __after,`),predicate=where<0?'': '('+sql.slice(where+7)+') AND ';
     for(;;){const query=selected+' WHERE '+predicate+identity+'>? ORDER BY '+identity+' LIMIT '+limit,page=(await this.store.exec<any>(bounded(query,'__after'),...bindings,after)).toArray();rows.push(...page);if(finished(page))return rows;adapt(page);after=page.at(-1).__after;}
   }
+  // Large prefetch batches take a heavy PostgreSQL read slot (isHeavyRead).
+  heavyBatch(statements:Statement[]):Statement[] {return this.store.backend==='postgres'?statements.map(s=>({...s,sql:s.sql+HEAVY_READ})):statements;}
   async primePublication(q:Query,rows:any[]):Promise<void> {
     const cache=new ReadCacheStore(this.store);this.store=cache;
     const kind=this.kind(q),ids=rows.flatMap(row=>{const id=q.operation==='files'?String(q.args?.number)+':'+String(row.filename):this.id(q.operation,row);return kind==='pr'?[id,queryKey({operation:'pr',args:{number:row.number}})]:[id];});
     if(q.args?.number){const parent=String(q.args.number),found=(await cache.exec("SELECT id FROM resources WHERE kind='pr' AND id=?",parent)).toArray();cache.seed("SELECT id FROM resources WHERE kind='pr' AND id=?",[parent],found);}
     for(let offset=0;offset<ids.length;offset+=256) {
       const chunk=ids.slice(offset,offset+256);
-      const stored=(await cache.batch([{sql:'SELECT * FROM resources WHERE kind=? AND id IN ('+chunk.map(()=>'?').join(',')+')',bindings:[kind,...chunk]},
-        {sql:'SELECT collection,id FROM members WHERE collection IN ('+(['pr_delta','issue_delta'].includes(q.operation)?'?,?':'?')+') AND id IN ('+chunk.map(()=>'?').join(',')+')',bindings:[queryKey(q),...(['pr_delta','issue_delta'].includes(q.operation)?[queryKey({operation:q.operation==='pr_delta'?'open_prs':'open_issues'})]:[]),...chunk]}]));
+      const stored=(await cache.batch(this.heavyBatch([{sql:'SELECT * FROM resources WHERE kind=? AND id IN ('+chunk.map(()=>'?').join(',')+')',bindings:[kind,...chunk]},
+        {sql:'SELECT collection,id FROM members WHERE collection IN ('+(['pr_delta','issue_delta'].includes(q.operation)?'?,?':'?')+') AND id IN ('+chunk.map(()=>'?').join(',')+')',bindings:[queryKey(q),...(['pr_delta','issue_delta'].includes(q.operation)?[queryKey({operation:q.operation==='pr_delta'?'open_prs':'open_issues'})]:[]),...chunk]}])));
       for(const id of chunk){const found=stored[0].toArray().filter(r=>r.id===id);cache.seed('SELECT * FROM resources WHERE kind=? AND id=?',[kind,id],found);cache.seed('SELECT data,updated,observed FROM resources WHERE kind=? AND id=?',[kind,id],found);cache.seed('SELECT data,tombstone FROM resources WHERE kind=? AND id=?',[kind,id],found);for(const key of [queryKey(q),...(['pr_delta','issue_delta'].includes(q.operation)?[queryKey({operation:q.operation==='pr_delta'?'open_prs':'open_issues'})]:[])])cache.seed('SELECT id FROM members WHERE collection=? AND id=?',[key,id],stored[1].toArray().filter(r=>r.id===id && r.collection===key));}
     }
   }
@@ -579,7 +581,7 @@ export class RepositoryState extends DurableObject<Env> {
         // SQLite. Heap/index order changes would otherwise reorder rollups.
         tasks.push({sql:"SELECT * FROM resources WHERE kind='status_context' AND parent IN ("+hs.map(()=>'?').join(',')+') AND tombstone=0 ORDER BY rowid',bindings:hs});
       }
-      const results=await cache.batch(tasks.map(t=>({...t,sql:t.sql+' LIMIT 50001'})));
+      const results=await cache.batch(this.heavyBatch(tasks.map(t=>({...t,sql:t.sql+' LIMIT 50001'}))));
       if(results.some(r=>r.toArray().length>50000))throw new Error('Related repository read exceeds batch bound');
       let at=0;
       if(ns.length)for(const [table,sql] of [['survey_hydrated','SELECT contract FROM survey_hydrated WHERE number=?'],['survey_state','SELECT data FROM survey_state WHERE number=?'],['survey_dirty','SELECT number FROM survey_dirty WHERE number=?']]) {
@@ -3053,13 +3055,13 @@ export class RepositoryState extends DurableObject<Env> {
     for(let offset=0;offset<numbers.length;offset+=128) {
       const ns=numbers.slice(offset,offset+128),ids=ns.map(String),keys=ns.map(number=>queryKey({operation:'files',args:{number}})),commentKeys=ns.map(number=>queryKey({operation:'issue_comments',args:{number}}));
       const allKeys=[...keys,...commentKeys];
-      const [resources,collections,loc,hydrated,fragments]=await cache.batch([
+      const [resources,collections,loc,hydrated,fragments]=await cache.batch(this.heavyBatch([
         {sql:"SELECT id,data,observed FROM resources WHERE kind='pr' AND tombstone=0 AND id IN ("+ids.map(()=>'?').join(',')+')',bindings:ids},
         {sql:'SELECT key,complete,revision,verified FROM collections WHERE key IN ('+allKeys.map(()=>'?').join(',')+')',bindings:allKeys},
         {sql:'SELECT number,fingerprint,data FROM activity_loc_cache WHERE number IN ('+ids.map(()=>'?').join(',')+')',bindings:ids},
         {sql:'SELECT number,contract FROM survey_hydrated WHERE number IN ('+ids.map(()=>'?').join(',')+')',bindings:ids},
         {sql:"SELECT f.parent,f.data,m.collection FROM survey_fragments f JOIN members m ON m.id=f.id WHERE f.kind='issue_comments' AND f.parent IN ("+ids.map(()=>'?').join(',')+') AND m.collection IN ('+commentKeys.map(()=>'?').join(',')+')',bindings:[...ids,...commentKeys]}
-      ]);
+      ]));
       const decoded=new Map<string,any>();
       for(const row of resources.toArray())decoded.set(row.id,await this.decode(row.data));
       const heads=ns.flatMap(number=>decoded.has(String(number))?[String(number),decoded.get(String(number)).headRefOid || '']:[]);

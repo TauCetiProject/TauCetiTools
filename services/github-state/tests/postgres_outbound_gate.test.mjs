@@ -47,7 +47,7 @@ test('heavy reads leave at least one slot for small reads',async()=>{
  assert.ok(HEAVY_READ_CONCURRENCY<HTTP_READ_CONCURRENCY);
  const page='SELECT * FROM (SELECT stored_page.* FROM (SELECT 1) AS stored_page) AS bounded_page WHERE true';
  assert.equal(isHeavyRead(page),true);assert.equal(isHeavyRead('SELECT jobs.* FROM jobs LIMIT 100'+HEAVY_READ),true);assert.equal(isHeavyRead('SELECT data FROM resources WHERE id=?'),false);
- const heavy=[...Array.from({length:2},()=>f.store.exec(page)),...Array.from({length:2},()=>f.store.batch([{sql:'SELECT 1'},{sql:'SELECT 2'}]))];
+ const heavy=[...Array.from({length:2},()=>f.store.exec(page)),...Array.from({length:2},()=>f.store.batch([{sql:'SELECT 1'+HEAVY_READ},{sql:'SELECT 2'+HEAVY_READ}]))];
  await tick();
  assert.equal(f.state.active,HEAVY_READ_CONCURRENCY);
  let snapshot=f.store.outbound().http_reads;assert.equal(snapshot.in_flight_heavy,HEAVY_READ_CONCURRENCY);assert.equal(snapshot.waiting_heavy,4-HEAVY_READ_CONCURRENCY);
@@ -86,6 +86,13 @@ test('heavy waiters fill at most half the queue',async()=>{
  assert.equal(gate.waiting,8);assert.equal(gate.snapshot().by_class.small.shed_queue_full,0);
  while(releases.length || gate.inFlight){releases.splice(0).forEach(release=>release());await tick();}
  await Promise.all(held);assert.equal(gate.snapshot().completed,11);
+});
+test('an unmarked read batch stays small',async()=>{
+ const f=fixture();
+ const work=[f.store.batch([{sql:'SELECT 1'},{sql:'SELECT 2'}]),f.store.batch([{sql:'SELECT 3'},{sql:'SELECT 4'+HEAVY_READ}])];await tick();
+ const snapshot=f.store.outbound().http_reads;assert.equal(snapshot.by_class.small.admitted,1);assert.equal(snapshot.by_class.heavy.admitted,1);
+ while(f.pending.length || f.state.active){f.pending.splice(0).forEach(release=>release());await tick();}
+ await Promise.all(work);
 });
 test('a shed heavy read is counted by class',async()=>{
  const gate=new OutboundGate(2,10,20);let release;

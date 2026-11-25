@@ -265,7 +265,7 @@ export const __timedFetchForTests=timedFetch;
 export const neonFetchEndpoint=(host:string):string=>'https://'+host+'/sql';
 try{if(neonConfig){neonConfig.fetchFunction=timedFetch;neonConfig.fetchEndpoint=neonFetchEndpoint;}}catch{}
 export const HTTP_READ_CONCURRENCY=3;
-// Heavy reads (stored scan pages and multi-statement read batches) move up to
+// Heavy reads (stored scan pages and marked prefetch batches) move up to
 // a few MB each and can hold a slot for seconds. They may use at most this many
 // slots, so at least one slot always serves small reads. Raising the total
 // instead would leave the writer WebSocket and R2 too few of the six outbound
@@ -492,7 +492,7 @@ export class PostgresStore implements RepositoryStore {
     if(!this.client && this.readers){
       // HTTP batches here are stored reads only (mutations entered transaction() above).
       const readers=this.readers;
-      return this.selectBatch(statements,query=>this.run(()=>this.gated(()=>readers.use(client=>query(client)),{label:'batch['+statements.length+'] '+statements.map(s=>s.sql.slice(0,40)).join(' | '),heavy:statements.length>1})));
+      return this.selectBatch(statements,query=>this.run(()=>this.gated(()=>readers.use(client=>query(client)),{label:'batch['+statements.length+'] '+statements.map(s=>s.sql.slice(0,40)).join(' | '),heavy:statements.some(s=>isHeavyRead(s.sql))})));
     }
     if(this.client) {
       if(statements.every(s=>/^\s*SELECT\b/i.test(s.sql)))return this.selectBatch(statements,query=>this.run(()=>query(this.client!)));
@@ -514,7 +514,7 @@ export class PostgresStore implements RepositoryStore {
       const results=await this.gated(()=>{
         const queries=statements.map(s=>this.http.query(postgresSQL(s.sql,this.schema),s.bindings || []));
         return this.http.transaction(queries,{readOnly:true,isolationLevel:'RepeatableRead',fetchOptions:{signal:AbortSignal.timeout(15000)}});
-      },{label:'batch['+statements.length+'] '+statements.map(s=>s.sql.slice(0,40)).join(' | '),heavy:statements.length>1});
+      },{label:'batch['+statements.length+'] '+statements.map(s=>s.sql.slice(0,40)).join(' | '),heavy:statements.some(s=>isHeavyRead(s.sql))});
       return results.map(rows=>new Rows(rows));
     });
   }
