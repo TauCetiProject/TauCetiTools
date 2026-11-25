@@ -625,7 +625,11 @@ webhooks for every TauCeti event. It was paused on 2026-11-25 by:
 
 The Worker script, its secrets, its Durable Objects and the
 `tauceti-github-state-test` R2 bucket are kept. The paused script has no
-route, cron or queue consumer, so nothing invokes it. The production Worker
+route, cron or queue consumer. Durable Object alarms that were already
+scheduled can still wake retained objects until their repair work stops
+(GitHub calls fail while the installation is suspended), so confirm with the
+GraphQL Analytics API that the script's requests and the bucket's R2
+operations have fallen to near zero. The production Worker
 (`tauceti-github-state`) is unaffected.
 
 To resume, from `services/github-state` on current `main`:
@@ -633,13 +637,18 @@ To resume, from `services/github-state` on current `main`:
 1. `npm ci && npm run deploy -- --env test` restores the custom domain, the
    cron trigger and both queue consumers from `wrangler.jsonc`. Check that its
    output names `tauceti-github-state-test`, never `tauceti-github-state`.
-2. Unsuspend the installation, with the App JWT
-   (`DELETE /app/installations/<id>/suspended`) or from the TauCetiProject
-   organization's GitHub Apps settings. The installation ID is in
+2. Unsuspend the installation with the App JWT
+   (`DELETE /app/installations/<id>/suspended`). An installation suspended by
+   the App can only be unsuspended through this App API, not from the
+   organization's settings. The installation ID is in
    `~/.config/tauceti-github-state-test/deployment.json`.
-3. Webhooks sent during the pause are lost, so the mirror is stale. Rehearsals
-   that need a complete mirror should start from a fresh import:
-   `python3 services/github-state/scripts/setup.py bootstrap --environment test`.
+3. Webhooks sent during the pause are lost, so the mirror is stale.
+   `python3 scripts/setup.py bootstrap --environment test` re-enqueues the
+   repository inventories over the retained state; it does not reset the
+   mirror or wait for completion. A rehearsal that needs a clean, complete
+   source should start from a fresh test import (see the
+   [migration runbook](../../docs/github-state-migration.md)) and check
+   coverage before relying on it.
 4. If the comparison sampler is wanted again, run
    `systemctl --user enable --now tauceti-github-state-shadow.service` on
    chungus2.
