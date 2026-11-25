@@ -174,6 +174,15 @@
 #     untrusted code has this ceiling; the pr-build bwrap sandbox plus human review
 #     of suspicious `initialize`/`@[init]` code are the outer defense. Everything
 #     short of that deliberate two-step forgery fails closed.
+#   * The scan and `#lint` drivers both run candidate code, and in the sandbox $TMPDIR is under
+#     the candidate-writable `.lake`. So everything that fixes the drivers' scope is generated
+#     before any candidate code runs and is never read back from there: the module lists (all
+#     modules, and the scoped lint list), the generated docstring-scan source, and the nonces and
+#     marker file. `lint-env.sh --prepare DIR`, run on the host from the trusted scripts, writes
+#     them to DIR and makes them read-only; the sandboxed run takes DIR in LINT_ENV_INPUTS,
+#     mounted read-only, and refuses to run there without it. Otherwise candidate code run by the
+#     docstring scan could swap the lists for a smaller set, and the `#lint` driver would pass
+#     with reduced coverage while this script reported full scope.
 #   * Residual risk (pre-existing, shared by every audit in the sandbox): the compiled
 #     driver's own code is built before candidate code runs and is mounted read-only, but
 #     like the `lean`-based audits it loads the Batteries, Mathlib and TauCeti `.olean`s from
@@ -183,8 +192,12 @@
 # needs the compiled oleans. It does no network I/O and writes only under $TMPDIR, so
 # it is safe inside the pr-build bwrap sandbox. Usage:
 #
-#   scripts/lint-env.sh            # check against the baseline
-#   scripts/lint-env.sh --update   # rewrite the baseline from the current state
+#   scripts/lint-env.sh                # check against the baseline
+#   scripts/lint-env.sh --update       # rewrite the baseline from the current state
+#   scripts/lint-env.sh --prepare DIR  # only write the sealed inputs (see SECURITY MODEL) to DIR
+#
+# With LINT_ENV_INPUTS=DIR a check reads its inputs from a directory --prepare wrote with the same
+# LINT_ONLY_MODULES and LINT_CHANGED_ONLY, instead of generating them under $TMPDIR.
 set -euo pipefail
 
 PROJECT_ROOT="${TAUCETI_PROJECT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -194,7 +207,12 @@ BASELINE="$TRUSTED_SCRIPTS/lint-baseline.txt"
 ROOT='TauCeti'
 ALLOWLIST="$TRUSTED_SCRIPTS/lint-nolints-allowlist.txt"
 UPDATE=0
+PREPARE=
 [ "${1:-}" = "--update" ] && UPDATE=1
+if [ "${1:-}" = "--prepare" ]; then
+  PREPARE="${2:?lint-env: --prepare needs a directory}"
+fi
+INPUTS_DIR="${LINT_ENV_INPUTS:-}"
 # Full runs retain the coverage floors, sentinels and baseline-visibility guards below.
 # Changed-only PR runs instead calibrate imported documentation independently and
 # verify every selected module was loaded, without claiming global inventory coverage.
@@ -260,10 +278,12 @@ if [ -n "$ONLY_MODULES" ]; then
   [ -f "$ONLY_MODULES" ] || fail "LINT_ONLY_MODULES names $ONLY_MODULES, which is not a file"
 fi
 
+[ -z "$PREPARE" ] || [ -z "$INPUTS_DIR" ] || fail "--prepare and LINT_ENV_INPUTS are exclusive"
+[ -z "$PREPARE" ] || [ "$UPDATE" != 1 ] || fail "--prepare and --update are exclusive"
+
 TMP="$(mktemp -d)" || fail "mktemp failed"
 trap 'rm -rf "$TMP"' EXIT
 DRIVER="$TMP/LintEnvDriver.lean"
-DOCDRIVER="$TMP/DocScanDriver.lean"
 
 # --- 0. `@[nolint <linter>]` ratchet: validate the allowlist shape up front -------
 # The authoritative check is declaration-level and environment-derived (see step 1b):
@@ -283,11 +303,6 @@ if [ "$UPDATE" != 1 ]; then
     || fail "$BASELINE is not sorted/duplicate-free — fix it with: LC_ALL=C sort -u -o $BASELINE $BASELINE"
 fi
 
-NONCE="$(od -An -N16 -tx8 /dev/urandom | tr -d ' \n')" || fail "nonce generation failed"
-MARKER="LINTENV-DRIVER-COMPLETE-$NONCE"
-DOCMARKER="DOCSCAN-COMPLETE-$NONCE"
-LINTERSETMARKER="LINTERSET-COMPLETE-$NONCE"
-
 # The explicitly approved default environment-linter sets minus docBlame (see the
 # header comment), sorted. The second is the first plus tacticAlt, which was added by
 # Mathlib #41818. Keeping both during the bump lets the workflow-pinned copy from
@@ -302,23 +317,72 @@ LINTERS_TACTIC_ALT="checkType defsWithUnderscore deprecatedNoSince impossibleIns
 LINTERS_BASE_LEAN=$(printf '"%s", ' $LINTERS_BASE | sed 's/, $//')
 LINTERS_TACTIC_ALT_LEAN=$(printf '"%s", ' $LINTERS_TACTIC_ALT | sed 's/, $//')
 
-MODULE_IMPORT_LIST="$TMP/modules.txt"
+# --- 0c. the inputs that fix the drivers' scope (see SECURITY MODEL) ----------------
+# Generated here before any candidate code runs, or with LINT_ENV_INPUTS read from a directory that
+# `--prepare` sealed, never from the candidate-writable $TMPDIR of a sandboxed run. In both cases the
+# module list must match the checkout: a sealed directory prepared for another tree fails here.
 . "$TRUSTED_SCRIPTS/source-modules.sh"
-tauceti_source_modules "$TMP/source-files" "$MODULE_IMPORT_LIST"
-mods=$(wc -l < "$MODULE_IMPORT_LIST")
-[ "${mods:-0}" -gt 0 ] || fail "found no TauCeti/*.lean modules — the lint is miswired"
-# The modules the #lint driver lints: all of them, or in scoped mode the requested ones that are
-# real TauCeti source modules (deleted or non-TauCeti files drop out here).
-LINT_LIST="$MODULE_IMPORT_LIST"
-if [ -n "$ONLY_MODULES" ]; then
-  LINT_LIST="$TMP/lint-modules.txt"
-  LC_ALL=C comm -12 <(LC_ALL=C sort -u "$ONLY_MODULES") <(LC_ALL=C sort -u "$MODULE_IMPORT_LIST") \
-    > "$LINT_LIST"
+only_modules_digest() {
+  if [ -n "$ONLY_MODULES" ]; then sha256sum < "$ONLY_MODULES" | cut -d' ' -f1; else echo none; fi
+}
+SCOPE_RECORD="changed_only=$CHANGED_ONLY only_modules=$(only_modules_digest)"
+if [ -n "$PREPARE" ]; then
+  INPUTS="$PREPARE"
+  mkdir -p "$INPUTS" || fail "cannot create $INPUTS"
+  [ -z "$(ls -A "$INPUTS")" ] || fail "--prepare needs an empty directory, but $INPUTS is not empty"
+  GENERATE=1
+elif [ -n "$INPUTS_DIR" ]; then
+  INPUTS="$INPUTS_DIR"
+  [ -d "$INPUTS" ] || fail "LINT_ENV_INPUTS names $INPUTS, which is not a directory"
+  GENERATE=0
+elif [ -n "${WATCHDOG_TOOLCHAIN:-}" ]; then
+  fail "the sandboxed build must supply inputs sealed before candidate code ran, in LINT_ENV_INPUTS"
+else
+  INPUTS="$TMP/inputs"
+  mkdir "$INPUTS"
+  GENERATE=1
 fi
-lint_mods=$(wc -l < "$LINT_LIST")
-
+MODULE_IMPORT_LIST="$INPUTS/modules.txt"
+DOCDRIVER="$INPUTS/DocScanDriver.lean"
+LINT_LIST="$MODULE_IMPORT_LIST"
+[ -z "$ONLY_MODULES" ] || LINT_LIST="$INPUTS/lint-modules.txt"
 DOC_IMPORT_LIST="$MODULE_IMPORT_LIST"
 if [ "$CHANGED_ONLY" = 1 ]; then DOC_IMPORT_LIST="$LINT_LIST"; fi
+
+if [ "$GENERATE" = 1 ]; then
+  od -An -N16 -tx8 /dev/urandom | tr -d ' \n' > "$INPUTS/nonce" || fail "nonce generation failed"
+  printf '%s\n' "$SCOPE_RECORD" > "$INPUTS/scope"
+  tauceti_source_modules "$INPUTS/source-files" "$MODULE_IMPORT_LIST"
+  # The modules the #lint driver lints: all of them, or in scoped mode the requested ones that are
+  # real TauCeti source modules (deleted or non-TauCeti files drop out here).
+  if [ -n "$ONLY_MODULES" ]; then
+    LC_ALL=C comm -12 <(LC_ALL=C sort -u "$ONLY_MODULES") <(LC_ALL=C sort -u "$MODULE_IMPORT_LIST") \
+      > "$LINT_LIST"
+  fi
+else
+  # Sealed means unwritable here: a writable directory (one under .lake, say) is no protection.
+  for f in "$INPUTS" "$INPUTS"/*; do
+    [ ! -w "$f" ] || fail "LINT_ENV_INPUTS must be read-only, but $f is writable"
+  done
+  [ -f "$INPUTS/scope" ] || fail "LINT_ENV_INPUTS is missing scope"
+  [ "$(cat "$INPUTS/scope")" = "$SCOPE_RECORD" ] \
+    || fail "LINT_ENV_INPUTS was prepared for another scope ($(cat "$INPUTS/scope"), not $SCOPE_RECORD)"
+  for f in nonce modules.txt DocScanDriver.lean marker.txt; do
+    [ -f "$INPUTS/$f" ] || fail "LINT_ENV_INPUTS is missing $f"
+  done
+  [ -z "$ONLY_MODULES" ] || [ -f "$LINT_LIST" ] || fail "LINT_ENV_INPUTS is missing lint-modules.txt"
+  tauceti_source_modules "$TMP/source-files" "$TMP/modules.txt"
+  cmp -s "$TMP/modules.txt" "$MODULE_IMPORT_LIST" \
+    || fail "LINT_ENV_INPUTS lists other modules than this checkout's TauCeti/ sources"
+fi
+NONCE="$(cat "$INPUTS/nonce")"
+[[ "$NONCE" =~ ^[0-9a-f]{32}$ ]] || fail "invalid nonce in $INPUTS/nonce"
+MARKER="LINTENV-DRIVER-COMPLETE-$NONCE"
+DOCMARKER="DOCSCAN-COMPLETE-$NONCE"
+LINTERSETMARKER="LINTERSET-COMPLETE-$NONCE"
+mods=$(wc -l < "$MODULE_IMPORT_LIST")
+[ "${mods:-0}" -gt 0 ] || fail "found no TauCeti/*.lean modules — the lint is miswired"
+lint_mods=$(wc -l < "$LINT_LIST")
 # These names came from validated source paths, not from candidate Lean text.
 SELECTED_LEAN=
 if [ "$CHANGED_ONLY" = 1 ]; then
@@ -329,6 +393,7 @@ fi
 # A LEGACY (non-module) driver with plain imports: the non-module root imports the
 # closure at the `private` olean level, where docstrings and true declaration kinds
 # are visible (they are NOT in a module-style driver; see the header comment).
+if [ "$GENERATE" = 1 ]; then
 {
   echo 'import Mathlib.Init'
   echo 'import Mathlib.Tactic.SetNotationForOrder'
@@ -440,6 +505,13 @@ run_meta do
   IO.println s!"DOCSCAN-SUMMARY scanned={scanned} documented={documented} undocumented={undoc} nolints={nolints} $DOCMARKER"
 EOF
 } > "$DOCDRIVER"
+printf '%s\n' "$MARKER" > "$INPUTS/marker.txt"
+fi
+if [ -n "$PREPARE" ]; then
+  chmod -R a-w "$INPUTS" || fail "could not make $INPUTS read-only"
+  echo "lint-env: sealed the inputs for $lint_mods of $mods module(s) in $INPUTS."
+  exit 0
+fi
 
 docscan_started=$SECONDS
 if ! run_lean "$DOCDRIVER" > "$TMP/docscan.txt" 2>&1; then
@@ -576,7 +648,6 @@ fi
 
 # --- 3. run it (exit 1 is EXPECTED when the linters report) -----------------------
 # shellcheck disable=SC2086 # $LINTERS is a space-separated list of linter names
-printf '%s\n' "$MARKER" > "$TMP/marker.txt"
 if [ "$lint_mods" -eq 0 ]; then
   # Scoped mode with no TauCeti module to lint. This script (trusted code, not the candidate)
   # writes the clean report the driver prints for an empty set of declarations, so the parser
@@ -594,7 +665,7 @@ else
     fi
   fi
   if [ "$SHARDS" -eq 1 ]; then
-    if run_driver "$DRIVER_EXE" "${driver_flags[@]}" "$DRIVER" "$TMP/marker.txt" "$LINT_LIST" \
+    if run_driver "$DRIVER_EXE" "${driver_flags[@]}" "$DRIVER" "$INPUTS/marker.txt" "$LINT_LIST" \
         $LINTERS > "$TMP/out-0.txt" 2>&1; then
       statuses=(0)
     else
@@ -608,7 +679,7 @@ else
     trap 'for pid in "${pids[@]}"; do kill -TERM -- "-$pid" 2>/dev/null || true; done; exit 130' INT TERM
     set -m
     for ((shard = 0; shard < SHARDS; shard++)); do
-      run_driver "$DRIVER_EXE" --shard "$shard/$SHARDS" "$DRIVER" "$TMP/marker.txt" "$LINT_LIST" \
+      run_driver "$DRIVER_EXE" --shard "$shard/$SHARDS" "$DRIVER" "$INPUTS/marker.txt" "$LINT_LIST" \
         $LINTERS > "$TMP/out-$shard.txt" 2>&1 &
       pids+=($!)
     done

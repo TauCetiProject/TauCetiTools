@@ -1583,20 +1583,27 @@ jobs:
       # scripts/LintEnvDriver.lean (pinned Batteries) and scripts/Axioms.lean (Lean sysroot),
       # BEFORE any candidate code runs: the build can rewrite .lake/packages/batteries. Both
       # executables are mounted read-only together; the sandbox never compiles either driver.
+      # The environment lint's module lists and docstring-scan source are sealed here too, from
+      # the audit scope decided above, so candidate code the lint runs cannot shrink its scope.
       - name: Build the trusted environment-lint driver (before any candidate code runs)
         if: ${{ env.INFRA != '1' }}
         run: |
           set -euo pipefail
           export PATH="$HOME/.elan/bin:$PATH"
           out="$RUNNER_TEMP/lint-env-driver"
+          inputs="$RUNNER_TEMP/lint-env-inputs"
           if [ "${ATTESTED:-false}" = true ]; then
-            # No audit or lint runs in an attested landing; the sandbox still mounts the directory.
-            mkdir -p "$out"
+            # No audit or lint runs in an attested landing; the sandbox still mounts the directories.
+            mkdir -p "$out" "$inputs"
           else
             bash gate/scripts/build-lint-driver.sh pr gate/scripts/LintEnvDriver.lean "$out"
             bash gate/scripts/build-audit-driver.sh pr gate/scripts "$out"
+            TAUCETI_PROJECT_ROOT="$PWD/pr" TAUCETI_TRUSTED_SCRIPTS="$PWD/gate/scripts" \
+              LINT_CHANGED_ONLY="${LINT_CHANGED_ONLY:-0}" LINT_ONLY_MODULES="${LINT_ONLY_MODULES:-}" \
+              bash gate/scripts/lint-env.sh --prepare "$inputs"
           fi
           echo "LINT_DRIVER_DIR=$out" >> "$GITHUB_ENV"
+          echo "LINT_ENV_INPUTS=$inputs" >> "$GITHUB_ENV"
 
       # Environment lint checks changed modules in PR CI; every staging batch, and full-lint and
       # repair PRs, select all modules (scripts/lint-scope.sh). Docstrings and style
@@ -1677,6 +1684,7 @@ jobs:
             --ro-bind "$WATCHDOG_TOOLCHAIN" "$WATCHDOG_TOOLCHAIN" \
             --ro-bind "$LINT_DRIVER_DIR" "$LINT_DRIVER_DIR" \
             --ro-bind "$LINT_SCOPE_DIR" "$LINT_SCOPE_DIR" \
+            --ro-bind "$LINT_ENV_INPUTS" "$LINT_ENV_INPUTS" \
             --ro-bind "$PWD/gate" "$PWD/gate" \
             "${object_mounts[@]}" \
             --ro-bind "$PWD/pr" "$PWD/pr" --bind "$PWD/pr/.lake" "$PWD/pr/.lake" \
@@ -1692,6 +1700,7 @@ jobs:
             --setenv LINT_CHANGED_ONLY "${LINT_CHANGED_ONLY:-0}" \
             --setenv LINT_ONLY_MODULES "${LINT_ONLY_MODULES:-}" \
             --setenv LINT_SHARDS "${LINT_SHARDS:-1}" \
+            --setenv LINT_ENV_INPUTS "$LINT_ENV_INPUTS" \
             --setenv AXIOMS_ONLY_MODULES "${AXIOMS_ONLY_MODULES:-}" \
             --setenv STAGE_LAKE_CACHE "${STAGE_LAKE_CACHE:-}" \
             --setenv IS_BATCH "${IS_BATCH:-}" \
