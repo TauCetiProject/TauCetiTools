@@ -1,4 +1,4 @@
-import { RepositoryStore, Statement, collectionJoin } from './repository_store';
+import { RepositoryStore, Statement, collectionJoin, HEAVY_READ } from './repository_store';
 import { queryKey } from './protocol';
 import { SURVEY_CONTRACT, SURVEY_INDEX_VERSION } from './survey';
 
@@ -16,7 +16,8 @@ export async function repositoryHealth(store:RepositoryStore):Promise<Record<str
     waits:{sql:'SELECT lane,wait_reason,COUNT(*) jobs FROM jobs WHERE wait_reason IS NOT NULL GROUP BY lane,wait_reason'},
     repair_operations:{sql:"SELECT json_extract(query,'$.operation') operation,COUNT(*) jobs,SUM(due<=?) due,MIN(due) next_due,MAX(attempt) attempts FROM jobs GROUP BY operation",bindings:[now]}
   };
-  const entries=Object.entries(statements),results=await store.batch(entries.map(([,s])=>s));
+  // Whole-table aggregates: a heavy PostgreSQL read (isHeavyRead).
+  const entries=Object.entries(statements),results=await store.batch(entries.map(([,s])=>store.backend==='postgres'?{...s,sql:s.sql+HEAVY_READ}:s));
   const rows=Object.fromEntries(entries.map(([name],i)=>[name,results[i].toArray()]));
   const meta=Object.fromEntries(rows.meta.map(r=>[r.key,JSON.parse(r.value)]));
   return {...meta,revision:meta.revision || 0,survey:{contract:SURVEY_CONTRACT,...rows.survey[0],failures:rows.failures[0].n},...Object.fromEntries(Object.entries(rows).filter(([name])=>!['meta','survey','failures'].includes(name)).map(([name,data])=>[name,name==='jobs'?data[0]:data]))};
