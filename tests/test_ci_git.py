@@ -451,6 +451,47 @@ class ReviewSizeTests(unittest.TestCase):
         ])
         self.assertEqual({path for path, _ in found}, {"TauCeti/.gitattributes"})
 
+    def test_text_content_guard_rejects_control_characters(self):
+        (self.repo / "TauCeti/Image.ppm").write_bytes(b"P6\n1 1\n255\n\x01\x02\x03")
+        (self.repo / "TauCeti/Escape.lean").write_text("-- \x1b[2J\n")
+        (self.repo / "TauCeti/C1.lean").write_text("-- \x85\n", encoding="utf-8")
+        (self.repo / "TauCeti/Fine.lean").write_text("-- tab\there\r\n\x0c\n")
+        self.assertEqual(self.forbidden(), [
+            ("TauCeti/C1.lean", "contains the control character U+0085"),
+            ("TauCeti/Escape.lean", "contains the control character U+001B"),
+            ("TauCeti/Image.ppm", "contains the control character U+0001"),
+        ])
+
+    def test_lfs_pointer_variants_git_lfs_accepts(self):
+        pointer = "oid sha256:" + "0" * 64 + "\nsize 12\n"
+        (self.repo / "TauCeti/A.lean").write_text("\nversion https://git-lfs.github.com/spec/v1\n" + pointer)
+        (self.repo / "TauCeti/B.lean").write_text("version https://hawser.github.com/spec/v1\n" + pointer)
+        (self.repo / "TauCeti/C.lean").write_text("-- version https://git-lfs.github.com/spec/v1 is a URL\n")
+        self.assertEqual(self.forbidden(), [
+            ("TauCeti/A.lean", "is a Git LFS pointer"), ("TauCeti/B.lean", "is a Git LFS pointer")])
+
+    def test_gitattributes_lookalike_names_and_git_whitespace(self):
+        (self.repo / "TauCeti/.GitAttributes").write_text("* -diff\n")
+        (self.repo / "web").mkdir()
+        (self.repo / "web/.git‌attributes").write_text("* -diff\n")
+        (self.repo / "web/.gitattributes.").write_text("* -diff\n")
+        (self.repo / "docs").mkdir()
+        (self.repo / "docs/.gitattributes").write_text(
+            " #* -diff\n"            # NBSP is part of the pattern for Git, not a comment
+            " \t# a real comment -diff\n"
+            "* linguist-generated=0\n"
+            "* linguist-generated=FALSE\n"
+            "* linguist-generated=false -linguist-generated !linguist-generated\n")
+        found = self.forbidden()
+        self.assertEqual(found, sorted([
+            ("TauCeti/.GitAttributes", "line 1 sets `-diff`"),
+            ("docs/.gitattributes", "line 1 sets `-diff`"),
+            ("docs/.gitattributes", "line 3 sets `linguist-generated=0`"),
+            ("docs/.gitattributes", "line 4 sets `linguist-generated=FALSE`"),
+            ("web/.git‌attributes", "line 1 sets `-diff`"),
+            ("web/.gitattributes.", "line 1 sets `-diff`"),
+        ]))
+
     def test_pr_guards_report_forbidden_content_without_lifting_it(self):
         (self.repo / "TauCeti/Nul.lean").write_bytes(b"\0")
         head = self.commit("head")

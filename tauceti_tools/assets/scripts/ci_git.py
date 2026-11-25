@@ -479,20 +479,39 @@ def changed_paths(git, base, head):
 
 
 # Every landed file must be reviewable as text in a plain diff. An added or modified file
-# must be UTF-8 without NUL bytes, must not be a Git LFS pointer or a submodule (gitlink),
+# must be UTF-8 without NUL bytes or other control characters (tab, line feed, carriage
+# return and form feed aside), must not be a Git LFS pointer or a submodule (gitlink),
 # and a `.gitattributes` must not mark files binary or attach a diff, merge or filter
 # driver, which would hide their content from diff-based review. Exact paths listed here
 # may carry non-text content; the list is empty by design, and extending it is a
 # reviewed TauCetiTools change.
 TEXT_CONTENT_ALLOWLIST = frozenset()
-LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/"
+# git-lfs accepts surrounding whitespace and the legacy hawser URL, and pointers are under 1024 bytes.
+LFS_POINTER = re.compile(rb"\A\s*version https://(?:git-lfs|hawser)\.github\.com/spec/")
+LFS_POINTER_SIZE = 1024
+CONTROL_CHARACTER = re.compile("[\x00-\x08\x0b\x0e-\x1f\x7f-\x9f]")
 REGULAR_MODES = (b"100644", b"100755", b"120000")
 FORBIDDEN_CONTENT_LISTED = 20
+# Git's own separators in attribute files (attr.c); Python's str.split would also split on
+# Unicode spaces such as NBSP, which Git keeps inside a pattern.
+GIT_BLANKS = " \t\r\n"
+# Code points HFS+ ignores in file names (Git's is_hfs_dotgit), so `.git\u200cattributes`
+# is `.gitattributes` there.
+HFS_IGNORABLE = dict.fromkeys(
+    [*range(0x200C, 0x2010), *range(0x202A, 0x202F), *range(0x206A, 0x2070), 0xFEFF])
+
+
+def is_gitattributes(path):
+    """Whether Git could read `path` as a `.gitattributes` file on some filesystem: names
+    are compared case-insensitively, without HFS+ ignorable code points and without the
+    trailing dots and spaces NTFS drops."""
+    name = path.rsplit("/", 1)[-1].translate(HFS_IGNORABLE).rstrip(". ").lower()
+    return name == ".gitattributes"
 
 
 def _gitattributes_line(line):
     """The attribute tokens of one `.gitattributes` line, or None for a blank or comment line."""
-    line = line.strip()
+    line = line.strip(GIT_BLANKS)
     if not line or line.startswith("#"):
         return None
     if line.startswith('"'):
@@ -508,22 +527,27 @@ def _gitattributes_line(line):
         else:
             raise ValueError("unterminated quoted pattern")
         rest = line[index + 1:]
-        if rest and not rest[0].isspace():
+        if rest and rest[0] not in GIT_BLANKS:
             raise ValueError("text after a quoted pattern")
-        return rest.split()
-    return line.split()[1:]
+        return _git_split(rest)
+    return _git_split(line)[1:]
+
+
+def _git_split(text):
+    return [token for token in re.split(f"[{re.escape(GIT_BLANKS)}]+", text) if token]
 
 
 def gitattributes_problems(text):
     """Why a `.gitattributes` text could hide content from review; empty when it cannot.
 
     It rejects macro definitions, `binary`, any `filter` or `working-tree-encoding`,
-    `linguist-generated` (which collapses a diff on the forge), and `diff`, `merge` and
-    `text` in any state but plainly set (`text=auto` is also fine). Unparseable lines fail closed.
+    `linguist-generated` (which collapses a diff on the forge) unless unset or exactly
+    `=false`, and `diff`, `merge` and `text` in any state but plainly set (`text=auto` is
+    also fine). Unparseable lines fail closed.
     """
     problems = []
     for number, line in enumerate(text.split("\n"), 1):
-        if line.strip().startswith("[attr]"):
+        if line.strip(GIT_BLANKS).startswith("[attr]"):
             problems.append(f"line {number} defines an attribute macro")
             continue
         try:
@@ -537,7 +561,7 @@ def gitattributes_problems(text):
             plain = not state and not has_value
             forbidden = (
                 name in ("binary", "filter", "working-tree-encoding")
-                or (name == "linguist-generated" and not state and value.lower() not in ("false", "0"))
+                or (name == "linguist-generated" and not state and value != "false")
                 or (name in ("diff", "merge") and not plain)
                 or (name == "text" and not plain and not (not state and value == "auto"))
             )
@@ -611,11 +635,11 @@ def forbidden_content(git, base, head):
             found.append((path, "is a submodule (gitlink)"))
             continue
         data = content[oid]
-        attributes = path.rsplit("/", 1)[-1] == ".gitattributes"
+        attributes = is_gitattributes(path)
         if attributes and mode == b"120000":
             found.append((path, "is a symbolic link"))
             continue
-        if data.startswith(LFS_POINTER_PREFIX):
+        if len(data) < LFS_POINTER_SIZE and LFS_POINTER.match(data):
             found.append((path, "is a Git LFS pointer"))
             continue
         if path not in TEXT_CONTENT_ALLOWLIST:
@@ -626,6 +650,10 @@ def forbidden_content(git, base, head):
                 text = data.decode("utf-8")
             except UnicodeDecodeError:
                 found.append((path, "is not valid UTF-8"))
+                continue
+            control = CONTROL_CHARACTER.search(text)
+            if control:
+                found.append((path, f"contains the control character U+{ord(control.group()):04X}"))
                 continue
         else:
             text = data.decode("utf-8", errors="replace")
@@ -656,7 +684,8 @@ def guard_violations(result):
             "adds content a plain text diff cannot review: "
             + "; ".join(f"{path} {reason}" for path, reason in listed)
             + (f"; and {rest} more" if rest else "")
-            + ". Every added or modified file must be UTF-8 text without NUL bytes; binary files, "
+            + ". Every added or modified file must be UTF-8 text without NUL bytes or control "
+            "characters; binary files, "
             "Git LFS pointers, submodules and .gitattributes that mark files binary or set a diff, "
             "merge or filter driver are not accepted."
         )

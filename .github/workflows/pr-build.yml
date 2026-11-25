@@ -864,10 +864,11 @@ jobs:
           fi
           if [ "$(jq '.new_files_too_long | length' "$measured")" != 0 ]; then
             echo "NEWFILE_TOO_LONG=1" >> "$GITHUB_ENV"
-            jq -r '.violations[] | select(contains("new Lean files")) | "::error::" + .' "$measured"
+            # JSON-quoted paths: a hostile file name cannot start a workflow command of its own.
+            jq -r '.new_files_too_long[] | "::error::" + (.[0] | @json) + ": new Lean files must be at most 1250 lines (found \(.[1])). Split it, or grow an existing file (allowed up to 1500)."' "$measured"
           fi
 
-      - name: 'Text-content guard: every added or modified file is UTF-8 text without NUL bytes, with no LFS pointers, submodules or diff-hiding .gitattributes'
+      - name: 'Text-content guard: every added or modified file is UTF-8 text without NUL bytes or control characters, with no LFS pointers, submodules or diff-hiding .gitattributes'
         # `ci_git.forbidden_content`, from the diff-size guard's measure. Binary content cannot be
         # reviewed in a plain diff, and a `.gitattributes` marking files binary or attaching a
         # diff, merge or filter driver would hide other files' content from review. Queue
@@ -886,7 +887,7 @@ jobs:
             echo "CONTENT_FORBIDDEN=1" >> "$GITHUB_ENV"
             # JSON-quoted paths: a hostile file name cannot start a workflow command of its own.
             jq -r '.forbidden_content[] | "::error::" + (.[0] | @json) + " " + (.[1] | @json)' "$measured"
-            echo "::error::Every added or modified file must be UTF-8 text without NUL bytes. Binary files, Git LFS pointers, submodules and .gitattributes that mark files binary or set a diff, merge or filter driver are not accepted."
+            echo "::error::Every added or modified file must be UTF-8 text without NUL bytes or control characters. Binary files, Git LFS pointers, submodules and .gitattributes that mark files binary or set a diff, merge or filter driver are not accepted."
           fi
 
       # Capture B once: both forward-bump policy and ordinary PR integration use this
