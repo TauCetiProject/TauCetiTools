@@ -614,22 +614,25 @@ or release rehearsal needs it. Run continuously, it cost about $70 a month in
 Worker requests and R2 operations, almost all of it from the test App's
 webhooks for every TauCeti event. It was paused on 2026-11-25 by:
 
-- suspending the `tauceti-github-state-test` App's installation on
-  TauCetiProject (`PUT /app/installations/<id>/suspended` with the App JWT),
-  so GitHub sends it no webhooks;
-- detaching the `github-state-test.taucetiproject.org` custom domain, clearing
-  the test script's cron schedule, and removing the Worker consumers of
-  `tauceti-github-state-test-events` and its dead letter queue;
+- detaching the `github-state-test.taucetiproject.org` custom domain, so the
+  test App's webhook deliveries fail at GitHub and never reach Cloudflare;
+- clearing the test script's cron schedule and removing the Worker consumers
+  of `tauceti-github-state-test-events` and its dead letter queue;
 - stopping and disabling the `tauceti-github-state-shadow` user unit on
   chungus2, which compared the two mirrors every five minutes.
+
+**Do not suspend or uninstall the `tauceti-github-state-test` App to pause
+this deployment.** TauCeti CI mints installation tokens from the same App
+(`pr-build / sandboxed-build`, "Select CI API credentials" and "Refresh CI
+reporting credentials"), so suspending its installation fails every PR build.
+For the same reason, leave the App's webhook settings and credentials alone.
 
 The Worker script, its secrets, its Durable Objects and the
 `tauceti-github-state-test` R2 bucket are kept. The paused script has no
 route, cron or queue consumer. Durable Object alarms that were already
-scheduled can still wake retained objects until their repair work stops
-(GitHub calls fail while the installation is suspended), so confirm with the
-GraphQL Analytics API that the script's requests and the bucket's R2
-operations have fallen to near zero. The production Worker
+scheduled can still wake retained objects until their repair work runs out,
+so confirm with the GraphQL Analytics API that the script's requests and the
+bucket's R2 operations have fallen to near zero. The production Worker
 (`tauceti-github-state`) is unaffected.
 
 To resume, from `services/github-state` on current `main`:
@@ -637,19 +640,15 @@ To resume, from `services/github-state` on current `main`:
 1. `npm ci && npm run deploy -- --env test` restores the custom domain, the
    cron trigger and both queue consumers from `wrangler.jsonc`. Check that its
    output names `tauceti-github-state-test`, never `tauceti-github-state`.
-2. Unsuspend the installation with the App JWT
-   (`DELETE /app/installations/<id>/suspended`). An installation suspended by
-   the App can only be unsuspended through this App API, not from the
-   organization's settings. The installation ID is in
-   `~/.config/tauceti-github-state-test/deployment.json`.
-3. Webhooks sent during the pause are lost, so the mirror is stale.
+   Webhook deliveries resume once the domain resolves again.
+2. Webhooks sent during the pause are lost, so the mirror is stale.
    `python3 scripts/setup.py bootstrap --environment test` re-enqueues the
    repository inventories over the retained state; it does not reset the
    mirror or wait for completion. A rehearsal that needs a clean, complete
    source should start from a fresh test import (see the
    [migration runbook](../../docs/github-state-migration.md)) and check
    coverage before relying on it.
-4. If the comparison sampler is wanted again, run
+3. If the comparison sampler is wanted again, run
    `systemctl --user enable --now tauceti-github-state-shadow.service` on
    chungus2.
 
