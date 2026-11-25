@@ -12,7 +12,10 @@ import textwrap
 import unittest
 from pathlib import Path
 
+import yaml
+
 SCRIPTS = Path(__file__).resolve().parents[1] / 'tauceti_tools/assets/scripts'
+WORKFLOW = Path(__file__).resolve().parents[1] / '.github/workflows/pr-build.yml'
 MODULES = ['A', 'B', 'C']
 
 # `lake env lean <docscan source>` stands for the docstring scan, the first candidate code that
@@ -149,6 +152,20 @@ class SealedInputs(unittest.TestCase):
         result = self.lint(LINT_ENV_INPUTS=str(inputs))
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn('lists other modules', result.stdout)
+
+    def test_pr_build_seals_the_inputs_before_the_sandbox_and_mounts_them_read_only(self):
+        workflow = yaml.safe_load(WORKFLOW.read_text())
+        steps = workflow['jobs']['sandboxed-build']['steps']
+        names = [step.get('name', '') for step in steps]
+        prepare = next(i for i, name in enumerate(names) if 'Build the trusted environment-lint driver' in name)
+        self.assertLess(names.index('Decide the audit scope'), prepare)
+        self.assertIn('lint-env.sh --prepare "$inputs"', steps[prepare]['run'])
+        phases = [step for step in steps[prepare:] if step.get('env', {}).get('SANDBOX_PHASE')]
+        for step in phases:
+            self.assertIn('--ro-bind "$LINT_ENV_INPUTS" "$LINT_ENV_INPUTS"', step['run'])
+            self.assertNotIn('--bind "$LINT_ENV_INPUTS"', step['run'])
+            self.assertIn('--setenv LINT_ENV_INPUTS "$LINT_ENV_INPUTS"', step['run'])
+        self.assertIn('lint-env', [step['env']['SANDBOX_PHASE'] for step in phases])
 
     def test_prepare_needs_an_empty_directory(self):
         inputs = self.root / 'host/used'
