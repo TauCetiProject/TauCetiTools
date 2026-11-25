@@ -7,6 +7,7 @@ const bundle=await build({entryPoints:['src/repository_store.ts'],bundle:true,pl
  b.onResolve({filter:/^\.\/storage$/},()=>({path:'logging',namespace:'outbound-fixture'}));
  b.onLoad({filter:/.*/,namespace:'outbound-fixture'},({path})=>({contents:path==='logging'?`export const log=(event,fields)=>globalThis.${key}.logs.push({event,...fields});`:`
  export const types={setTypeParser(){}};
+ export const neonConfig={};
  // Neon query results are lazy thenables: nothing is sent until awaited.
  export const neon=()=>({query:(sql,bindings,options)=>({then:(resolve,reject)=>globalThis.${key}.http(sql,bindings,options).then(resolve,reject)}),transaction:(queries,options)=>globalThis.${key}.http('transaction',[],options).then(rows=>queries.map(()=>rows))});
  export class Client {constructor(){throw Error('no writer in this fixture');}}

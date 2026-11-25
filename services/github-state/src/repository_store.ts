@@ -1,4 +1,4 @@
-import { Client, neon, types } from '@neondatabase/serverless';
+import { Client, neon, neonConfig, types } from '@neondatabase/serverless';
 import { log } from './storage';
 
 export type Bind = string | number | null;
@@ -200,6 +200,26 @@ const storeLog=(event:string,fields:Record<string,unknown>)=>{try{log(event,fiel
 // those reads. This gate keeps HTTP reads below the limit (leaving room for the
 // writer WebSocket and R2), starts each read timeout only once admitted, and
 // sheds reads that cannot be admitted promptly instead of stacking them.
+// Diagnostics only: times each Neon HTTP fetch to its response headers and to
+// its fully read body, separating a pre-header transport stall from a slow
+// response body. The driver reads the buffered body exactly as before.
+const fetchPhases={started:0,headers:0,bodies:0,failed_before_headers:0,failed_reading_body:0,max_headers_ms:0,max_body_ms:0,pre:new Map<number,number>(),body:new Map<number,number>(),next:0};
+export function fetchPhaseSnapshot():Record<string,unknown> {
+  const now=Date.now(),oldest=(m:Map<number,number>)=>{const v=Math.min(...m.values());return Number.isFinite(v)?now-v:null;};
+  const {pre,body,next,...counts}=fetchPhases;
+  return {...counts,awaiting_headers:pre.size,oldest_awaiting_headers_ms:oldest(pre),reading_body:body.size,oldest_reading_body_ms:oldest(body)};
+}
+async function timedFetch(input:any,init?:any):Promise<Response> {
+  const id=fetchPhases.next++,started=Date.now();fetchPhases.started++;fetchPhases.pre.set(id,started);
+  let response:Response;
+  try{response=await fetch(input,init);}catch(error){fetchPhases.failed_before_headers++;throw error;}finally{fetchPhases.pre.delete(id);}
+  const headersAt=Date.now();fetchPhases.headers++;fetchPhases.max_headers_ms=Math.max(fetchPhases.max_headers_ms,headersAt-started);fetchPhases.body.set(id,headersAt);
+  try{
+    const body=await response.arrayBuffer();fetchPhases.bodies++;fetchPhases.max_body_ms=Math.max(fetchPhases.max_body_ms,Date.now()-headersAt);
+    return new Response(body,{status:response.status,statusText:response.statusText,headers:response.headers});
+  }catch(error){fetchPhases.failed_reading_body++;throw error;}finally{fetchPhases.body.delete(id);}
+}
+try{if(neonConfig)neonConfig.fetchFunction=timedFetch;}catch{}
 export const HTTP_READ_CONCURRENCY=4;
 export const HTTP_READ_QUEUE=32;
 export const HTTP_READ_ADMISSION_MS=5000;
@@ -292,7 +312,7 @@ export class PostgresStore implements RepositoryStore {
   // Shared by every scoped store of this repository object.
   private gate=new OutboundGate();
   private writerSocket:{open:number,since:number|null,opened:number}={open:0,since:null,opened:0};
-  outbound():Record<string,unknown> {return {http_reads:this.gate.snapshot(),writer_socket:{...this.writerSocket,open_ms:this.writerSocket.since===null?null:Date.now()-this.writerSocket.since},writer_queued:this.writer.queuedOtherWork};}
+  outbound():Record<string,unknown> {return {http_reads:this.gate.snapshot(),http_fetch:fetchPhaseSnapshot(),writer_socket:{...this.writerSocket,open_ms:this.writerSocket.since===null?null:Date.now()-this.writerSocket.since},writer_queued:this.writer.queuedOtherWork};}
   private gated<T>(work:()=>Promise<T>,options?:{priority?:boolean,signal?:AbortSignal,label?:string}):Promise<T> {return this.gate.run(work,options);}
   constructor(private url:string,repository:string,private generation:string,private client?:Client,private diagnostics:{connections:number,queries:number,lastConnection?:number}={connections:0,queries:0},private connectionState?:ConnectionState,private onQuery?:()=>void) {
     this.schema=schemaName(repository);
