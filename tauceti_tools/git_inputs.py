@@ -273,6 +273,12 @@ def snapshot(
                               DIFF_TIMEOUT, stdin=(base+'\n'+head+'\n').encode())
             known = objects.decode().splitlines() == [base+' commit', head+' commit']
         if not known:
+            if cache_dir is not None:
+                # A fetch killed at its timeout, disk cap or interruption leaves its shallow.lock here,
+                # where it would fail every later fetch. Our flock excludes any live fetch, and an owner
+                # that died has its git killed by _GIT_OWNER, so the lock is stale.
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(os.path.join(directory, "shallow.lock"))
             run_git(
                 directory,
                 [

@@ -82,6 +82,37 @@ class GitInputs(unittest.TestCase):
                 )
             self.assertLess(objects() - before, 10, "second review transferred the unchanged snapshot again")
 
+    def test_lock_left_by_a_killed_fetch_does_not_block_the_next_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, cache = root / "source", root / "cache"
+
+            def commit(name):
+                (source / name).write_text(name)
+                git("add", ".")
+                git("commit", "-qm", name)
+                return git("rev-parse", "HEAD")
+
+            def git(*args):
+                return subprocess.check_output(
+                    ["git", "-C", str(source), *args], stderr=subprocess.DEVNULL, text=True
+                ).strip()
+
+            source.mkdir()
+            git("init", "-q")
+            git("config", "user.name", "fixture")
+            git("config", "user.email", "fixture@example.org")
+            base, first = commit("base"), commit("first")
+            with snapshot(str(source), base, first, cache_dir=cache, complete=True):
+                pass
+            (cache / "shallow.lock").write_text("partial")
+            second = commit("second")
+            with snapshot(str(source), base, second, cache_dir=cache, complete=True) as (repo, env):
+                self.assertEqual(
+                    _git(repo, ["rev-parse", "refs/tauceti/review/head"], env, 10).decode().strip(), second
+                )
+            self.assertFalse((cache / "shallow.lock").exists())
+
     def test_changed_paths_preserve_quoted_names_and_detect_renames(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
