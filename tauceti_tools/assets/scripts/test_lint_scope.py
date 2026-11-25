@@ -247,6 +247,20 @@ class LintScopeTest(unittest.TestCase):
                           "repos/o/r/pulls/12": metadata}))
         self.assertIsNone(self.run_scope(env, {}))
 
+    def test_forgejo_main_integration_never_reads_the_same_numbered_github_pr(self):
+        # Forgejo #12 is not GitHub #12: the GitHub PR's full-lint label must neither widen nor be
+        # needed for the scope, and nothing is asked of GitHub about it.
+        env = dict(self.PR_ENV, EVENT="repository_dispatch", IS_BATCH="false", PR_SOURCE="forgejo")
+        compare = {self.PR_COMPARE: {"files": [f("modified", "TauCeti/A.lean")],
+                                     "commits": [{"commit": {"message": "ordinary PR commit"}}]}}
+        for metadata in (pr(labels=("full-lint",)), pr(head_ref="lint-repair/main"), None):
+            with self.subTest(metadata=metadata):
+                responses = dict(compare, **({"repos/o/r/pulls/12": metadata} if metadata else {}))
+                self.assertEqual(self.run_scope(env, responses), ["TauCeti.A"])
+                self.assertEqual(self.last_calls, [])
+        self.assertIsNone(self.run_scope(dict(env, PR_SOURCE="gitlab"), compare))
+        self.assertEqual(self.last_calls, [])
+
     def test_dispatch_without_explicit_pr_classification_keeps_batch_fallback(self):
         for classification in ("true", "", "invalid"):
             with self.subTest(classification=classification):

@@ -436,6 +436,16 @@ def main_integration_route(runner_pages, observed, min_idle):
 def main_integration_main(environment, repository):
     raw = (environment.get("MAIN_INTEGRATION_MIN_IDLE") or "").strip()
     min_idle = int(raw) if raw.isdigit() and int(raw) > 0 else 8
+    if environment.get("MAIN_INTEGRATION_PRIORITY") == "pr":
+        # The queue's PR build of a head no GitHub event builds (a Forgejo PR): it waits for the
+        # Fleet PR class with every other PR build instead of looking for idle capacity. Any other
+        # value, including none, keeps the idle-only route.
+        target = json.dumps(dict(group="TauCetiFleet", labels=list(MAIN_INTEGRATION_LABELS)), separators=(",", ":"))
+        values = dict(runner=target, pool="fleet", idle="", attempt=environment["GITHUB_RUN_ATTEMPT"])
+        with open(environment["GITHUB_OUTPUT"], "a") as out:
+            out.write("".join(f"{k}={v}\n" for k, v in values.items()))
+        print("CI class=main-integration; priority=pr; queued on the Fleet PR class")
+        return
     observed = dict(queued_fleet=None)
     try:
         observed = shared_capacity(repository, environment.get("GITHUB_STATE_TOKEN", ""), 1) or observed

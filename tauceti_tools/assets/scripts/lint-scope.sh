@@ -18,6 +18,10 @@
 #   IS_BATCH         trusted workflow's canonical batch classification; false selects PR scope
 #                    for repository_dispatch, otherwise dispatches keep the batch fallback
 #   NUM              the PR number (pull_request_target, workflow_dispatch, non-batch dispatch)
+#   PR_SOURCE        the forge NUM belongs to: `github` (or unset) or, for the queue's build of a
+#                    Forgejo PR, `forgejo`. A Forgejo number never names a GitHub PR, so its
+#                    labels and branch are not read: the changed-module scope applies as for an
+#                    unlabelled GitHub PR, and staging still lints the whole library.
 #   BASE, HEAD       commit SHAs whose three-dot diff is the change: for a PR its base commit and
 #                    the exact head being built, so the scope is bound to that immutable commit
 #   SCOPE_REPO       tested candidate checkout, with its .git/objects available locally
@@ -69,6 +73,11 @@ case "$EVENT" in
     [[ "${BASE:-}" =~ ^[0-9a-f]{40}$ ]] || full "no base commit"
     [[ "${HEAD:-}" =~ ^[0-9a-f]{40}$ ]] || full "no head commit"
     prs="$NUM"
+    case "${PR_SOURCE:-github}" in
+      github) ;;
+      forgejo) prs="" ;;
+      *) full "unknown PR source" ;;
+    esac
     # Read the exact commits already fetched by trusted tooling. A REST quota
     # failure must not turn an available local diff into whole-library lint.
     if ! compare=$(metadata); then
@@ -103,8 +112,11 @@ esac
 
 # Only an entirely validated policy response may select the local module scope.
 # Pass the attributed numbers on stdin, not through shell evaluation or Git config.
-if ! reason=$(python3 "$tool_dir/lint_scope_policy.py" "$REPO" <<<"$prs"); then
-  full "${reason:-PR lint policy metadata is unavailable}"
+# A Forgejo PR has no GitHub labels or branch to read (PR_SOURCE above).
+if [ "${PR_SOURCE:-github}" != forgejo ] || [ "$EVENT" != workflow_dispatch ]; then
+  if ! reason=$(python3 "$tool_dir/lint_scope_policy.py" "$REPO" <<<"$prs"); then
+    full "${reason:-PR lint policy metadata is unavailable}"
+  fi
 fi
 
 # The merge base and complete tree diff both come from immutable local objects.
