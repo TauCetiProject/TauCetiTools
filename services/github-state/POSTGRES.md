@@ -48,8 +48,9 @@ reserves quota, sends GitHub requests and maintains real cooldowns.
 Stored reads outside transactions run over a small pool of read-only WebSocket
 sessions, at most three at once, leaving the rest of the Durable Object's six
 outbound connections to the writer and R2. Stored scan pages and multi-statement
-read batches may hold at most two of those slots, so small reads always keep
-one slot that slow large reads cannot occupy. A read not admitted within 5 s fails as
+read batches, plus the background retirement scan, may hold at most two of
+those slots and fill at most half of the admission queue, so small reads always
+keep one slot that slow large reads cannot occupy. A read not admitted within 5 s fails as
 unavailable; `/v1/health` reports admissions, sheds and timings per class under
 `outbound.http_reads.by_class`.
 

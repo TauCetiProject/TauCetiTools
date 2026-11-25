@@ -273,8 +273,10 @@ export const HTTP_READ_CONCURRENCY=3;
 export const HEAVY_READ_CONCURRENCY=2;
 export const HTTP_READ_QUEUE=32;
 export const HTTP_READ_ADMISSION_MS=5000;
-// scanRows wraps each PostgreSQL page in this derived table.
-export const isHeavyRead=(sql:string):boolean=>sql.includes(' AS bounded_page ');
+// scanRows wraps each PostgreSQL page in this derived table. Other large or
+// background reads end with HEAVY_READ (a SQL comment) to take a heavy slot.
+export const HEAVY_READ=' /* heavy read */';
+export const isHeavyRead=(sql:string):boolean=>sql.includes(' AS bounded_page ') || sql.endsWith(HEAVY_READ);
 type ReadClass='small'|'heavy';
 interface GateEntry {deadline:number;heavy:boolean;admit:()=>void;expire:()=>void}
 const classCounters=()=>({admitted:0,shed_queue_full:0,shed_wait:0,failed:0,wait_ms_total:0,max_wait_ms:0,busy_ms_total:0,max_busy_ms:0,over_5s:0});
@@ -292,7 +294,7 @@ export class OutboundGate {
   private running=new Map<number,{label:string,started:number,heavy:boolean}>();private nextRun=0;
   private slow:{label:string,busy_ms:number,ok:boolean,at:number,heavy:boolean}[]=[];
   private buckets={under_100ms:0,under_1s:0,under_5s:0,over_5s:0};
-  constructor(readonly limit=HTTP_READ_CONCURRENCY,readonly maxQueue=HTTP_READ_QUEUE,readonly maxWaitMs=HTTP_READ_ADMISSION_MS,readonly heavyLimit=Math.min(HEAVY_READ_CONCURRENCY,Math.max(1,limit-1))) {}
+  constructor(readonly limit=HTTP_READ_CONCURRENCY,readonly maxQueue=HTTP_READ_QUEUE,readonly maxWaitMs=HTTP_READ_ADMISSION_MS,readonly heavyLimit=Math.min(HEAVY_READ_CONCURRENCY,Math.max(1,limit-1)),readonly heavyMaxQueue=Math.max(1,Math.floor(maxQueue/2))) {}
   get inFlight():number{return this.active;}
   get waiting():number{return this.queue.length+this.priority.length;}
   private shedError(reason:'queue_full'|'wait',heavy:boolean):StoreUnavailable {
@@ -324,7 +326,8 @@ export class OutboundGate {
     const enqueued=Date.now(),heavy=Boolean(options.heavy) && !options.priority,cls=this.classes[heavy?'heavy':'small'];
     if(options.signal?.aborted)throw new StoreUnavailable();
     if(!this.admissible(heavy)) {
-      if(!options.priority && this.queue.length>=this.maxQueue)throw this.shedError('queue_full',heavy);
+      // Heavy waiters may fill only half the queue, keeping room for small reads.
+      if(!options.priority && (this.queue.length>=this.maxQueue || heavy && this.queue.filter(e=>e.heavy).length>=this.heavyMaxQueue))throw this.shedError('queue_full',heavy);
       this.counters.queued++;
       await new Promise<void>((resolve,reject)=>{
         let timer:ReturnType<typeof setTimeout>|undefined,settled=false;
@@ -355,7 +358,7 @@ export class OutboundGate {
   }
   snapshot():Record<string,unknown> {
     const c=this.counters,oldest=Math.min(...this.priority.concat(this.queue).map(e=>e.deadline));
-    return {limit:this.limit,heavy_limit:this.heavyLimit,max_queue:this.maxQueue,max_wait_ms_allowed:this.maxWaitMs,in_flight:this.active,in_flight_heavy:this.activeHeavy,waiting:this.waiting,waiting_heavy:this.queue.filter(e=>e.heavy).length,oldest_wait_ms:Number.isFinite(oldest)?Math.max(0,Date.now()-(oldest-this.maxWaitMs)):null,...c,
+    return {limit:this.limit,heavy_limit:this.heavyLimit,max_queue:this.maxQueue,heavy_max_queue:this.heavyMaxQueue,max_wait_ms_allowed:this.maxWaitMs,in_flight:this.active,in_flight_heavy:this.activeHeavy,waiting:this.waiting,waiting_heavy:this.queue.filter(e=>e.heavy).length,oldest_wait_ms:Number.isFinite(oldest)?Math.max(0,Date.now()-(oldest-this.maxWaitMs)):null,...c,
       mean_wait_ms:c.admitted?Math.round(c.wait_ms_total/c.admitted):null,mean_busy_ms:c.completed+c.failed?Math.round(c.busy_ms_total/(c.completed+c.failed)):null,last_shed_at:this.lastShedAt,
       busy_buckets:{...this.buckets},by_class:{small:{...this.classes.small},heavy:{...this.classes.heavy}},running:[...this.running.values()].map(r=>({label:r.label,heavy:r.heavy,age_ms:Date.now()-r.started})),recent_slow:[...this.slow]};
   }

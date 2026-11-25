@@ -13,7 +13,7 @@ const bundle=await build({entryPoints:['src/repository_store.ts'],bundle:true,pl
  export class Client {constructor(){throw Error('no writer in this fixture');}}
  `,loader:'js'}));
 }}]});
-const {PostgresStore,OutboundGate,StoreUnavailable,HTTP_READ_CONCURRENCY,HEAVY_READ_CONCURRENCY,isHeavyRead}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
+const {PostgresStore,OutboundGate,StoreUnavailable,HTTP_READ_CONCURRENCY,HEAVY_READ_CONCURRENCY,HEAVY_READ,isHeavyRead}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
 function fixture(){
  const pending=[],state={active:0,max:0,signals:[]};
  globalThis[key]={logs:[],http(sql,bindings,options){
@@ -46,7 +46,7 @@ test('heavy reads leave at least one slot for small reads',async()=>{
  const f=fixture();
  assert.ok(HEAVY_READ_CONCURRENCY<HTTP_READ_CONCURRENCY);
  const page='SELECT * FROM (SELECT stored_page.* FROM (SELECT 1) AS stored_page) AS bounded_page WHERE true';
- assert.equal(isHeavyRead(page),true);assert.equal(isHeavyRead('SELECT data FROM resources WHERE id=?'),false);
+ assert.equal(isHeavyRead(page),true);assert.equal(isHeavyRead('SELECT jobs.* FROM jobs LIMIT 100'+HEAVY_READ),true);assert.equal(isHeavyRead('SELECT data FROM resources WHERE id=?'),false);
  const heavy=[...Array.from({length:2},()=>f.store.exec(page)),...Array.from({length:2},()=>f.store.batch([{sql:'SELECT 1'},{sql:'SELECT 2'}]))];
  await tick();
  assert.equal(f.state.active,HEAVY_READ_CONCURRENCY);
@@ -74,6 +74,18 @@ test('a heavy read waiting for the heavy cap does not block small reads queued b
  releases.get('h1')();await tick();assert.ok(releases.has('h3'));assert.equal(gate.waiting,0);
  for(const name of ['h2','s2','h3'])releases.get(name)();
  await Promise.all(held);assert.equal(gate.snapshot().completed,5);assert.equal(gate.inFlight,0);
+});
+test('heavy waiters fill at most half the queue',async()=>{
+ const gate=new OutboundGate(3,8,60000);const releases=[];
+ const hold=heavy=>gate.run(()=>new Promise(resolve=>releases.push(resolve)),{heavy});
+ const held=[hold(true),hold(true),hold(false),...Array.from({length:4},()=>hold(true))];await tick();
+ assert.equal(gate.snapshot().waiting_heavy,4);
+ await assert.rejects(hold(true),error=>error instanceof StoreUnavailable);
+ assert.equal(gate.snapshot().by_class.heavy.shed_queue_full,1);
+ held.push(...Array.from({length:4},()=>hold(false)));await tick();
+ assert.equal(gate.waiting,8);assert.equal(gate.snapshot().by_class.small.shed_queue_full,0);
+ while(releases.length || gate.inFlight){releases.splice(0).forEach(release=>release());await tick();}
+ await Promise.all(held);assert.equal(gate.snapshot().completed,11);
 });
 test('a shed heavy read is counted by class',async()=>{
  const gate=new OutboundGate(2,10,20);let release;

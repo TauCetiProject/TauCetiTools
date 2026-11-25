@@ -1,4 +1,4 @@
-import { RepositoryStore, StoreUnavailable, StoreFenced, canReplayPublication, isBackendFailure, isMemberDataFailure, WriterPurpose, WriterOperation, SQLiteStore, PostgresStore, ReaderPool, ReadCacheStore, BufferedStore, SerialLane, columns, collectionJoin } from './repository_store';
+import { RepositoryStore, StoreUnavailable, StoreFenced, canReplayPublication, isBackendFailure, isMemberDataFailure, WriterPurpose, WriterOperation, SQLiteStore, PostgresStore, ReaderPool, ReadCacheStore, BufferedStore, SerialLane, columns, collectionJoin, HEAVY_READ } from './repository_store';
 import { repositoryHealth } from './repository_health';
 import { DurableObject } from 'cloudflare:workers';
 import { Env, EventPointer, matchesETag, Query, Result, digest, json, queryKey, repository, stub, validateQuery, parseGitHub, CI_EVENTS, NOT_MIRRORED, publicQuery, stagingStateKey, stagedPageKey } from './protocol';
@@ -2859,7 +2859,7 @@ export class RepositoryState extends DurableObject<Env> {
     // This position is disposable: a restart simply rescans cached facts.
     const before=this.owner.retirementAfter;
     const candidates=(await this.store.exec<any>("SELECT jobs.* FROM jobs WHERE "+(before?'key<? AND ':'')+"lease_until<=?"+omit.sql+
-      " AND NOT EXISTS (SELECT 1 FROM demand d WHERE d.key=jobs.key AND d.at>?) ORDER BY key DESC LIMIT 100",...(before?[before]:[]),now,...omit.bindings,now-300000)).toArray();
+      " AND NOT EXISTS (SELECT 1 FROM demand d WHERE d.key=jobs.key AND d.at>?) ORDER BY key DESC LIMIT 100"+(this.store.backend==='postgres'?HEAVY_READ:''),...(before?[before]:[]),now,...omit.bindings,now-300000)).toArray();
     if(!candidates.length){this.owner.retirementAfter='';return;}
     const groups=new Map<string,any[]>();
     for(const job of candidates){const operation=JSON.parse(job.query).operation,group=groups.get(operation)||[];group.push(job);groups.set(operation,group);}
