@@ -42,9 +42,8 @@ name: Nightly verification (called)
 # caller's, and the ref is exactly refs/heads/main. `vars` and the cache are the caller
 # repository's too.
 #
-# `verify`, `pick-reference-runner` and possibly `reference` run on the TauCetiFleet runner group,
-# which admits jobs by the file that defines them: this file must be listed there (Fleet's CHECKS
-# and the GitHub group). The capacity picker is defined here, rather than called, for that reason.
+# `verify` and `reference` run on the TauCetiFleet runner group, which admits jobs by the file
+# that defines them: this file must be listed there (Fleet's CHECKS and the GitHub group).
 # The shared tools come from this workflow's own revision (`job.workflow_sha`), so one run uses one
 # Tools revision.
 on:
@@ -78,8 +77,8 @@ jobs:
     # A clean build alone now exceeds GitHub-hosted runners' six-hour platform limit, so this
     # singleton maintenance job targets the Fleet PR class directly. Do not route it through the
     # ordinary picker: its GitHub fallback cannot finish this workload. The caller's concurrency group
-    # bounds this exception to one source verification at a time; the reference job still selects
-    # ordinary shared build capacity below. The PR class excludes staging-only and queue-control
+    # bounds this exception to one source verification at a time; the reference job below uses the
+    # same class. The PR class excludes staging-only and queue-control
     # reservations. Its runners must hold more disk than a cache-backed PR build needs: the clean
     # build also packs every output into a workspace-local Lake cache, and passed 56 GiB in
     # November 2026.
@@ -226,113 +225,18 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # Select capacity again when the expensive clean build has finished. Reusing its earlier
-  # placement decision would ignore other builds that started in the meantime.
-  pick-reference-runner:
-    needs: verify
-    if: ${{ !cancelled() && needs.verify.outputs.build == 'success'
-            && needs.verify.outputs.manifest_upload == 'success' && github.repository == 'TauCetiProject/TauCeti' }}
-    permissions:
-      actions: read
-      contents: read
-    # TauCeti's pick-runner.yml `pick` job as an ordinary (not staging or PR) picker: it reaches the
-    # Fleet PR pool when Fleet CI is enabled so GitHub-hosted backlogs cannot starve selection.
-    # Set vars.PICKER_GITHUB_FALLBACK='true' to fall back to ubuntu-24.04 without a PR.
-    # No App private key enters this job.
-    runs-on: ${{ (vars.FLEET_CI_ENABLED == 'true' && vars.PICKER_GITHUB_FALLBACK != 'true') && fromJSON('{"group":"TauCetiFleet","labels":["self-hosted","linux","x64","tauceti-fleet-pr"]}') || 'ubuntu-24.04' }}
-    timeout-minutes: 5
-    continue-on-error: true
-    outputs:
-      hosted-slot: ${{ steps.hosted-slot.outputs.slot }}
-      namespace-slot: ${{ steps.pick.outputs.namespace_slot }}
-      runner: ${{ steps.pick.outputs.runner }}
-      pool: ${{ steps.pick.outputs.pool }}
-      attempt: ${{ steps.pick.outputs.attempt }}
-      busy: ${{ steps.pick.outputs.busy }}
-      budget: ${{ steps.pick.outputs.budget }}
-      namespace_busy: ${{ steps.pick.outputs.namespace_busy }}
-      namespace_cap: ${{ steps.pick.outputs.namespace_cap }}
-    steps:
-      - name: Choose a native GitHub bulk-build concurrency slot
-        id: hosted-slot
-        env:
-          HOSTED_RUN_ID: ${{ github.run_id }}
-          BUDGET: ${{ vars.HOSTED_RUNNER_BUDGET || '12' }}
-        run: |
-          python3 - <<'PYTHON'
-          import os
-          raw = (os.environ.get("BUDGET") or "").strip()
-          slots = int(raw) if raw.isdigit() else 12
-          slots = max(1, min(19, slots))
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              print("slot=" + str(int(os.environ["HOSTED_RUN_ID"]) % slots), file=output)
-          PYTHON
-      - name: Checkout workflow-pinned runner selector
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.workflow_sha }}
-          sparse-checkout: |
-            tauceti.toml
-            scripts/fleet_runner.py
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
-      - name: Check out the shared tools
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
-          path: .tauceti-tools
-          persist-credentials: false
-      - name: Prepare pinned shared tools
-        uses: ./.tauceti-tools/.github/actions/setup
-        with:
-          tools-repository: ${{ job.workflow_repository }}
-          project-directory: .
-      # The runner inventory read uses a read-only App (organization self-hosted runners:
-      # read) when vars.FLEET_INVENTORY_APP_ID is set. Until then, or if minting fails, the
-      # FLEET_READ_TOKEN secret is used; with neither, the picker keeps GitHub-hosted capacity.
-      - name: Mint the read-only runner inventory token
-        id: inventory
-        if: ${{ vars.FLEET_INVENTORY_APP_ID != '' }}
-        continue-on-error: true
-        uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf # v2.2.1; v1 ignores permission-* inputs
-        with:
-          app-id: ${{ vars.FLEET_INVENTORY_APP_ID }}
-          private-key: ${{ secrets.FLEET_INVENTORY_APP_PRIVATE_KEY }}
-          owner: TauCetiProject
-          permission-organization-self-hosted-runners: read
-      - name: Select destination in configured preference order
-        id: pick
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GITHUB_STATE_TOKEN: ${{ secrets.TAUCETI_GITHUB_STATE_TOKEN }}
-          BUDGET: ${{ vars.HOSTED_RUNNER_BUDGET || '12' }}
-          NAMESPACE_ENABLED: ${{ vars.NAMESPACE_ENABLED }}
-          NAMESPACE_BUILD_CAP: ${{ vars.NAMESPACE_BUILD_CAP }}
-          API_RESERVE: ${{ vars.PICKER_REPOSITORY_API_RESERVE || '250' }}
-          FLEET_JOB_KIND: other
-          PR_HEAD: ''
-          FLEET_CI_ENABLED: ${{ vars.FLEET_CI_ENABLED }}
-          FLEET_RUNNER_GROUP_ID: ${{ vars.FLEET_RUNNER_GROUP_ID }}
-          FLEET_READ_TOKEN: ${{ steps.inventory.outputs.token || secrets.FLEET_READ_TOKEN }}
-        run: python3 scripts/fleet_runner.py --route
-
-
   # No secrets reach this job. The public cache's artifacts run only inside the sandbox;
   # neither the clean build nor its compiled outputs are present on this runner.
   reference:
-    needs: [verify, pick-reference-runner]
+    needs: verify
     if: ${{ !cancelled() && needs.verify.outputs.build == 'success'
             && needs.verify.outputs.manifest_upload == 'success' && github.repository == 'TauCetiProject/TauCeti' }}
-    # Nineteen native concurrency groups cap all hosted bulk builds across
-    # workflows, leaving one of the organization's 20 slots for small jobs and
-    # roadmap merge builds. Namespace uses the same runtime-cap slot groups as
-    # PR builds. Waiting consumes no runner; failed pickers share slot zero.
-    concurrency:
-      group: ${{ needs.pick-reference-runner.outputs.attempt == format('{0}', github.run_attempt) && (contains(needs.pick-reference-runner.outputs.runner, 'nscloud-') || contains(needs.pick-reference-runner.outputs.runner, 'namespace-profile-') || contains(needs.pick-reference-runner.outputs.runner, 'namespace-features:')) && format('tauceti-namespace-build-{0}', contains(fromJSON('["0","1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","18","19","20","21","22","23","24","25","26","27","28","29","30","31","32","33","34","35","36","37","38","39","40","41","42","43","44","45","46","47","48","49","50","51","52","53","54","55","56","57","58","59","60","61","62","63"]'), needs.pick-reference-runner.outputs.namespace-slot) && contains(fromJSON('["1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","18","19","20","21","22","23","24","25","26","27","28","29","30","31","32","33","34","35","36","37","38","39","40","41","42","43","44","45","46","47","48","49","50","51","52","53","54","55","56","57","58","59","60","61","62","63","64"]'), needs.pick-reference-runner.outputs.namespace_cap) && fromJSON(needs.pick-reference-runner.outputs.namespace-slot) < fromJSON(needs.pick-reference-runner.outputs.namespace_cap) && needs.pick-reference-runner.outputs.namespace-slot || '0') || contains(fromJSON('["ubuntu-latest","ubuntu-24.04","ubuntu-22.04"]'), fromJSON(needs.pick-reference-runner.outputs.attempt == format('{0}', github.run_attempt) && needs.pick-reference-runner.outputs.runner || '"ubuntu-24.04"')) && format('tauceti-hosted-bulk-{0}', needs.pick-reference-runner.outputs.hosted-slot || '0') || format('unlimited-reference-{0}', github.run_id) }}
-      queue: max
-      cancel-in-progress: false
-    runs-on: ${{ fromJSON(needs.pick-reference-runner.outputs.attempt == format('{0}', github.run_attempt) && needs.pick-reference-runner.outputs.runner || '"ubuntu-24.04"') }}
+    # Like `verify`, this targets the Fleet PR class directly and waits there for the next
+    # runner rather than spilling onto cloud capacity. The caller's concurrency group already
+    # bounds it to one reference build at a time.
+    runs-on:
+      group: TauCetiFleet
+      labels: [self-hosted, linux, x64, tauceti-fleet-pr]
     timeout-minutes: 240
     outputs:
       compare: ${{ steps.compare.outputs.status }}
