@@ -641,7 +641,9 @@ To resume, from `services/github-state` on current `main`:
    cron trigger and both queue consumers from `wrangler.jsonc`. Check that its
    output names `tauceti-github-state-test`, never `tauceti-github-state`.
    Webhook deliveries resume once the domain resolves again.
-2. Webhooks sent during the pause are lost, so the mirror is stale.
+2. Webhooks sent during the pause failed and GitHub does not retry them, so
+   the mirror is stale. Failed deliveries can be redelivered manually for
+   three days, which may suit a short pause.
    `python3 scripts/setup.py bootstrap --environment test` re-enqueues the
    repository inventories over the retained state; it does not reset the
    mirror or wait for completion. A rehearsal that needs a clean, complete
