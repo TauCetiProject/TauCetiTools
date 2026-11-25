@@ -96,3 +96,4 @@ runner_labels:
   tauceti-fleet-staging: [TauCetiFleet]
   tauceti-fleet-queue-control: [TauCetiQueueControl]
   tauceti-fleet-pr-status: [TauCetiPRStatus]
+  tauceti-fleet-docs: [TauCetiDocs]

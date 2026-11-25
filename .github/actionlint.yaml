@@ -6,6 +6,7 @@ self-hosted-runner:
     - tauceti-fleet-queue-control
     - tauceti-fleet-pr-status
     - tauceti-fleet-infra
+    - tauceti-fleet-docs
     - fleet-*
 paths:
   .github/workflows/**/*.{yml,yaml}:
