@@ -86,8 +86,12 @@ jobs:
     runs-on:
       group: TauCetiFleet
       labels: [self-hosted, linux, x64, tauceti-fleet-pr]
-    # Full clean builds retain their twelve-hour budget; allow headroom for source growth and audits.
-    timeout-minutes: 720
+    # The PR class shares its host's CPU and RAM with worker rounds and other guests. On
+    # 25 Nov 2026 a clean build on a busy chungus5 ran each module about ten times slower than on
+    # the same host five days earlier and hit a twelve-hour budget at 98% of the build. A day leaves
+    # room for that contention, source growth and the audits, well within the five days GitHub
+    # allows a self-hosted job.
+    timeout-minutes: 1440
     outputs:
       build: ${{ steps.fresh_build.outcome }}
       audit: ${{ steps.fresh_audit.outcome }}
