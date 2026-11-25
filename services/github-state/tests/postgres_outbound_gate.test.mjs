@@ -154,3 +154,7 @@ test('the caller abort still cancels a stalled body after headers',async()=>{
   assert.equal(bodySignal.aborted,true);
  }finally{globalThis.fetch=original;}
 });
+test('HTTP queries go to the compute endpoint host',async()=>{
+ const {neonFetchEndpoint}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
+ assert.equal(neonFetchEndpoint('ep-fixture.c-7.us-east-2.aws.neon.tech'),'https://ep-fixture.c-7.us-east-2.aws.neon.tech/sql');
+});
