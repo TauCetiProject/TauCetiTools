@@ -25,7 +25,9 @@ MODES = ("pr-integration", "frozen-candidate")
 
 
 class IntegrationConflict(ValueError):
-    pass
+    """H does not merge onto B. The PR needs a rebase, which the worker's rebase
+    stage takes up from GitHub's conflicting mergeability; it closes the PR once
+    its rebase attempts are spent."""
 
 
 def sha(value):
@@ -145,12 +147,12 @@ def prepare(candidate, base_checkout, head, base, mode, pins_changed=False, bump
                         break
                     conflicts.append(field)
                 if not conflicts or not pins_changed or any(p.decode() not in PINS for p in conflicts):
-                    raise IntegrationConflict(f"integration conflict between B={base} and H={head}: {conflicts!r}; needs human resolution (not stacking evidence)")
+                    raise IntegrationConflict(f"integration conflict between B={base} and H={head}: {conflicts!r}; the PR needs a rebase onto main (not stacking evidence)")
             if pins_changed:
                 # check-bump already validated the COMPLETE head pin pair against B.
                 # Preserve it as a pair, including when both branches bumped the same
                 # pin. Never combine JSON fragments or silently replace an authorized
-                # bump with base pins. Other conflicts still require human resolution.
+                # bump with base pins. Other conflicts need a rebase of the PR.
                 run("read-tree", tree)
                 for path in PINS:
                     raw = entry(head, path).decode().split()
