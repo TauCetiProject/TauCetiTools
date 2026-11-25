@@ -1,4 +1,4 @@
-import { RepositoryStore, StoreUnavailable, StoreFenced, canReplayPublication, isBackendFailure, isMemberDataFailure, WriterPurpose, WriterOperation, SQLiteStore, PostgresStore, ReaderPool, ReadCacheStore, BufferedStore, SerialLane, columns, collectionJoin } from './repository_store';
+import { RepositoryStore, StoreUnavailable, StoreFenced, canReplayPublication, isBackendFailure, isMemberDataFailure, WriterPurpose, WriterOperation, SQLiteStore, PostgresStore, ReaderPool, ReadCacheStore, BufferedStore, SerialLane, columns, collectionJoin, HEAVY_READ } from './repository_store';
 import { repositoryHealth } from './repository_health';
 import { DurableObject } from 'cloudflare:workers';
 import { Env, EventPointer, matchesETag, Query, Result, digest, json, queryKey, repository, stub, validateQuery, parseGitHub, CI_EVENTS, NOT_MIRRORED, publicQuery, stagingStateKey, stagedPageKey } from './protocol';
@@ -505,6 +505,8 @@ export class RepositoryState extends DurableObject<Env> {
     const remote=this.store.backend==='postgres';let limit=remote?4096:256;
     // Bound transferred bytes as well as row count, without multiplying remote
     // round trips for small rows. One oversized row is allowed for progress.
+    // The bounded_page alias also marks these pages as heavy reads for the
+    // PostgreSQL outbound gate (isHeavyRead).
     const bounded=(query:string,order:string)=>remote?'SELECT * FROM (SELECT stored_page.*,SUM(octet_length(to_jsonb(stored_page)::text)) OVER (ORDER BY '+order+' ROWS UNBOUNDED PRECEDING) AS __bytes,ROW_NUMBER() OVER (ORDER BY '+order+') AS __position,COUNT(*) OVER () AS __candidate_count FROM ('+query+') AS stored_page) AS bounded_page WHERE __bytes<=2097152 OR __position=1 ORDER BY '+order:query;
     const finished=(page:any[])=>!page.length || (remote?page.length===page[0].__candidate_count && page[0].__candidate_count<limit:page.length<limit);
     // A byte cut must also reduce candidate work on subsequent pages. Otherwise
@@ -2857,7 +2859,7 @@ export class RepositoryState extends DurableObject<Env> {
     // This position is disposable: a restart simply rescans cached facts.
     const before=this.owner.retirementAfter;
     const candidates=(await this.store.exec<any>("SELECT jobs.* FROM jobs WHERE "+(before?'key<? AND ':'')+"lease_until<=?"+omit.sql+
-      " AND NOT EXISTS (SELECT 1 FROM demand d WHERE d.key=jobs.key AND d.at>?) ORDER BY key DESC LIMIT 100",...(before?[before]:[]),now,...omit.bindings,now-300000)).toArray();
+      " AND NOT EXISTS (SELECT 1 FROM demand d WHERE d.key=jobs.key AND d.at>?) ORDER BY key DESC LIMIT 100"+(this.store.backend==='postgres'?HEAVY_READ:''),...(before?[before]:[]),now,...omit.bindings,now-300000)).toArray();
     if(!candidates.length){this.owner.retirementAfter='';return;}
     const groups=new Map<string,any[]>();
     for(const job of candidates){const operation=JSON.parse(job.query).operation,group=groups.get(operation)||[];group.push(job);groups.set(operation,group);}
