@@ -800,6 +800,26 @@ controls when later preference tiers are tried, rather than the overflow queue.
 Jobs already waiting on the fleet stay there when cloud capacity becomes free.
 Set `FLEET_CI_ENABLED=false` to stop routing new jobs to the fleet.
 
+Set the repository variable `FLEET_PRIORITY_LABEL` to a PR label (for a sprint, say `grh`) to
+start the PR builds of PRs carrying it on Fleet runners before every other PR build:
+
+```sh
+gh variable set FLEET_PRIORITY_LABEL --repo OWNER/REPO --body grh
+# Off: every PR build waits in queue order again.
+gh variable set FLEET_PRIORITY_LABEL --repo OWNER/REPO --body ''
+```
+
+The picker compares the label case-insensitively with the PR's labels: the
+`pull_request_target` event's own, or one read of the PR for dispatched builds (a Forgejo PR's
+from its forge, for the queue's `pr`-priority main-integration builds). Such a build targets the
+`tauceti-fleet-pr-priority` class, regardless of `pr_queue_limit` and cloud capacity, while an
+online Fleet runner offers that class; otherwise, or if the labels cannot be read, it is routed
+like any other PR build. Every Fleet PR runner offers the class, and while priority builds wait,
+updated hosts register freed slots as runners that offer only it, so no ordinary build can take
+them (TauCetiFleet `services/ci-broker/README.md`, "Priority PR builds"). Waiting priority builds
+count toward `pr_queue_limit`, so ordinary builds spill to later tiers sooner. A label added
+after a build was queued takes effect at the PR's next build.
+
 ### Runtime Namespace controls
 
 Wire the repository variables `NAMESPACE_ENABLED` and `NAMESPACE_BUILD_CAP` into

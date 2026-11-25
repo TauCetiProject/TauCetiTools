@@ -93,6 +93,7 @@ workflows:
 # defining file is admitted by every listed group's policy.
 runner_labels:
   tauceti-fleet-pr: [TauCetiFleet]
+  tauceti-fleet-pr-priority: [TauCetiFleet]
   tauceti-fleet-staging: [TauCetiFleet]
   tauceti-fleet-queue-control: [TauCetiQueueControl]
   tauceti-fleet-pr-status: [TauCetiPRStatus]

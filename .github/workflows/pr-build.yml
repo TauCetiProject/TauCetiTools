@@ -247,6 +247,15 @@ jobs:
           FLEET_READ_TOKEN: ${{ steps.inventory.outputs.token || secrets.FLEET_READ_TOKEN }}
           MAIN_INTEGRATION_MIN_IDLE: ${{ vars.MAIN_INTEGRATION_MIN_IDLE }}
           MAIN_INTEGRATION_PRIORITY: ${{ github.event.client_payload.priority }}
+          # While the caller's vars.FLEET_PRIORITY_LABEL names a PR label (empty is off), a PR
+          # build or `pr`-priority main-integration build of a PR carrying it waits on the Fleet PR
+          # priority class, ahead of every other PR build. A pull_request_target event carries the
+          # PR's labels; other triggers read them once (a Forgejo PR's from its forge).
+          PRIORITY_LABEL: ${{ vars.FLEET_PRIORITY_LABEL }}
+          PR_LABELS: ${{ github.event_name == 'pull_request_target' && toJSON(github.event.pull_request.labels.*.name) || '' }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.client_payload.pr || inputs.pr || '' }}
+          PR_SOURCE: ${{ github.event.client_payload.source || 'github' }}
+          FORGEJO_URL: ${{ vars.FORGEJO_URL || 'https://git.taucetiproject.org' }}
         run: python3 scripts/fleet_runner.py --route
       # An idle-priority main-integration build only uses idle Fleet PR capacity. When the picker
       # found none (or could not look), it builds nothing and says so on H, so the queue asks again

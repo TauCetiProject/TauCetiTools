@@ -368,7 +368,7 @@ def route(*, kind, order, machines, runner_pages, observed, github_budget, names
                 actual_labels = {runner["id"]: {label["name"].lower() for label in runner["labels"]}
                                  for runner in inventory(runner_pages)}
                 labels = [actual_labels[r["runner_id"]] for r in online_pr]
-                queued_pr = sum("tauceti-fleet-pr" in queued or (
+                queued_pr = sum(fleet_pr_job(queued) or (
                                    not queued & {"tauceti-fleet-staging", "tauceti-fleet-queue-control"}
                                    and any(queued <= target for target in labels))
                                 for queued in observed["queued_fleet"])
@@ -407,6 +407,83 @@ def route(*, kind, order, machines, runner_pages, observed, github_budget, names
 
 MAIN_INTEGRATION_LABELS = ["self-hosted", "linux", "x64", "tauceti-fleet-pr"]
 
+# Priority PR builds (the caller's vars.FLEET_PRIORITY_LABEL names the PR label; empty is off)
+# target this class. The broker gives it to every Fleet PR runner, so priority builds can use
+# any of them, and hosts register runners with only this class while priority builds wait, so
+# those runners take no other PR build (TauCetiFleet services/ci-broker README, "Priority PR builds").
+PRIORITY_CLASS = "tauceti-fleet-pr-priority"
+PRIORITY_LABELS = ["self-hosted", "linux", "x64", PRIORITY_CLASS]
+
+
+def priority_label(environment):
+    """The configured priority PR label, compared case-insensitively; empty means off."""
+    return (environment.get("PRIORITY_LABEL") or "").strip().lower()
+
+
+def pr_labels(environment, repository, source):
+    """The build's PR labels: the event's own list when it has one, else one bounded read.
+
+    A Forgejo PR's labels come from its forge, which serves them publicly; a GitHub PR number
+    is read with the job's token. Anything unreadable raises, which means "not a priority build".
+    """
+    raw = environment.get("PR_LABELS") or ""
+    if raw:
+        value = json.loads(raw)
+        if not isinstance(value, list) or any(not isinstance(v, str) for v in value):
+            raise ObservationError("invalid event labels")
+        return {v.strip().lower() for v in value}
+    number = environment.get("PR_NUMBER") or ""
+    if not re.fullmatch(r"[1-9][0-9]{0,9}", number):
+        raise ObservationError("no PR number")
+    headers = {"Accept": "application/json", "User-Agent": "TauCetiFleetPicker/2.0"}
+    if source == "forgejo":
+        base = (environment.get("FORGEJO_URL") or "https://git.taucetiproject.org").rstrip("/")
+        name = environment.get("FORGEJO_REPOSITORY") or repository
+        if urllib.parse.urlsplit(base).scheme != "https" or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", name):
+            raise ObservationError("invalid Forgejo repository")
+        url = f"{base}/api/v1/repos/{name}/issues/{number}/labels"
+    elif source == "github":
+        url = f"https://api.github.com/repos/{repository}/pulls/{number}"
+        headers.update(Authorization="Bearer " + environment.get("GH_TOKEN", ""), Accept="application/vnd.github+json")
+    else:
+        raise ObservationError("unknown PR source")
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.build_opener(NoRedirect()).open(request, timeout=10) as response:
+        raw = response.read(1024 * 1024 + 1)
+    if len(raw) > 1024 * 1024:
+        raise ObservationError("PR labels exceed bound")
+    value = json.loads(raw)
+    labels = value if source == "forgejo" else value.get("labels")
+    if not isinstance(labels, list) or any(not isinstance(v, dict) or not isinstance(v.get("name"), str) for v in labels):
+        raise ObservationError("invalid PR labels")
+    return {v["name"].strip().lower() for v in labels}
+
+
+def priority_build(environment, repository, source):
+    label = priority_label(environment)
+    if not label:
+        return False
+    try:
+        return label in pr_labels(environment, repository, source)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        print(f"::warning::Labels of PR {environment.get('PR_NUMBER') or '?'} unavailable; routing it as an ordinary PR build")
+        return False
+
+
+def priority_capacity(runner_pages):
+    """Whether an online Fleet runner offers the priority class; otherwise route normally."""
+    try:
+        return any(runner.get("status") == "online"
+                   and PRIORITY_CLASS in {str(label.get("name", "")).lower() for label in runner.get("labels", [])}
+                   for runner in inventory(runner_pages)) if runner_pages else False
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return False
+
+
+def fleet_pr_job(labels):
+    """A queued job waiting for a Fleet PR runner, ordinary or priority."""
+    return "tauceti-fleet-pr" in labels or PRIORITY_CLASS in labels
+
 
 def main_integration_route(runner_pages, observed, min_idle):
     """Idle Fleet PR capacity for the queue's main-integration build, or none.
@@ -425,7 +502,7 @@ def main_integration_route(runner_pages, observed, min_idle):
         # Only a complete queue observation can show that no PR job is waiting.
         if (isinstance(queued, list) and observed.get("fleet_queue_complete") is True
                 and not observed.get("placement_unavailable")):
-            waiting = sum("tauceti-fleet-pr" in labels for labels in queued)
+            waiting = sum(fleet_pr_job(labels) for labels in queued)
     except (ValueError, KeyError, TypeError):
         return dict(pool="busy", idle=0)
     if idle >= min_idle and waiting == 0:
@@ -439,12 +516,18 @@ def main_integration_main(environment, repository):
     if environment.get("MAIN_INTEGRATION_PRIORITY") == "pr":
         # The queue's PR build of a head no GitHub event builds (a Forgejo PR): it waits for the
         # Fleet PR class with every other PR build instead of looking for idle capacity. Any other
-        # value, including none, keeps the idle-only route.
-        target = json.dumps(dict(group="TauCetiFleet", labels=list(MAIN_INTEGRATION_LABELS)), separators=(",", ":"))
+        # value, including none, keeps the idle-only route. A PR carrying the priority label
+        # waits on the priority class instead, while an online runner offers it.
+        priority = (priority_build(environment, repository, environment.get("PR_SOURCE") or "github")
+                    and priority_capacity(fleet_inventory(environment, repository)))
+        labels = PRIORITY_LABELS if priority else MAIN_INTEGRATION_LABELS
+        target = json.dumps(dict(group="TauCetiFleet", labels=list(labels)), separators=(",", ":"))
         values = dict(runner=target, pool="fleet", idle="", attempt=environment["GITHUB_RUN_ATTEMPT"])
         with open(environment["GITHUB_OUTPUT"], "a") as out:
             out.write("".join(f"{k}={v}\n" for k, v in values.items()))
-        print("CI class=main-integration; priority=pr; queued on the Fleet PR class")
+        print("CI class=main-integration; priority=pr; " + (
+            f"PR labelled {priority_label(environment)}: queued on the Fleet PR priority class, ahead of other PR builds"
+            if priority else "queued on the Fleet PR class"))
         return
     observed = dict(queued_fleet=None)
     try:
@@ -558,51 +641,61 @@ def route_main():
             excluded = failed_placements(capacity_reader.read, repository, environment["GITHUB_RUN_ID"], attempt)
         except (OSError, ValueError, KeyError, TypeError):
             print("::notice::Retry placement history unavailable; using current runner availability")
-    # Walk the same preference order for every job class using shared observations
-    # first. Discover missing cloud capacity only when reaching that pool, so
-    # unknown capacity further down cannot veto a ready earlier machine.
-    cloud_counts = dict(github=observed["github_busy"], namespace=observed["namespace_busy"])
-    cloud_limits = dict(github=budget + 1, namespace=namespace_cap)
-    ready_order = []
-    needs_cloud_capacity = False
-    for name in order:
-        if name in excluded:
-            continue
-        if name in cloud_counts and cloud_counts[name] is None:
-            needs_cloud_capacity = True
-            break
-        ready_order.append(name)
-        if name in cloud_counts and cloud_counts[name] < cloud_limits[name]:
-            break
-    inventory_read = any(name not in cloud_counts for name in ready_order)
-    runner_pages = fleet_inventory(environment, repository) if inventory_read else []
-    candidate = route(kind=kind, order=ready_order, machines=config.get("machines", {}), runner_pages=runner_pages,
-                      observed=observed, github_budget=budget, namespace_cap=namespace_cap, excluded=excluded,
-                      selection_key=environment["GITHUB_RUN_ID"], pr_queue_limit=pr_queue_limit,
-                      namespace_enabled=namespace_enabled, pr_overflow_pool=pr_overflow_pool)
-    selected = None if candidate.get("waiting") else candidate
-    scanned = False
-    # A configured shared service owns the bounded organization scan. A partial
-    # result or outage must not fan out into another scan from every queued picker.
-    if selected is None and needs_cloud_capacity and not environment.get("GITHUB_STATE_TOKEN"):
-        for credential, reserve in readers:
-            try:
-                reader = GitHubRead(credential, reserve)
-                reader.preflight()
-                observed = scan_capacity(reader.read, repository=repository)
-                capacity_reader = reader
-                scanned = True
-                break
-            except (OSError, ValueError, KeyError, TypeError):
-                print("::notice::Capacity scan incomplete or API reserve protected")
-    # Refresh availability after a slow direct scan, or read it for the first
-    # time after reaching machines beyond a previously unknown cloud pool.
-    if selected is None and (not inventory_read or scanned):
+    # A PR carrying the configured priority label waits on the priority class, which only
+    # priority builds and the runners hosts register for them while those builds wait share,
+    # so it starts before every ordinary PR build already queued. Without an online runner
+    # offering that class (an older broker), it is routed like any other PR build.
+    selected = None
+    if kind == "pr" and priority_build(environment, repository, "github"):
         runner_pages = fleet_inventory(environment, repository)
-    selected = selected or route(kind=kind, order=order, machines=config.get("machines", {}), runner_pages=runner_pages,
-                     observed=observed, github_budget=budget, namespace_cap=namespace_cap, excluded=excluded or (),
-                     selection_key=environment["GITHUB_RUN_ID"], pr_queue_limit=pr_queue_limit,
-                     namespace_enabled=namespace_enabled, pr_overflow_pool=pr_overflow_pool)
+        if priority_capacity(runner_pages):
+            selected = dict(pool="fleet", labels=list(PRIORITY_LABELS), priority=True)
+    if selected is None:
+        # Walk the same preference order for every job class using shared observations
+        # first. Discover missing cloud capacity only when reaching that pool, so
+        # unknown capacity further down cannot veto a ready earlier machine.
+        cloud_counts = dict(github=observed["github_busy"], namespace=observed["namespace_busy"])
+        cloud_limits = dict(github=budget + 1, namespace=namespace_cap)
+        ready_order = []
+        needs_cloud_capacity = False
+        for name in order:
+            if name in excluded:
+                continue
+            if name in cloud_counts and cloud_counts[name] is None:
+                needs_cloud_capacity = True
+                break
+            ready_order.append(name)
+            if name in cloud_counts and cloud_counts[name] < cloud_limits[name]:
+                break
+        inventory_read = any(name not in cloud_counts for name in ready_order)
+        runner_pages = fleet_inventory(environment, repository) if inventory_read else []
+        candidate = route(kind=kind, order=ready_order, machines=config.get("machines", {}), runner_pages=runner_pages,
+                          observed=observed, github_budget=budget, namespace_cap=namespace_cap, excluded=excluded,
+                          selection_key=environment["GITHUB_RUN_ID"], pr_queue_limit=pr_queue_limit,
+                          namespace_enabled=namespace_enabled, pr_overflow_pool=pr_overflow_pool)
+        selected = None if candidate.get("waiting") else candidate
+        scanned = False
+        # A configured shared service owns the bounded organization scan. A partial
+        # result or outage must not fan out into another scan from every queued picker.
+        if selected is None and needs_cloud_capacity and not environment.get("GITHUB_STATE_TOKEN"):
+            for credential, reserve in readers:
+                try:
+                    reader = GitHubRead(credential, reserve)
+                    reader.preflight()
+                    observed = scan_capacity(reader.read, repository=repository)
+                    capacity_reader = reader
+                    scanned = True
+                    break
+                except (OSError, ValueError, KeyError, TypeError):
+                    print("::notice::Capacity scan incomplete or API reserve protected")
+        # Refresh availability after a slow direct scan, or read it for the first
+        # time after reaching machines beyond a previously unknown cloud pool.
+        if selected is None and (not inventory_read or scanned):
+            runner_pages = fleet_inventory(environment, repository)
+        selected = selected or route(kind=kind, order=order, machines=config.get("machines", {}), runner_pages=runner_pages,
+                         observed=observed, github_budget=budget, namespace_cap=namespace_cap, excluded=excluded or (),
+                         selection_key=environment["GITHUB_RUN_ID"], pr_queue_limit=pr_queue_limit,
+                         namespace_enabled=namespace_enabled, pr_overflow_pool=pr_overflow_pool)
     target = "ubuntu-24.04"
     if selected["pool"] == "namespace":
         staging = kind == "staging"
@@ -641,7 +734,9 @@ def route_main():
                f"inventory={namespace_inventory}; {namespace_state}")
     if observed.get("placement_unavailable"):
         message += f"; reason={observed['placement_unavailable']}"
-    if selected.get("queued_pr") is not None:
+    if selected.get("priority"):
+        message += f"; PR labelled {priority_label(environment)}: queued on the Fleet PR priority class, ahead of other PR builds"
+    elif selected.get("queued_pr") is not None:
         message += f"; waiting for shared fleet PR capacity ({selected['queued_pr']}/{pr_queue_limit} observed waiting)"
         if observed.get("snapshot_age_seconds") is not None:
             message += f"; queue observation age={observed['snapshot_age_seconds']}s"

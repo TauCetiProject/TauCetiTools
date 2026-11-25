@@ -425,8 +425,11 @@ class RoutingEntrypoint(unittest.TestCase):
             headers = {}
         class Opener:
             def open(self, request, timeout):
-                token = request.get_header("Authorization").removeprefix("Bearer ")
+                token = (request.get_header("Authorization") or "").removeprefix("Bearer ")
                 path = "shared" if request.full_url.startswith("https://github-state.taucetiproject.org/") else request.full_url.removeprefix("https://api.github.com/")
+                if request.full_url.startswith("https://git.taucetiproject.org/"):
+                    # The forge serves PR labels publicly: no credential is sent.
+                    token, path = "forgejo" if not token else "forgejo-with-credential", request.full_url.removeprefix("https://git.taucetiproject.org/")
                 calls.append((token, path))
                 if path == "shared":
                     shared_urls.append(request.full_url)
@@ -1195,6 +1198,99 @@ class MainIntegration(unittest.TestCase):
             with self.subTest(priority=other):
                 output, _ = entry.pick(down, MAIN_INTEGRATION_PRIORITY=other, **common)
                 self.assertEqual((output["pool"], output["runner"]), ("busy", ""))
+
+
+class PriorityLabel(unittest.TestCase):
+    """While a priority label is configured, PR builds of PRs carrying it wait on their own class."""
+
+    endpoint = "orgs/Test/actions/runner-groups/3/runners?per_page=100&page=1"
+    common = dict(FLEET_CI_ENABLED="true", FLEET_READ_TOKEN="fleet", FLEET_RUNNER_GROUP_ID="3", GITHUB_STATE_TOKEN="state")
+    config = ('[services.fleet]\nnamespace_enabled=true\nnamespace_build_cap=8\n'
+              'pr_order=["fleet","namespace","github"]\npr_queue_limit=3\n')
+    ordinary = ["self-hosted", "linux", "x64", "tauceti-fleet-pr"]
+
+    def guests(self, kinds=("pr", "pr-priority")):
+        guests = [LiveMembership().guest(f"{n:032x}", n, kinds) for n in range(1, 4)]
+        for guest in guests:
+            guest["busy"] = True
+        return guests
+
+    def pick(self, fixtures=None, guests=None, **overrides):
+        entry = RoutingEntrypoint()
+        # A backlog of ordinary PR builds already at the queue limit, and spare Namespace capacity.
+        shared = entry.shared(busy=20, routing_version=2, namespace_busy=0, fleet_queue_version=1,
+                              queued_fleet=[self.ordinary] * 3)
+        values = dict(fleet={self.endpoint: dict(total_count=3, runners=self.guests() if guests is None else guests)},
+                      state=dict(shared=shared))
+        values.update(fixtures or {})
+        output, calls = entry.pick(values, config=self.config, **{**self.common, **overrides})
+        return output, calls, entry.last_log
+
+    def test_labelled_pr_build_jumps_the_ordinary_backlog(self):
+        output, calls, log = self.pick(PRIORITY_LABEL=" GRH ", PR_LABELS='["ready","grh"]')
+        self.assertEqual(output["pool"], "fleet")
+        self.assertEqual(json.loads(output["runner"]), dict(group="TauCetiFleet", labels=fleet_runner.PRIORITY_LABELS))
+        self.assertIn("PR labelled grh: queued on the Fleet PR priority class", log)
+        # The event's labels suffice: no PR read.
+        self.assertFalse(any(token in ("app", "repository") for token, _ in calls))
+
+    def test_unlabelled_unconfigured_and_older_runners_route_as_before(self):
+        cases = (dict(PRIORITY_LABEL="grh", PR_LABELS='["ready"]'), dict(PRIORITY_LABEL="", PR_LABELS='["grh"]'),
+                 dict(PR_LABELS='["grh"]'))
+        for overrides in cases:
+            with self.subTest(**overrides):
+                output, _, _ = self.pick(**overrides)
+                self.assertEqual(output["pool"], "namespace")
+        # Runners that do not offer the priority class yet (an older broker) cannot strand the build.
+        output, _, _ = self.pick(guests=self.guests(("pr",)), PRIORITY_LABEL="grh", PR_LABELS='["grh"]')
+        self.assertEqual(output["pool"], "namespace")
+
+    def test_dispatched_builds_read_the_pr_labels_once(self):
+        pr = dict(number=7, labels=[dict(name="GRH")])
+        output, calls, _ = self.pick(dict(app={"repos/Test/code/pulls/7": pr}), PRIORITY_LABEL="grh", PR_NUMBER="7")
+        self.assertEqual(json.loads(output["runner"])["labels"], fleet_runner.PRIORITY_LABELS)
+        self.assertEqual([path for token, path in calls if token == "app"], ["repos/Test/code/pulls/7"])
+        for failure in (OSError("down"), dict(labels="grh"), dict(message="Not Found")):
+            with self.subTest(failure=failure):
+                output, _, log = self.pick(dict(app={"repos/Test/code/pulls/7": failure}), PRIORITY_LABEL="grh", PR_NUMBER="7")
+                self.assertEqual(output["pool"], "namespace")
+                self.assertIn("Labels of PR 7 unavailable", log)
+        output, calls, _ = self.pick(PRIORITY_LABEL="grh", PR_NUMBER="")
+        self.assertEqual(output["pool"], "namespace")
+
+    def test_forgejo_pr_builds_read_their_labels_from_the_forge(self):
+        entry = RoutingEntrypoint()
+        common = dict(self.common, FLEET_JOB_KIND="main-integration", MAIN_INTEGRATION_PRIORITY="pr",
+                      PR_SOURCE="forgejo", PR_NUMBER="5295", PRIORITY_LABEL="grh")
+        labels = "api/v1/repos/Test/code/issues/5295/labels"
+        fleet = {self.endpoint: dict(total_count=3, runners=self.guests())}
+        output, calls = entry.pick(dict(fleet=fleet, forgejo={labels: [dict(name="annals"), dict(name="grh")]}), **common)
+        self.assertEqual(json.loads(output["runner"]), dict(group="TauCetiFleet", labels=fleet_runner.PRIORITY_LABELS))
+        self.assertIn(("forgejo", labels), calls)
+        self.assertIn("PR labelled grh", entry.last_log)
+        # A Forgejo number is never looked up on GitHub.
+        self.assertFalse(any(token in ("app", "repository") for token, _ in calls))
+        for forge in ([dict(name="annals")], OSError("down")):
+            with self.subTest(forge=forge):
+                output, _ = entry.pick(dict(fleet=fleet, forgejo={labels: forge}), **common)
+                self.assertEqual(json.loads(output["runner"])["labels"], fleet_runner.MAIN_INTEGRATION_LABELS)
+        output, _ = entry.pick(dict(fleet={self.endpoint: dict(total_count=3, runners=self.guests(("pr",)))},
+                                    forgejo={labels: [dict(name="grh")]}), **common)
+        self.assertEqual(json.loads(output["runner"])["labels"], fleet_runner.MAIN_INTEGRATION_LABELS)
+
+    def test_waiting_priority_builds_count_as_fleet_pr_backlog(self):
+        priority = fleet_runner.PRIORITY_LABELS
+        # Ordinary builds see the priority builds ahead of them in the backlog.
+        entry = RoutingEntrypoint()
+        guests = self.guests()
+        shared = entry.shared(busy=20, routing_version=2, namespace_busy=0, fleet_queue_version=1,
+                              queued_fleet=[priority] * 2)
+        output, _ = entry.pick(dict(fleet={self.endpoint: dict(total_count=3, runners=guests)}, state=dict(shared=shared)),
+                               config=self.config, **self.common)
+        self.assertEqual((output["pool"], output["queued_pr"]), ("fleet", "2"))
+        guests = [LiveMembership().guest(f"{n:032x}", n) for n in range(1, 10)]
+        value = dict(queued_fleet=[set(priority)], fleet_queue_complete=True, placement_unavailable=None)
+        self.assertEqual(fleet_runner.main_integration_route([dict(total_count=9, runners=guests)], value, 3)["pool"], "busy")
 
 
 if __name__ == "__main__":
