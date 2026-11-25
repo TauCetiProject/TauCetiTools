@@ -45,6 +45,8 @@ SCOPE_TOO_LARGE = ("diff exceeds 3000 added lines, 2000 removed lines or 2000 fi
                    "PRs to keep review manageable")
 SCOPE_UNMEASURED = "could not measure the PR diff from local Git objects \u2014 re-run pr-build"
 SCOPE_NEW_FILE = "a newly added .lean file exceeds 1250 lines \u2014 split it (existing files may grow to 1500)"
+SCOPE_CONTENT = ("adds binary or non-UTF-8 content, an LFS pointer, a submodule or a diff-hiding "
+                 ".gitattributes; see the run")
 # The queue's sentence for an unmeasurable diff (TauCetiWorker tauceti_queue/diff_guard.py).
 UNMEASURABLE = "could not measure the PR's diff from local Git objects"
 
@@ -74,6 +76,8 @@ def diff_guards(repo, merge_base, head, remote=None):
         return result["violations"], SCOPE_TOO_LARGE
     if result["new_files_too_long"]:
         return result["violations"], SCOPE_NEW_FILE
+    if result["forbidden_content"]:
+        return result["violations"], SCOPE_CONTENT
     return [], ""
 
 

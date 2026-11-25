@@ -864,7 +864,30 @@ jobs:
           fi
           if [ "$(jq '.new_files_too_long | length' "$measured")" != 0 ]; then
             echo "NEWFILE_TOO_LONG=1" >> "$GITHUB_ENV"
-            jq -r '.violations[] | select(contains("new Lean files")) | "::error::" + .' "$measured"
+            # JSON-quoted paths: a hostile file name cannot start a workflow command of its own.
+            jq -r '.new_files_too_long[] | "::error::" + (.[0] | @json) + ": new Lean files must be at most 1250 lines (found \(.[1])). Split it, or grow an existing file (allowed up to 1500)."' "$measured"
+          fi
+
+      - name: 'Text-content guard: every added or modified file is UTF-8 text without NUL bytes or control characters, with no LFS pointers, submodules or diff-hiding .gitattributes'
+        # `ci_git.forbidden_content`, from the diff-size guard's measure. Binary content cannot be
+        # reviewed in a plain diff, and a `.gitattributes` marking files binary or attaching a
+        # diff, merge or filter driver would hide other files' content from review. Queue
+        # admission and the staging member policy apply the same guard to every landing on
+        # either forge; this step is the fast PR-time report. Exact paths in
+        # `ci_git.TEXT_CONTENT_ALLOWLIST` (empty) are exempt from the UTF-8 and NUL checks.
+        if: ${{ env.IS_BATCH != 'true' }}
+        run: |
+          measured="$RUNNER_TEMP/review-size.json"
+          if ! jq -e '.forbidden_content | type == "array"' "$measured" >/dev/null 2>&1; then
+            echo "DIFF_UNKNOWN=1" >> "$GITHUB_ENV"
+            echo "::error::could not read the PR's measured file content; failing closed"
+            exit 1
+          fi
+          if [ "$(jq '.forbidden_content | length' "$measured")" != 0 ]; then
+            echo "CONTENT_FORBIDDEN=1" >> "$GITHUB_ENV"
+            # JSON-quoted paths: a hostile file name cannot start a workflow command of its own.
+            jq -r '.forbidden_content[] | "::error::" + (.[0] | @json) + " " + (.[1] | @json)' "$measured"
+            echo "::error::Every added or modified file must be UTF-8 text without NUL bytes or control characters. Binary files, Git LFS pointers, submodules and .gitattributes that mark files binary or set a diff, merge or filter driver are not accepted."
           fi
 
       # Capture B once: both forward-bump policy and ordinary PR integration use this
@@ -1982,7 +2005,7 @@ jobs:
             if [ "${SOURCE_CANDIDATE:-false}" = true ]; then
               if [ "$ctx" = scope ]; then
                 if [ "${OUT_OF_SCOPE:-}" = 1 ] || [ "${BUMP_BAD:-}" = 1 ] || [ "${TOO_LARGE:-}" = 1 ] \
-                     || [ "${NEWFILE_TOO_LONG:-}" = 1 ] || [ "${CONFIG_BAD:-}" = 1 ] || [ "${SOURCE_MEMBER_POLICY_REJECTED:-}" = 1 ] || [ "${SOURCE_EMPTY_DIFF:-}" = 1 ]; then
+                     || [ "${NEWFILE_TOO_LONG:-}" = 1 ] || [ "${CONTENT_FORBIDDEN:-}" = 1 ] || [ "${CONFIG_BAD:-}" = 1 ] || [ "${SOURCE_MEMBER_POLICY_REJECTED:-}" = 1 ] || [ "${SOURCE_EMPTY_DIFF:-}" = 1 ]; then
                   st=failure
                 elif [ "${SCOPE_OK:-}" != 1 ] || [ "${SOURCE_SIZE_POLICY_COMPLETE:-}" != 1 ] || [ "${DIFF_UNKNOWN:-}" = 1 ] || [ "${SOURCE_SCOPE_DIFF_UNKNOWN:-}" = 1 ]; then
                   st=infrastructure
@@ -2145,6 +2168,8 @@ jobs:
             sc_state=failure; sc_desc="could not measure the PR diff from local Git objects — re-run pr-build"
           elif [ "${{ env.NEWFILE_TOO_LONG }}" = "1" ]; then
             sc_state=failure; sc_desc="a newly added .lean file exceeds 1250 lines — split it (existing files may grow to 1500)"
+          elif [ "${{ env.CONTENT_FORBIDDEN }}" = "1" ]; then
+            sc_state=failure; sc_desc="adds binary or non-UTF-8 content, an LFS pointer, a submodule or a diff-hiding .gitattributes; see the run"
           elif [ "${{ env.OUT_OF_SCOPE }}" = "1" ]; then
             # Only the path restriction is waivable. Every other scope/config/size
             # guard above must pass first. Approval comes from bors's HTTPS state,

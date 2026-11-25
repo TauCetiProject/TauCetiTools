@@ -132,8 +132,8 @@ class Git:
         if not follow_redirects:
             self.command += ["-c", "http.followRedirects=false"]
 
-    def run(self, *args, check=True):
-        return subprocess.run(self.command + list(args), env=self.env, check=check,
+    def run(self, *args, check=True, input=None):
+        return subprocess.run(self.command + list(args), env=self.env, check=check, input=input,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
 
     def branch(self, value):
@@ -478,6 +478,190 @@ def changed_paths(git, base, head):
     return [os.fsdecode(name) for name in fields]
 
 
+# Every landed file must be reviewable as text in a plain diff. An added or modified file
+# must be UTF-8 without NUL bytes or other control characters (tab, line feed, carriage
+# return and form feed aside), must not be a Git LFS pointer or a submodule (gitlink),
+# and a `.gitattributes` must not mark files binary or attach a diff, merge or filter
+# driver, which would hide their content from diff-based review. Exact paths listed here
+# may carry non-text content; the list is empty by design, and extending it is a
+# reviewed TauCetiTools change.
+TEXT_CONTENT_ALLOWLIST = frozenset()
+# git-lfs accepts surrounding whitespace and the legacy hawser URL, and pointers are under 1024 bytes.
+LFS_POINTER = re.compile(rb"\A\s*version https://(?:git-lfs|hawser)\.github\.com/spec/")
+LFS_POINTER_SIZE = 1024
+CONTROL_CHARACTER = re.compile("[\x00-\x08\x0b\x0e-\x1f\x7f-\x9f]")
+REGULAR_MODES = (b"100644", b"100755", b"120000")
+FORBIDDEN_CONTENT_LISTED = 20
+# Git's own separators in attribute files (attr.c); Python's str.split would also split on
+# Unicode spaces such as NBSP, which Git keeps inside a pattern.
+GIT_BLANKS = " \t\r\n"
+# Code points HFS+ ignores in file names (Git's is_hfs_dotgit), so `.git\u200cattributes`
+# is `.gitattributes` there.
+HFS_IGNORABLE = dict.fromkeys(
+    [*range(0x200C, 0x2010), *range(0x202A, 0x202F), *range(0x206A, 0x2070), 0xFEFF])
+
+
+def is_gitattributes(path):
+    """Whether Git could read `path` as a `.gitattributes` file on some filesystem: names
+    are compared case-insensitively, without HFS+ ignorable code points and without the
+    trailing dots and spaces NTFS drops."""
+    name = path.rsplit("/", 1)[-1].translate(HFS_IGNORABLE).rstrip(". ").lower()
+    return name == ".gitattributes"
+
+
+def _gitattributes_line(line):
+    """The attribute tokens of one `.gitattributes` line, or None for a blank or comment line."""
+    line = line.strip(GIT_BLANKS)
+    if not line or line.startswith("#"):
+        return None
+    if line.startswith('"'):
+        index, escaped = 1, False
+        while index < len(line):
+            if escaped:
+                escaped = False
+            elif line[index] == "\\":
+                escaped = True
+            elif line[index] == '"':
+                break
+            index += 1
+        else:
+            raise ValueError("unterminated quoted pattern")
+        rest = line[index + 1:]
+        if rest and rest[0] not in GIT_BLANKS:
+            raise ValueError("text after a quoted pattern")
+        return _git_split(rest)
+    return _git_split(line)[1:]
+
+
+def _git_split(text):
+    return [token for token in re.split(f"[{re.escape(GIT_BLANKS)}]+", text) if token]
+
+
+def gitattributes_problems(text):
+    """Why a `.gitattributes` text could hide content from review; empty when it cannot.
+
+    It rejects macro definitions, `binary`, any `filter` or `working-tree-encoding`,
+    `linguist-generated` (which collapses a diff on the forge) unless unset or exactly
+    `=false`, and `diff`, `merge` and `text` in any state but plainly set (`text=auto` is
+    also fine). Unparseable lines fail closed.
+    """
+    problems = []
+    for number, line in enumerate(text.split("\n"), 1):
+        if line.strip(GIT_BLANKS).startswith("[attr]"):
+            problems.append(f"line {number} defines an attribute macro")
+            continue
+        try:
+            tokens = _gitattributes_line(line)
+        except ValueError as error:
+            problems.append(f"line {number} is unreadable ({error})")
+            continue
+        for token in tokens or ():
+            state = token[:1] if token[:1] in "-!" else ""
+            name, has_value, value = token[len(state):].partition("=")
+            plain = not state and not has_value
+            forbidden = (
+                name in ("binary", "filter", "working-tree-encoding")
+                or (name == "linguist-generated" and not state and value != "false")
+                or (name in ("diff", "merge") and not plain)
+                or (name == "text" and not plain and not (not state and value == "auto"))
+            )
+            if forbidden:
+                problems.append(f"line {number} sets `{token}`")
+    return problems
+
+
+def _raw_records(raw):
+    """(new mode, new OID, path) for each `git diff --raw -z --no-renames` record."""
+    fields = raw.split(b"\0")
+    if fields.pop() != b"" or len(fields) % 2:
+        raise ValueError("malformed Git raw diff output")
+    records = []
+    for metadata, name in zip(fields[::2], fields[1::2]):
+        parts = metadata.split(b" ")
+        if len(parts) != 5 or not parts[0].startswith(b":") or not name:
+            raise ValueError("malformed Git raw diff record")
+        records.append((parts[1], parts[3].decode(), name))
+    return records
+
+
+def _read_blobs(git, oids):
+    """Map each blob OID to its content with one `git cat-file --batch`."""
+    unique = sorted(set(oids))
+    if not unique:
+        return {}
+    output = git.run("cat-file", "--batch", input="".join(oid + "\n" for oid in unique).encode()).stdout
+    blobs, offset = {}, 0
+    for oid in unique:
+        end = output.find(b"\n", offset)
+        header = output[offset:end].split(b" ") if end >= 0 else []
+        if len(header) != 3 or header[0].decode() != oid or header[1] != b"blob" or not header[2].isdigit():
+            raise ValueError("unreadable Git blob")
+        size = int(header[2])
+        start = end + 1
+        if output[start + size:start + size + 1] != b"\n":
+            raise ValueError("truncated Git blob")
+        blobs[oid] = output[start:start + size]
+        offset = start + size + 1
+    return blobs
+
+
+def forbidden_content(git, base, head):
+    """Sorted (path, reason) for each added or modified path a plain text diff cannot review.
+
+    Deleted paths are never measured, so a file already on the base is untouched until a
+    PR changes it. Unreadable objects raise ValueError so that every caller fails closed.
+    """
+    git.commit(base)
+    git.commit(head)
+    raw = git.run("diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--raw", "-z", "--no-abbrev",
+                  "--diff-filter=AMT", base, head, "--").stdout
+    found, blobs = [], []
+    records = _raw_records(raw)
+    for mode, oid, name in records:
+        sha(oid)
+        if mode == b"160000":
+            continue
+        if mode not in REGULAR_MODES:
+            raise ValueError("unexpected Git file mode")
+        blobs.append(oid)
+    content = _read_blobs(git, blobs)
+    for mode, oid, name in records:
+        try:
+            path = name.decode("utf-8")
+        except UnicodeDecodeError:
+            found.append((os.fsdecode(name), "its path is not valid UTF-8"))
+            continue
+        if mode == b"160000":
+            found.append((path, "is a submodule (gitlink)"))
+            continue
+        data = content[oid]
+        attributes = is_gitattributes(path)
+        if attributes and mode == b"120000":
+            found.append((path, "is a symbolic link"))
+            continue
+        if len(data) < LFS_POINTER_SIZE and LFS_POINTER.match(data):
+            found.append((path, "is a Git LFS pointer"))
+            continue
+        if path not in TEXT_CONTENT_ALLOWLIST:
+            if b"\0" in data:
+                found.append((path, "contains a NUL byte"))
+                continue
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                found.append((path, "is not valid UTF-8"))
+                continue
+            control = CONTROL_CHARACTER.search(text)
+            if control:
+                found.append((path, f"contains the control character U+{ord(control.group()):04X}"))
+                continue
+        else:
+            text = data.decode("utf-8", errors="replace")
+        if attributes:
+            found.extend((path, problem) for problem in gitattributes_problems(text))
+    return sorted(found)
+
+
 def guard_violations(result):
     """One readable sentence per failed PR-level diff guard in a `pr_guards` result."""
     messages = []
@@ -493,6 +677,18 @@ def guard_violations(result):
             f"{name}: new Lean files must be at most {NEW_FILE_LINE_CAP} lines (found {lines}). "
             "Split it, or grow an existing file (allowed up to 1500)."
         )
+    if result.get("forbidden_content"):
+        listed = result["forbidden_content"][:FORBIDDEN_CONTENT_LISTED]
+        rest = len(result["forbidden_content"]) - len(listed)
+        messages.append(
+            "adds content a plain text diff cannot review: "
+            + "; ".join(f"{path} {reason}" for path, reason in listed)
+            + (f"; and {rest} more" if rest else "")
+            + ". Every added or modified file must be UTF-8 text without NUL bytes or control "
+            "characters; binary files, "
+            "Git LFS pointers, submodules and .gitattributes that mark files binary or set a diff, "
+            "merge or filter driver are not accepted."
+        )
     if result.get("out_of_scope"):
         messages.append(
             "changes paths outside the library and the Lake pins, which need a human merge: "
@@ -507,9 +703,11 @@ def pr_guards(git, base, head, *, lean_root="TauCeti", scope=True, large_refacto
     PR CI, `lake lint`, queue admission and the staging member policy all call this,
     so no forge's PR totals are consulted and the four cannot disagree. `base` is the
     exact merge base. `scope=False` leaves path scope to a caller with its own
-    human-merge route. Unreadable statistics raise ValueError, so callers fail closed.
+    human-merge route; neither it nor `large_refactor` lifts the text-content guard
+    (`forbidden_content`). Unreadable statistics raise ValueError, so callers fail closed.
     """
     result = review_size(git, base, head, large_refactor=large_refactor)
+    result["forbidden_content"] = forbidden_content(git, base, head)
     result["out_of_scope"] = out_of_scope(changed_paths(git, base, head), lean_root) if scope else []
     result["violations"] = guard_violations(result)
     return result

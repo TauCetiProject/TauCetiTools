@@ -423,6 +423,8 @@ def member_size_policy(request, policy, context, workspace, *, read=None):
                 values["TOO_LARGE"] = "1"
             if size["new_files_too_long"]:
                 values["NEWFILE_TOO_LONG"] = "1"
+            if size["forbidden_content"]:
+                values["CONTENT_FORBIDDEN"] = "1"
             if size["violations"]:
                 reject(member, size["violations"], size, chained.get(member))
     if rejected:
@@ -970,7 +972,8 @@ def main(argv=None):
         return 0 if all(value in {"success", "not_required"} for value in result["verdicts"].values()) else 1
     if args.command == "member-policy" and any(
         result.get(flag) == "1"
-        for flag in ("TOO_LARGE", "DIFF_UNKNOWN", "NEWFILE_TOO_LONG", "SOURCE_MEMBER_POLICY_REJECTED")
+        for flag in ("TOO_LARGE", "DIFF_UNKNOWN", "NEWFILE_TOO_LONG", "CONTENT_FORBIDDEN",
+                     "SOURCE_MEMBER_POLICY_REJECTED")
     ):
         print("::error::source member review-size policy rejected this candidate; inspect source-member-policy.json")
         return 1

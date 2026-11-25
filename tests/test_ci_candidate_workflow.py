@@ -829,7 +829,13 @@ class PinGuard(unittest.TestCase):
         self.assertEqual(flags(added_lines=1251), {"SOURCE_SIZE_POLICY_COMPLETE": "1", "NEWFILE_TOO_LONG": "1"})
         self.assertEqual(flags(existing_lines=3001), {"SOURCE_SIZE_POLICY_COMPLETE": "1", "TOO_LARGE": "1"})
         self.assertEqual(self.member_policy(existing_lines=3001, pin_changed=True), {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
-        self.assertEqual(self.member_policy(binary=True), {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
+        # Binary content is measurable (zero lines), and the text-content guard rejects the member.
+        with contextlib.redirect_stdout(io.StringIO()):
+            binary = self.member_policy(binary=True)
+        self.assertEqual({key: value for key, value in binary.items() if key != "rejected_members"},
+                         {"SOURCE_SIZE_POLICY_COMPLETE": "1", "CONTENT_FORBIDDEN": "1"})
+        (record,) = binary["rejected_members"]
+        self.assertIn("Binary.lean contains a NUL byte", record["reasons"][0])
         # A moved file is neither new nor a full rewrite, matching the PR CI review-size guard.
         self.assertEqual(self.member_policy(moved_lines=2500), {"SOURCE_SIZE_POLICY_COMPLETE": "1"})
         self.assertEqual(
