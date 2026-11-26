@@ -1252,6 +1252,16 @@ class PriorityLabel(unittest.TestCase):
         output, calls, _ = self.pick(labelled, PRIORITY_LABEL="grh", PR_LABELS="[]", PR_NUMBER="7")
         self.assertEqual(json.loads(output["runner"])["labels"], fleet_runner.PRIORITY_LABELS)
         self.assertEqual([path for token, path in calls if token == "app"], ["repos/Test/code/pulls/7"])
+        import http.client
+        failures = (OSError("down"), TimeoutError(), http.client.IncompleteRead(b"{"),
+                    urllib.error.HTTPError("u", 403, "forbidden", {}, None), dict(labels=None))
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                output, calls, log = self.pick(dict(app={"repos/Test/code/pulls/7": failure}),
+                                               PRIORITY_LABEL="grh", PR_LABELS="[]", PR_NUMBER="7")
+                self.assertEqual(output["pool"], "namespace")
+                self.assertIn("Labels of PR 7 unavailable", log)
+                self.assertEqual([path for token, path in calls if token == "app"], ["repos/Test/code/pulls/7"])
 
     def test_dispatched_builds_read_the_pr_labels_once(self):
         pr = dict(number=7, labels=[dict(name="GRH")])
