@@ -810,8 +810,9 @@ gh variable set FLEET_PRIORITY_LABEL --repo OWNER/REPO --body ''
 ```
 
 The picker compares the label case-insensitively with the PR's labels: the
-`pull_request_target` event's own, or one read of the PR for dispatched builds (a Forgejo PR's
-from its forge, for the queue's `pr`-priority main-integration builds). Such a build targets the
+`pull_request_target` event's own when they include it, otherwise one read of the PR's current
+labels, since an `opened` event usually predates labelling (a Forgejo PR's from its forge, for
+the queue's `pr`-priority main-integration builds). Such a build targets the
 `tauceti-fleet-pr-priority` class, regardless of `pr_queue_limit` and cloud capacity, while an
 online Fleet runner offers that class; otherwise, or if the labels cannot be read, it is routed
 like any other PR build. Every Fleet PR runner offers the class, and while priority builds wait,

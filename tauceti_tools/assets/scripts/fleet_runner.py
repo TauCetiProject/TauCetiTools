@@ -464,8 +464,12 @@ def priority_build(environment, repository, source):
     if not label:
         return False
     try:
-        return label in pr_labels(environment, repository, source)
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        if label in pr_labels(environment, repository, source):
+            return True
+        # An event's labels are a snapshot from when it happened: an `opened` event usually
+        # predates the PR's labelling. Without the label there, read the PR's current labels.
+        return bool(environment.get("PR_LABELS")) and label in pr_labels(dict(environment, PR_LABELS=""), repository, source)
+    except Exception:  # any read failure, including http.client protocol errors, means ordinary routing
         print(f"::warning::Labels of PR {environment.get('PR_NUMBER') or '?'} unavailable; routing it as an ordinary PR build")
         return False
 
