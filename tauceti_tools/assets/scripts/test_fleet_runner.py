@@ -1235,15 +1235,23 @@ class PriorityLabel(unittest.TestCase):
         self.assertFalse(any(token in ("app", "repository") for token, _ in calls))
 
     def test_unlabelled_unconfigured_and_older_runners_route_as_before(self):
-        cases = (dict(PRIORITY_LABEL="grh", PR_LABELS='["ready"]'), dict(PRIORITY_LABEL="", PR_LABELS='["grh"]'),
+        unlabelled = dict(app={"repos/Test/code/pulls/7": dict(labels=[dict(name="ready")])})
+        cases = (dict(PRIORITY_LABEL="grh", PR_LABELS='["ready"]', PR_NUMBER="7"), dict(PRIORITY_LABEL="", PR_LABELS='["grh"]'),
                  dict(PR_LABELS='["grh"]'))
         for overrides in cases:
             with self.subTest(**overrides):
-                output, _, _ = self.pick(**overrides)
+                output, _, _ = self.pick(unlabelled, **overrides)
                 self.assertEqual(output["pool"], "namespace")
         # Runners that do not offer the priority class yet (an older broker) cannot strand the build.
         output, _, _ = self.pick(guests=self.guests(("pr",)), PRIORITY_LABEL="grh", PR_LABELS='["grh"]')
         self.assertEqual(output["pool"], "namespace")
+
+    def test_an_event_snapshot_without_the_label_is_rechecked_once(self):
+        # An `opened` event usually predates the PR's labelling.
+        labelled = dict(app={"repos/Test/code/pulls/7": dict(labels=[dict(name="grh")])})
+        output, calls, _ = self.pick(labelled, PRIORITY_LABEL="grh", PR_LABELS="[]", PR_NUMBER="7")
+        self.assertEqual(json.loads(output["runner"])["labels"], fleet_runner.PRIORITY_LABELS)
+        self.assertEqual([path for token, path in calls if token == "app"], ["repos/Test/code/pulls/7"])
 
     def test_dispatched_builds_read_the_pr_labels_once(self):
         pr = dict(number=7, labels=[dict(name="GRH")])
