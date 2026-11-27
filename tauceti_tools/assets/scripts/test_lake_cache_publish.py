@@ -22,7 +22,7 @@ import lake_cache_publish as publish
 INTEGRATION = "--integration" in sys.argv
 if INTEGRATION:
     sys.argv.remove("--integration")
-TOOLCHAIN = "leanprover/lean4:v4.36.0-rc2"
+TOOLCHAIN = os.environ.get("ELAN_TOOLCHAIN") or "leanprover/lean4:v4.36.0-rc2"
 SHA = "a" * 40
 NAME = "0123456789abcdef.ltar"
 REPO = "TauCetiProject/TauCeti"
@@ -147,7 +147,7 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual((stats["inherited"], stats["uploaded_objects"]), (0, 3))
         self.assertEqual(stats["upload_bytes"], stats["full_bytes"])
         self.assertEqual((upload / "map-url").read_text().strip(),
-                         f"https://upload.example/revisions/{REPO}/tc/leanprover--lean4---v4.36.0-rc2/{SHA}.jsonl")
+                         f"https://upload.example/revisions/{REPO}/tc/{TOOLCHAIN.replace('/', '--').replace(':', '---')}/{SHA}.jsonl")
         self.assertIn(f'upload-file = {json.dumps(str(self.root / "plan" / names[0]))}',
                       (upload / "artifacts.curl").read_text())
 
@@ -163,6 +163,13 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(uploaded, names[1:])
         self.assertEqual((stats["inherited"], stats["uploaded_objects"]), (1, 2))
         self.assertLess(stats["upload_bytes"], stats["full_bytes"])
+
+    def test_an_unreadable_answer_file_uploads_everything(self):
+        names, stats, uploaded, _ = self.plan(lambda names: "")
+        upload = self.root / "upload"
+        (upload / "heads.out").unlink()
+        (upload / "heads.out").mkdir()  # opening it raises IsADirectoryError
+        self.assertEqual(publish.present(upload), set())
 
     def test_every_identical_object_skipped_leaves_only_the_map(self):
         names, stats, uploaded, upload = self.plan(
@@ -250,8 +257,11 @@ class StockLakePublication(unittest.TestCase):
                 def do_PUT(self):
                     data = self.rfile.read(int(self.headers["Content-Length"]))
                     requests.append(("PUT", self.path))
-                    if not mode["put"] and "/artifacts/" in self.path:
-                        self.reply(403)
+                    if mode["put"] is not True and "/artifacts/" in self.path:
+                        if mode["put"] == "redirect":
+                            self.reply(307, headers=[("Location", "https://localhost:1/elsewhere")])
+                        else:
+                            self.reply(403)
                         return
                     objects[self.path] = data
                     self.reply(200)
@@ -358,9 +368,10 @@ class StockLakePublication(unittest.TestCase):
                 return sum(1 for m, path in requests if m == method and f"/{kind}/" in path)
 
             # A failed artifact upload never publishes the map; a retry does.
-            mode["put"] = False
-            publish_revision(SHA, ok=False)
-            self.assertFalse(any("/revisions/" in path for path in objects))
+            for refusal in ("forbidden", "redirect"):
+                mode["put"] = refusal
+                publish_revision(SHA, ok=False)
+                self.assertFalse(any("/revisions/" in path for path in objects), refusal)
             mode["put"] = True
             stats = publish_revision(SHA)
             self.assertEqual((count("HEAD", "artifacts"), count("PUT", "artifacts")), (archives, archives))

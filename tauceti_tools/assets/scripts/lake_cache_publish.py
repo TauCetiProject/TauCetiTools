@@ -146,7 +146,7 @@ def present(upload: Path) -> set[str]:
     try:
         with (upload / "heads.out").open("rb") as handle:
             raw = handle.read(MAX_ANSWERS + 1)
-    except FileNotFoundError:
+    except OSError:
         return set()
     if len(raw) > MAX_ANSWERS:
         return set()

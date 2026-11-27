@@ -323,17 +323,28 @@ jobs:
           UPLOAD="$RUNNER_TEMP/lake-publication-upload"
           [ -s "$UPLOAD/map-url" ] || { echo '::error::the upload plan has no revision map URL'; exit 1; }
           started=$SECONDS
+          # `--fail` passes redirects, so each artifact must report 200 or 201 (as Lake accepts)
+          # and the map 200 (as Lake requires) before the publication counts.
           if [ -s "$UPLOAD/artifacts.curl" ]; then
             curl --parallel --parallel-max 50 --fail-early --fail --silent --show-error \
               --retry 2 --retry-all-errors --max-time 120 \
               --aws-sigv4 aws:amz:auto:s3 --user "$KEY" --request PUT \
               --header 'Content-Type: application/vnd.reservoir.artifact' \
-              --config "$UPLOAD/artifacts.curl"
+              --write-out '%{http_code} %{url}\n' \
+              --config "$UPLOAD/artifacts.curl" > "$UPLOAD/puts.out"
+            wanted=$(grep -c '^url = ' "$UPLOAD/artifacts.curl")
+            stored=$(grep -E '^20[01] ' "$UPLOAD/puts.out" | cut -d' ' -f2- | sort -u | wc -l)
+            if [ "$stored" != "$wanted" ] || grep -qvE '^20[01] ' "$UPLOAD/puts.out"; then
+              echo "::error::only $stored of $wanted artifact uploads were accepted; the revision map is not uploaded"
+              exit 1
+            fi
           fi
-          curl --fail --silent --show-error --retry 2 --retry-all-errors --max-time 120 \
+          map_status=$(curl --fail --silent --show-error --retry 2 --retry-all-errors --max-time 120 \
             --aws-sigv4 aws:amz:auto:s3 --user "$KEY" --request PUT \
             --header 'Content-Type: application/vnd.reservoir.outputs+json-lines' \
-            --upload-file "$PLAN/outputs.jsonl" "$(cat "$UPLOAD/map-url")"
+            --output /dev/null --write-out '%{http_code}' \
+            --upload-file "$PLAN/outputs.jsonl" "$(cat "$UPLOAD/map-url")")
+          [ "$map_status" = 200 ] || { echo "::error::the revision map upload answered HTTP $map_status"; exit 1; }
           echo "Lake publication upload seconds: $((SECONDS - started))"
 
           echo 'uploaded=true' >> "$GITHUB_OUTPUT"
