@@ -54,10 +54,24 @@ the last seven complete days, `A` be net specification growth per day over those
 same seven days (floored at zero), and `B` be the current unfinished backlog.
 
 ```text
-inferred completion/day = (C / L) * v
-stop-authoring days     = B / inferred completion/day
-continue-authoring days = B / (inferred completion/day - A)
+modelled completion/day = (C / L) * v
+stop-authoring days     = B / modelled completion/day
+continue-authoring days = B / (modelled completion/day - A)
 ```
+
+The observed pace ignores library growth. Let `W` be the signed completion units
+of the events dated in the last seven complete days (reopenings subtract):
+
+```text
+observed completion/day = W / 7
+observed stop-authoring days     = B / observed completion/day
+observed continue-authoring days = B / (observed completion/day - A)
+```
+
+The JSON carries both: `completion_units_per_day`, `stop_authoring` and
+`continue_authoring` are modelled; `observed_completion_units_per_day`,
+`observed_stop_authoring` and `observed_continue_authoring` are observed. The
+exhaustion table shows the observed scenarios.
 
 Roadmap credit is frozen at the number of specification lines at archival;
 later edits to an archived document do not create completion credit. Reopening
@@ -68,10 +82,12 @@ without re-reading git history. Events are signed credit changes: archival can
 emit offsetting removals of active-layer keys and additions of archived-layer keys.
 Consumers should sum their signed units; these pairs create no net new completion.
 
-Absent positive completion history or positive recent library growth produces
-`insufficient-history` with `days: null`. An incomplete seven-day observation
-window does the same. If authoring equals or exceeds inferred completion, the
-continued-authoring scenario is `not-catching-up`, also with `days: null`.
+For the modelled pace, absent positive completion history or positive recent
+library growth produces `insufficient-history` with `days: null`. For both, an
+incomplete seven-day observation window does the same (the observed pace is then
+null). If the completion pace, less `A` when authoring continues, is zero or
+negative, the scenario is `not-catching-up`, also with `days: null`: this
+includes a covered week with no net observed completions.
 An empty recorded backlog produces zero days. No non-finite JSON numbers are used.
 
 These are rough extrapolations of observations, not measurements of effort or
