@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import chart_style
 import pr_stats_graphs as stats
@@ -1687,6 +1687,151 @@ class SiteStatsPageTest(unittest.TestCase):
             source.rindex(":::blob participationGraph"),
             source.rindex(":::blob contributorGraphs"),
         )
+
+
+class MergeLatencyTest(unittest.TestCase):
+    """Time to merge split at the queue's first approval, over 24-hour and seven-day windows."""
+
+    URL = "https://queue.example/statistics/landings?days=35"
+
+    @staticmethod
+    def at(day, hour=0):
+        return datetime(2026, 1, day, hour, tzinfo=UTC).timestamp()
+
+    def landings(self, entries, coverage_day=1):
+        return {"source": self.URL, "observed_at": self.at(20), "coverage_since": self.at(coverage_day),
+                "landings": entries}
+
+    def metrics(self, entries, *, github=(), forgejo=(), coverage_day=1, last_day=12):
+        return stats.merge_latency_metrics(
+            list(github), list(forgejo), self.landings(entries, coverage_day),
+            date(2026, 1, last_day), datetime(2026, 1, last_day + 1, 6, tzinfo=UTC), history_days=90)
+
+    def test_the_three_measures_add_up_and_follow_their_forge(self):
+        github = [pr(1, 2)]                       # opened 2 Jan 00:00
+        forgejo = [{**pr(1, 9), "number": 1}]     # same number, another pull request
+        entries = [["github", 1, self.at(10, 0), self.at(10, 12)],
+                   ["forgejo", 1, self.at(10, 6), self.at(10, 12)]]
+        m = self.metrics(entries, github=github, forgejo=forgejo, last_day=10)
+        day = m["dates"].index("2026-01-10")
+        one = m["series"]["24h"]
+        self.assertEqual(one["open_to_land"]["count"][day], 2)
+        # GitHub: 8.5 days open, 8 days to approval, 12 h in the queue; Forgejo: 36 h, 30 h, 6 h.
+        self.assertEqual(sorted([one["open_to_land"]["p25"][day], one["open_to_land"]["p75"][day]]),
+                         sorted([36 + (204 - 36) * .25, 36 + (204 - 36) * .75]))
+        self.assertEqual(one["approval_to_land"]["median"][day], 9.0)
+        self.assertEqual(one["open_to_approval"]["median"][day], (192 + 30) / 2)
+
+    def test_a_seven_day_point_needs_a_whole_week_of_coverage(self):
+        github = [pr(1, 1)]
+        entries = [["github", 1, self.at(5), self.at(5, 6)]]
+        m = self.metrics(entries, github=github, coverage_day=4, last_day=12)
+        # Coverage from exactly midnight covers that day itself.
+        self.assertEqual(m["dates"][0], "2026-01-04")
+        seven = m["series"]["7d"]["open_to_land"]["median"]
+        # Coverage starts 4 Jan 00:00: the week ending 9 Jan reaches before it, the one ending 10 Jan does not.
+        self.assertEqual(seven[m["dates"].index("2026-01-09")], None)
+        self.assertEqual(seven[m["dates"].index("2026-01-10")], 102.0)
+        # By 12 Jan the 5 Jan landing has left the week: an empty window, not a missing one.
+        self.assertIsNone(seven[m["dates"].index("2026-01-12")])
+        self.assertEqual(m["series"]["7d"]["open_to_land"]["count"][m["dates"].index("2026-01-12")], 0)
+        self.assertEqual(m["series"]["24h"]["open_to_land"]["count"][m["dates"].index("2026-01-06")], 0)
+
+    def test_current_covers_the_window_ending_at_the_snapshot(self):
+        github = [pr(1, 10), pr(2, 12)]
+        entries = [["github", 1, self.at(11), self.at(12, 1)], ["github", 2, self.at(13), self.at(13, 2)]]
+        m = self.metrics(entries, github=github, last_day=12)
+        self.assertEqual(m["current"]["as_of"], "2026-01-13T06:00:00Z")
+        self.assertEqual(m["current"]["24h"]["open_to_land"]["count"], 1)
+        self.assertEqual(m["current"]["24h"]["open_to_land"]["median"], 26.0)
+        self.assertEqual(m["current"]["7d"]["open_to_land"]["count"], 2)
+
+    def test_an_approval_before_opening_is_clamped_and_unknown_prs_are_counted(self):
+        entries = [["github", 1, self.at(1), self.at(10)], ["github", 9, self.at(9), self.at(10)]]
+        m = self.metrics(entries, github=[pr(1, 5)], last_day=10)
+        day = m["dates"].index("2026-01-10")
+        self.assertEqual(m["series"]["24h"]["open_to_approval"]["median"][day], 0.0)
+        self.assertEqual(m["series"]["24h"]["approval_to_land"]["median"][day], 120.0)
+        self.assertEqual(m["unmatched_landings"], 1)
+
+    def test_days_past_the_feed_s_last_observation_are_not_published(self):
+        entries = [["github", 1, self.at(5), self.at(5, 6)]]
+        m = stats.merge_latency_metrics(
+            [pr(1, 1)], [], {**self.landings(entries), "observed_at": self.at(8)},
+            date(2026, 1, 12), datetime(2026, 1, 13, tzinfo=UTC), 90)
+        one = m["series"]["24h"]["open_to_land"]["count"]
+        self.assertEqual(one[m["dates"].index("2026-01-07")], 0)
+        self.assertIsNone(one[m["dates"].index("2026-01-08")])
+        self.assertEqual(m["current"]["as_of"], "2026-01-08T00:00:00Z")
+
+    def test_a_current_window_reaching_before_coverage_is_null(self):
+        m = self.metrics([["github", 1, self.at(12), self.at(12, 6)]], github=[pr(1, 11)],
+                         coverage_day=10, last_day=12)
+        self.assertIsNone(m["current"]["7d"])
+        self.assertEqual(m["current"]["24h"]["open_to_land"]["count"], 1)
+
+    def test_an_empty_feed_is_covered_days_with_nothing_landed(self):
+        m = self.metrics([], github=[pr(1, 1)], last_day=5)
+        self.assertEqual(m["series"]["24h"]["open_to_land"]["count"][-1], 0)
+        self.assertIsNone(m["series"]["24h"]["open_to_land"]["median"][-1])
+
+    def test_a_landing_before_opening_is_set_aside(self):
+        m = self.metrics([["github", 1, self.at(2), self.at(3)]], github=[pr(1, 5)], last_day=5)
+        self.assertEqual(m["inconsistent_landings"], 1)
+        self.assertEqual(m["series"]["24h"]["open_to_land"]["count"][m["dates"].index("2026-01-03")], 0)
+
+    def test_no_feed_means_no_chart_data(self):
+        self.assertIsNone(stats.merge_latency_metrics([pr(1, 1)], [], None, date(2026, 1, 5),
+                                                      datetime(2026, 1, 6, tzinfo=UTC), 90))
+
+    def feed(self, since, observed, entries):
+        return {"schema": stats.QUEUE_LANDINGS_SCHEMA, "fields": stats.QUEUE_LANDINGS_FIELDS,
+                "since": since, "observed_at": observed, "landings": entries}
+
+    def test_contiguous_feeds_accumulate_and_a_gap_restarts_coverage(self):
+        first = self.feed(self.at(1), self.at(5), [["github", 1, self.at(2), self.at(3)]])
+        with patch.object(stats, "read_queue_landings", return_value=first):
+            kept = stats.fetch_queue_landings(self.URL, None)
+        second = self.feed(self.at(4), self.at(8), [["github", 2, self.at(6), self.at(7)]])
+        with patch.object(stats, "read_queue_landings", return_value=second):
+            joined = stats.fetch_queue_landings(self.URL, kept)
+        self.assertEqual([e[1] for e in joined["landings"]], [1, 2])
+        self.assertEqual(joined["coverage_since"], self.at(1))
+        late = self.feed(self.at(10), self.at(14), [["github", 3, self.at(11), self.at(12)]])
+        with patch.object(stats, "read_queue_landings", return_value=late):
+            restarted = stats.fetch_queue_landings(self.URL, joined)
+        self.assertEqual(([e[1] for e in restarted["landings"]], restarted["coverage_since"]),
+                         ([3], self.at(10)))
+
+    def test_a_failed_read_keeps_the_previous_landings(self):
+        previous = {"source": self.URL, "observed_at": 1.0, "coverage_since": 0.0, "landings": []}
+        with patch.object(stats, "read_queue_landings", side_effect=OSError("down")):
+            self.assertIs(stats.fetch_queue_landings(self.URL, previous), previous)
+
+    def test_a_malformed_feed_is_rejected(self):
+        for body in ({"schema": "x"}, self.feed(1, 2, [["github", "1", 1, 2]]), [], self.feed(1, 2, [[1, 2]]),
+                     {**self.feed(1, 2, []), "since": float("inf")}, self.feed(1, 2, [["github", 1, 2, 1.5]]),
+                     self.feed(1, 2, [["github", 1, 1, 3]])):
+            raw = json.dumps(body).encode()
+            response = MagicMock()
+            response.__enter__.return_value.read.side_effect = lambda n=-1, raw=raw: raw
+            with self.subTest(body=body), patch.object(stats.urllib.request, "urlopen", return_value=response):
+                with self.assertRaises(ValueError):
+                    stats.read_queue_landings(self.URL)
+
+    def test_the_chart_is_written_with_or_without_data(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "merge-latency.svg"
+            stats.render_merge_latency(path, None)
+            self.assertIn("No queue landing data yet", path.read_text())
+            m = self.metrics([["github", 1, self.at(10), self.at(10, 12)]], github=[pr(1, 9)], last_day=12)
+            stats.render_merge_latency(path, m)
+            self.assertIn("latest median", path.read_text())
+            # Two landing days with an empty day between them draw two separate lines.
+            gap = self.metrics([["github", 1, self.at(10), self.at(10, 12)], ["github", 2, self.at(12), self.at(12, 12)]],
+                               github=[pr(1, 9), pr(2, 11)], last_day=12)
+            stats.render_merge_latency(path, gap)
+            self.assertEqual(path.read_text().count("<polyline"), 2)
 
 
 if __name__ == "__main__":

@@ -32,6 +32,7 @@ days-times-contributors memory blow-up.
 from __future__ import annotations
 
 import argparse
+import bisect
 import hashlib
 import html
 import itertools
@@ -91,6 +92,7 @@ ASSET_NAMES = [
     "cumulative-reviews-by-contributor.svg",
     "merges-by-roadmap-and-contributor.svg",
     "reviews-by-roadmap-and-contributor.svg",
+    "merge-latency.svg",
     "pr-stats.json",
 ]
 
@@ -851,10 +853,13 @@ def apply_app_merges(repo: str, prs: list[dict], previous: dict | None = None,
 def fetch_snapshot(repo: str, previous: dict | None = None,
                    receipt_checks: int | None = None,
                    scoreboard_pages: int | None = SCOREBOARD_PAGES_PER_RUN,
-                   forgejo_repo: dict | None = None) -> dict:
+                   forgejo_repo: dict | None = None,
+                   queue_landings: str | None = None) -> dict:
     # First, so a Forgejo outage fails the run before the GitHub walk spends its budget.
     forgejo = (fetch_forgejo_prs(forgejo_repo, (previous or {}).get("forgejo"))
                if forgejo_repo else None)
+    landings = (fetch_queue_landings(queue_landings, (previous or {}).get("queue_landings"))
+                if queue_landings else None)
     prs = fetch_prs(repo, previous)
     complete = apply_app_merges(repo, prs, previous, receipt_checks)
     # The review posting App posts scoreboards but never authors a merged PR.
@@ -880,7 +885,80 @@ def fetch_snapshot(repo: str, previous: dict | None = None,
         "rejected_scoreboard_comments": dict(sorted(Counter(rejected.values()).items())),
         **scan_state,
         **({"forgejo": forgejo} if forgejo else {}),
+        **({"queue_landings": landings} if landings else {}),
     }
+
+
+# The TauCeti queue's per-PR landing feed: first queue approval and landing time of each pull request
+# it landed, which neither forge records. Approval is the queue admitting a head of the pull request
+# after an all-green review. The feed serves at most 35 days, so each run folds it into what the
+# previous snapshot held, keeping QUEUE_LANDINGS_KEEP of history.
+QUEUE_LANDINGS = {
+    "TauCetiProject/TauCeti": "https://queue.taucetiproject.org/statistics/landings?days=35",
+}
+QUEUE_LANDINGS_SCHEMA = "tauceti-queue.landings/v1"
+QUEUE_LANDINGS_FIELDS = ["forge", "number", "first_approved_at", "landed_at"]
+QUEUE_LANDINGS_KEEP = timedelta(days=120)
+QUEUE_LANDINGS_MAX_BYTES = 32 * 1024 * 1024
+
+
+def read_queue_landings(url: str) -> dict:
+    request = urllib.request.Request(url, headers={"Cache-Control": "no-cache",
+                                                   "User-Agent": "TauCetiPrStats/1.0"})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        raw = response.read(QUEUE_LANDINGS_MAX_BYTES + 1)
+    if len(raw) > QUEUE_LANDINGS_MAX_BYTES:
+        raise ValueError("queue landings exceed bound")
+    feed = json.loads(raw)
+    if (not isinstance(feed, dict) or feed.get("schema") != QUEUE_LANDINGS_SCHEMA
+            or feed.get("fields") != QUEUE_LANDINGS_FIELDS
+            or not unix_time(feed.get("since")) or not unix_time(feed.get("observed_at"))
+            or feed["since"] > feed["observed_at"]
+            or not isinstance(feed.get("landings"), list)):
+        raise ValueError("unexpected queue landings shape")
+    for entry in feed["landings"]:
+        if (not isinstance(entry, list) or len(entry) != 4 or not isinstance(entry[0], str)
+                or type(entry[1]) is not int
+                or not all(unix_time(t) for t in entry[2:]) or entry[2] > entry[3]
+                or not feed["since"] < entry[3] <= feed["observed_at"]):
+            raise ValueError("unexpected queue landing entry")
+    return feed
+
+
+def unix_time(value) -> bool:
+    """A finite instant this side of the year 5000, as JSON can carry one."""
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and 0 < value < 95_617_584_000)
+
+
+def fetch_queue_landings(url: str, previous: dict | None) -> dict | None:
+    """The queue's landings, folded into `previous` (a snapshot's `queue_landings`) where contiguous.
+
+    A failed read keeps what the previous snapshot held, reported on stderr: the chart then ends
+    where its data does rather than the whole run failing over an optional series.
+    """
+    try:
+        feed = read_queue_landings(url)
+    except (OSError, ValueError, OverflowError) as exc:
+        print(f"queue landings: {exc}; keeping the previous snapshot's", file=sys.stderr)
+        return previous
+    since, observed = float(feed["since"]), float(feed["observed_at"])
+    kept: dict[tuple[str, int], list] = {}
+    coverage = since
+    if previous and previous.get("source") == url and previous.get("observed_at", 0) >= since:
+        # Contiguous: the previous coverage reaches into this feed's window, so the two join.
+        coverage = min(since, previous.get("coverage_since", since))
+        floor = observed - QUEUE_LANDINGS_KEEP.total_seconds()
+        coverage = max(coverage, floor)
+        for entry in previous.get("landings") or []:
+            if entry[3] >= floor:
+                kept[(entry[0], entry[1])] = entry
+    for entry in feed["landings"]:
+        kept[(entry[0], entry[1])] = entry
+    print(f"queue landings: {len(feed['landings']):,} in the feed, {len(kept):,} kept since "
+          f"{iso_z(datetime.fromtimestamp(coverage, timezone.utc))}", file=sys.stderr)
+    return {"source": url, "observed_at": observed, "coverage_since": coverage,
+            "landings": sorted(kept.values(), key=lambda e: (e[3], e[0], e[1]))}
 
 
 # Since 2026-11 most of the project's pull requests are on its Forgejo instance, and the TauCeti
@@ -1170,6 +1248,97 @@ def rolling_metrics(prs: list[dict], last_full_day: date, history_days: int) -> 
         })
         day += timedelta(days=1)
     return rows
+
+
+MERGE_LATENCY_WINDOWS = {"24h": timedelta(hours=24), "7d": timedelta(days=7)}
+MERGE_LATENCY_MEASURES = ("open_to_land", "open_to_approval", "approval_to_land")
+MERGE_LATENCY_STATS = (("p25", .25), ("median", .5), ("p75", .75), ("p90", .9))
+
+
+def latency_summary(values: list[float]) -> dict:
+    return {"count": len(values), **{name: percentile(values, q) for name, q in MERGE_LATENCY_STATS}}
+
+
+def merge_latency_metrics(github: list[dict], forgejo: list[dict], landings: dict | None,
+                          last_full_day: date, snapshot: datetime, history_days: int) -> dict | None:
+    """Time to merge split at the queue's first approval, over 24-hour and seven-day windows.
+
+    Each daily point covers pull requests the queue landed in the window ending at the end of that
+    UTC day; `current` covers the window ending at the snapshot. A day appears only once the queue
+    feed covers its whole window, so a seven-day point never rests on a partial week.
+    """
+    if not landings:
+        return None
+    created = {("github", pr["number"]): parse_dt(pr["created_at"]) for pr in github}
+    created.update({("forgejo", pr["number"]): parse_dt(pr["created_at"]) for pr in forgejo})
+    rows, unmatched, inconsistent = [], 0, 0
+    for forge, number, approved, landed in landings["landings"]:
+        opened = created.get((forge, number))
+        if opened is None:
+            unmatched += 1
+            continue
+        opened_at = opened.timestamp()
+        if landed < opened_at:
+            # A landing before the pull request existed is a mismatched record, not a duration.
+            inconsistent += 1
+            continue
+        # A head can be approved before a later edit of the pull request's record, never before it
+        # was opened; clamp so the two parts still add up to the whole.
+        approved = min(max(approved, opened_at), landed)
+        rows.append((landed, {"open_to_land": (landed - opened_at) / 3600,
+                              "open_to_approval": (approved - opened_at) / 3600,
+                              "approval_to_land": (landed - approved) / 3600}))
+    rows.sort(key=lambda row: row[0])
+    times = [row[0] for row in rows]
+
+    def window(end: float, span: timedelta) -> dict:
+        lo = bisect.bisect_left(times, end - span.total_seconds())
+        hi = bisect.bisect_left(times, end)
+        chosen = [row[1] for row in rows[lo:hi]]
+        return {measure: latency_summary([c[measure] for c in chosen])
+                for measure in MERGE_LATENCY_MEASURES}
+
+    coverage, observed = landings["coverage_since"], landings["observed_at"]
+    # The first day whose own midnight-to-midnight window the feed covers.
+    first = datetime.fromtimestamp(coverage, timezone.utc)
+    first_day = first.date() + timedelta(days=0 if first.time() == day_time.min else 1)
+    start = max(first_day, last_full_day - timedelta(days=history_days - 1))
+    dates, series = [], {name: {m: {k: [] for k in ("count", *dict(MERGE_LATENCY_STATS))}
+                                for m in MERGE_LATENCY_MEASURES} for name in MERGE_LATENCY_WINDOWS}
+    day = start
+    while day <= last_full_day:
+        end = datetime.combine(day + timedelta(days=1), day_time.min, tzinfo=timezone.utc).timestamp()
+        dates.append(day.isoformat())
+        for name, span in MERGE_LATENCY_WINDOWS.items():
+            # Covered at both ends: after an outage the feed stops at `observed`, and a window
+            # running past it would publish a partial count as a whole one.
+            covered = end - span.total_seconds() >= coverage and end <= observed
+            summary = window(end, span) if covered else None
+            for measure in MERGE_LATENCY_MEASURES:
+                for key, values in series[name][measure].items():
+                    values.append(summary[measure][key] if summary else None)
+        day += timedelta(days=1)
+    now = min(snapshot.timestamp(), observed)
+    return {
+        "definition": {
+            "population": "pull requests the TauCeti merge queue landed, on GitHub and on forgejo_repo",
+            "approval": "the queue first admitting a head of the pull request, after an all-green review",
+            "open_to_land": "PR creation to the queue's landing",
+            "open_to_approval": "PR creation to the first approval",
+            "approval_to_land": "first approval to the queue's landing",
+            "windows": "24h: landed in the 24 hours ending at the point; 7d: in the seven days",
+        },
+        "coverage_since": iso_z(datetime.fromtimestamp(coverage, timezone.utc)),
+        "observed_through": iso_z(datetime.fromtimestamp(observed, timezone.utc)),
+        "unmatched_landings": unmatched,
+        "inconsistent_landings": inconsistent,
+        "dates": dates,
+        "series": series,
+        # A window reaching back before the feed's coverage is null rather than partial.
+        "current": {"as_of": iso_z(datetime.fromtimestamp(now, timezone.utc)),
+                    **{name: window(now, span) if now - span.total_seconds() >= coverage else None
+                       for name, span in MERGE_LATENCY_WINDOWS.items()}},
+    }
 
 
 def utc_day(moment: datetime) -> date:
@@ -1608,6 +1777,64 @@ def render_rolling(path: Path, rolling: list[dict]) -> None:
     atomic_write(path, "".join(parts) + "\n")
 
 
+def render_merge_latency(path: Path, latency: dict | None, window: str = "24h",
+                         measure: str = "open_to_land") -> None:
+    """The health page's default time-to-merge view, for readers without JavaScript."""
+    width, height = 1100, 460
+    title = "Time from opening to merge, trailing 24 hours"
+    rows = []
+    if latency:
+        values = latency["series"][window][measure]
+        # Every day keeps its place on the axis; a day without data breaks the line.
+        rows = [(d, values["p25"][i], values["median"][i], values["p75"][i])
+                for i, d in enumerate(latency["dates"])]
+        while rows and rows[0][2] is None:
+            rows.pop(0)
+        while rows and rows[-1][2] is None:
+            rows.pop()
+    parts = chart_frame(
+        width=width, height=height, left=55, aria_label=title, title=title,
+        subtitle=(f"Pull requests the merge queue landed each UTC day, {rows[0][0]} to {rows[-1][0]}: "
+                  "median solid, 25th to 75th percentile shaded, in hours" if rows
+                  else "No queue landing data yet"),
+        css="",
+    )
+    left, right, top, bottom = 90, width - 30, 110, height - 50
+    if rows:
+        axis_max = nice_axis_max(max(r[3] for r in rows if r[3] is not None))
+        x = lambda i: left + i * (right - left) / max(len(rows) - 1, 1)  # noqa: E731
+        y = lambda v: bottom - v / axis_max * (bottom - top)  # noqa: E731
+        for index in range(5):
+            value = index / 4 * axis_max
+            parts.append(f'<line x1="{left}" y1="{y(value):.1f}" x2="{right}" y2="{y(value):.1f}" class="grid"/>')
+            parts.append(f'<text x="{left-8}" y="{y(value)+4:.1f}" text-anchor="end" class="tick">{value:.0f}h</text>')
+        runs, run = [], []
+        for i, r in enumerate(rows):
+            if r[2] is None:
+                runs, run = runs + ([run] if run else []), []
+            else:
+                run.append((i, r))
+        runs += [run] if run else []
+        for run in runs:
+            band = ([f"{x(i):.1f},{y(r[3]):.1f}" for i, r in run]
+                    + [f"{x(i):.1f},{y(r[1]):.1f}" for i, r in reversed(run)])
+            parts.append(f'<polygon points="{" ".join(band)}" fill="{PALETTE[0]}" fill-opacity="0.18"/>')
+            line = " ".join(f"{x(i):.1f},{y(r[2]):.1f}" for i, r in run)
+            parts.append(f'<polyline points="{line}" fill="none" stroke="{PALETTE[0]}" stroke-width="3.5" '
+                         'stroke-linejoin="round" stroke-linecap="round"/>')
+        last_tick_x = -math.inf
+        for i, r in enumerate(rows):
+            if (i not in (0, len(rows) - 1) and x(i) - last_tick_x < 100) or (
+                    i == len(rows) - 1 and x(i) - last_tick_x < 70):
+                continue
+            day = date.fromisoformat(r[0])
+            parts.append(f'<text x="{x(i):.1f}" y="{bottom+20}" text-anchor="middle" class="tick">{day:%b} {day.day}</text>')
+            last_tick_x = x(i)
+        parts.append(f'<text x="{right}" y="80" text-anchor="end" class="tick">latest median {rows[-1][2]:.1f}h</text>')
+    parts.append("</svg>")
+    atomic_write(path, "".join(parts) + "\n")
+
+
 def color_for(name: str, other: bool = False) -> str:
     if other:
         return MUTED
@@ -1937,6 +2164,8 @@ def generate(
     # Forgejo's pull requests join only the seven-day series; see FORGEJO_REPOS.
     forgejo = data.get("forgejo") or {}
     rolling = rolling_metrics(prs + (forgejo.get("prs") or []), last_full_day, history_days)
+    latency = merge_latency_metrics(prs, forgejo.get("prs") or [], data.get("queue_landings"),
+                                    last_full_day, snapshot, history_days)
     # And the age of its open pull requests, kept apart from `total_open_hours`: they carry no
     # lifecycle labels, so the per-state clocks and the charts drawn from them stay GitHub's.
     queue["forgejo_open_hours"] = [
@@ -1987,10 +2216,12 @@ def generate(
             "merge": "GitHub mergedAt; for a closed PR, the installed bors or TauCeti queue app renaming it to a [Merged by Bors] title, or else that app's success receipt on it; on forgejo_repo, that app's success receipt posted by one of its merge logins, else Forgejo merged_at",
             "merge_scope": "rolling_seven_day counts pull requests on GitHub and on forgejo_repo, an author being the same contributor on both under the same login, and queue.forgejo_open_hours gives the ages of forgejo_repo's open pull requests; every other figure counts GitHub's alone",
             "merge_latency": "PR creation timestamp to merge timestamp",
+            "merge_latency_by_measure": "merge_latency.series and .current split time to merge at the TauCeti queue's first approval (its first admission of a head after an all-green review), over pull requests it landed on both forges, in 24-hour and seven-day windows; see merge_latency.definition",
         },
         "queue": queue,
         "review_cycles": cycles,
         "rolling_seven_day": rolling,
+        "merge_latency": latency,
         "contributor_limit": contributor_limit,
         "cumulative_dates": merge_dates,
         "cumulative_merges_plotted": merge_series,
@@ -2010,6 +2241,7 @@ def generate(
             staging / "review-cycles-reached.svg", cycles, max_review_cycles,
         )
         render_rolling(staging / "rolling-seven-day-history.svg", rolling)
+        render_merge_latency(staging / "merge-latency.svg", latency)
         render_cumulative_contributors(
             staging / "cumulative-merges-by-contributor.svg",
             "Merged PRs by contributor", "merged PRs",
@@ -2092,7 +2324,7 @@ def main() -> int:
             args.repo, load_previous(args.since_data, args.repo),
             receipt_checks=MERGE_RECEIPT_CHECKS_PER_RUN if resumable else None,
             scoreboard_pages=SCOREBOARD_PAGES_PER_RUN if resumable else None,
-            forgejo_repo=forgejo_source(args))
+            forgejo_repo=forgejo_source(args), queue_landings=QUEUE_LANDINGS.get(args.repo))
         if args.dump_data:
             atomic_write(args.dump_data, json.dumps(data, indent=2) + "\n")
     if scoreboard_history_unfinished(data):
