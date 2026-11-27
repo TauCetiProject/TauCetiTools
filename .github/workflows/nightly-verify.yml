@@ -96,6 +96,8 @@ jobs:
       audit: ${{ steps.fresh_audit.outcome }}
       manifest: ${{ steps.rev.outputs.manifest }}
       manifest_upload: ${{ steps.fresh_manifest.outcome }}
+      capacity: ${{ steps.capacity.outputs.status }}
+      capacity_detail: ${{ steps.capacity.outputs.detail }}
     steps:
       # We expect the 262k default to be relevant at around 10m LOC, and this raised limit to be relevant at around 40m LOC.
       - name: Raise vm.max_map_count
@@ -165,6 +167,47 @@ jobs:
           set -euo pipefail
           cd fresh
           lake exe cache get || lake exe cache get!
+
+      # Fail in minutes rather than hours on a runner whose disk cannot hold a clean build. The PR
+      # class mixes VM guests, whose disks are 100 GiB, with disk-native slots. On 27 Nov 2026 a
+      # guest with 81 GiB free at this point filled its disk at 98% of the build, after two hours;
+      # on 21 and 26 Nov guests on another host lost their runner the same way. The footprint
+      # grows with the library, so the floor leaves room above what the build needed then. A
+      # disk-native slot sees its host's whole filesystem through df but is stopped once it has
+      # allocated its own budget, so there the smaller of the two counts. A short runner is not a
+      # build failure: the report names it as a capacity problem.
+      - name: Check the runner has disk for a clean build
+        id: capacity
+        env:
+          NEED_GIB: "100"
+          NATIVE_PROGRESS: /fleet-link/native-progress.json
+        run: |
+          set -euo pipefail
+          avail_kib="$(df --output=avail -k fresh | tail -n 1 | tr -d ' ')"
+          free_gib=$(( avail_kib / 1048576 ))
+          budget_gib="$(python3 -I -c '
+          import json, sys
+          try:
+              value = json.load(open(sys.argv[1]))
+              left = int(value["disk_budget_bytes"]) - int(value["disk_allocated"])
+          except (OSError, ValueError, KeyError, TypeError):
+              sys.exit(0)
+          print(max(0, left) // 1024**3)
+          ' "$NATIVE_PROGRESS")"
+          where="free"
+          if [ -n "$budget_gib" ] && [ "$budget_gib" -lt "$free_gib" ]; then
+            free_gib="$budget_gib"
+            where="left in its slot's disk budget"
+          fi
+          detail="runner ${RUNNER_NAME:-unknown} had ${free_gib} GiB ${where} before the build; a clean build needs about ${NEED_GIB} GiB"
+          echo "detail=$detail" >> "$GITHUB_OUTPUT"
+          if [ "$free_gib" -lt "$NEED_GIB" ]; then
+            echo "status=short" >> "$GITHUB_OUTPUT"
+            echo "::error::Not enough disk for a clean build: $detail"
+            exit 1
+          fi
+          echo "status=ok" >> "$GITHUB_OUTPUT"
+          echo "$detail"
 
       # --- The hard signal: everything elaborated from source -------------------------------
       # LAKE_RESTORE_ARTIFACTS=false and a workspace-local LAKE_CACHE_DIR that is never fetched into
@@ -627,9 +670,20 @@ jobs:
                 || needs.reference.outputs.compare != 'agree') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    # Read access to this run's jobs, to name the runner and step when verify loses its runner.
+    permissions:
+      actions: read
+      contents: read
     steps:
       - name: Post the divergence to Zulip
         env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          CAPACITY: ${{ needs.verify.outputs.capacity }}
+          CAPACITY_DETAIL: ${{ needs.verify.outputs.capacity_detail }}
           ZULIP_API_KEY: ${{ secrets.ZULIP_API_KEY }}
           ZULIP_EMAIL: ${{ secrets.ZULIP_EMAIL }}
           ZULIP_SITE: https://leanprover.zulipchat.com
@@ -650,11 +704,43 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           import base64
+          from datetime import datetime
           import json
           import os
           import sys
           import urllib.parse
           import urllib.request
+
+          def verify_job():
+              # Best effort: a job that loses its runner publishes no outputs and often no log, so
+              # the jobs API is the only record of where verify ran and how far it got. A job that
+              # was cancelled before a runner took it, or failed while starting, leaves outputs
+              # empty too; only a started step that never finished points at the runner. Never
+              # fail the report over this.
+              try:
+                  api = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
+                  url = (f"{api}/repos/{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
+                         f"{os.environ['GITHUB_RUN_ID']}/attempts/{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}"
+                         "/jobs?per_page=100")
+                  req = urllib.request.Request(url)
+                  req.add_header("Authorization", "Bearer " + os.environ["GH_TOKEN"])
+                  req.add_header("Accept", "application/vnd.github+json")
+                  with urllib.request.urlopen(req, timeout=30) as resp:
+                      jobs = json.loads(resp.read().decode()).get("jobs", [])
+                  job = next(j for j in jobs if j.get("name", "").split(" / ")[-1] == "verify")
+                  running = [s["name"] for s in job.get("steps", [])
+                             if s.get("started_at") and not s.get("conclusion")]
+                  if not (job.get("runner_name") and job.get("started_at") and job.get("completed_at")
+                          and running):
+                      return ""
+                  stamp = lambda v: datetime.fromisoformat(v.replace("Z", "+00:00"))
+                  hours = (stamp(job["completed_at"]) - stamp(job["started_at"])).total_seconds() / 3600
+                  return (f"Its runner stopped reporting (lost, out of disk or out of memory): it ran on "
+                          f"`{job['runner_name']}` for {hours:.1f} hours and stopped during "
+                          f"\"{running[-1]}\".")
+              except Exception as error:  # noqa: BLE001
+                  print(f"::warning::could not read the verify job: {error}")
+                  return ""
 
           sha = os.environ["SHA"]
           where = f"[`{sha[:8]}`](https://github.com/TauCetiProject/TauCeti/commit/{sha})"
@@ -663,7 +749,11 @@ jobs:
           # Deliberately does not claim the cached per-push CI passed for this SHA: main's CI
           # coalesces intermediate commits, so this workflow's commit may never have had its own run.
           if os.environ.get("RESULT") != "success":
-              if os.environ.get("BUILD") == "failure":
+              if os.environ.get("CAPACITY") == "short":
+                  lines.append("The from-source verification was not attempted: "
+                               f"{os.environ.get('CAPACITY_DETAIL')}. This is a runner capacity "
+                               "problem, not a build or reproducibility failure.")
+              elif os.environ.get("BUILD") == "failure":
                   lines.append("The from-source build FAILED with cached build outputs not restored. "
                                "Treat the published Lake cache as suspect until this is explained.")
               elif os.environ.get("AUDIT") == "failure":
@@ -679,7 +769,7 @@ jobs:
                   # a missing outcome is not evidence that the build never started.
                   lines.append(f"The from-source verification did not complete "
                                f"(result: `{os.environ.get('RESULT')}`) and recorded no build outcome. "
-                               "The run log shows how far it got. "
+                               + (verify_job() or "The run log shows what happened.") + " "
                                "No complete independent verification was established for this commit.")
           elif os.environ.get("REFERENCE_RESULT") != "success":
               lines.append(f"The from-source build and audits passed, but cache verification "
