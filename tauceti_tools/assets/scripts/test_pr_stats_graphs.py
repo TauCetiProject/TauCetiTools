@@ -1097,11 +1097,11 @@ class ForgejoLandingsTest(unittest.TestCase):
                 stats.fetch_snapshot("o/r", None, forgejo_repo=SOURCE)
         github.assert_not_called()
 
-    def test_forgejo_landings_and_authors_join_the_seven_day_series_only(self):
+    def test_forgejo_landings_join_the_seven_day_series_and_contributor_merges(self):
         github = [pr(1, 1, merged_day=8), pr(2, 4, state="OPEN", author="bob")]
         # Forgejo numbers overlap GitHub's; number 1 here is a different pull request.
         forgejo = self.walk(FakeForgejo(
-            [forgejo_row(1, 3, closed_day=9, title=LANDED), forgejo_row(2, 4, author="carol")],
+            [forgejo_row(1, 3, closed_day=9, title=LANDED, author="alice"), forgejo_row(2, 4, author="carol")],
             [forgejo_comment(1, 9)]))
         data = {"repo": "o/r", "prs": github, "fetched_at": timestamp(10), "scoreboards": [],
                 "forgejo": forgejo}
@@ -1112,9 +1112,12 @@ class ForgejoLandingsTest(unittest.TestCase):
         self.assertEqual((last["merges"], last["active_authors"]), (2, 3))
         self.assertEqual(last["median_merge_hours"], (180 + 156) / 2)
         self.assertEqual(metrics["forgejo_repo"], FORGEJO)
-        for key in ("review_cycles", "by_roadmap_and_contributor",
-                    "merge_totals_by_contributor", "cumulative_merges_plotted"):
+        for key in ("review_cycles", "by_roadmap_and_contributor"):
             self.assertEqual(metrics[key], without[key])
+        # The Forgejo landing counts for its author, the same contributor as alice on GitHub.
+        self.assertEqual(without["merge_totals_by_contributor"], {"alice": 1})
+        self.assertEqual(metrics["merge_totals_by_contributor"], {"alice": 2})
+        self.assertEqual(metrics["cumulative_merges_plotted"]["alice"][-1], 2)
         self.assertEqual(without["rolling_seven_day"][-1]["merges"], 1)
         # The open Forgejo pull request's age is published beside GitHub's, not mixed into it.
         forgejo_ages = metrics["queue"].pop("forgejo_open_hours")
