@@ -476,6 +476,7 @@ def assess(pr, repo=None, now=None):
 
 # The TauCeti merge queue's status, whose `waiting` inputs are approved but not yet in a batch.
 QUEUE_STATUS = "https://queue.taucetiproject.org/status"
+TAUCETI_QUEUE_REPO = "TauCetiProject/TauCeti"
 QUEUE_STATUS_MAX_BYTES = 16 * 1024 * 1024
 
 
@@ -489,23 +490,35 @@ def tauceti_queue_numbers():
     """
     from bors_observation import observation  # scripts/, on the path of every caller
 
-    members = {member["pr"] for batch in observation().get("batches") or []
-               for member in batch.get("members") or []}
+    batches = observation().get("batches")
+    if not isinstance(batches, list) or not all(
+            isinstance(batch, dict) and isinstance(batch.get("members"), list)
+            and all(isinstance(m, dict) and type(m.get("pr")) is int for m in batch["members"])
+            for batch in batches):
+        raise ValueError("unexpected bors observation batch shape")
+    members = {member["pr"] for batch in batches for member in batch["members"]}
     request = urllib.request.Request(QUEUE_STATUS, headers={
         "Cache-Control": "no-cache", "User-Agent": "TauCetiReadiness/1.0"})
     with urllib.request.urlopen(request, timeout=30) as response:
         raw = response.read(QUEUE_STATUS_MAX_BYTES + 1)
     if len(raw) > QUEUE_STATUS_MAX_BYTES:
         raise ValueError("queue status exceeds bound")
-    inputs = (json.loads(raw).get("waiting") or {}).get("inputs")
+    status = json.loads(raw)
+    waiting = status.get("waiting") if isinstance(status, dict) else None
+    inputs = waiting.get("inputs") if isinstance(waiting, dict) else None
     if not isinstance(inputs, list) or not all(
-            isinstance(i, dict) and type(i.get("number")) is int for i in inputs):
+            isinstance(i, dict) and type(i.get("number")) is int
+            and (i.get("source_identity") is None or isinstance(i["source_identity"], dict))
+            for i in inputs):
         raise ValueError("unexpected queue status waiting.inputs shape")
-    waiting = {i["number"] for i in inputs
-               if ((i.get("source_identity") or {}).get("forge") or {}).get("kind", "github") == "github"}
-    if not all(type(number) is int for number in members):
-        raise ValueError("unexpected bors observation member shape")
-    return members | waiting
+
+    def forge(item):
+        found = (item.get("source_identity") or {}).get("forge", {"kind": "github"})
+        if not isinstance(found, dict) or not isinstance(found.get("kind"), str):
+            raise ValueError("unexpected queue status source_identity shape")
+        return found["kind"]
+
+    return members | {i["number"] for i in inputs if forge(i) == "github"}
 
 
 def queue_snapshot(repo):
@@ -516,8 +529,9 @@ def queue_snapshot(repo):
     sweep.REPO = repo
     entries = sweep.queue_entries()
     try:
-        held = tauceti_queue_numbers()
-    except (ImportError, OSError, ValueError, KeyError, TypeError) as exc:
+        # The TauCeti queue serves one repository; its PR numbers mean nothing for another.
+        held = tauceti_queue_numbers() if repo == TAUCETI_QUEUE_REPO else set()
+    except (ImportError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         # Unknown rather than empty: an empty set would report every eligible PR as not queued.
         raise RuntimeError(f"TauCeti queue read failed: {exc}") from exc
     return {"known": True, "numbers": sorted({e["number"] for e in entries} | held),

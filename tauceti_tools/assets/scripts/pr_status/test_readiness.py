@@ -698,8 +698,29 @@ class TauCetiQueueMembership(unittest.TestCase):
         self.assertEqual(self.numbers(), {11, 12, 13, 21, 22})
 
     def test_a_malformed_status_is_an_error_not_an_empty_queue(self):
-        with self.assertRaises(ValueError):
-            self.numbers({"waiting": {"inputs": [{"number": "21"}]}})
+        for status in ({"waiting": {"inputs": [{"number": "21"}]}}, [], {"waiting": []},
+                       {"waiting": {"inputs": [{"number": 21, "source_identity": "github"}]}},
+                       {"waiting": {"inputs": [{"number": 21, "source_identity": {"forge": "github"}}]}}):
+            with self.subTest(status=status), self.assertRaises(ValueError):
+                self.numbers(status)
+
+    def test_a_malformed_observation_is_an_error_not_an_empty_queue(self):
+        import bors_observation
+        for observed in ({}, {"batches": [{}]}, {"batches": [{"members": [{"pr": "11"}]}]}):
+            with self.subTest(observed=observed), \
+                 patch.object(bors_observation, "observation", return_value=observed), \
+                 patch.object(readiness.urllib.request, "urlopen", return_value=self.response(self.STATUS)):
+                with self.assertRaises(ValueError):
+                    readiness.tauceti_queue_numbers()
+
+    def test_another_repository_does_not_read_the_tauceti_queue(self):
+        sweep = SimpleNamespace(REPO=None, queue_entries=lambda: [{"number": 5}],
+                                reservation_holder=lambda entries, now: None)
+        with patch.object(readiness, "sweep_engine", return_value=sweep), \
+             patch.object(readiness, "tauceti_queue_numbers", side_effect=AssertionError("read")), \
+             patch.object(readiness.core, "_BLOCKED_UNTIL", 0):
+            snap = readiness.queue_snapshot("someone/else")
+        self.assertEqual(snap["numbers"], [5])
 
     def test_snapshot_unions_both_queues_and_keeps_github_reservation_policy(self):
         sweep = SimpleNamespace(REPO=None, queue_entries=lambda: [{"number": 5}],

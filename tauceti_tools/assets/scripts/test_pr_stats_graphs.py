@@ -1118,8 +1118,9 @@ class ForgejoLandingsTest(unittest.TestCase):
         self.assertEqual(without["rolling_seven_day"][-1]["merges"], 1)
         # The open Forgejo pull request's age is published beside GitHub's, not mixed into it.
         forgejo_ages = metrics["queue"].pop("forgejo_open_hours")
-        self.assertEqual(len(forgejo_ages), 1)
-        self.assertGreater(forgejo_ages[0], 0)
+        open_forgejo = next(p for p in forgejo["prs"] if p["state"] == "OPEN")
+        self.assertEqual(forgejo_ages, [
+            (stats.parse_dt(timestamp(10)) - stats.parse_dt(open_forgejo["created_at"])).total_seconds() / 3600])
         self.assertEqual(without["queue"].pop("forgejo_open_hours"), [])
         self.assertEqual(metrics["queue"], without["queue"])
 

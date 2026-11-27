@@ -57,7 +57,7 @@ from pr_lifecycle import (  # noqa: E402
     parse_dt,
 )
 from pr_stats_graphs import (  # noqa: E402
-    atomic_write, fetch_snapshot, load_previous, percentile,
+    FORGEJO_REPOS, atomic_write, fetch_snapshot, load_previous, percentile,
 )
 
 OWNED_BY_PROJECT = [s for s in STAGE_ORDER if s not in STATE_AUTHOR_ACTION | STATE_INACTIVE]
@@ -409,6 +409,12 @@ def analyse(
         "forgejo_repo": (snapshot.get("forgejo") or {}).get("repo"),
         "by_forge": {
             forge: {
+                "merged_per_hour": rate(counted("merged_at", window_start, now, forge), window_span),
+                "baseline_merged_per_hour": rate(
+                    counted("merged_at", baseline_start, baseline_end, forge), baseline_span),
+                "opened_per_hour": rate(counted("created_at", window_start, now, forge), window_span),
+                "baseline_opened_per_hour": rate(
+                    counted("created_at", baseline_start, baseline_end, forge), baseline_span),
                 "merged_count": counted("merged_at", window_start, now, forge),
                 "baseline_merged_count": counted("merged_at", baseline_start, baseline_end, forge),
                 "opened_count": counted("created_at", window_start, now, forge),
@@ -655,23 +661,26 @@ def find_cause(result: dict) -> dict | None:
     Only when neither holds is the fall genuinely unexplained, and saying so is
     better than picking a stage to blame.
     """
-    baseline = result["baseline_merged_per_hour"]
-    if not baseline or result["baseline_merged_count"] < MIN_COMPLETIONS:
+    # The stage evidence below is GitHub's alone, so the throughput it explains must be too:
+    # judged on both forges, a fall on Forgejo would be blamed on an unrelated GitHub stage.
+    flow = {**result, **((result.get("by_forge") or {}).get("github") or {})}
+    baseline = flow["baseline_merged_per_hour"]
+    if not baseline or flow["baseline_merged_count"] < MIN_COMPLETIONS:
         # Nothing to compare against. Saying "healthy" here would be a guess
         # dressed as a finding.
         return {"kind": "insufficient_data", "stage": None,
                 "why": "not enough baseline data to judge"}
-    if result["merged_per_hour"] >= baseline * THROUGHPUT_FRACTION:
+    if flow["merged_per_hour"] >= baseline * THROUGHPUT_FRACTION:
         return None
 
     readiness = result.get("merge_readiness") or {}
 
     found = result["anomalies"] if "anomalies" in result else anomalies(result)
-    opened, opened_baseline = result["opened_per_hour"], result["baseline_opened_per_hour"]
+    opened, opened_baseline = flow["opened_per_hour"], flow["baseline_opened_per_hour"]
     intake_down = (
         opened_baseline
         and opened < opened_baseline * THROUGHPUT_FRACTION
-        and result["baseline_opened_count"] >= MIN_COMPLETIONS
+        and flow["baseline_opened_count"] >= MIN_COMPLETIONS
     )
 
     if readiness.get("unverified_ready") and not found:
@@ -816,7 +825,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     snapshot = (json.loads(args.data.read_text()) if args.data
-                else fetch_snapshot(args.repo, load_previous(args.since_data, args.repo)))
+                else fetch_snapshot(args.repo, load_previous(args.since_data, args.repo),
+                                    forgejo_repo=FORGEJO_REPOS.get(args.repo)))
     if not args.data or args.verify_readiness:
         if args.as_of:
             parser.error("live readiness verification cannot be combined with historical --as-of")
