@@ -83,6 +83,23 @@ CASES = [
     ("none conflicts with marker", "refactor: general cleanup",
      'Roadmap: none\n<!--tauceti-target:v1 {"focus":"PDE","id":"target"}-->',
      TC, "roadmap/Unknown"),
+    ("supplier work names its consumer", "feat: add theorem",
+     "Roadmap: ReductiveGroups\nConsumer roadmap: RepresentationTheory\n"
+     "It unblocks RepresentationTheory/README.md, Layer 2.\n"
+     '<!--tauceti-target:v1 {"focus":"RepresentationTheory","id":"target"}-->',
+     TC, "roadmap/ReductiveGroups"),
+    ("consumer line excuses only its own area", "feat: add theorem",
+     "Roadmap: ReductiveGroups\nConsumer roadmap: RepresentationTheory\n"
+     "TauCetiRoadmap/PDE/README.md", TC, "roadmap/Unknown"),
+    ("consumer line needs an area declaration", "feat: add theorem",
+     "Roadmap: none\nConsumer roadmap: PDE\nTauCetiRoadmap/PDE/README.md",
+     TC, "roadmap/Unknown"),
+    ("quoted consumer line ignored", "feat: add theorem",
+     "Roadmap: ReductiveGroups\n> Consumer roadmap: PDE\nTauCetiRoadmap/PDE/README.md",
+     TC, "roadmap/Unknown"),
+    ("consumer line with trailing prose ignored", "feat: add theorem",
+     "Roadmap: ReductiveGroups\nConsumer roadmap: PDE. The edge runs to PDE/README.md.",
+     TC, "roadmap/Unknown"),
 
     # 3. infra and pin-only overrides ------------------------------------------
     ("infra beats citation", "feat: add roadmap CI",
@@ -136,6 +153,9 @@ def run_unit() -> int:
     assert rl.parse_declared_area("Roadmap: EffectiveBounds", AREAS) == (
         True, "EffectiveBounds")
     assert rl.parse_declared_area("nothing here", AREAS) == (False, None)
+    assert rl.parse_consumer_areas(
+        "Consumer roadmap: PDE\nConsumer roadmap: NotARoadmap\n```\nConsumer roadmap: UniversalCovers\n```",
+        AREAS) == {"PDE"}
     assert rl.is_infra(["TauCeti/A.lean"]) is False
     assert rl.is_infra(["scripts/x.sh"]) is True
     assert rl.is_pin_only(["lake-manifest.json", "lean-toolchain"]) is True
