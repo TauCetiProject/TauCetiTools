@@ -232,10 +232,16 @@ def classify(pr, comments, statuses, paths, merge_base_sha, now=None, self_teste
     head = pr["head"]["sha"]
     result = {"head": head, "number": pr["number"], "eligible": False,
               "category": None, "reason": "", "gate": None}
+    scope = statuses.get("scope", "")
+    if self_tested and not scope:
+        # Self-tested PRs skip PR CI, so nothing posts the scope status. Inline eligibility has
+        # already required every path to be under TauCeti/ (or a pin, for a guarded bump), which
+        # is narrower than the scope guard. A posted scope status is passed through unchanged.
+        scope = "success"
     verdict = gate.decide_from_comments(
         comments, head, set(rubrics), paths,
         statuses.get("build", ""), statuses.get("bump-guard", ""),
-        scope=statuses.get("scope", ""), now=now, merge_base_sha=merge_base_sha,
+        scope=scope, now=now, merge_base_sha=merge_base_sha,
         **({"self_tested": True} if self_tested else {}))
     result["gate"] = verdict
     result["reason"] = verdict["reason"]
@@ -272,7 +278,7 @@ def classify(pr, comments, statuses, paths, merge_base_sha, now=None, self_teste
             if human:
                 result["category"] = "needs-human-review"
             else:
-                guards = [statuses.get("scope", "")]
+                guards = [scope]
                 if paths & {"lake-manifest.json", "lean-toolchain"}:
                     guards.append(statuses.get("bump-guard", ""))
                 result["category"] = ("merge-check-failed" if any(g.lower() in {"failure", "error"}

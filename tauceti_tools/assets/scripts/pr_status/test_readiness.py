@@ -37,10 +37,10 @@ def marker(head=HEAD, expires=NOW + 60):
 
 class GateContract(unittest.TestCase):
     def check(self, expected, comments=None, statuses=None, paths=PATHS, pr=None,
-              merge_base=MERGE_BASE):
+              merge_base=MERGE_BASE, self_tested=False):
         result = readiness.classify(pr or PR, [board()] if comments is None else comments,
                                     STATUSES if statuses is None else statuses, paths,
-                                    merge_base, NOW)
+                                    merge_base, NOW, self_tested=self_tested)
         self.assertEqual(result["category"], expected, result)
         self.assertEqual(result["eligible"], expected == "ready-to-merge")
         if result["eligible"]:
@@ -162,6 +162,12 @@ class GateContract(unittest.TestCase):
         self.check("ci-failed", statuses=dict(STATUSES, build="failure"))
         self.check("awaiting-CI", statuses=dict(STATUSES, build="pending"))
         self.check("awaiting-CI", statuses=dict(STATUSES, build=""))
+
+    def test_self_tested_pr_without_any_ci_status_is_ready(self):
+        # PR CI is skipped, so neither build nor scope is ever posted on the head.
+        self.check("ready-to-merge", statuses={}, self_tested=True)
+        self.check("awaiting-review", statuses={}, comments=[], self_tested=True)
+        self.check("awaiting-CI", statuses={}, self_tested=False)
 
     def test_queue_independent_routing(self):
         self.check("awaiting-dependency", pr=dict(PR, base={"ref": "parent"}))
@@ -310,6 +316,22 @@ class ReadEvidence(unittest.TestCase):
         self.assertTrue(result['eligible'], result)
         assess.assert_called_once_with(1, 'owner/repo', pr=current, paths=PATHS)
         fake.git_diff.assert_called_once()
+
+    def test_eligible_self_tested_pr_without_ci_statuses_is_ready(self):
+        current = copy.deepcopy(PR)
+        current['labels'] = [{'name': 'self-tested'}]
+        current['head']['ref'] = 'math'
+        fake = MagicMock()
+        fake.git_diff.return_value = PATHS
+        import self_tested
+        for eligible, expected in ((True, 'ready-to-merge'), (False, 'awaiting-CI')):
+            with patch.object(readiness, 'evidence', return_value=(current, [board()], {})), \
+                 patch.object(readiness.core, 'gh_api', return_value=MERGE_BASE), \
+                 patch.object(readiness, 'diff_engine', return_value=fake), \
+                 patch.object(self_tested, 'reconcile', return_value=eligible):
+                result = readiness.assess(1, repo='owner/repo', now=NOW)
+            self.assertEqual(result['category'], expected, result)
+            self.assertEqual(result['eligible'], eligible, result)
 
     def test_old_receipt_does_not_skip_direct_eligibility(self):
         current = copy.deepcopy(PR)
