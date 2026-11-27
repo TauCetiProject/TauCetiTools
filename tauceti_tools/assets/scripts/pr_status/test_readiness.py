@@ -713,6 +713,67 @@ class TauCetiQueueMembership(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     readiness.tauceti_queue_numbers()
 
+    def audit_with(self, reads, landed=None, repo="TauCetiProject/TauCeti"):
+        """Run the audit over PRs 1-3 with these queue reads; record the order of calls."""
+        snapshot = {"repo": repo, "prs": [
+            {"number": n, "state": "OPEN", "is_draft": False} for n in (1, 2, 3)]}
+        order, reads = [], iter(reads)
+
+        def read(repo):
+            order.append("queue")
+            value = next(reads)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        def assess(n, repo):
+            order.append("assess")
+            return {"number": n, "eligible": True, "category": None}
+
+        def landings(moment):
+            order.append("landings")
+            if isinstance(landed, Exception):
+                raise landed
+            return set(landed or ())
+        with patch.object(readiness, "engine"), patch.object(readiness, "assess", side_effect=assess), \
+             patch.object(readiness, "queue_snapshot", side_effect=read), \
+             patch.object(readiness, "landed_github_numbers_since", side_effect=landings):
+            return readiness.audit(snapshot), order
+
+    @staticmethod
+    def known(numbers, holder=None):
+        return {"known": True, "numbers": list(numbers), "reservation_holder": holder}
+
+    def test_a_pr_landed_during_the_audit_counts_as_queued(self):
+        result, order = self.audit_with([self.known([1, 2], holder=9), self.known([2, 3], holder=8)], landed={1})
+        self.assertEqual(order, ["queue", "assess", "assess", "assess", "queue", "landings"])
+        self.assertEqual(result["queue"]["numbers"], [1, 2, 3])
+        self.assertEqual(result["queue"]["landed_during_audit"], [1])
+        self.assertEqual(result["queue"]["reservation_holder"], 8)
+
+    def test_a_pr_withdrawn_during_the_audit_is_not_queued(self):
+        result, _ = self.audit_with([self.known([1, 2]), self.known([2])], landed=set())
+        self.assertEqual(result["queue"]["numbers"], [2])
+
+    def test_an_unreadable_landings_feed_keeps_the_later_read_alone(self):
+        result, _ = self.audit_with([self.known([1, 2]), self.known([2])], landed=OSError("down"))
+        self.assertEqual(result["queue"]["numbers"], [2])
+        self.assertIn("unavailable", result["queue"]["landed_check"])
+
+    def test_an_unknown_first_read_leaves_the_later_one(self):
+        result, order = self.audit_with([RuntimeError("down"), self.known([2])])
+        self.assertEqual((result["queue"]["numbers"], "landings" in order), ([2], False))
+
+    def test_an_unknown_queue_after_the_audit_stays_unknown(self):
+        result, _ = self.audit_with([self.known([1]), RuntimeError("down")])
+        self.assertFalse(result["queue"]["known"])
+
+    def test_landings_feed_lists_github_landings_since_the_moment(self):
+        body = {"fields": ["forge", "number", "first_approved_at", "landed_at"], "landings": [
+            ["github", 11, 1.0, 100.0], ["github", 12, 1.0, 200.0], ["forgejo", 13, 1.0, 300.0]]}
+        with patch.object(readiness.urllib.request, "urlopen", return_value=TauCetiQueueMembership.response(None, body)):
+            self.assertEqual(readiness.landed_github_numbers_since(150.0), {12})
+
     def test_another_repository_does_not_read_the_tauceti_queue(self):
         sweep = SimpleNamespace(REPO=None, queue_entries=lambda: [{"number": 5}],
                                 reservation_holder=lambda entries, now: None)

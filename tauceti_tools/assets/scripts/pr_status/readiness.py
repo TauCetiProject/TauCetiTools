@@ -561,12 +561,53 @@ def audit(snapshot):
                 "queue": {"known": False, "reason": str(exc)}, "error": str(exc)}
     repo = snapshot["repo"]
     numbers = [pr["number"] for pr in snapshot["prs"] if pr["state"] == "OPEN" and not pr["is_draft"]]
+    # The audit takes minutes, and the queue moves meanwhile. A batch landing during it takes its
+    # members out of the queue after they were assessed open and eligible, so the queue is also read
+    # before the assessments, and a pull request that read held counts as queued if the queue has
+    # landed it since. One withdrawn meanwhile, still open, does not: it needs queueing again.
+    started = time.time()
+    before = _queue_or_unknown(repo)
     with ThreadPoolExecutor(max_workers=AUDIT_WORKERS) as pool:
         futures = [pool.submit(_audit_one, number, repo) for number in numbers]
         assessed = [future.result() for future in futures]
     results = {str(number): result for number, result in zip(numbers, assessed)}
-    try:
-        queue = queue_snapshot(repo)
-    except (RuntimeError, subprocess.CalledProcessError, KeyError, ValueError) as exc:
-        queue = {"known": False, "reason": str(exc)}
+    queue = _queue_or_unknown(repo)
+    if queue["known"] and before["known"]:
+        gone = set(before["numbers"]) - set(queue["numbers"])
+        if gone:
+            try:
+                landed = landed_github_numbers_since(started) if repo == TAUCETI_QUEUE_REPO else set()
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                landed = set()
+                queue["landed_check"] = f"unavailable: {exc}"
+            queue["numbers"] = sorted(set(queue["numbers"]) | (gone & landed))
+            queue["landed_during_audit"] = sorted(gone & landed)
     return {"checked_at": int(time.time()), "prs": results, "queue": queue}
+
+
+QUEUE_LANDINGS = "https://queue.taucetiproject.org/statistics/landings?days=1"
+
+
+def landed_github_numbers_since(moment):
+    """GitHub PR numbers the TauCeti queue landed at or after `moment` (unix seconds)."""
+    request = urllib.request.Request(QUEUE_LANDINGS, headers={
+        "Cache-Control": "no-cache", "User-Agent": "TauCetiReadiness/1.0"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        raw = response.read(QUEUE_STATUS_MAX_BYTES + 1)
+    if len(raw) > QUEUE_STATUS_MAX_BYTES:
+        raise ValueError("queue landings exceed bound")
+    feed = json.loads(raw)
+    entries = feed.get("landings") if isinstance(feed, dict) else None
+    if (feed.get("fields") != ["forge", "number", "first_approved_at", "landed_at"]
+            or not isinstance(entries, list)
+            or not all(isinstance(e, list) and len(e) == 4 and type(e[1]) is int
+                       and isinstance(e[3], (int, float)) for e in entries)):
+        raise ValueError("unexpected queue landings shape")
+    return {e[1] for e in entries if e[0] == "github" and e[3] >= moment}
+
+
+def _queue_or_unknown(repo):
+    try:
+        return queue_snapshot(repo)
+    except (RuntimeError, subprocess.CalledProcessError, KeyError, ValueError) as exc:
+        return {"known": False, "reason": str(exc)}
