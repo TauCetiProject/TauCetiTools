@@ -25,16 +25,16 @@ One kind of difference is known to be benign. Lean stores each definition's comp
 in the `.olean.private`, and the free variables in that code are named `_uniq.<k>.<n>`, where
 `<k>` depends on how parallel elaboration was scheduled. The same source can then give
 `.olean.private` files whose bytes differ while everything else, `.ir` and `.c` included, is
-identical. So `manifest` also records, for each `.olean.private`, a digest of its decoded object
-graph in which every `_uniq` name is replaced by the order of its first occurrence (see
+identical. So `manifest` also records, for each `.olean.private`, a digest of the file in which
+only the number and hash fields of each `_uniq` Name object are masked (see
 `private_olean_digest`). `compare`, given REFERENCE_BUILD_DIR, accepts a differing
 `.olean.private` as benign private-olean nondeterminism only when:
 
   * every differing artifact is an `.olean.private`, and no artifact is missing on either side,
     so the module's `.olean`, `.olean.server`, `.ilean`, `.ir` and `.c` all match byte for byte;
   * the cached file hashes to what the module's Lake trace records for it;
-  * both files decode, and their digests agree, so the two differ only by a one-to-one renaming
-    of `_uniq` names whose stored name hashes are all correct.
+  * both files decode, and their digests agree: the two are byte for byte the same apart from
+    those masked fields, and the names in them are renumbered one to one, with correct hashes.
 
 Anything else, including a file that does not decode, is a divergence. Each benign case is
 named in the log, as a notice and in the step summary, but does not fail the comparison.
@@ -125,16 +125,17 @@ class Undecodable(Exception):
 
 
 def private_olean_digest(olean, server, private):
-    """Digest of the `.olean.private` part up to a renaming of `_uniq` names, as `HEX/N`.
+    """Digest of an `.olean.private` up to a renumbering of `_uniq` names, as `HEX/N`.
 
-    The digest covers the private part's header and relocation table, and every object
-    reachable from its root, wherever it lives in the three parts. It is a Merkle hash: each
-    object hashes its kind, size, scalar bytes and its fields' hashes, so it does not depend on
-    which equal objects the compactor happened to share. A Name of the form `_uniq.<k>...<n>`
-    whose stored hashes are all correct hashes as `U<i>`, where `i` numbers the distinct such
-    names in order of first occurrence in a depth-first walk. Two files therefore agree exactly
-    when they are the same object tree up to a one-to-one renaming of those names. N is the
-    number of distinct `_uniq` names.
+    Every object in the private part's data section is walked in address order, checking that
+    the objects tile the section exactly. A Name.num object there whose prefix chain ends at
+    `_uniq` (a Name.str on the anonymous name) and whose stored name hashes are all correct is a
+    compiler-internal name; only its number and hash fields are masked. The digest is SHA-256 of
+    the whole file with those fields zeroed, the offsets that were masked, and for each masked
+    object the order in which its full name first occurs. Two files therefore agree exactly when
+    they are byte for byte the same except for those fields, at the same offsets, and the two
+    numberings are one-to-one: no padding, flag, pointer, cached hash or table can differ. N is the
+    number of masked names.
     """
     parts = []
     for data in (olean, server, private):
@@ -145,142 +146,114 @@ def private_olean_digest(olean, server, private):
         if size % 8 or DATA + size > len(data):
             raise Undecodable("truncated")
         parts.append((base + DATA, base + DATA + size, base, data))
-    gmp = private[6] & 1
-    memo = {}
-    names = {}
-    uniq = {}
+    for (_, hi, _, _), (next_lo, _, _, _) in zip(parts, parts[1:], strict=False):
+        if hi > next_lo:
+            raise Undecodable("overlapping parts")
 
     def locate(addr):
         if addr & 7:
-            raise Undecodable("misaligned pointer")
+            return None
         for lo, hi, base, data in parts:
             if lo <= addr < hi:
                 return data, addr - base, hi - base
-        raise Undecodable("pointer outside the module")
+        return None
 
-    def obj(addr):
-        data, off, end = locate(addr)
-        if off + 8 > end:
-            raise Undecodable("object past the end")
-        rc, size, other, tag = struct.unpack_from("<iHBB", data, off)
-        if rc != 0:
-            raise Undecodable("object with a reference count")
-        return data, off, end, size, other, tag
-
-    def uniq_name(addr):
-        """Components of `_uniq.<k>...` at `addr` if its hashes are right, else None."""
-        if addr in names:
-            return names[addr]
-        data, off, end, _, _, _ = obj(addr)
-        found = None
-        if data[off:off + 8] == NAME_NUM and off + 32 <= end:
-            prefix, value, stored = struct.unpack_from("<QQQ", data, off + 8)
-            if value & 1 and not prefix & 1:
-                value >>= 1
-                pdata, poff, pend, _, _, _ = obj(prefix)
-                header = pdata[poff:poff + 8]
-                phash = U64.unpack_from(pdata, poff + 24)[0] if poff + 32 <= pend else None
-                if phash is None or header not in (NAME_NUM, NAME_STR) or stored != mix_hash(phash, value):
-                    pass
-                elif header == NAME_NUM:
-                    inner = uniq_name(prefix)
-                    if inner is not None:
-                        found = inner + (value,)
-                else:
-                    anonymous, text = struct.unpack_from("<QQ", pdata, poff + 8)
-                    if anonymous == 1 and not text & 1:
-                        sdata, soff, _, _, _, stag = obj(text)
-                        if (stag == 249 and sdata[soff + 8:soff + 16] == U64.pack(6)
-                                and sdata[soff + 32:soff + 38] == b"_uniq\0"
-                                and phash == mix_hash(ANONYMOUS_HASH, murmur64a(b"_uniq", 11))):
-                            found = ("_uniq", value)
-        names[addr] = found
+    def name_hash(addr, header):
+        """Stored hash of the Name object of the given header at `addr`, or None."""
+        found = locate(addr)
+        if found is None:
+            return None
+        data, off, end = found
+        if off + 32 > end or data[off:off + 8] != header:
+            return None
         return found
 
-    def layout(addr):
-        """Identifying bytes of the object other than its pointers, and its fields."""
-        data, off, end, size, other, tag = obj(addr)
-        if tag <= 243:  # constructor: `other` object fields, then scalars, `size` bytes in all
-            if size < 8 + 8 * other or off + size > end:
-                raise Undecodable("bad constructor size")
-            fields = struct.unpack_from(f"<{other}Q", data, off + 8)
-            return b"C" + data[off + 4:off + 8] + data[off + 8 + 8 * other:off + size], fields
-        if tag == 245:  # closure: fn pointer, arity, number of fixed arguments, the arguments
-            fixed = struct.unpack_from("<H", data, off + 18)[0]
-            if size != 24 + 8 * fixed or off + size > end:
-                raise Undecodable("bad closure size")
-            closures.append(addr)
-            return b"F" + data[off + 8:off + 24], struct.unpack_from(f"<{fixed}Q", data, off + 24)
-        if tag == 246:  # array: size, capacity, elements
-            n = U64.unpack_from(data, off + 8)[0]
-            if off + 24 + 8 * n > end:
-                raise Undecodable("bad array size")
-            return b"A" + data[off + 8:off + 24], struct.unpack_from(f"<{n}Q", data, off + 24)
-        if tag == 248:  # scalar array: `other` is the element size
-            n = U64.unpack_from(data, off + 8)[0]
-            if off + 24 + other * n > end:
-                raise Undecodable("bad scalar array size")
-            return b"B" + bytes([other]) + data[off + 8:off + 24 + other * n], ()
-        if tag == 249:  # string: byte size, capacity, length, bytes
-            n = U64.unpack_from(data, off + 8)[0]
-            if off + 32 + n > end:
-                raise Undecodable("bad string size")
-            return b"T" + data[off + 8:off + 32 + n], ()
-        if tag == 250:  # bignum: everything but the limb pointer, which only says where it is
-            if size < 32 or off + size > end:
-                raise Undecodable("bad bignum size")
-            if gmp:
-                return b"Z" + data[off + 8:off + 16] + data[off + 24:off + size], ()
-            return b"Z" + data[off + 8:off + 24] + data[off + 32:off + size], ()
-        if tag in (244, 251, 252, 253):  # promise, thunk, task, ref: one value field
-            if tag == 251 and U64.unpack_from(data, off + 16)[0] != 0:
-                raise Undecodable("unevaluated thunk")
-            return b"R" + bytes([tag]), (U64.unpack_from(data, off + 8)[0],)
-        raise Undecodable(f"unexpected object tag {tag}")
+    uniq_hash = mix_hash(ANONYMOUS_HASH, murmur64a(b"_uniq", 11))
 
-    closures = []
-    root = U64.unpack_from(private, DATA)[0]
-    stack = [(root, False)]
-    while stack:
-        addr, finished = stack.pop()
-        if not finished:
-            if addr in memo:
-                continue
-            name = uniq_name(addr)
-            if name is not None:
-                memo[addr] = hashlib.sha256(f"U{uniq.setdefault(name, len(uniq))}".encode()).digest()
-                continue
-            memo[addr] = None  # in progress: meeting it again below the object is a cycle
-            stack.append((addr, True))
-            stack.extend((c, False) for c in reversed(layout(addr)[1]) if not c & 1 and c not in memo)
-            continue
-        identity, fields = layout(addr)
-        h = hashlib.sha256(identity)
-        for c in fields:
-            if c & 1:
-                h.update(b"S" + U64.pack(c))
-            elif memo.get(c) is None:
-                raise Undecodable("cycle")
+    def is_uniq_str(addr):
+        found = name_hash(addr, NAME_STR)
+        if found is None:
+            return False
+        data, off, _ = found
+        anonymous, text, stored = struct.unpack_from("<QQQ", data, off + 8)
+        if anonymous != 1 or stored != uniq_hash:
+            return False
+        located = locate(text)
+        if located is None:
+            return False
+        sdata, soff, send = located
+        return (soff + 40 <= send and sdata[soff:soff + 8] == bytes([0, 0, 0, 0, 1, 0, 0, 249])
+                and sdata[soff + 8:soff + 32] == struct.pack("<QQQ", 6, 6, 5)
+                and sdata[soff + 32:soff + 40] == b"_uniq\0\0\0")
+
+    names = {}  # address of a Name.num -> interned id of its full name, or None
+
+    def uniq_name(addr):
+        """Interned id of the `_uniq.<k>...` name at `addr`, or None; iterative over the chain."""
+        chain = []
+        while addr not in names:
+            found = name_hash(addr, NAME_NUM)
+            if found is None:
+                break
+            data, off, _ = found
+            prefix, value, stored = struct.unpack_from("<QQQ", data, off + 8)
+            chain.append((addr, prefix, value, stored))
+            addr = prefix
+        if addr in names:
+            known = names[addr]
+        elif is_uniq_str(addr):
+            known = ("_uniq",)
+        else:
+            known = None
+        for link, prefix, value, stored in reversed(chain):
+            if known is not None and value & 1:
+                pdata, poff, _ = locate(prefix)
+                if stored == mix_hash(U64.unpack_from(pdata, poff + 24)[0], value >> 1):
+                    known = interned.setdefault((known, value >> 1), len(interned))
+                else:
+                    known = None
             else:
-                h.update(b"P" + memo[c])
-        memo[addr] = h.digest()
+                known = None
+            names[link] = known
+        return names.get(chain[0][0]) if chain else names.get(addr)
 
-    # The trailer lists the data-relative offset of every closure `m_fun` in this part, for the
-    # loader to relocate. Check it against the closures actually found here, and hash the rest.
-    lo, hi, base, _ = parts[2]
-    trailer = private[hi - base:]
-    if len(trailer) < 4:
-        raise Undecodable("no trailer")
-    count = struct.unpack_from("<I", trailer, 0)[0]
-    if len(trailer) < 4 + 8 * count:
-        raise Undecodable("truncated trailer")
-    listed = sorted(struct.unpack_from(f"<{count}Q", trailer, 4))
-    here = sorted(a - lo + 8 for a in set(closures) if lo <= a < hi)
-    if listed != here:
-        raise Undecodable("closure table does not match the closures")
-    final = hashlib.sha256(b"H" + private[:HEADER] + b"L" + trailer[4 + 8 * count:])
-    final.update(b"R" + memo[root])
-    return f"{final.hexdigest()}/{len(uniq)}"
+    interned = {}
+    lo, hi, base, private_data = parts[2]
+    masked = []
+    off = DATA + 8  # the first data word is the root pointer
+    end = hi - base
+    while off < end:
+        rc, size, other, tag = struct.unpack_from("<iHBB", private_data, off)
+        if rc != 0:
+            raise Undecodable("object with a reference count")
+        if tag <= 245 or tag in (250, 251, 252, 253):
+            length = size
+        elif tag == 246:
+            length = 24 + 8 * U64.unpack_from(private_data, off + 8)[0]
+        elif tag == 248:
+            length = 24 + other * U64.unpack_from(private_data, off + 8)[0]
+        elif tag == 249:
+            length = 32 + U64.unpack_from(private_data, off + 8)[0]
+        else:
+            raise Undecodable(f"unexpected object tag {tag}")
+        if length < 8 or off + length > end:
+            raise Undecodable("bad object size")
+        if private_data[off:off + 8] == NAME_NUM:
+            name = uniq_name(base + off)
+            if name is not None:
+                masked.append((off, name))
+        off += (length + 7) & ~7
+    if off != end:
+        raise Undecodable("objects do not fill the data section")
+
+    blank = bytearray(private_data)
+    order = {}
+    final = hashlib.sha256()
+    for off, name in masked:
+        blank[off + 16:off + 32] = bytes(16)
+        final.update(struct.pack("<QQ", off, order.setdefault(name, len(order))))
+    final.update(b"F" + bytes(blank))
+    return f"{final.hexdigest()}/{len(order)}"
 
 
 def canonical_digest(stem):
@@ -377,22 +350,24 @@ def explain_private(rel, clean_digest, build_dir):
     for path in (stem + ".olean", stem + ".olean.server", full, trace):
         if not regular_file(path) or not os.path.realpath(path).startswith(inside):
             return None, f"{os.path.relpath(path, build_dir)} is missing or not a regular file"
-    with open(full, "rb") as f:
-        actual = f"{lake_hash(f.read()):016x}"
     try:
+        with open(full, "rb") as f:
+            actual = f"{lake_hash(f.read()):016x}"
         with open(trace, encoding="utf-8") as f:
             outputs = json.load(f)["outputs"]["o"]
         recorded = [o[:-len(PRIVATE)] for o in outputs
                     if isinstance(o, str) and o.endswith(PRIVATE)]
+        hash_file = full + ".hash"
+        sidecar = None
+        if regular_file(hash_file):
+            with open(hash_file, encoding="utf-8") as f:
+                sidecar = f.read().strip()
     except (OSError, ValueError, KeyError, TypeError) as error:
-        return None, f"its Lake trace is unreadable ({type(error).__name__})"
+        return None, f"its cached outputs or Lake trace are unreadable ({type(error).__name__})"
     if recorded != [actual]:
         return None, f"the cached file hashes to {actual}, but its Lake trace records {recorded}"
-    hash_file = full + ".hash"
-    if regular_file(hash_file):
-        with open(hash_file, encoding="utf-8") as f:
-            if f.read().strip() != actual:
-                return None, f"the cached file does not match {os.path.basename(hash_file)}"
+    if sidecar is not None and sidecar != actual:
+        return None, "the cached file does not match its .olean.private.hash"
     if clean_digest is None or "/" not in clean_digest:
         return None, f"the clean build's copy could not be decoded ({clean_digest or 'not recorded'})"
     cached_digest = canonical_digest(stem)
@@ -420,7 +395,10 @@ def do_compare(fresh_path, reference_path, reference_build=None):
             if reference_build is None:
                 unexplained.append((rel, "no cache-restored build to check it against"))
                 continue
-            why, failure = explain_private(rel, fresh_canonical.get(rel), reference_build)
+            try:
+                why, failure = explain_private(rel, fresh_canonical.get(rel), reference_build)
+            except Exception as error:  # noqa: BLE001 - never let one file stop the report
+                why, failure = None, f"it could not be checked ({type(error).__name__})"
             if failure is None:
                 benign.append((rel, why))
             else:

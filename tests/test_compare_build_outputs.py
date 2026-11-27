@@ -176,19 +176,35 @@ class PrivateOleanDigest(unittest.TestCase):
         parts[2][i] ^= 0x20
         self.assertNotEqual(cbo.private_olean_digest(*map(bytes, parts)), before)
 
-    def test_damage_is_undecodable_or_different(self):
+    def assertCaught(self, parts, before, what):
+        try:
+            after = cbo.private_olean_digest(*map(bytes, parts))
+        except cbo.Undecodable:
+            return
+        self.assertNotEqual(after, before, f"{what} went unnoticed")
+
+    def test_any_flipped_byte_is_caught(self):
         original = (FIXTURE / "Repro.olean.private").read_bytes()
         before = cbo.private_olean_digest(*map(bytes, load_parts()))
-        # The first byte of every 7th word (every word passes, but takes a minute): each word
-        # holds bytes the digest covers.
-        for offset in range(cbo.DATA + 8, len(original), 8 * 7):
+        # Every byte of the header and the first 4 KiB, then the first byte of every word.
+        offsets = sorted(set(range(4096)) | set(range(0, len(original), 8)))
+        for offset in offsets:
             parts = load_parts()
             parts[2][offset] ^= 0x01
-            try:
-                after = cbo.private_olean_digest(*map(bytes, parts))
-            except Exception:  # noqa: BLE001 - any decoding failure is a rejection here
-                continue
-            self.assertNotEqual(after, before, f"a flipped bit at offset {offset} went unnoticed")
+            self.assertCaught(parts, before, f"a flipped bit at offset {offset}")
+
+    def test_padding_flags_and_appended_bytes_are_caught(self):
+        before = cbo.private_olean_digest(*map(bytes, load_parts()))
+        for offset in (241, 558):  # string padding; an array header's flag byte
+            parts = load_parts()
+            parts[2][offset] ^= 0x80
+            self.assertCaught(parts, before, f"a change at offset {offset}")
+        parts = load_parts()
+        size = struct.unpack_from("<Q", parts[2], cbo.HEADER)[0]
+        end = cbo.DATA + size
+        parts[2][end:end] = bytes(8)
+        struct.pack_into("<Q", parts[2], cbo.HEADER, size + 8)
+        self.assertCaught(parts, before, "eight bytes appended to the data")
 
     def test_truncation_is_undecodable(self):
         parts = load_parts()
