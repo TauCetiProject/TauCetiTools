@@ -290,14 +290,25 @@ class NightlyVerification(unittest.TestCase):
         self.assertEqual(JOBS['verify']['outputs']['capacity'], '${{ steps.capacity.outputs.status }}')
         self.assertEqual(JOBS['report']['permissions'], {'actions': 'read', 'contents': 'read'})
         self.env['RUNNER_NAME'] = 'fleet-example'
-        for need, code, status in (('1', 0, 'ok'), ('100000000', 1, 'short')):
-            with self.subTest(need=need):
+        progress = self.root / 'native-progress.json'
+        for need, native, code, status in (('1', None, 0, 'ok'), ('100000000', None, 1, 'short'),
+                                           ('100', (128, 40), 1, 'short'), ('80', (128, 40), 0, 'ok'),
+                                           ('1', (128, None), 0, 'ok')):
+            with self.subTest(need=need, native=native):
                 Path(self.env['GITHUB_OUTPUT']).write_text('')
                 self.env['NEED_GIB'] = need
+                self.env['NATIVE_PROGRESS'] = str(progress)
+                progress.unlink(missing_ok=True)
+                if native:
+                    budget, allocated = native
+                    progress.write_text(json.dumps({'disk_budget_bytes': budget * 1024**3,
+                        'disk_allocated': None if allocated is None else allocated * 1024**3}))
                 result = self.shell(check['run'])
                 self.assertEqual(result.returncode, code, result.stderr)
                 self.assertEqual(self.outputs()['status'], status)
                 self.assertIn('fleet-example', self.outputs()['detail'])
+                if native and native[1] is not None:
+                    self.assertIn('88 GiB left in its slot', self.outputs()['detail'])
 
     def test_report_names_capacity_shortfalls_and_lost_runners(self):
         content = self.run_report({'RESULT': 'failure', 'BUILD': 'skipped', 'CAPACITY': 'short',
@@ -315,9 +326,14 @@ class NightlyVerification(unittest.TestCase):
         self.assertIn('runner stopped reporting', content)
         self.assertIn('`fleet-0fb9966f7c40-1` for 2.2 hours and stopped during "Build main from source"', content)
         self.assertNotIn('FAILED', content)
-        # An unreadable jobs listing still posts the report.
-        content = self.run_report({'RESULT': 'failure'}, [])
-        self.assertIn('recorded no build outcome', content)
+        # A job cancelled before any runner took it is not called a lost runner.
+        unstarted = [{'name': 'run / verify', 'runner_name': '', 'started_at': '2026-11-22T21:06:58Z',
+                      'completed_at': '2026-11-22T21:16:59Z', 'steps': []}]
+        for listing in (unstarted, []):
+            content = self.run_report({'RESULT': 'cancelled'}, listing)
+            self.assertIn('recorded no build outcome', content)
+            self.assertIn('run log shows what happened', content)
+            self.assertNotIn('runner stopped reporting', content)
 
     def test_all_workflow_shell_steps_parse(self):
         for job in JOBS.values():

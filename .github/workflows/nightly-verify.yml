@@ -173,16 +173,33 @@ jobs:
       # guest with 81 GiB free at this point filled its disk at 98% of the build, after two hours;
       # on 21 and 26 Nov guests on another host lost their runner the same way. The footprint
       # grows with the library, so the floor leaves room above what the build needed then. A
-      # short runner is not a build failure: the report names it as a capacity problem.
+      # disk-native slot sees its host's whole filesystem through df but is stopped once it has
+      # allocated its own budget, so there the smaller of the two counts. A short runner is not a
+      # build failure: the report names it as a capacity problem.
       - name: Check the runner has disk for a clean build
         id: capacity
         env:
           NEED_GIB: "100"
+          NATIVE_PROGRESS: /fleet-link/native-progress.json
         run: |
           set -euo pipefail
           avail_kib="$(df --output=avail -k fresh | tail -n 1 | tr -d ' ')"
           free_gib=$(( avail_kib / 1048576 ))
-          detail="runner ${RUNNER_NAME:-unknown} had ${free_gib} GiB free before the build; a clean build needs about ${NEED_GIB} GiB"
+          budget_gib="$(python3 -I -c '
+          import json, sys
+          try:
+              value = json.load(open(sys.argv[1]))
+              left = int(value["disk_budget_bytes"]) - int(value["disk_allocated"])
+          except (OSError, ValueError, KeyError, TypeError):
+              sys.exit(0)
+          print(max(0, left) // 1024**3)
+          ' "$NATIVE_PROGRESS")"
+          where="free"
+          if [ -n "$budget_gib" ] && [ "$budget_gib" -lt "$free_gib" ]; then
+            free_gib="$budget_gib"
+            where="left in its slot's disk budget"
+          fi
+          detail="runner ${RUNNER_NAME:-unknown} had ${free_gib} GiB ${where} before the build; a clean build needs about ${NEED_GIB} GiB"
           echo "detail=$detail" >> "$GITHUB_OUTPUT"
           if [ "$free_gib" -lt "$NEED_GIB" ]; then
             echo "status=short" >> "$GITHUB_OUTPUT"
@@ -694,9 +711,12 @@ jobs:
           import urllib.parse
           import urllib.request
 
-          def lost_runner():
-              # Best effort: a lost runner leaves outputs empty and often no log, so the jobs API
-              # is the only record of where verify ran and how far it got. Never fail the report.
+          def verify_job():
+              # Best effort: a job that loses its runner publishes no outputs and often no log, so
+              # the jobs API is the only record of where verify ran and how far it got. A job that
+              # was cancelled before a runner took it, or failed while starting, leaves outputs
+              # empty too; only a started step that never finished points at the runner. Never
+              # fail the report over this.
               try:
                   api = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
                   url = (f"{api}/repos/{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
@@ -708,13 +728,16 @@ jobs:
                   with urllib.request.urlopen(req, timeout=30) as resp:
                       jobs = json.loads(resp.read().decode()).get("jobs", [])
                   job = next(j for j in jobs if j.get("name", "").split(" / ")[-1] == "verify")
-                  stamp = lambda v: datetime.fromisoformat(v.replace("Z", "+00:00"))
-                  hours = (stamp(job["completed_at"]) - stamp(job["started_at"])).total_seconds() / 3600
                   running = [s["name"] for s in job.get("steps", [])
                              if s.get("started_at") and not s.get("conclusion")]
-                  where = f" during \"{running[-1]}\"" if running else ""
-                  return (f"It ran on runner `{job.get('runner_name') or 'unknown'}` for {hours:.1f} hours "
-                          f"and stopped{where}.")
+                  if not (job.get("runner_name") and job.get("started_at") and job.get("completed_at")
+                          and running):
+                      return ""
+                  stamp = lambda v: datetime.fromisoformat(v.replace("Z", "+00:00"))
+                  hours = (stamp(job["completed_at"]) - stamp(job["started_at"])).total_seconds() / 3600
+                  return (f"Its runner stopped reporting (lost, out of disk or out of memory): it ran on "
+                          f"`{job['runner_name']}` for {hours:.1f} hours and stopped during "
+                          f"\"{running[-1]}\".")
               except Exception as error:  # noqa: BLE001
                   print(f"::warning::could not read the verify job: {error}")
                   return ""
@@ -745,9 +768,8 @@ jobs:
                   # A job that loses its runner publishes no outputs, even for steps that ran, so
                   # a missing outcome is not evidence that the build never started.
                   lines.append(f"The from-source verification did not complete "
-                               f"(result: `{os.environ.get('RESULT')}`) and recorded no build outcome, "
-                               "which means the runner stopped reporting (lost, out of disk or out "
-                               "of memory). " + lost_runner() + " "
+                               f"(result: `{os.environ.get('RESULT')}`) and recorded no build outcome. "
+                               + (verify_job() or "The run log shows what happened.") + " "
                                "No complete independent verification was established for this commit.")
           elif os.environ.get("REFERENCE_RESULT") != "success":
               lines.append(f"The from-source build and audits passed, but cache verification "
