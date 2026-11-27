@@ -962,8 +962,8 @@ def fetch_queue_landings(url: str, previous: dict | None) -> dict | None:
 
 
 # Since 2026-11 most of the project's pull requests are on its Forgejo instance, and the TauCeti
-# queue lands them as it lands GitHub's. Only the seven-day series counts both forges; every other
-# figure still describes the GitHub repository alone. Forgejo pull-request numbers are a separate
+# queue lands them as it lands GitHub's. The seven-day series and the contributor merge counts
+# count both forges; every other figure still describes the GitHub repository alone. Forgejo pull-request numbers are a separate
 # sequence that overlaps GitHub's, so its pull requests stay in their own part of the snapshot and
 # never meet a GitHub number.
 #
@@ -2161,7 +2161,8 @@ def generate(
             f"{queue['missing_transition_fallbacks']} of {state_clock_count}"
         )
     cycles = review_cycle_metrics(prs)
-    # Forgejo's pull requests join only the seven-day series; see FORGEJO_REPOS.
+    # Forgejo's pull requests join the seven-day series and the contributor merge counts; see
+    # FORGEJO_REPOS.
     forgejo = data.get("forgejo") or {}
     rolling = rolling_metrics(prs + (forgejo.get("prs") or []), last_full_day, history_days)
     latency = merge_latency_metrics(prs, forgejo.get("prs") or [], data.get("queue_landings"),
@@ -2172,9 +2173,12 @@ def generate(
         max(0.0, (snapshot - parse_dt(pr["created_at"])).total_seconds() / 3600)
         for pr in forgejo.get("prs") or [] if pr["state"] == "OPEN"
     ]
+    # Both forges' landings, each credited to its author's login. A Forgejo account a contributor
+    # made by signing in with GitHub takes their GitHub login, which is what the contributor pages
+    # link to; the rolling series counts authors by the same rule.
     merge_events = [
         (parse_dt(pr["merged_at"]), pr["author"])
-        for pr in prs if pr.get("merged_at")
+        for pr in prs + (forgejo.get("prs") or []) if pr.get("merged_at")
     ]
     review_events = [
         (parse_dt(item["created_at"]), item["user"])
@@ -2214,7 +2218,7 @@ def generate(
             "review": "one canonical <!--tauceti-scoreboard--> comment on a pull request of this repository, identified by the tauceti-meta:v1 block naming that PR, whose posting login also authors a merged PR in the fetched snapshot",
             "active_author": "distinct PR author login opening a PR in the trailing seven-day window, on GitHub or on forgejo_repo",
             "merge": "GitHub mergedAt; for a closed PR, the installed bors or TauCeti queue app renaming it to a [Merged by Bors] title, or else that app's success receipt on it; on forgejo_repo, that app's success receipt posted by one of its merge logins, else Forgejo merged_at",
-            "merge_scope": "rolling_seven_day counts pull requests on GitHub and on forgejo_repo, an author being the same contributor on both under the same login, and queue.forgejo_open_hours gives the ages of forgejo_repo's open pull requests; every other figure counts GitHub's alone",
+            "merge_scope": "rolling_seven_day, merge_totals_by_contributor and cumulative_merges_plotted count pull requests on GitHub and on forgejo_repo, an author being the same contributor on both under the same login (a Forgejo account made by signing in with GitHub takes its GitHub login), and queue.forgejo_open_hours gives the ages of forgejo_repo's open pull requests; every other figure counts GitHub's alone",
             "merge_latency": "PR creation timestamp to merge timestamp",
             "merge_latency_by_measure": "merge_latency.series and .current split time to merge at the TauCeti queue's first approval (its first admission of a head after an all-green review), over pull requests it landed on both forges, in 24-hour and seven-day windows; see merge_latency.definition",
         },
