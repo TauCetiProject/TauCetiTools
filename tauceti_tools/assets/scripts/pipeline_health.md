@@ -159,8 +159,14 @@ problem.
 ## Where the data comes from
 
 Historical metrics use the same normalized snapshot as the statistics charts.
+From schema version 6, `opened_*`, `merged_*` and `open_prs` count the pull
+requests of the Forgejo mirror as well as GitHub's, with `by_forge` splitting
+them; the stage table, label drift and merge readiness are GitHub's alone,
+because Forgejo pull requests carry no lifecycle labels.
 Current readiness adds GraphQL evidence reads for open PRs, diffs only for
-otherwise approved PRs, and one queue scan using Auto-merge’s reservation policy. Fetching it walks every pull request's label timeline, which is
+otherwise approved PRs, and one queue scan: the TauCeti queue's batch members
+(its bors observation) and approved inputs not yet in a batch (its `/status`),
+plus GitHub's native merge queue for Auto-merge's reservation policy. Fetching it walks every pull request's label timeline, which is
 thousands of requests and takes tens of minutes, so:
 
 - **the Pages workflow** fetches once, writes the charts, and derives

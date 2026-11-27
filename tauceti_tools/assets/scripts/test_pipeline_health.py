@@ -882,5 +882,40 @@ class LiveFetch(unittest.TestCase):
         self.assertEqual(result["merged_count"], 1)
 
 
+class ForgeTests(unittest.TestCase):
+    """Throughput counts the Forgejo pull requests the queue lands, not GitHub's alone."""
+
+    def forgejo(self, number, *, created, merged=None):
+        return {"number": number, "created_at": iso(created), "merged_at": iso(merged) if merged else None,
+                "state": "MERGED" if merged else "OPEN", "author": "someone", "labels": []}
+
+    def test_forgejo_merges_openings_and_open_prs_are_counted(self):
+        data = snapshot([pr(1, [], state="MERGED", created=NOW - timedelta(hours=30),
+                            merged=NOW - timedelta(hours=2))])
+        data["forgejo"] = {"repo": "https://git.example/TauCeti", "prs": [
+            self.forgejo(7, created=NOW - timedelta(hours=5), merged=NOW - timedelta(hours=1)),
+            self.forgejo(8, created=NOW - timedelta(hours=3), merged=NOW - timedelta(hours=1)),
+            self.forgejo(9, created=NOW - timedelta(hours=2)),
+            self.forgejo(10, created=NOW - timedelta(days=3), merged=NOW - timedelta(days=2)),
+        ]}
+        result = health.analyse(data, 24, 24 * 14, NOW)
+        self.assertEqual(result["merged_count"], 3)
+        self.assertEqual(result["opened_count"], 3)
+        self.assertEqual(result["baseline_merged_count"], 1)
+        self.assertEqual(result["open_prs"], 1)
+        self.assertEqual(result["forgejo_repo"], "https://git.example/TauCeti")
+        self.assertEqual(result["by_forge"]["github"]["merged_count"], 1)
+        self.assertEqual(result["by_forge"]["forgejo"],
+                         {"merged_count": 2, "baseline_merged_count": 1, "opened_count": 3,
+                          "baseline_opened_count": 1, "open_prs": 1})
+
+    def test_a_snapshot_without_forgejo_counts_github_alone(self):
+        data = snapshot([pr(1, [], state="MERGED", merged=NOW - timedelta(hours=2))])
+        result = health.analyse(data, 24, 24 * 14, NOW)
+        self.assertEqual(result["merged_count"], 1)
+        self.assertIsNone(result["forgejo_repo"])
+        self.assertEqual(result["by_forge"]["forgejo"]["merged_count"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

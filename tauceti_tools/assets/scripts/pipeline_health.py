@@ -307,11 +307,23 @@ def analyse(
             if end >= window_start:
                 left[label]["window"] += 1
 
-    def counted(field: str, start: datetime, end: datetime) -> int:
+    # Throughput and open counts cover both forges the queue lands from. Most pull requests now
+    # open and land on the Forgejo mirror, so a GitHub-only count reads as a collapse in
+    # throughput. Forgejo pull requests carry no lifecycle labels, so the stage table, label
+    # drift and merge readiness above stay GitHub's alone.
+    forgejo_prs = (snapshot.get("forgejo") or {}).get("prs") or []
+    by_forge = {"github": prs, "forgejo": forgejo_prs}
+
+    def counted(field: str, start: datetime, end: datetime, forge: str | None = None) -> int:
         return sum(
-            1 for pr in prs
+            1 for name, entries in by_forge.items() if forge in (None, name)
+            for pr in entries
             if pr.get(field) and start <= parse_dt(pr[field]) < end
         )
+
+    def open_count(forge: str | None = None) -> int:
+        return sum(1 for name, entries in by_forge.items() if forge in (None, name)
+                   for pr in entries if pr["state"] == "OPEN")
 
     merge_readiness = readiness_summary(snapshot)
     stages = []
@@ -375,7 +387,7 @@ def analyse(
         })
 
     result = {
-        "schema_version": 5,
+        "schema_version": 6,
         "repo": snapshot.get("repo"),
         "generated_at": iso_z(now),
         "snapshot_fetched_at": snapshot.get("fetched_at"),
@@ -393,7 +405,18 @@ def analyse(
         "baseline_merged_count": counted("merged_at", baseline_start, baseline_end),
         "opened_count": counted("created_at", window_start, now),
         "baseline_opened_count": counted("created_at", baseline_start, baseline_end),
-        "open_prs": sum(1 for pr in prs if pr["state"] == "OPEN"),
+        "open_prs": open_count(),
+        "forgejo_repo": (snapshot.get("forgejo") or {}).get("repo"),
+        "by_forge": {
+            forge: {
+                "merged_count": counted("merged_at", window_start, now, forge),
+                "baseline_merged_count": counted("merged_at", baseline_start, baseline_end, forge),
+                "opened_count": counted("created_at", window_start, now, forge),
+                "baseline_opened_count": counted("created_at", baseline_start, baseline_end, forge),
+                "open_prs": open_count(forge),
+            }
+            for forge in by_forge
+        },
         "open_prs_without_a_lifecycle_label": unlabelled_open,
         "stages": stages,
         "merge_readiness": merge_readiness,
@@ -693,6 +716,11 @@ def report(result: dict) -> str:
     lines.append(
         f"  opened {result['opened_per_hour']}/h against {result['baseline_opened_per_hour']}/h"
     )
+    forges = result.get("by_forge") or {}
+    if (forges.get("forgejo") or {}).get("merged_count") or (forges.get("forgejo") or {}).get("open_prs"):
+        lines.append("  last {:.0f}h by forge: ".format(result["window_hours"]) + "; ".join(
+            f"{forge} {counts['merged_count']} merged, {counts['opened_count']} opened, "
+            f"{counts['open_prs']} open" for forge, counts in forges.items()))
     lines.append("")
     header = (f"  {'stage':<20}{'depth':>6}{'waiting':>9}{'oldest':>9}"
               f"{'in/h':>7}{'out/h':>7}{'dwell':>8}{'normal':>8}")

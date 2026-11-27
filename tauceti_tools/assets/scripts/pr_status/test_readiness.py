@@ -670,5 +670,55 @@ class SelfTestedDiffGuards(unittest.TestCase):
             self.assertTrue(result["eligible"], (labels, result))
 
 
+class TauCetiQueueMembership(unittest.TestCase):
+    """The queue that lands PRs is TauCeti's own; GitHub's native merge queue stays empty."""
+
+    OBSERVATION = {"batches": [{"members": [{"pr": 11, "head_sha": "a"}, {"pr": 12, "head_sha": "b"}]},
+                               {"members": [{"pr": 13, "head_sha": "c"}]}]}
+    STATUS = {"waiting": {"inputs": [
+        {"number": 21, "source_identity": {"forge": {"kind": "github"}}},
+        {"number": 22, "source_identity": None},
+        {"number": 6342, "source_identity": {"forge": {"kind": "forgejo"}}},
+    ]}}
+
+    def response(self, body):
+        raw = json.dumps(body).encode()
+        resp = MagicMock()
+        resp.__enter__.return_value.read.side_effect = lambda n=-1: raw
+        return resp
+
+    def numbers(self, status=None):
+        import bors_observation
+        with patch.object(bors_observation, "observation", return_value=self.OBSERVATION), \
+             patch.object(readiness.urllib.request, "urlopen",
+                          return_value=self.response(self.STATUS if status is None else status)):
+            return readiness.tauceti_queue_numbers()
+
+    def test_batch_members_and_github_waiting_inputs_are_queued(self):
+        self.assertEqual(self.numbers(), {11, 12, 13, 21, 22})
+
+    def test_a_malformed_status_is_an_error_not_an_empty_queue(self):
+        with self.assertRaises(ValueError):
+            self.numbers({"waiting": {"inputs": [{"number": "21"}]}})
+
+    def test_snapshot_unions_both_queues_and_keeps_github_reservation_policy(self):
+        sweep = SimpleNamespace(REPO=None, queue_entries=lambda: [{"number": 5}],
+                                reservation_holder=lambda entries, now: None)
+        with patch.object(readiness, "sweep_engine", return_value=sweep), \
+             patch.object(readiness, "tauceti_queue_numbers", return_value={11, 21}), \
+             patch.object(readiness.core, "_BLOCKED_UNTIL", 0):
+            snap = readiness.queue_snapshot("TauCetiProject/TauCeti")
+        self.assertEqual(snap, {"known": True, "numbers": [5, 11, 21], "reservation_holder": None})
+
+    def test_an_unreadable_tauceti_queue_makes_the_queue_unknown(self):
+        sweep = SimpleNamespace(REPO=None, queue_entries=lambda: [],
+                                reservation_holder=lambda entries, now: None)
+        with patch.object(readiness, "sweep_engine", return_value=sweep), \
+             patch.object(readiness, "tauceti_queue_numbers", side_effect=OSError("down")), \
+             patch.object(readiness.core, "_BLOCKED_UNTIL", 0):
+            with self.assertRaises(RuntimeError):
+                readiness.queue_snapshot("TauCetiProject/TauCeti")
+
+
 if __name__ == "__main__":
     unittest.main()

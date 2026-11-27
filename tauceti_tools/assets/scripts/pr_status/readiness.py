@@ -16,6 +16,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import urllib.request
 
 import core
 from tauceti_tools.survey_facts import deprecation_repair_finished
@@ -473,14 +474,53 @@ def assess(pr, repo=None, now=None):
     return result
 
 
+# The TauCeti merge queue's status, whose `waiting` inputs are approved but not yet in a batch.
+QUEUE_STATUS = "https://queue.taucetiproject.org/status"
+QUEUE_STATUS_MAX_BYTES = 16 * 1024 * 1024
+
+
+def tauceti_queue_numbers():
+    """GitHub PR numbers the TauCeti merge queue holds: batch members and approved inputs waiting.
+
+    The project lands through its own queue, not GitHub's native merge queue, so GitHub's
+    `mergeQueue` entries are empty and say nothing about what is queued. The bors observation
+    lists the GitHub members of every active batch; the queue's status adds the approved inputs
+    not yet placed in one. Forgejo inputs are left out: the readiness audit covers GitHub alone.
+    """
+    from bors_observation import observation  # scripts/, on the path of every caller
+
+    members = {member["pr"] for batch in observation().get("batches") or []
+               for member in batch.get("members") or []}
+    request = urllib.request.Request(QUEUE_STATUS, headers={
+        "Cache-Control": "no-cache", "User-Agent": "TauCetiReadiness/1.0"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        raw = response.read(QUEUE_STATUS_MAX_BYTES + 1)
+    if len(raw) > QUEUE_STATUS_MAX_BYTES:
+        raise ValueError("queue status exceeds bound")
+    inputs = (json.loads(raw).get("waiting") or {}).get("inputs")
+    if not isinstance(inputs, list) or not all(
+            isinstance(i, dict) and type(i.get("number")) is int for i in inputs):
+        raise ValueError("unexpected queue status waiting.inputs shape")
+    waiting = {i["number"] for i in inputs
+               if ((i.get("source_identity") or {}).get("forge") or {}).get("kind", "github") == "github"}
+    if not all(type(number) is int for number in members):
+        raise ValueError("unexpected bors observation member shape")
+    return members | waiting
+
+
 def queue_snapshot(repo):
-    """Read the queue once per report, using Auto-merge's reservation policy."""
+    """Read the queue once per report: TauCeti's own queue, plus GitHub's for Auto-merge's reservation policy."""
     if time.time() < core._BLOCKED_UNTIL:
         raise core.RateLimited("Queue read skipped after a rate limit")
     sweep = sweep_engine()
     sweep.REPO = repo
     entries = sweep.queue_entries()
-    return {"known": True, "numbers": [e["number"] for e in entries],
+    try:
+        held = tauceti_queue_numbers()
+    except (ImportError, OSError, ValueError, KeyError, TypeError) as exc:
+        # Unknown rather than empty: an empty set would report every eligible PR as not queued.
+        raise RuntimeError(f"TauCeti queue read failed: {exc}") from exc
+    return {"known": True, "numbers": sorted({e["number"] for e in entries} | held),
             "reservation_holder": sweep.reservation_holder(entries, datetime.now(timezone.utc))}
 
 
