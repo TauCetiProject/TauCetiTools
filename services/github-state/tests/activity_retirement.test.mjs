@@ -26,7 +26,9 @@ test('ordinary retirement advances past retained final files and removes obsolet
   await f.state.put('pr','202',header(202));await files(f,202);const final=query('files',202);await enqueue(f,final);
   const missing=query('pr',203);await f.state.put('pr','203',{number:203,state:'CLOSED',headRefOid:sha(203)});await enqueue(f,missing);
   const reaction={repository:'org/repo',operation:'reactions',args:{id:'comment'}};
-  await f.state.put('review_comments','comment',{id:'comment',body:'old'},Date.now(),false,'200');await enqueue(f,reaction);
+  // Reactions are no longer mirrored: a job retained from before is retired, never refetched.
+  await f.state.put('review_comments','comment',{id:'comment',body:'old'},Date.now(),false,'200');
+  await f.store.exec('INSERT INTO jobs(key,query,priority,due,attempt,lane,dirty) VALUES(?,?,?,?,?,?,?)',key(reaction),JSON.stringify(reaction),1,Date.now(),0,'active',1);
   const unmapped={repository:'org/repo',operation:'statuses',args:{sha:sha(777)}};await enqueue(f,unmapped);
   await f.store.exec('INSERT INTO demand VALUES(?,?)',key(hot),Date.now());
   // The owner holds its lease, and the hot history keeps its reader, for the whole test: four sweeps
@@ -170,7 +172,7 @@ test('terminal detail uses sufficient typed output facts and tolerates unrelated
  }finally{await f.close();}
 });
 
-test('review histories publish cached comments without eager reaction jobs; explicit reactions still queue',async()=>{
+test('review histories publish cached comments without reaction jobs, and explicit reactions queue nothing',async()=>{
  const f=await fixture();try{
   await f.state.put('pr','12',{...header(12),state:'OPEN'});
   for(const operation of ['review_comments','review_threads']) {
@@ -184,7 +186,9 @@ test('review histories publish cached comments without eager reaction jobs; expl
   const explicit={repository:'org/repo',operation:'reactions',args:{id:'122'}};
   await f.state.enqueue(explicit);
   await f.state.noteDemand(explicit);
-  assert.ok((await f.store.exec('SELECT * FROM jobs WHERE key=?',key(explicit))).one());
+  assert.equal((await f.store.exec('SELECT COUNT(*) n FROM jobs WHERE key=?',key(explicit))).one().n,0,'reactions are not mirrored');
+  const answer=await f.state.query(explicit);
+  assert.equal(answer.status,'unavailable');assert.equal(answer.reason,'not_mirrored');
  }finally{await f.close();}
 });
 

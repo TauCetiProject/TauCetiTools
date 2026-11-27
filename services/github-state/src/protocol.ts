@@ -101,8 +101,10 @@ export async function validSignature(body: ArrayBuffer, signature: string | null
 // GitHub Actions and check-run records are not mirrored: no client reads
 // them, and storing every run, job and check run for every commit filled the
 // repository database. Queries for them answer unavailable, so a client uses
-// its direct GitHub path instead of receiving an empty result.
-export const NOT_MIRRORED = new Set(['checks', 'workflow_runs', 'workflow_jobs']);
+// its direct GitHub path instead of receiving an empty result. Review-comment
+// reactions are not mirrored either: no client read them through the mirror,
+// and re-verifying every stored collection spent the App's quota.
+export const NOT_MIRRORED = new Set(['checks', 'workflow_runs', 'workflow_jobs', 'reactions']);
 export const CI_EVENTS = new Set(['check_run', 'check_suite', 'workflow_run', 'workflow_job']);
 export const OPERATIONS = new Set(['survey', 'open_prs', 'open_issues', 'recent_prs', 'recent_issues', 'pr', 'files', 'issue_comments', 'review_comments', 'review_threads', 'reviews', 'reactions', 'statuses', 'checks', 'workflow_runs', 'workflow_jobs', 'refs', 'repository', 'progress']);
 export function validateQuery(q: Query): void {
