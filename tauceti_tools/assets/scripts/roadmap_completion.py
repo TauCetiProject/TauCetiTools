@@ -9,8 +9,9 @@ Layer recognition and machine coverage validation use the Progress page's existi
 Completion is first observed in an archived roadmap or a coverage report. Those observation
 dates are approximate; do not backdate a new report's verdicts into older snapshots. Completion
 credit is measured at each observation against the library's then-current LOC, not elapsed
-time. The observed units-per-added-LOC ratio is converted to units/day using the last seven
-complete UTC days of library growth. New specification lines/layers over those same seven
+time. The observed units-per-added-LOC ratio is converted to a modelled units/day using the
+last seven complete UTC days of library growth. Separately, the net completion events over those
+same seven days give the observed units/day. New specification lines/layers over those seven
 days supply the continued-authoring scenario. These are rough extrapolations, not deadlines.
 """
 
@@ -227,12 +228,20 @@ def forecasts(rows, events, code):
         # a roadmap is not mistaken for negative authoring. Removals do not imply future shrinkage.
         authoring = max(0, latest[total] - (previous[total] if previous else 0)) / 7
         backlog = latest[total] - latest[done]
+        # Observed pace: net completion events (reopenings subtract; archival nets to zero)
+        # over the same seven complete days, independent of library growth.
+        window = [event["units"] for event in events if event["basis"] == basis
+                  and start.isoformat() < event["date"] <= end.isoformat()]
+        observed = sum(window) / 7 if previous is not None else None
         result["estimates"][basis] = {
             "backlog": backlog, "observed_completion_units": completed,
             "completion_units_per_library_line": rate,
             "completion_units_per_day": capacity, "authoring_units_per_day": authoring,
             "stop_authoring": scenario(backlog, capacity, 0),
             "continue_authoring": scenario(backlog, capacity, authoring),
+            "observed_completion_units_per_day": observed,
+            "observed_stop_authoring": scenario(backlog, observed, 0),
+            "observed_continue_authoring": scenario(backlog, observed, authoring),
         }
     # The work coordinate at each completion is exported for alternative fits by consumers.
     for event in events:
@@ -324,8 +333,8 @@ def duration(estimate):
 def render_forecasts(data, out):
     # Native text reflows at phone widths instead of shrinking the entire SVG table.
     estimate = data["estimates"]["layers"]
-    scenarios = (("stop_authoring", "If no new roadmap work is added"),
-                 ("continue_authoring", "If new work continues at last week's pace"))
+    scenarios = (("observed_stop_authoring", "If no new roadmap work is added"),
+                 ("observed_continue_authoring", "If new work continues at last week's pace"))
     rows = "\n".join(
         f'<tr><th scope="row">{html.escape(label)}</th>'
         f'<td class="{"unavailable" if estimate[name]["days"] is None else "estimate"}">'
@@ -367,8 +376,9 @@ td {{ color: {PALETTE[0]}; font-size: 24px; font-weight: 600; }}
 <table aria-label="Two scenarios for the remaining roadmap layers">
 <tbody>{rows}</tbody>
 </table>
-<p class="note">Assumes code production continues at its recent pace. Layers vary in difficulty,
-so these are rough extrapolations.</p>
+<p class="note">A rough model: the backlog divided by the net layers recorded complete over those
+seven days, less any new layers written. Layers vary in difficulty and completion reports lag
+the code, so read these as orders of magnitude.</p>
 </section>
 </body>
 </html>
@@ -401,7 +411,8 @@ def generate(roadmap_repo, roadmap_ref, code_repo, code_ref, out_dir, today=None
                    "completed_layer": "A current layer recorded done by a machine coverage marker, or belonging to an archived roadmap. Partial/unassessed earn zero credit; transitional hand-read assessments are not replayed.",
                    "observation_date": "First observed in the last first-parent commit of a complete UTC day; reporting and archival may lag implementation.",
                    "completion_events": "Signed changes in recorded completion credit; archival can emit offsetting negative active-layer and positive archived-layer entries, with no net new completion.",
-                   "calibration": "Net observed completions (roadmap size frozen at archival) divided by added library LOC over the recorded roadmap history.",
+                   "calibration": "Net observed completions (roadmap size frozen at archival) divided by added library LOC over the recorded roadmap history; times recent library growth, it gives the modelled completion_units_per_day.",
+                   "observed_completion": "Net completion events over seven complete UTC days, divided by seven; reopenings subtract. Null until the history covers the whole window. The observed_* scenarios divide the backlog by this pace.",
                    "authoring": "Nonnegative net increase in all specification lines or layers over seven complete UTC days, divided by seven.",
                }}
     out_dir = pathlib.Path(out_dir)

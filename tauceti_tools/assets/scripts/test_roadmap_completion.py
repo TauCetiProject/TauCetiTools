@@ -132,6 +132,38 @@ class Forecasts(unittest.TestCase):
         forecast = completion.forecasts(rows, [], code)["estimates"]["layers"]
         self.assertIsNone(forecast["stop_authoring"]["days"])
 
+    def test_observed_pace_counts_net_completion_events_in_the_window(self):
+        rows, code = self.data()
+        events = [dict(date="2026-07-01", basis="layers", units=5, id="before the window"),
+                  dict(date="2026-07-02", basis="layers", units=1, id="a"),
+                  dict(date="2026-07-03", basis="layers", units=1, id="b"),
+                  dict(date="2026-07-05", basis="layers", units=-1, id="a reopened"),
+                  dict(date="2026-07-06", basis="layers", units=-1, id="active, archived"),
+                  dict(date="2026-07-06", basis="layers", units=1, id="archived"),
+                  dict(date="2026-07-08", basis="layers", units=6, id="c"),
+                  dict(date="2026-07-09", basis="layers", units=9, id="after the window"),
+                  dict(date="2026-07-04", basis="spec_lines", units=40, id="Widgets")]
+        layers = completion.forecasts(rows, events, code)["estimates"]["layers"]
+        self.assertEqual(layers["observed_completion_units_per_day"], 1)
+        # The modelled pace is unchanged: 4 layers per 800 lines, times 100 lines a day.
+        self.assertAlmostEqual(layers["completion_units_per_day"], 0.5)
+        self.assertAlmostEqual(layers["observed_stop_authoring"]["days"], 8)
+        self.assertAlmostEqual(layers["observed_continue_authoring"]["days"], 8 / (1 - 2 / 7))
+
+    def test_observed_pace_below_authoring_or_unrecorded_does_not_finish(self):
+        rows, code = self.data()
+        events = [dict(date="2026-07-02", basis="layers", units=1, id="a")]
+        layers = completion.forecasts(rows, events, code)["estimates"]["layers"]
+        self.assertEqual(layers["observed_continue_authoring"], dict(days=None, state="not-catching-up"))
+        self.assertAlmostEqual(layers["observed_stop_authoring"]["days"], 56)
+        quiet = completion.forecasts(rows, [], code)["estimates"]["layers"]
+        self.assertEqual(quiet["observed_completion_units_per_day"], 0)
+        self.assertEqual(quiet["observed_stop_authoring"]["state"], "not-catching-up")
+        rows[0]["date"] = "2026-07-05"
+        partial = completion.forecasts(rows, events, code)["estimates"]["layers"]
+        self.assertIsNone(partial["observed_completion_units_per_day"])
+        self.assertEqual(partial["observed_stop_authoring"]["state"], "insufficient-history")
+
     def test_completed_events_export_then_current_library_loc(self):
         rows, code = self.data()
         events = [dict(date="2026-07-02", basis="layers", units=1)]
@@ -147,8 +179,9 @@ class Presentation(unittest.TestCase):
 
     def test_only_layers_are_needed_to_render_the_two_scenarios(self):
         data = dict(last_full_day="2026-10-07", estimates=dict(layers=dict(
-            backlog=286, stop_authoring=dict(state="finite", days=31.75),
-            continue_authoring=dict(state="finite", days=52.61))))
+            backlog=286, observed_stop_authoring=dict(state="finite", days=31.75),
+            observed_continue_authoring=dict(state="finite", days=52.61),
+            stop_authoring=dict(state="finite", days=3), continue_authoring=dict(state="finite", days=5))))
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "forecast.html"
             completion.render_forecasts(data, path)
@@ -159,6 +192,9 @@ class Presentation(unittest.TestCase):
         self.assertIn("About 2 months", content)
         self.assertIn("If no new roadmap work is added", content)
         self.assertIn("If new work continues at last week&#x27;s pace", content)
+        self.assertIn("A rough model", content)
+        self.assertNotIn("About 3 days", content)
+        self.assertNotIn("About 5 days", content)
         self.assertNotIn("Roadmap size", content)
         self.assertNotIn("Lean lines", content)
 
