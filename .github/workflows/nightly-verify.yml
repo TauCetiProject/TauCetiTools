@@ -42,8 +42,9 @@ name: Nightly verification (called)
 # caller's, and the ref is exactly refs/heads/main. `vars` and the cache are the caller
 # repository's too.
 #
-# `verify` and `reference` run on the TauCetiFleet runner group, which admits jobs by the file
-# that defines them: this file must be listed there (Fleet's CHECKS and the GitHub group).
+# `verify` and `reference` run on the TauCetiNightly runner group, which admits jobs by the file
+# that defines them: this file and TauCeti's caller must be listed there (Fleet's CHECKS and the
+# GitHub group).
 # The shared tools come from this workflow's own revision (`job.workflow_sha`), so one run uses one
 # Tools revision.
 on:
@@ -74,22 +75,23 @@ jobs:
   # The hard signal runs independently of cache verification, without secrets.
   verify:
     if: github.repository == 'TauCetiProject/TauCeti'
-    # A clean build alone now exceeds GitHub-hosted runners' six-hour platform limit, so this
-    # singleton maintenance job targets the Fleet PR class directly. Do not route it through the
-    # ordinary picker: its GitHub fallback cannot finish this workload. The caller's concurrency group
-    # bounds this exception to one source verification at a time; the reference job below uses the
-    # same class. The PR class excludes staging-only and queue-control
-    # reservations. Its runners must hold more disk than a cache-backed PR build needs: the clean
-    # build also packs every output into a workspace-local Lake cache, and passed 56 GiB in
-    # November 2026.
+    # A clean build alone exceeds GitHub-hosted runners' six-hour platform limit, so this
+    # singleton maintenance job targets Fleet's protected nightly slot directly. Do not route it
+    # through the ordinary picker: its GitHub fallback cannot finish this workload. The caller's
+    # concurrency group bounds it to one source verification at a time; the reference job below
+    # uses the same slot. On the generic PR class the clean build, which also packs every output
+    # into a workspace-local Lake cache, failed in November 2026 for want of capacity: out of disk
+    # on 100 GiB guests (it needed about 120 GiB on 27 Nov, growing 1 to 2 GiB a day), at a 54 GiB
+    # memory cap with 96 CPUs exposed, and starved of CPU on a busy host. The nightly slot is a
+    # fixed 48 vCPU, 64 GiB guest with a 320 GiB disk on a host chosen for it, and only this
+    # workflow can use it (TauCetiFleet's README, "nightly").
     runs-on:
-      group: TauCetiFleet
-      labels: [self-hosted, linux, x64, tauceti-fleet-pr]
-    # The PR class shares its host's CPU and RAM with worker rounds and other guests. On
-    # 25 Nov 2026 a clean build on a busy chungus5 ran each module about ten times slower than on
-    # the same host five days earlier and hit a twelve-hour budget at 98% of the build. A day leaves
-    # room for that contention, source growth and the audits, well within the five days GitHub
-    # allows a self-hosted job.
+      group: TauCetiNightly
+      labels: [self-hosted, linux, x64, tauceti-fleet-nightly]
+    # About four hours on 48 vCPUs. On 25 Nov 2026 a clean build on a busy chungus5 ran each
+    # module about ten times slower than on the same host five days earlier and hit a twelve-hour
+    # budget at 98% of the build. A day leaves room for contention, source growth and the audits,
+    # well within the five days GitHub allows a self-hosted job.
     timeout-minutes: 1440
     outputs:
       build: ${{ steps.fresh_build.outcome }}
@@ -274,12 +276,12 @@ jobs:
     needs: verify
     if: ${{ !cancelled() && needs.verify.outputs.build == 'success'
             && needs.verify.outputs.manifest_upload == 'success' && github.repository == 'TauCetiProject/TauCeti' }}
-    # Like `verify`, this targets the Fleet PR class directly and waits there for the next
-    # runner rather than spilling onto cloud capacity. The caller's concurrency group already
-    # bounds it to one reference build at a time.
+    # Like `verify`, this targets the protected nightly slot and waits there for its next guest
+    # rather than spilling onto other capacity. The caller's concurrency group already bounds it
+    # to one reference build at a time.
     runs-on:
-      group: TauCetiFleet
-      labels: [self-hosted, linux, x64, tauceti-fleet-pr]
+      group: TauCetiNightly
+      labels: [self-hosted, linux, x64, tauceti-fleet-nightly]
     timeout-minutes: 240
     outputs:
       compare: ${{ steps.compare.outputs.status }}
