@@ -1112,10 +1112,17 @@ class ForgejoLandingsTest(unittest.TestCase):
         self.assertEqual((last["merges"], last["active_authors"]), (2, 3))
         self.assertEqual(last["median_merge_hours"], (180 + 156) / 2)
         self.assertEqual(metrics["forgejo_repo"], FORGEJO)
-        for key in ("queue", "review_cycles", "by_roadmap_and_contributor",
+        for key in ("review_cycles", "by_roadmap_and_contributor",
                     "merge_totals_by_contributor", "cumulative_merges_plotted"):
             self.assertEqual(metrics[key], without[key])
         self.assertEqual(without["rolling_seven_day"][-1]["merges"], 1)
+        # The open Forgejo pull request's age is published beside GitHub's, not mixed into it.
+        forgejo_ages = metrics["queue"].pop("forgejo_open_hours")
+        open_forgejo = next(p for p in forgejo["prs"] if p["state"] == "OPEN")
+        self.assertEqual(forgejo_ages, [
+            (stats.parse_dt(timestamp(10)) - stats.parse_dt(open_forgejo["created_at"])).total_seconds() / 3600])
+        self.assertEqual(without["queue"].pop("forgejo_open_hours"), [])
+        self.assertEqual(metrics["queue"], without["queue"])
 
     def test_the_command_line_pairs_the_project_with_its_forgejo_repository(self):
         seen = []

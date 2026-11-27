@@ -1937,6 +1937,12 @@ def generate(
     # Forgejo's pull requests join only the seven-day series; see FORGEJO_REPOS.
     forgejo = data.get("forgejo") or {}
     rolling = rolling_metrics(prs + (forgejo.get("prs") or []), last_full_day, history_days)
+    # And the age of its open pull requests, kept apart from `total_open_hours`: they carry no
+    # lifecycle labels, so the per-state clocks and the charts drawn from them stay GitHub's.
+    queue["forgejo_open_hours"] = [
+        max(0.0, (snapshot - parse_dt(pr["created_at"])).total_seconds() / 3600)
+        for pr in forgejo.get("prs") or [] if pr["state"] == "OPEN"
+    ]
     merge_events = [
         (parse_dt(pr["merged_at"]), pr["author"])
         for pr in prs if pr.get("merged_at")
@@ -1979,7 +1985,7 @@ def generate(
             "review": "one canonical <!--tauceti-scoreboard--> comment on a pull request of this repository, identified by the tauceti-meta:v1 block naming that PR, whose posting login also authors a merged PR in the fetched snapshot",
             "active_author": "distinct PR author login opening a PR in the trailing seven-day window, on GitHub or on forgejo_repo",
             "merge": "GitHub mergedAt; for a closed PR, the installed bors or TauCeti queue app renaming it to a [Merged by Bors] title, or else that app's success receipt on it; on forgejo_repo, that app's success receipt posted by one of its merge logins, else Forgejo merged_at",
-            "merge_scope": "rolling_seven_day counts pull requests on GitHub and on forgejo_repo, an author being the same contributor on both under the same login; every other figure counts GitHub's alone",
+            "merge_scope": "rolling_seven_day counts pull requests on GitHub and on forgejo_repo, an author being the same contributor on both under the same login, and queue.forgejo_open_hours gives the ages of forgejo_repo's open pull requests; every other figure counts GitHub's alone",
             "merge_latency": "PR creation timestamp to merge timestamp",
         },
         "queue": queue,
