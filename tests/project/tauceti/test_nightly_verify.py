@@ -92,10 +92,10 @@ class NightlyVerification(unittest.TestCase):
                 self.assertEqual(output.read_text(), f'main={admitted}\n', ref)
 
     def test_jobs_have_separate_budgets_and_transfer_only_the_clean_manifest(self):
-        # Full source builds retain their budget on general CI capacity.
+        # Full source builds run on Fleet's protected nightly slot, with a long budget.
         self.assertEqual(JOBS['verify']['runs-on'], {
-            'group': 'TauCetiFleet',
-            'labels': ['self-hosted', 'linux', 'x64', 'tauceti-fleet-pr'],
+            'group': 'TauCetiNightly',
+            'labels': ['self-hosted', 'linux', 'x64', 'tauceti-fleet-nightly'],
         })
         self.assertGreater(JOBS['verify']['timeout-minutes'], 360)
         self.assertNotIn('needs', JOBS['verify'])
@@ -137,13 +137,13 @@ class NightlyVerification(unittest.TestCase):
             self.assertEqual(condition(step('verify', 'fresh_manifest')['if'],
                 steps=SimpleNamespace(fresh_build=SimpleNamespace(outcome=build))), build == 'success')
 
-    def test_reference_waits_for_the_fleet_pr_class_and_never_cloud_capacity(self):
+    def test_reference_waits_for_the_nightly_slot_and_never_cloud_capacity(self):
         self.assertNotIn('pick-reference-runner', JOBS)
         self.assertEqual(JOBS['reference']['needs'], 'verify')
         self.assertNotIn('concurrency', JOBS['reference'])
         for job in ('verify', 'reference'):
             self.assertEqual(JOBS[job]['runs-on'], {
-                'group': 'TauCetiFleet', 'labels': ['self-hosted', 'linux', 'x64', 'tauceti-fleet-pr']})
+                'group': 'TauCetiNightly', 'labels': ['self-hosted', 'linux', 'x64', 'tauceti-fleet-nightly']})
         text = (ROOT / '.github/workflows/nightly-verify.yml').read_text()
         for label in ('nscloud-', 'namespace-profile-', 'namespace-features:'):
             self.assertNotIn(label, text)

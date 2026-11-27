@@ -57,7 +57,7 @@ workflows:
           job: run
           triggers: [schedule, workflow_dispatch]
     jobs: [verify, reference, report]
-    runner_groups: [TauCetiFleet]
+    runner_groups: [TauCetiNightly]
   ci.yml:
     callers:
       TauCetiProject/TauCeti:
@@ -98,3 +98,4 @@ runner_labels:
   tauceti-fleet-queue-control: [TauCetiQueueControl]
   tauceti-fleet-pr-status: [TauCetiPRStatus]
   tauceti-fleet-docs: [TauCetiDocs]
+  tauceti-fleet-nightly: [TauCetiNightly]
