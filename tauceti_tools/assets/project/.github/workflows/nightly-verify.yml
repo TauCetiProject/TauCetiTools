@@ -486,8 +486,10 @@ jobs:
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # The cache-restored tree is passed so a differing .olean.private can be checked against
+          # its Lake trace and decoded; the script only reads it.
           python3 fresh/scripts/compare-build-outputs.py compare \
-            "$RUNNER_TEMP/clean-manifest.txt" "$RUNNER_TEMP/cached-manifest.txt"
+            "$RUNNER_TEMP/clean-manifest.txt" "$RUNNER_TEMP/cached-manifest.txt" reference/.lake/build
 
   # Reporting is a separate job on a fresh runner with no checkout, so the Zulip credential never
   # shares a machine with repository code, a cache-restored olean, or anything either could have
