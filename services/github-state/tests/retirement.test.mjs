@@ -78,3 +78,13 @@ test('another repository is unaffected by a retirement',async()=>{
  const due=Date.now()+60000;await object.setAlarm(due);
  assert.equal(alarm.at,due);
 });
+
+test('raw reconciliation skips a retired target without re-reading or re-recording its delivery',async()=>{
+ const {retainRaw}=await bundle('src/ingress.ts');
+ const calls=[];
+ const archive={async get(key){calls.push('get:'+key);return null;},async head(key){calls.push('head:'+key);return null;},async put(key){calls.push('put:'+key);}};
+ const env={ALLOWED_REPOSITORIES:JSON.stringify([repo,roadmap]),RETIRED_REPOSITORIES:'["org/roadmap"]',ARCHIVE:archive};
+ const object={key:'webhooks/2026/11/27/delivery-1.json',customMetadata:{targets:JSON.stringify([roadmap.id]),sha256:'a'.repeat(64),received:'1'}};
+ assert.equal(await retainRaw(env,object,()=>[],async()=>false),true);
+ assert.deepEqual(calls,[],'nothing is read or written for a retired target');
+});

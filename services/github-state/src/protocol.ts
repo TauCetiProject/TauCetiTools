@@ -51,10 +51,16 @@ export function retired(env: Env, repo: {id?: string; name?: string} | undefined
   if (!Array.isArray(names) || names.some(name => typeof name !== 'string')) throw new Error('invalid retired repository configuration');
   return names.some(name => name.toLowerCase() === repo.name?.toLowerCase() || name === repo.id);
 }
-export function repositories(env: Env): Repository[] {
+function installed(env: Env): Repository[] {
   const rows = JSON.parse(env.ALLOWED_REPOSITORIES || '[]');
   if (!Array.isArray(rows)) throw new Error('invalid repository configuration');
-  return rows.filter(row => !retired(env, row));
+  return rows;
+}
+export function repositories(env: Env): Repository[] {
+  return installed(env).filter(row => !retired(env, row));
+}
+export function retiredRepositories(env: Env): Repository[] {
+  return installed(env).filter(row => retired(env, row));
 }
 export function repository(env: Env, name: string): Repository | undefined {
   return repositories(env).find(r => r.name === name || r.id === name);
