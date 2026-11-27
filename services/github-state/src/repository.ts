@@ -1,7 +1,7 @@
 import { RepositoryStore, StoreUnavailable, StoreFenced, canReplayPublication, isBackendFailure, isMemberDataFailure, WriterPurpose, WriterOperation, SQLiteStore, PostgresStore, ReaderPool, ReadCacheStore, BufferedStore, SerialLane, columns, collectionJoin, HEAVY_READ, Statement } from './repository_store';
 import { repositoryHealth } from './repository_health';
 import { DurableObject } from 'cloudflare:workers';
-import { Env, EventPointer, matchesETag, Query, Result, digest, json, queryKey, repository, stub, validateQuery, parseGitHub, CI_EVENTS, NOT_MIRRORED, publicQuery, stagingStateKey, stagedPageKey } from './protocol';
+import { Env, EventPointer, matchesETag, Query, Result, digest, json, queryKey, repository, retired as retiredRepository, stub, validateQuery, parseGitHub, CI_EVENTS, NOT_MIRRORED, publicQuery, stagingStateKey, stagedPageKey } from './protocol';
 import { comment, issue, pr, status } from './normalize';
 import { equivalentPR, webhookPR } from './pr_updates';
 import { batchLimit } from './catalog';
@@ -370,9 +370,21 @@ export class RepositoryState extends DurableObject<Env> {
     if(this.degraded || this.repairsHeld()) return;
     try {await write();} catch(error) {this.noteFailure(operation,error);}
   }
+  // A repository taken out of service keeps its object and data but does no work: it schedules
+  // no alarms and its pending alarm is cancelled when it fires (protocol.ts, retired).
+  // Configuration changes only with a deployment, which restarts the object, so the answer is kept
+  // once the object knows its repository.
+  private retiredAnswer?:boolean;
+  retired():boolean {
+    if(this.retiredAnswer!==undefined)return this.retiredAnswer;
+    let repo:any;try{repo=this.localMeta('repository');}catch{return false;} // Fresh objects have no schema yet.
+    if(!repo)return false;
+    try{return this.retiredAnswer=retiredRepository(this.env,repo);}catch{return false;}
+  }
   async setAlarm(at:number,quota=false,continuation=false,repair=false): Promise<void> {
     // PostgreSQL uses the existing cron tick, never the obsolete SQLite file.
     if(this.store.backend==='postgres')return;
+    if(this.retired())return;
     if(this.faultFull) throw new Error(FULL_MESSAGE);
     const owner=this.owner,schedule=++owner.alarmSchedule;
     if(!repair)owner.ordinaryAlarmAt=Math.min(owner.ordinaryAlarmAt ?? at,at);
@@ -2733,6 +2745,7 @@ export class RepositoryState extends DurableObject<Env> {
     }
   }
   async alarm(): Promise<void> {
+    if(this.retired()){await this.ctx.storage.deleteAlarm?.();this.owner.repairAlarm=undefined;this.owner.ordinaryAlarmAt=undefined;return;}
     const owner=this.owner,tag=owner.repairAlarm;
     const ordinaryDue=owner.store.backend==='sqlite' && owner.ordinaryAlarmAt!==undefined && owner.ordinaryAlarmAt<=Date.now()+100;
     const continuation=!ordinaryDue && owner.store.backend==='sqlite' && tag?.continuation && tag.at<=Date.now() && owner.repairCoordinator;
@@ -3674,6 +3687,8 @@ export class RepositoryState extends DurableObject<Env> {
       req.headers.set('x-query-readonly','1');
     }
     const path=new URL(req.url).pathname;
+    // Only diagnostics reach a retired repository; anything that could schedule work is refused.
+    if(this.retired() && !['/health','/storage/summary'].includes(path))return json({error:'repository_retired'},410);
     if((path==='/tick' || path==='/migration-supervise') && this.migrationUnavailable) await this.retryMigrationControl();
     if(path==='/migration-supervise') {
       const result=this.migrationFlight.then(()=>this.superviseMigration());this.migrationFlight=result.catch(()=>{});return result;

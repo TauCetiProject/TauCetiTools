@@ -1,4 +1,4 @@
-import { Env, EventPointer, Repository, digest, parseGitHub, stub, CI_EVENTS, repositories } from './protocol';
+import { Env, EventPointer, Repository, digest, parseGitHub, stub, CI_EVENTS, repositories, retiredRepositories } from './protocol';
 import { blocksWrites, holdsRetention, readMigration } from './migration';
 import { classify, log } from './storage';
 import { policy, protectedObject } from './retention';
@@ -295,8 +295,12 @@ export async function retainRaw(env: Env, object: R2Object, targets: (payload: a
     const ids:unknown = JSON.parse(object.customMetadata.targets);
     if (!Array.isArray(ids) || ids.some(id=>typeof id!=='string')) throw new Error('raw_target_metadata_invalid:' + delivery);
     let durable = ids.length > 0;
+    // A retired repository applies nothing, so its target needs no recovery; without this, every
+    // pass would re-read and re-disposition its retained deliveries.
+    const active = repositories(env), retiredIds = new Set(retiredRepositories(env).map(repo=>repo.id));
     for (const id of ids) {
-      if (!repositories(env).some(repo=>repo.id===id)) {durable=false;break;}
+      if (retiredIds.has(id)) continue;
+      if (!active.some(repo=>repo.id===id)) {durable=false;break;}
       if (await env.ARCHIVE.head(receiptKey(id,delivery))) continue;
       const pointer = {delivery,received:Number(object.customMetadata.received)} as EventPointer;
       const pin = await env.ARCHIVE.head(bodyKey(id,delivery));

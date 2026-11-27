@@ -1,7 +1,7 @@
 import { scanHostedCapacity } from './runner-capacity';
 import { blocksRepairs, readMigration } from './migration';
 import { DurableObject } from 'cloudflare:workers';
-import { Env, json, Repository, repositories, stub, parseGitHub, digest } from './protocol';
+import { Env, json, Repository, repositories, retired, stub, parseGitHub, digest } from './protocol';
 import { INSTALLATION_HOP_MS } from './repair_io';
 import { Recipe, extract, recipes, batchQuery, batchLimit, UpstreamDataError } from './catalog';
 import { settings } from './reconciliation';
@@ -677,6 +677,8 @@ export class InstallationScheduler extends DurableObject<Env> {
       let input:any;
       if(['/read','/batch','/measure','/audit'].includes(path)) {
         input=await req.json();const repo=path==='/audit'?input:input.repository;
+        // A retired repository's object does no work; refuse anything still in flight from it.
+        if(retired(this.env,repo))return json({unavailable:true,reason:'repository_retired'},410);
         if(typeof repo?.id==='string') {tracked=repo.id;this.repositoryRequests.set(tracked!,1+(this.repositoryRequests.get(tracked!) || 0));}
         if(['test','production'].includes(this.env.MIGRATION_ENVIRONMENT || '') && repo?.id && blocksRepairs(await readMigration(this.env.ARCHIVE,repo.id)))return json({unavailable:true,reason:'migration_frozen',retry_at:Date.now()+60000},503);
       }

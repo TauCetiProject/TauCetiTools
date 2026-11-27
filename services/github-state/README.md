@@ -654,6 +654,30 @@ To resume, from `services/github-state` on current `main`:
    `systemctl --user enable --now tauceti-github-state-shadow.service` on
    chungus2.
 
+### Retiring a repository
+
+Removing a repository from `ALLOWED_REPOSITORIES` is not enough to stop it: its
+retained object keeps its stored configuration and alarms, and its repair jobs
+reschedule themselves. List it in `RETIRED_REPOSITORIES` (in `wrangler.jsonc`,
+by name or id) instead and deploy. A retired repository leaves every
+configured-repository lookup, so `/v1` reads answer `repository_unavailable`,
+its webhooks are ignored, the cron skips it and raw-delivery reconciliation
+passes over its retained deliveries. Its object cancels its pending alarm when
+it next fires, schedules no others, and answers `410 repository_retired` to
+everything except `/health` and `/storage/summary`; the installation scheduler
+refuses its reads. An object still running the previous version may finish
+work for a few minutes after the deploy. Its SQLite data and canonical R2
+resource blobs are kept; its temporary pages and raw webhook bodies expire
+under the ordinary retention rules.
+
+To bring it back, set the entry's list to `[]` (or remove the name) and deploy;
+because of `keep_vars`, deleting the variable would leave the deployed value in
+place. The next cron tick wakes the object, which resumes from its retained data,
+and delta reconciliation catches up the webhooks it missed.
+
+Production retires `TauCetiProject/TauCetiRoadmap`. Its only reader, the
+worker's intentions board, reads GitHub directly.
+
 
 ## Measurements and worker rollout
 
