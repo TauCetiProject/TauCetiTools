@@ -376,9 +376,10 @@ td {{ color: {PALETTE[0]}; font-size: 24px; font-weight: 600; }}
 <table aria-label="Two scenarios for the remaining roadmap layers">
 <tbody>{rows}</tbody>
 </table>
-<p class="note">A rough model: the backlog divided by the net layers recorded complete over those
-seven days, less any new layers written. Layers vary in difficulty and completion reports lag
-the code, so read these as orders of magnitude.</p>
+<p class="note">A rough model: the backlog divided by the net layers recorded complete per day
+over those seven days; if new work continues, the net layers written per day are first
+subtracted from that pace, and no estimate is given unless something is left. Layers vary in
+difficulty and completion reports lag the code, so read these as orders of magnitude.</p>
 </section>
 </body>
 </html>
@@ -412,7 +413,7 @@ def generate(roadmap_repo, roadmap_ref, code_repo, code_ref, out_dir, today=None
                    "observation_date": "First observed in the last first-parent commit of a complete UTC day; reporting and archival may lag implementation.",
                    "completion_events": "Signed changes in recorded completion credit; archival can emit offsetting negative active-layer and positive archived-layer entries, with no net new completion.",
                    "calibration": "Net observed completions (roadmap size frozen at archival) divided by added library LOC over the recorded roadmap history; times recent library growth, it gives the modelled completion_units_per_day.",
-                   "observed_completion": "Net completion events over seven complete UTC days, divided by seven; reopenings subtract. Null until the history covers the whole window. The observed_* scenarios divide the backlog by this pace.",
+                   "observed_completion": "Net completion events over seven complete UTC days, divided by seven; reopenings subtract. Null until the history covers the whole window. observed_stop_authoring divides the backlog by this pace; observed_continue_authoring divides it by this pace less authoring, with no finite estimate if that is not positive.",
                    "authoring": "Nonnegative net increase in all specification lines or layers over seven complete UTC days, divided by seven.",
                }}
     out_dir = pathlib.Path(out_dir)
