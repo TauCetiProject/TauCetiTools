@@ -33,6 +33,7 @@ invite, `Contents: write` to sweep), REPO (owner/name), optional CLAIMS_REPO, LA
 SWEEP_GRACE_MINUTES, FORGEJO_LANDERS_URL (empty to skip Forgejo).
 """
 
+import http.client
 import json
 import os
 import re
@@ -80,6 +81,9 @@ WINDOW = 5000
 # by the PR poster's numeric Forgejo ID, and this job only resolves each GitHub ID to its current login.
 FORGEJO_LANDERS_URL = os.environ.get("FORGEJO_LANDERS_URL", "https://queue.taucetiproject.org/claims/forgejo-landers")
 FORGEJO_LANDERS_SCHEMA = "tauceti-queue.claims-forgejo-landers/v1"
+# The queue host rewrites the document every ten minutes; one older than this is a stale copy, not evidence.
+FORGEJO_LANDERS_MAX_AGE = 2 * 86400
+FORGEJO_LANDERS_MAX_BYTES = 1 << 20
 CLOSED_PRS = """
 query($owner: String!, $name: String!, $cursor: String) {
   repository(owner: $owner, name: $name) {
@@ -228,43 +232,66 @@ def landed_by_queue(number, branch):
     return p.returncode == 0 and p.stdout.strip() in ("behind", "identical")
 
 
-def forgejo_landers(fetch=None):
-    """{login: Forgejo PR number} for the GitHub accounts of the people the merge queue landed a pull request
-    for on Forgejo. An unreachable or malformed answer is no one, said once in the log: grants are monotone and
-    the next run tries again, and a GitHub landing still counts meanwhile. Bot accounts never count, as in
-    `human_authors`."""
+def forgejo_landers(fetch=None, now=None):
+    """{login: (Forgejo PR number, GitHub user ID)} for the GitHub accounts of the people the merge queue landed
+    a pull request for on Forgejo. The document must name this repository and be recent: an old or foreign one
+    served by mistake is not evidence. An unreachable or unacceptable answer is no one, said once in the log:
+    grants are monotone and the next run tries again, and a GitHub landing still counts meanwhile. Bot accounts
+    never count, as in `human_authors`."""
     if not FORGEJO_LANDERS_URL:
         return {}
+    now = time.time() if now is None else now
     try:
         if fetch is None:
             request = urllib.request.Request(FORGEJO_LANDERS_URL, headers={"User-Agent": "tauceti-claims-access"})
             with urllib.request.urlopen(request, timeout=30) as response:
-                document = json.loads(response.read())
+                if response.geturl() != FORGEJO_LANDERS_URL:
+                    raise ValueError(f"redirected to {response.geturl()}")
+                body = response.read(FORGEJO_LANDERS_MAX_BYTES + 1)
+            if len(body) > FORGEJO_LANDERS_MAX_BYTES:
+                raise ValueError("answer too large")
+            document = json.loads(body)
         else:
             document = fetch(FORGEJO_LANDERS_URL)
         if not isinstance(document, dict) or document.get("schema") != FORGEJO_LANDERS_SCHEMA:
             raise ValueError("unexpected schema")
+        if str(document.get("repository") or "").lower() != REPO.lower():
+            raise ValueError(f"it attributes landings in {document.get('repository')!r}, not {REPO}")
+        generated = document.get("generated_at")
+        if type(generated) not in (int, float) or not now - FORGEJO_LANDERS_MAX_AGE <= generated <= now + 300:
+            raise ValueError(f"it was generated at {generated!r}, which is not recent")
         rows = document.get("landers")
         if not isinstance(rows, list):
             raise ValueError("no landers")
-    except (OSError, ValueError, urllib.error.URLError) as error:
+    except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException) as error:
         print(f"grant: no Forgejo landings this run: {FORGEJO_LANDERS_URL}: {error}")
         return {}
     landers = {}
     for row in rows:
         github_id = row.get("github_id") if isinstance(row, dict) else None
-        if type(github_id) is not int or github_id <= 0:
+        if type(github_id) is not int or github_id <= 0 or type(row.get("forgejo_pr")) is not int:
             continue
         # By ID, not by any login the queue saw: a GitHub login can be renamed and then taken by someone else.
+        # `grant` checks that the invitation it sends went to this ID.
         p = gh(["api", f"/user/{github_id}", "--jq", "[.login, .type] | @json"], GH_TOKEN, check=False)
         try:
             login, kind = json.loads(p.stdout) if p.returncode == 0 else (None, None)
         except (json.JSONDecodeError, TypeError, ValueError):
             login, kind = None, None
+        if p.returncode != 0:
+            print(f"grant: could not resolve GitHub user {github_id}: {(p.stderr or p.stdout).strip()}")
         if not login or kind != "User" or login.endswith("[bot]"):
             continue
-        landers.setdefault(login, row.get("forgejo_pr"))
+        landers.setdefault(login, (row["forgejo_pr"], github_id))
     return landers
+
+
+def invitee_id(answer):
+    """The user ID of the invitee in the answer to an invitation, or None."""
+    try:
+        return ((json.loads(answer) or {}).get("invitee") or {}).get("id")
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        return None
 
 
 def invitations():
@@ -361,7 +388,20 @@ def grant():
             continue
         # 201 answers with the invitation; 204 (empty) means they could already push after all, so
         # say what happened rather than claiming an invitation that was never sent.
-        why = f" (landed Forgejo PR {forgejo[login]})" if login in forgejo and login not in merged | set(landed) else ""
+        only_forgejo = login in forgejo and login not in merged | set(landed)
+        if only_forgejo and p.stdout.strip() and invitee_id(p.stdout) != forgejo[login][1]:
+            # The login was renamed and taken by another account between resolving it and inviting it.
+            failures += 1
+            number = (json.loads(p.stdout) or {}).get("id") if invitee_id(p.stdout) is not None else None
+            if number:
+                gh(["api", "-X", "DELETE", f"/repos/{CLAIMS_REPO}/invitations/{number}"], CLAIMS_TOKEN, check=False)
+            print(
+                f"grant: FAILED to invite {login}: the invitation went to another account than GitHub user "
+                f"{forgejo[login][1]}, and was cancelled",
+                file=sys.stderr,
+            )
+            continue
+        why = f" (landed Forgejo PR {forgejo[login][0]})" if only_forgejo else ""
         print(
             f"grant: invited {login} to {CLAIMS_REPO}{why}"
             if p.stdout.strip()

@@ -4,6 +4,7 @@ Run with: python3 scripts/test_claims_access.py
 """
 
 import json
+import time
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -298,7 +299,9 @@ class ClosedPRs(unittest.TestCase):
 class Grant(unittest.TestCase):
     """What `grant` sends, from what GitHub reports. Every login here can only read the claims repo."""
 
-    def grant(self, merged=(), closed=(), invitations=(), comments=None, closers=None, forgejo=None, users=None):
+    def grant(
+        self, merged=(), closed=(), invitations=(), comments=None, closers=None, forgejo=None, users=None, invitees=None
+    ):
         calls = []
 
         def gh(args, token, check=True):
@@ -327,7 +330,9 @@ class Grant(unittest.TestCase):
             elif "/compare/main..." in path:
                 out = "behind\n"
             elif args[:3] == ["api", "-X", "PUT"]:
-                out = "{}"
+                login = args[3].rsplit("/", 1)[1]
+                ids = {name: github_id for github_id, (name, _) in (users or {}).items()}
+                out = json.dumps({"id": 77, "invitee": {"id": (invitees or {}).get(login, ids.get(login, 1))}})
             elif args[1].startswith("/user/"):
                 found = (users or {}).get(int(args[1].rsplit("/", 1)[1]))
                 if found is None:
@@ -394,8 +399,9 @@ class Grant(unittest.TestCase):
         _, writes, _ = self.grant(merged=[{"author": {"login": "bob"}}], invitations=[("bob", "42", False)])
         self.assertEqual(writes, [])
 
-    def forgejo(self, *rows):
-        return {"schema": ca.FORGEJO_LANDERS_SCHEMA, "landers": [dict(row) for row in rows]}
+    def forgejo(self, *rows, **fields):
+        document = {"schema": ca.FORGEJO_LANDERS_SCHEMA, "repository": REPO, "generated_at": time.time()}
+        return {**document, "landers": [dict(row) for row in rows], **fields}
 
     def test_a_forgejo_lander_is_invited_by_github_id(self):
         _, writes, calls = self.grant(
@@ -427,6 +433,22 @@ class Grant(unittest.TestCase):
         ):
             _, writes, _ = self.grant(merged=[{"author": {"login": "bob"}}], forgejo=answer, users={5: ("eve", "User")})
             self.assertEqual(writes, [("PUT", "bob")])
+
+    def test_a_stale_or_foreign_attribution_invites_nobody(self):
+        for fields in ({"generated_at": time.time() - 3 * 86400}, {"repository": "Other/Repo"}, {"generated_at": "x"}):
+            _, writes, _ = self.grant(
+                forgejo=self.forgejo({"github_id": 7, "forgejo_pr": 1}, **fields), users={7: ("carol", "User")}
+            )
+            self.assertEqual(writes, [])
+
+    def test_an_invitation_that_reaches_another_account_is_cancelled(self):
+        # carol renamed between the lookup and the invitation, and someone else took the login
+        failures, writes, _ = self.grant(
+            forgejo=self.forgejo({"github_id": 7, "forgejo_pr": 1}),
+            users={7: ("carol", "User")},
+            invitees={"carol": 8},
+        )
+        self.assertEqual((failures, writes), (1, [("PUT", "carol"), ("DELETE", "77")]))
 
     def test_a_forgejo_lander_who_already_has_access_is_left_alone(self):
         _, writes, _ = self.grant(
