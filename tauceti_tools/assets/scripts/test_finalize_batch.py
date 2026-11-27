@@ -287,7 +287,12 @@ class WorkflowBoundaryTests(unittest.TestCase):
         self.assertEqual(checkouts[1]["ref"], "${{ github.workflow_sha }}")
         self.assertTrue(all(c["persist-credentials"] is False for c in checkouts))
         holders = [step["name"] for step in steps if "secrets.LAKE_CACHE_KEY" in str(step)]
-        self.assertEqual(holders, ["Publish the staged Lake cache"])
+        # TauCetiTools' publisher also holds the key for its existence check (signed HEADs only).
+        self.assertIn(holders, (["Publish the staged Lake cache"],
+                                ["Check which artifacts the bucket already holds", "Publish the staged Lake cache"]))
+        for step in steps:
+            if step.get("name") in holders:
+                self.assertNotIn("python3", step["run"])
         self.assertNotIn("actions/cache", str(steps))
         confirm = next(step for step in steps if step.get("name") == finalizer.CONFIRM)
         self.assertIn('--expected "$RUNNER_TEMP/lake-publication-plan/outputs.jsonl"', confirm["run"])

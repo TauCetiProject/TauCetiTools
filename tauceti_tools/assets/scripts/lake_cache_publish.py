@@ -11,11 +11,21 @@ downloads up to five artifacts at once (actions/download-artifact), and one
 artifact of a whole-library map (about 1.3 GB) took 7 to 15 minutes to download
 as a single stream. The publisher merges the parts into one directory and `prepare`
 checks it exactly as before: every file named by the map and nothing else.
+
+`check` and `select` let the publisher skip artifacts the bucket already holds. Both run
+without the upload key. `check` writes a curl configuration naming every artifact's
+signed upload URL and records each archive's MD5. The key-bearing workflow step sends
+those HEAD requests (R2 Class B operations) and writes one line per answer. `select`
+keeps an archive out of the upload only when the bucket answered 200 with an ETag equal
+to the MD5 of the publisher's own copy, so the bucket's object already has exactly these
+bytes. Every other answer, and a missing or unreadable answer file, uploads the archive,
+as `lake cache put-staged` would. The full map is always uploaded last.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -24,11 +34,13 @@ import stat
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import quote
 
-from lake_cache_probe import parse_map
+from lake_cache_probe import REPOSITORY, exact_map_url, parse_map, plain_https_endpoint
 
 ARCHIVE = re.compile(r"[0-9a-f]{16}\.ltar")
 MAX_MAP = 16 * 1024 * 1024
+MAX_ANSWERS = 64 * 1024 * 1024
 
 
 @contextmanager
@@ -93,6 +105,91 @@ def stage(source: Path, destination: Path) -> dict:
     return stats
 
 
+def artifact_url(endpoint: str, repository: str, name: str) -> str:
+    """Lake's ``s3ArtifactUrl`` under ``--repo``: ``<endpoint>/<owner>/<repo>/<hash>.art``."""
+    if not ARCHIVE.fullmatch(name):
+        raise ValueError("unsafe archive name")
+    if not REPOSITORY.fullmatch(repository) or any(c in {".", ".."} for c in repository.split("/")):
+        raise ValueError("the repository is not an owner/name pair")
+    return f"{plain_https_endpoint(endpoint)}/{repository}/{name[:-5]}.art"
+
+
+def check(plan: Path, upload: Path, endpoint: str, repository: str) -> int:
+    """Write the HEAD requests for every archive of a frozen plan, and each archive's MD5."""
+    names = mapping((plan / "outputs.jsonl").read_bytes())
+    upload.mkdir(parents=True, exist_ok=False)
+    expected, config = {}, []
+    parent = os.open(plan, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for name in sorted(names):
+            url = artifact_url(endpoint, repository, name)
+            digest = hashlib.md5(usedforsecurity=False)
+            with regular(parent, name) as handle:
+                for chunk in iter(lambda: handle.read(1 << 20), b""):
+                    digest.update(chunk)
+            expected[url] = [name, digest.hexdigest()]
+            config.append(f"url = {json.dumps(url)}\noutput = \"/dev/null\"\n")
+    finally:
+        os.close(parent)
+    (upload / "expected.json").write_text(json.dumps(expected) + "\n")
+    (upload / "heads.curl").write_text("".join(config))
+    return len(expected)
+
+
+def present(upload: Path) -> set[str]:
+    """URLs whose HEAD answered 200 with the MD5 ETag of the publisher's copy.
+
+    Each answer line is ``<status>\\t<ETag header>\\t<URL>``. A missing, oversized or
+    malformed answer file, or any other line, proves nothing, so those archives upload.
+    """
+    expected = json.loads((upload / "expected.json").read_text())
+    try:
+        with (upload / "heads.out").open("rb") as handle:
+            raw = handle.read(MAX_ANSWERS + 1)
+    except OSError:
+        return set()
+    if len(raw) > MAX_ANSWERS:
+        return set()
+    found = set()
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3:
+            continue
+        status, etag, url = parts
+        entry = expected.get(url)
+        if entry is not None and status == "200" and etag.strip() == f'"{entry[1]}"':
+            found.add(url)
+    return found
+
+
+def select(plan: Path, upload: Path, revision_endpoint: str, repository: str,
+           toolchain: str, revision: str) -> dict:
+    """Write the curl upload list of the archives the bucket lacks, the map URL and statistics."""
+    map_url = exact_map_url(revision_endpoint, toolchain, revision, repository)
+    scope = toolchain.replace("/", "--").replace(":", "---")
+    if quote(scope, safe="-_.~") != scope:
+        # Lake percent-encodes this path component; refuse rather than publish a map it never reads.
+        raise ValueError("the toolchain needs URL encoding in Lake's revision path")
+    expected = json.loads((upload / "expected.json").read_text())
+    if {name for name, _ in expected.values()} != mapping((plan / "outputs.jsonl").read_bytes()):
+        raise ValueError("the HEAD request list does not match the plan's map")
+    found = present(upload)
+    missing = sorted((name, url) for url, (name, _) in expected.items() if url not in found)
+    with (upload / "artifacts.curl").open("w") as config:
+        for name, url in missing:
+            config.write(f"upload-file = {json.dumps(str(plan / name))}\nurl = {json.dumps(url)}\n")
+    (upload / "map-url").write_text(map_url + "\n")
+    stats = json.loads((plan / "metrics.json").read_text())
+    stats.update(
+        inherited=len(found),
+        uploaded_objects=len(missing),
+        upload_bytes=sum((plan / name).stat().st_size for name, _ in missing),
+    )
+    (plan / "metrics.json").write_text(json.dumps(stats) + "\n")
+    print("Lake publication upload: " + json.dumps(stats), flush=True)
+    return stats
+
+
 def split(staged: Path, parts: Path, count: int) -> list[int]:
     """Move a trusted staged copy's files into ``part-0`` .. ``part-<count-1>`` under ``parts``.
 
@@ -123,11 +220,22 @@ def main():
     if any(os.environ.get(key) for key in ("LAKE_CACHE_KEY", "LAKE_CACHE_KEY_RAW")):
         raise ValueError("staging helper must never receive upload credentials")
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("stage", "prepare", "split"))
-    parser.add_argument("source", type=Path)
-    parser.add_argument("destination", type=Path)
+    parser.add_argument("action", choices=("stage", "prepare", "split", "check", "select"))
+    parser.add_argument("source", type=Path, help="check and select: the frozen publication plan")
+    parser.add_argument("destination", type=Path, help="check and select: the upload directory")
     parser.add_argument("--parts", type=int, default=5, help="split: the number of part directories")
+    parser.add_argument("--repo", help="check and select: the GitHub owner/name cache scope")
+    parser.add_argument("--toolchain", help="select: the revision's Lean toolchain")
+    parser.add_argument("--revision", help="select: the revision being published")
     args = parser.parse_args()
+    if args.action == "check":
+        count = check(args.source, args.destination, os.environ["S3_ARTIFACT_ENDPOINT"], args.repo)
+        print(f"Lake publication: checking {count} artifacts in the bucket", flush=True)
+        return
+    if args.action == "select":
+        select(args.source, args.destination, os.environ["S3_REVISION_ENDPOINT"], args.repo,
+               args.toolchain, args.revision)
+        return
     if args.action == "split":
         sizes = split(args.source, args.destination, args.parts)
         print("Lake staging parts (files): " + json.dumps(sizes), flush=True)

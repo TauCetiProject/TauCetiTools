@@ -180,6 +180,8 @@ jobs:
           elan toolchain install "$(cat project/lean-toolchain)"
       - name: Import, checkout and Lake publication fixtures
         working-directory: project
+        env:
+          TAUCETI_PUBLISHER_WORKFLOW: ${{ github.workspace }}/tools/.github/workflows/publish-lake-cache.yml
         run: |
           export ELAN_TOOLCHAIN="$(cat lean-toolchain)"
           LEAN="$(elan which lean)"
