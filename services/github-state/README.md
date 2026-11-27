@@ -157,6 +157,11 @@ and `checks`, `workflow_runs` and `workflow_jobs` queries answer
 GitHub path rather than an empty result.
 Existing CI rows are removed, without an archive, with the `ci_resources`,
 `ci_members`, `ci_collections` and `ci_meta` cleanup classes.
+Review-comment `reactions` are not mirrored either: no client read them through
+the mirror, and re-verifying every stored collection spent about 25 of the
+App's calls an hour. Their queries answer `not_mirrored`, no new reaction jobs
+are queued, and retained ones retire at the next maintenance sweep; stored
+reaction rows are kept.
 Quiet closed PRs also stop periodic history and head polling once their
 baseline is complete. Webhook updates continue, and renewed client demand
 reactivates background reconciliation while returning the stored result.
