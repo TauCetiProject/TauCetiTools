@@ -1726,7 +1726,8 @@ class MergeLatencyTest(unittest.TestCase):
         github = [pr(1, 1)]
         entries = [["github", 1, self.at(5), self.at(5, 6)]]
         m = self.metrics(entries, github=github, coverage_day=4, last_day=12)
-        self.assertEqual(m["dates"][0], "2026-01-05")
+        # Coverage from exactly midnight covers that day itself.
+        self.assertEqual(m["dates"][0], "2026-01-04")
         seven = m["series"]["7d"]["open_to_land"]["median"]
         # Coverage starts 4 Jan 00:00: the week ending 9 Jan reaches before it, the one ending 10 Jan does not.
         self.assertEqual(seven[m["dates"].index("2026-01-09")], None)
@@ -1752,6 +1753,32 @@ class MergeLatencyTest(unittest.TestCase):
         self.assertEqual(m["series"]["24h"]["open_to_approval"]["median"][day], 0.0)
         self.assertEqual(m["series"]["24h"]["approval_to_land"]["median"][day], 120.0)
         self.assertEqual(m["unmatched_landings"], 1)
+
+    def test_days_past_the_feed_s_last_observation_are_not_published(self):
+        entries = [["github", 1, self.at(5), self.at(5, 6)]]
+        m = stats.merge_latency_metrics(
+            [pr(1, 1)], [], {**self.landings(entries), "observed_at": self.at(8)},
+            date(2026, 1, 12), datetime(2026, 1, 13, tzinfo=UTC), 90)
+        one = m["series"]["24h"]["open_to_land"]["count"]
+        self.assertEqual(one[m["dates"].index("2026-01-07")], 0)
+        self.assertIsNone(one[m["dates"].index("2026-01-08")])
+        self.assertEqual(m["current"]["as_of"], "2026-01-08T00:00:00Z")
+
+    def test_a_current_window_reaching_before_coverage_is_null(self):
+        m = self.metrics([["github", 1, self.at(12), self.at(12, 6)]], github=[pr(1, 11)],
+                         coverage_day=10, last_day=12)
+        self.assertIsNone(m["current"]["7d"])
+        self.assertEqual(m["current"]["24h"]["open_to_land"]["count"], 1)
+
+    def test_an_empty_feed_is_covered_days_with_nothing_landed(self):
+        m = self.metrics([], github=[pr(1, 1)], last_day=5)
+        self.assertEqual(m["series"]["24h"]["open_to_land"]["count"][-1], 0)
+        self.assertIsNone(m["series"]["24h"]["open_to_land"]["median"][-1])
+
+    def test_a_landing_before_opening_is_set_aside(self):
+        m = self.metrics([["github", 1, self.at(2), self.at(3)]], github=[pr(1, 5)], last_day=5)
+        self.assertEqual(m["inconsistent_landings"], 1)
+        self.assertEqual(m["series"]["24h"]["open_to_land"]["count"][m["dates"].index("2026-01-03")], 0)
 
     def test_no_feed_means_no_chart_data(self):
         self.assertIsNone(stats.merge_latency_metrics([pr(1, 1)], [], None, date(2026, 1, 5),
@@ -1782,7 +1809,9 @@ class MergeLatencyTest(unittest.TestCase):
             self.assertIs(stats.fetch_queue_landings(self.URL, previous), previous)
 
     def test_a_malformed_feed_is_rejected(self):
-        for body in ({"schema": "x"}, self.feed(0, 1, [["github", "1", 0, 1]]), [], self.feed(0, 1, [[1, 2]])):
+        for body in ({"schema": "x"}, self.feed(1, 2, [["github", "1", 1, 2]]), [], self.feed(1, 2, [[1, 2]]),
+                     {**self.feed(1, 2, []), "since": float("inf")}, self.feed(1, 2, [["github", 1, 2, 1.5]]),
+                     self.feed(1, 2, [["github", 1, 1, 3]])):
             raw = json.dumps(body).encode()
             response = MagicMock()
             response.__enter__.return_value.read.side_effect = lambda n=-1, raw=raw: raw
@@ -1798,6 +1827,11 @@ class MergeLatencyTest(unittest.TestCase):
             m = self.metrics([["github", 1, self.at(10), self.at(10, 12)]], github=[pr(1, 9)], last_day=12)
             stats.render_merge_latency(path, m)
             self.assertIn("latest median", path.read_text())
+            # Two landing days with an empty day between them draw two separate lines.
+            gap = self.metrics([["github", 1, self.at(10), self.at(10, 12)], ["github", 2, self.at(12), self.at(12, 12)]],
+                               github=[pr(1, 9), pr(2, 11)], last_day=12)
+            stats.render_merge_latency(path, gap)
+            self.assertEqual(path.read_text().count("<polyline"), 2)
 
 
 if __name__ == "__main__":

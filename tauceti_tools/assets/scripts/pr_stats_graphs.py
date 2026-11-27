@@ -912,16 +912,23 @@ def read_queue_landings(url: str) -> dict:
     feed = json.loads(raw)
     if (not isinstance(feed, dict) or feed.get("schema") != QUEUE_LANDINGS_SCHEMA
             or feed.get("fields") != QUEUE_LANDINGS_FIELDS
-            or not isinstance(feed.get("since"), (int, float))
-            or not isinstance(feed.get("observed_at"), (int, float))
+            or not unix_time(feed.get("since")) or not unix_time(feed.get("observed_at"))
+            or feed["since"] > feed["observed_at"]
             or not isinstance(feed.get("landings"), list)):
         raise ValueError("unexpected queue landings shape")
     for entry in feed["landings"]:
         if (not isinstance(entry, list) or len(entry) != 4 or not isinstance(entry[0], str)
                 or type(entry[1]) is not int
-                or not all(isinstance(t, (int, float)) for t in entry[2:])):
+                or not all(unix_time(t) for t in entry[2:]) or entry[2] > entry[3]
+                or not feed["since"] < entry[3] <= feed["observed_at"]):
             raise ValueError("unexpected queue landing entry")
     return feed
+
+
+def unix_time(value) -> bool:
+    """A finite instant this side of the year 5000, as JSON can carry one."""
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and 0 < value < 95_617_584_000)
 
 
 def fetch_queue_landings(url: str, previous: dict | None) -> dict | None:
@@ -932,7 +939,7 @@ def fetch_queue_landings(url: str, previous: dict | None) -> dict | None:
     """
     try:
         feed = read_queue_landings(url)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, OverflowError) as exc:
         print(f"queue landings: {exc}; keeping the previous snapshot's", file=sys.stderr)
         return previous
     since, observed = float(feed["since"]), float(feed["observed_at"])
@@ -944,7 +951,7 @@ def fetch_queue_landings(url: str, previous: dict | None) -> dict | None:
         floor = observed - QUEUE_LANDINGS_KEEP.total_seconds()
         coverage = max(coverage, floor)
         for entry in previous.get("landings") or []:
-            if entry[3] > floor:
+            if entry[3] >= floor:
                 kept[(entry[0], entry[1])] = entry
     for entry in feed["landings"]:
         kept[(entry[0], entry[1])] = entry
@@ -1260,17 +1267,21 @@ def merge_latency_metrics(github: list[dict], forgejo: list[dict], landings: dic
     UTC day; `current` covers the window ending at the snapshot. A day appears only once the queue
     feed covers its whole window, so a seven-day point never rests on a partial week.
     """
-    if not landings or not landings.get("landings"):
+    if not landings:
         return None
     created = {("github", pr["number"]): parse_dt(pr["created_at"]) for pr in github}
     created.update({("forgejo", pr["number"]): parse_dt(pr["created_at"]) for pr in forgejo})
-    rows, unmatched = [], 0
+    rows, unmatched, inconsistent = [], 0, 0
     for forge, number, approved, landed in landings["landings"]:
         opened = created.get((forge, number))
         if opened is None:
             unmatched += 1
             continue
         opened_at = opened.timestamp()
+        if landed < opened_at:
+            # A landing before the pull request existed is a mismatched record, not a duration.
+            inconsistent += 1
+            continue
         # A head can be approved before a later edit of the pull request's record, never before it
         # was opened; clamp so the two parts still add up to the whole.
         approved = min(max(approved, opened_at), landed)
@@ -1287,9 +1298,11 @@ def merge_latency_metrics(github: list[dict], forgejo: list[dict], landings: dic
         return {measure: latency_summary([c[measure] for c in chosen])
                 for measure in MERGE_LATENCY_MEASURES}
 
-    coverage = landings["coverage_since"]
-    start = max(datetime.fromtimestamp(coverage, timezone.utc).date() + timedelta(days=1),
-                last_full_day - timedelta(days=history_days - 1))
+    coverage, observed = landings["coverage_since"], landings["observed_at"]
+    # The first day whose own midnight-to-midnight window the feed covers.
+    first = datetime.fromtimestamp(coverage, timezone.utc)
+    first_day = first.date() + timedelta(days=0 if first.time() == day_time.min else 1)
+    start = max(first_day, last_full_day - timedelta(days=history_days - 1))
     dates, series = [], {name: {m: {k: [] for k in ("count", *dict(MERGE_LATENCY_STATS))}
                                 for m in MERGE_LATENCY_MEASURES} for name in MERGE_LATENCY_WINDOWS}
     day = start
@@ -1297,13 +1310,15 @@ def merge_latency_metrics(github: list[dict], forgejo: list[dict], landings: dic
         end = datetime.combine(day + timedelta(days=1), day_time.min, tzinfo=timezone.utc).timestamp()
         dates.append(day.isoformat())
         for name, span in MERGE_LATENCY_WINDOWS.items():
-            covered = end - span.total_seconds() >= coverage
+            # Covered at both ends: after an outage the feed stops at `observed`, and a window
+            # running past it would publish a partial count as a whole one.
+            covered = end - span.total_seconds() >= coverage and end <= observed
             summary = window(end, span) if covered else None
             for measure in MERGE_LATENCY_MEASURES:
                 for key, values in series[name][measure].items():
                     values.append(summary[measure][key] if summary else None)
         day += timedelta(days=1)
-    now = min(snapshot.timestamp(), landings["observed_at"])
+    now = min(snapshot.timestamp(), observed)
     return {
         "definition": {
             "population": "pull requests the TauCeti merge queue landed, on GitHub and on forgejo_repo",
@@ -1314,11 +1329,15 @@ def merge_latency_metrics(github: list[dict], forgejo: list[dict], landings: dic
             "windows": "24h: landed in the 24 hours ending at the point; 7d: in the seven days",
         },
         "coverage_since": iso_z(datetime.fromtimestamp(coverage, timezone.utc)),
+        "observed_through": iso_z(datetime.fromtimestamp(observed, timezone.utc)),
         "unmatched_landings": unmatched,
+        "inconsistent_landings": inconsistent,
         "dates": dates,
         "series": series,
+        # A window reaching back before the feed's coverage is null rather than partial.
         "current": {"as_of": iso_z(datetime.fromtimestamp(now, timezone.utc)),
-                    **{name: window(now, span) for name, span in MERGE_LATENCY_WINDOWS.items()}},
+                    **{name: window(now, span) if now - span.total_seconds() >= coverage else None
+                       for name, span in MERGE_LATENCY_WINDOWS.items()}},
     }
 
 
@@ -1766,8 +1785,13 @@ def render_merge_latency(path: Path, latency: dict | None, window: str = "24h",
     rows = []
     if latency:
         values = latency["series"][window][measure]
+        # Every day keeps its place on the axis; a day without data breaks the line.
         rows = [(d, values["p25"][i], values["median"][i], values["p75"][i])
-                for i, d in enumerate(latency["dates"]) if values["median"][i] is not None]
+                for i, d in enumerate(latency["dates"])]
+        while rows and rows[0][2] is None:
+            rows.pop(0)
+        while rows and rows[-1][2] is None:
+            rows.pop()
     parts = chart_frame(
         width=width, height=height, left=55, aria_label=title, title=title,
         subtitle=(f"Pull requests the merge queue landed each UTC day, {rows[0][0]} to {rows[-1][0]}: "
@@ -1777,19 +1801,27 @@ def render_merge_latency(path: Path, latency: dict | None, window: str = "24h",
     )
     left, right, top, bottom = 90, width - 30, 110, height - 50
     if rows:
-        axis_max = nice_axis_max(max(r[3] for r in rows))
+        axis_max = nice_axis_max(max(r[3] for r in rows if r[3] is not None))
         x = lambda i: left + i * (right - left) / max(len(rows) - 1, 1)  # noqa: E731
         y = lambda v: bottom - v / axis_max * (bottom - top)  # noqa: E731
         for index in range(5):
             value = index / 4 * axis_max
             parts.append(f'<line x1="{left}" y1="{y(value):.1f}" x2="{right}" y2="{y(value):.1f}" class="grid"/>')
             parts.append(f'<text x="{left-8}" y="{y(value)+4:.1f}" text-anchor="end" class="tick">{value:.0f}h</text>')
-        band = ([f"{x(i):.1f},{y(r[3]):.1f}" for i, r in enumerate(rows)]
-                + [f"{x(i):.1f},{y(r[1]):.1f}" for i, r in reversed(list(enumerate(rows)))])
-        parts.append(f'<polygon points="{" ".join(band)}" fill="{PALETTE[0]}" fill-opacity="0.18"/>')
-        line = " ".join(f"{x(i):.1f},{y(r[2]):.1f}" for i, r in enumerate(rows))
-        parts.append(f'<polyline points="{line}" fill="none" stroke="{PALETTE[0]}" stroke-width="3.5" '
-                     'stroke-linejoin="round" stroke-linecap="round"/>')
+        runs, run = [], []
+        for i, r in enumerate(rows):
+            if r[2] is None:
+                runs, run = runs + ([run] if run else []), []
+            else:
+                run.append((i, r))
+        runs += [run] if run else []
+        for run in runs:
+            band = ([f"{x(i):.1f},{y(r[3]):.1f}" for i, r in run]
+                    + [f"{x(i):.1f},{y(r[1]):.1f}" for i, r in reversed(run)])
+            parts.append(f'<polygon points="{" ".join(band)}" fill="{PALETTE[0]}" fill-opacity="0.18"/>')
+            line = " ".join(f"{x(i):.1f},{y(r[2]):.1f}" for i, r in run)
+            parts.append(f'<polyline points="{line}" fill="none" stroke="{PALETTE[0]}" stroke-width="3.5" '
+                         'stroke-linejoin="round" stroke-linecap="round"/>')
         last_tick_x = -math.inf
         for i, r in enumerate(rows):
             if (i not in (0, len(rows) - 1) and x(i) - last_tick_x < 100) or (
