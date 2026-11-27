@@ -10,6 +10,8 @@ from unittest import mock
 
 import claims_access as ca
 
+ca_forgejo_landers = ca.forgejo_landers
+
 REPO = "TauCetiProject/TauCeti"
 SHA = "7ac17318810667a200f543cc646d98451c5327f3"
 
@@ -296,7 +298,7 @@ class ClosedPRs(unittest.TestCase):
 class Grant(unittest.TestCase):
     """What `grant` sends, from what GitHub reports. Every login here can only read the claims repo."""
 
-    def grant(self, merged=(), closed=(), invitations=(), comments=None, closers=None):
+    def grant(self, merged=(), closed=(), invitations=(), comments=None, closers=None, forgejo=None, users=None):
         calls = []
 
         def gh(args, token, check=True):
@@ -326,12 +328,23 @@ class Grant(unittest.TestCase):
                 out = "behind\n"
             elif args[:3] == ["api", "-X", "PUT"]:
                 out = "{}"
+            elif args[1].startswith("/user/"):
+                found = (users or {}).get(int(args[1].rsplit("/", 1)[1]))
+                if found is None:
+                    return SimpleNamespace(returncode=1, stdout="", stderr="HTTP 404")
+                out = json.dumps(list(found)) + "\n"
             return SimpleNamespace(returncode=0, stdout=out, stderr="")
+
+        def fetch(url):
+            if forgejo is None:
+                raise OSError("unreachable")
+            return forgejo
 
         with (
             mock.patch.object(ca, "gh", gh),
             mock.patch.object(ca, "DRY_RUN", False),
             mock.patch.object(ca, "REPO", REPO),
+            mock.patch.object(ca, "forgejo_landers", lambda: ca_forgejo_landers(fetch)),
         ):
             failures = ca.grant()
         writes = [(args[2], args[3].rsplit("/", 1)[1]) for args in calls if args[:2] == ["api", "-X"]]
@@ -379,6 +392,48 @@ class Grant(unittest.TestCase):
 
     def test_a_live_invitation_is_left_alone(self):
         _, writes, _ = self.grant(merged=[{"author": {"login": "bob"}}], invitations=[("bob", "42", False)])
+        self.assertEqual(writes, [])
+
+    def forgejo(self, *rows):
+        return {"schema": ca.FORGEJO_LANDERS_SCHEMA, "landers": [dict(row) for row in rows]}
+
+    def test_a_forgejo_lander_is_invited_by_github_id(self):
+        _, writes, calls = self.grant(
+            forgejo=self.forgejo({"github_id": 56166236, "forgejo_pr": 6051}),
+            users={56166236: ("CBirkbeck", "User")},
+        )
+        self.assertEqual(writes, [("PUT", "CBirkbeck")])
+        # the queue host has already confirmed the landing; nothing on GitHub is read for it
+        self.assertFalse([args for args in calls if "/comments?" in " ".join(args)])
+
+    def test_forgejo_landers_that_are_bots_unknown_or_malformed_invite_nobody(self):
+        _, writes, _ = self.grant(
+            forgejo=self.forgejo(
+                {"github_id": 1, "forgejo_pr": 1},
+                {"github_id": 2, "forgejo_pr": 2},
+                {"github_id": "3", "forgejo_pr": 3},
+                {"github_id": True, "forgejo_pr": 4},
+                {"github_id": -5},
+            ),
+            users={1: ("tauceti-review", "Bot"), 3: ("mallory", "User"), 5: ("eve", "User")},
+        )
+        self.assertEqual(writes, [])
+
+    def test_an_unreachable_or_foreign_attribution_is_no_one_and_github_still_counts(self):
+        for answer in (
+            None,
+            {"schema": "other/v1", "landers": [{"github_id": 5}]},
+            {"schema": ca.FORGEJO_LANDERS_SCHEMA},
+        ):
+            _, writes, _ = self.grant(merged=[{"author": {"login": "bob"}}], forgejo=answer, users={5: ("eve", "User")})
+            self.assertEqual(writes, [("PUT", "bob")])
+
+    def test_a_forgejo_lander_who_already_has_access_is_left_alone(self):
+        _, writes, _ = self.grant(
+            forgejo=self.forgejo({"github_id": 7, "forgejo_pr": 1}),
+            users={7: ("carol", "User")},
+            invitations=[("carol", "9", False)],
+        )
         self.assertEqual(writes, [])
 
     def test_an_invitation_sent_by_email_is_ignored(self):

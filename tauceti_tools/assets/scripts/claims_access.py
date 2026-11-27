@@ -8,11 +8,13 @@ no code, no Actions, no relationship to this one. Coordinating workers must neve
 the library itself, which is the whole reason the leases do not live here.
 
 So somebody has to be let in, and this decides who: the author of any pull request that landed in this
-repository. A maintainer looked at their work and took it, which is a better statement than org
+repository, on GitHub or on Forgejo. A maintainer looked at their work and took it, which is a better statement than org
 membership and is already recorded on GitHub, so there is no list to keep. Landed means merged by
 GitHub, or landed by the merge queue, which pushes the commit, records the landing in a comment on the
 PR (LANDED_RECORD) and closes it under LANDED_TITLE: GitHub records that PR as closed, not merged. A
-worker whose operator has not landed anything yet is not stuck waiting — it claims in its own fork
+pull request the queue landed on Forgejo counts for the GitHub account its author signed in to Forgejo
+with; the queue host works that out (`forgejo_landers`). A worker whose operator has not landed anything
+yet is not stuck waiting — it claims in its own fork
 until then, and so still coordinates with the rest of its own fleet.
 
   grant  Invite every landed-PR author who is not already a collaborator or already invited. Grants
@@ -28,7 +30,7 @@ next run.
 
 Env: GH_TOKEN (reads PRs here), CLAIMS_TOKEN (administers the claims repo: `Administration: write` to
 invite, `Contents: write` to sweep), REPO (owner/name), optional CLAIMS_REPO, LANDERS, DRY_RUN=1,
-SWEEP_GRACE_MINUTES.
+SWEEP_GRACE_MINUTES, FORGEJO_LANDERS_URL (empty to skip Forgejo).
 """
 
 import json
@@ -37,6 +39,8 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 
 REPO = os.environ.get("REPO", "")
 GH_TOKEN = os.environ.get("GH_TOKEN", "")
@@ -69,6 +73,13 @@ LANDERS = {name.strip().lower() for name in os.environ.get("LANDERS", "tauceti-q
 # these hold every PR that landed since the oldest of their updates: four days back in November 2026, for
 # a job scheduled hourly.
 WINDOW = 5000
+# The merge queue's record of who landed pull requests on Forgejo (TauCetiWorker `tauceti_queue.claims_access`,
+# served by the queue at GET /claims/forgejo-landers): the GitHub user ID of each such author. Forgejo accounts
+# are created by signing in with GitHub, and only Forgejo's site-admin API says which GitHub account an account
+# signed in with, so the queue host, which holds that credential and the queue's ledger, does the attribution,
+# by the PR poster's numeric Forgejo ID, and this job only resolves each GitHub ID to its current login.
+FORGEJO_LANDERS_URL = os.environ.get("FORGEJO_LANDERS_URL", "https://queue.taucetiproject.org/claims/forgejo-landers")
+FORGEJO_LANDERS_SCHEMA = "tauceti-queue.claims-forgejo-landers/v1"
 CLOSED_PRS = """
 query($owner: String!, $name: String!, $cursor: String) {
   repository(owner: $owner, name: $name) {
@@ -217,6 +228,45 @@ def landed_by_queue(number, branch):
     return p.returncode == 0 and p.stdout.strip() in ("behind", "identical")
 
 
+def forgejo_landers(fetch=None):
+    """{login: Forgejo PR number} for the GitHub accounts of the people the merge queue landed a pull request
+    for on Forgejo. An unreachable or malformed answer is no one, said once in the log: grants are monotone and
+    the next run tries again, and a GitHub landing still counts meanwhile. Bot accounts never count, as in
+    `human_authors`."""
+    if not FORGEJO_LANDERS_URL:
+        return {}
+    try:
+        if fetch is None:
+            request = urllib.request.Request(FORGEJO_LANDERS_URL, headers={"User-Agent": "tauceti-claims-access"})
+            with urllib.request.urlopen(request, timeout=30) as response:
+                document = json.loads(response.read())
+        else:
+            document = fetch(FORGEJO_LANDERS_URL)
+        if not isinstance(document, dict) or document.get("schema") != FORGEJO_LANDERS_SCHEMA:
+            raise ValueError("unexpected schema")
+        rows = document.get("landers")
+        if not isinstance(rows, list):
+            raise ValueError("no landers")
+    except (OSError, ValueError, urllib.error.URLError) as error:
+        print(f"grant: no Forgejo landings this run: {FORGEJO_LANDERS_URL}: {error}")
+        return {}
+    landers = {}
+    for row in rows:
+        github_id = row.get("github_id") if isinstance(row, dict) else None
+        if type(github_id) is not int or github_id <= 0:
+            continue
+        # By ID, not by any login the queue saw: a GitHub login can be renamed and then taken by someone else.
+        p = gh(["api", f"/user/{github_id}", "--jq", "[.login, .type] | @json"], GH_TOKEN, check=False)
+        try:
+            login, kind = json.loads(p.stdout) if p.returncode == 0 else (None, None)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            login, kind = None, None
+        if not login or kind != "User" or login.endswith("[bot]"):
+            continue
+        landers.setdefault(login, row.get("forgejo_pr"))
+    return landers
+
+
 def invitations():
     """{login: (invitation id, expired)} for the claims repository. GitHub keeps an invitation that
     expired unaccepted, and inviting the same login again only returns it, still expired, so `grant`
@@ -275,14 +325,15 @@ def grant():
     prs = closed_prs()
     merged = merged_pr_authors(prs)
     landed = queue_landed_prs(prs)
-    candidates = sorted((merged | set(landed)) - already_admitted(pending))
+    forgejo = forgejo_landers()
+    candidates = sorted((merged | set(landed) | set(forgejo)) - already_admitted(pending))
     invited = 0
     failures = 0
     branch = None  # read once, and only if a queue landing needs confirming
     for login in candidates:
         if has_access(login):
             continue  # an organization member; nothing to grant and nothing to report
-        if login not in merged:
+        if login not in merged and login not in forgejo:
             branch = default_branch() if branch is None else branch
             if not any(landed_by_queue(number, branch) for number in landed[login][:3]):
                 print(f"grant: skipped {login}: could not confirm that the merge queue landed one of their PRs")
@@ -310,7 +361,12 @@ def grant():
             continue
         # 201 answers with the invitation; 204 (empty) means they could already push after all, so
         # say what happened rather than claiming an invitation that was never sent.
-        print(f"grant: invited {login} to {CLAIMS_REPO}" if p.stdout.strip() else f"grant: {login} already had access")
+        why = f" (landed Forgejo PR {forgejo[login]})" if login in forgejo and login not in merged | set(landed) else ""
+        print(
+            f"grant: invited {login} to {CLAIMS_REPO}{why}"
+            if p.stdout.strip()
+            else f"grant: {login} already had access"
+        )
         invited += 1
     if not invited:
         print("grant: every landed-PR author already has the claim namespace")
