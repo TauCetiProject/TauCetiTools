@@ -4,7 +4,9 @@ name: publish-lake-cache
 # execute arbitrary Lean code while producing the staging artifact, so this workflow treats the
 # entire artifact and every reported value as hostile. Only the toolchain pin comes from the
 # immutable revision being published. All planning and confirmation helpers are workflow-pinned
-# and execute without keys. Only inline workflow shell and curl run in the upload step.
+# and execute without keys. Only inline workflow shell and curl run in the two key-bearing steps.
+# Artifacts the bucket already holds with identical bytes (MD5 ETag) are not uploaded again;
+# any other answer uploads the artifact, and the full revision map always uploads last.
 
 on:
   workflow_call:
@@ -232,6 +234,48 @@ jobs:
         run: |
           python3 publisher-tools/tauceti_tools/assets/scripts/lake_cache_publish.py prepare \
             "$STAGING" "$RUNNER_TEMP/lake-publication-plan"
+          python3 publisher-tools/tauceti_tools/assets/scripts/lake_cache_publish.py check \
+            "$RUNNER_TEMP/lake-publication-plan" "$RUNNER_TEMP/lake-publication-upload" \
+            --repo "$GITHUB_REPOSITORY"
+
+      # Signed HEADs against the bucket itself, not the CDN, so a deleted or overwritten object is
+      # seen as it is now. Any failure here only means more artifacts are uploaded.
+      - name: Check which artifacts the bucket already holds
+        if: ${{ vars.LAKE_CACHE_ARTIFACT_ENDPOINT != '' && vars.LAKE_CACHE_REVISION_ENDPOINT != '' && vars.LAKE_CACHE_ARTIFACT_ENDPOINT_PUBLIC != '' }}
+        continue-on-error: true
+        timeout-minutes: 10
+        env:
+          LAKE_CACHE_KEY_RAW: ${{ secrets.LAKE_CACHE_KEY }}
+        run: |
+          set -euo pipefail
+          UPLOAD="$RUNNER_TEMP/lake-publication-upload"
+          KEY="$LAKE_CACHE_KEY_RAW"
+          KEY="${KEY%"${KEY##*[![:space:]]}"}"
+          if [ -z "$KEY" ] || [ ! -s "$UPLOAD/heads.curl" ]; then
+            echo '::notice::no existence check; every artifact will be uploaded'
+            exit 0
+          fi
+          echo "::add-mask::$KEY"
+          started=$SECONDS
+          status=0
+          curl --parallel --parallel-max 64 --head --silent --show-error \
+            --connect-timeout 15 --max-time 30 --retry 2 \
+            --aws-sigv4 aws:amz:auto:s3 --user "$KEY" \
+            --write-out '%{http_code}\t%header{etag}\t%{url}\n' \
+            --config "$UPLOAD/heads.curl" > "$UPLOAD/heads.out" || status=$?
+          echo "Lake publication existence check seconds: $((SECONDS - started)) (curl exit $status)"
+          [ "$status" = 0 ] || echo '::warning::the existence check did not complete; unanswered artifacts will be uploaded'
+
+      - name: Select the artifacts the bucket lacks
+        if: ${{ vars.LAKE_CACHE_ARTIFACT_ENDPOINT != '' && vars.LAKE_CACHE_REVISION_ENDPOINT != '' && vars.LAKE_CACHE_ARTIFACT_ENDPOINT_PUBLIC != '' }}
+        env:
+          S3_REVISION_ENDPOINT: ${{ vars.LAKE_CACHE_REVISION_ENDPOINT }}
+          REVISION: ${{ inputs.revision }}
+          TOOLCHAIN: ${{ steps.toolchain.outputs.name }}
+        run: |
+          python3 publisher-tools/tauceti_tools/assets/scripts/lake_cache_publish.py select \
+            "$RUNNER_TEMP/lake-publication-plan" "$RUNNER_TEMP/lake-publication-upload" \
+            --repo "$GITHUB_REPOSITORY" --toolchain "$TOOLCHAIN" --revision "$REVISION"
 
       - name: Publish the staged Lake cache
         id: upload
@@ -241,7 +285,6 @@ jobs:
           PUBLIC_REVISION_ENDPOINT: ${{ vars.LAKE_CACHE_REVISION_ENDPOINT_PUBLIC }}
           PUBLIC_ARTIFACT_ENDPOINT: ${{ vars.LAKE_CACHE_ARTIFACT_ENDPOINT_PUBLIC }}
           LAKE_CACHE_KEY_RAW: ${{ secrets.LAKE_CACHE_KEY }}
-          ELAN_TOOLCHAIN: ${{ steps.toolchain.outputs.name }}
           REVISION: ${{ inputs.revision }}
           PUBLICATION_REQUIRED: ${{ inputs.publication-required }}
         run: |
@@ -273,15 +316,24 @@ jobs:
           [ -n "$KEY" ] || skip_or_fail 'the LAKE_CACHE_KEY secret is empty after trimming'
           echo "::add-mask::$KEY"
 
-          # Native put-staged does not load candidate workspace code.
+          # The key-free planner wrote Lake's URLs for the artifacts the bucket lacks and for the
+          # revision map. As in `lake cache put-staged`, every artifact upload must succeed before
+          # the FULL map is uploaded, so a published map only names artifacts in the bucket.
           PLAN="$RUNNER_TEMP/lake-publication-plan"
+          UPLOAD="$RUNNER_TEMP/lake-publication-upload"
+          [ -s "$UPLOAD/map-url" ] || { echo '::error::the upload plan has no revision map URL'; exit 1; }
           started=$SECONDS
-          cd "$PLAN"
-          LAKE_CACHE_KEY="$KEY" \
-          LAKE_CACHE_ARTIFACT_ENDPOINT="$S3_ARTIFACT_ENDPOINT" \
-          LAKE_CACHE_REVISION_ENDPOINT="$S3_REVISION_ENDPOINT" \
-            lake cache put-staged "$PLAN" --repo "$GITHUB_REPOSITORY" \
-              --rev="$REVISION" --toolchain="$ELAN_TOOLCHAIN"
+          if [ -s "$UPLOAD/artifacts.curl" ]; then
+            curl --parallel --parallel-max 50 --fail-early --fail --silent --show-error \
+              --retry 2 --retry-all-errors --max-time 120 \
+              --aws-sigv4 aws:amz:auto:s3 --user "$KEY" --request PUT \
+              --header 'Content-Type: application/vnd.reservoir.artifact' \
+              --config "$UPLOAD/artifacts.curl"
+          fi
+          curl --fail --silent --show-error --retry 2 --retry-all-errors --max-time 120 \
+            --aws-sigv4 aws:amz:auto:s3 --user "$KEY" --request PUT \
+            --header 'Content-Type: application/vnd.reservoir.outputs+json-lines' \
+            --upload-file "$PLAN/outputs.jsonl" "$(cat "$UPLOAD/map-url")"
           echo "Lake publication upload seconds: $((SECONDS - started))"
 
           echo 'uploaded=true' >> "$GITHUB_OUTPUT"
