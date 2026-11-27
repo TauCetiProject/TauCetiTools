@@ -561,12 +561,23 @@ def audit(snapshot):
                 "queue": {"known": False, "reason": str(exc)}, "error": str(exc)}
     repo = snapshot["repo"]
     numbers = [pr["number"] for pr in snapshot["prs"] if pr["state"] == "OPEN" and not pr["is_draft"]]
+    # The audit takes minutes, and the queue moves meanwhile: a batch landing during it takes its
+    # members out of the queue after they were assessed open and eligible, and an admission puts
+    # one in after it was assessed. So the queue is read on both sides of the assessments, and a
+    # pull request either read holds counts as queued.
+    before = _queue_or_unknown(repo)
     with ThreadPoolExecutor(max_workers=AUDIT_WORKERS) as pool:
         futures = [pool.submit(_audit_one, number, repo) for number in numbers]
         assessed = [future.result() for future in futures]
     results = {str(number): result for number, result in zip(numbers, assessed)}
-    try:
-        queue = queue_snapshot(repo)
-    except (RuntimeError, subprocess.CalledProcessError, KeyError, ValueError) as exc:
-        queue = {"known": False, "reason": str(exc)}
+    queue = _queue_or_unknown(repo)
+    if queue["known"] and before["known"]:
+        queue["numbers"] = sorted(set(queue["numbers"]) | set(before["numbers"]))
     return {"checked_at": int(time.time()), "prs": results, "queue": queue}
+
+
+def _queue_or_unknown(repo):
+    try:
+        return queue_snapshot(repo)
+    except (RuntimeError, subprocess.CalledProcessError, KeyError, ValueError) as exc:
+        return {"known": False, "reason": str(exc)}

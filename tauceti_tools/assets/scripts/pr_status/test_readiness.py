@@ -713,6 +713,31 @@ class TauCetiQueueMembership(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     readiness.tauceti_queue_numbers()
 
+    def test_a_pr_in_either_queue_read_around_the_audit_counts_as_queued(self):
+        snapshot = {"repo": "o/r", "prs": [
+            {"number": n, "state": "OPEN", "is_draft": False} for n in (1, 2, 3)]}
+        reads = iter([{"known": True, "numbers": [1, 2], "reservation_holder": None},   # 1 lands meanwhile
+                      {"known": True, "numbers": [2, 3], "reservation_holder": None}])  # 3 is admitted
+        with patch.object(readiness, "engine"), \
+             patch.object(readiness, "assess", side_effect=lambda n, repo: {"number": n, "eligible": True, "category": None}), \
+             patch.object(readiness, "queue_snapshot", side_effect=lambda repo: next(reads)):
+            result = readiness.audit(snapshot)
+        self.assertEqual(result["queue"]["numbers"], [1, 2, 3])
+
+    def test_an_unknown_queue_after_the_audit_stays_unknown(self):
+        snapshot = {"repo": "o/r", "prs": [{"number": 1, "state": "OPEN", "is_draft": False}]}
+        reads = iter([{"known": True, "numbers": [1], "reservation_holder": None}, RuntimeError("down")])
+
+        def read(repo):
+            value = next(reads)
+            if isinstance(value, Exception):
+                raise value
+            return value
+        with patch.object(readiness, "engine"), \
+             patch.object(readiness, "assess", side_effect=lambda n, repo: {"number": n, "eligible": True, "category": None}), \
+             patch.object(readiness, "queue_snapshot", side_effect=read):
+            self.assertFalse(readiness.audit(snapshot)["queue"]["known"])
+
     def test_another_repository_does_not_read_the_tauceti_queue(self):
         sweep = SimpleNamespace(REPO=None, queue_entries=lambda: [{"number": 5}],
                                 reservation_holder=lambda entries, now: None)
