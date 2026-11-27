@@ -227,7 +227,8 @@ pg('large verification groups use bulk dormancy checks and retain hot closed wor
  }finally{await f.close();}
 });
 
-for(const operation of ['statuses','reactions'])pg('bulk '+operation+' dormancy matches ordinary retirement decisions',async()=>{
+// Reactions are no longer mirrored (protocol.ts NOT_MIRRORED), so they queue no jobs to compare.
+for(const operation of ['statuses'])pg('bulk '+operation+' dormancy matches ordinary retirement decisions',async()=>{
  const f=await postgresFixture();try {
   await f.state.atomic(async state=>{
    for(const [id,status] of [[1,'OPEN'],[2,'CLOSED'],[3,'CLOSED'],[4,null]])await state.put('pr',String(id),{number:id,state:status});
