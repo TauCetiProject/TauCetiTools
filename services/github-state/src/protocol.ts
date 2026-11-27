@@ -6,6 +6,7 @@ export interface Env {
   GITHUB_PRIVATE_KEY: string; WEBHOOK_SECRET: string;
   CLIENT_TOKENS: string; ADMIN_TOKEN_HASH: string;
   PUBLIC_READ_REPOSITORIES?: string;
+  RETIRED_REPOSITORIES?: string;
   PUBLIC_QUERY_LIMIT?: RateLimit;
   RECONCILIATION_SETTINGS?: string; RECONCILIATION_TRACE?:string; REFERENCE_READS?: string; FAULT_INJECTION?: string;
   REPOSITORY_BACKEND?: 'sqlite' | 'postgres';
@@ -40,10 +41,20 @@ export function parseGitHub(text: string): any {
   return (JSON.parse as any)(text, (_key:string, value:any, context?:{source?:string}) =>
     typeof value==='number' && Number.isInteger(value) && !Number.isSafeInteger(value) && /^-?[0-9]+$/.test(context?.source || '') ? context!.source : value);
 }
+// RETIRED_REPOSITORIES lists installed repositories taken out of service, by name or id. They
+// leave every configured-repository lookup, so the edge, webhooks and the cron stop reaching
+// them, and a retained object for one cancels its alarms and refuses work (see
+// RepositoryState.retired), keeping its data. Removing the entry brings it back.
+export function retired(env: Env, repo: {id?: string; name?: string} | undefined): boolean {
+  if (!repo) return false;
+  const names = JSON.parse(env.RETIRED_REPOSITORIES || '[]');
+  if (!Array.isArray(names) || names.some(name => typeof name !== 'string')) throw new Error('invalid retired repository configuration');
+  return names.some(name => name.toLowerCase() === repo.name?.toLowerCase() || name === repo.id);
+}
 export function repositories(env: Env): Repository[] {
   const rows = JSON.parse(env.ALLOWED_REPOSITORIES || '[]');
   if (!Array.isArray(rows)) throw new Error('invalid repository configuration');
-  return rows;
+  return rows.filter(row => !retired(env, row));
 }
 export function repository(env: Env, name: string): Repository | undefined {
   return repositories(env).find(r => r.name === name || r.id === name);
