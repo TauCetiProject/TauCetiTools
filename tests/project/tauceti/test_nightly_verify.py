@@ -260,6 +260,65 @@ class NightlyVerification(unittest.TestCase):
                     self.assertNotIn('FAILED', content)
                     self.assertNotIn('suspect', content)
 
+    def run_report(self, env, jobs=None):
+        body = JOBS['report']['steps'][0]['run'].split("python3 - <<'PY'\n", 1)[1].rsplit('\nPY', 1)[0]
+        env = {'SHA': 'a' * 40, 'ZULIP_EMAIL': 'test@example.com', 'ZULIP_API_KEY': 'fixture',
+               'ZULIP_SITE': 'https://zulip.invalid', 'ZULIP_CHANNEL': 'Tau Ceti',
+               'ZULIP_TOPIC': 'Nightly verification', 'RUN_URL': 'https://example.com/run',
+               'GH_TOKEN': 'fixture', 'GITHUB_API_URL': 'https://api.invalid',
+               'GITHUB_REPOSITORY': 'TauCetiProject/TauCeti', 'GITHUB_RUN_ID': '7',
+               'GITHUB_RUN_ATTEMPT': '1', **env}
+        posted = MagicMock()
+        posted.__enter__.return_value.read.return_value = b'{"result":"success"}'
+        listed = MagicMock()
+        listed.__enter__.return_value.read.return_value = json.dumps({'jobs': jobs or []}).encode()
+        def urlopen(request, timeout=None):
+            return listed if '/actions/runs/' in request.full_url else posted
+        with patch.dict(os.environ, env, clear=True), \
+                patch('urllib.request.urlopen', side_effect=urlopen) as send, \
+                contextlib.redirect_stdout(io.StringIO()):
+            exec(compile(body, 'nightly-report', 'exec'), {})
+        sent = [c.args[0] for c in send.call_args_list if '/api/v1/messages' in c.args[0].full_url]
+        self.assertEqual(len(sent), 1)
+        return urllib.parse.parse_qs(sent[0].data.decode())['content'][0]
+
+    def test_capacity_check_runs_before_the_build_and_fails_short_runners(self):
+        steps = JOBS['verify']['steps']
+        check = step('verify', 'capacity')
+        self.assertLess(steps.index(step('verify', 'Fetch Mathlib oleans for the clean build')), steps.index(check))
+        self.assertEqual(steps.index(check) + 1, steps.index(step('verify', 'fresh_build')))
+        self.assertEqual(JOBS['verify']['outputs']['capacity'], '${{ steps.capacity.outputs.status }}')
+        self.assertEqual(JOBS['report']['permissions'], {'actions': 'read', 'contents': 'read'})
+        self.env['RUNNER_NAME'] = 'fleet-example'
+        for need, code, status in (('1', 0, 'ok'), ('100000000', 1, 'short')):
+            with self.subTest(need=need):
+                Path(self.env['GITHUB_OUTPUT']).write_text('')
+                self.env['NEED_GIB'] = need
+                result = self.shell(check['run'])
+                self.assertEqual(result.returncode, code, result.stderr)
+                self.assertEqual(self.outputs()['status'], status)
+                self.assertIn('fleet-example', self.outputs()['detail'])
+
+    def test_report_names_capacity_shortfalls_and_lost_runners(self):
+        content = self.run_report({'RESULT': 'failure', 'BUILD': 'skipped', 'CAPACITY': 'short',
+                                   'CAPACITY_DETAIL': 'runner r had 81 GiB free'})
+        self.assertIn('not attempted: runner r had 81 GiB free', content)
+        self.assertNotIn('FAILED', content)
+        jobs = [{'name': 'run / verify', 'runner_name': 'fleet-0fb9966f7c40-1',
+                 'started_at': '2026-11-27T00:04:32Z', 'completed_at': '2026-11-27T02:17:33Z',
+                 'steps': [{'name': 'Set up job', 'started_at': '2026-11-27T00:04:33Z', 'conclusion': 'success'},
+                           {'name': 'Build main from source', 'started_at': '2026-11-27T00:12:23Z',
+                            'conclusion': None},
+                           {'name': 'Record what the clean build produced', 'started_at': None,
+                            'conclusion': None}]}]
+        content = self.run_report({'RESULT': 'failure'}, jobs)
+        self.assertIn('runner stopped reporting', content)
+        self.assertIn('`fleet-0fb9966f7c40-1` for 2.2 hours and stopped during "Build main from source"', content)
+        self.assertNotIn('FAILED', content)
+        # An unreadable jobs listing still posts the report.
+        content = self.run_report({'RESULT': 'failure'}, [])
+        self.assertIn('recorded no build outcome', content)
+
     def test_all_workflow_shell_steps_parse(self):
         for job in JOBS.values():
             for s in job.get('steps', []):
