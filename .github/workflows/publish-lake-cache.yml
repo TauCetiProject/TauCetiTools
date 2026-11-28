@@ -1,6 +1,10 @@
 name: publish-lake-cache
 
-# Secret-isolated Lake cache publisher shared by main CI and merge-group CI. The caller may
+# Secret-isolated Lake cache publisher shared by main CI, merge-group CI and the nightly clean
+# build. The shared channel (the LAKE_CACHE_* endpoints) takes main and merge-group outputs. With
+# `trusted`, the job writes the trusted channel (the LAKE_CACHE_TRUSTED_* endpoints) instead, which
+# only nightly-verify.yml's cache-free build of main may feed; consumers outside TauCeti's own CI
+# read that channel only. An unset trusted endpoint never falls back to the shared one. The caller may
 # execute arbitrary Lean code while producing the staging artifact, so this workflow treats the
 # entire artifact and every reported value as hostile. Only the toolchain pin comes from the
 # immutable revision being published. All planning and confirmation helpers are workflow-pinned
@@ -51,6 +55,13 @@ on:
         required: false
         default: false
         type: boolean
+      trusted:
+        description: >-
+          Publish to the trusted channel instead of the shared one. Only a build of main that
+          restored no cached TauCeti outputs may set this (nightly-verify.yml).
+        required: false
+        default: false
+        type: boolean
     outputs:
       published:
         description: Whether the revision map was uploaded and observed on the public endpoint
@@ -76,7 +87,32 @@ jobs:
     env:
       TAUCETI_REPO: ${{ github.repository }}
       SOURCE_CANDIDATE: ${{ inputs.source_candidate_enabled }}
+      TRUSTED_CHANNEL: ${{ inputs.trusted }}
+      # The channel's endpoints. `&&` binds tighter than `||`, so an empty trusted variable yields
+      # '' (publication skips) rather than the shared endpoint.
+      CACHE_ARTIFACT_ENDPOINT: ${{ inputs.trusted && vars.LAKE_CACHE_TRUSTED_ARTIFACT_ENDPOINT || !inputs.trusted && vars.LAKE_CACHE_ARTIFACT_ENDPOINT || '' }}
+      CACHE_REVISION_ENDPOINT: ${{ inputs.trusted && vars.LAKE_CACHE_TRUSTED_REVISION_ENDPOINT || !inputs.trusted && vars.LAKE_CACHE_REVISION_ENDPOINT || '' }}
+      CACHE_ARTIFACT_ENDPOINT_PUBLIC: ${{ inputs.trusted && vars.LAKE_CACHE_TRUSTED_ARTIFACT_ENDPOINT_PUBLIC || !inputs.trusted && vars.LAKE_CACHE_ARTIFACT_ENDPOINT_PUBLIC || '' }}
+      CACHE_REVISION_ENDPOINT_PUBLIC: ${{ inputs.trusted && vars.LAKE_CACHE_TRUSTED_REVISION_ENDPOINT_PUBLIC || !inputs.trusted && vars.LAKE_CACHE_REVISION_ENDPOINT_PUBLIC || '' }}
     steps:
+      # Only a scheduled or manual run on main reaches the trusted channel, and never with a
+      # source candidate. Shell `=` is case-sensitive, unlike expression `==`.
+      - name: Admit trusted-channel publication
+        if: ${{ inputs.trusted }}
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$SOURCE_CANDIDATE" = true ]; then
+            echo '::error::a source candidate may not publish to the trusted channel'; exit 1
+          fi
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::trusted publication runs only on main, not $GITHUB_REF"; exit 1
+          fi
+          case "$EVENT" in
+            schedule|workflow_dispatch) ;;
+            *) echo "::error::trusted publication is not admitted for $EVENT events"; exit 1 ;;
+          esac
       - name: Check publisher isolation before receiving staged data
         env:
           WORKFLOW_SHA: ${{ github.workflow_sha }}
@@ -223,12 +259,12 @@ jobs:
           printf 'name=%s\n' "$TOOLCHAIN" >> "$GITHUB_OUTPUT"
 
       - name: Copy native staging data into the credential boundary
-        if: ${{ vars.LAKE_CACHE_ARTIFACT_ENDPOINT != '' && vars.LAKE_CACHE_REVISION_ENDPOINT != '' && vars.LAKE_CACHE_ARTIFACT_ENDPOINT_PUBLIC != '' }}
+        if: ${{ env.CACHE_ARTIFACT_ENDPOINT != '' && env.CACHE_REVISION_ENDPOINT != '' && env.CACHE_ARTIFACT_ENDPOINT_PUBLIC != '' }}
         env:
           STAGING: ${{ runner.temp }}/lake-cache-staging
-          S3_ARTIFACT_ENDPOINT: ${{ vars.LAKE_CACHE_ARTIFACT_ENDPOINT }}
-          S3_REVISION_ENDPOINT: ${{ vars.LAKE_CACHE_REVISION_ENDPOINT }}
-          PUBLIC_ARTIFACT_ENDPOINT: ${{ vars.LAKE_CACHE_ARTIFACT_ENDPOINT_PUBLIC }}
+          S3_ARTIFACT_ENDPOINT: ${{ env.CACHE_ARTIFACT_ENDPOINT }}
+          S3_REVISION_ENDPOINT: ${{ env.CACHE_REVISION_ENDPOINT }}
+          PUBLIC_ARTIFACT_ENDPOINT: ${{ env.CACHE_ARTIFACT_ENDPOINT_PUBLIC }}
           REVISION: ${{ inputs.revision }}
           TOOLCHAIN: ${{ steps.toolchain.outputs.name }}
         run: |
@@ -241,7 +277,7 @@ jobs:
       # Signed HEADs against the bucket itself, not the CDN, so a deleted or overwritten object is
       # seen as it is now. Any failure here only means more artifacts are uploaded.
       - name: Check which artifacts the bucket already holds
-        if: ${{ vars.LAKE_CACHE_ARTIFACT_ENDPOINT != '' && vars.LAKE_CACHE_REVISION_ENDPOINT != '' && vars.LAKE_CACHE_ARTIFACT_ENDPOINT_PUBLIC != '' }}
+        if: ${{ env.CACHE_ARTIFACT_ENDPOINT != '' && env.CACHE_REVISION_ENDPOINT != '' && env.CACHE_ARTIFACT_ENDPOINT_PUBLIC != '' }}
         continue-on-error: true
         timeout-minutes: 10
         env:
@@ -267,9 +303,9 @@ jobs:
           [ "$status" = 0 ] || echo '::warning::the existence check did not complete; unanswered artifacts will be uploaded'
 
       - name: Select the artifacts the bucket lacks
-        if: ${{ vars.LAKE_CACHE_ARTIFACT_ENDPOINT != '' && vars.LAKE_CACHE_REVISION_ENDPOINT != '' && vars.LAKE_CACHE_ARTIFACT_ENDPOINT_PUBLIC != '' }}
+        if: ${{ env.CACHE_ARTIFACT_ENDPOINT != '' && env.CACHE_REVISION_ENDPOINT != '' && env.CACHE_ARTIFACT_ENDPOINT_PUBLIC != '' }}
         env:
-          S3_REVISION_ENDPOINT: ${{ vars.LAKE_CACHE_REVISION_ENDPOINT }}
+          S3_REVISION_ENDPOINT: ${{ env.CACHE_REVISION_ENDPOINT }}
           REVISION: ${{ inputs.revision }}
           TOOLCHAIN: ${{ steps.toolchain.outputs.name }}
         run: |
@@ -280,10 +316,10 @@ jobs:
       - name: Publish the staged Lake cache
         id: upload
         env:
-          S3_ARTIFACT_ENDPOINT: ${{ vars.LAKE_CACHE_ARTIFACT_ENDPOINT }}
-          S3_REVISION_ENDPOINT: ${{ vars.LAKE_CACHE_REVISION_ENDPOINT }}
-          PUBLIC_REVISION_ENDPOINT: ${{ vars.LAKE_CACHE_REVISION_ENDPOINT_PUBLIC }}
-          PUBLIC_ARTIFACT_ENDPOINT: ${{ vars.LAKE_CACHE_ARTIFACT_ENDPOINT_PUBLIC }}
+          S3_ARTIFACT_ENDPOINT: ${{ env.CACHE_ARTIFACT_ENDPOINT }}
+          S3_REVISION_ENDPOINT: ${{ env.CACHE_REVISION_ENDPOINT }}
+          PUBLIC_REVISION_ENDPOINT: ${{ env.CACHE_REVISION_ENDPOINT_PUBLIC }}
+          PUBLIC_ARTIFACT_ENDPOINT: ${{ env.CACHE_ARTIFACT_ENDPOINT_PUBLIC }}
           LAKE_CACHE_KEY_RAW: ${{ secrets.LAKE_CACHE_KEY }}
           REVISION: ${{ inputs.revision }}
           PUBLICATION_REQUIRED: ${{ inputs.publication-required }}
@@ -356,7 +392,7 @@ jobs:
         id: confirm
         if: ${{ steps.upload.outputs.uploaded == 'true' }}
         env:
-          PUBLIC_REVISION_ENDPOINT: ${{ vars.LAKE_CACHE_REVISION_ENDPOINT_PUBLIC }}
+          PUBLIC_REVISION_ENDPOINT: ${{ env.CACHE_REVISION_ENDPOINT_PUBLIC }}
           ELAN_TOOLCHAIN: ${{ steps.toolchain.outputs.name }}
           REVISION: ${{ inputs.revision }}
         run: |

@@ -2,7 +2,10 @@ name: Nightly verification (called)
 
 # Rebuild main's own modules from source without restoring any cached build outputs (Mathlib's
 # prebuilt oleans are still fetched, and the build still writes a workspace-local Lake cache), and
-# check that this clean compile agrees byte for byte with what the cache serves.
+# check that this clean compile agrees byte for byte with what the cache serves. The clean build's
+# own outputs are then published to the trusted cache channel (publish-trusted-cache below), the
+# promoted-snapshot scheme described next: a map there was produced by a build that restored no
+# TauCeti output from any cache, so no merge-group build ever contributed to it.
 #
 # ci.yml used to be this check by accident: it recompiled the whole library on every push, so main
 # was an independent root of trust that never took a compiled artifact on faith. Restoring the cache
@@ -56,6 +59,8 @@ on:
         required: true
       ZULIP_EMAIL:
         required: true
+      # The trusted channel's upload key, passed only to publish-trusted-cache. Unset is inert.
+      LAKE_CACHE_TRUSTED_KEY: {required: false}
       # Read by the reference capacity picker. TauCeti passes none of them today, so the picker
       # sees no runner inventory and keeps GitHub-hosted capacity, as its pick-runner.yml call did.
       FLEET_READ_TOKEN: {required: false}
@@ -102,6 +107,8 @@ jobs:
       manifest_upload: ${{ steps.fresh_manifest.outcome }}
       capacity: ${{ steps.capacity.outputs.status }}
       capacity_detail: ${{ steps.capacity.outputs.detail }}
+      trusted_staged: ${{ steps.trusted_stage.outputs.staged }}
+      reported_toolchain: ${{ steps.trusted_stage.outputs.toolchain }}
     steps:
       # We expect the 262k default to be relevant at around 10m LOC, and this raised limit to be relevant at around 40m LOC.
       - name: Raise vm.max_map_count
@@ -233,12 +240,106 @@ jobs:
           echo "Clean build resources: $(nproc) CPUs"
           free -h
           df -h .
-          /usr/bin/time -v lake build
+          # `-o` records the root package's input-to-output map for the trusted channel; it changes
+          # nothing about what is built.
+          /usr/bin/time -v lake build -o .lake/outputs.jsonl
 
       # Snapshot before the audits add their own artifacts. Transfer only the digest manifest;
       # the cache-verification job must never import outputs from the clean build.
       - name: Record what the clean build produced
         run: python3 fresh/scripts/compare-build-outputs.py manifest fresh/.lake/build "$RUNNER_TEMP/clean-manifest.txt"
+
+      # --- Trusted channel: stage the clean build's own outputs ------------------------------
+      # Dormant until the LAKE_CACHE_TRUSTED_* endpoints are set. Staging only copies the archives
+      # this build packed into its workspace-local cache; the secret-bearing upload is the isolated
+      # publisher below. Like ci.yml's staging, this runs after main's code has executed in this
+      # job, so it trusts what landed on main, but nothing a merge-group build produced.
+      - name: Stage the clean build for the trusted cache channel
+        id: trusted_stage
+        if: ${{ steps.fresh_build.outcome == 'success' && vars.LAKE_CACHE_TRUSTED_ARTIFACT_ENDPOINT != '' && vars.LAKE_CACHE_TRUSTED_REVISION_ENDPOINT != '' && vars.LAKE_CACHE_TRUSTED_ARTIFACT_ENDPOINT_PUBLIC != '' }}
+        continue-on-error: true
+        env:
+          LAKE_ARTIFACT_CACHE: "true"
+          LAKE_RESTORE_ARTIFACTS: "false"
+          LAKE_NO_CACHE: "true"
+          LAKE_CACHE_DIR: ${{ github.workspace }}/fresh/.lake/cache
+        run: |
+          set -euo pipefail
+          cd fresh
+          # The publisher derives the upload scope from lean-toolchain alone; see ci.yml's staging.
+          if ! grep -Eq '^[[:space:]]*platformIndependent[[:space:]]*=[[:space:]]*true' lakefile.toml; then
+            echo "::error::lakefile.toml no longer sets platformIndependent = true"; exit 1
+          fi
+          if grep -Eq '^[[:space:]]*(fixedToolchain|bootstrap)[[:space:]]*=[[:space:]]*true' lakefile.toml; then
+            echo "::error::lakefile.toml sets fixedToolchain or bootstrap"; exit 1
+          fi
+          lake cache stage .lake/outputs.jsonl .lake/trusted-publication-stage
+          python3 scripts/lake_cache_publish.py stage .lake/trusted-publication-stage "$RUNNER_TEMP/trusted-lake-cache-staging"
+          # Five artifacts, which the publisher downloads at once (see lake_cache_publish.py split).
+          python3 scripts/lake_cache_publish.py split "$RUNNER_TEMP/trusted-lake-cache-staging" \
+            "$RUNNER_TEMP/trusted-lake-cache-staging-parts" --parts 5
+          TOOLCHAIN="$(lake env printenv ELAN_TOOLCHAIN || true)"
+          case "$TOOLCHAIN" in
+            leanprover/lean4:[A-Za-z0-9]*) ;;
+            *) echo "::error::could not determine the toolchain that scopes the upload"; exit 1 ;;
+          esac
+          printf 'toolchain=%s\n' "$TOOLCHAIN" >> "$GITHUB_OUTPUT"
+          echo 'staged=true' >> "$GITHUB_OUTPUT"
+
+      - name: Hand the clean build to the trusted publisher (part 1 of 5)
+        if: ${{ steps.trusted_stage.outputs.staged == 'true' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: trusted-lake-cache-staging-${{ github.run_attempt }}-part-0
+          path: ${{ runner.temp }}/trusted-lake-cache-staging-parts/part-0
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Hand the clean build to the trusted publisher (part 2 of 5)
+        if: ${{ steps.trusted_stage.outputs.staged == 'true' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: trusted-lake-cache-staging-${{ github.run_attempt }}-part-1
+          path: ${{ runner.temp }}/trusted-lake-cache-staging-parts/part-1
+          if-no-files-found: ignore
+          retention-days: 1
+          compression-level: 0
+
+      - name: Hand the clean build to the trusted publisher (part 3 of 5)
+        if: ${{ steps.trusted_stage.outputs.staged == 'true' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: trusted-lake-cache-staging-${{ github.run_attempt }}-part-2
+          path: ${{ runner.temp }}/trusted-lake-cache-staging-parts/part-2
+          if-no-files-found: ignore
+          retention-days: 1
+          compression-level: 0
+
+      - name: Hand the clean build to the trusted publisher (part 4 of 5)
+        if: ${{ steps.trusted_stage.outputs.staged == 'true' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: trusted-lake-cache-staging-${{ github.run_attempt }}-part-3
+          path: ${{ runner.temp }}/trusted-lake-cache-staging-parts/part-3
+          if-no-files-found: ignore
+          retention-days: 1
+          compression-level: 0
+
+      - name: Hand the clean build to the trusted publisher (part 5 of 5)
+        if: ${{ steps.trusted_stage.outputs.staged == 'true' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: trusted-lake-cache-staging-${{ github.run_attempt }}-part-4
+          path: ${{ runner.temp }}/trusted-lake-cache-staging-parts/part-4
+          if-no-files-found: ignore
+          retention-days: 1
+          compression-level: 0
 
       - name: Audit and lint the from-source build
         id: fresh_audit
@@ -659,6 +760,29 @@ jobs:
           # its Lake trace and decoded; the script only reads it.
           python3 fresh/scripts/compare-build-outputs.py compare \
             "$RUNNER_TEMP/clean-manifest.txt" "$RUNNER_TEMP/cached-manifest.txt" reference/.lake/build
+
+  # The trusted channel's only publisher: the clean build's own map, on a fresh runner through the
+  # same isolated publisher as merge-group and main CI, with the trusted endpoints and key. It needs
+  # the clean build and its audits, not the advisory cache comparison, because nothing in this map
+  # was restored from a cache. Merge-group and main CI keep writing the shared channel only.
+  publish-trusted-cache:
+    needs: verify
+    if: ${{ !cancelled() && github.repository == 'TauCetiProject/TauCeti'
+            && needs.verify.outputs.build == 'success' && needs.verify.outputs.audit == 'success'
+            && needs.verify.outputs.trusted_staged == 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/publish-lake-cache.yml
+    with:
+      tools_repository: TauCetiProject/TauCetiTools
+      revision: ${{ github.sha }}
+      artifact-name: trusted-lake-cache-staging-${{ github.run_attempt }}
+      artifact-parts: 5
+      reported-toolchain: ${{ needs.verify.outputs.reported_toolchain }}
+      publication-required: false
+      trusted: true
+    secrets:
+      LAKE_CACHE_KEY: ${{ secrets.LAKE_CACHE_TRUSTED_KEY }}
 
   # Reporting is a separate job on a fresh runner with no checkout, so the Zulip credential never
   # shares a machine with repository code, a cache-restored olean, or anything either could have
