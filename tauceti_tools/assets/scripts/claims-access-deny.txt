@@ -1,0 +1,16 @@
+# GitHub accounts that the claims-access job (claims_access.py `grant`) never invites to
+# TauCetiProject/tauceti-claims, whatever they have landed on GitHub or on Forgejo.
+#
+# Grants are reconciled from every past landing, so removing someone from tauceti-claims by hand does
+# not stick: the next run invites them again. To remove someone:
+#   1. Remove them from tauceti-claims (Settings > Collaborators, or cancel their pending invitation).
+#   2. Add them here, in a TauCetiTools PR, so that no later run invites them again.
+#
+# One entry per line: the account's numeric GitHub user ID, then optionally `# login` as a reminder.
+# Only the ID counts, so renaming the account does not dodge the entry. Look an ID up with
+#   gh api /users/<login> --jq .id
+# Everything after `#` is ignored. A line that is not a positive integer stops `grant` inviting anyone
+# until it is fixed.
+#
+# Example:
+#   12345678  # some-login
