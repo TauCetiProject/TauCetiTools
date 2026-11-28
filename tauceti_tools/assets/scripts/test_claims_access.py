@@ -4,6 +4,9 @@ Run with: python3 scripts/test_claims_access.py
 """
 
 import json
+import os
+import pathlib
+import tempfile
 import time
 import unittest
 from types import SimpleNamespace
@@ -300,9 +303,30 @@ class Grant(unittest.TestCase):
     """What `grant` sends, from what GitHub reports. Every login here can only read the claims repo."""
 
     def grant(
-        self, merged=(), closed=(), invitations=(), comments=None, closers=None, forgejo=None, users=None, invitees=None
+        self,
+        merged=(),
+        closed=(),
+        invitations=(),
+        comments=None,
+        closers=None,
+        forgejo=None,
+        users=None,
+        invitees=None,
+        logins=None,
+        deny="",
+        collaborators=(),
+        answer=None,
+        refuse_delete=False,
     ):
+        """`logins` is {login: GitHub user ID} for `/users/<login>`, 1000 + len(login) by default, None for
+        an account GitHub does not answer for; `deny` is the deny list's text; `collaborators` the logins
+        that can already push; `answer` replaces GitHub's answer to an invitation; `refuse_delete` makes
+        cancelling an invitation fail."""
         calls = []
+        logins = logins or {}
+
+        def account(login):
+            return logins.get(login, 1000 + len(login))
 
         def gh(args, token, check=True):
             calls.append(args)
@@ -315,8 +339,15 @@ class Grant(unittest.TestCase):
                 ]
                 nodes += [node(pr["number"], pr["author"]["login"], title=pr["title"]) for pr in closed]
                 out = listing_page(nodes)
+            elif "/invitations?" in path and ".invitee.id" in path:
+                out = "".join(f"{number} {account(login)} {login}\n" for login, number, _ in invitations)
             elif "/invitations?" in path:
                 out = "".join(f"{login} {number} {str(expired).lower()}\n" for login, number, expired in invitations)
+            elif "/collaborators?" in path:
+                ids = ".id" in path
+                out = "".join((f"{account(login)} " if ids else "") + login + "\n" for login in collaborators)
+            elif args[:3] == ["api", "-X", "DELETE"] and refuse_delete:
+                return SimpleNamespace(returncode=1, stdout="", stderr="HTTP 403")
             elif path.endswith("/permission --jq .permission"):
                 out = "read\n"
             elif "/comments?" in path:
@@ -332,7 +363,13 @@ class Grant(unittest.TestCase):
             elif args[:3] == ["api", "-X", "PUT"]:
                 login = args[3].rsplit("/", 1)[1]
                 ids = {name: github_id for github_id, (name, _) in (users or {}).items()}
-                out = json.dumps({"id": 77, "invitee": {"id": (invitees or {}).get(login, ids.get(login, 1))}})
+                reached = (invitees or {}).get(login, ids.get(login, account(login)))
+                out = json.dumps({"id": 77, "invitee": {"id": reached}}) if answer is None else answer
+            elif args[1].startswith("/users/"):
+                github_id = logins.get(args[1].rsplit("/", 1)[1], 1000 + len(args[1].rsplit("/", 1)[1]))
+                if github_id is None:
+                    return SimpleNamespace(returncode=1, stdout="", stderr="HTTP 404")
+                out = f"{github_id}\n"
             elif args[1].startswith("/user/"):
                 found = (users or {}).get(int(args[1].rsplit("/", 1)[1]))
                 if found is None:
@@ -345,7 +382,12 @@ class Grant(unittest.TestCase):
                 raise OSError("unreachable")
             return forgejo
 
+        deny_file = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False)
+        with deny_file:
+            deny_file.write(deny)
+        self.addCleanup(os.unlink, deny_file.name)
         with (
+            mock.patch.object(ca, "DENY_FILE", deny_file.name),
             mock.patch.object(ca, "gh", gh),
             mock.patch.object(ca, "DRY_RUN", False),
             mock.patch.object(ca, "REPO", REPO),
@@ -458,9 +500,110 @@ class Grant(unittest.TestCase):
         )
         self.assertEqual(writes, [])
 
+    def test_a_denied_forgejo_lander_is_never_invited(self):
+        _, writes, _ = self.grant(
+            forgejo=self.forgejo({"github_id": 7, "forgejo_pr": 1}, {"github_id": 8, "forgejo_pr": 2}),
+            users={7: ("carol", "User"), 8: ("dave", "User")},
+            deny="7  # carol\n",
+        )
+        self.assertEqual(writes, [("PUT", "dave")])
+
+    def test_a_denied_github_author_is_never_invited_even_after_a_rename(self):
+        # mallory landed as `mallory` and has since renamed; the entry is by ID, and the comment is only a note
+        _, writes, _ = self.grant(
+            merged=[{"author": {"login": "mallory2"}}, {"author": {"login": "bob"}}],
+            logins={"mallory2": 42, "bob": 43},
+            deny="# removed for abuse\n42  # mallory\n",
+        )
+        self.assertEqual(writes, [("PUT", "bob")])
+
+    def test_a_denied_author_whose_invitation_expired_is_not_invited_again(self):
+        _, writes, _ = self.grant(
+            merged=[{"author": {"login": "mallory"}}],
+            invitations=[("mallory", "9", True)],
+            logins={"mallory": 42},
+            deny="42",
+        )
+        self.assertEqual(writes, [("DELETE", "9")])  # the expired invitation is tidied away, and not sent again
+
+    def test_a_denied_queue_lander_is_never_invited(self):
+        landed = {5: [("tauceti-queue[bot]", queue_comment("landed", 5))]}
+        _, writes, _ = self.grant(closed=[self.landed(5, "alice")], comments=landed, logins={"alice": 42}, deny="42\n")
+        self.assertEqual(writes, [])
+
+    def test_an_invitation_that_reaches_a_denied_account_is_cancelled(self):
+        # bob renamed between the lookup and the invitation, and a denied account took the login
+        failures, writes, _ = self.grant(
+            merged=[{"author": {"login": "bob"}}], logins={"bob": 43}, invitees={"bob": 42}, deny="42\n"
+        )
+        self.assertEqual((failures, writes), (1, [("PUT", "bob"), ("DELETE", "77")]))
+
+    def test_an_author_whose_id_cannot_be_read_is_not_invited(self):
+        _, writes, _ = self.grant(merged=[{"author": {"login": "bob"}}], logins={"bob": None})
+        self.assertEqual(writes, [])
+
+    def test_a_cancellation_that_fails_is_reported(self):
+        failures, writes, _ = self.grant(
+            merged=[{"author": {"login": "bob"}}],
+            logins={"bob": 43},
+            invitees={"bob": 42},
+            deny="42\n",
+            refuse_delete=True,
+        )
+        self.assertEqual((failures, writes), (1, [("PUT", "bob"), ("DELETE", "77")]))
+
+    def test_an_answer_that_does_not_name_the_invitee_is_a_failure_and_is_cancelled(self):
+        for answer in ('{"id": 77}', '{"id": 77, "invitee": {"id": "42"}}', '{"id": 77, "invitee": null}'):
+            failures, writes, _ = self.grant(merged=[{"author": {"login": "bob"}}], deny="42\n", answer=answer)
+            self.assertEqual((failures, writes), (1, [("PUT", "bob"), ("DELETE", "77")]))
+        failures, writes, _ = self.grant(merged=[{"author": {"login": "bob"}}], answer="not json")
+        self.assertEqual((failures, writes), (1, [("PUT", "bob")]))
+
+    def test_a_live_invitation_to_a_denied_account_is_cancelled(self):
+        failures, writes, _ = self.grant(
+            invitations=[("mallory", "9", False), ("bob", "10", False)], logins={"mallory": 42}, deny="42\n"
+        )
+        self.assertEqual((failures, writes), (0, [("DELETE", "9")]))
+
+    def test_a_denied_collaborator_is_reported_and_left_for_a_human(self):
+        failures, writes, _ = self.grant(collaborators=["mallory", "bob"], logins={"mallory": 42}, deny="42\n")
+        self.assertEqual((failures, writes), (1, []))
+
+    def test_an_unreadable_deny_list_invites_nobody(self):
+        for deny in ("42\nmallory\n", "0\n", "-3\n"):
+            failures, writes, calls = self.grant(merged=[{"author": {"login": "bob"}}], deny=deny)
+            self.assertEqual((failures, writes, calls), (1, [], []))
+
     def test_an_invitation_sent_by_email_is_ignored(self):
         with mock.patch.object(ca, "gh_lines", lambda args, token: ["null 7 false", "bob 8 true"]):
             self.assertEqual(ca.invitations(), {"bob": ("8", True)})
+
+    def test_the_answer_to_an_invitation(self):
+        self.assertEqual(ca.invitation('{"id": 77, "invitee": {"id": 42}}'), (77, 42))
+        for answer in ("", "[]", "null", '{"id": true, "invitee": {"id": 0}}', '{"invitee": "42"}'):
+            self.assertEqual(ca.invitation(answer), (None, None))
+
+
+class DenyList(unittest.TestCase):
+    def read(self, text):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "deny.txt"
+            path.write_text(text)
+            return ca.denied_ids(path)
+
+    def test_ids_comments_and_blank_lines(self):
+        self.assertEqual(self.read("# header\n\n12345678  # some-login\n  99\n12345678\n"), {12345678, 99})
+
+    def test_a_login_instead_of_an_id_is_refused(self):
+        with self.assertRaisesRegex(ValueError, ":2: 'mallory'"):
+            self.read("1\nmallory  # 42\n")
+
+    def test_a_missing_file_is_refused(self):
+        with self.assertRaises(OSError):
+            ca.denied_ids("/nonexistent/claims-access-deny.txt")
+
+    def test_the_committed_deny_list_reads(self):
+        self.assertIsInstance(ca.denied_ids(pathlib.Path(ca.__file__).with_name("claims-access-deny.txt")), set)
 
 
 if __name__ == "__main__":

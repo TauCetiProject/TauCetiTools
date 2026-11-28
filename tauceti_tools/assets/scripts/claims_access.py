@@ -19,7 +19,11 @@ until then, and so still coordinates with the rest of its own fleet.
 
   grant  Invite every landed-PR author who is not already a collaborator or already invited. Grants
          are monotone: nothing is revoked automatically, because a quiet operator silently losing
-         coordination is a confusing thing to debug from the worker side. Remove abuse by hand.
+         coordination is a confusing thing to debug from the worker side. Nobody listed in
+         claims-access-deny.txt, next to this script, is ever invited: to remove someone, take them out
+         of the claims repository by hand and add their GitHub user ID to that file, or the next run,
+         which reads every past landing, invites them again. `grant` cancels any invitation still open
+         to someone on the list, and fails while one of them is still a collaborator.
   sweep  Delete leases that expired more than SWEEP_GRACE_MINUTES ago. Releasing a lease deletes it,
          so these are the leavings of workers that died holding one; the grace period keeps the sweep
          clear of a live takeover, which is itself a compare-and-swap.
@@ -30,12 +34,13 @@ next run.
 
 Env: GH_TOKEN (reads PRs here), CLAIMS_TOKEN (administers the claims repo: `Administration: write` to
 invite, `Contents: write` to sweep), REPO (owner/name), optional CLAIMS_REPO, LANDERS, DRY_RUN=1,
-SWEEP_GRACE_MINUTES, FORGEJO_LANDERS_URL (empty to skip Forgejo).
+SWEEP_GRACE_MINUTES, FORGEJO_LANDERS_URL (empty to skip Forgejo), CLAIMS_DENY_FILE.
 """
 
 import http.client
 import json
 import os
+import pathlib
 import re
 import subprocess
 import sys
@@ -84,6 +89,12 @@ FORGEJO_LANDERS_SCHEMA = "tauceti-queue.claims-forgejo-landers/v1"
 # The queue host rewrites the document every ten minutes; one older than this is a stale copy, not evidence.
 FORGEJO_LANDERS_MAX_AGE = 2 * 86400
 FORGEJO_LANDERS_MAX_BYTES = 1 << 20
+# The GitHub user IDs `grant` never invites (see that file for how to add one). By ID, because a login can
+# be renamed. The file is part of the shared scripts, so it is the one committed in TauCetiTools, unless a
+# project's own scripts/ directory carries a file of the same name, which replaces it.
+DENY_FILE = pathlib.Path(
+    os.environ.get("CLAIMS_DENY_FILE") or pathlib.Path(__file__).with_name("claims-access-deny.txt")
+)
 CLOSED_PRS = """
 query($owner: String!, $name: String!, $cursor: String) {
   repository(owner: $owner, name: $name) {
@@ -286,12 +297,97 @@ def forgejo_landers(fetch=None, now=None):
     return landers
 
 
-def invitee_id(answer):
-    """The user ID of the invitee in the answer to an invitation, or None."""
+def denied_ids(path=None):
+    """The GitHub user IDs in the deny list: one per line, `#` starting a comment. Raises ValueError, or
+    OSError for a missing file, rather than guessing: `grant` then invites nobody, because an entry it
+    failed to read is someone it would invite again."""
+    path = DENY_FILE if path is None else path
+    ids = set()
+    for number, line in enumerate(pathlib.Path(path).read_text().splitlines(), 1):
+        entry = line.split("#", 1)[0].strip()
+        if not entry:
+            continue
+        if not entry.isdigit() or int(entry) <= 0:
+            raise ValueError(f"{path}:{number}: {entry!r} is not a GitHub user ID")
+        ids.add(int(entry))
+    return ids
+
+
+def user_id(login):
+    """The numeric ID of the GitHub account that currently has this login, or None if GitHub does not say."""
+    p = gh(["api", f"/users/{login}", "--jq", ".id"], GH_TOKEN, check=False)
+    answer = p.stdout.strip() if p.returncode == 0 else ""
+    return int(answer) if answer.isdigit() else None
+
+
+def github_id(value):
+    """`value` if it is a GitHub user ID, a positive integer, else None."""
+    return value if type(value) is int and value > 0 else None
+
+
+def invitation(answer):
+    """(invitation id, invitee's user ID) from the answer to an invitation, each None if it is not there."""
     try:
-        return ((json.loads(answer) or {}).get("invitee") or {}).get("id")
-    except (json.JSONDecodeError, TypeError, AttributeError):
-        return None
+        document = json.loads(answer)
+    except (json.JSONDecodeError, TypeError):
+        return None, None
+    if not isinstance(document, dict):
+        return None, None
+    invitee = document.get("invitee")
+    return github_id(document.get("id")), github_id(invitee.get("id")) if isinstance(invitee, dict) else None
+
+
+def cancel_invitation(number):
+    """Cancel this invitation to the claims repository; True if GitHub says it is gone."""
+    p = gh(["api", "-X", "DELETE", f"/repos/{CLAIMS_REPO}/invitations/{number}"], CLAIMS_TOKEN, check=False)
+    return p.returncode == 0
+
+
+def enforce_deny(denied):
+    """Cancel every live invitation to an account in the deny list, and report every direct collaborator
+    in it, who has to be removed by hand: this job never revokes access. That covers an entry added for
+    someone already invited or admitted, and an invitation that reached a denied account in a race, by a
+    rename between the lookup and the invitation, and was accepted, or not cancelled, before `grant`
+    noticed. Returns the number of failures; a denied collaborator is one, so the job ends red."""
+    failures = 0
+    rows = gh_lines(
+        [
+            "api",
+            "--paginate",
+            f"/repos/{CLAIMS_REPO}/invitations?per_page=100",
+            "--jq",
+            r'.[] | "\(.id) \(.invitee.id) \(.invitee.login)"',
+        ],
+        CLAIMS_TOKEN,
+    )
+    for row in rows:
+        number, invitee, login = (row.split() + ["", "", ""])[:3]
+        if not invitee.isdigit() or int(invitee) not in denied:
+            continue
+        if DRY_RUN:
+            print(f"grant: would cancel the invitation of {login} (GitHub user {invitee}, in the deny list)")
+        elif cancel_invitation(number):
+            print(f"grant: cancelled the invitation of {login} (GitHub user {invitee}, in the deny list)")
+        else:
+            failures += 1
+            print(
+                f"grant: FAILED to cancel the invitation of {login} (GitHub user {invitee}, in the deny list)",
+                file=sys.stderr,
+            )
+    rows = gh_lines(
+        ["api", "--paginate", f"/repos/{CLAIMS_REPO}/collaborators?per_page=100", "--jq", r'.[] | "\(.id) \(.login)"'],
+        CLAIMS_TOKEN,
+    )
+    for row in rows:
+        member, login = (row.split() + ["", ""])[:2]
+        if member.isdigit() and int(member) in denied:
+            failures += 1
+            print(
+                f"grant: FAILED: {login} (GitHub user {member}) is in the deny list but is a collaborator on "
+                f"{CLAIMS_REPO}; remove them by hand",
+                file=sys.stderr,
+            )
+    return failures
 
 
 def invitations():
@@ -347,7 +443,14 @@ def has_access(login):
 def grant():
     """Invite every author who is not in yet. A failure on one login does not stop the others, but
     the job still ends red so somebody looks (an org that forbids outside collaborators, or requires
-    2FA of them, fails exactly here)."""
+    2FA of them, fails exactly here). Nobody in the deny list is invited; a deny list that cannot be read
+    invites nobody."""
+    try:
+        denied = denied_ids()
+    except (OSError, ValueError) as error:
+        print(f"grant: FAILED to read the deny list, so inviting nobody: {error}", file=sys.stderr)
+        return 1
+    failures = enforce_deny(denied) if denied else 0
     pending = invitations()
     prs = closed_prs()
     merged = merged_pr_authors(prs)
@@ -355,7 +458,6 @@ def grant():
     forgejo = forgejo_landers()
     candidates = sorted((merged | set(landed) | set(forgejo)) - already_admitted(pending))
     invited = 0
-    failures = 0
     branch = None  # read once, and only if a queue landing needs confirming
     for login in candidates:
         if has_access(login):
@@ -365,6 +467,14 @@ def grant():
             if not any(landed_by_queue(number, branch) for number in landed[login][:3]):
                 print(f"grant: skipped {login}: could not confirm that the merge queue landed one of their PRs")
                 continue
+        # The account the invitation will reach: the Forgejo lander's own ID, or whoever has the login now.
+        account = forgejo[login][1] if login in forgejo else user_id(login)
+        if account is None:
+            print(f"grant: skipped {login}: could not read their GitHub user ID to check the deny list")
+            continue
+        if account in denied:
+            print(f"grant: skipped {login}: GitHub user {account} is in the deny list")
+            continue
         number, expired = pending.get(login, (None, False))
         if DRY_RUN:
             print(f"grant: would invite {login}" + (" (cancelling their expired invitation)" if expired else ""))
@@ -388,18 +498,24 @@ def grant():
             continue
         # 201 answers with the invitation; 204 (empty) means they could already push after all, so
         # say what happened rather than claiming an invitation that was never sent.
+        # A 204 can also mean that GitHub granted access outright, to an organization member; if a denied one
+        # took the login in between, the next run's `enforce_deny` reports them.
         only_forgejo = login in forgejo and login not in merged | set(landed)
-        if only_forgejo and p.stdout.strip() and invitee_id(p.stdout) != forgejo[login][1]:
-            # The login was renamed and taken by another account between resolving it and inviting it.
+        number, reached = invitation(p.stdout) if p.stdout.strip() else (None, account)
+        if reached is None or reached in denied or reached != account:
+            # The login was renamed and taken by another account between resolving it and inviting it, or
+            # GitHub's answer does not say whom it invited.
             failures += 1
-            number = (json.loads(p.stdout) or {}).get("id") if invitee_id(p.stdout) is not None else None
-            if number:
-                gh(["api", "-X", "DELETE", f"/repos/{CLAIMS_REPO}/invitations/{number}"], CLAIMS_TOKEN, check=False)
-            print(
-                f"grant: FAILED to invite {login}: the invitation went to another account than GitHub user "
-                f"{forgejo[login][1]}, and was cancelled",
-                file=sys.stderr,
+            whom = (
+                "an account GitHub's answer does not name"
+                if reached is None
+                else f"GitHub user {reached}, who is in the deny list"
+                if reached in denied
+                else f"another account than GitHub user {account}"
             )
+            cancelled = number is not None and cancel_invitation(number)
+            outcome = "and was cancelled" if cancelled else "and could not be cancelled: cancel it by hand"
+            print(f"grant: FAILED to invite {login}: the invitation went to {whom}, {outcome}", file=sys.stderr)
             continue
         why = f" (landed Forgejo PR {forgejo[login][0]})" if only_forgejo else ""
         print(
