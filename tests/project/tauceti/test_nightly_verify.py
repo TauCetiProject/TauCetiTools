@@ -290,6 +290,13 @@ class NightlyVerification(unittest.TestCase):
         self.assertEqual(JOBS['verify']['outputs']['capacity'], '${{ steps.capacity.outputs.status }}')
         self.assertEqual(JOBS['report']['permissions'], {'actions': 'read', 'contents': 'read'})
         self.env['RUNNER_NAME'] = 'fleet-example'
+        # Report 1 TiB free whatever the host has, so the slot budget below is the smaller figure
+        # on GitHub-hosted runners too.
+        bin_dir = self.root / 'bin'
+        bin_dir.mkdir()
+        (bin_dir / 'df').write_text("#!/bin/sh\nprintf ' Avail\\n%s\\n' 1073741824\n")
+        (bin_dir / 'df').chmod(0o755)
+        self.env['PATH'] = f"{bin_dir}{os.pathsep}{self.env['PATH']}"
         progress = self.root / 'native-progress.json'
         for need, native, code, status in (('1', None, 0, 'ok'), ('100000000', None, 1, 'short'),
                                            ('100', (128, 40), 1, 'short'), ('80', (128, 40), 0, 'ok'),
