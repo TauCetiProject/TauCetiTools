@@ -3,8 +3,10 @@
 #
 # Grants are reconciled from every past landing, so removing someone from tauceti-claims by hand does
 # not stick: the next run invites them again. To remove someone:
-#   1. Remove them from tauceti-claims (Settings > Collaborators, or cancel their pending invitation).
+#   1. Remove them from tauceti-claims (Settings > Collaborators).
 #   2. Add them here, in a TauCetiTools PR, so that no later run invites them again.
+# The job cancels any invitation still open to someone listed here, and fails while someone listed
+# here is still a collaborator, because it never removes access itself.
 #
 # One entry per line: the account's numeric GitHub user ID, then optionally `# login` as a reminder.
 # Only the ID counts, so renaming the account does not dodge the entry. Look an ID up with

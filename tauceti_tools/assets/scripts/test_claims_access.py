@@ -314,11 +314,19 @@ class Grant(unittest.TestCase):
         invitees=None,
         logins=None,
         deny="",
+        collaborators=(),
+        answer=None,
+        refuse_delete=False,
     ):
         """`logins` is {login: GitHub user ID} for `/users/<login>`, 1000 + len(login) by default, None for
-        an account GitHub does not answer for; `deny` is the deny list's text."""
+        an account GitHub does not answer for; `deny` is the deny list's text; `collaborators` the logins
+        that can already push; `answer` replaces GitHub's answer to an invitation; `refuse_delete` makes
+        cancelling an invitation fail."""
         calls = []
         logins = logins or {}
+
+        def account(login):
+            return logins.get(login, 1000 + len(login))
 
         def gh(args, token, check=True):
             calls.append(args)
@@ -331,8 +339,15 @@ class Grant(unittest.TestCase):
                 ]
                 nodes += [node(pr["number"], pr["author"]["login"], title=pr["title"]) for pr in closed]
                 out = listing_page(nodes)
+            elif "/invitations?" in path and ".invitee.id" in path:
+                out = "".join(f"{number} {account(login)} {login}\n" for login, number, _ in invitations)
             elif "/invitations?" in path:
                 out = "".join(f"{login} {number} {str(expired).lower()}\n" for login, number, expired in invitations)
+            elif "/collaborators?" in path:
+                ids = ".id" in path
+                out = "".join((f"{account(login)} " if ids else "") + login + "\n" for login in collaborators)
+            elif args[:3] == ["api", "-X", "DELETE"] and refuse_delete:
+                return SimpleNamespace(returncode=1, stdout="", stderr="HTTP 403")
             elif path.endswith("/permission --jq .permission"):
                 out = "read\n"
             elif "/comments?" in path:
@@ -348,8 +363,8 @@ class Grant(unittest.TestCase):
             elif args[:3] == ["api", "-X", "PUT"]:
                 login = args[3].rsplit("/", 1)[1]
                 ids = {name: github_id for github_id, (name, _) in (users or {}).items()}
-                reached = (invitees or {}).get(login, ids.get(login, logins.get(login, 1000 + len(login))))
-                out = json.dumps({"id": 77, "invitee": {"id": reached}})
+                reached = (invitees or {}).get(login, ids.get(login, account(login)))
+                out = json.dumps({"id": 77, "invitee": {"id": reached}}) if answer is None else answer
             elif args[1].startswith("/users/"):
                 github_id = logins.get(args[1].rsplit("/", 1)[1], 1000 + len(args[1].rsplit("/", 1)[1]))
                 if github_id is None:
@@ -509,7 +524,7 @@ class Grant(unittest.TestCase):
             logins={"mallory": 42},
             deny="42",
         )
-        self.assertEqual(writes, [])
+        self.assertEqual(writes, [("DELETE", "9")])  # the expired invitation is tidied away, and not sent again
 
     def test_a_denied_queue_lander_is_never_invited(self):
         landed = {5: [("tauceti-queue[bot]", queue_comment("landed", 5))]}
@@ -527,6 +542,33 @@ class Grant(unittest.TestCase):
         _, writes, _ = self.grant(merged=[{"author": {"login": "bob"}}], logins={"bob": None})
         self.assertEqual(writes, [])
 
+    def test_a_cancellation_that_fails_is_reported(self):
+        failures, writes, _ = self.grant(
+            merged=[{"author": {"login": "bob"}}],
+            logins={"bob": 43},
+            invitees={"bob": 42},
+            deny="42\n",
+            refuse_delete=True,
+        )
+        self.assertEqual((failures, writes), (1, [("PUT", "bob"), ("DELETE", "77")]))
+
+    def test_an_answer_that_does_not_name_the_invitee_is_a_failure_and_is_cancelled(self):
+        for answer in ('{"id": 77}', '{"id": 77, "invitee": {"id": "42"}}', '{"id": 77, "invitee": null}'):
+            failures, writes, _ = self.grant(merged=[{"author": {"login": "bob"}}], deny="42\n", answer=answer)
+            self.assertEqual((failures, writes), (1, [("PUT", "bob"), ("DELETE", "77")]))
+        failures, writes, _ = self.grant(merged=[{"author": {"login": "bob"}}], answer="not json")
+        self.assertEqual((failures, writes), (1, [("PUT", "bob")]))
+
+    def test_a_live_invitation_to_a_denied_account_is_cancelled(self):
+        failures, writes, _ = self.grant(
+            invitations=[("mallory", "9", False), ("bob", "10", False)], logins={"mallory": 42}, deny="42\n"
+        )
+        self.assertEqual((failures, writes), (0, [("DELETE", "9")]))
+
+    def test_a_denied_collaborator_is_reported_and_left_for_a_human(self):
+        failures, writes, _ = self.grant(collaborators=["mallory", "bob"], logins={"mallory": 42}, deny="42\n")
+        self.assertEqual((failures, writes), (1, []))
+
     def test_an_unreadable_deny_list_invites_nobody(self):
         for deny in ("42\nmallory\n", "0\n", "-3\n"):
             failures, writes, calls = self.grant(merged=[{"author": {"login": "bob"}}], deny=deny)
@@ -535,6 +577,11 @@ class Grant(unittest.TestCase):
     def test_an_invitation_sent_by_email_is_ignored(self):
         with mock.patch.object(ca, "gh_lines", lambda args, token: ["null 7 false", "bob 8 true"]):
             self.assertEqual(ca.invitations(), {"bob": ("8", True)})
+
+    def test_the_answer_to_an_invitation(self):
+        self.assertEqual(ca.invitation('{"id": 77, "invitee": {"id": 42}}'), (77, 42))
+        for answer in ("", "[]", "null", '{"id": true, "invitee": {"id": 0}}', '{"invitee": "42"}'):
+            self.assertEqual(ca.invitation(answer), (None, None))
 
 
 class DenyList(unittest.TestCase):
