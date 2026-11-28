@@ -2,8 +2,14 @@
 
 Only workflow-pinned tooling runs here, outside the candidate checkout. No Git
 commands or candidate files/configuration are consulted while credentials exist.
-There are no retries or label-pagination requests: any uncertainty selects full
-lint. Metrics describe this policy lookup, excluding compare/local diff/step time.
+There are no label-pagination requests and any uncertainty selects full lint.
+
+When the GraphQL request fails (typically the read installation's GraphQL
+quota, which every CI job shares), each PR is read once through the separate
+REST quota, provided at most REST_FALLBACK_PRS PRs are attributed. The REST
+answer is reshaped and checked by the same validation. Whole-library scope
+also widens the audits, which can then exceed their time limit on a busy host.
+Metrics describe this policy lookup, excluding compare/local diff/step time.
 """
 
 import json
@@ -17,12 +23,18 @@ import time
 CHUNK_SIZE = 32
 MAX_LABELS = 100
 MAX_RESPONSE_BYTES = 1024 * 1024
+MAX_ERROR_BYTES = 4096
+REST_FALLBACK_PRS = CHUNK_SIZE
 REQUEST_SECONDS = 15
 TOTAL_SECONDS = 45
 
 
 class FullLint(Exception):
     """The caller must lint the entire library."""
+
+
+class RequestFailed(FullLint):
+    """gh exited non-zero; the REST fallback may still answer."""
 
 
 def check_citations(repo, comparison):
@@ -67,19 +79,42 @@ def response_limit():
     resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_RESPONSE_BYTES, MAX_RESPONSE_BYTES))
 
 
-def request(query, timeout):
-    with tempfile.TemporaryFile() as output:
+def run_gh(args, timeout, what):
+    """Run one bounded gh call and return its parsed JSON output."""
+    with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
         result = subprocess.run(
-            ["gh", "api", "graphql", "-f", f"query={query}"],
-            stdout=output, stderr=subprocess.DEVNULL, timeout=timeout,
+            ["gh", *args], stdout=output, stderr=errors, timeout=timeout,
             preexec_fn=response_limit)
         if result.returncode:
-            raise FullLint("PR lint policy metadata request failed")
+            # Classify the error without echoing it: gh's message is not ours to print.
+            errors.seek(0)
+            limited = b"rate limit" in errors.read(MAX_ERROR_BYTES).lower()
+            raise RequestFailed(f"{what} {'was rate limited' if limited else 'failed'}")
         output.seek(0)
         raw = output.read(MAX_RESPONSE_BYTES + 1)
     if len(raw) >= MAX_RESPONSE_BYTES:
         raise FullLint("PR lint policy response reached its size limit")
     return json.loads(raw)
+
+
+def request(query, timeout):
+    return run_gh(["api", "graphql", "-f", f"query={query}"], timeout,
+                  "PR lint policy metadata request")
+
+
+def rest_request(repo, number, timeout):
+    """One PR through the REST quota, reshaped as its GraphQL field for validate."""
+    pr = run_gh(["api", f"repos/{repo}/pulls/{number}"], timeout,
+                "PR lint policy REST fallback request")
+    if not isinstance(pr, dict) or not isinstance(pr.get("head"), dict):
+        raise FullLint("PR lint policy REST response is malformed")
+    labels = pr.get("labels")
+    if not isinstance(labels, list) or any(not isinstance(label, dict) for label in labels):
+        raise FullLint("PR lint policy REST labels are malformed")
+    # REST returns every label inline, so there is no further page.
+    return {"number": pr.get("number"), "headRefName": pr["head"].get("ref"),
+            "labels": {"totalCount": len(labels), "pageInfo": {"hasNextPage": False},
+                       "nodes": [{"name": label.get("name")} for label in labels]}}
 
 
 def validate(data, numbers):
@@ -117,8 +152,15 @@ def validate(data, numbers):
 
 def check_policy(repo, raw_numbers):
     start = time.monotonic()
-    calls = 0
+    calls = rest_calls = 0
     numbers = []
+
+    def remaining():
+        left = TOTAL_SECONDS - (time.monotonic() - start)
+        if left <= 0:
+            raise FullLint("PR lint policy lookup exceeded its time limit")
+        return min(REQUEST_SECONDS, left)
+
     try:
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
             raise FullLint("invalid policy repository")
@@ -130,15 +172,27 @@ def check_policy(repo, raw_numbers):
         if len(set(numbers)) != len(numbers):
             raise FullLint("duplicate attributed PR numbers")
         for offset in range(0, len(numbers), CHUNK_SIZE):
-            remaining = TOTAL_SECONDS - (time.monotonic() - start)
-            if remaining <= 0:
-                raise FullLint("PR lint policy lookup exceeded its time limit")
             chunk = numbers[offset:offset + CHUNK_SIZE]
+            timeout = remaining()
             calls += 1
-            validate(request(query_for(repo, chunk), min(REQUEST_SECONDS, remaining)), chunk)
+            try:
+                data = request(query_for(repo, chunk), timeout)
+            except RequestFailed as error:
+                if len(numbers) > REST_FALLBACK_PRS:
+                    raise
+                print(f"lint-policy: {error}; reading {len(chunk)} PR(s) through REST",
+                      file=sys.stderr)
+                fields = {}
+                for n in chunk:
+                    timeout = remaining()
+                    rest_calls += 1
+                    fields[f"pr{n}"] = rest_request(repo, n, timeout)
+                data = {"data": {"repository": fields}}
+            validate(data, chunk)
     finally:
         print(f"lint-policy: prs={len(numbers)} requests={calls} "
-              f"elapsed_seconds={time.monotonic() - start:.3f}", file=sys.stderr)
+              f"elapsed_seconds={time.monotonic() - start:.3f} rest_requests={rest_calls}",
+              file=sys.stderr)
 
 
 def main():

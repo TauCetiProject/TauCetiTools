@@ -35,6 +35,8 @@ FAKE_GH = textwrap.dedent('''\
     if path == "graphql":
         if "graphql" in responses:
             data = responses["graphql"]
+            if isinstance(data, dict) and "_error" in data:
+                sys.exit(data["_error"])
         else:
             query = args[args.index("-f") + 1]
             numbers = re.findall(r"pr([0-9]+): pullRequest", query)
@@ -428,6 +430,52 @@ class LintScopeTest(unittest.TestCase):
                 self.assertIsNone(self.run_scope(
                     env, {endpoint: compare, "repos/o/r/pulls/12": {"_error": "HTTP 503"}},
                     files=[f("added", "TauCeti/A.lean")]))
+
+    GRAPHQL_QUOTA = {"_error": "GraphQL: API rate limit exceeded for installation ID 1"}
+
+    def test_graphql_failure_reads_the_policy_through_rest(self):
+        # Production 26 Nov: every PR built while the read installation's GraphQL
+        # quota was exhausted fell back to whole-library audits and timed out.
+        for event in ("pull_request_target", "workflow_dispatch"):
+            with self.subTest(event=event):
+                env = dict(self.PR_ENV, EVENT=event)
+                self.assertEqual(self.run_scope(
+                    env, {self.PR_COMPARE: {"files": []}, "graphql": self.GRAPHQL_QUOTA,
+                          "repos/o/r/pulls/12": {**pr(), "number": 12}},
+                    files=[f("added", "TauCeti/A.lean")]), ["TauCeti.A"])
+                self.assertEqual([call[1] for call in self.last_calls if "pulls" in call[1]
+                                  or call[1] == "graphql"], ["graphql", "repos/o/r/pulls/12"])
+                self.assertIn("was rate limited; reading 1 PR(s) through REST", self.last_stderr)
+                self.assertIn("requests=1 elapsed_seconds=", self.last_stderr)
+                self.assertIn("rest_requests=1", self.last_stderr)
+                self.assertNotIn("installation ID", self.last_stderr + self.last_stdout)
+
+    def test_rest_fallback_keeps_the_full_lint_policy(self):
+        for rest in ({**pr(labels=["full-lint"]), "number": 12},
+                     {**pr(head_ref="lint-repair/main"), "number": 12},
+                     {**pr(), "number": 13}, pr(), {**pr(), "number": 12, "labels": None},
+                     {**pr(), "number": 12, "labels": [{"name": ""}]},
+                     {"number": 12, "labels": []}, {"_error": "HTTP 403: rate limit"}):
+            with self.subTest(rest=rest):
+                self.assertIsNone(self.run_scope(
+                    self.PR_ENV, {self.PR_COMPARE: {"files": []}, "graphql": self.GRAPHQL_QUOTA,
+                                  "repos/o/r/pulls/12": rest},
+                    files=[f("added", "TauCeti/A.lean")]))
+
+    def test_rest_fallback_is_bounded_to_one_chunk(self):
+        for count, scoped in ((32, True), (33, False)):
+            compare = {"total_commits": count, "commits": [
+                {"commit": {"message": f"change (#{n})"}} for n in range(1, count + 1)]}
+            responses = {f"repos/o/r/compare/{SHA_A}...{SHA_B}": compare,
+                         "graphql": self.GRAPHQL_QUOTA}
+            responses.update({f"repos/o/r/pulls/{n}": {**pr(), "number": n}
+                              for n in range(1, count + 1)})
+            with self.subTest(count=count):
+                result = self.run_scope({"EVENT": "push", "BASE": SHA_A, "HEAD": SHA_B},
+                                        responses, files=[f("added", "TauCeti/X.lean")])
+                self.assertEqual(result, ["TauCeti.X"] if scoped else None)
+                rest = [call for call in self.last_calls if "/pulls/" in call[1]]
+                self.assertEqual(len(rest), count if scoped else 0)
 
     def test_large_batches_keep_complete_local_scope_and_chunked_policy_requests(self):
         # Include a real production batch size and a list beyond the old 2048-byte stdin limit.
