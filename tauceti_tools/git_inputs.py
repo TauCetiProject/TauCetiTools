@@ -1,6 +1,7 @@
 """Bounded Git transport and reusable exact-commit snapshots for source consumers."""
 
 import contextlib
+import contextvars
 import fcntl
 import os
 import re
@@ -48,15 +49,22 @@ ENV_ALLOW = (
 
 PREPARATION_WAIT_EXIT = 83
 
+# Descriptors of the snapshot cache locks this thread holds. Every git started while one is held
+# inherits it, so a cache's flock is released only once its owner and that owner's git have all
+# exited: a replacement owner cannot take the cache while a dying owner's git still writes there.
+_HELD_LOCKS = contextvars.ContextVar("held_cache_locks", default=())
+
 # The parent's pipe owns this process group, including remote helpers. Unlike a
 # timer in the CLI, this guardian also observes SIGKILL/owner death on EOF.
+# The guardian passes the held cache-lock descriptors (argv[2], comma-separated) on to git.
 _GIT_OWNER = """import os,signal,subprocess,sys,threading
 fd=int(sys.argv[1])
+held=tuple(int(n) for n in sys.argv[2].split(",") if n)
 def owner_gone():
  while os.read(fd,1): pass
  os.killpg(os.getpgrp(),signal.SIGKILL)
 threading.Thread(target=owner_gone,daemon=True).start()
-child=subprocess.Popen(sys.argv[2:])
+child=subprocess.Popen(sys.argv[3:],pass_fds=held)
 rc=child.wait()
 os._exit(rc if rc>=0 else 128-rc)
 """
@@ -131,6 +139,7 @@ def _git(d, args, env, timeout, sink=None, limit=MAX_BYTES, stdin=b"", disk_cap=
         inp.write(stdin)
         inp.seek(0)
         reader, owner = os.pipe()
+        held = _HELD_LOCKS.get()
         try:
             p = subprocess.Popen(
                 [
@@ -138,6 +147,7 @@ def _git(d, args, env, timeout, sink=None, limit=MAX_BYTES, stdin=b"", disk_cap=
                     "-c",
                     _GIT_OWNER,
                     str(reader),
+                    ",".join(map(str, held)),
                     "git",
                     "-c",
                     "maintenance.autoDetach=false",
@@ -153,7 +163,7 @@ def _git(d, args, env, timeout, sink=None, limit=MAX_BYTES, stdin=b"", disk_cap=
                 stderr=err,
                 env=env,
                 start_new_session=True,
-                pass_fds=(reader,),
+                pass_fds=(reader, *held),
             )
         except OSError as e:
             os.close(owner)
@@ -255,6 +265,8 @@ def snapshot(
             os.makedirs(cache_dir, mode=0o700, exist_ok=True)
             lock = lifetime.enter_context(open(os.fspath(cache_dir) + ".lock", "a"))
             fcntl.flock(lock, fcntl.LOCK_EX)
+            held = _HELD_LOCKS.set((*_HELD_LOCKS.get(), lock.fileno()))
+            lifetime.callback(_HELD_LOCKS.reset, held)
             directory = os.fspath(cache_dir)
         run_git(directory, ["init", "-q", "--bare"], env, FETCH_TIMEOUT)
         run_git(directory, ["config", "remote.origin.url", remote], env, FETCH_TIMEOUT)
@@ -273,6 +285,13 @@ def snapshot(
                               DIFF_TIMEOUT, stdin=(base+'\n'+head+'\n').encode())
             known = objects.decode().splitlines() == [base+' commit', head+' commit']
         if not known:
+            if cache_dir is not None:
+                # A fetch killed at its timeout, disk cap or interruption leaves its shallow.lock here,
+                # where it would fail every later fetch. Our flock excludes any live fetch: every git
+                # inherits the flock (_HELD_LOCKS), so it outlives a killed owner until _GIT_OWNER has
+                # killed that owner's git too. The lock is therefore stale.
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(os.path.join(directory, "shallow.lock"))
             run_git(
                 directory,
                 [

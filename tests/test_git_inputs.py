@@ -1,7 +1,12 @@
 """Exact Git snapshots reuse objects and handle filenames through machine output."""
 
+import fcntl
+import os
+import signal
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -81,6 +86,106 @@ class GitInputs(unittest.TestCase):
                     _git(repo, ["rev-parse", "refs/tauceti/review/head"], env, 10).decode().strip(), second
                 )
             self.assertLess(objects() - before, 10, "second review transferred the unchanged snapshot again")
+
+    def test_lock_left_by_a_killed_fetch_does_not_block_the_next_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, cache = root / "source", root / "cache"
+
+            def commit(name):
+                (source / name).write_text(name)
+                git("add", ".")
+                git("commit", "-qm", name)
+                return git("rev-parse", "HEAD")
+
+            def git(*args):
+                return subprocess.check_output(
+                    ["git", "-C", str(source), *args], stderr=subprocess.DEVNULL, text=True
+                ).strip()
+
+            source.mkdir()
+            git("init", "-q")
+            git("config", "user.name", "fixture")
+            git("config", "user.email", "fixture@example.org")
+            base, first = commit("base"), commit("first")
+            with snapshot(str(source), base, first, cache_dir=cache, complete=True):
+                pass
+            (cache / "shallow.lock").write_text("partial")
+            second = commit("second")
+            with snapshot(str(source), base, second, cache_dir=cache, complete=True) as (repo, env):
+                self.assertEqual(
+                    _git(repo, ["rev-parse", "refs/tauceti/review/head"], env, 10).decode().strip(), second
+                )
+            self.assertFalse((cache / "shallow.lock").exists())
+
+    def test_cache_lock_outlives_a_killed_owner_until_its_git_exits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, cache, pidfile = root / "source", root / "cache", root / "git.pid"
+
+            def git(*args):
+                return subprocess.check_output(
+                    ["git", "-C", str(source), *args], stderr=subprocess.DEVNULL, text=True
+                ).strip()
+
+            source.mkdir()
+            git("init", "-q")
+            git("config", "user.name", "fixture")
+            git("config", "user.email", "fixture@example.org")
+            (source / "base").write_text("base")
+            git("add", ".")
+            git("commit", "-qm", "base")
+            base = git("rev-parse", "HEAD")
+            # The owner takes the cache, then runs a git that records its PID and outlives the owner.
+            owner = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys\n"
+                    "from tauceti_tools.git_inputs import _git, snapshot\n"
+                    "with snapshot(sys.argv[1], sys.argv[2], sys.argv[2], cache_dir=sys.argv[3]) as (repo, env):\n"
+                    "    _git(repo, ['hold'], env, None, config=(f'alias.hold=!echo $$ > {sys.argv[4]}; exec sleep 60',))\n",
+                    str(source),
+                    base,
+                    str(cache),
+                    str(pidfile),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+            )
+            try:
+                deadline = time.monotonic() + 60
+                while not (pidfile.exists() and pidfile.read_text().strip()):
+                    self.assertIsNone(owner.poll(), "the owner exited before its git started")
+                    self.assertLess(time.monotonic(), deadline, "the owner's git never started")
+                    time.sleep(0.05)
+                group = os.getpgid(int(pidfile.read_text()))
+                # Stop the git and its guardian so the guardian cannot kill them on the owner's death,
+                # then kill the owner: its git still holds the cache.
+                os.killpg(group, signal.SIGSTOP)
+                owner.kill()
+                owner.wait()
+                with open(str(cache) + ".lock", "a") as lock:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    # Resumed, the guardian sees the owner's pipe close and kills the git; the cache
+                    # is then free.
+                    os.killpg(group, signal.SIGCONT)
+                    deadline = time.monotonic() + 30
+                    while True:
+                        try:
+                            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            break
+                        except BlockingIOError:
+                            self.assertLess(time.monotonic(), deadline, "the killed owner's git kept the cache")
+                            time.sleep(0.05)
+            finally:
+                owner.kill()
+                owner.wait()
+                if pidfile.exists() and pidfile.read_text().strip():
+                    try:
+                        os.killpg(os.getpgid(int(pidfile.read_text())), signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
 
     def test_changed_paths_preserve_quoted_names_and_detect_renames(self):
         with tempfile.TemporaryDirectory() as directory:
